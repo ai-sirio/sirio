@@ -750,13 +750,7 @@ impl Render for StatusBar {
                     .child(IconElement::new(Icon::Sparkles, IconSize::XSmall))
                     .child(text!(
                         id = "status-update-label",
-                        match self.update_state.status {
-                            UpdateStatus::Downloading { .. } | UpdateStatus::Installing { .. } => {
-                                "Updating…"
-                            }
-                            UpdateStatus::Installed { .. } => "Restart to update",
-                            _ => "Update available",
-                        }
+                        update_indicator_label(&self.update_state.status)
                     )),
             );
         }
@@ -827,11 +821,38 @@ fn status_bar_foreground(theme: Theme) -> Hsla {
     }
 }
 
+/// The words the update indicator shows for a status.
+fn update_indicator_label(status: &UpdateStatus) -> &'static str {
+    match status {
+        UpdateStatus::Downloading { .. } | UpdateStatus::Installing { .. } => "Updating…",
+        UpdateStatus::Installed { .. } => "Restart to update",
+        UpdateStatus::ApplyFailed { .. } => "Update failed",
+        _ => "Update available",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{Modifiers, VisualTestContext};
     use sirio_usage::UsageReason;
+
+    #[test]
+    fn the_indicator_names_a_failed_update_as_failed() {
+        let failed = UpdateStatus::ApplyFailed {
+            version: "1.0.0".into(),
+            message: "network unreachable".into(),
+            retryable: true,
+        };
+        assert_eq!(update_indicator_label(&failed), "Update failed");
+        assert_eq!(
+            update_indicator_label(&UpdateStatus::Available {
+                version: "1.0.0".into(),
+                notes: String::new(),
+            }),
+            "Update available"
+        );
+    }
 
     fn window_resetting_in(label: &str, percent: u8, now: SystemTime, secs: u64) -> UsageWindow {
         UsageWindow {

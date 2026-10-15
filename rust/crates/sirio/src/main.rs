@@ -6473,6 +6473,7 @@ impl SirioWorkspace {
             hidden: self.update_card_hidden,
             agents_working: self.activity.running_pane_count(),
             installer_restarts: cfg!(target_os = "windows"),
+            restart_after: self.update_after_apply == AfterApply::Restart,
         })
     }
 

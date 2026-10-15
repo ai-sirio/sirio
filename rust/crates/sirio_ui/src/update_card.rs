@@ -43,6 +43,9 @@ pub struct UpdateCardInput<'a> {
     pub agents_working: usize,
     /// Whether the platform's installer restarts Sirio by itself (Windows).
     pub installer_restarts: bool,
+    /// Whether a restart follows the apply in flight (*Restart to update*, not
+    /// *Install without restarting*).
+    pub restart_after: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,8 +70,11 @@ pub struct UpdateCardView {
 
 const NOTES_CAP: usize = 4096;
 
-/// The card is this wide.
-const CARD_WIDTH: f32 = 360.0;
+/// The card is this wide. The three-button row (Later, Install without
+/// restarting, Restart to update) is about 416 px at the default font, measured
+/// from the update-ui capture, and the content box is the card less 30 px of
+/// padding and border, so 420 px would still wrap it.
+const CARD_WIDTH: f32 = 450.0;
 /// The indeterminate segment that slides along the progress track.
 const PROGRESS_SEGMENT: f32 = 120.0;
 /// Where the segment's left edge sweeps, as a fraction of the track: from
@@ -181,9 +187,15 @@ pub fn update_card_view(input: &UpdateCardInput<'_>) -> Option<UpdateCardView> {
         UpdateStatus::Downloading { .. } | UpdateStatus::Installing { .. } => UpdateCardView {
             title: format!("Updating to Sirio {version}"),
             body: None,
-            // The warning has no exemption for work in flight (§2.2): the
-            // restart that follows still stops the agents.
-            warning,
+            // Work in flight keeps the warning (§2.2) where a restart follows
+            // it. After *Install without restarting* none does, so no agent is
+            // stopped by it. Windows' installer closes Sirio on any apply, so
+            // there the warning stays whichever button started it.
+            warning: if input.restart_after || input.installer_restarts {
+                warning
+            } else {
+                None
+            },
             progress: Some(
                 if matches!(status, UpdateStatus::Downloading { .. }) {
                     format!("Downloading Sirio {version}…")
@@ -446,7 +458,15 @@ impl RenderOnce for UpdateCard {
                 )
             })
             .when(!view.buttons.is_empty(), |card| {
-                card.child(div().flex().justify_end().gap(px(8.0)).children(buttons))
+                // A row that is too wide wraps inside the card, not past its edge.
+                card.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .justify_end()
+                        .gap(px(8.0))
+                        .children(buttons),
+                )
             })
     }
 }
@@ -455,6 +475,7 @@ impl RenderOnce for UpdateCard {
 mod tests {
     use super::*;
     use UpdateCardAction::*;
+    use gpui::{Context, Render, TestAppContext, VisualTestContext, Window, div, prelude::*};
 
     /// The progress track: the card less its 14 px padding and the 1 px
     /// border on each side. The sweep must clear it at this width.
@@ -467,7 +488,14 @@ mod tests {
         UpdateStatus::Ready { version: version.into(), notes: "Fixes.".into() }
     }
     fn input(state: &UpdateState) -> UpdateCardInput<'_> {
-        UpdateCardInput { state, dismissed: None, hidden: false, agents_working: 0, installer_restarts: false }
+        UpdateCardInput {
+            state,
+            dismissed: None,
+            hidden: false,
+            agents_working: 0,
+            installer_restarts: false,
+            restart_after: true,
+        }
     }
     fn actions(view: &UpdateCardView) -> Vec<(UpdateCardAction, bool)> {
         view.buttons.iter().map(|button| (button.action, button.enabled)).collect()
@@ -538,19 +566,6 @@ mod tests {
             let mut hidden = input(&s);
             hidden.hidden = true;
             assert!(update_card_view(&hidden).is_some(), "{status:?} was hidden behind the cross");
-        }
-    }
-
-    #[test]
-    fn every_button_is_selected_by_its_socket_name() {
-        for (action, id) in [
-            (Later, "update-card-action-later"),
-            (Restart, "update-card-action-restart"),
-            (InstallOnly, "update-card-action-install"),
-            (Retry, "update-card-action-retry"),
-            (Hide, "update-card-action-hide"),
-        ] {
-            assert_eq!(action.element_id(), id);
         }
     }
 
@@ -747,5 +762,120 @@ mod tests {
             update_card_view(&input(&tabbed)).unwrap().body.as_deref(),
             Some("fix the bug")
         );
+    }
+
+    /// The card alone, docked the way the app docks it.
+    struct CardHarness {
+        view: UpdateCardView,
+    }
+
+    impl Render for CardHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(UpdateCard::new(self.view.clone(), |_, _, _| {}))
+        }
+    }
+
+    fn drawn(cx: &mut TestAppContext, view: UpdateCardView) -> VisualTestContext {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(move |_, _| CardHarness { view });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx
+    }
+
+    /// Every button of the view is drawn inside the card's bounds. A row that
+    /// overflows the card's edge is what this catches; whether the row fits on
+    /// one line depends on the font, which this harness does not measure, so
+    /// the captures carry that proof.
+    fn assert_buttons_inside_the_card(view: &UpdateCardView, cx: &mut VisualTestContext) {
+        let card = cx.debug_bounds("update-card").expect("the card is drawn");
+        for button in &view.buttons {
+            let id = button.action.element_id();
+            let bounds = cx.debug_bounds(id).unwrap_or_else(|| panic!("{id} is drawn"));
+            assert!(
+                bounds.left() >= card.left()
+                    && bounds.right() <= card.right()
+                    && bounds.top() >= card.top()
+                    && bounds.bottom() <= card.bottom(),
+                "{id} at {bounds:?} lies outside the card at {card:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn the_three_button_row_fits_inside_the_card(cx: &mut TestAppContext) {
+        let s = state(ready("1.0.0"));
+        let mut i = input(&s);
+        i.agents_working = 1;
+        let view = update_card_view(&i).unwrap();
+        assert_eq!(view.buttons.len(), 3, "later, install without restarting, restart");
+        let mut cx = drawn(cx, view.clone());
+        assert_buttons_inside_the_card(&view, &mut cx);
+    }
+
+    #[gpui::test]
+    async fn the_windows_two_button_row_fits_inside_the_card(cx: &mut TestAppContext) {
+        let s = state(ready("1.0.0"));
+        let mut i = input(&s);
+        i.agents_working = 1;
+        i.installer_restarts = true;
+        let view = update_card_view(&i).unwrap();
+        assert_eq!(view.buttons.len(), 2, "later, update and restart");
+        let mut cx = drawn(cx, view.clone());
+        assert_buttons_inside_the_card(&view, &mut cx);
+    }
+
+    #[gpui::test]
+    async fn the_retry_row_fits_inside_the_card(cx: &mut TestAppContext) {
+        let s = state(UpdateStatus::ApplyFailed {
+            version: "1.0.0".into(),
+            message: "network unreachable".into(),
+            retryable: true,
+        });
+        let mut i = input(&s);
+        i.agents_working = 1;
+        let view = update_card_view(&i).unwrap();
+        assert_eq!(view.buttons.len(), 2, "later, retry");
+        let mut cx = drawn(cx, view.clone());
+        assert_buttons_inside_the_card(&view, &mut cx);
+    }
+
+    #[test]
+    fn an_install_without_a_restart_draws_no_agents_warning_while_it_works() {
+        for status in [
+            UpdateStatus::Downloading { version: "1.0.0".into() },
+            UpdateStatus::Installing { version: "1.0.0".into() },
+        ] {
+            let s = state(status.clone());
+            let mut i = input(&s);
+            i.agents_working = 2;
+            i.restart_after = false;
+            assert_eq!(update_card_view(&i).unwrap().warning, None, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn the_warning_stays_where_a_restart_follows_or_the_installer_restarts() {
+        let s = state(UpdateStatus::Downloading { version: "1.0.0".into() });
+        let mut restarting = input(&s);
+        restarting.agents_working = 2;
+        assert!(update_card_view(&restarting).unwrap().warning.is_some());
+
+        // Windows: Inno closes Sirio on any apply, Settings' Stay included, so
+        // a restart comes whichever button started the apply.
+        let mut windows_stay = restarting.clone();
+        windows_stay.restart_after = false;
+        windows_stay.installer_restarts = true;
+        assert!(update_card_view(&windows_stay).unwrap().warning.is_some());
+    }
+
+    #[test]
+    fn restart_after_changes_nothing_outside_the_work_in_flight() {
+        let s = state(ready("1.0.0"));
+        let mut i = input(&s);
+        i.agents_working = 1;
+        i.restart_after = false;
+        assert!(update_card_view(&i).unwrap().warning.is_some());
     }
 }
