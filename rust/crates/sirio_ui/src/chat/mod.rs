@@ -2006,17 +2006,17 @@ pub struct Chat {
     transcript_bar: list_scroll::ListScrollbarState,
     transcript_selection: Option<TranscriptSelection>,
     transcript_dragging: bool,
-    /// F-CHAT-22, turn half: turns the reader has explicitly re-opened,
-    /// keyed by the entry index of the [`Entry::TurnFooter`] that closes
-    /// each one — the analogue of Swift's `controller.unfoldedTurns`, whose
-    /// key is `divider.id`.
+    /// F-CHAT-22, turn half: turns the reader has explicitly folded, keyed
+    /// by the entry index of the [`Entry::TurnFooter`] that closes each one.
+    /// Nothing is ever added here except by the reader's click: a turn is
+    /// drawn in full until then, however many newer turns follow it.
     ///
     /// An index is a safe identity only because entries are otherwise
     /// append-only; the two paths that do remove entries
     /// ([`Self::clear_recovered_connection_errors`] and the two resets) empty
     /// this set as well, rather than leave keys pointing at whatever slid
     /// into their place.
-    unfolded_turns: BTreeSet<usize>,
+    folded_turns: BTreeSet<usize>,
     copied_target: Option<CopyTarget>,
     edit_summaries: BTreeMap<usize, EditSummaryState>,
     /// When each live tool call started, by protocol id, so its first
@@ -2346,7 +2346,7 @@ impl Chat {
             transcript_bar: list_scroll::ListScrollbarState::new(bezel::motion::Painter::of(cx)),
             transcript_selection: None,
             transcript_dragging: false,
-            unfolded_turns: BTreeSet::new(),
+            folded_turns: BTreeSet::new(),
             copied_target: None,
             edit_summaries: BTreeMap::new(),
             tool_started: HashMap::new(),
@@ -2556,20 +2556,20 @@ impl Chat {
         cx.notify();
     }
 
-    /// F-CHAT-22, turn half: flips one older turn between its collapsed
-    /// stand-in row and its full contents, in place.
+    /// F-CHAT-22, turn half: flips one closed turn between its full
+    /// contents and its collapsed stand-in row, in place.
     ///
     /// `turn_id` is the turn's footer index. Every row of the turn changes
     /// height at once, so the whole span is remeasured — remeasuring only
     /// the clicked row would leave the virtualizer holding stale heights for
     /// the rows that just appeared, and the transcript would jump.
-    fn toggle_turn_unfolded(&mut self, turn_id: usize, cx: &mut Context<Self>) {
+    fn toggle_turn_folded(&mut self, turn_id: usize, cx: &mut Context<Self>) {
         let turns = segment_turns(&self.entries);
         let Some(turn) = turns.iter().find(|turn| turn.footer == Some(turn_id)) else {
             return;
         };
-        if !self.unfolded_turns.remove(&turn_id) {
-            self.unfolded_turns.insert(turn_id);
+        if !self.folded_turns.insert(turn_id) {
+            self.folded_turns.remove(&turn_id);
         }
         self.list_state.remeasure_items(turn.start..turn.end + 1);
         cx.notify();
@@ -3604,10 +3604,10 @@ impl Chat {
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
         self.entries.clear();
         self.turn_message_ids.clear();
-        // F-CHAT-22: `unfolded_turns` is keyed by entry index, so anything
+        // F-CHAT-22: `folded_turns` is keyed by entry index, so anything
         // that renumbers entries must drop it rather than let a key point at
         // whatever slid into its place.
-        self.unfolded_turns.clear();
+        self.folded_turns.clear();
         self.thought_scroll.clear();
         self.tool_output_scroll.clear();
         for turn in transcript.turns {
@@ -3844,7 +3844,7 @@ impl Chat {
         });
         self.turn_message_ids = kept_ids;
         if self.entries.len() != old_count {
-            self.unfolded_turns.clear();
+            self.folded_turns.clear();
             self.thought_scroll.clear();
             self.tool_output_scroll.clear();
             self.list_state.splice(0..old_count, self.entries.len());
@@ -4509,7 +4509,7 @@ impl Chat {
         self.entries.clear();
         self.turn_message_ids.clear();
         self.pending_rewind = None;
-        self.unfolded_turns.clear();
+        self.folded_turns.clear();
         self.thought_scroll.clear();
         self.tool_output_scroll.clear();
         self.list_state.splice(0..old_count, 0);
@@ -5887,7 +5887,7 @@ impl Chat {
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// F-CHAT-22, turn half: the single row an older turn collapses to.
+    /// F-CHAT-22, turn half: the single row a folded turn collapses to.
     ///
     /// Swift's `TurnFoldRow` — a chevron, `Turn: <label>`, the turn's clock
     /// time pushed to the right, on a quiet rounded plate — and, as there,
@@ -5917,7 +5917,7 @@ impl Chat {
             .hover(|style| style.bg(theme.sirio.overlay))
             .on_click(move |_, _, cx| {
                 entity.update(cx, |chat, cx| {
-                    chat.toggle_turn_unfolded(turn_id, cx);
+                    chat.toggle_turn_folded(turn_id, cx);
                 });
             })
             .child(
@@ -6129,7 +6129,7 @@ impl Render for Chat {
         // F-CHAT-22, turn half: resolved once per frame, not once per drawn
         // row — segmenting the transcript is O(entries), and the virtualizer
         // calls its row processor separately for every visible index.
-        let turn_roles = turn_row_roles(&self.entries, &self.unfolded_turns);
+        let turn_roles = turn_row_roles(&self.entries, &self.folded_turns);
         let transcript_focus = self.transcript_focus.clone();
         // The answer field's caret, resolved before the tree is built so the
         // card and the composer agree within one frame.
@@ -6227,8 +6227,8 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                 // Execute wells: handle persistente per isolare
                                 // la wheel interna dalla lista esterna.
                                 this.ensure_tool_output_scroll_for_entry(entry_index);
-                                // F-CHAT-22, turn half: an older turn stands
-                                // in for itself with one row. Resolved before
+                                // F-CHAT-22, turn half: a turn the reader
+                                // folded stands in for itself with one row. Resolved before
                                 // the tool-call grouping below, because a
                                 // folded turn hides its tool calls too.
                                 match turn_roles
@@ -6256,12 +6256,10 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                             ))
                                             .into_any_element();
                                     }
-                                    // The footer of an unfolded older turn
-                                    // keeps its hairline-and-timestamp look
-                                    // and becomes the way back: the clause is
-                                    // "expand *and collapse*", and a fold the
-                                    // reader can only ever open once is a
-                                    // one-way door.
+                                    // The footer of a closed turn keeps its
+                                    // hairline-and-timestamp look and is the
+                                    // way to fold it; the fold row is the
+                                    // way back.
                                     TurnRowRole::Refoldable { turn_id } => {
                                         let refold_entity = entity.clone();
                                         let source_start = transcript_ranges
@@ -6283,7 +6281,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                                     .cursor(CursorStyle::PointingHand)
                                                     .on_click(move |_, _, cx| {
                                                         refold_entity.update(cx, |chat, cx| {
-                                                            chat.toggle_turn_unfolded(turn_id, cx);
+                                                            chat.toggle_turn_folded(turn_id, cx);
                                                         });
                                                     })
                                                     .children(
@@ -6647,10 +6645,6 @@ fn tool_call_run_bounds_inclusive(entries: &[Entry], index: usize) -> Option<(us
     Some((start, end))
 }
 
-/// F-CHAT-22, turn half: how many of the most recent turns stay open. Swift's
-/// `TimelineBuilder.openTurnCount` — "current + previous".
-const OPEN_TURN_COUNT: usize = 2;
-
 /// F-CHAT-22: the fold row's label is the turn's opening question, clipped.
 /// Swift's `Turn.label` takes `String(line.prefix(60))`.
 const TURN_LABEL_MAX_CHARS: usize = 60;
@@ -6699,26 +6693,17 @@ fn segment_turns(entries: &[Entry]) -> Vec<TurnSegment> {
     turns
 }
 
-/// F-CHAT-22's fold POLICY, transcribed from `TimelineBuilder.rows`:
+/// F-CHAT-22's fold POLICY: which turns the reader may fold. Nothing folds
+/// by itself — Swift's `TimelineBuilder` folded every turn older than the
+/// last two, so sending a prompt closed the conversation above it; here a
+/// turn folds only when the reader clicks its footer.
 ///
-/// ```swift
-/// let isFoldable = index < turns.count - openTurnCount
-///     && turn.divider != nil && !turn.items.isEmpty
-/// ```
-///
-/// A turn folds when it is *closed* (it has a footer — a turn still being
-/// answered is never taken away from the reader), when it has a body worth
-/// hiding, and when at least `OPEN_TURN_COUNT` newer turns exist. The
-/// current turn and the one before it therefore always stay open, and a
-/// turn folds by itself the moment a second newer turn closes — nothing
-/// folds on a timer or on scrolling away.
-///
-/// Written as `position + OPEN_TURN_COUNT < turns.len()` rather than Swift's
-/// subtraction because `turns.len() - 2` underflows on `usize` for a
-/// transcript with fewer than two turns.
+/// A turn may be folded when it is *closed* (it has a footer — a turn still
+/// being answered is never taken away from the reader) and when it has a
+/// body worth hiding.
 fn turn_is_foldable(turns: &[TurnSegment], position: usize) -> bool {
     turns.get(position).is_some_and(|turn| {
-        turn.footer.is_some() && turn.has_body() && position + OPEN_TURN_COUNT < turns.len()
+        turn.footer.is_some() && turn.has_body()
     })
 }
 
@@ -6746,22 +6731,22 @@ fn turn_label(entries: &[Entry], turn: &TurnSegment) -> String {
 enum TurnRowRole {
     Normal,
     Hidden,
-    /// The collapsed stand-in for a whole turn. `turn_id` is the turn's
-    /// footer index, its identity in `unfolded_turns`.
+    /// The collapsed stand-in for a turn the reader folded. `turn_id` is the
+    /// turn's footer index, its identity in `folded_turns`.
     Fold {
         turn_id: usize,
         label: String,
         at: String,
     },
-    /// The footer of a foldable turn the reader has unfolded: clicking it
-    /// folds the turn back up.
+    /// The footer of a closed turn drawn in full: clicking it folds the
+    /// turn.
     Refoldable {
         turn_id: usize,
     },
 }
 
 /// One [`TurnRowRole`] per entry, computed once per frame.
-fn turn_row_roles(entries: &[Entry], unfolded: &BTreeSet<usize>) -> Vec<TurnRowRole> {
+fn turn_row_roles(entries: &[Entry], folded: &BTreeSet<usize>) -> Vec<TurnRowRole> {
     let turns = segment_turns(entries);
     let mut roles = vec![TurnRowRole::Normal; entries.len()];
     for (position, turn) in turns.iter().enumerate() {
@@ -6769,7 +6754,7 @@ fn turn_row_roles(entries: &[Entry], unfolded: &BTreeSet<usize>) -> Vec<TurnRowR
             continue;
         }
         let turn_id = turn.end;
-        if unfolded.contains(&turn_id) {
+        if !folded.contains(&turn_id) {
             roles[turn_id] = TurnRowRole::Refoldable { turn_id };
             continue;
         }
@@ -14363,7 +14348,7 @@ two"
             "New Conversation clears the transcript"
         );
         assert!(
-            chat.read_with(&cx.cx, |chat, _| chat.unfolded_turns.is_empty()),
+            chat.read_with(&cx.cx, |chat, _| chat.folded_turns.is_empty()),
             "New Conversation clears the turn fold state"
         );
         assert!(
@@ -14882,12 +14867,11 @@ two"
     // F-CHAT-22 (turn half), F-CHAT-23 (locations), F-CHAT-31 (diff)
     // ---------------------------------------------------------------
 
-    /// The fold POLICY, transcribed from Swift's `TimelineBuilder`: the two
-    /// most recent turns stay open, a turn still being answered is never
-    /// folded, and a turn with nothing but its own footer has nothing to
-    /// fold. Mirrors `olderTurnsFoldKeepingLastTwoOpen`.
+    /// The fold POLICY: nothing folds by itself. Every closed turn with a
+    /// body is drawn in full and may be folded by the reader; a turn still
+    /// being answered, or one with nothing but its own footer, never can.
     #[test]
-    fn only_turns_older_than_the_last_two_fold() {
+    fn no_turn_folds_by_itself_and_every_closed_turn_can_be_folded() {
         let entries = vec![
             Entry::User {
                 text: "first question".into(),
@@ -14899,10 +14883,6 @@ two"
                 at: None,
             },
             Entry::TurnFooter("10:01".into()),
-            Entry::User {
-                text: "third question".into(),
-                at: None,
-            },
             Entry::TurnFooter("10:02".into()),
             Entry::User {
                 text: "fourth question".into(),
@@ -14914,31 +14894,29 @@ two"
         let foldable = (0..turns.len())
             .filter(|position| turn_is_foldable(&turns, *position))
             .collect::<Vec<_>>();
-        assert_eq!(foldable, vec![0, 1], "the last two turns stay open");
-        assert_eq!(turns[3].footer, None, "the trailing turn is still open");
-    }
+        assert_eq!(
+            foldable,
+            vec![0, 1],
+            "the newest closed turn too, but neither the body-less one nor the open one"
+        );
 
-    /// A transcript with only one or two turns folds nothing — and, because
-    /// Swift's `turns.count - openTurnCount` is a `usize` subtraction here,
-    /// this is also the case that would panic on underflow if the comparison
-    /// were transcribed literally.
-    #[test]
-    fn a_short_transcript_folds_nothing_and_does_not_underflow() {
-        for count in 0..=2usize {
-            let mut entries = Vec::new();
-            for index in 0..count {
-                entries.push(Entry::User {
-                    text: format!("question {index}"),
-                    at: None,
-                });
-                entries.push(Entry::TurnFooter(format!("10:0{index}")));
-            }
-            let turns = segment_turns(&entries);
-            assert!(
-                (0..turns.len()).all(|position| !turn_is_foldable(&turns, position)),
-                "nothing folds with {count} closed turns"
-            );
-        }
+        let roles = turn_row_roles(&entries, &BTreeSet::new());
+        assert!(
+            roles
+                .iter()
+                .all(|role| matches!(role, TurnRowRole::Normal | TurnRowRole::Refoldable { .. })),
+            "with nothing folded by the reader every row is drawn: {roles:?}"
+        );
+        assert_eq!(roles[1], TurnRowRole::Refoldable { turn_id: 1 });
+        assert_eq!(roles[3], TurnRowRole::Refoldable { turn_id: 3 });
+
+        let roles = turn_row_roles(&entries, &BTreeSet::from([3]));
+        assert!(
+            matches!(roles[2], TurnRowRole::Fold { turn_id: 3, .. }),
+            "a turn the reader folded stands in for itself: {roles:?}"
+        );
+        assert_eq!(roles[3], TurnRowRole::Hidden);
+        assert_eq!(roles[1], TurnRowRole::Refoldable { turn_id: 1 });
     }
 
     /// Swift's `Turn.label`: the first line of the turn's first user
@@ -14981,12 +14959,12 @@ two"
         assert_eq!(turn_label(&entries, &turns[0]), "Turn");
     }
 
-    /// F-CHAT-22, turn half, driven: a folded turn draws exactly one row in
-    /// place of its whole body, a real click on that row puts the body back,
-    /// and a real click on the re-exposed footer folds it again — without
-    /// moving the rows below it.
+    /// F-CHAT-22, turn half, driven: nothing folds by itself — every closed
+    /// turn is drawn in full, however many newer turns follow. A real click
+    /// on a turn's footer folds it into one row, and a real click on that
+    /// row puts the body back — without moving the rows below it.
     #[gpui::test]
-    async fn a_real_click_unfolds_an_older_turn_and_folds_it_back(cx: &mut TestAppContext) {
+    async fn a_real_click_folds_a_closed_turn_and_unfolds_it_back(cx: &mut TestAppContext) {
         cx.update(Theme::init);
         cx.update(bezel::ui::input::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
@@ -15022,20 +15000,40 @@ two"
         });
         refresh_frame(cx);
 
+        assert!(
+            cx.debug_bounds("turn-fold-2").is_none() && cx.debug_bounds("turn-fold-4").is_none(),
+            "no turn folds by itself, however many newer turns follow it"
+        );
+        assert!(
+            cx.debug_bounds("tool-call-toggle-1").is_some(),
+            "the oldest turn's contents are drawn"
+        );
+        let settled_below = cx
+            .debug_bounds("turn-refold-4")
+            .expect("the second turn's footer is drawn");
+        let footer = cx
+            .debug_bounds("turn-refold-2")
+            .expect("a closed turn's footer is the way to fold it");
+
+        cx.simulate_click(footer.center(), Modifiers::none());
+        cx.run_until_parked();
+        refresh_frame(cx);
         let fold = cx
             .debug_bounds("turn-fold-2")
-            .expect("the oldest turn draws its collapsed stand-in row");
-        assert!(
-            cx.debug_bounds("turn-fold-4").is_some(),
-            "so does the second-oldest"
-        );
+            .expect("clicking the footer folds the turn into one row");
         assert!(
             cx.debug_bounds("tool-call-toggle-1").is_none(),
             "and the folded turn's contents are not drawn at all"
         );
-        let settled_below = cx
-            .debug_bounds("turn-fold-4")
-            .expect("second fold row is drawn");
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat
+                .folded_turns
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()),
+            vec![2],
+            "the folded turn is recorded by its footer index"
+        );
 
         cx.simulate_click(fold.center(), Modifiers::none());
         cx.run_until_parked();
@@ -15049,34 +15047,9 @@ two"
             "and the stand-in row gives way to the real contents"
         );
         assert_eq!(
-            chat.read_with(cx, |chat, _| chat
-                .unfolded_turns
-                .iter()
-                .copied()
-                .collect::<Vec<_>>()),
-            vec![2],
-            "the reopened turn is recorded by its footer index, the way \
-             Swift records `divider.id` in `unfoldedTurns`"
-        );
-        let refold = cx
-            .debug_bounds("turn-refold-2")
-            .expect("the re-opened turn's footer is the way back");
-
-        cx.simulate_click(refold.center(), Modifiers::none());
-        cx.run_until_parked();
-        refresh_frame(cx);
-        assert!(
-            cx.debug_bounds("turn-fold-2").is_some(),
-            "clicking the footer folds the turn back up"
-        );
-        assert!(
-            cx.debug_bounds("tool-call-toggle-1").is_none(),
-            "and its contents are hidden again"
-        );
-        assert_eq!(
-            cx.debug_bounds("turn-fold-4").map(|bounds| bounds.origin),
+            cx.debug_bounds("turn-refold-4").map(|bounds| bounds.origin),
             Some(settled_below.origin),
-            "an unfold/refold cycle leaves everything below it exactly where \
+            "a fold/unfold cycle leaves everything below it exactly where \
              it was -- a fold that scrolls the transcript out from under the \
              reader fails the clause as surely as one that cannot re-open"
         );
