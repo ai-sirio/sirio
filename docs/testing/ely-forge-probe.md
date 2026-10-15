@@ -51,14 +51,14 @@ start-up closure returns. A window opened in that same closure after
 `set_mode(Light)` drew Ely's dark palette. The probe calls
 `sirio_ui::ely::init` after choosing the mode.
 
-**This is not probe-only.** `sirio`'s `main.rs` has the same order in one
-start-up closure (`ely::init`, then `Theme::set_mode`, then `open_window`).
-The chat is unaffected because `Chat::render` calls `ely::sync_theme_if_changed`
-on every frame. A surface that does not, such as the change-request tab and
-list in deliveries 2 to 4, would draw Ely's dark palette after launch for a
-Light user. Those deliveries must call `sync_theme_if_changed` in their render
-(or `main.rs` must sync after its start-up `set_mode`), and prove it with a
-light-mode frame.
+**This is not probe-only, and the start-up case is fixed in `ely.rs`.**
+`sirio`'s `main.rs` has the same order in one start-up closure (`ely::init`,
+then `Theme::set_mode`, then `open_window`). `ely::init` now defers a sync to the
+flush, so a theme installed in that same batch reaches Ely (commit 1db4dfad;
+the test `a_theme_installed_in_the_startup_batch_reaches_ely` in `ely.rs`). The
+change-request surfaces therefore need no per-render sync for start-up. A theme
+changed after start-up still reaches Ely through the observer `ely::init`
+registers. `Chat::render` keeps its per-frame `sync_theme_if_changed` call.
 
 ## Not established
 

@@ -7,7 +7,6 @@
 use std::rc::Rc;
 
 use ely_gpui_component::primitives::{IconName, Severity};
-use ely_gpui_component::theme::{ActiveTheme as _, Elevation};
 use gpui::{
     Animation, AnimationExt, App, IntoElement, RenderOnce, Window, div, prelude::*, px, relative,
 };
@@ -379,9 +378,10 @@ impl RenderOnce for UpdateCard {
             .border_1()
             .border_color(theme.ely.border)
             .bg(theme.sirio.floating_surface)
-            // Ely's floating elevation, as its popovers draw it: the card sits
-            // off the window in light and dark alike.
-            .shadow(cx.theme().elevation(Elevation::Floating))
+            // The shadow Sirio's other floating surfaces draw (outline,
+            // history toolbar, settings). Ely's own Floating layers are too faint
+            // on the light window for the card's edge to show.
+            .shadow_lg()
             .child(header)
             .when_some(view.body.clone(), |card, body| {
                 card.child(

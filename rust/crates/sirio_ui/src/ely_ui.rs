@@ -102,9 +102,9 @@ pub(crate) fn icon_button(
 /// a compact line, not Ely's titled `Callout`, whose fixed "Danger" heading
 /// would sit above every error.
 ///
-/// `id` names the words. Two messages drawn in one window need two ids: with
-/// one shared id, bezel's accessibility tree sees a duplicate node (a panic in
-/// debug builds), so every call site passes its own.
+/// `id` names the words. Ids only need to differ among messages drawn together
+/// in one window: bezel's accessibility tree rejects a duplicate node id (a
+/// panic in debug builds), and alternative arms of a card may share one.
 pub(crate) fn message(
     severity: Severity,
     text: String,
