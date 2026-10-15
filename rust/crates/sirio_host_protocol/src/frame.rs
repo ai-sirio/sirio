@@ -4,16 +4,17 @@
 
 pub const MAGIC: [u8; 4] = *b"SRH1";
 pub const HEADER_LEN: usize = 12;
-/// Payload limit for control frames — the limit `sirio_control` enforces.
-pub const MAX_CONTROL_PAYLOAD: usize = 1 << 20;
+/// Payload limit for every frame kind — the limit `sirio_control` enforces.
+pub const MAX_PAYLOAD: usize = 1 << 20;
+/// Kept as the control-plane name for existing consumers.
+pub const MAX_CONTROL_PAYLOAD: usize = MAX_PAYLOAD;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameKind {
     Request,
     Response,
     Event,
-    /// Raw bytes. Reserved by major 1 so that SP2 can use it without a major;
-    /// refused until a capability announces it.
+    /// Raw bytes, enabled by SP2's `terminal` capability.
     Data,
 }
 
@@ -51,7 +52,6 @@ pub enum FrameError {
     NonZeroFlags(u8),
     NonZeroReserved(u16),
     TooLarge { len: u64, limit: usize },
-    DataNotSupported,
 }
 
 impl std::fmt::Display for FrameError {
@@ -62,7 +62,6 @@ impl std::fmt::Display for FrameError {
             Self::NonZeroFlags(v) => write!(f, "frame flags must be zero, got {v}"),
             Self::NonZeroReserved(v) => write!(f, "frame reserved bits must be zero, got {v}"),
             Self::TooLarge { len, limit } => write!(f, "frame of {len} bytes exceeds {limit}"),
-            Self::DataNotSupported => write!(f, "data frames are not enabled"),
         }
     }
 }
@@ -70,13 +69,10 @@ impl std::fmt::Display for FrameError {
 impl std::error::Error for FrameError {}
 
 pub fn encode(kind: FrameKind, payload: &[u8]) -> Result<Vec<u8>, FrameError> {
-    if kind == FrameKind::Data {
-        return Err(FrameError::DataNotSupported);
-    }
-    if payload.len() > MAX_CONTROL_PAYLOAD {
+    if payload.len() > MAX_PAYLOAD {
         return Err(FrameError::TooLarge {
             len: payload.len() as u64,
-            limit: MAX_CONTROL_PAYLOAD,
+            limit: MAX_PAYLOAD,
         });
     }
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
@@ -125,9 +121,6 @@ impl FrameDecoder {
         }
         let kind_byte = self.buf[4];
         let kind = FrameKind::from_byte(kind_byte).ok_or(FrameError::UnknownKind(kind_byte))?;
-        if kind == FrameKind::Data {
-            return Err(FrameError::DataNotSupported);
-        }
         if self.buf[5] != 0 {
             return Err(FrameError::NonZeroFlags(self.buf[5]));
         }
@@ -137,10 +130,10 @@ impl FrameDecoder {
         }
         let len =
             u32::from_be_bytes([self.buf[8], self.buf[9], self.buf[10], self.buf[11]]) as usize;
-        if len > MAX_CONTROL_PAYLOAD {
+        if len > MAX_PAYLOAD {
             return Err(FrameError::TooLarge {
                 len: len as u64,
-                limit: MAX_CONTROL_PAYLOAD,
+                limit: MAX_PAYLOAD,
             });
         }
         if self.buf.len() < HEADER_LEN + len {
@@ -179,6 +172,32 @@ mod tests {
             );
             assert!(!d.has_partial());
         }
+    }
+
+    #[test]
+    fn a_ping_request_frame_is_these_exact_bytes() {
+        let payload = br#"{"id":1,"method":"host.ping"}"#;
+        let frame = encode(FrameKind::Request, payload).unwrap();
+        let mut expected = b"SRH1".to_vec();
+        expected.extend_from_slice(&[1, 0, 0, 0]);
+        expected.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        expected.extend_from_slice(payload);
+        assert_eq!(frame, expected);
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&expected);
+        let decoded = decoder.next_frame().unwrap().unwrap();
+        assert_eq!(
+            (decoded.kind, decoded.payload.as_slice()),
+            (FrameKind::Request, &payload[..])
+        );
+    }
+
+    #[test]
+    fn an_empty_event_frame_is_a_bare_header() {
+        assert_eq!(
+            encode(FrameKind::Event, b"").unwrap(),
+            b"SRH1\x03\x00\x00\x00\x00\x00\x00\x00".to_vec()
+        );
     }
 
     #[test]
@@ -239,14 +258,13 @@ mod tests {
     }
 
     #[test]
-    fn data_frames_are_refused_in_major_one() {
+    fn a_data_frame_decodes_as_data() {
         let mut d = FrameDecoder::new();
-        d.push(&header(4, 0, 0, 0));
-        assert_eq!(d.next_frame(), Err(FrameError::DataNotSupported));
-        assert_eq!(
-            encode(FrameKind::Data, b""),
-            Err(FrameError::DataNotSupported)
-        );
+        let frame = encode(FrameKind::Data, b"xyz").unwrap();
+        assert_eq!(&frame[4..8], &[4, 0, 0, 0]);
+        d.push(&frame);
+        let decoded = d.next_frame().unwrap().unwrap();
+        assert_eq!((decoded.kind, decoded.payload), (FrameKind::Data, b"xyz".to_vec()));
     }
 
     #[test]

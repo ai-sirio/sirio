@@ -34,10 +34,10 @@ use sirio_project::{
     is_git_repository, numeric_tab_selection, read_head_label,
 };
 use sirio_terminal::{
-    TerminalActivityEvent, TerminalContextAction, TerminalContextEvent, TerminalDropEvent,
-    TerminalExitStatus, TerminalIdentity, TerminalLinkEvent, TerminalPaneCache,
-    TerminalPromptAction, TerminalPromptEvent, TerminalShell, TerminalView,
-    command_shell_invocation,
+    Abandon, HostLink, HostOpenError, OpenOutcome, OpenRequest, SessionFactory, SessionFactoryGlobal, TerminalActivityEvent,
+    TerminalContextAction, TerminalContextEvent, TerminalDropEvent, TerminalExitStatus,
+    TerminalIdentity, TerminalLinkEvent, TerminalPaneCache, TerminalPromptAction,
+    TerminalPromptEvent, TerminalShell, TerminalView, command_shell_invocation,
 };
 use sirio_theme::{AgentBrandColor, Theme, ThemeMode};
 use sirio_ui::{
@@ -80,7 +80,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -93,6 +93,26 @@ use std::time::{Duration, Instant, SystemTime};
 /// point add nothing a drain would act on differently, and dropping them
 /// keeps a build from growing the buffer without bound.
 const FILES_WATCH_PENDING_LIMIT: usize = 4096;
+
+/// The tabs a layout saves: `tabs` without those `attached` names. The save
+/// path and its test share this one filter, so the rule cannot drift.
+fn persisted_tabs<T>(tabs: Vec<T>, attached: impl Fn(&T) -> bool) -> Vec<T> {
+    tabs.into_iter().filter(|tab| !attached(tab)).collect()
+}
+
+/// Whether a tab shows a host session another client owns: any terminal
+/// pane of it is attached (`TerminalView::attached`).
+fn tab_shows_attached_session(tab: &OpenTab, cx: &App) -> bool {
+    let mut attached = false;
+    tab.panes.for_each(&mut |_, content| {
+        if let TabContent::Terminal { view } = content
+            && view.read(cx).attached()
+        {
+            attached = true;
+        }
+    });
+    attached
+}
 
 /// A hand-off's Done text, with Sirio's note on the worktree after it when the
 /// file carries one. The note is the file's line without its list marker.
@@ -249,6 +269,7 @@ mod display_backend;
 mod forge;
 #[cfg(not(windows))]
 mod login_path;
+mod host_sessions;
 mod lsp;
 mod lsp_install;
 // Compiled everywhere so every platform checks it; only macOS routes to it.
@@ -1050,6 +1071,11 @@ fn handoff_command_from_params(params: &BTreeMap<String, String>) -> Result<Hand
 }
 
 enum ControlAction {
+    /// `panel.show` / `panel.focus`: the tab for a host session, on the GPUI thread.
+    ShowSession {
+        session_id: String,
+        reply: ControlReply,
+    },
     Quit {
         reply: ControlReply,
     },
@@ -1207,6 +1233,9 @@ enum ControlAction {
     },
     CloseListedTab {
         position: usize,
+        /// Debug-only `confirm=yes`: closes a live terminal without the
+        /// "Close dirty tab?" prompt, as the prompt's Close button would.
+        confirmed: bool,
         reply: ControlReply,
     },
     ReadFile {
@@ -1268,6 +1297,30 @@ enum ControlAction {
     /// never observes on its own — nothing re-renders it without this
     /// action nudging the GPUI-thread poll loop to call `refresh_sidebar`.
     RefreshSidebar,
+    /// Debug-only `surface.host.end_all`: performs End All without the dialog.
+    EndAllSessions {
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.terminal.open`: an application terminal tab in the
+    /// selected worktree, running `command` under `sh -c` when given, or the
+    /// agent `agent` launched the way a new agent tab is.
+    OpenTerminal {
+        command: Option<String>,
+        agent: Option<String>,
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.terminal.restart {pane}`: Restart on a terminal
+    /// tab, as its *Session lost* button does.
+    TerminalRestart {
+        pane: String,
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.terminal.state {pane}`: whether the tab shows
+    /// *Session lost*.
+    TerminalState {
+        pane: String,
+        reply: ControlReply,
+    },
 }
 
 enum ChatControlAction {
@@ -1368,6 +1421,11 @@ struct ParkedWorktreeTabs {
     /// status under its own `pane-N` key, which is what the Activity list
     /// reads.
     chat_panes_by_tab: Vec<HashSet<usize>>,
+    /// The terminal panes among `terminal_panes_by_tab` that were attached when
+    /// the worktree was parked: a shown session, or an orphan with no tab row.
+    /// Their sessions are another worktree's or a shown tab's, so closing the
+    /// worktree must not end them (SP2 spec §4.2).
+    attached_panes: HashSet<usize>,
 }
 
 struct TabRename {
@@ -1893,6 +1951,68 @@ struct AppControlHandler {
     /// tests, which matches the pre-existing "runtime only" behavior for
     /// them.
     database_path: Option<PathBuf>,
+    /// The host's terminal client, once the host has answered (SP2 §5).
+    /// Filled on the GPUI thread when the factory is installed; read on the
+    /// control thread, where its blocking calls belong, never on GPUI's.
+    host_terminal: Arc<HostTerminal>,
+}
+
+/// The app's link to the host's terminal sessions for `panel.*` (SP2 §5).
+/// The GPUI thread fills it once the host answers; the control thread reads
+/// it, and rebuilds the client through `reconnect` when the connection drops.
+/// What the host's listing says about a session a show names.
+enum ShowCheck {
+    Live,
+    Exited,
+    Missing,
+}
+
+/// The host link for the GPUI thread's own host work (Show session's check,
+/// ending a closed worktree's sessions): the same link the control thread uses.
+#[derive(Clone)]
+struct HostTerminalGlobal(Arc<HostTerminal>);
+impl gpui::Global for HostTerminalGlobal {}
+
+#[derive(Default)]
+struct HostTerminal {
+    link: Mutex<Option<HostTerminalLink>>,
+}
+
+struct HostTerminalLink {
+    client: sirio_host_client::TermClient,
+    reconnect: Option<Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>>,
+}
+
+impl HostTerminal {
+    fn set(
+        &self,
+        client: sirio_host_client::TermClient,
+        reconnect: Option<Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>>,
+    ) {
+        if let Ok(mut link) = self.link.lock() {
+            *link = Some(HostTerminalLink { client, reconnect });
+        }
+    }
+
+    fn client(&self) -> Option<sirio_host_client::TermClient> {
+        self.link
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|link| link.client.clone())
+    }
+
+    /// Rebuilds the client through the factory's reconnect and keeps it.
+    fn reconnect(&self) -> Option<sirio_host_client::TermClient> {
+        let reconnect = self.link.lock().ok()?.as_ref()?.reconnect.clone()?;
+        let fresh = reconnect()?;
+        if let Ok(mut link) = self.link.lock()
+            && let Some(link) = link.as_mut()
+        {
+            link.client = fresh.clone();
+        }
+        Some(fresh)
+    }
 }
 
 impl AppControlHandler {
@@ -1915,7 +2035,204 @@ impl AppControlHandler {
             session_store,
             socket_info,
             database_path: None,
+            host_terminal: Arc::new(HostTerminal::default()),
         }
+    }
+
+    /// Shares the link the host factory fills (see `ensure_host_in_background`).
+    fn with_host_terminal(mut self, host_terminal: Arc<HostTerminal>) -> Self {
+        self.host_terminal = host_terminal;
+        self
+    }
+
+    /// `panel.*` (SP2 §5). The host answers for the terminal sessions it owns;
+    /// the app answers for its own tabs and keeps the sidebar's registry of
+    /// control sessions current.
+    fn panel(&self, request: &ControlRequest) -> ControlResponse {
+        match request.method.as_str() {
+            "panel.create" | "panel.split" => {
+                if self.host_terminal.client().is_none() {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "cannot spawn pane: the host is not running",
+                    );
+                }
+                let mut request = request.clone();
+                if request.method == "panel.create" && !request.params.contains_key("cwd") {
+                    let Some(working_directory) = self
+                        .state()
+                        .working_directory(request.params.get("worktree").map(String::as_str))
+                    else {
+                        return ControlResponse::failure(&request.id, "unknown worktree");
+                    };
+                    request.params.insert(
+                        "cwd".to_string(),
+                        working_directory.to_string_lossy().into_owned(),
+                    );
+                }
+                let response = self.host_request(&request);
+                self.refresh_control();
+                response
+            }
+            "panel.list" => self.panel_list(request),
+            "panel.show" => self.show_session(request),
+            "panel.focus" => {
+                let Some(id) = request.params.get("id") else {
+                    return ControlResponse::failure(&request.id, "panel.focus requires id");
+                };
+                if self.panes.is_app_pane(id) {
+                    return Self::pane_error(request, self.panes.missing_pane_error(id));
+                }
+                self.show_session(request)
+            }
+            method => {
+                let Some(id) = request.params.get("id").cloned() else {
+                    return ControlResponse::failure(&request.id, format!("{method} requires id"));
+                };
+                if self.panes.is_app_pane(&id) {
+                    return self.app_pane(request, &id);
+                }
+                if self.host_terminal.client().is_none() {
+                    return Self::pane_error(request, self.panes.missing_pane_error(&id));
+                }
+                let response = self.host_request(request);
+                if method == "panel.close" {
+                    self.refresh_control();
+                }
+                response
+            }
+        }
+    }
+
+    /// A `panel.*` call on one of the app's own panes: read and state come
+    /// from the GPUI side; the rest is refused as it always was for these.
+    fn app_pane(&self, request: &ControlRequest, id: &str) -> ControlResponse {
+        match request.method.as_str() {
+            "panel.read" => match self.panes.read(id) {
+                Ok(output) => {
+                    Self::success(&request.id, [("data".to_string(), base64_encode(&output))])
+                }
+                Err(error) => Self::pane_error(request, error),
+            },
+            "panel.state" => {
+                let id = id.to_string();
+                self.queue_action(request, move |reply| ControlAction::ReadPane {
+                    id,
+                    query: PaneQuery::State,
+                    reply,
+                })
+            }
+            "panel.scrollback" => {
+                let max_bytes = match request.params.get("maxBytes") {
+                    Some(value) => match value.parse::<usize>() {
+                        Ok(value) => Some(value),
+                        Err(_) => {
+                            return ControlResponse::failure(
+                                &request.id,
+                                "maxBytes must be a nonnegative integer",
+                            );
+                        }
+                    },
+                    None => None,
+                };
+                let id = id.to_string();
+                self.queue_action(request, move |reply| ControlAction::ReadPane {
+                    id,
+                    query: PaneQuery::Scrollback(max_bytes),
+                    reply,
+                })
+            }
+            _ => Self::pane_error(request, self.panes.missing_pane_error(id)),
+        }
+    }
+
+    /// Runs one call against the host, off the GPUI thread. A lost connection
+    /// is `Unreached`; a read (`read_only`) is run once more over a connection
+    /// rebuilt by the factory's reconnect, a write never is.
+    fn host_call<T>(
+        &self,
+        read_only: bool,
+        call: impl Fn(&sirio_control::host_panels::HostPanels) -> Result<T, sirio_control::host_panels::Failure>,
+    ) -> Result<T, sirio_control::host_panels::Failure> {
+        use sirio_control::host_panels::{Failure, HostPanels};
+        let Some(client) = self.host_terminal.client() else {
+            return Err(Failure::Unreached("the host is not running".to_string()));
+        };
+        match call(&HostPanels::new(client)) {
+            Err(Failure::Unreached(message)) if read_only => match self.host_terminal.reconnect() {
+                Some(fresh) => call(&HostPanels::new(fresh)),
+                None => Err(Failure::Unreached(message)),
+            },
+            other => other,
+        }
+    }
+
+    /// Forwards one `panel.*` request to the host; a lost connection is
+    /// reported, not guessed at.
+    fn host_request(&self, request: &ControlRequest) -> ControlResponse {
+        let read_only = sirio_control::host_panels::HostPanels::is_read_only(&request.method);
+        match self.host_call(read_only, |host| host.answer(request)) {
+            Ok(response) => response,
+            Err(_) => ControlResponse::failure(&request.id, "Sirio could not reach its host"),
+        }
+    }
+
+    /// Brings the registry's control sessions up to the host's listing, so
+    /// the sidebar and `panel.list` see what the host holds.
+    fn refresh_control(&self) {
+        if let Ok(sessions) = self.host_call(true, |host| host.control_sessions()) {
+            if let Err(error) = self.panes.set_control_sessions(sessions) {
+                eprintln!("[control] failed to register control sessions: {error}");
+            }
+        }
+    }
+
+    /// `panel.show`: opens the tab for a host session on the GPUI thread. The
+    /// GPUI side reads the host's listing first and attaches only (see
+    /// `SirioWorkspace::show_session`).
+    fn show_session(&self, request: &ControlRequest) -> ControlResponse {
+        let Some(id) = request.params.get("id").cloned() else {
+            return ControlResponse::failure(&request.id, format!("{} requires id", request.method));
+        };
+        self.queue_action(request, move |reply| ControlAction::ShowSession {
+            session_id: id,
+            reply,
+        })
+    }
+
+    /// `panel.list`: the app's tabs and the control sessions of the worktree,
+    /// as the registry holds them after a refresh from the host.
+    fn panel_list(&self, request: &ControlRequest) -> ControlResponse {
+        let Some(working_directory) = self
+            .state()
+            .working_directory(request.params.get("worktree").map(String::as_str))
+        else {
+            return ControlResponse::failure(&request.id, "unknown worktree");
+        };
+        self.refresh_control();
+        let panes = match self.panes.list_for(&working_directory) {
+            Ok(panes) => panes,
+            Err(error) => return Self::pane_error(request, error),
+        };
+        let rows: Vec<BTreeMap<String, String>> = panes
+            .into_iter()
+            .map(|pane| {
+                BTreeMap::from([
+                    ("id".to_string(), pane.id),
+                    ("tab".to_string(), pane.tab),
+                    ("title".to_string(), pane.title),
+                    ("agent".to_string(), pane.agent),
+                    ("active".to_string(), pane.active.to_string()),
+                ])
+            })
+            .collect();
+        Self::success(
+            &request.id,
+            [(
+                "panels".to_string(),
+                sirio_control::protocol::rows::encode(&rows),
+            )],
+        )
     }
 
     /// F-CTRL-WORK-01: wires the database path used to persist
@@ -2160,6 +2477,7 @@ impl ControlHandler for AppControlHandler {
                     "panel.scrollback",
                     "panel.wait",
                     "panel.focus",
+                    "panel.show",
                     "panel.close",
                     "pane.split",
                     "pane.focus",
@@ -2219,6 +2537,10 @@ impl ControlHandler for AppControlHandler {
                 if cfg!(debug_assertions) {
                     methods.push("surface.change_request.act");
                     methods.push("surface.changes.confirm");
+                    methods.push("surface.host.end_all");
+                    methods.push("surface.terminal.open");
+                    methods.push("surface.terminal.restart");
+                    methods.push("surface.terminal.state");
                 }
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
@@ -2572,6 +2894,33 @@ impl ControlHandler for AppControlHandler {
                 params.remove("action");
                 self.queue_action(request, move |reply| ControlAction::ActChangeRequest { action, params, reply })
             }
+            // Debug-only `surface.host.end_all`: performs End All without the
+            // dialog (Task 12 drives it). Absent from a release build's
+            // `capabilities`, answered "unknown method" there.
+            "surface.host.end_all" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::EndAllSessions { reply })
+            }
+            // Debug-only `surface.terminal.open {cmd?, agent?}`: the tab a user's
+            // "new terminal" makes (an app-origin session on the host), one that
+            // runs `cmd` directly under `sh -c` so its pid is the session's, or
+            // a new agent tab for the adapter `agent`.
+            "surface.terminal.open" if cfg!(debug_assertions) => {
+                let command = request.params.get("cmd").cloned();
+                let agent = request.params.get("agent").cloned();
+                self.queue_action(request, move |reply| ControlAction::OpenTerminal {
+                    command,
+                    agent,
+                    reply,
+                })
+            }
+            "surface.terminal.restart" if cfg!(debug_assertions) => {
+                let pane = request.params.get("pane").cloned().unwrap_or_default();
+                self.queue_action(request, move |reply| ControlAction::TerminalRestart { pane, reply })
+            }
+            "surface.terminal.state" if cfg!(debug_assertions) => {
+                let pane = request.params.get("pane").cloned().unwrap_or_default();
+                self.queue_action(request, move |reply| ControlAction::TerminalState { pane, reply })
+            }
             "surface.tabs.read" => self.queue_action(request, |reply| ControlAction::ReadTabs { reply }),
             "surface.tabs.select" => {
                 let Some(position) = request
@@ -2593,7 +2942,13 @@ impl ControlHandler for AppControlHandler {
                 else {
                     return ControlResponse::failure(&request.id, "surface.tabs.close requires a positive index");
                 };
-                self.queue_action(request, move |reply| ControlAction::CloseListedTab { position, reply })
+                let confirmed = cfg!(debug_assertions)
+                    && request.params.get("confirm").is_some_and(|value| value == "yes");
+                self.queue_action(request, move |reply| ControlAction::CloseListedTab {
+                    position,
+                    confirmed,
+                    reply,
+                })
             }
             "surface.file.read" => self.queue_action(request, |reply| ControlAction::ReadFile { reply }),
             // F-SET-15: registers an isolated Claude/Codex account and
@@ -2731,183 +3086,9 @@ impl ControlHandler for AppControlHandler {
                 };
                 self.queue_action(request, move |reply| ControlAction::Chat { action, reply })
             }
-            "panel.create" => {
-                let Some(working_directory) = self
-                    .state()
-                    .working_directory(request.params.get("worktree").map(String::as_str))
-                else {
-                    return ControlResponse::failure(&request.id, "unknown worktree");
-                };
-                let command = request.params.get("cmd").map(String::as_str);
-                let title = command
-                    .and_then(|value| value.split_whitespace().next())
-                    .unwrap_or("Panel");
-                match self.panes.create(working_directory, command, title) {
-                    Ok(pane) => Self::success(&request.id, [("id".to_string(), pane.id)]),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.split" => {
-                let Some(source) = request.params.get("from") else {
-                    return ControlResponse::failure(&request.id, "panel.split requires from");
-                };
-                let Some(direction) = request.params.get("direction") else {
-                    return ControlResponse::failure(&request.id, "panel.split requires direction");
-                };
-                match self.panes.split(
-                    source,
-                    direction,
-                    request.params.get("cmd").map(String::as_str),
-                ) {
-                    Ok(pane) => Self::success(&request.id, [("id".to_string(), pane.id)]),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.list" => {
-                let working_directory = if let Some(working_directory) = self
-                    .state()
-                    .working_directory(request.params.get("worktree").map(String::as_str))
-                {
-                    working_directory
-                } else {
-                    return ControlResponse::failure(&request.id, "unknown worktree");
-                };
-                match self.panes.list_for(&working_directory) {
-                    Ok(panes) => {
-                        let rows: Vec<BTreeMap<String, String>> = panes
-                            .into_iter()
-                            .map(|pane| {
-                                BTreeMap::from([
-                                    ("id".to_string(), pane.id),
-                                    ("tab".to_string(), pane.tab),
-                                    ("title".to_string(), pane.title),
-                                    ("agent".to_string(), pane.agent),
-                                    ("active".to_string(), pane.active.to_string()),
-                                ])
-                            })
-                            .collect();
-                        Self::success(
-                            &request.id,
-                            [(
-                                "panels".to_string(),
-                                sirio_control::protocol::rows::encode(&rows),
-                            )],
-                        )
-                    }
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.write" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.write requires id");
-                };
-                let Some(input) = request.params.get("input") else {
-                    return ControlResponse::failure(&request.id, "panel.write requires input");
-                };
-                match self.panes.write(id, input.as_bytes()) {
-                    Ok(()) => Self::success(&request.id, []),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.key" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.key requires id");
-                };
-                let Some(key) = request.params.get("key") else {
-                    return ControlResponse::failure(&request.id, "panel.key requires key");
-                };
-                match self.panes.key(id, key) {
-                    Ok(()) => Self::success(&request.id, []),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.read" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.read requires id");
-                };
-                match self.panes.read(id) {
-                    Ok(output) => {
-                        Self::success(&request.id, [("data".to_string(), base64_encode(&output))])
-                    }
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.state" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.state requires id");
-                };
-                let id = id.clone();
-                self.queue_action(request, move |reply| ControlAction::ReadPane {
-                    id,
-                    query: PaneQuery::State,
-                    reply,
-                })
-            }
-            "panel.scrollback" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.scrollback requires id");
-                };
-                let max_bytes = match request.params.get("maxBytes") {
-                    Some(value) => match value.parse::<usize>() {
-                        Ok(value) => Some(value),
-                        Err(_) => {
-                            return ControlResponse::failure(
-                                &request.id,
-                                "maxBytes must be a nonnegative integer",
-                            );
-                        }
-                    },
-                    None => None,
-                };
-                let id = id.clone();
-                self.queue_action(request, move |reply| ControlAction::ReadPane {
-                    id,
-                    query: PaneQuery::Scrollback(max_bytes),
-                    reply,
-                })
-            }
-            "panel.wait" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.wait requires id");
-                };
-                let timeout = match request.params.get("timeoutMs") {
-                    Some(value) => match value.parse::<u64>() {
-                        Ok(milliseconds) => Some(Duration::from_millis(milliseconds)),
-                        Err(_) => {
-                            return ControlResponse::failure(
-                                &request.id,
-                                "timeoutMs must be a nonnegative integer",
-                            );
-                        }
-                    },
-                    None => None,
-                };
-                match self.panes.wait(id, timeout) {
-                    Ok(exit_code) => Self::success(
-                        &request.id,
-                        [("exitCode".to_string(), exit_code.to_string())],
-                    ),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.close" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.close requires id");
-                };
-                match self.panes.close(id) {
-                    Ok(()) => Self::success(&request.id, []),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
-            "panel.focus" => {
-                let Some(id) = request.params.get("id") else {
-                    return ControlResponse::failure(&request.id, "panel.focus requires id");
-                };
-                match self.panes.focus(id) {
-                    Ok(()) => Self::success(&request.id, []),
-                    Err(error) => Self::pane_error(request, error),
-                }
-            }
+            "panel.create" | "panel.split" | "panel.list" | "panel.write" | "panel.key"
+            | "panel.read" | "panel.state" | "panel.scrollback" | "panel.wait"
+            | "panel.close" | "panel.focus" | "panel.show" => self.panel(request),
             "pane.split" => {
                 let Some(direction) = request.params.get("direction") else {
                     return ControlResponse::failure(&request.id, "pane.split requires direction");
@@ -3895,6 +4076,7 @@ fn panel_state_pairs(snapshot: &PaneStateSnapshot, scrollback: &[u8]) -> Vec<(St
             "workingDirectory".to_string(),
             display_absolute_path(&snapshot.working_directory),
         ),
+        ("survives".to_string(), snapshot.survives.to_string()),
         ("scrollback".to_string(), base64_encode(scrollback)),
         ("scrollbackBytes".to_string(), scrollback.len().to_string()),
     ];
@@ -4928,6 +5110,9 @@ struct SirioWorkspace {
     /// bypass this — same precedent as `project.add`: no user is present to
     /// answer a prompt.
     pending_pane_close: Option<PendingPaneClose>,
+    /// End All Terminal Sessions confirmation (SP2 spec §4.2): shown only
+    /// when some session reports `foreground.running` or an agent.
+    pending_end_all: Option<PendingEndAll>,
     /// F-WIN-10: a transient, floating, auto-dismissing notice -- distinct
     /// from `Sidebar::set_notice`'s persistent inline banner, which stays
     /// silent when the sidebar isn't the visible surface. `toast_id` tags
@@ -4935,6 +5120,9 @@ struct SirioWorkspace {
     /// already replaced) can't clear a toast it doesn't own.
     toast: Option<Toast>,
     next_toast_id: u64,
+    /// Shows whose host listing is in flight, by session id, with every
+    /// request waiting on it: a second show joins the first, never opens a tab.
+    pending_shows: HashMap<String, Vec<Option<ControlReply>>>,
     /// F-WIN-11: the update-toast's own state machine, driven exclusively
     /// by `ControlAction::UpdateEvent` -- no Linux update transport exists
     /// yet to raise these on its own (see `sirio_project::ui`'s
@@ -5002,6 +5190,9 @@ struct SirioWorkspace {
     /// a mounted worktree uses this snapshot when its DB row is empty or
     /// belongs to another worktree.
     parked_worktree_tabs: BTreeMap<String, ParkedWorktreeTabs>,
+    /// How each new agent tab's terminal was launched (fix batch 7, I1). A pane
+    /// that moves to a fresh id launches again from it, under that id.
+    new_agent_launches: Vec<NewAgentLaunch>,
     /// Chat tabs of worktrees the user switched away from, keyed by worktree
     /// id and then by the tab's stable persistence id. The terminal cache is
     /// what keeps a terminal alive across a switch; a chat's `Entity<Chat>`
@@ -5097,6 +5288,12 @@ struct PendingPaneClose {
     /// just landed. `None` is the ordinary same-worktree close, whose wording
     /// is unchanged.
     from_worktree: Option<String>,
+}
+
+#[derive(Clone)]
+struct PendingEndAll {
+    focus: FocusHandle,
+    needs_focus: bool,
 }
 
 impl SirioWorkspace {
@@ -5508,14 +5705,27 @@ impl SirioWorkspace {
                                         tab.control_act(&action, &params, window, cx)
                                     }));
                                 }
+                                ControlAction::EndAllSessions { reply } => {
+                                    workspace.perform_end_all_sessions(cx);
+                                    let _ = reply.send(Ok(vec![]));
+                                }
+                                ControlAction::OpenTerminal { command, agent, reply } => {
+                                    let _ = reply.send(workspace.control_open_terminal(command, agent, cx));
+                                }
+                                ControlAction::TerminalRestart { pane, reply } => {
+                                    let _ = reply.send(workspace.control_terminal_restart(&pane, cx));
+                                }
+                                ControlAction::TerminalState { pane, reply } => {
+                                    let _ = reply.send(workspace.control_terminal_state(&pane, cx));
+                                }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
                                 }
                                 ControlAction::SelectListedTab { position, reply } => {
                                     let _ = reply.send(workspace.control_select_listed_tab(position, window, cx));
                                 }
-                                ControlAction::CloseListedTab { position, reply } => {
-                                    let _ = reply.send(workspace.control_close_listed_tab(position, window, cx));
+                                ControlAction::CloseListedTab { position, confirmed, reply } => {
+                                    let _ = reply.send(workspace.control_close_listed_tab(position, confirmed, window, cx));
                                 }
                                 ControlAction::ReadFile { reply } => {
                                     let _ = reply.send(workspace.control_read_file(cx));
@@ -5545,6 +5755,9 @@ impl SirioWorkspace {
                                         cx,
                                     );
                                     let _ = reply.send(result);
+                                }
+                                ControlAction::ShowSession { session_id, reply } => {
+                                    workspace.show_session(&session_id, Some(reply), cx);
                                 }
                                 ControlAction::ReadPane { id, query, reply } => {
                                     workspace.sync_control_panes(cx);
@@ -5692,6 +5905,9 @@ impl SirioWorkspace {
                                 tray::TrayRequest::Quit => {
                                     cx.quit();
                                 }
+                                tray::TrayRequest::EndAllSessions => {
+                                    workspace.request_end_all_sessions(cx);
+                                }
                             }
                         }
                     })
@@ -5713,7 +5929,14 @@ impl SirioWorkspace {
             },
         )
         .detach();
-        Self::bind_terminal_tabs(&tabs, cx);
+        let known_worktrees = std::sync::Arc::from(
+            project_catalog
+                .projects()
+                .iter()
+                .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
+                .collect::<Vec<PathBuf>>(),
+        );
+        Self::bind_terminal_tabs(&tabs, &known_worktrees, cx);
         Self::apply_terminal_font_size_to_tabs(&tabs, terminal_font_size, cx);
         // `bind_file_tabs` needs `&mut self`, which does not exist yet, so
         // collect the restored file views here and adopt them just below,
@@ -5751,7 +5974,7 @@ impl SirioWorkspace {
         .detach();
 
         let tabs_len = tabs.len();
-        let next_pane_id = next_pane_id(&tabs);
+        let next_pane_id = next_pane_id(&tabs).max(db_pane_id_floor(&session, &project_catalog));
         let tab_worktree_paths = tabs
             .iter()
             .map(|tab| (tab.id, working_directory.clone()))
@@ -5904,9 +6127,11 @@ impl SirioWorkspace {
             show_settings: false,
             restore_focus_pending: false,
             pending_pane_close: None,
+            pending_end_all: None,
             published_pane_directories: BTreeSet::new(),
             toast: None,
             next_toast_id: 0,
+            pending_shows: HashMap::new(),
             update_state: UpdateState::Idle,
             live_update_state: UiUpdateState::default(),
             updater: None,
@@ -5920,6 +6145,7 @@ impl SirioWorkspace {
             worktree_picker,
             terminal_pane_cache: TerminalPaneCache::new(),
             parked_worktree_tabs: BTreeMap::new(),
+            new_agent_launches: Vec::new(),
             retained_worktree_chats: BTreeMap::new(),
             parked_sidebar_tabs: BTreeMap::new(),
             files_snapshots: HashMap::new(),
@@ -6330,10 +6556,9 @@ impl SirioWorkspace {
         window.set_background_appearance(appearance);
     }
 
-    /// The shell's current layout, in the shape persistence understands.
-    fn layout(&self, cx: &App) -> SessionLayout {
-        let owned_tabs: Vec<&OpenTab> = self
-            .tabs
+    /// The tabs of the worktree on screen, in strip order.
+    fn worktree_tabs(&self) -> Vec<&OpenTab> {
+        self.tabs
             .iter()
             .filter(|tab| {
                 // Every kind is saved, Project Settings included: its edits
@@ -6344,7 +6569,27 @@ impl SirioWorkspace {
                     &self.working_directory,
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    /// The shell's layout as held in memory: every tab of the worktree,
+    /// attached ones included. Parking keeps this, so a parked attached tab
+    /// comes back attached with its own pane.
+    fn layout(&self, cx: &App) -> SessionLayout {
+        self.layout_of(cx, self.worktree_tabs())
+    }
+
+    /// The layout the session save writes. An attached tab (Show session) is
+    /// a view onto a session another client owns: it is never saved, so a
+    /// relaunch cannot restore it as an owned tab (spec §5). The session
+    /// lives on in the host.
+    fn saved_layout(&self, cx: &App) -> SessionLayout {
+        let owned_tabs =
+            persisted_tabs(self.worktree_tabs(), |tab| tab_shows_attached_session(tab, cx));
+        self.layout_of(cx, owned_tabs)
+    }
+
+    fn layout_of(&self, cx: &App, owned_tabs: Vec<&OpenTab>) -> SessionLayout {
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         SessionLayout {
             working_directory: self.working_directory.clone(),
@@ -6497,7 +6742,7 @@ impl SirioWorkspace {
         }) {
             return;
         }
-        self.session.schedule(self.layout(cx));
+        self.session.schedule(self.saved_layout(cx));
     }
 
     fn sidebar_projects(&self) -> Vec<SidebarProject> {
@@ -7367,6 +7612,9 @@ impl SirioWorkspace {
                 sirio_ui::settings::SettingsEvent::RequestPermission(kind) => {
                     workspace.request_permission(*kind, cx);
                 }
+                sirio_ui::settings::SettingsEvent::EndAllSessions => {
+                    workspace.request_end_all_sessions(cx);
+                }
             },
         )
         .detach();
@@ -7610,6 +7858,9 @@ impl SirioWorkspace {
         .detach();
     }
 
+    /// Gives a terminal the identity of `pane_id` and routes its events to the
+    /// workspace. A terminal bound again (a pane moved to a fresh id) keeps only
+    /// the subscriptions of its latest binding.
     fn bind_terminal(
         terminal: &Entity<TerminalView>,
         tab_id: usize,
@@ -7622,10 +7873,258 @@ impl SirioWorkspace {
                 format!("terminal-{pane_id}"),
             ));
         });
-        Self::subscribe_terminal(terminal, tab_id, pane_id, cx);
-        Self::subscribe_terminal_link(terminal, pane_id, cx);
-        Self::subscribe_terminal_activity(terminal, pane_id, cx);
-        Self::subscribe_terminal_drop(terminal, cx);
+        let subscriptions = vec![
+            Self::subscribe_terminal(terminal, tab_id, pane_id, cx),
+            Self::subscribe_terminal_link(terminal, pane_id, cx),
+            Self::subscribe_terminal_activity(terminal, pane_id, cx),
+            Self::subscribe_terminal_drop(terminal, cx),
+        ];
+        if !cx.has_global::<TerminalBindings>() {
+            cx.set_global(TerminalBindings::default());
+        }
+        cx.global_mut::<TerminalBindings>()
+            .0
+            .insert(terminal.entity_id(), subscriptions);
+    }
+
+    /// The tab and pane id of a terminal in the active worktree's strip.
+    fn terminal_pane_of(&self, terminal: &Entity<TerminalView>) -> Option<(usize, usize)> {
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let mut found = None;
+            tab.panes.for_each(&mut |pane_id, content| {
+                if let TabContent::Terminal { view } = content
+                    && view == terminal
+                {
+                    found = Some(pane_id);
+                }
+            });
+            if let Some(pane_id) = found {
+                return Some((index, pane_id));
+            }
+        }
+        None
+    }
+
+    /// The one-time dedup of pane ids across the worktrees' persisted layouts
+    /// (SP2 fix batch 5, N2 and N3). It runs when the host first answers, before
+    /// any terminal opens, so no pane has opened under an id it is about to lose.
+    /// An id that two layouts name keeps one holder: a parked layout (its
+    /// session runs), else the worktree owning the live session with that id,
+    /// else the first in catalog order. The others move to fresh ids from the
+    /// allocator: the active strip's panes live, the other rows are rewritten.
+    /// With no listing (`sessions` empty) there is no owner to prefer.
+    fn dedup_pane_ids_at_first_answer(
+        &mut self,
+        sessions: &[sirio_host_protocol::term::SessionSummary],
+        cx: &mut Context<Self>,
+    ) {
+        let worktrees = self.known_worktree_paths();
+        let active = self.working_directory.clone();
+        let parked: HashSet<PathBuf> = worktrees
+            .iter()
+            .filter(|path| **path != active)
+            .filter(|path| {
+                let id = path.to_string_lossy();
+                self.parked_worktree_tabs.contains_key(id.as_ref())
+                    || self.terminal_pane_cache.has_in_worktree(&id)
+            })
+            .cloned()
+            .collect();
+        let layouts: Vec<host_sessions::PaneIdLayout> = worktrees
+            .iter()
+            .map(|path| host_sessions::PaneIdLayout {
+                worktree: path.clone(),
+                ids: self.session.persisted_pane_ids_for(path).into_iter().collect(),
+                parked: parked.contains(path),
+            })
+            .collect();
+        let owners: HashMap<usize, PathBuf> = sessions
+            .iter()
+            .filter(|session| session.origin == sirio_host_protocol::term::Origin::App)
+            .filter_map(|session| {
+                let id = session.session_id.strip_prefix("pane-")?.parse::<usize>().ok()?;
+                let owner =
+                    sirio_control::panel::owning_worktree(Path::new(&session.cwd), &worktrees)?;
+                Some((id, owner.clone()))
+            })
+            .collect();
+        let listed: Vec<String> = sessions.iter().map(|session| session.session_id.clone()).collect();
+        let layout_floor = layouts
+            .iter()
+            .flat_map(|layout| layout.ids.iter())
+            .max()
+            .map_or(0, |max| max.saturating_add(1));
+        let floor = host_sessions::next_pane_floor(&listed)
+            .max(layout_floor)
+            .max(self.next_pane_id);
+        let moves = host_sessions::dedup_pane_ids(&layouts, &owners, floor);
+        if moves.is_empty() {
+            return;
+        }
+        eprintln!("[sirio] pane ids: {} duplicate id(s) moved to fresh ids", moves.len());
+        let refs = self.session.load_session_refs();
+        let mut by_worktree: BTreeMap<PathBuf, Vec<(usize, usize)>> = BTreeMap::new();
+        for pane_move in &moves {
+            by_worktree
+                .entry(pane_move.worktree.clone())
+                .or_default()
+                .push((pane_move.from, pane_move.to));
+            // A moved pane still resumes whatever its old key would have.
+            if let Some(reference) = refs.get(&format!("pane-{}", pane_move.from)) {
+                self.session
+                    .save_session_ref(&format!("pane-{}", pane_move.to), reference);
+            }
+        }
+        for (worktree, pairs) in &by_worktree {
+            if *worktree == active {
+                for &(from, to) in pairs {
+                    self.move_live_pane(from, to, cx);
+                }
+            } else {
+                self.session.edit_persisted_layout(worktree, |restored| {
+                    apply_pane_id_moves(restored, pairs);
+                    true
+                });
+            }
+        }
+        self.next_pane_id = self.next_pane_id.max(floor + moves.len());
+        self.sync_control_panes(cx);
+        self.schedule_save(cx);
+    }
+
+    /// A terminal whose open found its session id held by another session
+    /// (SP2 fix batch 5, N5 and #11): the pane takes a fresh id from the one
+    /// allocator, its tab's history and its subscriptions follow it, and it
+    /// opens again. The held session is neither attached to nor closed.
+    fn rebind_taken_terminal(&mut self, terminal: &Entity<TerminalView>, cx: &mut Context<Self>) {
+        let Some((tab_index, from)) = self.terminal_pane_of(terminal) else {
+            return;
+        };
+        let to = self.next_pane_id;
+        self.next_pane_id += 1;
+        self.move_pane(tab_index, from, to, Some(terminal), cx);
+        terminal.update(cx, |view, cx| view.retry(cx));
+        self.sync_control_panes(cx);
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// Renames pane `from` of tab `tab_index` to `to`: the tree's leaf, the
+    /// focus, the tab's history and the activity model's entry. A terminal
+    /// (`terminal` is its view) is also bound under `to`, so its events follow
+    /// it and the old bindings are dropped.
+    fn move_pane(
+        &mut self,
+        tab_index: usize,
+        from: usize,
+        to: usize,
+        terminal: Option<&Entity<TerminalView>>,
+        cx: &mut Context<Self>,
+    ) {
+        let (tab_id, agent_id, was_root) = {
+            let tab = &mut self.tabs[tab_index];
+            let was_root = tab_primary_pane_id(tab) == Some(from);
+            tab.panes.rename_leaf(from, to);
+            if tab.focused_pane == from {
+                tab.focused_pane = to;
+            }
+            host_sessions::rename_pane_in_session_state(&mut tab.session_state, from, to);
+            (tab.id, tab.agent_id.clone(), was_root)
+        };
+        self.activity.pane_closed(&format!("pane-{from}"));
+        register_restored_agent(&mut self.activity, to, agent_id.as_deref());
+        if let Some(terminal) = terminal {
+            Self::bind_terminal(terminal, tab_id, to, cx);
+            // The root pane of an agent tab runs the agent, and the agent's hooks
+            // and resume command name the pane they run in: it launches again
+            // under `to`, before its next open (fix batch 7, I1).
+            if was_root
+                && let Some(shell) =
+                    self.relaunch_agent_shell(terminal, agent_id.as_deref(), from, to, cx)
+            {
+                terminal.update(cx, |view, _| view.set_launch_shell(shell));
+            }
+        }
+    }
+
+    /// The shell an agent pane that moved from `from` to `to` launches with
+    /// (fix batch 7, I1): the launch its tab was made with, under the new key.
+    /// A new agent starts fresh with its prompt, as `add_agent_terminal_tab`
+    /// starts it. A restored one resumes the session its pane saved under
+    /// `from`, which moves to `to` with it, as a restore resumes it. `None` for
+    /// a pane with no agent, or when sirioctl cannot be resolved (the command
+    /// it has keeps the old key then).
+    fn relaunch_agent_shell(
+        &mut self,
+        terminal: &Entity<TerminalView>,
+        agent_id: Option<&str>,
+        from: usize,
+        to: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<TerminalShell> {
+        let worktree = self.working_directory.to_string_lossy().into_owned();
+        let pane_key = format!("pane-{to}");
+        if let Some(launch) = self
+            .new_agent_launches
+            .iter()
+            .find(|launch| launch.terminal.entity_id() == terminal.entity_id())
+        {
+            let (shell, warning) =
+                fresh_agent_shell(launch.adapter, &pane_key, &worktree, &launch.prompt);
+            if let Some(warning) = warning {
+                eprintln!("[sirio] {pane_key}: {warning}");
+            }
+            return Some(shell);
+        }
+        let adapter = *AGENT_CATALOG
+            .iter()
+            .find(|adapter| Some(adapter.id()) == agent_id)?;
+        let from_key = format!("pane-{from}");
+        let refs = self.session.load_session_refs();
+        let mut resumable = BTreeMap::new();
+        if let Some(reference) = refs.get(&from_key) {
+            self.session.save_session_ref(&pane_key, reference);
+            let resume = self.settings.read(cx).snapshot().resume_agent_sessions;
+            if resume
+                && sirio_agents::AgentSessionValidator::is_likely_valid(
+                    adapter.id(),
+                    reference,
+                    &worktree,
+                    claude_config_dir(),
+                    codex_home(),
+                )
+            {
+                resumable.insert(pane_key.clone(), reference.clone());
+            }
+        }
+        restored_agent_shell(Some(adapter.id()), &pane_key, Path::new(&worktree), &resumable)
+    }
+
+    /// Moves the live pane `from` of the active strip to `to`, whatever its
+    /// content is. `false` when no tab of the strip holds it.
+    fn move_live_pane(&mut self, from: usize, to: usize, cx: &mut Context<Self>) -> bool {
+        let mut found = None;
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let mut terminal = None;
+            let mut holds = false;
+            tab.panes.for_each(&mut |pane_id, content| {
+                if pane_id == from {
+                    holds = true;
+                    if let TabContent::Terminal { view } = content {
+                        terminal = Some(view.clone());
+                    }
+                }
+            });
+            if holds {
+                found = Some((index, terminal));
+                break;
+            }
+        }
+        let Some((index, terminal)) = found else {
+            return false;
+        };
+        self.move_pane(index, from, to, terminal.as_ref(), cx);
+        true
     }
 
     /// Every open document and its view. Shared by `bind_file_tabs` and the
@@ -7678,13 +8177,18 @@ impl SirioWorkspace {
         }
     }
 
-    fn bind_terminal_tabs(tabs: &[OpenTab], cx: &mut Context<Self>) {
-        Self::bind_terminal_tabs_with_reused(tabs, None, cx);
+    fn bind_terminal_tabs(
+        tabs: &[OpenTab],
+        known_worktrees: &std::sync::Arc<[PathBuf]>,
+        cx: &mut Context<Self>,
+    ) {
+        Self::bind_terminal_tabs_with_reused(tabs, None, known_worktrees, cx);
     }
 
     fn bind_terminal_tabs_with_reused(
         tabs: &[OpenTab],
         reused_terminal_panes: Option<&HashSet<usize>>,
+        known_worktrees: &std::sync::Arc<[PathBuf]>,
         cx: &mut Context<Self>,
     ) {
         for tab in tabs {
@@ -7693,6 +8197,14 @@ impl SirioWorkspace {
                 if let TabContent::Terminal { view } = content
                     && !reused_terminal_panes.is_some_and(|reused| reused.contains(&pane_id))
                 {
+                    // Restored tabs are the only terminals that may attach to
+                    // a session the host already holds (finding 11).
+                    // A restore's open checks the session against the worktrees
+                    // the app knows (fix batch 5, N3).
+                    view.update(cx, |terminal, _| {
+                        terminal.set_restored();
+                        terminal.set_known_worktrees(known_worktrees.clone());
+                    });
                     Self::bind_terminal(view, tab_id, pane_id, cx);
                 }
             });
@@ -7727,7 +8239,7 @@ impl SirioWorkspace {
         tab_id: usize,
         pane_id: usize,
         cx: &mut Context<Self>,
-    ) {
+    ) -> gpui::Subscription {
         let expected_pane_id = format!("pane-{pane_id}");
         let terminal_entity = terminal.clone();
         cx.subscribe(
@@ -7758,14 +8270,13 @@ impl SirioWorkspace {
                 }
             },
         )
-        .detach();
     }
 
     fn subscribe_terminal_link(
         terminal: &Entity<TerminalView>,
         pane_id: usize,
         cx: &mut Context<Self>,
-    ) {
+    ) -> gpui::Subscription {
         let expected_pane_id = format!("pane-{pane_id}");
         cx.subscribe(
             terminal,
@@ -7782,7 +8293,6 @@ impl SirioWorkspace {
                 }
             },
         )
-        .detach();
     }
 
     /// F-CHG-18: a changed-file row dragged from the Changes panel onto a
@@ -7798,24 +8308,29 @@ impl SirioWorkspace {
     /// same action a changed-file row's own "Open Diff in Editor" menu item
     /// takes), so dropping a diff onto a terminal now opens/focuses that
     /// same Diff tab instead of silently updating a field nothing reads.
-    fn subscribe_terminal_drop(terminal: &Entity<TerminalView>, cx: &mut Context<Self>) {
+    fn subscribe_terminal_drop(terminal: &Entity<TerminalView>, cx: &mut Context<Self>) -> gpui::Subscription {
         cx.subscribe(terminal, |workspace, _, event: &TerminalDropEvent, cx| {
             if let TerminalDropEvent::Diff { path, .. } = event {
                 workspace.add_changes_tab(Some(path.clone()), cx);
             }
         })
-        .detach();
     }
 
     fn subscribe_terminal_activity(
         terminal: &Entity<TerminalView>,
         pane_id: usize,
         cx: &mut Context<Self>,
-    ) {
+    ) -> gpui::Subscription {
         let activity_pane_id = format!("pane-{pane_id}");
         cx.subscribe(
             terminal,
             move |workspace, terminal, event: &TerminalActivityEvent, cx| {
+                // The open was refused because the id is held: the pane takes
+                // a fresh one and opens again (SP2 fix batch 5).
+                if matches!(event, TerminalActivityEvent::IdTaken) {
+                    workspace.rebind_taken_terminal(&terminal, cx);
+                    return;
+                }
                 sirio_perf::event(
                     match event {
                         TerminalActivityEvent::OscTitle(_) => "activity_event.osc_title",
@@ -7826,6 +8341,8 @@ impl SirioWorkspace {
                         TerminalActivityEvent::LifecycleChanged { .. } => {
                             "activity_event.lifecycle_changed"
                         }
+                        TerminalActivityEvent::SessionLost => "activity_event.session_lost",
+                        TerminalActivityEvent::IdTaken => "activity_event.id_taken",
                     },
                     pane_id as u64,
                 );
@@ -7881,6 +8398,16 @@ impl SirioWorkspace {
                     }
                     TerminalActivityEvent::OscTitle(_)
                     | TerminalActivityEvent::OutputSettled { .. } => {}
+                    // The host is gone: the pane keeps its scrollback and the
+                    // view draws `Session lost` with `Restart`
+                    // (`TerminalView::restart`, prelude replay). Mark and
+                    // repaint like an exit; Layer D keeps polling `shell_pid()`,
+                    // which now comes from the link.
+                    TerminalActivityEvent::IdTaken => {}
+                    TerminalActivityEvent::SessionLost => {
+                        workspace.mark_activity_dirty();
+                        cx.notify();
+                    }
                 }
                 if let Some(transition) = transition.as_ref() {
                     workspace.post_activity_notification(transition);
@@ -7915,7 +8442,6 @@ impl SirioWorkspace {
                 }
             },
         )
-        .detach();
     }
 
     /// Layer C off the UI thread: takes the cheap agent-id lookup
@@ -8557,10 +9083,49 @@ impl SirioWorkspace {
     }
 
     fn remove_project(&mut self, id: &str, cx: &mut Context<Self>) {
+        let removed_paths: Vec<PathBuf> = self
+            .project_catalog
+            .projects()
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| {
+                project
+                    .worktrees
+                    .iter()
+                    .map(|worktree| worktree.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Read before the project leaves the catalog, so each of its worktrees
+        // is still known when a session's deepest owner is worked out.
+        let known_before = self.known_worktree_paths();
+        let layout_ids = self.layout_session_ids(&removed_paths);
         if self.project_catalog.remove(id) {
             self.session.schedule_catalog(&self.project_catalog);
             self.sync_control_state();
             self.refresh_sidebar(cx);
+            // Closing a project ends its sessions (SP2 spec §4.2).
+            self.end_app_sessions(removed_paths.clone(), known_before, layout_ids, cx);
+            for path in &removed_paths {
+                let worktrees = self.known_worktree_paths();
+                match self.panes.shutdown_for(path, &worktrees) {
+                    Ok(ids) => Self::end_control_sessions(ids, cx),
+                    Err(error) => eprintln!(
+                        "[control] failed to forget panes of removed project {}: {error}",
+                        path.display()
+                    ),
+                }
+                let worktree_id = path.to_string_lossy().into_owned();
+                for controller in self
+                    .terminal_pane_cache
+                    .panes_for_detach_in_worktree(&worktree_id)
+                {
+                    controller.update(cx, |terminal, _| terminal.end_session());
+                }
+                self.terminal_pane_cache.remove_worktree(&worktree_id);
+                self.parked_worktree_tabs.remove(&worktree_id);
+                self.retained_worktree_chats.remove(&worktree_id);
+            }
             // A settings tab of a removed project has no project left to show.
             let doomed: Vec<usize> = self
                 .tabs
@@ -8576,6 +9141,22 @@ impl SirioWorkspace {
                     });
                     hosted.then_some(tab.id)
                 })
+                .collect();
+            for tab_id in doomed {
+                self.close_tab_by_id(tab_id, None, cx);
+            }
+            // Terminal tabs whose worktree belonged to the removed project.
+            let doomed: Vec<usize> = self
+                .tabs
+                .iter()
+                .filter(|tab| {
+                    self.tab_worktree_paths.get(&tab.id).is_some_and(|path| {
+                        removed_paths
+                            .iter()
+                            .any(|removed| paths_name_the_same_document(removed, path))
+                    })
+                })
+                .map(|tab| tab.id)
                 .collect();
             for tab_id in doomed {
                 self.close_tab_by_id(tab_id, None, cx);
@@ -9800,6 +10381,7 @@ impl SirioWorkspace {
                         String::new(),
                         PaneStateSnapshot {
                             working_directory: tab_worktree_path.clone(),
+                            survives: false,
                             exit_status: None,
                         },
                         None,
@@ -9810,6 +10392,7 @@ impl SirioWorkspace {
                         let state = PaneStateSnapshot {
                             working_directory: tab_worktree_path.clone(),
                             exit_status: pane_exit_status(terminal.exit_status()),
+                            survives: terminal.survives_app(),
                         };
                         let scrollback_source = terminal.scrollback_source().map(|source| {
                             let source: ScrollbackSource = Arc::new(move || source.capture());
@@ -9827,6 +10410,7 @@ impl SirioWorkspace {
                         String::new(),
                         PaneStateSnapshot {
                             working_directory: tab_worktree_path.clone(),
+                            survives: false,
                             exit_status: None,
                         },
                         None,
@@ -9939,8 +10523,9 @@ impl SirioWorkspace {
         };
         for id in evicted {
             // An evicted worktree is no longer mounted, so release the strong
-            // entity references here. TerminalView::drop then shuts down its
-            // PTY instead of leaving a shell behind in the cache.
+            // entity references here. TerminalView::drop then detaches its
+            // session instead of leaving a shell behind in the cache (a host
+            // session lives on; a local one ends with its link).
             self.terminal_pane_cache.remove_worktree(&id);
             self.parked_worktree_tabs.remove(&id);
             self.retained_worktree_chats.remove(&id);
@@ -10124,7 +10709,13 @@ impl SirioWorkspace {
             {
                 self.parked_worktree_tabs.remove(&selected_worktree_id);
             }
-            Self::bind_terminal_tabs_with_reused(&new_tabs, Some(&reused_terminal_panes), cx);
+            let known_worktrees = std::sync::Arc::from(self.known_worktree_paths());
+            Self::bind_terminal_tabs_with_reused(
+                &new_tabs,
+                Some(&reused_terminal_panes),
+                &known_worktrees,
+                cx,
+            );
             Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
             self.bind_file_tabs(&new_tabs, &selected_path, cx);
             Self::bind_change_request_tabs(&new_tabs, cx);
@@ -10472,13 +11063,28 @@ impl SirioWorkspace {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .current_workspace()
                 .is_some();
-        if let Err(error) = self.panes.shutdown_for(&path) {
-            eprintln!(
+        let worktrees = self.known_worktree_paths();
+        // Read before anything below drops this worktree's row or parked
+        // layout: the sessions its layouts name end with it (SP2 spec §4.2).
+        let layout_ids = self.layout_session_ids(std::slice::from_ref(&path));
+        match self.panes.shutdown_for(&path, &worktrees) {
+            Ok(ids) => Self::end_control_sessions(ids, cx),
+            Err(error) => eprintln!(
                 "[control] failed to terminate panes for closed worktree {}: {error}",
                 path.display()
-            );
+            ),
         }
+        self.end_app_sessions(vec![path.clone()], worktrees, layout_ids, cx);
         let worktree_id = path.to_string_lossy().into_owned();
+        // Closing a worktree ends its sessions (SP2 spec §4.2): shut down
+        // cached terminals before dropping them; parked layouts carry no
+        // entities themselves.
+        for controller in self
+            .terminal_pane_cache
+            .panes_for_detach_in_worktree(&worktree_id)
+        {
+            controller.update(cx, |terminal, _| terminal.end_session());
+        }
         self.terminal_pane_cache.remove_worktree(&worktree_id);
         self.parked_worktree_tabs.remove(&worktree_id);
         self.retained_worktree_chats.remove(&worktree_id);
@@ -10551,7 +11157,8 @@ impl SirioWorkspace {
                 cx,
             );
             Self::apply_terminal_font_size_to_tabs(&tabs, self.terminal_font_size, cx);
-            Self::bind_terminal_tabs(&tabs, cx);
+            let known_worktrees = std::sync::Arc::from(self.known_worktree_paths());
+            Self::bind_terminal_tabs(&tabs, &known_worktrees, cx);
             let worktree = self.working_directory.clone();
             self.bind_file_tabs(&tabs, &worktree, cx);
             Self::bind_change_request_tabs(&tabs, cx);
@@ -11558,16 +12165,33 @@ impl SirioWorkspace {
                 (terminal_pane_ids, chat_pane_ids)
             })
             .collect();
+        let mut attached_panes = HashSet::new();
+        for tab in self
+            .tabs
+            .iter()
+            .filter(|tab| paths_name_the_same_document(&self.tab_worktree_path(tab.id), &current_path))
+        {
+            tab.panes.for_each(&mut |pane_id, content| {
+                if let TabContent::Terminal { view } = content
+                    && view.read(cx).attached()
+                {
+                    attached_panes.insert(pane_id);
+                }
+            });
+        }
         let worktree_id = current_path.to_string_lossy().into_owned();
         self.parked_worktree_tabs.insert(
             worktree_id,
             ParkedWorktreeTabs {
-                layout: layout.clone(),
+                layout,
                 terminal_panes_by_tab,
                 chat_panes_by_tab,
+                attached_panes,
             },
         );
-        layout
+        // The outgoing worktree is saved now, and that save never names an
+        // attached tab; the parked copy above keeps it.
+        self.saved_layout(cx)
     }
 
     /// The pane ids the other parked worktrees are still live under — the
@@ -11885,10 +12509,9 @@ impl SirioWorkspace {
             }
         });
         for terminal in terminals {
-            // TerminalView exposes PTY input but not a public shutdown method.
-            // Interrupt first, then send EOF so the login shell exits and the
-            // alacritty event loop observes child exit and reaps the PTY.
-            terminal.update(cx, |terminal, _| terminal.input([3, 4]));
+            // Closing a tab ends its sessions (SP2 spec §4.2), except an
+            // attached one, which only detaches (spec §5): `end_session`.
+            terminal.update(cx, |terminal, _| terminal.end_session());
         }
         for browser in browsers {
             // F-BRW: same reason as the terminals above — `Drop` is not a close
@@ -12073,14 +12696,529 @@ impl SirioWorkspace {
     /// focus on whatever the tab-menu button last held until the user
     /// clicked back into the pane.
 
-    fn shutdown_terminals(&mut self, cx: &mut Context<Self>) {
+    /// Quit detaches and nothing else (SP2 spec §4.2): every view stops
+    /// watching, cached ones included; the host keeps the sessions.
+    fn detach_terminals(&mut self, cx: &mut Context<Self>) {
         for tab in &self.tabs {
             tab.panes.for_each(&mut |_, content| {
                 if let Some(terminal) = content.terminal() {
-                    terminal.update(cx, |terminal, _| terminal.shutdown());
+                    terminal.update(cx, |terminal, _| terminal.detach());
                 }
             });
         }
+        for pane in self.terminal_pane_cache.panes_for_detach() {
+            pane.update(cx, |terminal, _| terminal.detach());
+        }
+    }
+
+    /// The palette / Settings / tray entry point: asks for confirmation (an
+    /// Ely `Dialog`, like the Changes discard) only when some session reports
+    /// `foreground.running` or an agent, then `host.shutdown {force: true}`.
+    /// With no host it is disabled (the palette already disables it).
+    ///
+    /// The socket is never touched on the GPUI thread (SP2 review finding 4):
+    /// the listing runs in the background through the shared host client, and
+    /// the confirmation (or the shutdown) is decided back on the foreground.
+    fn request_end_all_sessions(&mut self, cx: &mut Context<Self>) {
+        if cx
+            .try_global::<HostConnection>()
+            .is_none_or(|conn| !conn.0.as_ref().is_some_and(|route| route.has_host()))
+        {
+            return;
+        }
+        let Some(client) = cx
+            .try_global::<HostTerminalGlobal>()
+            .and_then(|link| link.0.client())
+        else {
+            return;
+        };
+        let has_agent = self.tabs.iter().any(|tab| tab.agent_id.is_some());
+        let listing = cx.background_executor().spawn(async move {
+            client
+                .list()
+                .map(|list| {
+                    list.sessions
+                        .iter()
+                        .any(|summary| summary.foreground.running)
+                })
+                .unwrap_or(false)
+        });
+        cx.spawn(async move |this, cx| {
+            let running = listing.await;
+            let _ = this.update(cx, |workspace, cx| {
+                if has_agent || running {
+                    workspace.pending_end_all = Some(PendingEndAll {
+                        focus: cx.focus_handle().tab_stop(true),
+                        needs_focus: true,
+                    });
+                    cx.notify();
+                } else {
+                    workspace.perform_end_all_sessions(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_pending_end_all(&mut self, cx: &mut Context<Self>) {
+        self.pending_end_all = None;
+        cx.notify();
+    }
+
+    fn confirm_pending_end_all(&mut self, cx: &mut Context<Self>) {
+        self.pending_end_all = None;
+        self.perform_end_all_sessions(cx);
+        cx.notify();
+    }
+
+    /// `host.shutdown {force: true}` through the shared host client, on the
+    /// background executor. Every open terminal view then shows the session's
+    /// exit (`Exited`) through its own event stream, like any other exit.
+    fn perform_end_all_sessions(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = cx
+            .try_global::<HostTerminalGlobal>()
+            .and_then(|link| link.0.client())
+        else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = client.shutdown_force() {
+                    eprintln!("[sirio] end all sessions failed: {error}");
+                }
+            })
+            .detach();
+    }
+
+    /// Raises `next_pane_id` to at least `floor` (SP2 spec §4.1): a new pane
+    /// never collides with an orphan the host still lists.
+    fn raise_next_pane_id(&mut self, floor: usize) {
+        self.next_pane_id = self.next_pane_id.max(floor);
+    }
+
+    /// Adopts orphaned `origin: app` host sessions (SP2 spec §4.2): every
+    /// listed app session whose id is not a leaf of any restored tab gets a
+    /// terminal tab bound to that leaf id, whose view attaches through the
+    /// factory. Logs `orphan.adopted` with the id only.
+    fn adopt_host_orphans(
+        &mut self,
+        sessions: Vec<sirio_host_protocol::term::SessionSummary>,
+        cx: &mut Context<Self>,
+    ) {
+        use sirio_host_protocol::term::Origin;
+        // A session is referenced by any tab that names it (fix batch 1,
+        // finding 1): the current tabs, every worktree's persisted layout (only
+        // the active worktree is restored at startup), a parked layout and a
+        // cached view. Only what nothing names is an orphan.
+        let mut leaves = HashSet::new();
+        for tab in &self.tabs {
+            for id in tab.panes.leaf_ids() {
+                leaves.insert(id);
+            }
+        }
+        for path in self.known_worktree_paths() {
+            leaves.extend(self.session.persisted_pane_ids_for(&path));
+        }
+        for parked in self.parked_worktree_tabs.values() {
+            for panes in parked
+                .terminal_panes_by_tab
+                .iter()
+                .chain(parked.chat_panes_by_tab.iter())
+            {
+                leaves.extend(panes.iter().copied());
+            }
+        }
+        for pane in self.terminal_pane_cache.iter() {
+            if let Some(leaf) = pane
+                .content_id
+                .strip_prefix("terminal-")
+                .and_then(|rest| rest.parse::<usize>().ok())
+            {
+                leaves.insert(leaf);
+            }
+        }
+        let mut worktrees: Vec<(usize, PathBuf)> = Vec::new();
+        for project in self.project_catalog.projects() {
+            for worktree in &project.worktrees {
+                let id = worktrees.len();
+                worktrees.push((id, worktree.path.clone()));
+            }
+        }
+        let mut projects: Vec<(usize, PathBuf)> = Vec::new();
+        for project in self.project_catalog.projects() {
+            let id = projects.len();
+            projects.push((id, project.root_path.clone()));
+        }
+        // Map back from the adoption id to a path.
+        let worktree_path = |id: usize| {
+            worktrees
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, p)| p.clone())
+        };
+        let project_path = |id: usize| {
+            projects
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, p)| p.clone())
+        };
+        for summary in sessions {
+            if summary.origin != Origin::App {
+                continue;
+            }
+            let Some(rest) = summary.session_id.strip_prefix("pane-") else {
+                continue;
+            };
+            let Ok(leaf) = rest.parse::<usize>() else {
+                continue;
+            };
+            if leaves.contains(&leaf) {
+                continue;
+            }
+            let cwd = PathBuf::from(&summary.cwd);
+            let target = host_sessions::adoption_target(&cwd, &worktrees, &projects);
+            let tab_dir = match target {
+                host_sessions::AdoptionTarget::Worktree(id) => {
+                    worktree_path(id).unwrap_or_else(|| self.working_directory.clone())
+                }
+                host_sessions::AdoptionTarget::Project(id) => {
+                    project_path(id).unwrap_or_else(|| self.working_directory.clone())
+                }
+                host_sessions::AdoptionTarget::Active => self.working_directory.clone(),
+            };
+            eprintln!("[sirio] orphan.adopted {}", summary.session_id);
+            if tab_dir == self.working_directory {
+                self.insert_orphan_terminal_tab(leaf, tab_dir, false, cx);
+            } else {
+                // Another worktree's session: its tab waits in that worktree's
+                // persisted layout and attaches when the worktree is selected
+                // (finding 1). With no row for that worktree it is shown,
+                // attached and never owned, in the active worktree.
+                let title = tab_dir
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Terminal".to_owned());
+                if !self.session.append_terminal_tab(&tab_dir, leaf, &title) {
+                    let active = self.working_directory.clone();
+                    self.insert_orphan_terminal_tab(leaf, active, true, cx);
+                }
+            }
+            leaves.insert(leaf);
+        }
+    }
+
+    /// Shows a host session (spec §5): selects its tab if one shows it,
+    /// otherwise reads the host's listing off the GPUI thread and opens an
+    /// attached, not owned tab only if the session is live. A missing or
+    /// exited session gets no tab; the answer says which. The palette passes
+    /// no reply and hears about a failure on the toast.
+    fn show_session(
+        &mut self,
+        session_id: &str,
+        reply: Option<ControlReply>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(index) = self.tab_showing_session(session_id, cx) {
+            self.focus_tab(index, cx);
+            self.finish_show(reply, Ok(Vec::new()), cx);
+            return;
+        }
+        if let Some(waiting) = self.pending_shows.get_mut(session_id) {
+            waiting.push(reply);
+            return;
+        }
+        let Some(client) = cx
+            .try_global::<HostTerminalGlobal>()
+            .and_then(|link| link.0.client())
+        else {
+            self.finish_show(
+                reply,
+                Err("Sirio could not reach its host".to_string()),
+                cx,
+            );
+            return;
+        };
+        let id = session_id.to_string();
+        self.pending_shows.insert(id.clone(), vec![reply]);
+        let listing = cx.background_executor().spawn({
+            let id = id.clone();
+            async move {
+                client.list().map(|listed| {
+                    match listed.sessions.into_iter().find(|session| session.session_id == id) {
+                        None => ShowCheck::Missing,
+                        Some(session) if session.exit.is_some() => ShowCheck::Exited,
+                        Some(_) => ShowCheck::Live,
+                    }
+                })
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let check = listing.await;
+            let _ = this.update(cx, |workspace, cx| {
+                let waiting = workspace.pending_shows.remove(&id).unwrap_or_default();
+                let result = match check {
+                    Ok(ShowCheck::Live) => {
+                        match workspace.tab_showing_session(&id, cx) {
+                            Some(index) => workspace.focus_tab(index, cx),
+                            None => workspace.open_session_tab(&id, cx),
+                        }
+                        Ok(Vec::new())
+                    }
+                    Ok(ShowCheck::Missing) => Err(format!("unknown pane: {id}")),
+                    Ok(ShowCheck::Exited) => Err(format!("closed pane: {id}")),
+                    Err(_) => Err("Sirio could not reach its host".to_string()),
+                };
+                for reply in waiting {
+                    workspace.finish_show(reply, result.clone(), cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Makes the tab at `index` the active one.
+    fn focus_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.active_tab = index;
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
+    /// The index of the tab whose terminal shows `session_id`, if any.
+    fn tab_showing_session(&self, session_id: &str, cx: &App) -> Option<usize> {
+        self.tabs.iter().position(|tab| {
+            let mut shown = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let Some(terminal) = content.terminal() {
+                    shown |= terminal.read(cx).identity().pane_id() == session_id;
+                }
+            });
+            shown
+        })
+    }
+
+    /// Answers a show: the control socket gets the result, the palette a toast
+    /// for a failure.
+    fn finish_show(
+        &mut self,
+        reply: Option<ControlReply>,
+        result: Result<Vec<(String, String)>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match reply {
+            Some(reply) => {
+                let _ = reply.send(result);
+            }
+            None => {
+                if let Err(message) = result {
+                    self.show_toast(message, cx);
+                }
+            }
+        }
+    }
+
+    /// Opens an attached, not owned tab on a live host session. The view's
+    /// identity is the session id, so the factory attaches to it, and the
+    /// attach never creates it again (attach-only).
+    fn open_session_tab(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        let directory = self.working_directory.clone();
+        let title = directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Terminal".to_owned());
+        let terminal = cx.new(|cx| {
+            match TerminalView::with_shell(&directory, TerminalShell::System, cx) {
+                Ok(view) => view,
+                Err(error) => TerminalView::failed(
+                    &directory,
+                    TerminalShell::System,
+                    format!("{error:#}"),
+                    cx,
+                ),
+            }
+        });
+        let leaf = self.next_pane_id;
+        // Attached before the tab is inserted: the insert saves the layout at
+        // once, and an attached tab must never reach the saved layout.
+        terminal.update(cx, |terminal, _| terminal.set_attached());
+        self.insert_terminal_tab(title, terminal.clone(), None, cx);
+        let session_id = session_id.to_string();
+        terminal.update(cx, |terminal, _| {
+            terminal.set_identity(TerminalIdentity::new(
+                session_id,
+                format!("terminal-{leaf}"),
+            ));
+        });
+    }
+
+    /// Every worktree path in the catalog.
+    fn known_worktree_paths(&self) -> Vec<PathBuf> {
+        self.project_catalog
+            .projects()
+            .iter()
+            .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
+            .collect()
+    }
+
+    /// The session ids the persisted and parked layouts of these worktrees name,
+    /// as `pane-<leaf>` (SP2 spec §4.2). Read on the GPUI thread, before the rows
+    /// or the parked layout are dropped. An attached parked pane is left out.
+    fn layout_session_ids(&self, worktrees: &[PathBuf]) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        for path in worktrees {
+            ids.extend(
+                self.session
+                    .persisted_pane_ids_for(path)
+                    .into_iter()
+                    .map(|leaf| format!("pane-{leaf}")),
+            );
+            let worktree_id = path.to_string_lossy().into_owned();
+            if let Some(parked) = self.parked_worktree_tabs.get(&worktree_id) {
+                ids.extend(
+                    parked
+                        .terminal_panes_by_tab
+                        .iter()
+                        .flatten()
+                        .filter(|leaf| !parked.attached_panes.contains(leaf))
+                        .map(|leaf| format!("pane-{leaf}")),
+                );
+            }
+        }
+        ids
+    }
+
+    /// Ends the app sessions a closing worktree, or each of a closing project's
+    /// worktrees, owns (SP2 spec §4.2), off the GPUI thread: one host listing,
+    /// then a `term.close` for each session `host_sessions::app_sessions_to_end`
+    /// names. A session the views already ended answers `unknown_session`, the
+    /// expected double close, and is not logged. Without a host there are none.
+    fn end_app_sessions(
+        &self,
+        closing: Vec<PathBuf>,
+        known: Vec<PathBuf>,
+        layout_ids: HashSet<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if closing.is_empty() {
+            return;
+        }
+        let Some(client) = cx
+            .try_global::<HostTerminalGlobal>()
+            .and_then(|link| link.0.client())
+        else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                let listed: Vec<(String, sirio_host_protocol::term::Origin, PathBuf)> =
+                    match client.list() {
+                        Ok(list) => list
+                            .sessions
+                            .into_iter()
+                            .map(|summary| {
+                                (summary.session_id, summary.origin, PathBuf::from(summary.cwd))
+                            })
+                            .collect(),
+                        Err(error) => {
+                            eprintln!(
+                                "[sirio] could not list the host's sessions to end a closed worktree's: {error}"
+                            );
+                            return;
+                        }
+                    };
+                for id in host_sessions::app_sessions_to_end(&listed, &closing, &known, &layout_ids) {
+                    match client.close(&id) {
+                        Ok(()) => {}
+                        Err(sirio_host_client::connection::CallError::Remote(body))
+                            if body.code == sirio_host_protocol::messages::ErrorCode::UnknownSession => {}
+                        Err(error) => eprintln!("[sirio] could not end session {id}: {error}"),
+                    }
+                }
+            })
+            .detach();
+    }
+
+    /// Ends host sessions a closed worktree or project owned (spec §4.2),
+    /// off the GPUI thread.
+    fn end_control_sessions(ids: Vec<String>, cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        let Some(client) = cx
+            .try_global::<HostTerminalGlobal>()
+            .and_then(|link| link.0.client())
+        else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                for id in ids {
+                    if let Err(error) = client.close(&id) {
+                        eprintln!("[control] could not end session {id}: {error}");
+                    }
+                }
+            })
+            .detach();
+    }
+
+    /// Inserts a terminal tab bound to an explicit leaf id (orphan adoption):
+    /// the view's identity becomes `pane-<leaf>`, so the factory attaches to
+    /// the listed session. A missing session is created with a plain shell.
+    fn insert_orphan_terminal_tab(
+        &mut self,
+        leaf: usize,
+        directory: PathBuf,
+        attached: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let title = directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Terminal".to_owned());
+        let terminal = cx.new(|cx| match TerminalView::with_shell(&directory, TerminalShell::System, cx)
+        {
+            Ok(view) => view,
+            Err(error) => TerminalView::failed(
+                &directory,
+                TerminalShell::System,
+                format!("{error:#}"),
+                cx,
+            ),
+        });
+        let tab_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_font_size(self.terminal_font_size, cx)
+        });
+        // An orphan is a session that already exists: adopting it is a restore.
+        terminal.update(cx, |terminal, _| {
+            terminal.set_restored();
+            if attached {
+                terminal.set_attached();
+            }
+        });
+        Self::bind_terminal(&terminal, tab_id, leaf, cx);
+        self.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id: self.session.new_tab_id(&directory, tab_id),
+            title: title.clone(),
+            kind: TabKind::Terminal,
+            pane: TabKind::Terminal.default_pane(),
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(leaf),
+            panes: PaneNode::leaf(leaf, TabContent::Terminal { view: terminal }),
+            focused_pane: leaf,
+            title_is_auto_named: true,
+        });
+        self.tab_worktree_paths.insert(tab_id, directory);
+        self.active_tab = self.tabs.len() - 1;
+        if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Terminal, &title) {
+            self.rebuild_center_split();
+        }
+        self.schedule_save(cx);
+        self.session.flush_now();
+        self.mark_activity_dirty();
+        cx.notify();
     }
 
     fn add_chat_tab(
@@ -12433,7 +13571,11 @@ impl SirioWorkspace {
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Terminal, &title) {
             self.rebuild_center_split();
         }
+        // A new terminal tab triggers an immediate session save (SP2 spec
+        // §4.1), not the next periodic one, so a crash right after creation
+        // rarely leaves an orphan.
         self.schedule_save(cx);
+        self.session.flush_now();
         self.mark_activity_dirty();
         cx.notify();
     }
@@ -14098,28 +15240,20 @@ impl SirioWorkspace {
     ) -> Option<String> {
         let pane_key = format!("pane-{}", self.next_pane_id);
         let worktree = self.working_directory.to_string_lossy().into_owned();
-        let mut warning = None;
-        let sirioctl = match resolve_sirioctl_for_process() {
-            Ok(path) => path.to_string_lossy().into_owned(),
-            Err(error) => {
-                warning = Some(format!("hooks not written: {error}"));
-                String::new()
-            }
-        };
-        if warning.is_none()
-            && let Err(error) = adapter.prepare(&worktree, &pane_key, &sirioctl)
-        {
-            warning = Some(format!("hooks not written: {error}"));
-        }
-        let command = adapter.command_with_prompt(&worktree, &pane_key, &sirioctl, prompt);
-        let (program, args) = command_shell_invocation(&command);
+        let (shell, warning) = fresh_agent_shell(adapter, &pane_key, &worktree, prompt);
         let terminal = self.add_terminal_tab_with_shell_and_agent(
             adapter.display_name(),
-            TerminalShell::WithArguments { program, args },
+            shell,
             Icon::for_agent_id(adapter.id()),
             Some(adapter.id().to_string()),
             cx,
         );
+        self.new_agent_launches.retain(|launch| launch.terminal.upgrade().is_some());
+        self.new_agent_launches.push(NewAgentLaunch {
+            terminal: terminal.downgrade(),
+            adapter,
+            prompt: prompt.to_string(),
+        });
         // The agent works whether or not its tab is drawn (a hidden window,
         // another worktree), so it starts now rather than on first render.
         terminal.update(cx, |terminal, cx| terminal.start(cx));
@@ -15945,6 +17079,75 @@ impl SirioWorkspace {
         self.control_read_change_request(cx)
     }
 
+    /// Debug-only `surface.terminal.open`. It goes through the path a
+    /// terminal launched by an agent takes: a tab, then `start` (no render
+    /// needed). The reply names the pane, `pane-<n>`, which is the session id
+    /// the host lists it under.
+    fn control_open_terminal(
+        &mut self,
+        command: Option<String>,
+        agent: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let pane = format!("pane-{}", self.next_pane_id);
+        if let Some(agent) = agent {
+            let adapter = *AGENT_CATALOG
+                .iter()
+                .find(|adapter| adapter.id() == agent)
+                .ok_or_else(|| format!("there is no agent adapter {agent}"))?;
+            self.add_agent_terminal_tab(adapter, "", cx);
+            return Ok(vec![("pane".to_string(), pane)]);
+        }
+        let shell = match command {
+            Some(command) => TerminalShell::WithArguments {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), command],
+            },
+            None => TerminalShell::System,
+        };
+        let terminal = self.add_terminal_tab_with_shell_and_agent("Terminal", shell, None, None, cx);
+        terminal.update(cx, |terminal, cx| terminal.start(cx));
+        Ok(vec![("pane".to_string(), pane)])
+    }
+
+    /// The terminal of the pane `pane` (`pane-<n>`), in whichever tab holds it.
+    fn control_terminal_view(&self, pane: &str) -> Result<Entity<TerminalView>, String> {
+        let id: usize = pane
+            .strip_prefix("pane-")
+            .unwrap_or(pane)
+            .parse()
+            .map_err(|_| format!("{pane} is not a pane id"))?;
+        let mut found = None;
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |pane_id, content| {
+                if pane_id == id && found.is_none() {
+                    found = content.terminal();
+                }
+            });
+        }
+        found.ok_or_else(|| format!("no terminal {pane} in any tab"))
+    }
+
+    fn control_terminal_restart(
+        &mut self,
+        pane: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self.control_terminal_view(pane)?;
+        view.update(cx, |terminal, cx| terminal.restart(cx));
+        Ok(Vec::new())
+    }
+
+    fn control_terminal_state(
+        &self,
+        pane: &str,
+        cx: &App,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self.control_terminal_view(pane)?;
+        let lost = view.read(cx).session_lost();
+        Ok(vec![("sessionLost".to_string(), lost.to_string())])
+    }
+
     /// Every tab as `<kind>|<snapshot yes|no>|<title>`, and which is active.
     fn control_read_tabs(&self, cx: &Context<Self>) -> Vec<(String, String)> {
         let mut report = vec![
@@ -15994,11 +17197,15 @@ impl SirioWorkspace {
     fn control_close_listed_tab(
         &mut self,
         position: usize,
+        confirmed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let id = self.listed_tab_id(position)?;
-        self.request_close_tab_by_id(id, window, cx);
+        match self.tabs.iter().position(|tab| tab.id == id) {
+            Some(index) if confirmed => self.close_tab(index, Some(window), cx),
+            _ => self.request_close_tab_by_id(id, window, cx),
+        }
         Ok(self.control_read_tabs(cx))
     }
 
@@ -16495,7 +17702,8 @@ impl SirioWorkspace {
                 .pane_events
                 .push(PaneEvent::Close { id: focused_pane });
             if let Some(terminal) = removed.terminal() {
-                terminal.update(cx, |terminal, _| terminal.input([3, 4]));
+                // Closing a pane in a split ends its session (SP2 spec §4.2).
+                terminal.update(cx, |terminal, _| terminal.end_session());
                 self.terminal_pane_cache
                     .remove_in_worktree(&worktree_id, &format!("terminal-{focused_pane}"));
             }
@@ -16960,6 +18168,55 @@ impl SirioWorkspace {
                         key_entity.update(cx, |workspace, cx| {
                             workspace.handle_pane_close_confirm_key(event, window, cx);
                         });
+                    },
+                )),
+            },
+            theme,
+        ))
+    }
+
+    /// End All Terminal Sessions confirmation (SP2 spec §4.2): an Ely
+    /// `Dialog`, like the Changes discard — only when some session reports
+    /// `foreground.running` or an agent.
+    fn render_end_all_confirm(&self, theme: Theme, entity: Entity<Self>) -> Option<AnyElement> {
+        let pending = self.pending_end_all.clone()?;
+        let confirm_entity = entity.clone();
+        let cancel_entity = entity.clone();
+        Some(render_modal(
+            ModalSpec {
+                id: "end-all-sessions-confirm",
+                title: "End all terminal sessions?".into(),
+                body: "Some sessions are running or host agents. End every terminal session and the host?".into(),
+                text_field: None,
+                buttons: vec![
+                    ModalButton::new(
+                        "cancel",
+                        "Cancel",
+                        ModalButtonTone::Plain,
+                        move |_, window, cx| {
+                            cancel_entity.update(cx, |workspace, cx| {
+                                workspace.cancel_pending_end_all(cx);
+                                let _ = window;
+                            });
+                        },
+                    ),
+                    ModalButton::new(
+                        "end-all",
+                        "End All",
+                        ModalButtonTone::Destructive,
+                        move |_, window, cx| {
+                            confirm_entity.update(cx, |workspace, cx| {
+                                workspace.confirm_pending_end_all(cx);
+                                let _ = window;
+                            });
+                        },
+                    ),
+                ],
+                focus: Some(ModalFocus::new(
+                    pending.focus.clone(),
+                    move |event, _, cx| {
+                        cx.stop_propagation();
+                        let _ = event;
                     },
                 )),
             },
@@ -19689,6 +20946,21 @@ impl SirioWorkspace {
             has_retained_chat: !self.retained_chats.is_empty(),
             sidebar_target,
             symbols_available: self.active_file_offers_symbols(cx),
+            has_host: cx
+                .try_global::<HostConnection>()
+                .is_some_and(|conn| conn.0.as_ref().is_some_and(|route| route.has_host())),
+            control_sessions: self
+                .panes
+                .control_sessions()
+                .into_iter()
+                .map(|pane| {
+                    if pane.title.is_empty() {
+                        pane.id
+                    } else {
+                        format!("{} ({})", pane.id, pane.title)
+                    }
+                })
+                .collect(),
         }
     }
 
@@ -19919,7 +21191,7 @@ impl SirioWorkspace {
                 }
             }
             "enter" | "return" => {
-                if let Some(entry) = filtered.get(self.palette_selected).copied()
+                if let Some(entry) = filtered.get(self.palette_selected).cloned()
                     && entry.is_enabled()
                 {
                     self.dispatch_palette_command(entry.command, window, cx);
@@ -20033,6 +21305,19 @@ impl SirioWorkspace {
                 self.close_command_palette(window, cx);
                 self.go_to_symbol(window, cx);
             }
+            PaletteCommand::EndAllSessions => {
+                self.request_end_all_sessions(cx);
+            }
+            PaletteCommand::ShowSession(index) => {
+                if let Some(id) = self
+                    .panes
+                    .control_sessions()
+                    .get(index)
+                    .map(|pane| pane.id.clone())
+                {
+                    self.show_session(&id, None, cx);
+                }
+            }
         }
         self.close_command_palette(window, cx);
     }
@@ -20123,10 +21408,10 @@ impl SirioWorkspace {
             .flex_col()
             .gap(px(1.0));
 
-        for (index, entry) in filtered.iter().copied().enumerate() {
+        for (index, entry) in filtered.iter().cloned().enumerate() {
             let active = index == selected;
             let entity = entity.clone();
-            let selector = Self::palette_selector(entry.label);
+            let selector = Self::palette_selector(&entry.label);
             rows = rows.child(
                 div()
                     .id(selector.clone())
@@ -20156,7 +21441,7 @@ impl SirioWorkspace {
                             },
                         )
                     })
-                    .child(entry.label)
+                    .child(entry.label.clone())
                     .child(
                         div()
                             .flex()
@@ -20164,7 +21449,7 @@ impl SirioWorkspace {
                             .gap(px(8.0))
                             .text_color(theme.ely.fg_subtle)
                             .child(entry.shortcut.unwrap_or(""))
-                            .when_some(entry.disabled_reason, |this, reason| {
+                            .when_some(entry.disabled_reason.clone(), |this, reason| {
                                 this.child(
                                     div()
                                         .debug_selector(move || {
@@ -20457,7 +21742,8 @@ impl SirioWorkspace {
             self.render_pane_close_confirm(theme, entity.clone()),
             self.render_title_prompt(theme, entity.clone()),
             self.render_toast(theme, entity.clone()),
-            self.render_update_toast(theme, entity),
+            self.render_update_toast(theme, entity.clone()),
+            self.render_end_all_confirm(theme, entity),
         ]
         .into_iter()
         .flatten()
@@ -20575,6 +21861,13 @@ impl Render for SirioWorkspace {
         // target and everything typed while the banner was up reached its
         // PTY instead.
         if let Some(pending) = self.pending_pane_close.as_mut()
+            && pending.needs_focus
+        {
+            pending.needs_focus = false;
+            let focus = pending.focus.clone();
+            focus.focus(window, cx);
+        }
+        if let Some(pending) = self.pending_end_all.as_mut()
             && pending.needs_focus
         {
             pending.needs_focus = false;
@@ -21019,6 +22312,33 @@ fn replay_pane_events<T>(
     tree
 }
 
+/// The shell a new agent starts under `pane_key`: `prepare` writes the
+/// worktree's hooks for that pane, then the adapter's command with its prompt.
+/// The warning names what could not be written, and the command still runs.
+fn fresh_agent_shell(
+    adapter: &dyn sirio_agents::AgentAdapter,
+    pane_key: &str,
+    worktree: &str,
+    prompt: &str,
+) -> (TerminalShell, Option<String>) {
+    let mut warning = None;
+    let sirioctl = match resolve_sirioctl_for_process() {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        Err(error) => {
+            warning = Some(format!("hooks not written: {error}"));
+            String::new()
+        }
+    };
+    if warning.is_none()
+        && let Err(error) = adapter.prepare(worktree, pane_key, &sirioctl)
+    {
+        warning = Some(format!("hooks not written: {error}"));
+    }
+    let command = adapter.command_with_prompt(worktree, pane_key, &sirioctl, prompt);
+    let (program, args) = command_shell_invocation(&command);
+    (TerminalShell::WithArguments { program, args }, warning)
+}
+
 fn register_restored_agent(
     activity: &mut AgentActivityModel,
     root_pane_id: usize,
@@ -21189,7 +22509,7 @@ fn restore_tabs(
     (tabs, active)
 }
 
-fn restored_tab_pane_ids(root_pane_id: usize, state: &SessionTabState) -> HashSet<usize> {
+pub(crate) fn restored_tab_pane_ids(root_pane_id: usize, state: &SessionTabState) -> HashSet<usize> {
     let mut pane_ids = HashSet::from([state.root_id.unwrap_or(root_pane_id)]);
     for event in &state.pane_events {
         match event {
@@ -21210,7 +22530,7 @@ fn restored_tab_pane_ids(root_pane_id: usize, state: &SessionTabState) -> HashSe
 /// fallback is retained whenever it is free; only the colliding legacy tab
 /// moves, which keeps old pane identities stable as far as the snapshot
 /// allows.
-fn restored_pane_ids(restored: &RestoredSession, fallback_start: usize) -> Vec<usize> {
+pub(crate) fn restored_pane_ids(restored: &RestoredSession, fallback_start: usize) -> Vec<usize> {
     let mut reserved = HashSet::new();
     for state in &restored.tab_states {
         if let Some(root_id) = state.root_id {
@@ -21243,6 +22563,37 @@ fn restored_pane_ids(restored: &RestoredSession, fallback_start: usize) -> Vec<u
             root_id
         })
         .collect()
+}
+
+/// Renames pane ids in a restored layout (SP2 fix batch 5). Each legacy root
+/// is pinned first, as the restore pins it, so the renamed layout and the next
+/// restore agree.
+fn apply_pane_id_moves(restored: &mut RestoredSession, moves: &[(usize, usize)]) {
+    if restored.tab_states.len() < restored.tabs.len() {
+        restored
+            .tab_states
+            .resize_with(restored.tabs.len(), SessionTabState::default);
+    }
+    let roots = restored_pane_ids(restored, 0);
+    for (index, (state, root)) in restored.tab_states.iter_mut().zip(&roots).enumerate() {
+        materialize_restored_root(state, *root, index);
+        for &(from, to) in moves {
+            host_sessions::rename_pane_in_session_state(state, from, to);
+        }
+    }
+}
+
+/// One past the largest pane id any catalog worktree's persisted layout names
+/// (SP2 fix batch 5): a new pane never takes an id a layout holds, whichever
+/// worktree holds it.
+fn db_pane_id_floor(session: &session::SessionStore, catalog: &ProjectCatalog) -> usize {
+    catalog
+        .projects()
+        .iter()
+        .flat_map(|project| project.worktrees.iter())
+        .flat_map(|worktree| session.persisted_pane_ids_for(&worktree.path))
+        .max()
+        .map_or(0, |max| max.saturating_add(1))
 }
 
 /// Gives every pane of a restored session that a live pane elsewhere already
@@ -21683,6 +23034,36 @@ fn restore_tabs_with_terminal_cache(
         });
         if tab.active {
             active = id;
+        }
+    }
+    // SP2 spec §4.2: a restored tab already gets its old leaf id through
+    // `bind_terminal`; `ensure_started` asks the factory with that id, so a
+    // surviving session is attached and a missing one is created with the
+    // saved scrollback as `prelude` and the agent's `resume_command` as the
+    // program. The scrollback moves from the post-spawn `replay_scrollback`
+    // into `OpenRequest.prelude` (the replay now happens inside the session's
+    // VT, so `panel.read` sees it too). An attached surviving session gets no
+    // prelude and no resume command (the factory ignores both on attach).
+    for tab in &mut tabs {
+        let pane_ids = tab.panes.leaf_ids();
+        for pane_id in pane_ids {
+            let Some(bytes) = tab.session_state.scrollback.remove(&pane_id) else {
+                continue;
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            let mut view_entity = None;
+            tab.panes.for_each(&mut |id, content| {
+                if id == pane_id
+                    && let TabContent::Terminal { view } = content
+                {
+                    view_entity = Some(view.clone());
+                }
+            });
+            if let Some(view) = view_entity {
+                view.update(cx, |terminal, _| terminal.set_prelude(bytes));
+            }
         }
     }
     (tabs, active, reused_terminal_panes)
@@ -22931,13 +24312,612 @@ fn ensure_windows_console() {
     }
 }
 
-/// Keeps the app's connection to its host for the app's lifetime: the host
-/// counts this connection as a client, so it does not idle out under a
-/// running app (spec §5.5). Nothing functional depends on it in SP1 (spec
-/// §7) — it is held, and its status line is shown in Settings → General.
-// Held, never read in SP1: dropping it is what would end the connection.
-struct HostConnection(#[allow(dead_code)] Option<sirio_host_client::HostHandle>);
+/// A new agent tab's launch, kept with its terminal (fix batch 7, I1): the
+/// adapter and the prompt it was started with. A restored agent tab has none
+/// (its launch comes from its saved tab), so only a new one is recorded here.
+/// The terminal is weak, so an entry whose tab closed is dropped on the next
+/// new agent tab.
+struct NewAgentLaunch {
+    terminal: gpui::WeakEntity<TerminalView>,
+    adapter: &'static dyn sirio_agents::AgentAdapter,
+    prompt: String,
+}
+
+/// The subscriptions that route a terminal pane's events to the workspace,
+/// keyed by the terminal's entity. A pane given a fresh id replaces its set, so
+/// the old subscriptions are dropped and no closure keeps routing a session's
+/// events to a pane id the pane no longer holds (fix batch 5).
+#[derive(Default)]
+struct TerminalBindings(HashMap<gpui::EntityId, Vec<gpui::Subscription>>);
+impl gpui::Global for TerminalBindings {}
+
+/// Keeps the app's route to its host for the app's lifetime. The host counts
+/// the route's connection as a client, so it does not idle out under a running
+/// app (spec §5.5). The route is the one place a host's client is replaced
+/// (see [`HostRoute`]); the palette and End All read whether there is a host.
+struct HostConnection(Option<Arc<HostRoute>>);
 impl gpui::Global for HostConnection {}
+
+/// Why a host open gave no session. Only `NoHost` falls back to a local
+/// shell (spec §8): a host that is there but could not be reached may hold
+/// the session live, so a local shell beside it would run a second agent
+/// (review finding 7).
+#[derive(Clone, Debug)]
+enum HostUnavailable {
+    /// No host, or one without the `terminal` capability.
+    NoHost(String),
+    /// A host is there but the open failed.
+    Failed(String),
+    /// The session id is held by another session: the pane takes a fresh id.
+    Taken(String),
+}
+
+/// The terminal client and reconnect closure of the host, as one unit.
+#[derive(Clone)]
+struct HostClient {
+    client: sirio_host_client::TermClient,
+    reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
+}
+
+/// The app's one route to its host's terminal sessions (SP2 review finding 6).
+/// Every open, Restart and the control socket reach the host through it. A
+/// client whose connection has closed (the host was killed, or End All ended
+/// it) is replaced by what one `ensure_host` finds, and only when a terminal
+/// asks for one: the next terminal starts a host again (spec §3.1, §4.2 row
+/// 7). Nothing re-ensures on a timer or on a silent host (spec §8). One ensure
+/// runs at a time; a second caller waits for it and takes the client it made.
+struct HostRoute {
+    environment: BTreeMap<String, String>,
+    current_exe: PathBuf,
+    /// The client of the last successful ensure, read without waiting.
+    current: Mutex<Option<HostClient>>,
+    /// Held for the length of one ensure: the handle that holds the host's
+    /// connection for the app, and the last failure (fix batch 6, N4).
+    ensure: Mutex<EnsureSlot>,
+    /// How many ensures have completed, successful or not. Read before a
+    /// caller waits for the lock, so the caller can tell an ensure it waited
+    /// for from one that finished before it began.
+    completed: AtomicU64,
+    /// The GPUI thread's client (End All, Show session, worktree close).
+    host_terminal: Arc<HostTerminal>,
+    /// The control socket's client (`panel.*`).
+    control_terminal: Arc<HostTerminal>,
+    /// Whether the last ensure found a host with the terminal capability.
+    present: AtomicBool,
+    /// Every adoption a `connect` makes sends the host's listing here, and the
+    /// GPUI thread applies the startup work (the floor, the orphans and the
+    /// control registry) with it (SP2 fix batch 5). Read on the GPUI thread
+    /// only through [`ensure_host_in_background`]'s receiver.
+    adopted: Mutex<futures::channel::mpsc::UnboundedSender<Vec<sirio_host_protocol::term::SessionSummary>>>,
+}
+
+impl HostRoute {
+    fn new(
+        environment: BTreeMap<String, String>,
+        current_exe: PathBuf,
+        host_terminal: Arc<HostTerminal>,
+        control_terminal: Arc<HostTerminal>,
+        adopted: futures::channel::mpsc::UnboundedSender<Vec<sirio_host_protocol::term::SessionSummary>>,
+    ) -> Self {
+        Self {
+            environment,
+            current_exe,
+            current: Mutex::new(None),
+            ensure: Mutex::new(EnsureSlot::default()),
+            completed: AtomicU64::new(0),
+            host_terminal,
+            control_terminal,
+            present: AtomicBool::new(false),
+            adopted: Mutex::new(adopted),
+        }
+    }
+
+    fn has_host(&self) -> bool {
+        self.present.load(Ordering::Acquire)
+    }
+
+    /// The client of the last ensure, when its connection is still up.
+    fn current(&self) -> Option<HostClient> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|current| !current.client.closed())
+            .cloned()
+    }
+
+    /// Records the host the startup ensure found: its handle, the terminal
+    /// client and the control socket's own client.
+    fn adopt(
+        &self,
+        handle: sirio_host_client::HostHandle,
+        client: sirio_host_client::TermClient,
+        control: Option<sirio_host_client::TermClient>,
+        reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
+    ) {
+        let mut slot = self
+            .ensure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.host_terminal
+            .set(client.clone(), Some(Arc::clone(&reconnect)));
+        if let Some(control) = control {
+            self.control_terminal
+                .set(control, Some(Arc::clone(&reconnect)));
+        }
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(HostClient { client, reconnect });
+        self.succeed(&mut slot, handle);
+    }
+
+    /// Records a successful ensure: its handle is kept, and the failure it
+    /// replaces is forgotten, so the next open after a lost client ensures at
+    /// once (spec §3.1: re-ensure only after a client that was connected).
+    fn succeed(&self, slot: &mut EnsureSlot, handle: sirio_host_client::HostHandle) {
+        self.completed.fetch_add(1, Ordering::AcqRel);
+        slot.failed = None;
+        slot.handle = Some(handle);
+        self.present.store(true, Ordering::Release);
+    }
+
+    /// Records a failed ensure: no handle is kept, the host is not present,
+    /// and the failure is what the callers that waited for it, and any caller
+    /// inside its back-off, are answered with.
+    fn fail(&self, slot: &mut EnsureSlot, why: HostUnavailable) {
+        let completed = self.completed.fetch_add(1, Ordering::AcqRel) + 1;
+        slot.handle = None;
+        slot.failed = Some(EnsureFailure {
+            completed,
+            at: Instant::now(),
+            why,
+        });
+        self.present.store(false, Ordering::Release);
+    }
+
+    /// The startup ensure found no host and could not start one: terminals
+    /// opened after it take that answer, as they would take a failed ensure of
+    /// their own, rather than each starting a host of its own (fix batch 6,
+    /// N4). A failure with a live host is not recorded: a terminal waits for
+    /// that host as before (spec §8).
+    fn record_startup_failure(&self, error: &sirio_host_client::EnsureError) {
+        if !error.means_no_host() {
+            return;
+        }
+        let mut slot = self
+            .ensure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.fail(&mut slot, HostUnavailable::NoHost(error.to_string()));
+    }
+
+    /// The client a terminal open uses: the current one while its connection
+    /// is up, else the one a fresh `ensure_host` finds. Blocking: call it off
+    /// the GPUI thread only.
+    fn connect(&self) -> Result<HostClient, HostUnavailable> {
+        if let Some(current) = self.current() {
+            return Ok(current);
+        }
+        // Read before the wait: an ensure that completes after this point is
+        // one this caller waited for, and its failure is shared with it.
+        let seen = self.completed.load(Ordering::Acquire);
+        let mut slot = self
+            .ensure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Another worker's ensure may have finished while this one waited.
+        if let Some(current) = self.current() {
+            return Ok(current);
+        }
+        if let Some(failure) = &slot.failed {
+            // A failure this caller waited for is shared, whatever it was. A
+            // failure that leaves no host is also answered for 30 s: re-running
+            // it only starts another host that will not answer. A failure with
+            // a live host is not held back, so the next open asks again.
+            let shared = failure.completed > seen;
+            let backed_off = matches!(failure.why, HostUnavailable::NoHost(_))
+                && failure.at.elapsed() < NO_HOST_BACKOFF;
+            if shared || backed_off {
+                return Err(failure.why.clone());
+            }
+        }
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let handle = match ensure_now(self.environment.clone(), self.current_exe.clone()) {
+            Ok(handle) => handle,
+            Err(unavailable) => {
+                self.fail(&mut slot, unavailable.clone());
+                return Err(unavailable);
+            }
+        };
+        let Some(client) = handle.term() else {
+            // Held by nobody: a host without sessions of ours can idle out
+            // (spec §5.5). Terminals fall back as the banner says.
+            drop(handle);
+            let unavailable =
+                HostUnavailable::NoHost("the host has no terminal capability".to_string());
+            self.fail(&mut slot, unavailable.clone());
+            return Err(unavailable);
+        };
+        let reconnect: Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync> =
+            handle.term_reconnect().unwrap_or_else(|| Arc::new(|| None));
+        let control = handle.term();
+        self.host_terminal
+            .set(client.clone(), Some(Arc::clone(&reconnect)));
+        if let Some(control) = control {
+            self.control_terminal
+                .set(control, Some(Arc::clone(&reconnect)));
+        }
+        // The first adoption after a startup that did not find the host (or a
+        // re-ensure of a lost host) runs the startup work the startup's own
+        // adoption ran: the floor, the orphans and the control registry.
+        let listed = client.list().map(|list| list.sessions).unwrap_or_default();
+        let _ = self
+            .adopted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unbounded_send(listed);
+        let fresh = HostClient {
+            client,
+            reconnect,
+        };
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fresh.clone());
+        self.succeed(&mut slot, handle);
+        Ok(fresh)
+    }
+}
+
+/// How long a failed ensure that leaves no host is answered from its failure
+/// (fix batch 6, N4).
+const NO_HOST_BACKOFF: Duration = Duration::from_secs(30);
+
+/// What a route's ensure holds: the handle of the host it found, and the last
+/// failed ensure, if the last one failed.
+#[derive(Default)]
+struct EnsureSlot {
+    handle: Option<sirio_host_client::HostHandle>,
+    failed: Option<EnsureFailure>,
+}
+
+/// A failed ensure: how many ensures had completed when it did, when, and why.
+struct EnsureFailure {
+    completed: u64,
+    at: Instant,
+    why: HostUnavailable,
+}
+
+/// `ensure_host`, retried while a host holds its lock and does not answer
+/// (review finding 7): three bounded attempts, as at startup. A failure that
+/// leaves no host to lose is `NoHost`; any other is `Failed`, because a host
+/// may be live beside the terminal (fix batch 6, N6).
+fn ensure_now(
+    environment: BTreeMap<String, String>,
+    current_exe: PathBuf,
+) -> Result<sirio_host_client::HostHandle, HostUnavailable> {
+    const ATTEMPTS: usize = 3;
+    let options = host_ensure_options(environment, current_exe)
+        .map_err(|error| HostUnavailable::NoHost(error.to_string()))?;
+    let mut last = String::from("the host did not answer");
+    for _ in 0..ATTEMPTS {
+        match sirio_host_client::ensure_host(&options) {
+            Ok(handle) => return Ok(handle),
+            Err(error @ sirio_host_client::EnsureError::Unverifiable { .. }) => {
+                last = error.to_string();
+            }
+            Err(error) if error.means_no_host() => {
+                return Err(HostUnavailable::NoHost(error.to_string()));
+            }
+            Err(error) => return Err(HostUnavailable::Failed(error.to_string())),
+        }
+    }
+    Err(HostUnavailable::Failed(last))
+}
+
+/// The app's session factory: every terminal opens through the host.
+///
+/// Opening never touches the socket on the calling (GPUI) thread. The first
+/// `open` for an id records it as in flight, starts a `sirio-host-open`
+/// worker doing the blocking work (the recreate close-and-wait included,
+/// then `attach_or_create`), and answers `Pending`. When the worker finishes
+/// it stores the result in the id's slot and wakes the views: a `cx.spawn`
+/// task installed with the factory re-sets `SessionFactoryGlobal` (the same
+/// `Arc`), which is what retries every `Connecting` view (Task 9). The next
+/// `open` for that id takes the stored result out of the slot — a `Linked`
+/// link is handed out once, never to two views.
+struct HostSessions {
+    /// Yields the terminal client and its reconnect closure. Off the GPUI
+    /// thread, once per open: the route's current client, or a fresh ensure.
+    connect: HostConnect,
+    slots: Arc<Mutex<HashMap<String, HostOpenSlot>>>,
+    wake: futures::channel::mpsc::UnboundedSender<()>,
+}
+
+/// The terminal client and reconnect closure of a host, obtained off the GPUI
+/// thread.
+type HostConnectResult = (
+    sirio_host_client::TermClient,
+    Arc<dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync>,
+);
+type HostConnect =
+    Arc<dyn Fn() -> Result<HostConnectResult, HostUnavailable> + Send + Sync>;
+
+enum HostOpenSlot {
+    /// The worker is running. `abandoned` is the end or detach the view asked
+    /// for before the open finished (finding 12): the worker applies it.
+    InFlight { abandoned: Option<Abandon> },
+    Ready(Result<Box<dyn sirio_terminal::SessionLink>, HostUnavailable>),
+}
+
+/// Stored as `Failed` if the open worker unwinds before finishing: an id must
+/// never wedge in `Connecting` with no worker and no result.
+struct HostOpenWorkerGuard {
+    slots: Arc<Mutex<HashMap<String, HostOpenSlot>>>,
+    id: String,
+    wake: futures::channel::mpsc::UnboundedSender<()>,
+}
+
+impl Drop for HostOpenWorkerGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slots) = self.slots.try_lock() {
+            if !matches!(slots.get(&self.id), Some(HostOpenSlot::Ready(_))) {
+                slots.insert(
+                    self.id.clone(),
+                    HostOpenSlot::Ready(Err(HostUnavailable::Failed(
+                        "the host open worker panicked".to_string(),
+                    ))),
+                );
+            }
+        }
+        let _ = self.wake.unbounded_send(());
+    }
+}
+
+/// Ends or detaches a session an open produced after its view let go of it
+/// (finding 12). A failed open applies `End` to nothing: a session the failed
+/// open may have created is not closed by id, because a listed id can belong
+/// to another session that the open refused as a duplicate.
+fn settle_abandoned(
+    result: Result<Box<dyn sirio_terminal::SessionLink>, HostUnavailable>,
+    intent: Abandon,
+) {
+    if let Ok(link) = result {
+        match intent {
+            Abandon::End => link.end(),
+            Abandon::Detach => link.detach(),
+        }
+    }
+}
+
+impl SessionFactory for HostSessions {
+    fn open(&self, request: OpenRequest) -> OpenOutcome {
+        let id = request.session_id.clone();
+        // One lock acquisition for the whole check-and-set: a worker storing
+        // `Ready` can never land between a `remove` and a re-`insert` and be
+        // overwritten back to `InFlight` — which wedged the id in
+        // `Connecting` with no worker left to finish it.
+        let spawn = {
+            let mut slots = self
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match slots.remove(&id) {
+                Some(HostOpenSlot::Ready(Ok(link))) => return OpenOutcome::Linked(link),
+                Some(HostOpenSlot::Ready(Err(HostUnavailable::NoHost(reason)))) => {
+                    return OpenOutcome::NoHost(reason);
+                }
+                Some(HostOpenSlot::Ready(Err(HostUnavailable::Failed(reason)))) => {
+                    return OpenOutcome::Failed(reason);
+                }
+                Some(HostOpenSlot::Ready(Err(HostUnavailable::Taken(reason)))) => {
+                    return OpenOutcome::Taken(reason);
+                }
+                Some(HostOpenSlot::InFlight { abandoned }) => {
+                    slots.insert(id.clone(), HostOpenSlot::InFlight { abandoned });
+                    false
+                }
+                None => {
+                    slots.insert(id.clone(), HostOpenSlot::InFlight { abandoned: None });
+                    true
+                }
+            }
+        };
+        if !spawn {
+            return OpenOutcome::Pending;
+        }
+        let connect = Arc::clone(&self.connect);
+        let slots = Arc::clone(&self.slots);
+        let worker_id = id.clone();
+        let wake = self.wake.clone();
+        if std::thread::Builder::new()
+            .name("sirio-host-open".into())
+            .spawn({
+                let slots = Arc::clone(&slots);
+                let wake = wake.clone();
+                move || {
+                    let guard = HostOpenWorkerGuard {
+                        slots: Arc::clone(&slots),
+                        id: worker_id.clone(),
+                        wake: wake.clone(),
+                    };
+                    // Blocking host work stays off the GPUI thread (SP1 §7):
+                    // reaching the host, the recreate close-and-wait and the
+                    // attach-or-create round trips all run here.
+                    let result: Result<Box<dyn sirio_terminal::SessionLink>, HostUnavailable> =
+                        match connect() {
+                            Err(unavailable) => Err(unavailable),
+                            Ok((client, reconnect)) => {
+                                if request.recreate {
+                                    // RESTART RACE (Task 9 review): `restart` queues
+                                    // `Shutdown` and re-opens under the same id at
+                                    // once; with `HostLink` that can attach to the
+                                    // still-listed dying session. Close synchronously
+                                    // (wait for `term.close` to be answered, then for
+                                    // the id to leave `term.list`) before re-creating.
+                                    let _ = client.close(&request.session_id);
+                                    let start = std::time::Instant::now();
+                                    let timeout = std::time::Duration::from_secs(5);
+                                    while start.elapsed() < timeout {
+                                        match client.list() {
+                                            Ok(listed)
+                                                if listed.sessions.iter().any(|s| {
+                                                    s.session_id == request.session_id
+                                                }) =>
+                                            {
+                                                std::thread::sleep(
+                                                    std::time::Duration::from_millis(50),
+                                                );
+                                            }
+                                            _ => break,
+                                        }
+                                    }
+                                }
+                                match HostLink::attach_or_create_with_reconnect(
+                                    client,
+                                    &request,
+                                    reconnect,
+                                ) {
+                                    Ok(link) => Ok(Box::new(link)),
+                                    Err(HostOpenError::Taken(reason)) => {
+                                        Err(HostUnavailable::Taken(reason))
+                                    }
+                                    Err(HostOpenError::Failed(reason)) => {
+                                        Err(HostUnavailable::Failed(reason))
+                                    }
+                                }
+                            }
+                        };
+                    let mut stored = slots
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match stored.get(&request.session_id) {
+                        Some(HostOpenSlot::InFlight {
+                            abandoned: Some(intent),
+                        }) => {
+                            let intent = *intent;
+                            stored.remove(&request.session_id);
+                            drop(stored);
+                            settle_abandoned(result, intent);
+                        }
+                        _ => {
+                            stored.insert(
+                                request.session_id.clone(),
+                                HostOpenSlot::Ready(result),
+                            );
+                            drop(stored);
+                        }
+                    }
+                    let _ = wake.unbounded_send(());
+                    std::mem::forget(guard);
+                }
+            })
+            .is_err()
+        {
+            slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
+            return OpenOutcome::Failed("could not start the session open".to_string());
+        }
+        OpenOutcome::Pending
+    }
+
+    fn abandon(&self, session_id: &str, intent: Abandon) {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match slots.get_mut(session_id) {
+            Some(HostOpenSlot::InFlight { abandoned }) => {
+                *abandoned = Some(abandoned.map_or(intent, |held| held.merge(intent)));
+            }
+            Some(HostOpenSlot::Ready(_)) => {
+                let Some(HostOpenSlot::Ready(result)) = slots.remove(session_id) else {
+                    return;
+                };
+                drop(slots);
+                // Off the GPUI thread: ending or detaching is a host call.
+                let _ = std::thread::Builder::new()
+                    .name("sirio-host-abandon".into())
+                    .spawn(move || settle_abandoned(result, intent));
+            }
+            None => {}
+        }
+    }
+}
+
+/// The host is still being found; the view waits in `Connecting`.
+struct PendingFactory;
+
+impl SessionFactory for PendingFactory {
+    fn open(&self, _request: OpenRequest) -> OpenOutcome {
+        OpenOutcome::Pending
+    }
+}
+
+/// The host options `ensure_host` needs, from the environment the app runs
+/// in. The one place both the startup ensure and a later re-ensure build them.
+fn host_ensure_options(
+    environment: BTreeMap<String, String>,
+    current_exe: PathBuf,
+) -> Result<sirio_host_client::EnsureOptions, sirio_host_client::EnsureError> {
+    let Some(paths) = session::host_root() else {
+        return Err(sirio_host_client::EnsureError::NoDataRoot);
+    };
+    let major = if cfg!(debug_assertions) {
+        sirio_host_protocol::version::effective_major(
+            environment
+                .get("SIRIO_HOST_PROTOCOL_MAJOR")
+                .map(String::as_str),
+        )
+    } else {
+        sirio_host_protocol::version::PROTOCOL_MAJOR
+    };
+    Ok(sirio_host_client::EnsureOptions {
+        paths,
+        client_version: sirio_control::VERSION.to_string(),
+        current_exe,
+        environment,
+        major,
+    })
+}
+
+/// Installs the terminals' session factory over `connect`, and re-sets the
+/// global whenever an open worker finishes, which wakes every `Connecting`
+/// view (Task 9).
+fn install_host_sessions(connect: HostConnect, cx: &mut App) {
+    let (wake, mut woken) = futures::channel::mpsc::unbounded::<()>();
+    let factory = Arc::new(HostSessions {
+        connect,
+        slots: Arc::new(Mutex::new(HashMap::new())),
+        wake,
+    });
+    cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+    cx.spawn(async move |cx| {
+        use futures::StreamExt as _;
+        while woken.next().await.is_some() {
+            let factory = factory.clone();
+            let _ = cx.update(|cx| {
+                cx.set_global(SessionFactoryGlobal(Some(factory)));
+            });
+        }
+    })
+    .detach();
+}
+
+/// The factory's connect closure for `route`.
+fn route_connect(route: Arc<HostRoute>) -> HostConnect {
+    Arc::new(move || {
+        route
+            .connect()
+            .map(|connected| (connected.client, connected.reconnect))
+    })
+}
 
 /// Finds, starts or adopts the session host on a thread of its own —
 /// `ensure_host` blocks, up to ~15 s on a host that will not answer, and a
@@ -22945,37 +24925,94 @@ impl gpui::Global for HostConnection {}
 /// behind it — and hands its diagnostic line to Settings. When there is no
 /// host the app runs exactly as it did without one: the row says why, and
 /// nothing else changes.
-fn ensure_host_in_background(settings: Entity<Settings>, cx: &mut App) {
+///
+/// Terminals wait in `Connecting` while the host is found (`PendingFactory`
+/// installed below before the ensure thread spawns); once the ensure ends,
+/// the factory flips to the route's `HostSessions`, which wakes every
+/// `Connecting` view (Task 9). A later open re-ensures through the route when
+/// its client has closed (finding 6).
+fn ensure_host_in_background(
+    settings: Entity<Settings>,
+    workspace_slot: Arc<Mutex<Option<Entity<SirioWorkspace>>>>,
+    host_terminal: Arc<HostTerminal>,
+    control_terminal: Arc<HostTerminal>,
+    panes: Arc<PaneRegistry>,
+    cx: &mut App,
+) {
+    cx.set_global(SessionFactoryGlobal(Some(Arc::new(PendingFactory))));
     let environment: BTreeMap<String, String> = std::env::vars().collect();
     let current_exe = std::env::current_exe().unwrap_or_default();
+    let (adopted_tx, mut adopted_rx) = futures::channel::mpsc::unbounded::<
+        Vec<sirio_host_protocol::term::SessionSummary>,
+    >();
+    let route = Arc::new(HostRoute::new(
+        environment.clone(),
+        current_exe.clone(),
+        host_terminal.clone(),
+        control_terminal.clone(),
+        adopted_tx,
+    ));
+    {
+        let workspace_slot = workspace_slot.clone();
+        let panes = panes.clone();
+        cx.spawn(async move |cx| {
+            use futures::StreamExt as _;
+            // An adoption made off the GPUI thread (a `connect` after the host
+            // was lost or was not found at startup) applies the startup work here.
+            while let Some(sessions) = adopted_rx.next().await {
+                let _ = cx.update(|cx| {
+                    let listed: Vec<String> =
+                        sessions.iter().map(|s| s.session_id.clone()).collect();
+                    let floor = host_sessions::next_pane_floor(&listed);
+                    let _ = panes.set_control_sessions(
+                        sirio_control::host_panels::control_sessions_from(&sessions),
+                    );
+                    if let Some(workspace) = workspace_slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .cloned()
+                    {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.raise_next_pane_id(floor);
+                            workspace.adopt_host_orphans(sessions, cx);
+                        });
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+    cx.set_global(HostConnection(Some(route.clone())));
+    // The GPUI thread's client is filled by the route when a host answers.
+    cx.set_global(HostTerminalGlobal(host_terminal.clone()));
     let (sender, outcome) = futures::channel::oneshot::channel();
     let ensure = move || {
-        let Some(paths) = sirio_host_protocol::paths::HostPaths::from_environment(&environment)
-        else {
-            return Err(sirio_host_client::EnsureError::NoDataRoot);
-        };
-        let major = if cfg!(debug_assertions) {
-            sirio_host_protocol::version::effective_major(
-                environment
-                    .get("SIRIO_HOST_PROTOCOL_MAJOR")
-                    .map(String::as_str),
-            )
-        } else {
-            sirio_host_protocol::version::PROTOCOL_MAJOR
-        };
-        let mut handle = sirio_host_client::ensure_host(&sirio_host_client::EnsureOptions {
-            paths,
-            client_version: sirio_control::VERSION.to_string(),
-            current_exe,
-            environment,
-            major,
-        })?;
+        let options = host_ensure_options(environment, current_exe)?;
+        let mut handle = sirio_host_client::ensure_host(&options)?;
         let line = handle.status_line();
         // An N−1 host is named in the line and then let go: it has no
         // sessions in SP1, and holding it would keep it from idling out
         // (spec §5.6).
         handle.previous = None;
-        Ok((handle, line))
+        // The startup's client and listing are resolved here, on the ensure
+        // worker. The UI thread below only installs the factory and applies
+        // the listed sessions.
+        let term_data = handle.term().map(|client| {
+            let reconnect: Arc<
+                dyn Fn() -> Option<sirio_host_client::TermClient> + Send + Sync,
+            > = handle.term_reconnect().unwrap_or_else(|| Arc::new(|| None));
+            let sessions = client
+                .list()
+                .map(|list| list.sessions)
+                .unwrap_or_default();
+            // `panel.*` gets its own connection, so a long-poll it holds
+            // never queues behind a tab's input on this one (SP2 review
+            // finding 2).
+            let control = handle.term();
+            (client, reconnect, sessions, control)
+        });
+        Ok((handle, line, term_data))
     };
     let spawned = std::thread::Builder::new()
         .name("sirio-host-ensure".into())
@@ -22992,14 +25029,66 @@ fn ensure_host_in_background(settings: Entity<Settings>, cx: &mut App) {
             }),
             Err(error) => Err(sirio_host_client::EnsureError::Io(error)),
         };
-        cx.update(|cx| {
+        let _ = cx.update(|cx| {
             let line = match outcome {
-                Ok((handle, line)) => {
-                    cx.set_global(HostConnection(Some(handle)));
+                Ok((handle, line, term_data)) => {
+                    match term_data {
+                        Some((client, reconnect, sessions, control)) => {
+                            // No socket work below: the floor and the orphans
+                            // come from the single worker-side `list()`.
+                            let listed: Vec<String> = sessions
+                                .iter()
+                                .map(|s| s.session_id.clone())
+                                .collect();
+                            let floor = host_sessions::next_pane_floor(&listed);
+                            route.adopt(handle, client, control, reconnect);
+                            let _ = panes.set_control_sessions(
+                                sirio_control::host_panels::control_sessions_from(&sessions),
+                            );
+                            install_host_sessions(route_connect(route.clone()), cx);
+                            if let Some(workspace) = workspace_slot
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                                .cloned()
+                            {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.dedup_pane_ids_at_first_answer(&sessions, cx);
+                                    workspace.raise_next_pane_id(floor);
+                                    workspace.adopt_host_orphans(sessions, cx);
+                                });
+                            }
+                        }
+                        None => {
+                            // No `terminal` capability (an SP1 host, say): the
+                            // handle is dropped, so the host is held by nobody
+                            // and can idle out (spec §5.5). The route asks
+                            // again on each open and reports the reason.
+                            eprintln!("[sirio] host has no terminal capability");
+                            drop(handle);
+                            install_host_sessions(route_connect(route.clone()), cx);
+                            // No terminal of ours lives on such a host: its
+                            // layouts are the only ids there are to dedup.
+                            if let Some(workspace) = workspace_slot
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                                .cloned()
+                            {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.dedup_pane_ids_at_first_answer(&[], cx);
+                                });
+                            }
+                        }
+                    }
                     line
                 }
                 Err(error) => {
                     eprintln!("[sirio] host unavailable: {error}");
+                    route.record_startup_failure(&error);
+                    // The terminals' opens ask the route again, so a host
+                    // that answers later is still found (spec §3.1).
+                    install_host_sessions(route_connect(route.clone()), cx);
                     sirio_host_client::status_line_for_error(&error)
                 }
             };
@@ -23061,6 +25150,11 @@ fn main() {
     // before `application()`), before any logging or window exists.
     #[cfg(target_os = "windows")]
     ensure_windows_console();
+
+    // Spec §7.1.1 (amended): the host root follows the database in use. It is
+    // resolved here, before the host, the sirioctl of every pane or anything
+    // else asks for it; a pane receives it as SIRIO_PANE_HOST_HOME.
+    session::export_pane_host_root();
 
     sirio_perf::init();
     // bezel's icons are `svg().path("icons/…")`; without an asset source
@@ -23204,6 +25298,8 @@ fn main() {
         }
         let control_state = Arc::new(Mutex::new(control_state_seed));
         let panes = Arc::new(PaneRegistry::new());
+        let host_terminal: Arc<HostTerminal> = Arc::new(HostTerminal::default());
+        let control_terminal: Arc<HostTerminal> = Arc::new(HostTerminal::default());
         let notifications = Arc::new(Mutex::new(Vec::<ControlNotification>::new()));
         let saved_session_refs = session_store.load_session_refs();
         let session_refs = Arc::new(Mutex::new(saved_session_refs.clone()));
@@ -23232,7 +25328,8 @@ fn main() {
                 Some(session_store.clone()),
                 socket_info.clone(),
             )
-            .with_database_path(database_path.clone()),
+            .with_database_path(database_path.clone())
+            .with_host_terminal(control_terminal.clone()),
         );
         let control_socket = Arc::new(ControlSocketController::new(
             socket_info.clone(),
@@ -23311,6 +25408,7 @@ fn main() {
                 .detach();
         }
 
+        let panes_for_host_link = panes.clone();
         let window_result = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -23478,7 +25576,14 @@ fn main() {
                 // Once, for the process: this is the Settings entity the
                 // running shell keeps (`SirioWorkspace.settings`), so the
                 // host's row lands where Settings → General draws it.
-                ensure_host_in_background(settings.clone(), cx);
+                ensure_host_in_background(
+                    settings.clone(),
+                    workspace_slot.clone(),
+                    host_terminal.clone(),
+                    control_terminal.clone(),
+                    panes_for_host_link.clone(),
+                    cx,
+                );
                 let workspace = cx.new(|cx| {
                     let sidebar = cx.new(|cx| {
                         let mut sidebar = Sidebar::from_projects(catalog_for_sidebar, cx);
@@ -23642,7 +25747,7 @@ fn main() {
                     workspace
                         .session
                         .schedule_catalog(&workspace.project_catalog);
-                    workspace.shutdown_terminals(cx);
+                    workspace.detach_terminals(cx);
                     workspace.lsp.take_all()
                 });
                 // `ForegroundExecutor::block_on` (gpui executor.rs:434) is
@@ -23749,6 +25854,25 @@ mod tests {
     // Only the tests address a parked tab by its row id; the app addresses
     // one by its pill, so this import lives here rather than at the top.
     use sirio_ui::sidebar::{SidebarView, parked_tab_row_id};
+
+    /// `panel.state` tells a caller whether a pane's session outlives the
+    /// app: a host session does, so its answer must say so (SP2 spec §5).
+    #[test]
+    fn panel_state_answers_survives_from_the_snapshot() {
+        let snapshot = |survives| PaneStateSnapshot {
+            working_directory: PathBuf::from("/wt"),
+            exit_status: None,
+            survives,
+        };
+        let answer = |survives| {
+            panel_state_pairs(&snapshot(survives), b"")
+                .into_iter()
+                .find(|(key, _)| key == "survives")
+                .map(|(_, value)| value)
+        };
+        assert_eq!(answer(true).as_deref(), Some("true"), "a host session survives the app");
+        assert_eq!(answer(false).as_deref(), Some("false"), "an in-process fallback does not");
+    }
 
     #[test]
     fn the_identifier_under_the_caret_names_the_search() {
@@ -25396,7 +27520,7 @@ done
             terminal.update(cx, |terminal, _| {
                 terminal.set_identity(TerminalIdentity::new("pane-0", "terminal-0"));
             });
-            SirioWorkspace::subscribe_terminal_link(&terminal, 0, cx);
+            SirioWorkspace::subscribe_terminal_link(&terminal, 0, cx).detach();
             terminal.update(cx, |_, cx| {
                 cx.emit(TerminalLinkEvent {
                     target: TerminalIdentity::new("pane-0", "terminal-0"),
@@ -28281,12 +30405,21 @@ done
         // snapshot, so it belongs to that worktree independently of whatever
         // this window happens to be showing.
         let third = worktrees[2].clone();
-        let errored_pane = workspace.read_with(&cx.cx, |workspace, _| {
+        let errored_pane = "pane-ui-errored".to_string();
+        workspace.read_with(&cx.cx, |workspace, _| {
             workspace
                 .panes
-                .create(&third, Some("sleep 60"), "Claude Code")
-                .expect("register a control pane on the third worktree")
-                .id
+                .set_control_sessions(vec![sirio_control::panel::ControlSession {
+                    info: PaneInfo {
+                        id: errored_pane.clone(),
+                        tab: String::new(),
+                        title: "Claude Code".to_string(),
+                        agent: "claude".to_string(),
+                        active: true,
+                    },
+                    working_directory: third.clone(),
+                }])
+                .expect("register a control session on the third worktree");
         });
         workspace.update(&mut cx.cx, |workspace, cx| {
             let now = Instant::now();
@@ -28346,7 +30479,7 @@ done
         );
 
         workspace.read_with(&cx.cx, |workspace, _| {
-            let _ = workspace.panes.close(&errored_pane);
+            let _ = workspace.panes.shutdown_for(&third, &[]);
         });
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);
@@ -28652,6 +30785,118 @@ done
                 workspace.parked_tab_status(&worktrees[0].join("."), "urgency-terminal"),
                 Some(ActivityStatus::Running),
                 "an equivalent but differently spelled worktree path finds parked status"
+            );
+        });
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Fix round 5: an attached tab (Show session) sits beside an owned shell
+    /// tab in one worktree. Parking must keep both tabs and their panes paired
+    /// through a switch away and back, while the session save never names the
+    /// attached tab.
+    #[gpui::test]
+    async fn an_attached_tab_parks_and_restores_beside_an_owned_tab(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, worktrees) = urgency_test_root("session-park-attached");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.add_terminal_tab_with_shell(
+                "Shown",
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
+                None,
+                cx,
+            );
+            workspace.add_terminal_tab_with_shell(
+                "Owned",
+                pty_fixture_shell("sleep 60", &["sleep", "inf"]),
+                None,
+                cx,
+            );
+            let shown = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.title == "Shown")
+                .expect("the shown tab");
+            let (shown_tab, shown_pane) = (shown.persistence_id.clone(), shown.focused_pane);
+            let mut shown_view = None;
+            shown.panes.for_each(&mut |_, content| {
+                if let TabContent::Terminal { view } = content {
+                    shown_view = Some(view.clone());
+                }
+            });
+            shown_view
+                .expect("the shown tab's terminal")
+                .update(cx, |view, _| view.set_attached());
+            let owned = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.title == "Owned")
+                .expect("the owned tab");
+            let (owned_tab, owned_pane) = (owned.persistence_id.clone(), owned.focused_pane);
+            assert!(
+                workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.title == "Shown")
+                    .is_some_and(|tab| tab_shows_attached_session(tab, cx)),
+                "the predicate sees the attached tab"
+            );
+
+            workspace
+                .select_worktree(worktrees[1].clone(), None, cx)
+                .expect("switch away");
+            workspace
+                .select_worktree(worktrees[0].clone(), None, cx)
+                .expect("switch back");
+
+            let pane_of = |workspace: &SirioWorkspace, tab_id: &str| {
+                workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.persistence_id == tab_id)
+                    .map(|tab| tab.focused_pane)
+            };
+            assert_eq!(
+                pane_of(workspace, &shown_tab),
+                Some(shown_pane),
+                "the attached tab comes back with its own pane"
+            );
+            assert_eq!(
+                pane_of(workspace, &owned_tab),
+                Some(owned_pane),
+                "the owned tab comes back with its own pane, not the attached tab's"
+            );
+            assert!(
+                !workspace
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.persistence_id.starts_with("cached-terminal-")),
+                "no tab is rebuilt from a pane the parked layout did not name"
+            );
+            assert!(
+                workspace
+                    .layout(cx)
+                    .tabs
+                    .iter()
+                    .any(|tab| tab.id == shown_tab),
+                "the in-memory layout keeps the attached tab"
+            );
+            let saved = workspace.saved_layout(cx);
+            assert!(
+                !saved.tabs.iter().any(|tab| tab.id == shown_tab),
+                "the session save never names the attached tab"
+            );
+            assert!(
+                saved.tabs.iter().any(|tab| tab.id == owned_tab),
+                "the session save keeps the owned tab"
             );
         });
         shutdown_workspace_terminals(&workspace, &mut cx);
@@ -38017,10 +40262,15 @@ done
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
+            | ControlAction::ShowSession { reply, .. }
             | ControlAction::PerfTerminalWrite { reply, .. }
             | ControlAction::FocusPane { reply, .. }
             | ControlAction::SplitPane { reply, .. }
             | ControlAction::ClosePane { reply }
+            | ControlAction::EndAllSessions { reply }
+            | ControlAction::OpenTerminal { reply, .. }
+            | ControlAction::TerminalRestart { reply, .. }
+            | ControlAction::TerminalState { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -38147,6 +40397,11 @@ done
             "surface.change_request.open_file" => request::change_request_open_file("a.txt", None),
             "surface.change_request.open_commit" => request::change_request_open_commit("abc"),
             "surface.change_request.act" => request::change_request_act("close", &BTreeMap::new()),
+            "surface.host.end_all" => request_with_params(method, &[]),
+            "surface.terminal.open" => request_with_params(method, &[]),
+            "surface.terminal.restart" | "surface.terminal.state" => {
+                request_with_params(method, &[("pane", "pane-1")])
+            }
             "surface.tabs.read" => request::tabs_read(),
             "surface.tabs.select" => request::tabs_select(1),
             "surface.tabs.close" => request::tabs_close(1),
@@ -41283,21 +43538,19 @@ browser  profile  "
                 cx,
             )
         });
-        let terminal = cx.update(|cx| {
-            cx.new(|cx| {
-                TerminalView::with_shell(
-                    &working_directory,
-                    pty_fixture_shell("exec sleep 1", &["sleep", "1"]),
-                    cx,
-                )
-                .expect("create deterministic restore test terminal")
-            })
+        // SP2: the persisted scrollback moves into `OpenRequest.prelude`, not
+        // a post-spawn `replay_scrollback` — the restored view carries it and
+        // the session state no longer does.
+        let mut restored_view = None;
+        tabs[0].panes.for_each(&mut |_, content| {
+            if let TabContent::Terminal { view } = content {
+                restored_view = Some(view.clone());
+            }
         });
-        tabs[0].panes = PaneNode::leaf(
-            0,
-            TabContent::Terminal {
-                view: terminal.clone(),
-            },
+        let terminal = restored_view.expect("restore builds a terminal view");
+        assert!(
+            tabs[0].session_state.scrollback.is_empty(),
+            "the persisted scrollback is consumed as prelude, not left for replay"
         );
         let window = cx.add_window({
             let terminal = terminal.clone();
@@ -41305,7 +43558,6 @@ browser  profile  "
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        cx.update(|_, app| replay_persisted_terminal_scrollback(&mut tabs, app));
         let snapshot = terminal.read_with(&cx.cx, |terminal, _| terminal.snapshot());
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
@@ -41316,6 +43568,362 @@ browser  profile  "
                 .any(|window| window == needle),
             "restored terminal must contain the persisted nonce"
         );
+    }
+
+    /// Fix round 1: `HostSessions::open` never blocks the GPUI thread. This
+    /// `HostSessions`-shaped fake answers `Pending` at once while a
+    /// `sirio-host-open` worker does the (simulated) blocking work, stores
+    /// the result, and wakes the views by re-setting the same factory `Arc`
+    /// — after which the `Connecting` pane reaches `Running`. A fake worker
+    /// stands in for the host: no socket exists in this harness.
+    struct AsyncOpenFakeLink {
+        session_id: String,
+        incoming: mpsc::Receiver<sirio_terminal::LinkChunk>,
+        // Held so the channel stays open and the owner's drain blocks
+        // instead of seeing a disconnect.
+        #[allow(dead_code)]
+        keep: mpsc::Sender<sirio_terminal::LinkChunk>,
+    }
+
+    impl sirio_terminal::SessionLink for AsyncOpenFakeLink {
+        fn session_id(&self) -> &str {
+            &self.session_id
+        }
+
+        fn shell_pid(&self) -> Option<u32> {
+            None
+        }
+
+        fn input(&self, _bytes: Vec<u8>) {}
+
+        fn feed(&self, _bytes: Vec<u8>) {}
+
+        fn resize(&self, _cols: u16, _rows: u16) {}
+
+        fn chunks(&self) -> &mpsc::Receiver<sirio_terminal::LinkChunk> {
+            &self.incoming
+        }
+
+        fn end(&self) {}
+
+        fn detach(&self) {}
+
+        fn survives_app(&self) -> bool {
+            false
+        }
+    }
+
+    enum AsyncOpenFakeSlot {
+        InFlight,
+        Ready(Result<Box<dyn sirio_terminal::SessionLink>, String>),
+    }
+
+    /// Like production's `HostOpenWorkerGuard` but without the wakeup send
+    /// (see the `wake` field doc).
+    struct AsyncOpenFakeGuard {
+        slots: Arc<Mutex<HashMap<String, AsyncOpenFakeSlot>>>,
+        id: String,
+    }
+
+    impl Drop for AsyncOpenFakeGuard {
+        fn drop(&mut self) {
+            if let Ok(mut slots) = self.slots.try_lock() {
+                if !matches!(slots.get(&self.id), Some(AsyncOpenFakeSlot::Ready(_))) {
+                    slots.insert(
+                        self.id.clone(),
+                        AsyncOpenFakeSlot::Ready(Err("the host open worker panicked".to_string())),
+                    );
+                }
+            }
+        }
+    }
+
+    struct AsyncOpenFakeFactory {
+        slots: Arc<Mutex<HashMap<String, AsyncOpenFakeSlot>>>,
+        // Mirrors `HostSessions.wake` structurally; the fake worker never
+        // sends on it: waking a future the test executor parks trips the
+        // harness's cross-thread determinism guard (it wedges instead of
+        // merely failing). The test re-sets the same factory `Arc` by hand
+        // once the worker stored its result — exactly what production's
+        // wakeup task does on every send.
+        #[allow(dead_code)]
+        wake: futures::channel::mpsc::UnboundedSender<()>,
+        work_delay: Duration,
+        spawns: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SessionFactory for AsyncOpenFakeFactory {
+        fn open(&self, request: OpenRequest) -> OpenOutcome {
+            let id = request.session_id.clone();
+            // Same single-acquisition check-and-set as production: a stored
+            // `Ready` is taken, `InFlight` is left alone, and only an absent
+            // id records `InFlight` and spawns.
+            let spawn = {
+                let mut slots = self
+                    .slots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match slots.remove(&id) {
+                    Some(AsyncOpenFakeSlot::Ready(Ok(link))) => {
+                        return OpenOutcome::Linked(link);
+                    }
+                    Some(AsyncOpenFakeSlot::Ready(Err(reason))) => {
+                        return OpenOutcome::Failed(reason);
+                    }
+                    Some(AsyncOpenFakeSlot::InFlight) => {
+                        slots.insert(id.clone(), AsyncOpenFakeSlot::InFlight);
+                        false
+                    }
+                    None => {
+                        slots.insert(id.clone(), AsyncOpenFakeSlot::InFlight);
+                        true
+                    }
+                }
+            };
+            if !spawn {
+                return OpenOutcome::Pending;
+            }
+            let slots = Arc::clone(&self.slots);
+            let delay = self.work_delay;
+            let spawns = Arc::clone(&self.spawns);
+            if std::thread::Builder::new()
+                .name("sirio-host-open".into())
+                .spawn({
+                    let slots = Arc::clone(&slots);
+                    move || {
+                        let _guard = AsyncOpenFakeGuard {
+                            slots: Arc::clone(&slots),
+                            id: request.session_id.clone(),
+                        };
+                        // Simulated blocking socket work, off the GPUI thread.
+                        // No wakeup send here (see the `wake` field doc): the
+                        // test re-sets the factory `Arc` once `slots` holds
+                        // the result, which is the wakeup's entire effect.
+                        std::thread::sleep(delay);
+                        let (keep, incoming) = mpsc::channel();
+                        let link: Box<dyn sirio_terminal::SessionLink> =
+                            Box::new(AsyncOpenFakeLink {
+                                session_id: request.session_id.clone(),
+                                incoming,
+                                keep,
+                            });
+                        slots
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(
+                                request.session_id.clone(),
+                                AsyncOpenFakeSlot::Ready(Ok(link)),
+                            );
+                        std::mem::forget(_guard);
+                    }
+                })
+                .is_err()
+            {
+                slots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&id);
+                return OpenOutcome::Failed("could not start the session open".to_string());
+            }
+            spawns.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            OpenOutcome::Pending
+        }
+    }
+
+    /// Fix round 2, finding 1: the slot check-and-set is one lock acquisition,
+    /// so this interleaving is driven deterministically — a `Ready` stored
+    /// "between two calls" (here: by us, standing in for the winning worker)
+    /// is taken by the next `open`, never overwritten back to `InFlight`. No
+    /// GPUI needed: `open` is synchronous slot logic plus a spawn.
+    #[test]
+    fn async_open_slots_never_overwrite_a_finished_result() {
+        fn request(id: &str) -> OpenRequest {
+            OpenRequest {
+                session_id: id.to_string(),
+                cwd: std::env::temp_dir(),
+                shell: TerminalShell::System,
+                cols: 80,
+                rows: 24,
+                prelude: Vec::new(),
+                recreate: false,
+                attach_only: false,
+                restore: false,
+                known_worktrees: std::sync::Arc::from(Vec::new()),
+            }
+        }
+
+        fn fake_link(id: &str) -> Box<dyn sirio_terminal::SessionLink> {
+            let (keep, incoming) = mpsc::channel();
+            Box::new(AsyncOpenFakeLink {
+                session_id: id.to_string(),
+                incoming,
+                keep,
+            })
+        }
+
+        fn spawns_of(factory: &AsyncOpenFakeFactory) -> usize {
+            factory
+                .spawns
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        let new_factory = || AsyncOpenFakeFactory {
+            slots: Arc::new(Mutex::new(HashMap::new())),
+            wake: futures::channel::mpsc::unbounded::<()>().0,
+            // The workers below must not finish while the assertions run;
+            // they touch only their own factory's slots and exit on their own.
+            work_delay: Duration::from_secs(60),
+            spawns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let spawns_of = |factory: &AsyncOpenFakeFactory| {
+            factory
+                .spawns
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+
+        let factory = new_factory();
+        {
+            let mut slots = factory
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A finished link is taken, never overwritten — and takes no worker.
+            slots.insert(
+                "pane-1".to_string(),
+                AsyncOpenFakeSlot::Ready(Ok(fake_link("pane-1"))),
+            );
+            // A stored failure behaves the same (one-shot; the next retry
+            // re-spawns its worker).
+            slots.insert(
+                "pane-2".to_string(),
+                AsyncOpenFakeSlot::Ready(Err("boom".to_string())),
+            );
+            // An in-flight id stays in flight with no second worker.
+            slots.insert("pane-3".to_string(), AsyncOpenFakeSlot::InFlight);
+        }
+        assert!(matches!(
+            factory.open(request("pane-1")),
+            OpenOutcome::Linked(_)
+        ));
+        assert_eq!(spawns_of(&factory), 0);
+        assert!(matches!(
+            factory.open(request("pane-2")),
+            OpenOutcome::Failed(_)
+        ));
+        assert_eq!(spawns_of(&factory), 0);
+        assert!(matches!(
+            factory.open(request("pane-3")),
+            OpenOutcome::Pending
+        ));
+        assert_eq!(spawns_of(&factory), 0);
+        // An absent id records `InFlight` and spawns exactly one worker.
+        assert!(matches!(
+            factory.open(request("pane-4")),
+            OpenOutcome::Pending
+        ));
+        assert_eq!(spawns_of(&factory), 1);
+        assert!(matches!(
+            factory
+                .slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get("pane-4"),
+            Some(AsyncOpenFakeSlot::InFlight)
+        ));
+    }
+
+    #[gpui::test]
+    async fn async_factory_opens_off_the_ui_thread(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (wake, _woken) = futures::channel::mpsc::unbounded::<()>();
+        let concrete = Arc::new(AsyncOpenFakeFactory {
+            slots: Arc::new(Mutex::new(HashMap::new())),
+            wake,
+            work_delay: Duration::from_millis(800),
+            spawns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let factory: Arc<dyn SessionFactory> = concrete.clone();
+        cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+        // The open answers `Pending` at once instead of blocking for the
+        // worker's simulated socket work.
+        let probe = OpenRequest {
+            session_id: "pane-9001".to_string(),
+            cwd: std::env::temp_dir(),
+            shell: TerminalShell::System,
+            cols: 80,
+            rows: 24,
+            prelude: Vec::new(),
+            recreate: false,
+            attach_only: false,
+            restore: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
+        };
+        let started = Instant::now();
+        assert!(matches!(factory.open(probe), OpenOutcome::Pending));
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "the first open must return before its worker finishes"
+        );
+        let working_directory = std::env::temp_dir();
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("terminal-connecting").is_some(),
+            "the first open pends: the pane waits in Connecting"
+        );
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        let pane_id = terminal.read_with(&cx.cx, |terminal, _| {
+            terminal.identity().pane_id().to_owned()
+        });
+        // After the worker finishes, re-setting the same factory `Arc` — what
+        // production's wakeup task does on every worker completion — retries
+        // the pane: it takes the stored link out of the slot and reaches
+        // `Running`, with no second worker for the id.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let (connecting, running) = (
+                cx.debug_bounds("terminal-connecting").is_some(),
+                terminal.read_with(&cx.cx, |terminal, _| {
+                    terminal.scrollback_source().is_some()
+                }),
+            );
+            if !connecting && running {
+                break;
+            }
+            let worker_done = matches!(
+                concrete
+                    .slots
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(&pane_id),
+                Some(AsyncOpenFakeSlot::Ready(_))
+            );
+            if worker_done {
+                cx.update(|_, cx| {
+                    cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+                });
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pane never left Connecting after its worker completed \
+                 (connecting={connecting}, running={running})"
+            );
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
     }
 
     /// F-CORE-DOM-08: `restored_scrollback_scheduled` used to be a hand-rolled
@@ -42995,3 +45603,4 @@ browser  profile  "
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+

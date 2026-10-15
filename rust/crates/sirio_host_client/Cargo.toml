@@ -9,7 +9,12 @@ libc = "0.2"
 sirio_ipc = { path = "../sirio_ipc" }
 sirio_host_protocol = { path = "../sirio_host_protocol" }
 serde_json = "1"
+serde = "1"
 sha2 = "0.10"
+
+[dev-dependencies]
+sirio_term_session = { path = "../sirio_term_session" }
+libghostty-vt = "0.2.1"
 
 # Win32_Security is needed by `CreateJobObjectW` and `CreateFileW` (both take a
 # SECURITY_ATTRIBUTES pointer), Win32_Storage_FileSystem by `CreateFileW`, which

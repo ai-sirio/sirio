@@ -11,13 +11,18 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
 use sirio_control::protocol::rows;
 use sirio_control::protocol::request::ThreadOp;
 use sirio_control::{
     ControlRequest, ControlResponse, default_socket_path,
     extract::{session_ref_from_json, session_ref_from_payload_arguments},
-    format_version_json, format_version_lines, round_trip,
+    format_version_json, format_version_lines, host_panels::HostPanels, round_trip, route,
 };
+use sirio_host_client::{Mux, TermClient};
+use sirio_host_protocol::paths::HostPaths;
+use sirio_host_protocol::version::{PROTOCOL_MAJOR, majors_spoken};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -115,7 +120,7 @@ fn usage() {
          \x20 new-workspace --project <p> [--branch <b>]\n\
          \x20 select-workspace --workspace <w>  select a worktree in the sidebar\n\
          \x20 current-workspace [--json]        show the selected worktree\n\
-         \x20 close-workspace --workspace <w>   unmount a worktree's terminals\n\
+         \x20 close-workspace --workspace <w>   close a worktree and end its terminals\n\
          \x20 worktree-set --worktree <w> [--comment c] [--session s]\n\
          \x20 restore-session                   restore the launch snapshot\n\
          \x20 pane split <right|down>            split the focused application pane\n\
@@ -147,7 +152,10 @@ fn usage() {
          \x20 surface change-request reveal <path> [line]|open-file <path> [line]|open-commit <sha>\n\
            \x20 surface change-request thread --reveal ID|--toggle ID|--compose PATH:SIDE:LINE[-LAST]|--suggest|--cancel\n\
            \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment|reply|resolve|unresolve|line-comment|edit-thread-comment|review-add|review-open-submit|review-submit|review-discard|review-discard-confirm|draft-edit|draft-delete|rerun-job|rerun-failed\n\
+         \x20 panel show <id>                   show a session in a tab (app only)\n\
          \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
+         \x20 surface terminal open [--cmd c | --agent a]  (debug builds) open an app terminal tab running c, or agent a\n\
+         \x20 surface host end-all             (debug builds) End All sessions without its dialog\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
          \x20 browser open <url> [--id-format uuids|both] [--json]\n\
@@ -162,7 +170,7 @@ fn usage() {
          \x20 browser console <surface> [--since ts]\n\
          \x20 panel state <id> [--json]         read terminal state and scrollback\n\
          \x20 panel scrollback <id> [--max-bytes n] [--json]\n\
-         \x20 panel create [--worktree w] [--cmd c]\n\
+         \x20 panel create [--worktree w] [--cwd dir] [--cmd c]\n\
          \x20 panel split <dir> --from <id> [--cmd c]\n\
          \x20 panel list [--worktree w]         list control panes\n\
          \x20 panel write <id> --input s [--enter]\n\
@@ -257,6 +265,57 @@ fn round_trip_or_die(socket: PathBuf, request: &ControlRequest) -> ControlRespon
             exit(1);
         }
     }
+}
+
+/// A `panel.*` request: the app when it answers, the host when no app is
+/// listening (spec SP2 §5). A socket that accepts and does not answer is
+/// not bypassed: loss of contact is not evidence of death (SP1 §5).
+fn panel_call(socket: PathBuf, request: &ControlRequest) -> ControlResponse {
+    match route::decide(route::probe(&socket)) {
+        route::Route::App => require_ok(socket, request),
+        route::Route::Host => host_panel_call(request),
+        route::Route::Wait => {
+            eprintln!("sirioctl: Sirio is not answering");
+            exit(1);
+        }
+    }
+}
+
+fn host_panel_call(request: &ControlRequest) -> ControlResponse {
+    const NO_HOST: &str = "Sirio is not running and no host is up";
+    if request.params.contains_key("worktree") {
+        eprintln!("sirioctl: --worktree needs Sirio running");
+        exit(1);
+    }
+    let environment = current_environment();
+    let Some(paths) = HostPaths::from_environment(&environment) else {
+        eprintln!("sirioctl: {NO_HOST}");
+        exit(1);
+    };
+    let majors = majors_spoken(PROTOCOL_MAJOR);
+    let Ok((mux, _welcome)) = Mux::open(&paths.endpoint(PROTOCOL_MAJOR), env!("CARGO_PKG_VERSION"), &majors) else {
+        eprintln!("sirioctl: {NO_HOST}");
+        exit(1);
+    };
+    let Some(client) = TermClient::new(Arc::new(mux)) else {
+        eprintln!("sirioctl: the host up at this data root serves no terminal sessions");
+        exit(1);
+    };
+    let response = match HostPanels::new(client).handle(request) {
+        Ok(response) => response,
+        Err(_) => {
+            eprintln!("sirioctl: Sirio could not reach its host");
+            exit(1);
+        }
+    };
+    if !response.ok {
+        eprintln!(
+            "sirioctl: {}",
+            response.error.clone().unwrap_or_else(|| request.method.clone())
+        );
+        exit(1);
+    }
+    response
 }
 
 fn require_ok(socket: PathBuf, request: &ControlRequest) -> ControlResponse {
@@ -584,11 +643,12 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         .ok_or_else(|| "Missing panel action".to_string())?;
     match action.as_str() {
         "create" => {
-            let response = require_ok(
+            let response = panel_call(
                 socket,
                 &sirio_control::protocol::request::panel_create(
                     parsed.value("worktree"),
                     parsed.value("cmd"),
+                    parsed.value("cwd"),
                 ),
             );
             print_result(&response, &["id"], parsed.flag("json"));
@@ -600,7 +660,7 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 .or_else(|| parsed.positional.get(1).map(String::as_str))
                 .ok_or_else(|| "Missing split direction".to_string())?;
             let from = parsed.require("from")?;
-            let response = require_ok(
+            let response = panel_call(
                 socket,
                 &sirio_control::protocol::request::panel_split(
                     &from,
@@ -612,7 +672,7 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             Ok(())
         }
         "list" => {
-            let response = require_ok(
+            let response = panel_call(
                 socket,
                 &sirio_control::protocol::request::panel_list(parsed.value("worktree")),
             );
@@ -630,7 +690,7 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             if parsed.flag("enter") {
                 input.push('\r');
             }
-            let _ = require_ok(
+            let _ = panel_call(
                 socket,
                 &sirio_control::protocol::request::panel_write(&id, &input),
             );
@@ -639,7 +699,7 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         "key" => {
             let id = panel_id(parsed)?;
             let key = parsed.require("key")?;
-            let _ = require_ok(
+            let _ = panel_call(
                 socket,
                 &sirio_control::protocol::request::panel_key(&id, &key),
             );
@@ -647,20 +707,19 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         }
         "read" => {
             let id = panel_id(parsed)?;
-            let response = require_ok(socket, &sirio_control::protocol::request::panel_read(&id));
+            let response = panel_call(socket, &sirio_control::protocol::request::panel_read(&id));
             print_result(&response, &["data"], parsed.flag("json"));
             Ok(())
         }
         "state" => {
             let id = panel_id(parsed)?;
-            let response = require_ok(socket, &sirio_control::protocol::request::panel_state(&id));
+            let response = panel_call(socket, &sirio_control::protocol::request::panel_state(&id));
             print_result(
                 &response,
                 &[
                     "workingDirectory",
                     "exitStatus",
                     "exitCode",
-                    "scrollbackBytes",
                 ],
                 parsed.flag("json"),
             );
@@ -676,7 +735,7 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                         .map_err(|_| "--max-bytes must be a nonnegative integer".to_string())
                 })
                 .transpose()?;
-            let response = require_ok(
+            let response = panel_call(
                 socket,
                 &sirio_control::protocol::request::panel_scrollback(&id, max_bytes),
             );
@@ -693,7 +752,7 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                         .map_err(|_| "--timeout-ms must be a nonnegative integer".to_string())
                 })
                 .transpose()?;
-            let response = require_ok(
+            let response = panel_call(
                 socket,
                 &sirio_control::protocol::request::panel_wait(&id, timeout_ms),
             );
@@ -702,12 +761,17 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         }
         "focus" => {
             let id = panel_id(parsed)?;
-            let _ = require_ok(socket, &sirio_control::protocol::request::panel_focus(&id));
+            let _ = panel_call(socket, &sirio_control::protocol::request::panel_focus(&id));
             Ok(())
         }
         "close" => {
             let id = panel_id(parsed)?;
-            let _ = require_ok(socket, &sirio_control::protocol::request::panel_close(&id));
+            let _ = panel_call(socket, &sirio_control::protocol::request::panel_close(&id));
+            Ok(())
+        }
+        "show" => {
+            let id = panel_id(parsed)?;
+            let _ = panel_call(socket, &sirio_control::protocol::request::panel_show(&id));
             Ok(())
         }
         other => Err(format!("unknown panel action '{other}'")),
@@ -909,6 +973,29 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             ),
         ),
         ("tabs", "read") => require_ok(socket, &sirio_control::protocol::request::tabs_read()),
+        ("host", "end-all") => require_ok(
+            socket,
+            &sirio_control::protocol::request::host_end_all(),
+        ),
+        ("terminal", "open") => require_ok(
+            socket,
+            &sirio_control::protocol::request::terminal_open(
+                parsed.value("cmd"),
+                parsed.value("agent"),
+            ),
+        ),
+        ("terminal", "restart" | "state") => {
+            let pane = parsed
+                .positional
+                .get(2)
+                .ok_or_else(|| "Missing pane id".to_string())?;
+            let request = if action == "restart" {
+                sirio_control::protocol::request::terminal_restart(pane)
+            } else {
+                sirio_control::protocol::request::terminal_state(pane)
+            };
+            require_ok(socket, &request)
+        }
         ("tabs", "select" | "close") => {
             let position = parsed
                 .positional
@@ -918,6 +1005,8 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 .ok_or_else(|| "Tab index must be a positive integer".to_string())?;
             let request = if action == "select" {
                 sirio_control::protocol::request::tabs_select(position)
+            } else if parsed.flag("confirm") {
+                sirio_control::protocol::request::tabs_close_confirmed(position)
             } else {
                 sirio_control::protocol::request::tabs_close(position)
             };

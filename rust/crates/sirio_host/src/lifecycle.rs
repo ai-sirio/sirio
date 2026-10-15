@@ -38,6 +38,7 @@ pub fn run(config: HostConfig) -> i32 {
             return 3;
         }
     };
+    std::thread::sleep(config.start_delay);
     let mut listener = match LocalListener::bind(&config.paths.endpoint(config.major)) {
         Ok(listener) => listener,
         Err(error) => {
@@ -63,14 +64,17 @@ pub fn run(config: HostConfig) -> i32 {
     // it leaves.
     #[cfg(unix)]
     let bound = file_identity(&config.paths.endpoint(config.major));
-    let generation = random_token();
-    let core = Arc::new(HostCore::new(
+    #[cfg(not(unix))]
+    let bound = None;
+    let generation = crate::sessions::random_token();
+    let core = HostCore::new(
         config.version.clone(),
         config.major,
         config.mode.clone(),
         generation.clone(),
-        random_token(),
-    ));
+        crate::sessions::random_token(),
+        Arc::clone(&log),
+    );
     let state = HostStateFile {
         pid: std::process::id(),
         start_time: sirio_ipc::process::start_time(std::process::id()).unwrap_or(0),
@@ -89,6 +93,7 @@ pub fn run(config: HostConfig) -> i32 {
     if let Err(e) = published {
         log.line("start.state_file_failed", &format!("{:?}", e.kind()));
         eprintln!("sirio-host: cannot write the state file: {e}");
+        remove_bound_endpoint(&config, bound);
         return 4;
     }
     log.line(
@@ -124,20 +129,7 @@ pub fn run(config: HostConfig) -> i32 {
     // lock. Only what is still this host's own goes: a root removed and
     // re-created under a running host holds a successor's files by now.
     let _ = accept.join();
-    #[cfg(unix)]
-    {
-        let endpoint = config.paths.endpoint(config.major);
-        if bound.is_some() && file_identity(&endpoint) == bound {
-            let _ = fs::remove_file(&endpoint);
-        }
-    }
-    let state_path = config.paths.state(config.major);
-    let recorded = fs::read(&state_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<HostStateFile>(&bytes).ok());
-    if recorded.is_some_and(|recorded| recorded.generation == generation) {
-        let _ = fs::remove_file(&state_path);
-    }
+    remove_own_files(&config, bound, &generation);
     // Each connection closes itself once it sees the shutdown flag; give them
     // a moment so the answer to `host.shutdown` is on the wire before the
     // process, and with it every socket, goes.
@@ -157,6 +149,33 @@ fn file_identity(path: &Path) -> Option<(u64, u64)> {
     fs::symlink_metadata(path)
         .ok()
         .map(|meta| (meta.dev(), meta.ino()))
+}
+
+fn remove_bound_endpoint(config: &HostConfig, bound: Option<(u64, u64)>) {
+    #[cfg(unix)]
+    {
+        let endpoint = config.paths.endpoint(config.major);
+        if bound.is_some() && file_identity(&endpoint) == bound {
+            let _ = fs::remove_file(endpoint);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (config, bound);
+}
+
+fn remove_own_files(config: &HostConfig, bound: Option<(u64, u64)>, generation: &str) {
+    let state_path = config.paths.state(config.major);
+    let recorded = fs::read(&state_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<HostStateFile>(&bytes).ok());
+    let owns_state_file = recorded
+        .as_ref()
+        .is_some_and(|recorded| recorded.generation == generation);
+
+    if owns_state_file {
+        remove_bound_endpoint(config, bound);
+        let _ = fs::remove_file(state_path);
+    }
 }
 
 fn acquire_lock(path: &Path) -> Option<File> {
@@ -191,27 +210,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension(format!("json.{}", std::process::id()));
     fs::write(&tmp, bytes)?;
     fs::rename(&tmp, path)
-}
-
-/// An identifier that only has to differ between host starts: two hashes of
-/// the process id and the clock, each seeded by `RandomState`'s own
-/// per-instance random keys, printed as 32 hex digits. It is not a secret and
-/// not drawn straight from the OS's entropy source — nothing may treat it as
-/// one — but needs no crate and behaves the same on every platform.
-fn random_token() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u32(std::process::id());
-    hasher.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
-    let a = hasher.finish();
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    hasher.write_u64(a);
-    format!("{a:016x}{:016x}", hasher.finish())
 }
 
 #[cfg(unix)]

@@ -144,7 +144,7 @@ impl Connection {
                     )));
                 }
                 Ok(n) => self.decoder.push(&buf[..n]),
-                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
                 Err(e) => return Err(CallError::Io(e)),
             }
         }

@@ -5,8 +5,10 @@ name: Windows check
 # (spec §9.3) has Windows-only code that Linux and macOS never compile: the
 # named-pipe endpoint, GetProcessTimes, CREATE_BREAKAWAY_FROM_JOB, LockFileEx
 # behind File::try_lock. This builds the host crates and runs the probe and
-# the E2E on the platform itself. It does not build the app: that needs Zig
-# and the whole GPUI stack, which the release job already covers.
+# the E2Es on the platform itself, plus the terminal session engine's unit
+# tests. It does not build the app: that needs the whole GPUI stack, which
+# the release job already covers (the Zig install below is only for the
+# engine's VT dependency, which shells out to `zig build`).
 on:
   pull_request:
     branches: [main]
@@ -42,6 +44,13 @@ jobs:
         with:
           toolchain: stable-x86_64-pc-windows-msvc
 
+      # As build-release.yml's windows job names it: libghostty-vt-sys shells
+      # out to `zig build`, and upstream pins exactly 0.15.2.
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
       # rust/.cargo/config.toml sets `rustc-wrapper = "sccache"` unconditionally.
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.11
@@ -58,6 +67,13 @@ jobs:
         working-directory: rust
         run: cargo test --locked -p sirio_ipc -p sirio_control -p sirio_host_protocol -p sirio_host_client
 
+      # The terminal session engine. Only the pure units run here: the engine
+      # tests are `cfg(unix)` except `a_missing_cwd_is_refused…`, which runs
+      # anywhere.
+      - name: Test sirio_term_session
+        working-directory: rust
+        run: cargo test --locked -p sirio_term_session
+
       # The probe and the E2E run even when a step before them failed, so a
       # failing test elsewhere never hides the host's own evidence; the job
       # still fails.
@@ -68,3 +84,18 @@ jobs:
       - name: Host E2E
         if: success() || failure()
         run: Scripts/Tests/test-host-e2e.sh
+
+      # The host's terminal sessions on Windows itself (spec §9.2 of the
+      # terminal-sessions design): the ConPTY and job-object rows of the
+      # platform probe only pass here.
+      - name: Terminal sessions E2E
+        if: success() || failure()
+        run: Scripts/Tests/test-term-e2e.sh --out-dir term-e2e
+
+      - name: Upload terminal E2E evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: term-e2e-windows
+          path: term-e2e
+          if-no-files-found: warn

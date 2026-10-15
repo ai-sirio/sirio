@@ -729,6 +729,8 @@ pub enum SettingsEvent {
     /// prompt — it can wait on the user, so never on the UI thread — then
     /// re-reads that one permission. Open Settings never reaches the host.
     RequestPermission(PermissionKind),
+    /// Settings → General → End All Terminal Sessions (SP2 spec §4.2).
+    EndAllSessions,
 }
 
 impl EventEmitter<SettingsEvent> for Settings {}
@@ -3651,7 +3653,29 @@ impl Settings {
                 theme,
             ))
             .child(controls::separator(theme))
-            .child(controls::row_view(host_label, div(), theme));
+            .child(controls::row_view(
+                host_label,
+                {
+                    let end_all_entity = entity.clone();
+                    let host_live = self
+                        .host_status
+                        .as_ref()
+                        .is_some_and(|line| line.starts_with("Live"));
+                    controls::button_maybe(
+                        "settings-host-end-all",
+                        "End All Terminal Sessions",
+                        theme,
+                        host_live.then(|| {
+                            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                                end_all_entity.update(cx, |_, cx| {
+                                    cx.emit(SettingsEvent::EndAllSessions)
+                                });
+                            }
+                        }),
+                    )
+                },
+                theme,
+            ));
         // F-SET-09: the provisioner (`agent_skill_install_command`) is
         // built and tested; this button's job is only to reach it and hand
         // the resulting command to whoever the host wires as

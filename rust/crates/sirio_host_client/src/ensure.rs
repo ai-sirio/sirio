@@ -5,17 +5,20 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sirio_host_protocol::liveness::Verdict;
-use sirio_host_protocol::messages::{HelloReply, HostInfo, HostMode, Welcome, method};
+use sirio_host_protocol::liveness::{LockState, Verdict};
+use sirio_host_protocol::messages::{HelloReply, HostInfo, HostMode, Welcome, capability, method};
 use sirio_host_protocol::paths::HostPaths;
 use sirio_host_protocol::version::majors_spoken;
 
 use crate::connection::Connection;
 use crate::detach::{DetachMethod, DetachedSpawn, spawn_detached};
+use crate::mux::Mux;
 use crate::observe::observe;
 use crate::stage::{host_binary_name, locate_packaged_host, prune_binaries, stage_binary};
+use crate::term::TermClient;
 
 const UNVERIFIABLE_WAIT: Duration = Duration::from_secs(10);
 const START_WAIT: Duration = Duration::from_secs(10);
@@ -33,6 +36,8 @@ pub struct HostSession {
     pub connection: Connection,
     pub welcome: Welcome,
     pub major: u32,
+    endpoint: PathBuf,
+    client_version: String,
 }
 
 pub struct HostHandle {
@@ -49,8 +54,12 @@ pub enum EnsureError {
     },
     Stage(io::Error),
     Spawn(io::Error),
+    /// The data root could not be created before anything was staged: no
+    /// host can be started on it (fix batch 6, N6).
+    DataRoot(io::Error),
     Unverifiable {
         waited: Duration,
+        reason: Option<String>,
     },
     Refused {
         host_major: u32,
@@ -85,11 +94,18 @@ impl std::fmt::Display for EnsureError {
             ),
             Self::Stage(e) => write!(f, "could not copy sirio-host: {e}"),
             Self::Spawn(e) => write!(f, "could not start sirio-host: {e}"),
-            Self::Unverifiable { waited } => write!(
-                f,
-                "a host holds the lock but does not answer (waited {}s)",
-                waited.as_secs()
-            ),
+            Self::DataRoot(e) => write!(f, "could not create the data directory: {e}"),
+            Self::Unverifiable { waited, reason } => {
+                write!(
+                    f,
+                    "a host holds the lock but does not answer (waited {}s)",
+                    waited.as_secs()
+                )?;
+                if let Some(reason) = reason {
+                    write!(f, " — {reason}")?;
+                }
+                Ok(())
+            }
             Self::Refused {
                 host_major,
                 client_majors,
@@ -110,6 +126,29 @@ impl std::fmt::Display for EnsureError {
 }
 
 impl std::error::Error for EnsureError {}
+
+impl EnsureError {
+    /// Whether this failure leaves no host to lose, so a terminal may fall
+    /// back to a local shell (spec §8). Every failure rooted in `Absent` says
+    /// so: no host was found, and none could be started. So does `Refused`,
+    /// a newer host that will not serve this client and holds nothing it
+    /// could see. A host that answered `Live` and then failed to connect, or
+    /// one that holds its lock without answering, may still be live beside
+    /// the terminal, so the failure is one to retry (spec §8, finding 7).
+    pub fn means_no_host(&self) -> bool {
+        match self {
+            Self::NoDataRoot
+            | Self::BinaryMissing { .. }
+            | Self::Stage(_)
+            | Self::Spawn(_)
+            | Self::DataRoot(_)
+            | Self::Refused { .. }
+            | Self::StartTimeout
+            | Self::EndpointPathTooLong { .. } => true,
+            Self::Unverifiable { .. } | Self::Io(_) => false,
+        }
+    }
+}
 
 pub fn ensure_host(options: &EnsureOptions) -> Result<HostHandle, EnsureError> {
     let majors = majors_spoken(options.major);
@@ -158,7 +197,17 @@ fn ensure_major(
                     });
                 }
                 match connect(options, major, majors) {
-                    Ok(session) => return Ok((session, None)),
+                    Ok(mut session) => {
+                        // An SP1 host (no `terminal` capability) with no
+                        // session is replaced by the packaged host, so it is
+                        // not held for the whole run (finding 3). When it
+                        // cannot be replaced, the session is returned and the
+                        // app drops it, so that host can idle out.
+                        if major == options.major && !has_terminal(&session) && retire(&mut session, options, major, majors) {
+                            continue;
+                        }
+                        return Ok((session, None));
+                    }
                     // The host answered a moment ago and is gone or turning
                     // us away now (its idle exit, §5.5): the client that
                     // loses that race goes through §5.3 again, bounded by
@@ -171,6 +220,12 @@ fn ensure_major(
                 if started.elapsed() >= UNVERIFIABLE_WAIT {
                     return Err(EnsureError::Unverifiable {
                         waited: started.elapsed(),
+                        reason: match observation.lock {
+                            LockState::Unopenable(kind) => Some(format!(
+                                "the lock file cannot be opened ({kind})"
+                            )),
+                            LockState::Held | LockState::Free => None,
+                        },
                     });
                 }
                 std::thread::sleep(Duration::from_millis(250));
@@ -193,6 +248,54 @@ fn ensure_major(
     }
 }
 
+/// How long a retired host may take to leave before it is treated as kept.
+const RETIRE_WAIT: Duration = Duration::from_secs(10);
+
+fn has_terminal(session: &HostSession) -> bool {
+    session
+        .welcome
+        .capabilities
+        .iter()
+        .any(|name| name == capability::TERMINAL)
+}
+
+/// Asks a host that predates `terminal` to leave, but only when it holds no
+/// session: a non-force `host.shutdown` is refused otherwise, and the answer
+/// is the same as a host that refuses for any other reason (SP2 finding 3).
+/// `true` once the host is `Absent`, within `RETIRE_WAIT`.
+fn retire(session: &mut HostSession, options: &EnsureOptions, major: u32, majors: &[u32]) -> bool {
+    let sessions = session
+        .connection
+        .call(method::INFO, serde_json::json!({}), None)
+        .ok()
+        .and_then(|info| serde_json::from_value::<HostInfo>(info).ok())
+        .map(|info| info.sessions);
+    if sessions != Some(0) {
+        return false;
+    }
+    // Every request after the welcome carries the host's generation: a host
+    // refuses a shutdown that names none (`stale_generation`).
+    if session
+        .connection
+        .call(
+            method::SHUTDOWN,
+            serde_json::json!({ "force": false }),
+            Some(&session.welcome.generation),
+        )
+        .is_err()
+    {
+        return false;
+    }
+    let deadline = Instant::now() + RETIRE_WAIT;
+    while Instant::now() < deadline {
+        if observe(&options.paths, major, majors).verdict == Verdict::Absent {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 fn start(options: &EnsureOptions, major: u32) -> Result<DetachMethod, EnsureError> {
     // Before anything is staged or spawned: a host on this root would exit
     // at its bind, and the client would wait out START_WAIT for nothing.
@@ -207,7 +310,7 @@ fn start(options: &EnsureOptions, major: u32) -> Result<DetachMethod, EnsureErro
                     .unwrap_or_default(),
             }
         })?;
-    std::fs::create_dir_all(&options.paths.root).map_err(EnsureError::Io)?;
+    std::fs::create_dir_all(&options.paths.root).map_err(EnsureError::DataRoot)?;
     // A stale endpoint or state file of a host that is gone is not cleared
     // here: the host replaces a stale socket when it binds and rewrites its
     // state file when it is ready, and a client that removed them would, when
@@ -216,7 +319,14 @@ fn start(options: &EnsureOptions, major: u32) -> Result<DetachMethod, EnsureErro
         .map_err(EnsureError::Stage)?;
     spawn_detached(&DetachedSpawn {
         program,
-        args: vec!["--mode".into(), "on-demand".into()],
+        // The root is an argument, not the environment: the host's shells
+        // inherit its environment, and the app's root must not reach them.
+        args: vec![
+            "--mode".into(),
+            "on-demand".into(),
+            "--root".into(),
+            options.paths.root.as_os_str().to_owned(),
+        ],
         cwd: options.paths.root.clone(),
         label: format!("sirio-host-v{major}"),
         launchd_dir: options.paths.launchd_dir(),
@@ -246,13 +356,15 @@ fn connect(
     major: u32,
     majors: &[u32],
 ) -> Result<HostSession, EnsureError> {
-    let mut connection =
-        Connection::open(&options.paths.endpoint(major), CALL_TIMEOUT).map_err(EnsureError::Io)?;
+    let endpoint = options.paths.endpoint(major);
+    let mut connection = Connection::open(&endpoint, CALL_TIMEOUT).map_err(EnsureError::Io)?;
     match connection.hello(&options.client_version, majors) {
         Ok(HelloReply::Welcome(welcome)) => Ok(HostSession {
             connection,
             welcome,
             major,
+            endpoint,
+            client_version: options.client_version.clone(),
         }),
         Ok(HelloReply::Refused(r)) => Err(EnsureError::Refused {
             host_major: r.host_major,
@@ -263,6 +375,48 @@ fn connect(
 }
 
 impl HostHandle {
+    /// Opens the terminal capability on the primary host with a second
+    /// connection, keeping the existing SP1 connection intact.
+    pub fn term(&self) -> Option<TermClient> {
+        if !self
+            .primary
+            .welcome
+            .capabilities
+            .iter()
+            .any(|name| name == capability::TERMINAL)
+        {
+            return None;
+        }
+        let (mux, _) = Mux::open(
+            &self.primary.endpoint,
+            &self.primary.client_version,
+            &majors_spoken(self.primary.major),
+        )
+        .ok()?;
+        TermClient::new(Arc::new(mux))
+    }
+
+    /// A reconnect closure for `HostLink`: re-opens a `Mux` to the primary
+    /// host's endpoint. `None` when the host has no `terminal` capability.
+    pub fn term_reconnect(&self) -> Option<Arc<dyn Fn() -> Option<TermClient> + Send + Sync>> {
+        if !self
+            .primary
+            .welcome
+            .capabilities
+            .iter()
+            .any(|name| name == capability::TERMINAL)
+        {
+            return None;
+        }
+        let endpoint = self.primary.endpoint.clone();
+        let client_version = self.primary.client_version.clone();
+        let majors = majors_spoken(self.primary.major);
+        Some(Arc::new(move || {
+            let (mux, _) = Mux::open(&endpoint, &client_version, &majors).ok()?;
+            TermClient::new(Arc::new(mux))
+        }))
+    }
+
     /// The diagnostic row (spec §7): version, pid, mode, verdict.
     pub fn status_line(&mut self) -> String {
         let info = self
@@ -427,5 +581,69 @@ mod tests {
         let line = compose_status(Some(&info(HostMode::OnDemand)), "0.31.0", None, None);
         assert!(line.contains("on-demand"), "{line}");
         assert!(!line.contains("OnDemand"), "{line}");
+    }
+
+    #[test]
+    fn unverifiable_error_includes_the_lock_open_reason() {
+        let error = EnsureError::Unverifiable {
+            waited: Duration::from_secs(10),
+            reason: Some("the lock file cannot be opened (PermissionDenied)".into()),
+        };
+        assert_eq!(
+            error.to_string(),
+            concat!(
+                "a host holds the lock but does not answer (waited 10s)",
+                " — the lock file cannot be opened (PermissionDenied)"
+            )
+        );
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+
+    /// Every variant, with what a terminal must make of it: `true` when the
+    /// failure leaves no host to lose (a fallback), `false` when a host may be
+    /// live beside the terminal (a failure to retry).
+    fn every_variant() -> Vec<(EnsureError, bool)> {
+        vec![
+            (EnsureError::NoDataRoot, true),
+            (EnsureError::BinaryMissing { looked: vec![] }, true),
+            (EnsureError::Stage(io::Error::other("copy")), true),
+            (EnsureError::Spawn(io::Error::other("spawn")), true),
+            (EnsureError::DataRoot(io::Error::other("mkdir")), true),
+            (
+                EnsureError::Unverifiable {
+                    waited: Duration::from_secs(10),
+                    reason: None,
+                },
+                false,
+            ),
+            (
+                EnsureError::Refused {
+                    host_major: 2,
+                    client_majors: vec![1],
+                },
+                true,
+            ),
+            (EnsureError::StartTimeout, true),
+            (
+                EnsureError::EndpointPathTooLong {
+                    path: PathBuf::from("/r/host-v1.sock"),
+                    max: 107,
+                },
+                true,
+            ),
+            // A connect that fails after a host answered: the host is live.
+            (EnsureError::Io(io::Error::other("connect")), false),
+        ]
+    }
+
+    #[test]
+    fn every_failure_says_whether_it_leaves_no_host() {
+        for (error, expected) in every_variant() {
+            assert_eq!(error.means_no_host(), expected, "{error}");
+        }
     }
 }

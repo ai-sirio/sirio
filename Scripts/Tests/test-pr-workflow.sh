@@ -52,6 +52,17 @@ grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/ci\.sh[[:space:]]*$" "$PR_CODE" \
 grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-host-e2e\.sh[[:space:]]*$" "$PR_CODE" \
   || fail "pr.yml must run the host E2E"
 
+# The host's terminal sessions E2E (the terminal-sessions design's spec §9.2)
+# is not part of Scripts/ci.sh either, for the same reason as the host E2E, so
+# this workflow is the only place it runs on every pull request on Linux.
+grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-term-e2e\.sh --out-dir term-e2e[[:space:]]*$" "$PR_CODE" \
+  || fail "pr.yml must run the terminal sessions E2E"
+
+# The app-level terminal sessions E2E (SP2 spec §9.3) runs the real app, so it
+# needs a display: on Linux that is the private Xvfb the script starts itself.
+grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-host-sessions-e2e\.sh --xvfb --out-dir host-sessions-e2e[[:space:]]*$" "$PR_CODE" \
+  || fail "pr.yml must run the host sessions E2E under Xvfb"
+
 # Scripts/ci.sh runs check-cycle-version.sh, which compares the workspace
 # version against the last released tag. A shallow clone carries no tags, so
 # the check would pass by knowing nothing -- the exact failure it exists to

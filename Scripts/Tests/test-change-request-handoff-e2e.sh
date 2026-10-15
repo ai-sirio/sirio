@@ -117,6 +117,7 @@ cleanup() {
   stop_app
   stop_forge
   kill_stubs
+  stop_hosts
   cp "$RUN_DIR"/*.log "$OUT_DIR/" 2>/dev/null || true
   rm -rf "$RUN_DIR"
 }
@@ -126,6 +127,20 @@ kill_stubs() {
   for pidfile in "$RUN_DIR"/pids/*; do
     [ -f "$pidfile" ] || continue
     kill "$(cat "$pidfile")" 2>/dev/null || true
+  done
+}
+# The isolated hosts this run's apps started. Since SP2 a quit only detaches, so each
+# scenario's host outlives its app. Only a pid its own state file names, and only while
+# that pid is still a sirio-host, is signalled.
+stop_hosts() {
+  local state pid
+  for state in "$RUN_DIR"/*-host/host-v*.json; do
+    [ -f "$state" ] || continue
+    pid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pid", ""))' "$state" 2>/dev/null) || continue
+    [ -n "$pid" ] || continue
+    case "$(cat "/proc/$pid/comm" 2>/dev/null || ps -o comm= -p "$pid" 2>/dev/null)" in
+      *sirio-host*) kill "$pid" 2>/dev/null || true ;;
+    esac
   done
 }
 trap cleanup EXIT
@@ -542,7 +557,8 @@ scenario_same() { # flavour host forge number origin-url fork-url
   echo "another branch: a worktree switched elsewhere is left alone"
   git_retry -C "$NEW" checkout -q -b other
   printf 'other\n' >"$NEW/other.txt"
-  git -C "$NEW" add other.txt; git -C "$NEW" commit -q -m "work on other"
+  # Retried like the checkout: the running app's own git reads can hold the index lock.
+  git_retry -C "$NEW" add other.txt; git_retry -C "$NEW" commit -q -m "work on other"
   OTHER=$(git -C "$NEW" rev-parse HEAD)
   echo "link: a linked worktree switched to another branch no longer shows the change request"
   ctl surface change-requests show >/dev/null

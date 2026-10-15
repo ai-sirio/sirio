@@ -219,6 +219,13 @@ fn build_vendored(link_mode: LinkMode) {
     }
     match link_mode {
         LinkMode::Dynamic => println!("cargo:rustc-link-lib=dylib=ghostty-vt"),
+        // Backported from upstream 0.2.2: on Windows `static=ghostty-vt` resolves to
+        // `ghostty-vt.lib`, the import library of `ghostty-vt.dll`, which links but leaves
+        // a load-time dependency on a DLL no Sirio package ships. Name the archive Zig
+        // installs, verbatim.
+        LinkMode::Static if target.contains("windows") => {
+            println!("cargo:rustc-link-lib=static:+verbatim=ghostty-vt-static.lib")
+        }
         LinkMode::Static => println!("cargo:rustc-link-lib=static=ghostty-vt"),
     }
     emit_include_metadata(&[include_dir]);

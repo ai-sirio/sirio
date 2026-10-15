@@ -38,3 +38,47 @@ cargo run -p sirio_host_protocol --example write_schema -- ../protocol/host-v1/s
 
 The conformance cases run against a real host, not against the types, so a
 ledger that names a method the host does not serve is caught there.
+
+## Framing and terminal data
+
+Protocol major 1 uses the `SRH1` frame format. Its header is 12 bytes:
+
+| Bytes | Field | Meaning |
+|---|---|---|
+| 0–3 | Magic | ASCII `SRH1` |
+| 4 | Kind | Frame type listed below |
+| 5 | Flags | Must be zero in major 1 |
+| 6–7 | Reserved | Must be zero in major 1 |
+| 8–11 | Length | Payload byte count, unsigned big-endian `u32` |
+
+The four frame kinds are:
+
+| Kind | Payload | Direction |
+|---|---|---|
+| 1 | JSON Request | Client to host |
+| 2 | JSON Response | Host to client |
+| 3 | JSON Event | Host to client |
+| 4 | `Data` bytes | Either direction, after negotiating `terminal` |
+
+The payload limit is 1 MiB for every kind. A `Data` payload starts with this
+13-byte header, followed by terminal bytes:
+
+| Bytes | Field | Meaning |
+|---|---|---|
+| 0–3 | Stream | Unsigned big-endian `u32` stream id |
+| 4 | Phase | `0` snapshot, `1` output, `2` input |
+| 5–12 | Offset | Unsigned big-endian `u64` journal offset |
+| 13 onward | Bytes | Raw terminal bytes |
+
+Phase `0` travels from host to client with offset zero. Phase `1` travels from
+host to client with the journal offset of its first byte. Phase `2` travels
+from client to host with offset zero. Other phases are frame errors. The
+terminal bytes in one `Data` payload can be at most 1 MiB minus the 13-byte
+header, or 1,048,563 bytes. A large snapshot is sent in consecutive phase 0
+frames; the first phase 1 frame ends it.
+
+A client sends `Data` only after `Welcome` named `terminal`.
+
+Events about a connection's own terminal streams use subscription `0` and
+sequence `0` (for example, `resync` and `lagged`). No `host.subscribe` call
+returns `0`; host-wide subscriptions start at `1`.

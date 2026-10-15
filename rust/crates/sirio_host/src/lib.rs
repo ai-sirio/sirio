@@ -6,6 +6,7 @@ mod core;
 mod lifecycle;
 mod log;
 mod router;
+mod sessions;
 
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ pub struct HostConfig {
     pub major: u32,
     pub mode: HostMode,
     pub idle_grace: Duration,
+    pub start_delay: Duration,
     pub version: String,
 }
 

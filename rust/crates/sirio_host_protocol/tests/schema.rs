@@ -33,7 +33,19 @@ fn every_ledger_capability_names_methods_the_protocol_defines() {
         sirio_host_protocol::messages::method::INFO,
         sirio_host_protocol::messages::method::SHUTDOWN,
         sirio_host_protocol::messages::method::SUBSCRIBE,
+        sirio_host_protocol::messages::method::TERM_CREATE,
+        sirio_host_protocol::messages::method::TERM_ATTACH,
+        sirio_host_protocol::messages::method::TERM_DETACH,
+        sirio_host_protocol::messages::method::TERM_RESIZE,
+        sirio_host_protocol::messages::method::TERM_READ,
+        sirio_host_protocol::messages::method::TERM_KEY,
+        sirio_host_protocol::messages::method::TERM_WRITE,
+        sirio_host_protocol::messages::method::TERM_FEED,
+        sirio_host_protocol::messages::method::TERM_WAIT,
+        sirio_host_protocol::messages::method::TERM_CLOSE,
+        sirio_host_protocol::messages::method::TERM_LIST,
         sirio_host_protocol::messages::topic::HOST_STATE,
+        sirio_host_protocol::messages::topic::TERM_SESSIONS,
     ];
     for cap in ledger["capabilities"].as_array().unwrap() {
         for name in cap["methods"]
@@ -48,6 +60,42 @@ fn every_ledger_capability_names_methods_the_protocol_defines() {
             );
         }
     }
+}
+
+#[test]
+fn the_terminal_capability_advertises_its_minor_methods_and_topic() {
+    let ledger: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../protocol/host-v1/capabilities.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let terminal = ledger["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|capability| capability["name"] == "terminal")
+        .expect("terminal capability");
+    assert_eq!(terminal["since_minor"], 1);
+    assert_eq!(
+        terminal["methods"],
+        serde_json::json!([
+            "term.create",
+            "term.attach",
+            "term.detach",
+            "term.resize",
+            "term.read",
+            "term.key",
+            "term.write",
+            "term.feed",
+            "term.wait",
+            "term.close",
+            "term.list"
+        ])
+    );
+    assert_eq!(terminal["topics"], serde_json::json!(["term.sessions"]));
 }
 
 /// Every `$ref` in the document, wherever it sits.

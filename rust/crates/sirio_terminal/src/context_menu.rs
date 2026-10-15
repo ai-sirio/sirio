@@ -228,9 +228,33 @@ pub struct TerminalContextEvent {
     pub action: TerminalContextAction,
 }
 
+/// The items an attached view offers: never Restart, since restarting would
+/// end a host session the view does not own (spec §5). An owned view keeps
+/// every item.
+pub fn offered_items(items: Vec<TerminalContextItem>, attached: bool) -> Vec<TerminalContextItem> {
+    items
+        .into_iter()
+        .filter(|item| !(attached && item.action == TerminalContextAction::RestartTerminal))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TerminalContextAction, items_with_split_availability};
+    use super::{TerminalContextAction, items, items_with_split_availability, offered_items};
+
+    /// An attached view drops Restart and keeps every other item, in order;
+    /// an owned view is offered the whole menu.
+    #[test]
+    fn an_attached_view_is_offered_no_restart() {
+        let attached = offered_items(items().to_vec(), true);
+        assert!(
+            attached
+                .iter()
+                .all(|item| item.action != TerminalContextAction::RestartTerminal)
+        );
+        assert_eq!(attached.len(), items().len() - 1);
+        assert_eq!(offered_items(items().to_vec(), false).len(), items().len());
+    }
 
     /// F-TAB-11: a pane too short disables only Split Above/Down (a wide
     /// pane keeps its horizontal splits), and the reason says "short", not

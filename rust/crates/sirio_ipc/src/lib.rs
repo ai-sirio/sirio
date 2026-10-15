@@ -101,8 +101,19 @@ pub trait LocalStreamExt: Read + Write {
     /// Used when a peer violates the protocol's size cap.
     fn abort(&mut self);
 
+    /// A second handle on the same connection, so one thread can block in
+    /// `read` while another writes. Unix: `try_clone` (a dup'd fd). Windows:
+    /// `DuplicateHandle` of the overlapped pipe handle — each handle issues its
+    /// own OVERLAPPED operations, which overlapped I/O allows concurrently.
+    fn try_clone_stream(&self) -> io::Result<Self>
+    where
+        Self: Sized;
+
     /// Bounds how long a single read may block; `None` waits forever.
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+
+    /// Bounds how long a single write may block; `None` waits forever.
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
 }
 
 #[cfg(unix)]
@@ -115,9 +126,17 @@ impl LocalStreamExt for std::os::unix::net::UnixStream {
         let _ = self.shutdown(std::net::Shutdown::Both);
     }
 
+    fn try_clone_stream(&self) -> io::Result<Self> {
+        std::os::unix::net::UnixStream::try_clone(self)
+    }
+
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         // The inherent method, which a path call prefers over this one.
         std::os::unix::net::UnixStream::set_read_timeout(self, timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        std::os::unix::net::UnixStream::set_write_timeout(self, timeout)
     }
 }
 
@@ -129,9 +148,17 @@ impl LocalStreamExt for windows_pipe::PipeStream {
         windows_pipe::PipeStream::abort(self)
     }
 
+    fn try_clone_stream(&self) -> io::Result<Self> {
+        windows_pipe::PipeStream::try_clone(self)
+    }
+
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         // The inherent method, which a path call prefers over this one.
         windows_pipe::PipeStream::set_read_timeout(self, timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        windows_pipe::PipeStream::set_write_timeout(self, timeout)
     }
 }
 

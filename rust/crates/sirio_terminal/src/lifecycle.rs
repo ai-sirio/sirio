@@ -133,6 +133,12 @@ impl<T> TerminalPaneCache<T> {
             .get_mut(&(worktree_id.to_owned(), content_id.to_owned()))
     }
 
+    /// Every cached pane of every worktree (fix batch 1, finding 1: orphan
+    /// adoption must know each live view's session).
+    pub fn iter(&self) -> impl Iterator<Item = &CachedTerminalPane<T>> {
+        self.panes.values()
+    }
+
     pub fn iter_in_worktree(
         &self,
         worktree_id: &str,
@@ -188,6 +194,26 @@ impl<T> TerminalPaneCache<T> {
         self.panes
             .keys()
             .any(|(cached_worktree, _)| cached_worktree == worktree_id)
+    }
+
+    /// Every cached controller, for quit-time detach (SP2 spec §4.2).
+    pub fn panes_for_detach(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.panes.values().map(|pane| pane.controller.clone()).collect()
+    }
+
+    /// Cached controllers of one worktree, for worktree-close shutdown.
+    pub fn panes_for_detach_in_worktree(&self, worktree_id: &str) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.panes
+            .values()
+            .filter(|pane| pane.worktree_id == worktree_id)
+            .map(|pane| pane.controller.clone())
+            .collect()
     }
 
     fn remove_by_key(
