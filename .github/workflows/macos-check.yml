@@ -88,3 +88,34 @@ jobs:
 
       - name: Host E2E
         run: Scripts/Tests/test-host-e2e.sh
+
+      # The host's terminal sessions on the release platform (spec §9.2 of
+      # the terminal-sessions design). Runs even when a step before it failed,
+      # so a failing check elsewhere never hides the sessions' own evidence;
+      # the job still fails.
+      - name: Terminal sessions E2E
+        if: success() || failure()
+        run: Scripts/Tests/test-term-e2e.sh --out-dir term-e2e
+
+      - name: Upload terminal E2E evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: term-e2e-macos
+          path: term-e2e
+          if-no-files-found: warn
+
+      # The app-level sessions E2E on the release platform, on the runner's own
+      # session. State-only: no window capture exists for macOS yet, so the
+      # run proves the state, not the pixels.
+      - name: Host sessions E2E
+        if: success() || failure()
+        run: Scripts/Tests/test-host-sessions-e2e.sh --state-only --out-dir host-sessions-e2e
+
+      - name: Upload host sessions E2E evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-sessions-e2e-macos
+          path: host-sessions-e2e
+          if-no-files-found: warn

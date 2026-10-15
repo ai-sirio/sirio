@@ -954,7 +954,8 @@ mod tests {
                     | SettingsEvent::StartAccountLogin(_)
                     | SettingsEvent::RefreshUsage
                     | SettingsEvent::RefreshPermissions
-                    | SettingsEvent::RequestPermission(_) => {}
+                    | SettingsEvent::RequestPermission(_)
+                    | SettingsEvent::EndAllSessions => {}
                 },
             );
             std::mem::forget(subscription);
@@ -1009,7 +1010,8 @@ mod tests {
                     | SettingsEvent::StartAccountLogin(_)
                     | SettingsEvent::RefreshUsage
                     | SettingsEvent::RefreshPermissions
-                    | SettingsEvent::RequestPermission(_) => {}
+                    | SettingsEvent::RequestPermission(_)
+                    | SettingsEvent::EndAllSessions => {}
                 },
             );
             std::mem::forget(subscription);
@@ -1171,7 +1173,8 @@ mod tests {
                     | SettingsEvent::StartAccountLogin(_)
                     | SettingsEvent::RefreshUsage
                     | SettingsEvent::RefreshPermissions
-                    | SettingsEvent::RequestPermission(_) => {}
+                    | SettingsEvent::RequestPermission(_)
+                    | SettingsEvent::EndAllSessions => {}
                 },
             );
             // The subscription must outlive this update scope for the whole

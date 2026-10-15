@@ -1,0 +1,128 @@
+# Local override of the published `bezel-ui` crate (release 0.1.4), substituted in via the
+# `[patch.crates-io]` section of ../../Cargo.toml. See ../README.md for what changed and why.
+# Everything below mirrors the released manifest field-for-field except the `[workspace]` table
+# (so this path resolves as an independent workspace root rather than an implicit member of the
+# enclosing one) and `publish = false`. `[package] name` stays `bezel-ui` so this path matches the
+# crates.io package name the `[patch.crates-io]` entry targets; `[lib] name` stays `ui`.
+
+[workspace]
+
+[package]
+edition = "2024"
+publish = false
+rust-version = "1.85"
+name = "bezel-ui"
+version = "0.1.4"
+authors = ["clearloop <tianyi.gc@gmail.com>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "SwiftUI-flavored components for gpui — popovers, menus, buttons, toggles, and loaders"
+homepage = "https://github.com/crabtalk/bezel"
+readme = "README.md"
+keywords = [
+    "gpui",
+    "gui",
+    "ui",
+    "components",
+]
+categories = ["gui"]
+license = "MIT"
+repository = "https://github.com/crabtalk/bezel"
+resolver = "2"
+
+[features]
+default = [
+    "geist-sans",
+    "geist-mono",
+    "geist-weights",
+]
+geist-mono = []
+geist-sans = []
+geist-weights = ["geist-sans"]
+
+[lib]
+name = "ui"
+path = "src/lib.rs"
+
+[[test]]
+name = "date"
+path = "tests/date.rs"
+
+[[test]]
+name = "frames"
+path = "tests/frames.rs"
+
+[[test]]
+name = "icons"
+path = "tests/icons.rs"
+
+[[test]]
+name = "input"
+path = "tests/input.rs"
+
+[[test]]
+name = "list"
+path = "tests/list.rs"
+
+[[test]]
+name = "menubar"
+path = "tests/menubar.rs"
+
+[[test]]
+name = "pagination"
+path = "tests/pagination.rs"
+
+[[test]]
+name = "popover"
+path = "tests/popover.rs"
+
+[[test]]
+name = "scroll"
+path = "tests/scroll.rs"
+
+[[test]]
+name = "table"
+path = "tests/table.rs"
+
+[[test]]
+name = "tree"
+path = "tests/tree.rs"
+
+[[test]]
+name = "widgets"
+path = "tests/widgets.rs"
+
+[dependencies.gpui]
+version = "0.3.8"
+package = "bezel-gpui"
+
+[dependencies.motion]
+version = "0.1.4"
+package = "bezel-motion"
+
+[dependencies.theme]
+version = "0.1.4"
+package = "bezel-theme"
+
+[dependencies.unicode-segmentation]
+version = "1"
+
+[dependencies.web-time]
+version = "1"
+
+[dev-dependencies.gpui]
+version = "0.3.8"
+features = ["test-support"]
+package = "bezel-gpui"
+
+[target."cfg(unix)".dependencies.libc]
+version = "0.2"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = ['cfg(feature, values("cargo-clippy"))']

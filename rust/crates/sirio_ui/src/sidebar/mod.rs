@@ -181,7 +181,10 @@ pub struct SidebarTab {
 /// pushes a different one, through [`Sidebar::set_panel_width`].
 const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
-/// Horizontal padding of one Projects/Sessions tab: bezel's `theme.tab()`.
+/// The one size of the icons under the view switch: expand all, collapse
+/// all and the `+`.
+const HEADER_ICON_SIZE: IconSize = IconSize::Medium;
+/// Horizontal padding of one Projects/Sessions segment.
 const VIEW_TAB_PAD_X: f32 = 10.0;
 
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
@@ -3554,18 +3557,15 @@ impl Focusable for Sidebar {
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
 
-/// One tab of the header's view switch: bezel's `theme.tab()` recipe,
-/// composed by hand because that widget takes a text label and this one leads
-/// with an icon — the host's tab strip does the same. The current view is
-/// told apart by tone, weight and a 2px underline whose last pixel is the
-/// strip's hairline.
+/// One segment of the header's view switch, drawn like the Chat/Code
+/// switch it copies: the two segments share the track's width, the current
+/// one is a filled pill on the track and the other is bare text.
 fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    let (id, icon_id, label_id, underline_id, icon, label) = match tab {
+    let (id, icon_id, label_id, icon, label) = match tab {
         SidebarView::Projects => (
             "sidebar-view-projects",
             "sidebar-view-icon-projects",
             "sidebar-view-label-projects",
-            "sidebar-view-underline-projects",
             Icon::FolderFill,
             "Projects",
         ),
@@ -3573,7 +3573,6 @@ fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stat
             "sidebar-view-sessions",
             "sidebar-view-icon-sessions",
             "sidebar-view-label-sessions",
-            "sidebar-view-underline-sessions",
             Icon::MessageSquare,
             "Sessions",
         ),
@@ -3583,14 +3582,15 @@ fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stat
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
-        .relative()
+        .flex_1()
         .h_full()
         .min_w_0()
         .flex()
         .items_center()
+        .justify_center()
         .gap(px(6.0))
         .px(px(VIEW_TAB_PAD_X))
-        .rounded_t(theme.radii.control)
+        .rounded(theme.radii.chip_active)
         .text_size(theme.typography.scaled(13.0))
         .font_weight(if active {
             FontWeight::MEDIUM
@@ -3599,7 +3599,15 @@ fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stat
         })
         .text_color(tone)
         .cursor_pointer()
-        .hover(|style| style.bg(theme.ely.hover))
+        .map(|this| {
+            if active {
+                this.bg(theme.ely.active)
+            } else {
+                // The track is already `hover`, so the bare segment answers
+                // the pointer with its text.
+                this.hover(|style| style.text_color(theme.ely.fg))
+            }
+        })
         .child(
             div()
                 .debug_selector(move || icon_id.to_owned())
@@ -3608,7 +3616,7 @@ fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stat
                 .child(IconElement::new(icon, IconSize::Small).text_color(tone)),
         )
         .child(
-            // At the narrowest sidebar the labels give way, never the `+`.
+            // At the narrowest sidebar the labels give way, never the icons.
             div()
                 .debug_selector(move || label_id.to_owned())
                 .min_w_0()
@@ -3616,22 +3624,10 @@ fn view_tab(tab: SidebarView, current: SidebarView, theme: &Theme) -> gpui::Stat
                 .text_ellipsis()
                 .child(label),
         )
-        .when(active, |this| {
-            this.child(
-                div()
-                    .debug_selector(move || underline_id.to_owned())
-                    .absolute()
-                    .bottom(px(-1.0))
-                    .left_0()
-                    .right_0()
-                    .h(px(2.0))
-                    .bg(theme.ely.fg),
-            )
-        })
 }
 
-/// A 20px icon control in the header strip, the size and hover of the `+`
-/// beside it. The icon says what it does only by shape, so the words live in
+/// A 20px icon control in the row under the view switch, the size and hover
+/// of the `+` beside it. The icon says what it does only by shape, so the words live in
 /// the tooltip. The caller attaches the click.
 fn header_icon_button(
     id: &'static str,
@@ -3651,7 +3647,13 @@ fn header_icon_button(
         .cursor_pointer()
         .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
         .tooltip(move |window, cx| crate::controls::sidebar_tooltip(tooltip, window, cx))
-        .child(IconElement::new(icon, IconSize::Small).text_color(theme.ely.fg_subtle))
+        .child(
+            div()
+                .debug_selector(move || format!("{id}-icon"))
+                .flex()
+                .flex_none()
+                .child(IconElement::new(icon, HEADER_ICON_SIZE).text_color(theme.ely.fg_subtle)),
+        )
 }
 
 impl Render for Sidebar {
@@ -3986,122 +3988,125 @@ impl Render for Sidebar {
             .child(
                 div()
                     .debug_selector(|| "sidebar-view-tabs".to_owned())
-                    .h(px(28.0))
-                    .w_full()
-                    // The first tab's icon lands on the 12px content inset
-                    // the rows and the filter field share.
-                    .pl(px(12.0 - VIEW_TAB_PAD_X))
-                    .pr(px(FILTER_LEFT_INSET))
+                    .h(px(30.0))
+                    .mx(px(12.0))
                     .flex()
                     .items_center()
-                    .justify_between()
-                    // The hairline the tabs sit on (bezel's `tab_bar()`).
-                    .border_b_1()
+                    .gap(px(2.0))
+                    // The track's own 2px inset around its 26px segments —
+                    // component geometry, like `controls::segmented`.
+                    .p(px(2.0))
+                    .rounded(theme.radii.control)
+                    // `hover`, not `surface`: on every ladder it stands off
+                    // the sidebar's `bg` in both appearances, where
+                    // `surface` all but vanished on the light ones.
+                    .bg(theme.ely.hover)
+                    .border_1()
                     .border_color(theme.ely.border)
-                    .text_size(theme.typography.scaled(12.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.ely.fg_subtle)
                     .child({
                         let projects_entity = entity.clone();
-                        let sessions_entity = entity.clone();
-                        div()
-                            .h_full()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .child(
-                                view_tab(SidebarView::Projects, view, &theme).on_click(
-                                    move |_, _, cx| {
-                                        projects_entity.update(cx, |sidebar, cx| {
-                                            sidebar.choose_view(SidebarView::Projects, cx)
-                                        });
-                                    },
-                                ),
-                            )
-                            .child(
-                                view_tab(SidebarView::Sessions, view, &theme)
-                                    .when_some(badge, |this, status| {
-                                        let (color, name) = match status {
-                                            ActivityStatus::Error => (theme.ely.danger, "error"),
-                                            _ => (theme.ely.warning, "needs-input"),
-                                        };
-                                        this.child(
-                                            div()
-                                                .debug_selector(move || {
-                                                    format!("sidebar-sessions-badge-{name}")
-                                                })
-                                                .w(px(6.0))
-                                                .h(px(6.0))
-                                                .rounded_full()
-                                                .bg(color),
-                                        )
-                                    })
-                                    .on_click(move |_, _, cx| {
-                                        sessions_entity.update(cx, |sidebar, cx| {
-                                            sidebar.choose_view(SidebarView::Sessions, cx)
-                                        });
-                                    }),
-                            )
+                        view_tab(SidebarView::Projects, view, &theme).on_click(move |_, _, cx| {
+                            projects_entity.update(cx, |sidebar, cx| {
+                                sidebar.choose_view(SidebarView::Projects, cx)
+                            });
+                        })
                     })
-                    .when(view == SidebarView::Projects, |this| {
-                        // Fold and open the whole list, then the `+`. They
-                        // are icons, so the tooltip is the only place the
-                        // words appear; like the `+` they never give way to
-                        // the tab labels.
-                        this.child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .gap(px(2.0))
-                                .child(
-                                    header_icon_button(
-                                        "sidebar-expand-all",
-                                        Icon::ExpandVertical,
-                                        "Expand all projects",
-                                        &theme,
-                                    )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_all_projects_expanded(true, cx);
-                                    })),
-                                )
-                                .child(
-                                    header_icon_button(
-                                        "sidebar-collapse-all",
-                                        Icon::FoldVertical,
-                                        "Collapse all projects",
-                                        &theme,
-                                    )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_all_projects_expanded(false, cx);
-                                    })),
-                                )
-                                .child(
+                    .child({
+                        let sessions_entity = entity.clone();
+                        view_tab(SidebarView::Sessions, view, &theme)
+                            .when_some(badge, |this, status| {
+                                let (color, name) = match status {
+                                    ActivityStatus::Error => (theme.ely.danger, "error"),
+                                    _ => (theme.ely.warning, "needs-input"),
+                                };
+                                this.child(
                                     div()
-                                        .id("add-project")
-                                        .debug_selector(|| "add-project".to_string())
+                                        .debug_selector(move || {
+                                            format!("sidebar-sessions-badge-{name}")
+                                        })
                                         .flex_none()
-                                        .w(px(20.0))
-                                        .h(px(20.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_size(theme.typography.scaled(17.0))
-                                        .text_color(theme.ely.fg_subtle)
-                                        .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
-                                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
-                                            this.add_project_menu.note_trigger_press();
-                                        }))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.start_add_project(cx);
-                                        }))
-                                        .child("+")
-                                        .when_some(add_project_menu, |this, menu| this.child(menu)),
-                                ),
-                        )
+                                        .w(px(6.0))
+                                        .h(px(6.0))
+                                        .rounded_full()
+                                        .bg(color),
+                                )
+                            })
+                            .on_click(move |_, _, cx| {
+                                sessions_entity.update(cx, |sidebar, cx| {
+                                    sidebar.choose_view(SidebarView::Sessions, cx)
+                                });
+                            })
                     }),
             )
+            .when(view == SidebarView::Projects, |this| {
+                // Open and fold the whole list, then the `+`: one row under
+                // the switch, the three drawn at one size. They are icons, so
+                // the tooltip is the only place the bulk buttons' words
+                // appear.
+                this.child(
+                    div()
+                        .debug_selector(|| "sidebar-header-actions".to_owned())
+                        .mt(px(6.0))
+                        .h(px(20.0))
+                        .w_full()
+                        .pr(px(FILTER_LEFT_INSET))
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(4.0))
+                        .child(
+                            header_icon_button(
+                                "sidebar-expand-all",
+                                Icon::SquarePlus,
+                                "Expand all projects",
+                                &theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_all_projects_expanded(true, cx);
+                            })),
+                        )
+                        .child(
+                            header_icon_button(
+                                "sidebar-collapse-all",
+                                Icon::SquareMinus,
+                                "Collapse all projects",
+                                &theme,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_all_projects_expanded(false, cx);
+                            })),
+                        )
+                        .child(
+                            div()
+                                .id("add-project")
+                                .debug_selector(|| "add-project".to_string())
+                                .flex_none()
+                                .w(px(20.0))
+                                .h(px(20.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
+                                    this.add_project_menu.note_trigger_press();
+                                }))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.start_add_project(cx);
+                                }))
+                                .child(
+                                    div()
+                                        .debug_selector(|| "add-project-icon".to_owned())
+                                        .flex()
+                                        .flex_none()
+                                        .child(
+                                            IconElement::new(Icon::Plus, HEADER_ICON_SIZE)
+                                                .text_color(theme.ely.fg_subtle),
+                                        ),
+                                )
+                                .when_some(add_project_menu, |this, menu| this.child(menu)),
+                        ),
+                )
+            })
             .child(
                 div()
                     .id("filter-field")
@@ -7687,9 +7692,9 @@ mod tests {
         }
     }
 
-    /// At the narrowest sidebar the tab labels give way, never a control:
-    /// the `+` and both bulk buttons stay whole inside the strip, to the
-    /// right of the Sessions tab.
+    /// At the narrowest sidebar the segment labels give way, never a
+    /// control: the `+` and both bulk buttons stay whole in their own row
+    /// under the view switch, at the same size, inside the sidebar.
     #[gpui::test]
     async fn at_the_narrowest_sidebar_the_header_controls_stay_whole(cx: &mut TestAppContext) {
         cx.update(Theme::init);
@@ -7700,25 +7705,42 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let strip = cx.debug_bounds("sidebar-view-tabs").expect("the header strip");
-        let sessions = cx.debug_bounds("sidebar-view-sessions").expect("the Sessions tab");
+        let strip = cx.debug_bounds("sidebar-view-tabs").expect("the view switch");
+        let projects = cx.debug_bounds("sidebar-view-projects").expect("the Projects segment");
+        let sessions = cx.debug_bounds("sidebar-view-sessions").expect("the Sessions segment");
+        assert!(
+            sessions.right() <= strip.right() && projects.left() >= strip.left(),
+            "both segments sit inside the track"
+        );
+        assert_eq!(projects.size.width, sessions.size.width, "the segments share the track");
+        let filter = cx.debug_bounds("filter-field").expect("the filter field");
         for selector in ["sidebar-collapse-all", "sidebar-expand-all", "add-project"] {
             let control = cx
                 .debug_bounds(selector)
                 .unwrap_or_else(|| panic!("{selector} is drawn"));
             assert!(
-                control.right() <= strip.right(),
-                "{selector} ends at {} inside the strip ending at {}",
+                control.right() <= filter.right(),
+                "{selector} ends at {} inside the sidebar ending at {}",
                 control.right(),
-                strip.right()
+                filter.right()
             );
             assert!(
-                control.left() >= sessions.right(),
-                "{selector} starts at {} clear of the Sessions tab ending at {}",
-                control.left(),
-                sessions.right()
+                control.top() >= strip.bottom() && control.bottom() <= filter.top(),
+                "{selector} sits between the view switch and the filter"
             );
         }
+        // The glyphs, not their 20px boxes: the `+` was text and the bulk
+        // buttons smaller icons in boxes of one size.
+        let glyphs = ["sidebar-expand-all-icon", "sidebar-collapse-all-icon", "add-project-icon"]
+            .map(|selector| {
+                cx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} is drawn"))
+                    .size
+            });
+        assert!(
+            glyphs.iter().all(|size| *size == glyphs[0]),
+            "the three header glyphs share one size: {glyphs:?}"
+        );
     }
 
     /// F-SID-10: the context menu's Remove Project asks the platform for

@@ -50,6 +50,11 @@ pub(crate) fn apply_terminal_activity_event(
             activity.apply_exit_result(pane_id, terminal_exit_code(*status), now)
         }
         TerminalActivityEvent::LifecycleChanged { .. } => None,
+        // A lost session keeps its scrollback and offers a Restart; it
+        // changes no agent identity or status on its own.
+        TerminalActivityEvent::SessionLost => None,
+        // A refused open changes no agent identity; the pane is rebound.
+        TerminalActivityEvent::IdTaken => None,
     }
 }
 
@@ -279,6 +284,21 @@ pub(crate) enum PaneNode<T> {
 }
 
 impl<T> PaneNode<T> {
+    /// Renames the leaf `from` to `to`, keeping its place in the tree (a pane
+    /// moved to a fresh id, fix batch 5). `false` when no leaf has `from`.
+    pub(crate) fn rename_leaf(&mut self, from: usize, to: usize) -> bool {
+        match self {
+            Self::Leaf { id, .. } if *id == from => {
+                *id = to;
+                true
+            }
+            Self::Leaf { .. } => false,
+            Self::Split { first, second, .. } => {
+                first.rename_leaf(from, to) || second.rename_leaf(from, to)
+            }
+        }
+    }
+
     pub(crate) fn leaf(id: usize, content: T) -> Self {
         Self::Leaf {
             id,

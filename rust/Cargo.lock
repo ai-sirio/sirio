@@ -1073,8 +1073,6 @@ dependencies = [
 [[package]]
 name = "bezel-ui"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55c4a9604fbe2d7c483778d247e8b0c357dacb0fdf433e93d478422f021c6689"
 dependencies = [
  "bezel-gpui",
  "bezel-motion",
@@ -7414,6 +7412,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sirio_acp",
+ "sirio_host_client",
+ "sirio_host_protocol",
  "sirio_ipc",
  "sirio_persistence",
 ]
@@ -7459,6 +7459,7 @@ dependencies = [
  "serde_json",
  "sirio_host_protocol",
  "sirio_ipc",
+ "sirio_term_session",
 ]
 
 [[package]]
@@ -7466,10 +7467,13 @@ name = "sirio_host_client"
 version = "0.32.0"
 dependencies = [
  "libc",
+ "libghostty-vt",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "sirio_host_protocol",
  "sirio_ipc",
+ "sirio_term_session",
  "windows-sys 0.61.2",
 ]
 
@@ -7605,6 +7609,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_term_session"
+version = "0.32.0"
+dependencies = [
+ "image",
+ "libc",
+ "libghostty-vt",
+ "portable-pty",
+ "sirio_perf",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "sirio_terminal"
 version = "0.32.0"
 dependencies = [
@@ -7618,9 +7634,13 @@ dependencies = [
  "libghostty-vt",
  "parking_lot",
  "portable-pty",
+ "sirio_host_client",
+ "sirio_host_protocol",
  "sirio_perf",
  "sirio_project",
+ "sirio_term_session",
  "sirio_theme",
+ "sirio_ui",
 ]
 
 [[package]]

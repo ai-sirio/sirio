@@ -1,57 +1,188 @@
-//! One client: SRH1 frames in and out on a blocking stream, polled with a
-//! short read timeout so host-initiated events are written between reads.
-//! Every failure closes this connection, never the host.
+//! One client: a reader thread decodes SRH1 frames and dispatches them; a
+//! writer thread drains one outbound channel of encoded frames — responses,
+//! events and, from SP2, Data — onto the stream. Nothing polls: a frame for
+//! the client is written the moment it is queued. Every failure closes this
+//! connection, never the host.
 
 use std::io::{ErrorKind, Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sirio_host_protocol::frame::{FrameDecoder, FrameError, FrameKind, encode};
-use sirio_host_protocol::messages::*;
+use sirio_host_protocol::messages::{
+    ErrorCode, Hello as HelloParams, HelloReply, Principal, ProtocolVersion, Refused,
+    RefusedReason, Request, Response, SubscribeParams, Subscribed, Transport, Welcome,
+    method,
+};
 use sirio_host_protocol::version::{Negotiation, PROTOCOL_MINOR, negotiate};
 use sirio_ipc::{LocalStream, LocalStreamExt};
 
 use crate::core::HostCore;
 use crate::log::Log;
-use crate::router::Router;
+use crate::router::{ConnState, Router};
 
-const POLL: Duration = Duration::from_millis(50);
+/// A peer must complete `host.hello` within this (spec §7.1.4).
+pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(5);
+/// A single frame write that blocks this long means the peer stopped
+/// reading: the connection is closed (its streams detach).
+pub const WRITE_DEADLINE: Duration = Duration::from_secs(10);
+/// How often a blocked read wakes to notice the host leaving.
+const READ_WAKE: Duration = Duration::from_millis(250);
+
+enum OutboundMessage {
+    Frame {
+        bytes: Vec<u8>,
+        on_written: Option<Box<dyn FnOnce() + Send>>,
+    },
+    Close,
+}
+
+/// The writer's queue. Cloneable; a send after the connection closed is a
+/// no-op the caller may ignore.
+#[derive(Clone)]
+pub struct Outbound {
+    tx: mpsc::Sender<OutboundMessage>,
+    closed: Arc<AtomicBool>,
+}
+
+impl Outbound {
+    pub fn frame(&self, kind: FrameKind, payload: &[u8]) -> bool {
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        match encode(kind, payload) {
+            Ok(bytes) => self
+                .tx
+                .send(OutboundMessage::Frame {
+                    bytes,
+                    on_written: None,
+                })
+                .is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    pub fn data_frame(
+        &self,
+        payload: &[u8],
+        on_written: impl FnOnce() + Send + 'static,
+    ) -> bool {
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        match encode(FrameKind::Data, payload) {
+            Ok(bytes) => self
+                .tx
+                .send(OutboundMessage::Frame {
+                    bytes,
+                    on_written: Some(Box::new(on_written)),
+                })
+                .is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    pub fn json<T: serde::Serialize>(&self, kind: FrameKind, value: &T) -> bool {
+        serde_json::to_vec(value).is_ok_and(|payload| self.frame(kind, &payload))
+    }
+
+    fn finish(&self) {
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            let _ = self.tx.send(OutboundMessage::Close);
+        }
+    }
+}
 
 pub fn serve(mut stream: LocalStream, core: Arc<HostCore>, router: Arc<Router>, log: Arc<Log>) {
     stream.restore_blocking();
-    let _ = stream.set_read_timeout(Some(POLL));
-    let principal = Principal {
-        transport: Transport::Local,
-    };
-    let (events_tx, events_rx) = mpsc::channel::<Event>();
-    let mut decoder = FrameDecoder::new();
-    let mut welcomed = false;
-    let mut buf = [0u8; 16 * 1024];
     if !core.client_connected() {
-        // The host decided to leave while this client was being accepted.
         log.line("client.refused", "draining");
         return;
     }
     log.line("client.connected", "");
-    'conn: loop {
-        while let Ok(event) = events_rx.try_recv() {
-            if !write(&mut stream, FrameKind::Event, &event) {
-                break 'conn;
-            }
+    let closed = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<OutboundMessage>();
+    let outbound = Outbound {
+        tx,
+        closed: Arc::clone(&closed),
+    };
+    let writer = match stream.try_clone_stream() {
+        Ok(mut w) => {
+            let _ = w.set_write_timeout(Some(WRITE_DEADLINE));
+            let closed = Arc::clone(&closed);
+            std::thread::spawn(move || {
+                while let Ok(message) = rx.recv() {
+                    if !write_outbound_frame(&mut w, message) {
+                        break;
+                    }
+                }
+                closed.store(true, Ordering::SeqCst);
+                w.abort();
+            })
         }
-        // A host that is leaving closes its connections itself, once the
-        // answer to whoever asked it to leave has been written (that answer
-        // is written inside the loop below, before this check is reached).
-        if core.shutdown.load(Ordering::SeqCst) {
-            break;
+        Err(_) => {
+            log.line("client.clone_failed", "");
+            core.client_disconnected();
+            return;
+        }
+    };
+    let _ = stream.set_read_timeout(Some(READ_WAKE));
+    read_loop(&mut stream, &core, &router, &log, &outbound, &closed);
+    // A subscription can retain a clone of this sender in HostCore. Close
+    // explicitly so those clones cannot keep the writer thread alive.
+    outbound.finish();
+    drop(outbound);
+    let _ = writer.join();
+    core.client_disconnected();
+    log.line("client.disconnected", "");
+}
+
+fn write_outbound_frame(writer: &mut impl Write, message: OutboundMessage) -> bool {
+    match message {
+        OutboundMessage::Frame { bytes, on_written } => {
+            if writer.write_all(&bytes).and_then(|_| writer.flush()).is_err() {
+                return false;
+            }
+            if let Some(on_written) = on_written {
+                on_written();
+            }
+            true
+        }
+        OutboundMessage::Close => false,
+    }
+}
+
+fn read_loop(
+    stream: &mut LocalStream,
+    core: &Arc<HostCore>,
+    router: &Arc<Router>,
+    log: &Log,
+    outbound: &Outbound,
+    closed: &AtomicBool,
+) {
+    let principal = Principal {
+        transport: Transport::Local,
+    };
+    let mut conn = router.connection(outbound.clone());
+    let mut decoder = FrameDecoder::new();
+    let mut welcomed = false;
+    let started = Instant::now();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        if closed.load(Ordering::SeqCst) || core.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        if !welcomed && started.elapsed() > HANDSHAKE_DEADLINE {
+            log.line("client.handshake_timeout", "");
+            return;
         }
         match stream.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => return,
             Ok(n) => decoder.push(&buf[..n]),
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => continue,
-            Err(_) => break,
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => continue,
+            Err(_) => return,
         }
         loop {
             let frame = match decoder.next_frame() {
@@ -59,112 +190,190 @@ pub fn serve(mut stream: LocalStream, core: Arc<HostCore>, router: Arc<Router>, 
                 Ok(None) => break,
                 Err(error) => {
                     log.line("client.frame_error", frame_error_kind(&error));
-                    refuse_framing(&mut stream, &error);
-                    break 'conn;
+                    if matches!(error, FrameError::BadMagic(_)) {
+                        stream.abort();
+                    } else {
+                        send_frame_error(outbound, &error.to_string());
+                    }
+                    return;
                 }
             };
-            if frame.kind != FrameKind::Request {
-                log.line("client.frame_error", "unexpected_kind");
-                send_frame_error(
-                    &mut stream,
-                    "only request frames are accepted from a client",
-                );
-                break 'conn;
+            match frame.kind {
+                FrameKind::Request => {}
+                FrameKind::Data => {
+                    if !welcomed || !conn.terminal() {
+                        log.line("client.frame_error", "bad_data");
+                        send_frame_error(outbound, "Data requires a terminal welcome");
+                        return;
+                    }
+                    if let Err(reason) = conn.data(&frame.payload, log) {
+                        log.line("client.frame_error", "bad_data");
+                        send_frame_error(outbound, &reason);
+                        return;
+                    }
+                    continue;
+                }
+                _ => {
+                    log.line("client.frame_error", "unexpected_kind");
+                    send_frame_error(outbound, "only request frames are accepted from a client");
+                    return;
+                }
             }
             let request: Request = match serde_json::from_slice(&frame.payload) {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = write(
-                        &mut stream,
+                    outbound.json(
                         FrameKind::Response,
                         &Response::err(0, ErrorCode::InvalidParams, e.to_string()),
                     );
                     continue;
                 }
             };
-            let response = if !welcomed {
-                if request.method != method::HELLO {
-                    let _ = write(
-                        &mut stream,
-                        FrameKind::Response,
-                        &Response::err(
-                            request.id,
-                            ErrorCode::HandshakeRequired,
-                            "send host.hello first",
-                        ),
-                    );
-                    break 'conn;
-                }
-                match serde_json::from_value::<Hello>(request.params.clone()) {
-                    Err(e) => Response::err(request.id, ErrorCode::InvalidParams, e.to_string()),
-                    Ok(hello) => match negotiate(core.major, &hello.majors) {
-                        Negotiation::Accept { .. } => {
-                            welcomed = true;
-                            Response::ok(
-                                request.id,
-                                HelloReply::Welcome(Welcome {
-                                    host_version: core.version.clone(),
-                                    protocol: ProtocolVersion {
-                                        major: core.major,
-                                        minor: PROTOCOL_MINOR,
-                                    },
-                                    capabilities: vec![capability::HOST_V1.to_string()],
-                                    host_id: core.host_id.clone(),
-                                    generation: core.generation.clone(),
-                                }),
-                            )
+            if !welcomed {
+                match hello(core, router, &request) {
+                    Hello::Welcomed(response) => {
+                        welcomed = true;
+                        if outbound.json(FrameKind::Response, &response) {
+                            conn.welcomed_terminal();
                         }
-                        Negotiation::Refuse { host_major } => {
-                            let _ = write(
-                                &mut stream,
-                                FrameKind::Response,
-                                &Response::ok(
-                                    request.id,
-                                    HelloReply::Refused(Refused {
-                                        reason: RefusedReason::NoCommonMajor,
-                                        host_major,
-                                    }),
-                                ),
-                            );
-                            break 'conn;
-                        }
-                    },
+                    }
+                    Hello::Close(response) => {
+                        outbound.json(FrameKind::Response, &response);
+                        return;
+                    }
+                    Hello::Invalid(response) => {
+                        outbound.json(FrameKind::Response, &response);
+                    }
                 }
-            } else if request.method == method::SUBSCRIBE {
-                match serde_json::from_value::<SubscribeParams>(request.params.clone()) {
-                    Err(e) => Response::err(request.id, ErrorCode::InvalidParams, e.to_string()),
-                    Ok(p) => match router.subscribe(&principal, &p.topic, events_tx.clone()) {
-                        Ok(subscription) => Response::ok(request.id, Subscribed { subscription }),
-                        Err(error) => Response {
-                            id: request.id,
-                            result: None,
-                            error: Some(error),
-                        },
-                    },
-                }
-            } else {
-                router.handle(&principal, &request)
-            };
-            if !write(&mut stream, FrameKind::Response, &response) {
-                break 'conn;
+                continue;
             }
+            // A request that can block (SP2 review finding 2) is served on a
+            // thread of its own: this read thread keeps reading Data, resize,
+            // attach and close while it waits.
+            if matches!(
+                request.method.as_str(),
+                method::TERM_CREATE | method::TERM_READ | method::TERM_WAIT
+            ) {
+                serve_off_thread(router, outbound, request);
+                continue;
+            }
+            let response = if request.method == method::SUBSCRIBE {
+                subscribe(router, &principal, &request, &mut conn)
+            } else {
+                conn.handle(&principal, &request)
+            };
+            let sent = outbound.json(FrameKind::Response, &response);
+            if !sent {
+                // The answer did not fit one frame (spec §6.1, 1 MiB payload):
+                // say so instead of leaving the client to its timeout. The
+                // error is tiny and always encodes.
+                outbound.json(
+                    FrameKind::Response,
+                    &Response::err(request.id, ErrorCode::Internal, "response too large"),
+                );
+            }
+            conn.after_response(sent);
         }
     }
-    core.client_disconnected();
-    log.line("client.disconnected", "");
 }
 
-fn write<T: serde::Serialize>(stream: &mut LocalStream, kind: FrameKind, value: &T) -> bool {
-    let Ok(payload) = serde_json::to_vec(value) else {
-        return false;
+/// Serves one request on its own thread and writes its answer through the
+/// connection's writer. Responses are matched by id, so one may overtake
+/// another; each is one whole frame, so none interleaves with another.
+fn serve_off_thread(router: &Arc<Router>, outbound: &Outbound, request: Request) {
+    let worker_router = Arc::clone(router);
+    let worker_outbound = outbound.clone();
+    let id = request.id;
+    let spawned = std::thread::Builder::new()
+        .name("sirio-host-request".into())
+        .spawn(move || {
+            let principal = Principal {
+                transport: Transport::Local,
+            };
+            let mut worker = worker_router.connection(worker_outbound.clone());
+            let response = worker.handle(&principal, &request);
+            if !worker_outbound.json(FrameKind::Response, &response) {
+                // Refused: the client is gone (the error goes nowhere), or
+                // the answer did not fit one frame (spec §6.1).
+                worker_outbound.json(
+                    FrameKind::Response,
+                    &Response::err(id, ErrorCode::Internal, "response too large"),
+                );
+            }
+        });
+    if spawned.is_err() {
+        outbound.json(
+            FrameKind::Response,
+            &Response::err(id, ErrorCode::Internal, "could not start a request thread"),
+        );
+    }
+}
+
+enum Hello {
+    Welcomed(Response),
+    Close(Response),
+    Invalid(Response),
+}
+
+fn hello(core: &HostCore, router: &Router, request: &Request) -> Hello {
+    if request.method != method::HELLO {
+        return Hello::Close(Response::err(
+            request.id,
+            ErrorCode::HandshakeRequired,
+            "send host.hello first",
+        ));
+    }
+    let hello = match serde_json::from_value::<HelloParams>(request.params.clone()) {
+        Ok(hello) => hello,
+        Err(e) => {
+            return Hello::Invalid(Response::err(
+                request.id,
+                ErrorCode::InvalidParams,
+                e.to_string(),
+            ));
+        }
     };
-    let Ok(frame) = encode(kind, &payload) else {
-        return false;
-    };
-    stream
-        .write_all(&frame)
-        .and_then(|_| stream.flush())
-        .is_ok()
+    match negotiate(core.major, &hello.majors) {
+        Negotiation::Accept { .. } => Hello::Welcomed(Response::ok(
+            request.id,
+            HelloReply::Welcome(Welcome {
+                host_version: core.version.clone(),
+                protocol: ProtocolVersion {
+                    major: core.major,
+                    minor: PROTOCOL_MINOR,
+                },
+                capabilities: router.capabilities(),
+                host_id: core.host_id.clone(),
+                generation: core.generation.clone(),
+            }),
+        )),
+        Negotiation::Refuse { host_major } => Hello::Close(Response::ok(
+            request.id,
+            HelloReply::Refused(Refused {
+                reason: RefusedReason::NoCommonMajor,
+                host_major,
+            }),
+        )),
+    }
+}
+
+fn subscribe(
+    router: &Router,
+    principal: &Principal,
+    request: &Request,
+    conn: &mut ConnState,
+) -> Response {
+    match serde_json::from_value::<SubscribeParams>(request.params.clone()) {
+        Err(e) => Response::err(request.id, ErrorCode::InvalidParams, e.to_string()),
+        Ok(params) => match router.subscribe(principal, &params.topic, conn.outbound.clone()) {
+            Ok(subscription) => Response::ok(request.id, Subscribed { subscription }),
+            Err(error) => Response {
+                id: request.id,
+                result: None,
+                error: Some(error),
+            },
+        },
+    }
 }
 
 /// What a refused frame is called in the log: the kind of the error and
@@ -176,31 +385,69 @@ fn frame_error_kind(error: &FrameError) -> &'static str {
         FrameError::NonZeroFlags(_) => "nonzero_flags",
         FrameError::NonZeroReserved(_) => "nonzero_reserved",
         FrameError::TooLarge { .. } => "too_large",
-        FrameError::DataNotSupported => "data_not_supported",
-    }
-}
-
-/// Ends a conversation whose framing the peer broke (spec §6.1). A wrong
-/// magic is a foreign protocol — an NDJSON client, a port scanner — and
-/// receives not one byte of SRH1; the connection is aborted. Any other
-/// refusal had a whole header the peer meant as SRH1, and gets one error
-/// response before the connection closes.
-fn refuse_framing(stream: &mut LocalStream, error: &FrameError) {
-    if matches!(error, FrameError::BadMagic(_)) {
-        stream.abort();
-    } else {
-        send_frame_error(stream, &error.to_string());
     }
 }
 
 /// One `frame_error` response, best effort: if it cannot be written the
-/// connection closes anyway. The caller drops the stream, which closes it
-/// without `abort` — a hard disconnect could discard the response on a
-/// transport (the Windows pipe) that throws away unread data.
-fn send_frame_error(stream: &mut LocalStream, message: &str) {
-    let _ = write(
-        stream,
+/// connection closes anyway.
+fn send_frame_error(outbound: &Outbound, message: &str) {
+    outbound.json(
         FrameKind::Response,
         &Response::err(0, ErrorCode::FrameError, message),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn data_consumption_runs_only_after_the_frame_is_written() {
+        let (tx, rx) = mpsc::channel();
+        let outbound = Outbound {
+            tx,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let consumed = Arc::new(AtomicBool::new(false));
+        let callback_state = Arc::clone(&consumed);
+        assert!(outbound.data_frame(b"payload", move || {
+            callback_state.store(true, Ordering::SeqCst);
+        }));
+        assert!(!consumed.load(Ordering::SeqCst));
+
+        let message = rx.recv().unwrap();
+        let mut written = Vec::new();
+        assert!(write_outbound_frame(&mut written, message));
+        assert!(consumed.load(Ordering::SeqCst));
+        assert!(!written.is_empty());
+    }
+
+    #[test]
+    fn a_failed_data_write_does_not_consume_attachment_bytes() {
+        struct FailedWrite;
+        impl Write for FailedWrite {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("write failed"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let outbound = Outbound {
+            tx,
+            closed: Arc::new(AtomicBool::new(false)),
+        };
+        let consumed = Arc::new(AtomicBool::new(false));
+        let callback_state = Arc::clone(&consumed);
+        assert!(outbound.data_frame(b"payload", move || {
+            callback_state.store(true, Ordering::SeqCst);
+        }));
+        let message = rx.recv().unwrap();
+        assert!(!write_outbound_frame(&mut FailedWrite, message));
+        assert!(!consumed.load(Ordering::SeqCst));
+    }
 }

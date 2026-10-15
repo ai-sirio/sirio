@@ -269,7 +269,11 @@ pub mod request {
         request("session.restore", BTreeMap::new())
     }
 
-    pub fn panel_create(worktree: Option<&str>, command: Option<&str>) -> ControlRequest {
+    pub fn panel_create(
+        worktree: Option<&str>,
+        command: Option<&str>,
+        cwd: Option<&str>,
+    ) -> ControlRequest {
         let mut params = BTreeMap::new();
         if let Some(worktree) = worktree {
             params.insert("worktree".to_string(), worktree.to_string());
@@ -277,7 +281,17 @@ pub mod request {
         if let Some(command) = command {
             params.insert("cmd".to_string(), command.to_string());
         }
+        if let Some(cwd) = cwd {
+            params.insert("cwd".to_string(), cwd.to_string());
+        }
         request("panel.create", params)
+    }
+
+    pub fn panel_show(id: &str) -> ControlRequest {
+        request(
+            "panel.show",
+            BTreeMap::from([("id".to_string(), id.to_string())]),
+        )
     }
 
     pub fn panel_split(from: &str, direction: &str, command: Option<&str>) -> ControlRequest {
@@ -736,6 +750,55 @@ pub mod request {
         request(
             "surface.tabs.close",
             BTreeMap::from([("index".to_string(), position.to_string())]),
+        )
+    }
+
+    /// Debug-only: `tabs_close` with the dirty-tab prompt already answered
+    /// "Close" (a live terminal's tab otherwise asks first).
+    pub fn tabs_close_confirmed(position: usize) -> ControlRequest {
+        request(
+            "surface.tabs.close",
+            BTreeMap::from([
+                ("index".to_string(), position.to_string()),
+                ("confirm".to_string(), "yes".to_string()),
+            ]),
+        )
+    }
+
+    /// Debug-only `surface.host.end_all`: End All without its dialog.
+    pub fn host_end_all() -> ControlRequest {
+        request("surface.host.end_all", BTreeMap::new())
+    }
+
+    /// Debug-only `surface.terminal.open`: opens an application terminal tab
+    /// in the selected worktree, running `command` under `sh -c` when given,
+    /// or the agent adapter `agent` launched the way a new agent tab is.
+    pub fn terminal_open(command: Option<&str>, agent: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::new();
+        if let Some(command) = command {
+            params.insert("cmd".to_string(), command.to_string());
+        }
+        if let Some(agent) = agent {
+            params.insert("agent".to_string(), agent.to_string());
+        }
+        request("surface.terminal.open", params)
+    }
+
+    /// Debug-only `surface.terminal.restart {pane}`: Restart on an application
+    /// terminal tab, as its *Session lost* button does.
+    pub fn terminal_restart(pane: &str) -> ControlRequest {
+        request(
+            "surface.terminal.restart",
+            BTreeMap::from([("pane".to_string(), pane.to_string())]),
+        )
+    }
+
+    /// Debug-only `surface.terminal.state {pane}`: `sessionLost` of an
+    /// application terminal tab.
+    pub fn terminal_state(pane: &str) -> ControlRequest {
+        request(
+            "surface.terminal.state",
+            BTreeMap::from([("pane".to_string(), pane.to_string())]),
         )
     }
 

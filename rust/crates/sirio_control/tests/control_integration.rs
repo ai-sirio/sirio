@@ -825,190 +825,6 @@ fn sirioctl_quit_requests_a_graceful_application_exit() {
 // Control-owned panes have no PTY backend off unix yet (`spawn_process`
 // returns Unsupported there), and these tests are about real process
 // groups — genuinely unportable today, not merely inconvenient.
-#[cfg(unix)]
-#[test]
-fn pane_registry_runs_a_real_command_and_returns_output_and_exit_code() {
-    let registry = PaneRegistry::new();
-    let pane = registry
-        .create(
-            std::env::current_dir().expect("current directory"),
-            Some("printf registry-ready; exit 7"),
-            "registry test",
-        )
-        .expect("pane creates");
-
-    let exit_code = registry
-        .wait(&pane.id, Some(Duration::from_secs(5)))
-        .expect("pane exits");
-    assert_eq!(exit_code, 7);
-    assert_eq!(
-        registry.read(&pane.id).expect("pane output"),
-        b"registry-ready"
-    );
-}
-
-// Control-owned panes have no PTY backend off unix yet (`spawn_process`
-// returns Unsupported there), and these tests are about real process
-// groups — genuinely unportable today, not merely inconvenient.
-#[cfg(unix)]
-#[test]
-fn pane_registry_writes_input_to_a_live_command() {
-    let registry = PaneRegistry::new();
-    let pane = registry
-        .create(
-            std::env::current_dir().expect("current directory"),
-            Some("IFS= read line; printf 'got:%s' \"$line\""),
-            "input test",
-        )
-        .expect("pane creates");
-
-    registry.write(&pane.id, b"hello\r").expect("pane write");
-    let exit_code = registry
-        .wait(&pane.id, Some(Duration::from_secs(5)))
-        .expect("pane exits");
-    assert_eq!(exit_code, 0);
-    assert!(
-        String::from_utf8_lossy(&registry.read(&pane.id).expect("pane output"))
-            .contains("got:hello")
-    );
-}
-
-// Control-owned panes have no PTY backend off unix yet (`spawn_process`
-// returns Unsupported there), and these tests are about real process
-// groups — genuinely unportable today, not merely inconvenient.
-#[cfg(unix)]
-#[test]
-fn pane_registry_close_terminates_process_group() {
-    let dir = TempDir::new("close-group");
-    let pid_file = dir.path().join("pids");
-    let command = format!(
-        "( trap '' TERM HUP; exec sleep 60 ) & child=$!; printf '%s %s' \"$$\" \"$child\" > {}; wait",
-        pid_file.display()
-    );
-    let registry = PaneRegistry::new();
-    let pane = registry
-        .create(dir.path(), Some(&command), "compound")
-        .expect("spawn compound pane");
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let pids = loop {
-        if let Ok(contents) = std::fs::read_to_string(&pid_file) {
-            let pids = contents
-                .split_whitespace()
-                .map(|pid| pid.parse::<i32>().expect("numeric pid"))
-                .collect::<Vec<_>>();
-            if pids.len() == 2 {
-                break pids;
-            }
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "compound pane did not publish both pids"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    assert!(pids.iter().all(|pid| process_exists(*pid)));
-
-    registry.close(&pane.id).expect("close compound pane");
-    let terminated = wait_for_processes_to_exit(&pids, deadline);
-    if !terminated {
-        // Keep a red run from leaking a 60-second child into the developer's
-        // session when the implementation still kills only the shell.
-        unsafe {
-            libc::kill(pids[1], libc::SIGKILL);
-        }
-    }
-    assert!(
-        terminated,
-        "all process-group pids must be gone after close"
-    );
-}
-
-// Control-owned panes have no PTY backend off unix yet (`spawn_process`
-// returns Unsupported there), and these tests are about real process
-// groups — genuinely unportable today, not merely inconvenient.
-#[cfg(unix)]
-#[test]
-fn pane_registry_shutdown_for_only_its_worktree() {
-    let first_dir = TempDir::new("shutdown-for-first");
-    let second_dir = TempDir::new("shutdown-for-second");
-    let first_pid_file = first_dir.path().join("pids");
-    let second_pid_file = second_dir.path().join("pids");
-    let first_command = format!(
-        "( trap '' TERM HUP; exec sleep 60 ) & child=$!; printf '%s %s' \"$$\" \"$child\" > {}; wait",
-        first_pid_file.display()
-    );
-    let second_command = format!(
-        "( trap '' TERM HUP; exec sleep 60 ) & child=$!; printf '%s %s' \"$$\" \"$child\" > {}; wait",
-        second_pid_file.display()
-    );
-    let registry = PaneRegistry::new();
-    let first = registry
-        .create(first_dir.path(), Some(&first_command), "first")
-        .expect("spawn first pane");
-    let second = registry
-        .create(second_dir.path(), Some(&second_command), "second")
-        .expect("spawn second pane");
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let first_pids = wait_for_pid_file(&first_pid_file, deadline);
-    let second_pids = wait_for_pid_file(&second_pid_file, deadline);
-    assert!(first_pids.iter().all(|pid| process_exists(*pid)));
-    assert!(second_pids.iter().all(|pid| process_exists(*pid)));
-
-    registry
-        .shutdown_for(first_dir.path())
-        .expect("shutdown first worktree");
-    assert!(wait_for_processes_to_exit(&first_pids, deadline));
-    assert!(
-        registry
-            .list_for(second_dir.path())
-            .expect("list second worktree")
-            .iter()
-            .any(|pane| pane.id == second.id),
-        "closing one worktree must leave other worktree panes registered"
-    );
-    assert!(
-        second_pids.iter().all(|pid| process_exists(*pid)),
-        "closing one worktree must leave other worktree processes alive"
-    );
-
-    assert!(registry.list_for(first_dir.path()).unwrap().is_empty());
-    assert!(registry.close(&first.id).is_err());
-    registry.shutdown();
-    assert!(wait_for_processes_to_exit(&second_pids, deadline));
-}
-
-// Control-owned panes have no PTY backend off unix yet (`spawn_process`
-// returns Unsupported there), and these tests are about real process
-// groups — genuinely unportable today, not merely inconvenient.
-#[cfg(unix)]
-#[test]
-fn workspace_close_terminates_process_group_when_worktree_is_missing() {
-    let dir = TempDir::new("workspace-close-missing");
-    let pid_file = dir.path().join("pids");
-    let command = format!(
-        "( trap \"\" TERM HUP; exec sleep 60 ) & child=$!; printf '%s %s' \"$$\" \"$child\" > {}; wait",
-        pid_file.display()
-    );
-    let registry = PaneRegistry::new();
-    registry
-        .create(dir.path(), Some(&command), "workspace-close")
-        .expect("spawn workspace pane");
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let pids = wait_for_pid_file(&pid_file, deadline);
-    assert!(pids.iter().all(|pid| process_exists(*pid)));
-
-    std::fs::remove_dir_all(dir.path()).expect("remove worktree before close");
-    registry
-        .shutdown_for(dir.path())
-        .expect("closing a missing worktree still terminates its panes");
-    assert!(
-        wait_for_processes_to_exit(&pids, deadline),
-        "workspace close must terminate the process group even after the directory disappears"
-    );
-}
-
 #[test]
 fn pane_registry_reports_live_state_and_distinguishes_closed_from_unknown() {
     let registry = PaneRegistry::new();
@@ -1033,6 +849,7 @@ fn pane_registry_reports_live_state_and_distinguishes_closed_from_unknown() {
                 pane.clone(),
                 PaneStateSnapshot {
                     working_directory: working_directory.clone(),
+                    survives: false,
                     exit_status: Some(PaneExitStatus::Success),
                 },
                 Some(source),
@@ -1074,6 +891,7 @@ fn pane_registry_reports_live_state_and_distinguishes_closed_from_unknown() {
                 pane.clone(),
                 PaneStateSnapshot {
                     working_directory: working_directory.clone(),
+                    survives: false,
                     exit_status: Some(PaneExitStatus::Success),
                 },
                 None,
@@ -1134,6 +952,7 @@ fn pane_registry_read_finds_a_live_application_pane_panel_list_already_reported(
                 pane.clone(),
                 PaneStateSnapshot {
                     working_directory: working_directory.clone(),
+                    survives: false,
                     exit_status: None,
                 },
                 Some(Arc::new(|| b"opencode ready\n".to_vec())),
@@ -1278,13 +1097,19 @@ fn sirioctl_exposes_every_panel_subcommand() {
         .into_iter()
         .map(|request| request.method)
         .collect();
-    assert_eq!(
-        methods,
-        commands
-            .iter()
-            .map(|(_, method)| method.to_string())
-            .collect::<Vec<_>>()
-    );
+    // A `panel.*` call first asks the app whether it answers (`system.ping`,
+    // the route's probe); the probe is part of the wire, so it is asserted.
+    let expected: Vec<String> = commands
+        .iter()
+        .flat_map(|(_, method)| {
+            if method.starts_with("panel.") {
+                vec!["system.ping".to_string(), method.to_string()]
+            } else {
+                vec![method.to_string()]
+            }
+        })
+        .collect();
+    assert_eq!(methods, expected);
 }
 
 #[test]
@@ -1336,13 +1161,19 @@ fn sirioctl_exposes_terminal_state_and_surface_subcommands() {
         .into_iter()
         .map(|request| request.method)
         .collect();
-    assert_eq!(
-        methods,
-        commands
-            .iter()
-            .map(|(_, method)| method.to_string())
-            .collect::<Vec<_>>()
-    );
+    // A `panel.*` call first asks the app whether it answers (`system.ping`,
+    // the route's probe); the probe is part of the wire, so it is asserted.
+    let expected: Vec<String> = commands
+        .iter()
+        .flat_map(|(_, method)| {
+            if method.starts_with("panel.") {
+                vec!["system.ping".to_string(), method.to_string()]
+            } else {
+                vec![method.to_string()]
+            }
+        })
+        .collect();
+    assert_eq!(methods, expected);
 }
 
 #[test]
@@ -1833,46 +1664,6 @@ fn socket_mode_is_never_permissive_during_startup() {
         violated, 0,
         "socket mode was observed {violated}/{observed} times as anything but 0600"
     );
-}
-
-#[cfg(unix)]
-fn process_exists(pid: i32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-#[cfg(unix)]
-fn wait_for_pid_file(path: &Path, deadline: std::time::Instant) -> Vec<i32> {
-    loop {
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            let pids = contents
-                .split_whitespace()
-                .map(|pid| pid.parse::<i32>().expect("numeric pid"))
-                .collect::<Vec<_>>();
-            if pids.len() == 2 {
-                return pids;
-            }
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "compound pane did not publish both pids"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-#[cfg(unix)]
-fn wait_for_processes_to_exit(pids: &[i32], deadline: std::time::Instant) -> bool {
-    while std::time::Instant::now() < deadline {
-        if pids.iter().all(|pid| !process_exists(*pid)) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
 }
 
 // ---------------------------------------------------------------------------

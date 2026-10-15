@@ -7,10 +7,11 @@ pub enum Handshake {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LockState {
     Held,
     Free,
+    Unopenable(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,7 +32,9 @@ pub enum Verdict {
 pub fn verdict(handshake: Handshake, lock: LockState, process: ProcessObservation) -> Verdict {
     match (handshake, lock, process) {
         (Handshake::Completed, _, _) => Verdict::Live,
-        (Handshake::Failed, LockState::Held, _) => Verdict::Unverifiable,
+        (Handshake::Failed, LockState::Held | LockState::Unopenable(_), _) => {
+            Verdict::Unverifiable
+        }
         (Handshake::Failed, LockState::Free, ProcessObservation::SameStart) => {
             Verdict::Unverifiable
         }
@@ -82,7 +85,7 @@ mod tests {
             (Failed, Free, DifferentStart, Absent),
         ];
         for (h, l, p, expected) in cases {
-            assert_eq!(verdict(h, l, p), expected, "{h:?} {l:?} {p:?}");
+            assert_eq!(verdict(h, l.clone(), p), expected, "{h:?} {l:?} {p:?}");
         }
     }
 
@@ -97,5 +100,19 @@ mod tests {
             ProcessObservation::DifferentStart
         );
         assert_eq!(observe_process(100, None), ProcessObservation::Gone);
+    }
+
+    #[test]
+    fn an_unopenable_lock_is_never_absent() {
+        for process in [ProcessObservation::NoRecord, ProcessObservation::Gone] {
+            assert_eq!(
+                verdict(
+                    Handshake::Failed,
+                    LockState::Unopenable("PermissionDenied".into()),
+                    process
+                ),
+                Verdict::Unverifiable
+            );
+        }
     }
 }

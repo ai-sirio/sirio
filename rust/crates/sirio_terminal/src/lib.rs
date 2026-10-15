@@ -1,12 +1,11 @@
-//! A small GPUI terminal backed by libghostty-vt (VT state) and portable-pty
-//! (PTY). Stage 2 of #45: the paint loop consumes grapheme clusters per cell
-//! and every SGR attribute gpui can express — bold, italic, underline (+
-//! color, styles degraded to gpui's ceiling per #31), strikethrough, inverse,
-//! faint, invisible.
+//! A small GPUI terminal backed by libghostty-vt (VT state) and a session
+//! link (a local engine session or a host session). Stage 2 of #45: the paint
+//! loop consumes grapheme clusters per cell and every SGR attribute gpui can
+//! express — bold, italic, underline (+ color, styles degraded to gpui's
+//! ceiling per #31), strikethrough, inverse, faint, invisible.
 
 use std::{
     collections::HashMap,
-    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     sync::Arc,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -26,10 +25,11 @@ use gpui::{
     anchored, deferred, div, fill, font, point, px, relative, rgba, size,
 };
 use image::{Frame, RgbaImage};
-use libghostty_vt::alloc::{Allocator, Bytes};
 use libghostty_vt::kitty::graphics::{
-    DecodePng, DecodedImage, Graphics, ImageFormat, Layer, PlacementIteration, PlacementIterator,
+    Graphics, ImageFormat, Layer, PlacementIteration, PlacementIterator,
 };
+#[cfg(test)]
+use libghostty_vt::kitty::graphics::DecodePng;
 use libghostty_vt::{
     Error, RenderState, Terminal, TerminalOptions, key, mouse,
     render::{CellIteration, CellIterator, Colors, RowIterator},
@@ -39,12 +39,16 @@ use libghostty_vt::{
     terminal::{Mode, Point as GhosttyPoint, PointCoordinate, PointSpace, ScrollViewport},
 };
 use parking_lot::Mutex;
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use sirio_theme::Theme;
+use sirio_term_session::{
+    apply_kitty_ingest_limits, login_shell as system_pane_shell, KittyPngDecoder,
+};
+use sirio_ui::text_selection::selectable_text;
 
 mod context_menu;
 mod domain;
 mod lifecycle;
+mod link;
 mod link_router;
 mod scrollbar;
 
@@ -54,6 +58,11 @@ pub use context_menu::{
 };
 pub use domain::{SplitAxis, SplitDirection, SplitTree, TerminalKey};
 pub use lifecycle::{CachedTerminalPane, TerminalPaneCache, TerminalSurfaceHost};
+pub use link::{
+    HostOpenError,
+    Abandon, HostLink, LinkChunk, LocalLink, OpenOutcome, OpenRequest, SessionFactory,
+    SessionFactoryGlobal, SessionLink,
+};
 pub use link_router::{opens_terminal_link, resolve_click_cell, url_at_column};
 
 const FONT_SIZE: Pixels = px(13.0);
@@ -173,6 +182,14 @@ pub enum TerminalActivityEvent {
         failed: bool,
         exit_status: Option<TerminalExitStatus>,
     },
+    /// The host is gone or the stream could not be re-established. The pane
+    /// keeps its scrollback; the app offers a Restart, which replays it as
+    /// the new session's prelude.
+    SessionLost,
+    /// The open was refused because the session id is held by another session
+    /// on the host. The pane stays failed until its owner gives it a fresh
+    /// identity and reopens it (fix batch 5, N5 and #11).
+    IdTaken,
 }
 
 /// The renderer-owned state that persistence and headless verification can
@@ -189,6 +206,7 @@ pub struct TerminalStateSnapshot {
 }
 
 impl TerminalExitStatus {
+    #[cfg_attr(not(test), allow(dead_code))] // exercised by the exit-status unit test
     fn from_exit_code(code: i32) -> Self {
         if code == 0 {
             Self::Success
@@ -212,21 +230,32 @@ impl TerminalExitStatus {
     }
 }
 
-/// What a [`TerminalView`] is showing: a live PTY, or the failure the PTY
-/// could not be started — surfaced INSIDE the pane instead of aborting the
-/// process, because forking a PTY fails for ordinary reasons (file-
-/// descriptor exhaustion, a directory the user deleted or renamed since the
-/// last session, a sandbox denial).
+/// What a [`TerminalView`] is showing: a live session link, the wait for one,
+/// or the failure no link could be opened for — surfaced INSIDE the pane
+/// instead of aborting the process, because opening a session fails for
+/// ordinary reasons (file-descriptor exhaustion, a directory the user deleted
+/// or renamed since the last session, a sandbox denial).
 enum TerminalState {
     /// The view was created before its host assigned the stable pane ID. The
-    /// PTY is intentionally delayed until the first render so that the child
-    /// inherits the host identity rather than the generated placeholder.
+    /// link is intentionally delayed until the first render so that the
+    /// session inherits the host identity rather than the generated
+    /// placeholder.
     Pending,
-    /// A live PTY, pumping events.
+    /// The factory is still being found; the view retries `ensure_started`
+    /// when the factory global changes.
+    Connecting,
+    /// A live session link, pumping events.
     Running(TerminalHandle),
-    /// The last spawn attempt failed; the pane renders the message and a
+    /// The last open attempt failed; the pane renders the message and a
     /// retry button.
     Failed { message: String },
+}
+
+/// Whether this pane's session outlives the app: a host session does, the
+/// in-process fallback does not. Drives the fallback banner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct TerminalViewMode {
+    pub survives: bool,
 }
 
 /// The parameters a spawn (or retry) needs, kept so a failed pane can
@@ -242,14 +271,16 @@ struct SpawnParams {
 /// is read off the `Terminal` and diffed into these.
 #[derive(Clone, Debug)]
 enum TerminalEvent {
-    /// PTY output was fed into the emulator.
+    /// Session output was fed into the emulator.
     Wakeup,
     /// The viewport moved in response to local scrolling.
     ViewportChanged,
     /// The OSC title changed. An empty string is an OSC title reset.
     Title(String),
-    /// The PTY child exited after its final output was drained.
+    /// The session exited after its final output was drained.
     ChildExit(TerminalExitStatus),
+    /// The host is gone or the stream could not be re-established.
+    SessionLost,
 }
 
 /// Codepoints kept inline in one [`SnapshotCell`] before truncation. Flags
@@ -449,16 +480,17 @@ impl MouseEncoderState<'static> {
 type SnapshotReply = (Vec<Vec<SnapshotCell>>, (usize, usize));
 
 enum TerminalCommand {
-    /// Write bytes to the PTY (file drops and programmatic input).
+    /// Write bytes to the session (file drops and programmatic input).
     Input(Vec<u8>),
-    /// Write clipboard bytes to the PTY, using bracketed paste when enabled.
+    /// Write clipboard bytes to the session, using bracketed paste when enabled.
     Paste(Vec<u8>),
     /// Encode a keyboard event against the guest-controlled terminal state.
     Key(KeyInput),
     /// Encode a mouse event against the guest-controlled terminal state.
     Mouse(MouseInput),
-    /// Feed bytes straight into the VT parser without touching the PTY
-    /// (`replay_scrollback`, `clear_screen`).
+    /// Feed bytes into the session's VT without touching its child
+    /// (`replay_scrollback`, `clear_screen`). They come back as `Output` and
+    /// reach the replica like everything else.
     Feed(Vec<u8>),
     Resize(u16, u16, u16, u16),
     Scroll(SirioScroll),
@@ -479,6 +511,9 @@ enum TerminalCommand {
         std::sync::mpsc::Sender<Option<SelectedRange>>,
     ),
     Shutdown,
+    /// Stop watching the session; it lives on (Quit, eviction, Drop). For a
+    /// `LocalLink` this ends it too.
+    Detach,
 }
 
 /// Viewport scroll requests, mirroring the subset of alacritty's `grid::Scroll`
@@ -665,6 +700,13 @@ struct TerminalHandle {
     /// Sirio-gesture vs encode without a blocking round-trip into the !Send
     /// terminal state.
     mouse_tracking: Arc<AtomicBool>,
+    /// Whether a foreground command currently holds the session's terminal.
+    /// Written by the owner thread from the session's `Foreground` events;
+    /// read by [`TerminalHandle::foreground_command_running`]. The session
+    /// engine derives it from the PTY's foreground process group on unix and
+    /// from the host's report elsewhere, so "Running" works on every
+    /// platform whenever the session reports it.
+    foreground_running: Arc<AtomicBool>,
     /// Where the viewport sits in the scrollback, for the scrollbar. Written
     /// by the owner thread *before* it sends any event that asks the view to
     /// repaint, so a render that follows an event never reads metrics older
@@ -681,77 +723,6 @@ struct TerminalHandle {
     /// selection so a press that never becomes a drag can clear the highlight
     /// without inventing a zero-width range.
     selection_anchor: Arc<Mutex<Option<(usize, usize)>>>,
-    /// F-TERM-03: the PTY master's raw fd number, captured once at spawn
-    /// time before the master itself moves to the terminal owner thread (the
-    /// fd *number* stays valid for as long as the master is open, so holding
-    /// just the number — not the handle — is enough to query it without
-    /// contending with that thread's reads/writes).
-    /// `tcgetpgrp` on this fd is a read-only terminal-driver ioctl
-    /// (`TIOCGPGRP`) and does not consume PTY data.
-    ///
-    /// Unix-only; `None` when portable-pty could not expose the fd, in which
-    /// case [`Self::foreground_command_running`] reports `false`.
-    #[cfg(unix)]
-    pty_master_fd: Option<std::os::unix::io::RawFd>,
-}
-
-/// The shell a `TerminalShell::System` pane falls back to when `$SHELL` is unset,
-/// together with the arguments that make it a login shell.
-///
-/// This is the last OS-specific assumption in the PTY spawn path, so it is gated
-/// per platform instead of shared. The reference implementation hardcodes
-/// `/bin/zsh` — macOS's default login shell. Inheriting that constant on Linux is
-/// not merely an unusual choice: `/bin/zsh` does not exist on a stock box, so the
-/// pane fails to spawn and the user gets no shell at all.
-///
-/// Each platform is named explicitly rather than folded into a single `cfg(unix)`
-/// arm, for the reason recorded further down this file — `cfg(unix)` silently
-/// hands macOS the Linux branch, which is how that earlier bug happened.
-#[cfg(target_os = "macos")]
-fn default_system_shell() -> (String, Vec<String>) {
-    ("/bin/zsh".to_string(), vec!["-il".to_string()])
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn default_system_shell() -> (String, Vec<String>) {
-    // POSIX guarantees `/bin/sh`, so it is the floor that can never fail to
-    // exist; bash is preferred when present because it is what a login shell on
-    // these systems normally is.
-    let program = ["/bin/bash", "/bin/sh"]
-        .into_iter()
-        .find(|candidate| std::path::Path::new(candidate).exists())
-        .unwrap_or("/bin/sh");
-    (program.to_string(), vec!["-il".to_string()])
-}
-
-/// `$SHELL` and the `-il` login convention are POSIX notions, so Windows resolves
-/// its own interpreter and passes no login arguments.
-#[cfg(windows)]
-fn default_system_shell() -> (String, Vec<String>) {
-    let program = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
-    (program, Vec::new())
-}
-
-/// Program and arguments a [`TerminalShell::System`] pane spawns.
-///
-/// The single source of truth. The spawn path and the UI breadcrumb both read
-/// this, so what the user is told cannot drift from what is actually running —
-/// the drift is what #230 was.
-#[cfg(not(windows))]
-fn system_pane_shell() -> (String, Vec<String>) {
-    match std::env::var("SHELL") {
-        Ok(value) if !value.is_empty() => (value, vec!["-il".to_string()]),
-        _ => default_system_shell(),
-    }
-}
-
-/// `$SHELL` and `-il` are POSIX notions. A value inherited from Git Bash is an
-/// MSYS path (`/bin/bash.exe`) that `CreateProcessW` cannot resolve, so
-/// honouring it made every pane fail to start with os error 3 (#230). Windows
-/// resolves its own interpreter from `COMSPEC` instead.
-#[cfg(windows)]
-fn system_pane_shell() -> (String, Vec<String>) {
-    default_system_shell()
 }
 
 /// The display name of the shell a System pane runs: the file stem of
@@ -774,7 +745,7 @@ pub fn system_shell_display_name() -> String {
 /// (`-lc` is POSIX, cmd.exe wants `/C`).
 ///
 /// The macOS and Linux arms are deliberately shared here, unlike
-/// [`default_system_shell`]: what differs between them is only the fallback
+/// [`login_shell`]: what differs between them is only the fallback
 /// program, and that decision is delegated. Do not "fix" this into a
 /// three-way split — the split already happened one call down.
 #[cfg(not(windows))]
@@ -810,22 +781,21 @@ fn user_shell_program() -> String {
 /// must still pass the pieces through VERBATIM (`CommandBuilder::arg`).
 #[cfg(windows)]
 pub fn command_shell_invocation(command: &str) -> (String, Vec<String>) {
-    let (program, _) = default_system_shell();
+    let (program, _) = system_pane_shell();
     // Unquoted: portable-pty's CommandBuilder quotes it (#39).
     (program, vec!["/C".to_string(), command.to_string()])
 }
 
 /// Inputs for [`spawn_terminal_thread`]. Everything here is `Send`; the
-/// libghostty-vt objects are constructed inside the thread.
+/// libghostty-vt objects are constructed inside the thread, and the session
+/// lives behind the link.
 struct TerminalThreadInputs {
     cols: u16,
     rows: u16,
     command_rx: std::sync::mpsc::Receiver<TerminalCommand>,
-    bytes_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    link: Box<dyn SessionLink>,
     event_tx: futures::channel::mpsc::UnboundedSender<TerminalEvent>,
-    writer: Box<dyn std::io::Write + Send>,
-    master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    foreground_running: Arc<AtomicBool>,
     mouse_tracking: Arc<AtomicBool>,
     scroll_metrics: Arc<Mutex<scrollbar::ScrollMetrics>>,
     /// #308 R4.4: the mutation stamp the view gates its Kitty placement
@@ -1093,74 +1063,6 @@ fn decode_kitty_image(
     Some(RenderImage::new(vec![frame]))
 }
 
-/// #301: `DecodePng` the owner thread registers so PNG transmits (f=100 —
-/// what omp emits — measured in the shipped pi-tui's `encodeKittyTransmit`)
-/// are stored at all: ghostty refuses a PNG unless a decoder is registered
-/// (`graphics_image.zig` `complete`/`decodePng`). R2.1 keeps libghostty's own
-/// optional `png` feature off, so this uses the workspace `image` crate — the
-/// tree still has exactly one PNG implementation.
-struct KittyPngDecoder {
-    failure_flag: Arc<AtomicBool>,
-}
-
-impl KittyPngDecoder {
-    #[cfg(test)]
-    fn new() -> Self {
-        Self::with_failure_flag(Arc::new(AtomicBool::new(false)))
-    }
-
-    fn with_failure_flag(failure_flag: Arc<AtomicBool>) -> Self {
-        Self { failure_flag }
-    }
-}
-
-impl DecodePng for KittyPngDecoder {
-    fn decode_png<'alloc>(
-        &mut self,
-        alloc: &'alloc Allocator<'_>,
-        data: &[u8],
-    ) -> Option<DecodedImage<'alloc>> {
-        let mut reader =
-            image::ImageReader::with_format(std::io::Cursor::new(data), image::ImageFormat::Png);
-        let mut limits = image::Limits::default();
-        limits.max_alloc = Some(KITTY_DECOMPRESSED_MAX_BYTES);
-        reader.limits(limits);
-        let image = match reader.decode() {
-            Ok(image) => image.into_rgba8(),
-            Err(_) => {
-                self.failure_flag.store(true, Ordering::Release);
-                return None;
-            }
-        };
-        let (width, height) = image.dimensions();
-        // The output buffer must be allocated with ghostty's allocator — the
-        // emulator takes ownership and frees it through the same one.
-        let Some(mut out) = Bytes::new_with_alloc(alloc, image.as_raw().len()).ok() else {
-            self.failure_flag.store(true, Ordering::Release);
-            return None;
-        };
-        out.copy_from_slice(image.as_raw());
-        Some(DecodedImage {
-            width,
-            height,
-            data: out,
-        })
-    }
-}
-
-/// #301 R1.3: states the pane's Kitty ingest ceilings explicitly instead of
-/// inheriting the emulator's defaults. Applied by the owner thread at spawn
-/// and by the headless test harness, so the tested values are the shipped
-/// ones.
-fn apply_kitty_ingest_limits(terminal: &mut Terminal<'_, '_>) {
-    terminal
-        .set_apc_max_bytes_kitty(Some(KITTY_APC_MAX_BYTES))
-        .expect("set the Kitty APC buffer ceiling");
-    terminal
-        .set_kitty_image_storage_limit(KITTY_IMAGE_STORAGE_LIMIT)
-        .expect("set the Kitty image storage limit");
-}
-
 /// #308 (R4.3/R4.7): the decoded-image render cache for one pane, living
 /// beside the other per-pane state on [`TerminalHandle`] — NOT in
 /// `TerminalPaintState`, which is rebuilt every prepaint. Keys are
@@ -1321,9 +1223,9 @@ impl Drop for KittyImageCache {
 ///
 /// libghostty-vt's `Terminal` (and its render helpers) are all `!Send`, so
 /// unlike alacritty's shared `FairMutex<Term>` there is no cross-thread
-/// terminal object: this thread owns the emulator, render state, iterators,
-/// PTY writer, PTY master, and child process, and serves every other caller
-/// through the command channel.
+/// terminal object: this thread owns the emulator (the *replica* of the
+/// session's own VT), render state, iterators, and the session link, and
+/// serves every other caller through the command channel.
 ///
 /// The loop POLLS rather than blocking on any channel — deliberately, not by
 /// inheritance from the alacritty path: a channel waker would fire on the
@@ -1336,11 +1238,9 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             cols,
             rows,
             command_rx,
-            bytes_rx,
+            link,
             event_tx,
-            mut writer,
-            master,
-            mut child,
+            foreground_running,
             mouse_tracking,
             scroll_metrics,
             mutation_stamp,
@@ -1351,13 +1251,11 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
 
         // libghostty-vt never writes to the pty itself; it hands the
         // embedder its replies (DSR/DECRQM answers etc.) through this
-        // callback. ConPTY opens with ESC[6n and blocks until answered, so
-        // dropping these starves the child at its first byte of output —
-        // measured in #33 as exactly 4 bytes then silence. The channel
-        // exists because `writer` is owned by this thread while the callback
-        // borrows the terminal during parsing; replies are drained to the
-        // pty right after each parse batch, on THIS thread.
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        // callback. They are deliberately DROPPED here: the session's own
+        // VT answers queries (spec §2), so the replica must never write
+        // back — it only renders what the session sends. The callback stays
+        // registered (rather than unregistered) so a future reader of this
+        // thread sees the decision instead of rediscovering the question.
         let mut terminal = Terminal::new(TerminalOptions {
             cols,
             rows,
@@ -1372,9 +1270,7 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             .set_mode(Mode::GRAPHEME_CLUSTER, true)
             .expect("terminal owner thread: enabling DEC 2027 grapheme clustering");
         terminal
-            .on_pty_write(move |_term, data: &[u8]| {
-                let _ = reply_tx.send(data.to_vec());
-            })
+            .on_pty_write(move |_term, _data: &[u8]| {})
             .expect("terminal owner thread: registering the pty-write callback");
 
         // #301: state the Kitty ingest ceilings explicitly (R1.3) and register
@@ -1396,24 +1292,53 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
         let mut mouse_encoder =
             MouseEncoderState::new().expect("terminal owner thread: mouse encoder");
 
-        let mut last_title = String::new();
-        let mut child_exit_reported = false;
+        // The last size the view asked for: the replica is resized to it, and
+        // a session snapshot that disagrees is answered with a `link.resize`
+        // back to it — the window decides the size once attached.
+        let mut view_size = (cols, rows);
+        let mut cell_size = (0u16, 0u16);
         // A command that arrived while this thread was parked at the bottom of
         // the loop, carried forward to be served at the top of the next
         // iteration rather than handled out of order down there.
         let mut carried: Option<TerminalCommand> = None;
         loop {
-            // 1. Drain whatever the PTY produced into the parser.
+            // 1. Drain whatever the session produced into the replica.
             let mut had_output = false;
-            while let Ok(chunk) = bytes_rx.try_recv() {
-                terminal.vt_write(&chunk);
-                had_output = true;
-            }
-            // vt_write fires on_pty_write synchronously, so the replies owed
-            // to the host are flushed after parsing, not before.
-            while let Ok(reply) = reply_rx.try_recv() {
-                let _ = writer.write_all(&reply);
-                let _ = writer.flush();
+            while let Ok(chunk) = link.chunks().try_recv() {
+                match chunk {
+                    LinkChunk::Snapshot { cols, rows, bytes } => {
+                        let _ = terminal.resize(
+                            cols,
+                            rows,
+                            u32::from(cell_size.0),
+                            u32::from(cell_size.1),
+                        );
+                        terminal.reset();
+                        terminal.vt_write(&bytes);
+                        had_output = true;
+                        if (cols, rows) != view_size {
+                            link.resize(view_size.0, view_size.1);
+                        }
+                    }
+                    LinkChunk::Output(bytes) => {
+                        if !bytes.is_empty() {
+                            terminal.vt_write(&bytes);
+                            had_output = true;
+                        }
+                    }
+                    LinkChunk::Title(title) => {
+                        let _ = event_tx.unbounded_send(TerminalEvent::Title(title));
+                    }
+                    LinkChunk::Foreground(running) => {
+                        foreground_running.store(running, Ordering::Relaxed);
+                    }
+                    LinkChunk::Exited(status) => {
+                        let _ = event_tx.unbounded_send(TerminalEvent::ChildExit(status));
+                    }
+                    LinkChunk::Lost => {
+                        let _ = event_tx.unbounded_send(TerminalEvent::SessionLost);
+                    }
+                }
             }
             if had_output {
                 // Before the event: the repaint it asks for reads the metrics.
@@ -1424,48 +1349,47 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
             // 2. Serve queued commands.
             let mut mutated = false;
             let mut shutdown = false;
+            let mut detach = false;
             while let Some(command) = carried.take().or_else(|| command_rx.try_recv().ok()) {
                 match command {
                     TerminalCommand::Input(bytes) => {
-                        let _ = writer.write_all(&bytes);
-                        let _ = writer.flush();
+                        link.input(bytes);
                     }
                     TerminalCommand::Paste(bytes) => {
+                        // Encoding stays here, against the replica's modes,
+                        // which equal the session's: bracketed paste included.
                         if terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false) {
                             let mut bracketed = Vec::with_capacity(bytes.len() + 12);
                             bracketed.extend_from_slice(b"\x1b[200~");
                             bracketed.extend_from_slice(&bytes);
                             bracketed.extend_from_slice(b"\x1b[201~");
-                            let _ = writer.write_all(&bracketed);
+                            link.input(bracketed);
                         } else {
-                            let _ = writer.write_all(&bytes);
+                            link.input(bytes);
                         }
-                        let _ = writer.flush();
                     }
                     TerminalCommand::Key(input) => {
                         if let Ok(bytes) = encode_key_input(&terminal, &mut key_encoder, input) {
-                            let _ = writer.write_all(&bytes);
-                            let _ = writer.flush();
+                            link.input(bytes);
                         }
                     }
                     TerminalCommand::Mouse(input) => {
                         if let Ok(bytes) = encode_mouse_input(&terminal, &mut mouse_encoder, input)
                         {
-                            let _ = writer.write_all(&bytes);
-                            let _ = writer.flush();
+                            link.input(bytes);
                         }
                     }
                     TerminalCommand::Feed(bytes) => {
-                        terminal.vt_write(&bytes);
-                        mutated = true;
+                        // Only into the session: the bytes come back as
+                        // `Output` and reach the replica like everything
+                        // else, so `clear_screen` and `replay_scrollback`
+                        // change the session's VT too.
+                        link.feed(bytes);
                     }
                     TerminalCommand::Resize(columns, lines, cell_width, cell_height) => {
-                        let _ = master.resize(PtySize {
-                            rows: lines,
-                            cols: columns,
-                            pixel_width: 0,
-                            pixel_height: 0,
-                        });
+                        view_size = (columns, lines);
+                        cell_size = (cell_width, cell_height);
+                        link.resize(columns, lines);
                         let _ = terminal.resize(
                             columns,
                             lines,
@@ -1521,6 +1445,10 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                         shutdown = true;
                         break;
                     }
+                    TerminalCommand::Detach => {
+                        detach = true;
+                        break;
+                    }
                 }
             }
             // #308 R4.4: any mutation that can move placements or change
@@ -1547,33 +1475,19 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                 }
             }
             if shutdown {
-                let _ = child.kill();
-                // Dropping the master closes the pty, which unblocks the
-                // reader thread's read() so it can end too.
-                drop(master);
-                drop(writer);
+                // End the session (tab, worktree or project closed; End all
+                // sessions), then return: dropping the link releases it.
+                link.end();
+                return;
+            }
+            if detach {
+                // Stop watching; the session lives on (Quit, eviction, Drop).
+                link.detach();
                 return;
             }
 
-            // 3. Diff observable terminal state into events.
-            if let Ok(title) = terminal.title()
-                && title != last_title
-            {
-                last_title = title.to_string();
-                let _ = event_tx.unbounded_send(TerminalEvent::Title(title.to_string()));
-            }
-            if !child_exit_reported && let Ok(Some(status)) = child.try_wait() {
-                child_exit_reported = true;
-                // portable-pty reports a signalled exit as a signal
-                // *name* string, not a number, so a signalled child
-                // degrades to its (nonzero) code rather than Signal(n).
-                let status = if status.success() {
-                    TerminalExitStatus::Success
-                } else {
-                    TerminalExitStatus::from_exit_code(status.exit_code() as i32)
-                };
-                let _ = event_tx.unbounded_send(TerminalEvent::ChildExit(status));
-            }
+            // 3. The title and the exit both arrive as link chunks above; the
+            // replica is never diffed or polled for them.
 
             // #43: refresh the shared tracking gate once per poll-loop
             // iteration so the view can decide Sirio-gesture vs encode from a
@@ -1774,47 +1688,6 @@ fn resolve_style_color(color: StyleColor, colors: Option<&Colors>) -> Option<Sir
     }
 }
 
-/// The working directory handed to a spawned PTY child. Strips the Windows
-/// verbatim prefix on Windows: `\\?\C:\a\b` becomes `C:\a\b` and
-/// `\\?\UNC\server\share\x` becomes `\\server\share\x`; on every other
-/// platform (and for any non-verbatim path) the input passes through
-/// untouched.
-///
-/// This is a **deliberate third copy** of an idiom already carried twice in
-/// this repo: `sirio_git::path_arg`/`sirio_git::strip_verbatim_prefix`
-/// (`crates/sirio_git/src/git.rs`) strip the prefix for paths leaving as
-/// *git arguments*, and `sirio_project::display_absolute_path`
-/// (`crates/sirio_project/src/domain.rs`) strips it for *display*. No new
-/// dependency is taken and neither existing copy is made public — the copies
-/// live independently on purpose. This one exists because a path handed to
-/// a **child process** as its working directory must not carry the prefix:
-/// `CreateProcess` accepts it, but `cmd.exe` then refuses to keep a `\\?\`
-/// directory as its cwd (it reads it as UNC) and silently falls back to the
-/// Windows directory — so every command in the terminal runs against the
-/// wrong directory (#150).
-///
-/// [`validate_working_directory`] deliberately keeps the original verbatim
-/// path: `std::fs::metadata` handles it fine and keeps its long-path
-/// capability. Only the child's cwd is stripped.
-fn spawn_cwd(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let string = path.to_string_lossy();
-        let rest = string.strip_prefix(r"\\?\");
-        if let Some(rest) = rest {
-            if let Some(unc) = rest.strip_prefix("UNC\\") {
-                return PathBuf::from(format!(r"\\{unc}"));
-            }
-            return PathBuf::from(rest.to_string());
-        }
-        path.to_path_buf()
-    }
-    #[cfg(not(windows))]
-    {
-        path.to_path_buf()
-    }
-}
-
 impl TerminalHandle {
     fn validate_working_directory(working_directory: &Path) -> Result<()> {
         let metadata = std::fs::metadata(working_directory).with_context(|| {
@@ -1840,104 +1713,45 @@ impl TerminalHandle {
         Self::new_with_pane_id(working_directory, shell, None)
     }
 
+    #[cfg(test)]
     fn new_with_pane_id(
         working_directory: impl AsRef<Path>,
         shell: &TerminalShell,
         pane_id: Option<&str>,
     ) -> Result<(Self, UnboundedReceiver<TerminalEvent>)> {
-        // portable-pty swallows a failed chdir in the spawned child (the
-        // shell would silently start in the app's cwd, i.e. the wrong
-        // project). Validate the directory here so a stale path surfaces as
-        // a retryable pane error instead.
-        let working_directory = working_directory.as_ref();
-        Self::validate_working_directory(working_directory)?;
-
-        const COLS: u16 = 80;
-        const ROWS: u16 = 24;
-
-        let (wakeup_tx, wakeup_rx) = futures::channel::mpsc::unbounded();
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: ROWS,
-                cols: COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("creating terminal PTY")?;
-
-        let (program, args) = match shell {
-            TerminalShell::System => system_pane_shell(),
-            TerminalShell::WithArguments { program, args } => (program.clone(), args.clone()),
-        };
-        let mut command = CommandBuilder::new(program);
-        for argument in &args {
-            command.arg(argument);
-        }
-        command.env("TERM", "xterm-256color");
-        command.env("COLORTERM", "truecolor");
-        // #301 R1.4 (omp half): omp's pi-tui decides its image protocol from
-        // PI_FORCE_IMAGE_PROTOCOL before it sends anything — the Kitty support
-        // query is answered (R1.1, pinned by test #264) but omp never emits a
-        // graphics byte unless this is set (its `detectCapabilities` reads
-        // only the environment; measured in #264). The spec calls this one
-        // line the milestone (R1.4). It is deliberately NOT a terminal-identity
-        // claim: #86 settled Sirio's identity as ai.sirio.Sirio, and this
-        // variable only pins the image protocol choice. omp is its only reader
-        // in practice — pi's own shipped tree never references it and plain
-        // shells ignore it — so exporting it on every pane is the smallest
-        // honest surface; scoping it to omp panes would require TerminalShell
-        // to carry env, which the next ticket can add if that ever matters.
-        command.env("PI_FORCE_IMAGE_PROTOCOL", "kitty");
-        if let Some(pane_id) = pane_id {
-            command.env("SIRIO_PANE_ID", pane_id);
-            // Scripts and agent skills written before the rebrand read the
-            // pane id under its old name. Exporting both costs one variable
-            // and keeps them working inside a pane they cannot see renamed.
-            command.env("TILLER_PANE_ID", pane_id);
-        }
-        command.cwd(spawn_cwd(working_directory));
-
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .context("spawning PTY child")?;
-        drop(pair.slave);
-        let shell_pid = child.process_id().unwrap_or(0);
-
-        // Captured before `master` moves to the owner thread below — see the
-        // field doc on `pty_master_fd` for why the bare fd number outlives
-        // that move.
-        #[cfg(unix)]
-        let pty_master_fd = pair.master.as_raw_fd();
-
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .context("cloning PTY reader")?;
-        let writer = pair.master.take_writer().context("taking PTY writer")?;
-
-        // The reader thread only ever sends owned bytes; the emulator itself
-        // is never touched off its owner thread (libghostty-vt is !Send).
-        let (bytes_tx, bytes_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        std::thread::spawn(move || {
-            let mut buffer = [0u8; 8192];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if bytes_tx.send(buffer[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
+        let session_id = pane_id.map(str::to_owned).unwrap_or_else(|| {
+            let serial = NEXT_TERMINAL_ID.fetch_add(1, Ordering::Relaxed);
+            format!("pane-{serial}")
         });
+        let request = OpenRequest {
+            session_id,
+            cwd: working_directory.as_ref().to_path_buf(),
+            shell: shell.clone(),
+            cols: 80,
+            rows: 24,
+            prelude: Vec::new(),
+            recreate: false,
+            attach_only: false,
+            restore: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
+        };
+        let link = LocalLink::open(&request).map_err(|message| anyhow::anyhow!("{message}"))?;
+        Ok(Self::new_with_link(Box::new(link)))
+    }
+
+    /// Takes a ready [`SessionLink`]: the PTY (or host session) already
+    /// exists behind it, so this never forks and never fails. Production
+    /// opens the link through the installed [`SessionFactory`]
+    /// (`TerminalView::ensure_started`); tests open a [`LocalLink`].
+    fn new_with_link(link: Box<dyn SessionLink>) -> (Self, UnboundedReceiver<TerminalEvent>) {
+        let (wakeup_tx, wakeup_rx) = futures::channel::mpsc::unbounded();
+        let shell_pid = link.shell_pid().unwrap_or(0);
 
         let (commands, command_rx) = std::sync::mpsc::channel::<TerminalCommand>();
         let scrollback = ScrollbackCapture::new(commands.clone());
         // Shared before the thread spawns and handed to both the owner loop
         // (writer) and the handle (reader) below.
+        let foreground_running = Arc::new(AtomicBool::new(false));
         let mouse_tracking_flag = Arc::new(AtomicBool::new(false));
         let scroll_metrics = Arc::new(Mutex::new(scrollbar::ScrollMetrics::default()));
         let mutation_stamp = Arc::new(AtomicU64::new(0));
@@ -1945,14 +1759,12 @@ impl TerminalHandle {
         let scrollback_captures = Arc::new(AtomicU64::new(0));
         let kitty_decode_failed = Arc::new(AtomicBool::new(false));
         spawn_terminal_thread(TerminalThreadInputs {
-            cols: COLS,
-            rows: ROWS,
+            cols: 80,
+            rows: 24,
             command_rx,
-            bytes_rx,
+            link,
             event_tx: wakeup_tx,
-            writer,
-            master: pair.master,
-            child,
+            foreground_running: foreground_running.clone(),
             mouse_tracking: mouse_tracking_flag.clone(),
             scroll_metrics: scroll_metrics.clone(),
             mutation_stamp: mutation_stamp.clone(),
@@ -1961,7 +1773,7 @@ impl TerminalHandle {
             kitty_decode_failed: kitty_decode_failed.clone(),
         });
 
-        Ok((
+        (
             Self {
                 commands,
                 scrollback,
@@ -1980,35 +1792,31 @@ impl TerminalHandle {
                 grid_assemblies: Arc::new(AtomicU64::new(0)),
                 kitty_decode_failed,
                 mouse_tracking: mouse_tracking_flag,
+                foreground_running,
                 scroll_metrics,
                 selection: Arc::new(Mutex::new(None)),
                 selection_anchor: Arc::new(Mutex::new(None)),
-                #[cfg(unix)]
-                pty_master_fd,
             },
             wakeup_rx,
-        ))
+        )
     }
 
     /// Whether a foreground command other than the shell itself currently
     /// owns the terminal — i.e. whether the pane should show "Running".
     ///
-    /// A terminal pane's shell process is always alive from spawn to
-    /// teardown, so "a child process exists" cannot distinguish "idle at the
-    /// prompt" from "running a command": both have a live shell. The signal
-    /// that actually distinguishes them is the PTY's **foreground process
-    /// group** (`tcgetpgrp` on the master fd, `TIOCGPGRP` under the hood):
-    /// alacritty's PTY setup calls `setsid()` in the child's `pre_exec`
-    /// (`tty/unix.rs`), so the shell starts as its own session and process
-    /// group leader — `getpgid(shell_pid) == shell_pid`. When an interactive
-    /// shell with job control runs a foreground command, it puts that
-    /// command in a *new* process group and hands the PTY's foreground
-    /// group to it for the duration; the shell reclaims it when the command
-    /// exits. So `tcgetpgrp(master_fd) != shell_pid` is true exactly while a
-    /// foreground command is running, and false at an idle prompt — this is
-    /// the same technique terminal multiplexers use to report pane activity.
+    /// A terminal pane's shell process is always alive from open to teardown,
+    /// so "a child process exists" cannot distinguish "idle at the prompt"
+    /// from "running a command": both have a live shell. The signal that
+    /// actually distinguishes them is the session's own foreground report,
+    /// which the owner thread stores here from the session's `Foreground`
+    /// events: the engine derives it from the PTY's foreground process group
+    /// on unix (the shell starts as its own session and process group leader,
+    /// and hands the foreground group to a command for its duration — the
+    /// same technique terminal multiplexers use), and the host reports it on
+    /// every platform, so "Running" works on Windows whenever the host
+    /// reports it.
     ///
-    /// Rejected alternatives:
+    /// Rejected alternative:
     /// - **A live child process exists** (`descendant_pids`/libproc): true
     ///   the entire time the shell itself is alive, so it can never report
     ///   "idle" — the exact bug this method exists to fix.
@@ -2016,31 +1824,8 @@ impl TerminalHandle {
     ///   CLAUDE.md): identity-gated to the five supported agent CLIs. A
     ///   prior pass already confirmed a bare `sleep 20` never moves it, so
     ///   it is silent for exactly the case this pill needs to cover.
-    ///
-    /// Unix-only: `tcgetpgrp`/process groups are a POSIX job-control notion
-    /// with no Windows equivalent, so this always reports `false` there —
-    /// the pill simply never shows "Running" on that platform, a known gap
-    /// rather than a silent wrong answer.
     fn foreground_command_running(&self) -> bool {
-        #[cfg(unix)]
-        {
-            // SAFETY: `pty_master_fd` is a plain fd number captured while
-            // the master itself was alive; the master (owned by the terminal
-            // owner thread) keeps the fd open for exactly the
-            // `TerminalHandle`'s lifetime, so it is still open here.
-            // `tcgetpgrp` is documented to return -1 with `errno` set (e.g.
-            // `ENOTTY`, `EBADF`) rather than to invoke UB on any input fd,
-            // so a race with teardown is a plain error return, not memory
-            // unsafety.
-            self.pty_master_fd.is_some_and(|fd| {
-                let foreground_pgid = unsafe { libc::tcgetpgrp(fd) };
-                foreground_pgid > 0 && foreground_pgid as u32 != self.shell_pid
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            false
-        }
+        self.foreground_running.load(Ordering::Relaxed)
     }
 
     fn write(&self, bytes: Vec<u8>) {
@@ -2061,20 +1846,26 @@ impl TerminalHandle {
             .send(TerminalCommand::Feed(b"\x1b[3J\x1b[2J\x1b[H".to_vec()));
     }
 
-    /// Terminate the PTY's process group(s) and tell the owner thread to kill
-    /// the child and drop the PTY. portable-pty only kills its direct child;
-    /// signaling the group(s) here is what also reaches the shell's
-    /// descendants — including ones that detached into their own process
-    /// group after job control forked them (F-PER-06), which a single
-    /// `killpg` on the pgid captured at spawn never reaches. A stubborn
-    /// process gets SIGKILL after a short grace period so close/quit cannot
-    /// leave a live process group behind.
+    /// End the session: the owner thread tells the link to close it, which
+    /// terminates the session's process group(s) (the engine kills the whole
+    /// tree, including children that detached into their own process group —
+    /// F-PER-06 — with SIGKILL after a grace period, so close/quit cannot
+    /// leave a live process group behind).
+    ///
+    /// Never signals process groups from here: `shell_pid` may name a
+    /// process on the host, which must never be signaled from this machine.
+    /// Teardown belongs to the session, local or remote.
     fn shutdown(&self) {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }
-        terminate_descendant_process_groups(self.shell_pid);
         let _ = self.commands.send(TerminalCommand::Shutdown);
+    }
+
+    /// Stop watching the session; it lives on. A `LocalLink` ends with it:
+    /// an in-process session cannot outlive the app.
+    fn detach(&self) {
+        let _ = self.commands.send(TerminalCommand::Detach);
     }
 
     fn resize(&self, columns: u16, lines: u16, cell_width: u16, cell_height: u16) {
@@ -2240,8 +2031,6 @@ fn normalize_scrollback_for_replay(bytes: &[u8]) -> Vec<u8> {
     normalized
 }
 
-#[cfg_attr(not(unix), allow(dead_code))] // referenced by unix-only teardown
-const TERMINAL_TERMINATE_GRACE: Duration = Duration::from_millis(500);
 const TERMINAL_RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// Reads where the viewport sits and stores it for the view, returning whether
@@ -2378,204 +2167,52 @@ fn resolve_link(cells: &[Vec<SnapshotCell>], row: usize, column: usize) -> Optio
     url_at_column(&text, byte_column)
 }
 
-#[cfg(unix)]
-fn terminate_process_group(process_group: u32) {
-    let process_group = process_group as libc::pid_t;
-    if process_group <= 0 {
-        return;
-    }
-
-    unsafe {
-        libc::killpg(process_group, libc::SIGTERM);
-    }
-
-    std::thread::spawn(move || {
-        std::thread::sleep(TERMINAL_TERMINATE_GRACE);
-        let group_is_alive = unsafe { libc::killpg(process_group, 0) == 0 };
-        if group_is_alive {
-            unsafe {
-                libc::killpg(process_group, libc::SIGKILL);
-            }
-        }
-    });
-}
-
-/// Every process id that is currently a descendant of `root` (not
-/// including `root` itself), discovered by walking the kernel's own live
-/// parent/child view (F-PER-06).
-///
-/// `/proc/<pid>/task/<tid>/children` is read fresh per pid rather than
-/// cached: a job-control-spawned child (a compound command, a backgrounded
-/// job) can detach into its own session/process group at any point after
-/// spawn, and a stubborn descendant can itself keep forking, so only a walk
-/// done at kill time — not the single pgid captured once at spawn — can
-/// find all of it. A process can have multiple threads (`task/<tid>`), and
-/// each thread's `children` file only lists the children *that thread*
-/// directly spawned, so every tid must be read to see the whole process's
-/// children.
-#[cfg(target_os = "linux")]
-fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
-    let mut discovered = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    seen.insert(root);
-    let mut frontier = vec![root];
-    while let Some(pid) = frontier.pop() {
-        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
-            continue;
-        };
-        for task in tasks.flatten() {
-            let Ok(contents) = std::fs::read_to_string(task.path().join("children")) else {
-                continue;
-            };
-            for token in contents.split_whitespace() {
-                let Ok(child) = token.parse::<libc::pid_t>() else {
-                    continue;
-                };
-                if seen.insert(child) {
-                    discovered.push(child);
-                    frontier.push(child);
-                }
-            }
-        }
-    }
-    discovered
-}
-
-/// macOS implementation of [`descendant_pids`], using libproc's live child
-/// table because macOS has no `/proc` filesystem.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn descendant_pids(root: libc::pid_t) -> Vec<libc::pid_t> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut discovered = Vec::new();
-        let mut seen = std::collections::HashSet::from([root]);
-        let mut frontier = vec![root];
-        while let Some(pid) = frontier.pop() {
-            let Ok(children) = macos_child_pids(pid) else {
-                continue;
-            };
-            for child in children {
-                if seen.insert(child) {
-                    discovered.push(child);
-                    frontier.push(child);
-                }
-            }
-        }
-        discovered
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = root;
-        Vec::new()
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_child_pids(parent: libc::pid_t) -> std::io::Result<Vec<libc::pid_t>> {
-    use std::os::raw::{c_int, c_void};
-
-    const INITIAL_PID_CAPACITY: usize = 64;
-    const MAX_PID_CAPACITY: usize = 16_384;
-
-    #[link(name = "proc")]
-    unsafe extern "C" {
-        fn proc_listchildpids(ppid: c_int, buffer: *mut c_void, buffersize: c_int) -> c_int;
-    }
-
-    let mut buffer = vec![0_i32; INITIAL_PID_CAPACITY];
-    loop {
-        let buffer_size = (buffer.len() * std::mem::size_of::<libc::pid_t>()) as c_int;
-        // libproc returns the number of PIDs copied, not a byte count.
-        let reported_count =
-            unsafe { proc_listchildpids(parent, buffer.as_mut_ptr().cast(), buffer_size) };
-        if reported_count < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let count = (reported_count as usize).min(buffer.len());
-        if (reported_count as usize) < buffer.len() {
-            return Ok(buffer[..count]
-                .iter()
-                .copied()
-                .filter(|pid| *pid > 0)
-                .map(|pid| pid as libc::pid_t)
-                .collect());
-        }
-
-        if buffer.len() >= MAX_PID_CAPACITY {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::OutOfMemory,
-                "macOS child-process list exceeded safety limit",
-            ));
-        }
-        buffer.resize((buffer.len() * 2).min(MAX_PID_CAPACITY), 0);
-    }
-}
-
-/// The distinct process groups spanning the shell (`shell_pid`) and every
-/// descendant it has right now, deduplicated. A single `killpg` on the pgid
-/// captured once at spawn only ever reaches the shell's *original* group —
-/// a job-control-spawned child that detached into a new group (a compound
-/// command run under job control, a backgrounded job in an interactive
-/// shell) is invisible to it and survives shutdown as an orphan (F-PER-06).
-/// Reading `getpgid` per pid at kill time, rather than assuming the shell's
-/// own pid is still its pgid, is what makes this correct even if the shell
-/// itself has re-grouped.
-#[cfg(unix)]
-fn descendant_process_groups(shell_pid: libc::pid_t) -> Vec<libc::pid_t> {
-    let mut pids = vec![shell_pid];
-    pids.extend(descendant_pids(shell_pid));
-    let mut groups: Vec<libc::pid_t> = Vec::new();
-    for pid in pids {
-        let pgid = unsafe { libc::getpgid(pid) };
-        if pgid > 0 && !groups.contains(&pgid) {
-            groups.push(pgid);
-        }
-    }
-    groups
-}
-
-/// Terminates the shell at `shell_pid` and every process group any of its
-/// current descendants live in — not just the group captured at spawn
-/// (F-PER-06). Each distinct group gets its own SIGTERM-then-grace-then-
-/// SIGKILL handling via [`terminate_process_group`].
-#[cfg(unix)]
-fn terminate_descendant_process_groups(shell_pid: u32) {
-    for group in descendant_process_groups(shell_pid as libc::pid_t) {
-        terminate_process_group(group as u32);
-    }
-}
-
-/// Windows stand-in for [`terminate_descendant_process_groups`]. Unix's
-/// `killpg`/`getpgid` walk over `/proc/<pid>/task/<tid>/children` has no
-/// Toolhelp32 port here (`CreateToolhelp32Snapshot` + `Process32First`/
-/// `Process32Next`, matching `th32ParentProcessID`, would enumerate the
-/// descendants; there is no Windows process-group signal to broadcast to
-/// once found). The more idiomatic Windows fix is different in kind, not
-/// just in API: attach the child to a Job Object created with
-/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing the job handle kills the
-/// whole descendant tree atomically — no enumerate-then-kill race at all.
-/// `portable-pty`'s `tty/windows/` (ConPTY) backend is the natural
-/// place to own that job handle, since it already owns the child's lifetime;
-/// duplicating it here would fight that ownership rather than complement it.
-/// This is therefore a real no-op, not a partial implementation: the PTY's
-/// own child still gets torn down via the `Msg::Shutdown` send right after
-/// this call in `shutdown()`, but a descendant that has spawned its own
-/// detached process is not reached, and there is no substitute here yet.
-#[cfg(not(unix))]
-fn terminate_descendant_process_groups(_shell_pid: u32) {}
-
-/// A live PTY-backed terminal view, or a failed pane showing why the PTY
-/// could not be started.
+/// A live session-backed terminal view, or a failed pane showing why no
+/// session could be opened.
 pub struct TerminalView {
     terminal: TerminalState,
     spawn: SpawnParams,
+    /// Whether this pane's session survives the app, and why not when it is
+    /// the in-process fallback. Set when the link opens.
+    view_mode: TerminalViewMode,
+    /// Why the in-process fallback was used, when it was: drawn as a
+    /// one-line banner above the grid. `None` on a host session — and on a
+    /// local session opened with no factory installed, which is the normal
+    /// path there, not a fallback.
+    fallback_reason: Option<String>,
+    /// Scrollback to feed the next session as its prelude: set by
+    /// `restart` after a lost session, consumed by `ensure_started`.
+    pending_prelude: Vec<u8>,
+    /// A restart re-opens under the same id: carried into `OpenRequest.recreate`
+    /// so the factory closes the old session before re-creating.
+    pending_recreate: bool,
+    /// The link reported `Lost` and no new session has opened since.
+    session_lost: bool,
+    /// The factory-global observer, registered once while Connecting.
+    /// Replaced, never stacked: assigning drops the previous subscription,
+    /// which unsubscribes it.
+    factory_observer: Option<gpui::Subscription>,
+    /// The factory that answered the open still in flight (`Pending`), kept
+    /// so an end or detach while Connecting reaches the open (finding 12).
+    /// `shutdown(&self)` has no `cx`, so the global cannot be asked then.
+    connecting_factory: Option<Arc<dyn SessionFactory>>,
+    /// The end or detach this view was given while it had no session yet.
+    /// A view that was abandoned never opens again.
+    abandoned: std::cell::Cell<Option<Abandon>>,
     empty_prompt: bool,
     font_size: Pixels,
     focus_handle: gpui::FocusHandle,
     exit_status: Option<TerminalExitStatus>,
     identity: TerminalIdentity,
+    /// Attached, not owned (SP2 spec §5): a session another client created,
+    /// shown here. Ending the view detaches it; the session lives on.
+    attached: bool,
+    /// A restored tab (a persisted `session_id`): the one open that may attach
+    /// to a session the host already lists. A fresh view only creates
+    /// (fix batch 1, finding 11).
+    restored: bool,
+    /// The worktrees the app knows, handed to a restore's open (fix batch 5, N3).
+    known_worktrees: std::sync::Arc<[std::path::PathBuf]>,
     context_menu: Option<Point<Pixels>>,
     /// #259: the running autoscroll, armed only while a drag is held outside
     /// the pane. Cancel-on-drop, so releasing the button or coming back
@@ -2657,27 +2294,6 @@ fn terminal_pump_interval(capture_retry_pending: bool) -> Duration {
     }
 }
 
-/// #301 R1.3 + #308 R4.6: the Kitty ingest ceilings and the atlas cache cap
-/// are ALL decided together and stated as one coordinated pair of numbers —
-/// an emulator limit generous enough to retain hundreds of images, paired
-/// with a cache that uploads every one of them, would be an atlas policy
-/// nobody chose. 32 MiB holds any base64 PNG omp emits in a single APC; the
-/// emulator's image store keeps 64 MiB of image bytes (≈200 images at the
-/// 320 KiB average the store implies); the pane's atlas cache mirrors that
-/// same ≈200-image working set, evicting least-recently-painted first
-/// (R4.7) so GPU memory tracks the emulator's own retention instead of
-/// growing without limit.
-const KITTY_APC_MAX_BYTES: usize = 32 * 1024 * 1024;
-const KITTY_IMAGE_STORAGE_LIMIT: u64 = 64 * 1024 * 1024;
-/// #303 R2.4: cap image decoder allocations, including the decompressed
-/// RGBA output, before a compressed PNG can expand into an unbounded buffer.
-const KITTY_DECOMPRESSED_MAX_BYTES: u64 = KITTY_IMAGE_STORAGE_LIMIT;
-
-/// #308 R4.6: the atlas ceiling, coordinated with `KITTY_IMAGE_STORAGE_LIMIT`
-/// above (64 MiB ÷ 200 ≈ 320 KiB per image). No agent session renders more
-/// than this many Kitty images at once, and the LRU-painted eviction (R4.7)
-/// bounds everything else, so GPU memory cannot grow past the configured
-/// ceiling however many images a session replaces or scrolls past.
 const KITTY_ATLAS_IMAGE_CAP: usize = 200;
 
 /// #301 R2.6: the wash for a placement whose image the pane refused to
@@ -2775,8 +2391,19 @@ impl TerminalView {
 
         let host = TerminalSurfaceHost::new(identity.terminal_id());
         Ok(Self {
+            attached: false,
+            restored: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
             terminal: TerminalState::Pending,
             spawn,
+            view_mode: TerminalViewMode::default(),
+            fallback_reason: None,
+            pending_prelude: Vec::new(),
+            pending_recreate: false,
+            session_lost: false,
+            factory_observer: None,
+            connecting_factory: None,
+            abandoned: std::cell::Cell::new(None),
             empty_prompt: false,
             font_size: FONT_SIZE,
             focus_handle,
@@ -2802,11 +2429,22 @@ impl TerminalView {
         let identity = generated_identity();
         let host = TerminalSurfaceHost::new(identity.terminal_id());
         Self {
+            attached: false,
+            restored: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
             terminal: TerminalState::Pending,
             spawn: SpawnParams {
                 working_directory,
                 shell: TerminalShell::System,
             },
+            view_mode: TerminalViewMode::default(),
+            fallback_reason: None,
+            pending_prelude: Vec::new(),
+            pending_recreate: false,
+            session_lost: false,
+            factory_observer: None,
+            connecting_factory: None,
+            abandoned: std::cell::Cell::new(None),
             empty_prompt: true,
             font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
@@ -2852,6 +2490,9 @@ impl TerminalView {
         let mut host = TerminalSurfaceHost::new(identity.terminal_id());
         host.teardown();
         Self {
+            attached: false,
+            restored: false,
+            known_worktrees: std::sync::Arc::from(Vec::new()),
             terminal: TerminalState::Failed {
                 message: message.into(),
             },
@@ -2859,6 +2500,14 @@ impl TerminalView {
                 working_directory: working_directory.as_ref().to_path_buf(),
                 shell,
             },
+            view_mode: TerminalViewMode::default(),
+            fallback_reason: None,
+            pending_prelude: Vec::new(),
+            pending_recreate: false,
+            session_lost: false,
+            factory_observer: None,
+            connecting_factory: None,
+            abandoned: std::cell::Cell::new(None),
             empty_prompt: false,
             font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
@@ -2884,6 +2533,14 @@ impl TerminalView {
     /// child will inherit `SIRIO_PANE_ID`.
     pub fn set_identity(&mut self, identity: TerminalIdentity) {
         self.identity = identity;
+    }
+
+    /// Sets the prelude for the next open: a restored tab's scrollback, fed
+    /// into the VT and the journal before the child's first byte when the
+    /// session is created here (SP2 spec §3.1). Ignored when an existing
+    /// session is attached.
+    pub fn set_prelude(&mut self, prelude: Vec<u8>) {
+        self.pending_prelude = prelude;
     }
 
     /// Applies the user-configured terminal font size. The terminal renderer
@@ -2920,17 +2577,62 @@ impl TerminalView {
         &self.identity
     }
 
-    /// Whether this pane is in the failed state (a live PTY could not be
-    /// started). The host may use this to show a distinct tab glyph.
+    /// Marks the view as restoring a persisted session: its open may attach to
+    /// the session the host already holds under its id.
+    pub fn set_restored(&mut self) {
+        self.restored = true;
+    }
+
+    /// The worktrees the app knows, for a restore's ownership check (fix batch
+    /// 5, N3). Set on a restored view with [`Self::set_restored`].
+    pub fn set_known_worktrees(&mut self, worktrees: std::sync::Arc<[std::path::PathBuf]>) {
+        self.known_worktrees = worktrees;
+    }
+
+    /// Marks the view as showing a session it did not create (Show session).
+    pub fn set_attached(&mut self) {
+        self.attached = true;
+    }
+
+    /// Whether the view shows a session it did not create.
+    pub fn attached(&self) -> bool {
+        self.attached
+    }
+
+    /// Ends this view's end of the session: a session the view created is
+    /// shut down, an attached one is only detached, so closing a tab that
+    /// shows someone else's session never ends it (SP2 spec §5).
+    pub fn end_session(&self) {
+        if self.attached {
+            self.detach();
+        } else {
+            self.shutdown();
+        }
+    }
+
+    /// Whether the pane shows *Session lost*: its host is gone and the
+    /// pane offers Restart. Read by the debug-only `surface.terminal.state`.
+    pub fn session_lost(&self) -> bool {
+        self.session_lost
+    }
+
+    /// Whether this pane is in the failed state (no session link could be
+    /// opened). The host may use this to show a distinct tab glyph.
     pub fn is_failed(&self) -> bool {
         matches!(self.terminal, TerminalState::Failed { .. })
+    }
+
+    /// Whether the host is gone while the pane keeps its scrollback (SP2 spec
+    /// §4.2). The pane draws `Session lost` with `Restart`.
+    pub fn is_session_lost(&self) -> bool {
+        self.session_lost
     }
 
     /// The message of a failed pane, if failed.
     pub fn failure_message(&self) -> Option<&str> {
         match &self.terminal {
             TerminalState::Failed { message } => Some(message),
-            TerminalState::Pending | TerminalState::Running(_) => None,
+            TerminalState::Pending | TerminalState::Connecting | TerminalState::Running(_) => None,
         }
     }
 
@@ -2939,12 +2641,17 @@ impl TerminalView {
         self.exit_status
     }
 
+    /// Whether this pane's session outlives the app (a host session does).
+    pub fn survives_app(&self) -> bool {
+        self.view_mode.survives
+    }
+
     /// F-TERM-03: whether the pane's status pill should show "Running" right
-    /// now — a live PTY, no recorded exit yet, and a foreground command
+    /// now — a live session, no recorded exit yet, and a foreground command
     /// currently holds the terminal (see
     /// [`TerminalHandle::foreground_command_running`] for the definition and
     /// the alternatives it rejects). Exit takes priority by construction:
-    /// once `exit_status` is recorded the PTY is gone, so this is `false`
+    /// once `exit_status` is recorded the session is gone, so this is `false`
     /// from then on without needing an explicit check here.
     pub fn is_command_running(&self) -> bool {
         self.running_terminal()
@@ -2960,6 +2667,14 @@ impl TerminalView {
     /// host when it needs to explain or test a specialised launch surface.
     pub fn launch_shell(&self) -> &TerminalShell {
         &self.spawn.shell
+    }
+
+    /// Replaces the command the pane's next open runs: its first start, a
+    /// retry, or a restart. The owner calls it when the pane moves to a fresh
+    /// id, so an agent's command names that id (SP2 fix batch 7, I1). A
+    /// process that already runs keeps the command it started with.
+    pub fn set_launch_shell(&mut self, shell: TerminalShell) {
+        self.spawn.shell = shell;
     }
 
     /// The last diff accepted through this pane's drop target, if any.
@@ -3051,7 +2766,9 @@ impl TerminalView {
     pub fn capture_scrollback(&self) -> Vec<u8> {
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.capture_scrollback(),
-            TerminalState::Pending | TerminalState::Failed { .. } => Vec::new(),
+            TerminalState::Pending | TerminalState::Connecting | TerminalState::Failed { .. } => {
+                Vec::new()
+            }
         }
     }
 
@@ -3061,7 +2778,9 @@ impl TerminalView {
     pub fn scrollback_source(&self) -> Option<ScrollbackCapture> {
         match &self.terminal {
             TerminalState::Running(terminal) => Some(terminal.scrollback_source()),
-            TerminalState::Pending | TerminalState::Failed { .. } => None,
+            TerminalState::Pending | TerminalState::Connecting | TerminalState::Failed { .. } => {
+                None
+            }
         }
     }
 
@@ -3084,28 +2803,160 @@ impl TerminalView {
         }
     }
 
-    /// Forks the PTY for the given parameters, without any view state.
-    fn spawn_terminal(
-        spawn: &SpawnParams,
-        pane_id: &str,
-    ) -> Result<(TerminalHandle, UnboundedReceiver<TerminalEvent>)> {
-        TerminalHandle::new_with_pane_id(&spawn.working_directory, &spawn.shell, Some(pane_id))
+    /// The link size a fresh open asks for. The first prepaint resizes to the
+    /// real window geometry right after; the window decides the size once
+    /// attached.
+    const LINK_COLS: u16 = 80;
+    const LINK_ROWS: u16 = 24;
+
+    fn open_request(&self) -> OpenRequest {
+        OpenRequest {
+            session_id: self.identity.pane_id().to_owned(),
+            cwd: self.spawn.working_directory.clone(),
+            shell: self.spawn.shell.clone(),
+            cols: Self::LINK_COLS,
+            rows: Self::LINK_ROWS,
+            // Cloned, not taken: a `Pending` factory holds the request, and
+            // the retry must carry the same prelude.
+            prelude: self.pending_prelude.clone(),
+            recreate: self.pending_recreate,
+            // An attached tab never creates the session it shows (spec §5).
+            attach_only: self.attached,
+            restore: self.restored,
+            known_worktrees: self.known_worktrees.clone(),
+        }
+    }
+
+    /// Opens a link without any factory: today's behaviour, now through the
+    /// in-process engine.
+    fn open_local(request: &OpenRequest) -> OpenOutcome {
+        match LocalLink::open(request) {
+            Ok(link) => OpenOutcome::Linked(Box::new(link)),
+            Err(message) => OpenOutcome::Failed(message),
+        }
     }
 
     fn ensure_started(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.empty_prompt || !matches!(self.terminal, TerminalState::Pending) {
+        if self.empty_prompt {
             return;
         }
-        match Self::spawn_terminal(&self.spawn, self.identity.pane_id()) {
-            Ok((terminal, wakeup_rx)) => {
-                Self::pump_terminal_events(terminal.clone(), wakeup_rx, self.host.generation(), cx);
-                self.terminal = TerminalState::Running(terminal);
+        // Ended or dropped while it waited: never opened again, so nothing is
+        // created or attached for a tab that is gone (finding 12).
+        if self.abandoned.get().is_some() {
+            return;
+        }
+        // A fresh `Pending` opens at once; a `Connecting` pane retries on
+        // every trigger (render, factory-global change) until the factory
+        // answers `Linked` or `Failed`. A `Pending` factory outcome is
+        // side-effect-free, so re-asking it is harmless.
+        if !matches!(
+            self.terminal,
+            TerminalState::Pending | TerminalState::Connecting
+        ) {
+            return;
+        }
+        let request = self.open_request();
+        let factory = cx
+            .try_global::<SessionFactoryGlobal>()
+            .and_then(|SessionFactoryGlobal(factory)| factory.clone());
+        let outcome = match &factory {
+            Some(factory) => factory.open(request.clone()),
+            None => Self::open_local(&request),
+        };
+        if !matches!(outcome, OpenOutcome::Pending) {
+            self.connecting_factory = None;
+        }
+        match outcome {
+            OpenOutcome::Linked(link) => {
+                let survives = link.survives_app();
+                let (handle, wakeup_rx) = TerminalHandle::new_with_link(link);
+                Self::pump_terminal_events(
+                    handle.clone(),
+                    wakeup_rx,
+                    self.host.generation(),
+                    cx,
+                );
+                self.view_mode.survives = survives;
+                self.fallback_reason = None;
+                self.pending_prelude.clear();
+                self.pending_recreate = false;
+                self.session_lost = false;
+                self.terminal = TerminalState::Running(handle);
             }
-            Err(error) => {
-                self.terminal = TerminalState::Failed {
-                    message: format!("{error:#}"),
-                };
+            OpenOutcome::Pending => {
+                // Waiting on the host: no local shell exists, so the session
+                // is not a LocalLink (finding 7). The factory that answered
+                // keeps the open an end or detach can reach (finding 12).
+                self.connecting_factory = factory;
+                self.view_mode.survives = true;
+                self.terminal = TerminalState::Connecting;
+                // Registered once per view and replaced, never stacked:
+                // assigning drops the previous subscription.
+                if self.factory_observer.is_none() {
+                    self.factory_observer = Some(
+                        cx.observe_global::<SessionFactoryGlobal>(|view, cx| {
+                            view.ensure_started(cx);
+                            cx.notify();
+                        }),
+                    );
+                }
+            }
+            // An attached view that cannot attach shows the lost session; it
+            // never falls back to a shell under the session's id (spec §5).
+            // The id is held by another session (a fresh open, or a restore
+            // whose listed session is not this worktree's). Nothing is
+            // attached or closed here: the pane asks its owner for a fresh id.
+            OpenOutcome::Taken(reason) => {
+                eprintln!("[sirio] terminal id {} is held on the host: {reason}", request.session_id);
+                self.view_mode.survives = true;
+                self.fallback_reason = None;
+                self.session_lost = false;
+                self.terminal = TerminalState::Failed { message: reason };
                 self.host.teardown();
+                cx.emit(TerminalActivityEvent::IdTaken);
+            }
+            OpenOutcome::Failed(reason) if request.attach_only => {
+                self.pending_prelude.clear();
+                self.pending_recreate = false;
+                self.terminal = TerminalState::Failed { message: reason };
+                self.host.teardown();
+            }
+            // A host that is there but failed the open (unverifiable, a
+            // transient error, a dead connection) is not "no host": the
+            // session may be live, so no local shell is started beside it.
+            // Retry re-attempts the open (spec §8).
+            OpenOutcome::Failed(reason) => {
+                eprintln!("[sirio] terminal open failed, not falling back: {reason}");
+                // No local shell was started; the session is the host's.
+                self.view_mode.survives = true;
+                self.fallback_reason = None;
+                self.session_lost = true;
+                self.terminal = TerminalState::Failed { message: reason };
+                self.host.teardown();
+            }
+            OpenOutcome::NoHost(reason) => {
+                eprintln!("[sirio] terminal on the in-process fallback: {reason}");
+                match LocalLink::open(&request) {
+                    Ok(link) => {
+                        let (handle, wakeup_rx) = TerminalHandle::new_with_link(Box::new(link));
+                        Self::pump_terminal_events(
+                            handle.clone(),
+                            wakeup_rx,
+                            self.host.generation(),
+                            cx,
+                        );
+                        self.view_mode.survives = false;
+                        self.fallback_reason = Some(reason);
+                        self.pending_prelude.clear();
+                        self.pending_recreate = false;
+                        self.session_lost = false;
+                        self.terminal = TerminalState::Running(handle);
+                    }
+                    Err(message) => {
+                        self.terminal = TerminalState::Failed { message };
+                        self.host.teardown();
+                    }
+                }
             }
         }
         self.emit_lifecycle_changed(cx);
@@ -3118,29 +2969,19 @@ impl TerminalView {
         });
     }
 
-    /// Re-attempts the spawn after a failure: on success the pane switches
-    /// to the live terminal, on failure the message is updated in place.
+    /// Re-attempts the open after a failure: on success the pane switches
+    /// to the live session, on failure the message is updated in place.
     /// F-TERM-PTY-07: this is also a relaunch -- the previous attempt never
     /// reached `Running`, so there is no live process this one could race
     /// against, but the generation still bumps so the surface host's count
     /// reflects every real "started a fresh process" event, not just the
     /// ones reached through [`Self::restart`].
-    fn retry(&mut self, cx: &mut gpui::Context<Self>) {
+    pub fn retry(&mut self, cx: &mut gpui::Context<Self>) {
         self.host.relaunch();
-        match Self::spawn_terminal(&self.spawn, self.identity.pane_id()) {
-            Ok((terminal, wakeup_rx)) => {
-                Self::pump_terminal_events(terminal.clone(), wakeup_rx, self.host.generation(), cx);
-                self.terminal = TerminalState::Running(terminal);
-                self.exit_status = None;
-            }
-            Err(error) => {
-                self.terminal = TerminalState::Failed {
-                    message: format!("{error:#}"),
-                };
-                self.host.teardown();
-            }
-        }
-        self.emit_lifecycle_changed(cx);
+        self.terminal = TerminalState::Pending;
+        self.exit_status = None;
+        self.session_lost = false;
+        self.ensure_started(cx);
         cx.notify();
     }
 
@@ -3154,18 +2995,42 @@ impl TerminalView {
     }
 
     /// F-TERM-PTY-07 (`TerminalSurfaceHost::relaunch`): tears down the live
-    /// process (if any) and starts a fresh one in place, in the *same*
+    /// session (if any) and starts a fresh one in place, in the *same*
     /// `Entity<TerminalView>` and therefore the same pane/split -- the host
-    /// bumps to a new generation first, so the outgoing PTY's own
+    /// bumps to a new generation first, so the outgoing session's own
     /// `pump_terminal_events` task cannot clobber the incoming one's state
     /// (see that function's doc comment). Public: this is the "relaunch it"
     /// half of the row's own VERIFY clause, driven from a context-menu
     /// action the app crate owns.
+    ///
+    /// The old session ends and the new one opens under the same id. After a
+    /// lost session the replica's scrollback is passed as the new session's
+    /// prelude — captured here, before the old session ends.
     pub fn restart(&mut self, cx: &mut gpui::Context<Self>) {
-        self.shutdown();
+        // An attached view must not end the session it shows: restart is
+        // refused, and its lost overlay offers no Restart (spec §5).
+        if self.attached {
+            return;
+        }
+        if self.session_lost {
+            self.pending_prelude = self.capture_scrollback();
+        }
+        // A restart re-opens under the same id. The factory closes the old host
+        // session before re-creating it (see `OpenRequest.recreate`), which is
+        // only safe for a session this pane is running: a Failed pane's session
+        // may be live on a host it could not reach, so its restart is a retry
+        // that attaches or creates and closes nothing (finding N5). Only a
+        // running session is ended here: a pane still connecting must not be
+        // marked abandoned, or its reopen below would never happen.
+        let running = matches!(self.terminal, TerminalState::Running(_));
+        self.pending_recreate = running;
+        if running {
+            self.shutdown();
+        }
         self.host.relaunch();
         self.terminal = TerminalState::Pending;
         self.exit_status = None;
+        self.session_lost = false;
         self.ensure_started(cx);
         cx.notify();
     }
@@ -3240,6 +3105,7 @@ impl TerminalView {
                 since_repaint = since_repaint.saturating_add(poll_interval);
                 let mut exit_status = None;
                 let mut osc_title = None;
+                let mut session_lost = false;
                 let mut viewport_changed = false;
                 let mut output_seen = false;
                 let mut pending = 0;
@@ -3255,6 +3121,8 @@ impl TerminalView {
                             if let Some(title) = Self::osc_title_from_event(&event) {
                                 osc_title = Some(title);
                             }
+                            session_lost |=
+                                matches!(event, TerminalEvent::SessionLost);
                             viewport_changed |=
                                 matches!(event, TerminalEvent::ViewportChanged);
                             output_seen |= matches!(event, TerminalEvent::Wakeup);
@@ -3269,17 +3137,19 @@ impl TerminalView {
                     unsettled_output |= output_seen;
                     awaiting_repaint |= output_seen;
                     quiet_for = Duration::ZERO;
-                    // A child exiting or retitling changes what the pane says
-                    // about itself, is rare, and cannot wait behind a frame
-                    // floor meant for a torrent of ordinary output.
-                    let structural = exit_status.is_some() || osc_title.is_some();
+                    // A child exiting, a lost session or a retitle changes
+                    // what the pane says about itself, is rare, and cannot
+                    // wait behind a frame floor meant for a torrent of
+                    // ordinary output.
+                    let structural =
+                        exit_status.is_some() || osc_title.is_some() || session_lost;
                     let repaint =
                         structural || viewport_changed || since_repaint >= REPAINT_FRAME_BUDGET;
                     if this
                         .update(cx, |view, cx| {
                             if view.host.generation() != generation {
                                 // Superseded by a later respawn -- this batch
-                                // is from a PTY the view has already moved
+                                // is from a session the view has already moved
                                 // past.
                                 return;
                             }
@@ -3289,6 +3159,10 @@ impl TerminalView {
                                 cx.emit(TerminalActivityEvent::ChildExited {
                                     status: exit_status,
                                 });
+                            }
+                            if session_lost {
+                                view.session_lost = true;
+                                cx.emit(TerminalActivityEvent::SessionLost);
                             }
                             if let Some(title) = osc_title {
                                 cx.emit(TerminalActivityEvent::OscTitle(title));
@@ -3395,21 +3269,49 @@ impl TerminalView {
         }
     }
 
-    /// Writes bytes to the live PTY, the same path keystrokes use. Callers
-    /// send bytes, never a raw file descriptor. A failed pane has no PTY and
-    /// silently drops input (it renders a retry button instead).
+    /// Writes bytes to the live session, the same path keystrokes use. Callers
+    /// send bytes, never a raw file descriptor. A failed pane has no session
+    /// and silently drops input (it renders a retry button instead).
     pub fn input(&self, bytes: impl Into<Vec<u8>>) {
         if let TerminalState::Running(terminal) = &self.terminal {
             terminal.write(bytes.into());
         }
     }
 
-    /// Stops the PTY event loop and lets its Unix PTY destructor terminate the
-    /// child. The app calls this from its quit hook while the GPUI entity is
-    /// still alive, avoiding background-test scheduler activity during drop.
+    /// Ends the session. The app calls this from its quit hook while the
+    /// GPUI entity is still alive, avoiding background-test scheduler
+    /// activity during drop.
     pub fn shutdown(&self) {
-        if let TerminalState::Running(terminal) = &self.terminal {
-            terminal.shutdown();
+        match &self.terminal {
+            TerminalState::Running(terminal) => terminal.shutdown(),
+            TerminalState::Pending | TerminalState::Connecting => {
+                self.abandon(Abandon::End);
+            }
+            TerminalState::Failed { .. } => {}
+        }
+    }
+
+    /// Stops watching the session; it lives on (Quit, eviction, window
+    /// close). Dropping a view must never end a host session, so `Drop`
+    /// calls this, not `shutdown()`.
+    pub fn detach(&self) {
+        match &self.terminal {
+            TerminalState::Running(terminal) => terminal.detach(),
+            TerminalState::Pending | TerminalState::Connecting => {
+                self.abandon(Abandon::Detach);
+            }
+            TerminalState::Failed { .. } => {}
+        }
+    }
+
+    /// The view wants no session from its open any more. The factory that
+    /// answered `Pending` applies the intent when the open finishes; the view
+    /// never opens again (finding 12).
+    fn abandon(&self, intent: Abandon) {
+        let merged = self.abandoned.get().map_or(intent, |held| held.merge(intent));
+        self.abandoned.set(Some(merged));
+        if let Some(factory) = &self.connecting_factory {
+            factory.abandon(self.identity.pane_id(), intent);
         }
     }
 
@@ -3969,7 +3871,9 @@ impl TerminalView {
     fn running_terminal(&self) -> Option<&TerminalHandle> {
         match &self.terminal {
             TerminalState::Running(terminal) => Some(terminal),
-            TerminalState::Pending | TerminalState::Failed { .. } => None,
+            TerminalState::Pending | TerminalState::Connecting | TerminalState::Failed { .. } => {
+                None
+            }
         }
     }
 
@@ -4086,8 +3990,10 @@ impl Drop for TerminalView {
     fn drop(&mut self) {
         // GPUI can drop an entity before the host's quit hook runs. The
         // background event pump owns a handle clone, so relying on ordinary
-        // field destruction would keep the PTY alive after the view vanished.
-        self.shutdown();
+        // field destruction would keep the session watched after the view
+        // vanished. Detach, never end: dropping a view (eviction, window
+        // close) must not end a host session.
+        self.detach();
     }
 }
 
@@ -4591,6 +4497,12 @@ impl TerminalView {
     }
 }
 
+/// Whether a lost session's overlay offers Restart (spec §5): never for an
+/// attached view, which must not end a session it does not own.
+pub(crate) fn lost_overlay_offers_restart(attached: bool) -> bool {
+    !attached
+}
+
 impl gpui::Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("TerminalView.render", cx.entity_id().as_u64());
@@ -4601,6 +4513,8 @@ impl gpui::Render for TerminalView {
         let terminal_entity = cx.entity();
         let file_drop_entity = terminal_entity.clone();
         let external_drop_entity = terminal_entity.clone();
+        let session_lost_restart = terminal_entity.clone();
+        let attached = self.attached;
         let dropped_path = self
             .last_dropped_diff
             .as_ref()
@@ -4628,14 +4542,17 @@ impl gpui::Render for TerminalView {
                 .bg(theme.menu_surface())
                 .shadow_lg();
 
-            let items = match split_pane_size {
-                Some((width, height)) => context_menu::items_with_split_availability(
-                    width,
-                    height,
-                    self.sole_tab_in_group,
-                ),
-                None => context_menu::items().to_vec(),
-            };
+            let items = context_menu::offered_items(
+                match split_pane_size {
+                    Some((width, height)) => context_menu::items_with_split_availability(
+                        width,
+                        height,
+                        self.sole_tab_in_group,
+                    ),
+                    None => context_menu::items().to_vec(),
+                },
+                attached,
+            );
             for (index, item) in items.iter().enumerate() {
                 let action = item.action;
                 let item_entity = entity.clone();
@@ -4700,6 +4617,23 @@ impl gpui::Render for TerminalView {
             deferred(anchored().position(position).snap_to_window().child(menu)).priority(1)
         });
         match &self.terminal {
+            TerminalState::Connecting => {
+                div()
+                    .size_full()
+                    .bg(theme.sirio.terminal_surface)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("terminal-connecting")
+                            .debug_selector(|| "terminal-connecting".to_owned())
+                            .text_size(px(13.0))
+                            .text_color(theme.ely.fg_muted)
+                            .child("Connecting to the session host…"),
+                    )
+                    .into_any_element()
+            }
             TerminalState::Pending => {
                 if !self.empty_prompt {
                     return div()
@@ -4762,6 +4696,38 @@ impl gpui::Render for TerminalView {
             }
             TerminalState::Running(terminal) => div()
                 .size_full()
+                .flex()
+                .flex_col()
+                .bg(theme.sirio.terminal_surface)
+                // The in-process fallback banner: one selectable line above
+                // the grid. Only when a factory existed and the open fell
+                // back — a host session, and a local session opened with no
+                // factory at all, draw no banner.
+                .when_some(
+                    (!self.view_mode.survives)
+                        .then(|| self.fallback_reason.clone())
+                        .flatten(),
+                    |this, reason| {
+                        this.child(
+                            div()
+                                .id("terminal-fallback-banner")
+                                .debug_selector(|| "terminal-fallback-banner".to_owned())
+                                .w_full()
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .bg(theme.ely.surface)
+                                .text_size(px(12.0))
+                                .text_color(theme.ely.fg_muted)
+                                .child(selectable_text(format!(
+                                    "This terminal will not survive closing Sirio — {reason}"
+                                ))),
+                        )
+                    },
+                )
+                .child(
+                    div()
+                .flex_1()
+                .min_h(px(0.0))
                 .relative()
                 .debug_selector(|| "terminal-drop-target".to_owned())
                 .bg(theme.sirio.terminal_surface)
@@ -4892,7 +4858,44 @@ impl gpui::Render for TerminalView {
                         .priority(1),
                     )
                 })
+                // The host is gone: the pane keeps its scrollback and offers
+                // Restart, which replays it as the new session's prelude.
+                .when(self.session_lost, move |this| {
+                    let restart_entity = session_lost_restart.clone();
+                    let offers_restart = lost_overlay_offers_restart(attached);
+                    this.child(
+                        div()
+                            .absolute()
+                            .left(px(8.0))
+                            .top(px(8.0))
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .rounded(theme.radii.control)
+                            .bg(theme.ely.surface)
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .text_size(px(12.0))
+                            .text_color(theme.ely.fg)
+                            .child("Session lost")
+                            .children(offers_restart.then(|| {
+                                div()
+                                    .id("terminal-restart")
+                                    .debug_selector(|| "terminal-restart".to_owned())
+                                    .px(px(10.0))
+                                    .py(px(4.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme.ely.hover)
+                                    .cursor(gpui::CursorStyle::PointingHand)
+                                    .on_click(move |_, _, cx| {
+                                        restart_entity.update(cx, |view, cx| view.restart(cx));
+                                    })
+                                    .child("Restart")
+                            })),
+                    )
+                })
                 .when_some(context_menu, |this, menu| this.child(menu))
+                )
                 .into_any_element(),
             TerminalState::Failed { message } => {
                 let retry_entity = cx.entity();
@@ -4912,7 +4915,11 @@ impl gpui::Render for TerminalView {
                             .text_size(px(14.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.ely.warning)
-                            .child("Terminal failed to start"),
+                            .child(if self.attached || self.restored {
+                                "Session lost"
+                            } else {
+                                "Terminal failed to start"
+                            }),
                     )
                     .child(
                         div()
@@ -6119,17 +6126,27 @@ mod tests {
         // Wait for TRUE quiescence: Windows ConPTY shells deliver startup
         // traffic in several chunks with gaps between them, so a single
         // `Empty` drain can return before the banner has fully arrived. Settle
-        // only when the stamp is unchanged across a quiet gap — more output
-        // would have bumped it — and only once it has moved at all: a stamp
-        // still at zero means the shell has not even printed its prompt yet
-        // (it starts late when the test binary spawns many PTYs at once), and
-        // that prompt would land inside the idle window below.
+        // only when the stamp is unchanged across three consecutive quiet
+        // gaps — more output would have bumped it — and only once it has
+        // moved at all: a stamp still at zero means the shell has not even
+        // printed its prompt yet (it starts late when the test binary spawns
+        // many PTYs at once), and that prompt would land inside the idle
+        // window below. Three gaps, not one: session output now crosses two
+        // owner ticks and the link forwarder before it reaches this stamp,
+        // so a single 100 ms gap can sit entirely inside one burst's
+        // delivery skew under a spawn storm.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut flat_gaps = 0;
         let before = loop {
             while wakeup_rx.try_recv().is_ok() {}
             let sample = handle.mutation_stamp.load(Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(100));
             if sample > 0 && handle.mutation_stamp.load(Ordering::Relaxed) == sample {
+                flat_gaps += 1;
+            } else {
+                flat_gaps = 0;
+            }
+            if flat_gaps >= 3 {
                 break sample;
             }
             assert!(
@@ -6490,7 +6507,7 @@ mod tests {
     #[test]
     fn spawn_cwd_strips_the_windows_verbatim_prefix() {
         assert_eq!(
-            spawn_cwd(Path::new(r"\\?\C:\Users\me\project")),
+            sirio_term_session::spawn_cwd(Path::new(r"\\?\C:\Users\me\project")),
             Path::new(r"C:\Users\me\project")
         );
     }
@@ -6499,7 +6516,7 @@ mod tests {
     #[test]
     fn spawn_cwd_converts_the_verbatim_unc_form_to_a_dos_unc_path() {
         assert_eq!(
-            spawn_cwd(Path::new(r"\\?\UNC\server\share\x")),
+            sirio_term_session::spawn_cwd(Path::new(r"\\?\UNC\server\share\x")),
             Path::new(r"\\server\share\x")
         );
     }
@@ -7281,7 +7298,7 @@ mod tests {
         let parent_pid = std::process::id() as libc::pid_t;
         let mut descendants = Vec::new();
         for _ in 0..50 {
-            descendants = descendant_pids(parent_pid);
+            descendants = sirio_term_session::terminate::descendant_pids(parent_pid);
             if descendants.contains(&(child.id() as libc::pid_t)) {
                 break;
             }
@@ -7565,6 +7582,13 @@ mod tests {
         .unwrap();
         restored.replay_scrollback(&captured);
 
+        // The replay travels through the session link (`Feed` comes back as
+        // `Output`), so the nonce arrives on the link's schedule, not
+        // synchronously.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && !screen_text(&restored).contains(&nonce) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(
             screen_text(&restored).contains(&nonce),
             "replayed terminal state must contain the nonce"
@@ -7587,7 +7611,22 @@ mod tests {
         // terminal control sequences or PTY input semantics.
         let captured = b"RESTORE_LINE_A\nRESTORE_LINE_B\nRESTORE_LINE_C";
         restored.replay_scrollback(captured);
-        let (rows, _) = restored.snapshot();
+        // The replay travels through the session link (`Feed` comes back as
+        // `Output`), so the rows arrive on the link's schedule, not
+        // synchronously.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut rows = restored.snapshot().0;
+        while std::time::Instant::now() < deadline
+            && !["RESTORE_LINE_A", "RESTORE_LINE_B", "RESTORE_LINE_C"]
+                .iter()
+                .all(|marker| {
+                    rows.iter()
+                        .any(|row| frame_row_text(row).contains(marker))
+                })
+        {
+            std::thread::sleep(Duration::from_millis(10));
+            rows = restored.snapshot().0;
+        }
 
         for marker in ["RESTORE_LINE_A", "RESTORE_LINE_B", "RESTORE_LINE_C"] {
             let row = rows
@@ -8392,6 +8431,506 @@ mod view_tests {
         );
     }
 
+    /// An attached view (Show session) whose attach fails must never fall
+    /// back to a local shell under the session's id (spec §5, ruling r3).
+    #[gpui::test]
+    async fn attached_view_whose_attach_fails_never_starts_a_local_shell(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(FailingSessionFactory(
+            "Session lost: pane-c000000000000 is no longer on the host",
+        )))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-attach-only-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            let mut view = TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal");
+            view.identity = TerminalIdentity::new("pane-c000000000000", "terminal-attach");
+            view.set_attached();
+            view
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let (failed, running, message) = cx.update(|window, cx| {
+            let terminal = window.root::<TerminalView>().flatten().expect("terminal root");
+            let terminal = terminal.read(cx);
+            (
+                terminal.is_failed(),
+                terminal.running_terminal().is_some(),
+                terminal.failure_message().unwrap_or_default().to_string(),
+            )
+        });
+        assert!(!running, "an attached view must never run a local shell");
+        assert!(failed, "the attach failure is the view's state");
+        assert!(message.starts_with("Session lost"), "got: {message}");
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// A lost session's overlay offers Restart to an owned view only.
+    #[test]
+    fn attached_view_offers_no_restart_on_a_lost_session() {
+        assert!(!lost_overlay_offers_restart(true));
+        assert!(lost_overlay_offers_restart(false));
+    }
+
+    /// A factory that counts the opens it is asked for and always fails over.
+    struct CountingFailingFactory {
+        opens: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        reason: &'static str,
+    }
+    impl SessionFactory for CountingFailingFactory {
+        fn open(&self, _request: OpenRequest) -> OpenOutcome {
+            self.opens
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            OpenOutcome::Failed(self.reason.to_string())
+        }
+    }
+
+    /// Restart on an attached view that has lost its session is refused: it
+    /// reaches no host (no factory open, so no create and no close) and the
+    /// view stays in Session lost (spec §5).
+    #[gpui::test]
+    async fn restart_on_an_attached_lost_view_reaches_no_host(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reason = "Session lost: pane-c000000000000 is no longer on the host";
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(CountingFailingFactory {
+            opens: opens.clone(),
+            reason,
+        }))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-attached-restart-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            let mut view = TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal");
+            view.identity = TerminalIdentity::new("pane-c000000000000", "terminal-restart");
+            view.set_attached();
+            view
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let opens_before = opens.load(std::sync::atomic::Ordering::SeqCst);
+        cx.update(|window, cx| {
+            let terminal = window.root::<TerminalView>().flatten().expect("terminal root");
+            terminal.update(cx, |terminal, cx| terminal.restart(cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            opens.load(std::sync::atomic::Ordering::SeqCst),
+            opens_before,
+            "restart on an attached view must reach no host"
+        );
+        let (failed, message) = cx.update(|window, cx| {
+            let terminal = window.root::<TerminalView>().flatten().expect("terminal root");
+            let terminal = terminal.read(cx);
+            (
+                terminal.is_failed(),
+                terminal.failure_message().unwrap_or_default().to_string(),
+            )
+        });
+        assert!(failed, "the view stays in Session lost");
+        assert_eq!(message, reason);
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// Records whether each open asked to close the session its id names,
+    /// and always fails the open, as an unreachable host does.
+    struct RecreateRecordingFactory {
+        recreates: std::sync::Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+    impl SessionFactory for RecreateRecordingFactory {
+        fn open(&self, request: OpenRequest) -> OpenOutcome {
+            self.recreates
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.recreate);
+            OpenOutcome::Failed("host is unverifiable".to_string())
+        }
+    }
+
+    /// Finding N5: Restart on a Failed pane must never ask the factory to close
+    /// the session its id names. The open failed because the host could not be
+    /// reached, so the session may be live on it; Restart on such a pane is a
+    /// retry, and every open after it carries no recreate.
+    #[gpui::test]
+    async fn restart_on_a_failed_pane_never_asks_for_a_recreate(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let recreates = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(RecreateRecordingFactory {
+            recreates: recreates.clone(),
+        }))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-failed-restart-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let terminal = window.root::<TerminalView>().flatten().expect("terminal root");
+            terminal.update(cx, |terminal, cx| terminal.restart(cx));
+        });
+        cx.run_until_parked();
+        let recorded = recreates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(!recorded.is_empty(), "the restart must reach the factory");
+        assert!(
+            recorded.iter().all(|recreate| !recreate),
+            "Restart on a failed pane asked the factory to close the session its id names: {recorded:?}"
+        );
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// Records each open's session id and refuses it as `Taken`, as a fresh
+    /// open of an id the host already holds is refused.
+    struct TakenFactory {
+        opened: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+    impl SessionFactory for TakenFactory {
+        fn open(&self, request: OpenRequest) -> OpenOutcome {
+            self.opened
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.session_id);
+            OpenOutcome::Taken("pane-7 is already a session on the host".to_string())
+        }
+    }
+
+    /// Finding N5 and #11: an open refused because its id is held runs nothing
+    /// and attaches to nothing. The pane stays failed and tells its owner
+    /// (`IdTaken`), which gives it a fresh identity; reopening under that
+    /// identity is the only open the factory sees for the new id.
+    #[gpui::test]
+    async fn a_taken_open_reports_the_id_and_reopens_under_a_new_identity(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // The host answers later: the first open waits, then the factory
+        // global changes to the one that refuses the id.
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(PendingSessionFactory))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-taken-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            let mut view = TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal");
+            view.set_identity(TerminalIdentity::new("pane-7", "terminal-7"));
+            view
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let taken = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let _subscription = cx.update(|window, cx| {
+            let terminal = window.root::<TerminalView>().flatten().expect("terminal root");
+            let taken = taken.clone();
+            cx.subscribe(&terminal, move |_, event: &TerminalActivityEvent, _| {
+                if matches!(event, TerminalActivityEvent::IdTaken) {
+                    *taken.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                }
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            cx.set_global(SessionFactoryGlobal(Some(Arc::new(TakenFactory {
+                opened: opened.clone(),
+            }))));
+        });
+        cx.run_until_parked();
+        let terminal = cx.update(|window, _| {
+            window.root::<TerminalView>().flatten().expect("terminal root")
+        });
+        assert!(
+            terminal.read_with(&cx.cx, |terminal, _| terminal.is_failed()),
+            "a taken open leaves the pane failed"
+        );
+        assert_eq!(*taken.lock().unwrap_or_else(std::sync::PoisonError::into_inner), 1);
+        assert_eq!(
+            *opened.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["pane-7".to_string()],
+        );
+        terminal.update(&mut cx.cx, |terminal, cx| {
+            terminal.set_identity(TerminalIdentity::new("pane-8", "terminal-8"));
+            terminal.retry(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *opened.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["pane-7".to_string(), "pane-8".to_string()],
+            "the reopen goes out under the fresh identity"
+        );
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// A factory that never resolves: the pane waits in Connecting until the
+    /// factory global changes.
+    struct PendingSessionFactory;
+    impl SessionFactory for PendingSessionFactory {
+        fn open(&self, _request: OpenRequest) -> OpenOutcome {
+            OpenOutcome::Pending
+        }
+    }
+
+    /// A factory that always fails over: the pane falls back to the
+    /// in-process engine with the reason bannered.
+    struct FailingSessionFactory(&'static str);
+    impl SessionFactory for FailingSessionFactory {
+        fn open(&self, _request: OpenRequest) -> OpenOutcome {
+            OpenOutcome::Failed(self.0.to_string())
+        }
+    }
+
+    /// No host at all: the one case that falls back to a local shell.
+    struct NoHostSessionFactory(&'static str);
+    impl SessionFactory for NoHostSessionFactory {
+        fn open(&self, _request: OpenRequest) -> OpenOutcome {
+            OpenOutcome::NoHost(self.0.to_string())
+        }
+    }
+
+    #[gpui::test]
+    async fn pending_factory_leaves_the_pane_connecting(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(PendingSessionFactory))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-connecting-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(&working_directory, TerminalShell::System, cx)
+                .expect("create terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("terminal-connecting").is_some(),
+            "a pane with no session yet draws the Connecting state"
+        );
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        let (failed, running) = terminal.read_with(&cx.cx, |terminal, _| {
+            (
+                terminal.is_failed(),
+                terminal.running_terminal().is_some(),
+            )
+        });
+        assert!(!failed, "Connecting is not a failure");
+        assert!(!running, "no link must open while the factory is pending");
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// Finding 7: a failed open of a host that is there (unverifiable, a
+    /// transient error) shows the failure with Retry; no local shell starts
+    /// beside the session the host may still hold.
+    #[gpui::test]
+    async fn a_failed_host_open_never_runs_a_local_shell(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(FailingSessionFactory(
+            "host is unverifiable",
+        )))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-no-fallback-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(
+                &working_directory,
+                pty_fixture_shell("exec sleep 60", &["sleep", "inf"]),
+                cx,
+            )
+            .expect("create terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        let (failed, running, survives) = terminal.read_with(&cx.cx, |terminal, _| {
+            (
+                terminal.is_failed(),
+                terminal.running_terminal().is_some(),
+                terminal.survives_app(),
+            )
+        });
+        assert!(failed, "a failed host open shows the failure");
+        assert!(!running, "no local shell starts beside the host's session");
+        assert!(survives, "the session is the host's, never a local one");
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    #[gpui::test]
+    async fn no_host_falls_back_to_a_local_link_with_a_banner(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        cx.set_global(SessionFactoryGlobal(Some(Arc::new(NoHostSessionFactory(
+            "host unreachable",
+        )))));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-fallback-banner-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(
+                &working_directory,
+                pty_fixture_shell("exec sleep 60", &["sleep", "inf"]),
+                cx,
+            )
+            .expect("create terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("terminal-fallback-banner").is_some(),
+            "a pane on the in-process fallback banners why it will not survive"
+        );
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        let (failed, running, reason) = terminal.read_with(&cx.cx, |terminal, _| {
+            (
+                terminal.is_failed(),
+                terminal.running_terminal().is_some(),
+                terminal.fallback_reason.clone(),
+            )
+        });
+        assert!(!failed);
+        assert!(running, "the fallback still opens a live local session");
+        assert_eq!(reason.as_deref(), Some("host unreachable"));
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
+    /// A factory that answers Pending until flipped, then opens a LocalLink
+    /// from the request — the shape the app's factory takes once the host
+    /// is known.
+    struct FlippingSessionFactory {
+        ready: Arc<AtomicBool>,
+    }
+    impl SessionFactory for FlippingSessionFactory {
+        fn open(&self, request: OpenRequest) -> OpenOutcome {
+            if self.ready.load(Ordering::SeqCst) {
+                match LocalLink::open(&request) {
+                    Ok(link) => OpenOutcome::Linked(Box::new(link)),
+                    Err(message) => OpenOutcome::Failed(message),
+                }
+            } else {
+                OpenOutcome::Pending
+            }
+        }
+    }
+
+    /// A pane whose factory resolves later must open once it does: Pending
+    /// renders Connecting, and after the factory flips (published through
+    /// the factory global, which notifies the view's observer) the pane
+    /// reaches Running and shows the child's output.
+    #[gpui::test]
+    async fn connecting_pane_opens_once_its_factory_resolves(cx: &mut gpui::TestAppContext) {
+        cx.set_global(Theme::light());
+        let ready = Arc::new(AtomicBool::new(false));
+        let factory: Arc<dyn SessionFactory> = Arc::new(FlippingSessionFactory {
+            ready: ready.clone(),
+        });
+        cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+        let working_directory = std::env::temp_dir().join(format!(
+            "sirio-terminal-factory-resolve-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&working_directory).expect("create PTY directory");
+        let window = cx.add_window(|_, cx| {
+            TerminalView::with_shell(
+                &working_directory,
+                pty_fixture_shell(
+                    "printf 'FACTORY_MARKER\\n'; exec sleep 60",
+                    &["print", "FACTORY_MARKER\\n", "--sleep", "60"],
+                ),
+                cx,
+            )
+            .expect("create terminal")
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("terminal-connecting").is_some(),
+            "a pane with no session yet draws the Connecting state"
+        );
+
+        // The host is found: flip the factory and publish the global again
+        // (`set_global` notifies global observers, which is what retries a
+        // Connecting pane).
+        ready.store(true, Ordering::SeqCst);
+        cx.update(|_, cx| {
+            cx.set_global(SessionFactoryGlobal(Some(factory.clone())));
+        });
+
+        let terminal = cx.update(|window, _| {
+            window
+                .root::<TerminalView>()
+                .flatten()
+                .expect("terminal root")
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let connecting = cx.debug_bounds("terminal-connecting").is_some();
+            let (running, scrollback) = terminal.read_with(&cx.cx, |terminal, _| {
+                (
+                    terminal.running_terminal().is_some(),
+                    terminal.capture_scrollback(),
+                )
+            });
+            if !connecting
+                && running
+                && String::from_utf8_lossy(&scrollback).contains("FACTORY_MARKER")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pane never left Connecting after its factory resolved \
+                 (connecting={connecting}, running={running})"
+            );
+            cx.background_executor
+                .advance_clock(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
+        cx.run_until_parked();
+        let _ = std::fs::remove_dir_all(working_directory);
+    }
+
     /// F-TERM-PTY-04: `TerminalShell::System` prefers `$SHELL`, and falls back to
     /// a shell that actually exists on *this* platform when it is unset.
     ///
@@ -8407,14 +8946,13 @@ mod view_tests {
     /// macOS-only path — red on the old code, green on the new.
     #[test]
     fn system_shell_falls_back_to_a_shell_that_exists_on_this_platform() {
-        let (program, _args) = default_system_shell();
+        let previous = std::env::var_os("SHELL");
+        unsafe { std::env::remove_var("SHELL") };
+        let (program, _args) = system_pane_shell();
         assert!(
             std::path::Path::new(&program).exists(),
             "the fallback must name a shell present on this platform, got: {program}"
         );
-
-        let previous = std::env::var_os("SHELL");
-        unsafe { std::env::remove_var("SHELL") };
 
         let working_directory = std::env::temp_dir().join(format!(
             "sirio-terminal-shell-fallback-{}",
@@ -9217,13 +9755,13 @@ mod view_tests {
     /// becoming `Some` -- this test's final assertion catches that.
     ///
     /// unix only, and genuinely so: `is_command_running()` is
-    /// `TerminalHandle::foreground_command_running`, whose definition is
-    /// `tcgetpgrp` on the PTY master. Windows has no foreground process
-    /// group, so that method is `#[cfg(not(unix))] { false }` by
-    /// construction and the pill never reports Running there — a known gap,
-    /// documented on the method itself. The central assertion of this test
-    /// ("the pill must report Running") therefore has no Windows behaviour
-    /// to hold on to, and the interactive `/bin/bash` and its `cat
+    /// `TerminalHandle::foreground_command_running`, which reads the session
+    /// engine's foreground report — derived from `tcgetpgrp` on the session's
+    /// PTY master. Foreground process groups are a POSIX job-control notion
+    /// with no Windows equivalent, so the engine reports `false` there and
+    /// the pill never reports Running on that platform. The central assertion
+    /// of this test ("the pill must report Running") therefore has no Windows
+    /// behaviour to hold on to, and the interactive `/bin/bash` and its `cat
     /// >/dev/null; exit 7` job control have no equivalent either.
     #[cfg(unix)]
     #[gpui::test]

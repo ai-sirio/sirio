@@ -340,6 +340,39 @@ fn migrate_legacy_state_root(root: &Path) {
     }
 }
 
+/// The app's host root (spec §7.1.1), resolved once from its database and its
+/// environment, and held in process: the app never exports it under a name it
+/// reads itself, so a child that inherits the environment cannot adopt it.
+static HOST_ROOT: std::sync::OnceLock<Option<sirio_host_protocol::paths::HostPaths>> =
+    std::sync::OnceLock::new();
+
+/// The root this app and the host it starts use. The root follows the database
+/// in use (`database_path`), not the `SIRIO_DB` variable alone.
+pub fn host_root() -> Option<sirio_host_protocol::paths::HostPaths> {
+    HOST_ROOT
+        .get_or_init(|| {
+            let database = database_path();
+            let stable = app_support_root().join("sirio.sqlite");
+            let environment: BTreeMap<String, String> = std::env::vars().collect();
+            sirio_host_protocol::paths::root_for_database(&environment, &database, &stable)
+        })
+        .clone()
+}
+
+/// Exports the root to this app's panes and their children as
+/// `SIRIO_PANE_HOST_HOME`, which only `sirioctl` and `host_probe` read, and only
+/// inside a pane (fix batch 6, N1). A root that does not resolve removes a
+/// variable inherited from a parent app's pane. Call it on the main thread
+/// before any thread exists: it changes the process environment.
+pub fn export_pane_host_root() {
+    match host_root() {
+        // SAFETY: called first thing in `main`, before any thread is spawned,
+        // so nothing can be reading the environment concurrently.
+        Some(paths) => unsafe { std::env::set_var("SIRIO_PANE_HOST_HOME", &paths.root) },
+        None => unsafe { std::env::remove_var("SIRIO_PANE_HOST_HOME") },
+    }
+}
+
 fn app_support_root() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -1923,6 +1956,154 @@ impl SessionStore {
                     "[session] failed to read tabs for {worktree_id}: {error}; listing no tabs"
                 );
                 Vec::new()
+            }
+        }
+    }
+
+    /// Every pane id a worktree's persisted tabs hold, terminals and chats
+    /// alike, as the restore gives them: a legacy tab with no root is the id
+    /// its index restores to, not pane 0. Orphan adoption and the pane-id
+    /// dedup read it for every worktree (fix batch 1, finding 1; batch 5).
+    pub fn persisted_pane_ids_for(&self, working_directory: &Path) -> HashSet<usize> {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return HashSet::new();
+        };
+        let Ok(Some(worktree_id)) = worktree_id_for_database(db, working_directory) else {
+            return HashSet::new();
+        };
+        match tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf()) {
+            Ok(restored) => {
+                let roots = crate::restored_pane_ids(&restored, 0);
+                restored
+                    .tab_states
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, state)| {
+                        crate::restored_tab_pane_ids(
+                            roots.get(index).copied().unwrap_or(0),
+                            state,
+                        )
+                    })
+                    .collect()
+            }
+            Err(error) => {
+                eprintln!("[session] failed to read pane ids for {worktree_id}: {error}");
+                HashSet::new()
+            }
+        }
+    }
+
+    /// Edits a worktree's persisted layout in place (fix batch 5: the pane-id
+    /// dedup moves ids in the rows of worktrees that are not mounted). `edit`
+    /// returns whether it changed anything; the row is written only then.
+    /// `false` when the worktree has no row, or when nothing changed.
+    pub fn edit_persisted_layout(
+        &self,
+        working_directory: &Path,
+        edit: impl FnOnce(&mut RestoredSession) -> bool,
+    ) -> bool {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return false;
+        };
+        let Ok(Some(worktree_id)) = worktree_id_for_database(db, working_directory) else {
+            return false;
+        };
+        let branch = db
+            .worktrees()
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|row| row.id == worktree_id))
+            .map(|row| row.branch)
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or_else(|| "main".to_string());
+        let Ok(mut restored) =
+            tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf())
+        else {
+            return false;
+        };
+        if !edit(&mut restored) {
+            return false;
+        }
+        let layout = SessionLayout {
+            working_directory: working_directory.to_path_buf(),
+            branch,
+            tabs: restored.tabs,
+            tab_states: restored.tab_states,
+        };
+        match write_layout(db, &layout) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[session] failed to rewrite a worktree's pane ids: {error}");
+                false
+            }
+        }
+    }
+
+    /// Adds a terminal tab that shows `leaf` to a worktree's persisted layout
+    /// that is not mounted, so it appears when the worktree is selected and
+    /// restores (attaches) to its session. `false` when the worktree has no
+    /// row yet, and nothing is written.
+    pub fn append_terminal_tab(&self, working_directory: &Path, leaf: usize, title: &str) -> bool {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_mut() else {
+            return false;
+        };
+        let Ok(Some(worktree_id)) = worktree_id_for_database(db, working_directory) else {
+            return false;
+        };
+        let branch = db
+            .worktrees()
+            .ok()
+            .and_then(|rows| rows.into_iter().find(|row| row.id == worktree_id))
+            .map(|row| row.branch)
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or_else(|| "main".to_string());
+        let Ok(restored) = tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf())
+        else {
+            return false;
+        };
+        let counter = restored.tabs.len();
+        let mut tabs = restored.tabs;
+        let mut tab_states = restored.tab_states;
+        tabs.push(SessionTab {
+            id: new_tab_id_for_worktree(&worktree_id, counter),
+            title: title.to_string(),
+            kind: "terminal".to_string(),
+            agent_id: None,
+            agent_session_id: None,
+            active: false,
+        });
+        while tab_states.len() < counter {
+            tab_states.push(SessionTabState::default());
+        }
+        tab_states.push(SessionTabState {
+            root_id: Some(leaf),
+            ..SessionTabState::default()
+        });
+        let layout = SessionLayout {
+            working_directory: working_directory.to_path_buf(),
+            branch,
+            tabs,
+            tab_states,
+        };
+        match write_layout(db, &layout) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[session] failed to add an adopted terminal tab: {error}");
+                false
             }
         }
     }

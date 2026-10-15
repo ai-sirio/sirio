@@ -73,9 +73,12 @@ physical Wayland session and native macOS/Windows input are unverified.
   `ThinkingIndicator::glyph` and `ThinkingBlock::thinking_glyph` take a
   host-owned glyph in place of the sparkles, so Sirio keeps its Cluster orb;
   without one the indicator draws its original icon.
-- `chat/composer.rs`: the stop control is `Primary`, like send, instead of
-  `Secondary`; on the custom shell's sunken fill a Secondary button's fill and
+- `chat/composer.rs`: the stop control takes the same variant as send instead
+  of `Secondary`; on the custom shell's fill a Secondary button's fill and
   border all but match the card, leaving only a thin outlined square.
+  `SendButton::variant` picks that variant (`Primary` by default); the custom
+  shell draws both as `Subtle`, the theme's hover fill, because a solid accent
+  square was the one off-palette mark on the card.
 
 - `agent/permission.rs`, `agent/control.rs`: custom request constructors plus
   rich body/action slots render only protocol-supplied controls. Human custom
@@ -88,13 +91,13 @@ physical Wayland session and native macOS/Windows input are unverified.
   release builds, so both are test hooks only there.
 
 - `chat/composer.rs`: `PromptInput::custom` draws Ely's shell around the
-  host's own editor, with host-supplied send eligibility (`ready`) and focus
-  (`.focused`). It takes no `forms::Enter` action and offers no completion
+  host's own editor, with host-supplied send eligibility (`ready`). It takes no `forms::Enter` action and offers no completion
   rows, so the host's keyboard, IME and popups stay in charge; the default
   constructor keeps its upstream behaviour. In custom mode the shell wears
-  the input fill (`sunken`) so the host's field and the card read as one
-  surface, its focused border steps to `fg_muted` instead of the ring colour,
-  and the tool row wraps. `.trailing` puts tools at the end of the row, next
+  the theme's `surface`, with the host's field painting no fill of its own
+  (Sirio's vendored bezel-ui `TextField::with_transparent_fill`), so the two
+  read as one card in the theme's card colour; its border is `border` in both
+  states, never the ring colour or a brighter step, and the tool row wraps. `.trailing` puts tools at the end of the row, next
   to the send control. `SendButton` carries `send`, `send-ready` and
   `stop-glyph` debug selectors, and `PromptInput`'s card `ely-prompt-input`
   (no-ops in release builds); the card sets a text colour so content without

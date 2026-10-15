@@ -149,6 +149,24 @@ Bumping the pinned `bezel-gpui-windows` version means re-applying that one descr
 hand — or dropping the override, if upstream's no-DirectComposition path has become
 translucency-capable by then (worth checking first, as for `gpui_linux`).
 
+## `bezel_ui` — a text field that can leave its fill to its host
+
+`vendor/bezel_ui/` is the released `bezel-ui` 0.1.4 source with exactly one change: `TextField`
+gains `with_transparent_fill()`, which skips the field's `.bg(theme.input_bg)` in `src/input.rs`.
+The chat composer is the one caller. Its shell (Ely's `PromptInput::custom`) paints the theme's
+`surface` and the field inside it clips its own border away; without this the field painted the
+app-wide input fill (`ely.sunken`, by `sirio_theme`'s contract) over almost the whole card, so the
+card could only ever be `sunken` — a grey slab that matched nothing else in the theme. A builder
+flag rather than a colour, because the theme can change under a live field and only a host that
+reads it every frame stays right. Every other file is byte-for-byte the released source, plus
+the MIT `LICENSE` from the repository's `v0.1.4` tag, which the published crate does not ship.
+
+The manifest follows `gpui_windows`'s conventions (`[workspace]` table, `publish = false`, package
+name kept as `bezel-ui`, `[lib] name` kept as `ui`); no standalone `Cargo.lock`. Check with
+`cargo tree -i bezel-ui` (the path source, no `patch ... was not used` warning). Bumping the pinned
+bezel version means re-applying the one builder by hand, or dropping the override if upstream has
+gained a way to style a field's fill by then.
+
 ## `libghostty-vt-sys` — a portable CPU floor for the Zig-built VT parser
 
 `libghostty-vt-sys` shells out to `zig build` to compile Ghostty's VT parser and links the result
@@ -181,10 +199,14 @@ would replace it, so every affected user has to reinstall by hand.
 
 ### What's patched, and how little
 
-Five lines in `build.rs`, backported verbatim from upstream
+Two backports in `build.rs`. The first is five lines, backported verbatim from upstream
 [uzaaft/libghostty-rs#73](https://github.com/uzaaft/libghostty-rs/pull/73) (merged 2026-08-14,
 closing their #66): `-Dcpu` is now always passed, defaulting to `baseline` and overridable through
-`LIBGHOSTTY_VT_SYS_CPU`. Every other file is byte-for-byte the published 0.2.1 source, apart from
+`LIBGHOSTTY_VT_SYS_CPU`. The second is upstream 0.2.2's Windows static link: 0.2.1 emits
+`static=ghostty-vt`, which MSVC resolves to `ghostty-vt.lib`, the *import library* of
+`ghostty-vt.dll`, so every Windows binary linked against a DLL no package ships (SP2's
+`sirio-host`, staged alone into the data root, could not start); the build now links
+`ghostty-vt-static.lib` with `+verbatim`. Every other file is byte-for-byte the published 0.2.1 source, apart from
 the `[workspace]` table this arrangement needs (and the removed `Cargo.toml.orig`/`Cargo.lock`
 publishing artifacts). `libghostty-vt`, the safe wrapper, is **not** patched: the vendored `-sys`
 keeps 0.2.1's ghostty pin and generated bindings, so the two halves still match.

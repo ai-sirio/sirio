@@ -1,7 +1,7 @@
 //! Which majors meet (spec §6.4). The minor is additive and never refuses.
 
 pub const PROTOCOL_MAJOR: u32 = 1;
-pub const PROTOCOL_MINOR: u32 = 0;
+pub const PROTOCOL_MINOR: u32 = 1;
 
 /// The majors a peer built at `current` speaks: its own and, once there is
 /// one, the previous (spec §1, "the app speaks majors N and N−1").
