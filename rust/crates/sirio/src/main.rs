@@ -5399,14 +5399,14 @@ impl SirioWorkspace {
                                     let _ = reply.send(workspace.control_changes_confirm(cx));
                                 }
                                 ControlAction::UpdateCardRead { reply } => {
-                                    let _ = reply.send(Ok(workspace.control_read_update_card()));
+                                    let _ = reply.send(Ok(workspace.control_read_update_card(window)));
                                 }
                                 ControlAction::UpdateCardAct { action, reply } => {
-                                    let _ = reply.send(workspace.control_update_card_act(&action, cx));
+                                    let _ = reply.send(workspace.control_update_card_act(&action, window, cx));
                                 }
                                 ControlAction::UpdateCardInject { status, version, notes, message, reply } => {
                                     let _ = reply.send(
-                                        workspace.control_update_card_inject(&status, version, notes, message, cx),
+                                        workspace.control_update_card_inject(&status, version, notes, message, window, cx),
                                     );
                                 }
                                 ControlAction::OpenSettings { section, reply } => {
@@ -6359,6 +6359,7 @@ impl SirioWorkspace {
         self.push_update_state(next, cx);
         let outcomes = self.update_outcomes.clone();
         let wake = self.update_wake.clone();
+        let updates_enabled = self.updates_enabled.clone();
         cx.spawn(async move |this, cx| {
             let verified = match plan {
                 ApplyPlan::Nothing => return,
@@ -6390,6 +6391,17 @@ impl SirioWorkspace {
                     verified
                 }
             };
+            // Updates may have been turned off while the download ran: no apply
+            // starts then (spec §4). The outcome is parked, and the drain drops
+            // it as a dropped outcome, which ends the card's progress.
+            if !updates_enabled.load(Ordering::SeqCst) {
+                park_update_outcome(
+                    &outcomes,
+                    &wake,
+                    UpdateHostOutcome::Download(Ok(sirio_update::DownloadResult::Ready(verified))),
+                );
+                return;
+            }
             if cfg!(target_os = "windows") {
                 // Inno closes Sirio from outside once the installer runs, and no
                 // quit hook can be relied on then: save the session before the
@@ -6460,7 +6472,12 @@ impl SirioWorkspace {
     }
 
     /// The status bar's indicator: shows the card again, *Later* and × undone.
+    /// The card is not drawn in Settings, so the indicator leaves Settings
+    /// first, as the other actions that reach the card do.
     fn show_update_card(&mut self, cx: &mut Context<Self>) {
+        if self.show_settings {
+            self.close_settings_surface(cx);
+        }
         self.update_card_dismissed = None;
         self.update_card_hidden = false;
         cx.notify();
@@ -15935,7 +15952,7 @@ impl SirioWorkspace {
         self.control_read_changes(cx)
     }
 
-    fn control_read_update_card(&self) -> Vec<(String, String)> {
+    fn control_read_update_card(&self, window: &Window) -> Vec<(String, String)> {
         let card = self.current_update_card();
         let text = |value: Option<&String>| value.cloned().unwrap_or_default();
         vec![
@@ -15964,6 +15981,9 @@ impl SirioWorkspace {
                 self.live_update_state.status.version().unwrap_or_default().into(),
             ),
             ("agentsWorking".into(), self.activity.running_pane_count().to_string()),
+            // Whether bezel's accessibility adapter is active. The E2E's duplicate-id
+            // guard only means something while it is.
+            ("a11yActive".into(), window.is_a11y_active().to_string()),
             ("pid".into(), std::process::id().to_string()),
         ]
     }
@@ -15971,12 +15991,13 @@ impl SirioWorkspace {
     fn control_update_card_act(
         &mut self,
         action: &str,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let action = match action {
             "open" => {
                 self.show_update_card(cx);
-                return Ok(self.control_read_update_card());
+                return Ok(self.control_read_update_card(window));
             }
             "later" => UpdateCardAction::Later,
             "restart" => UpdateCardAction::Restart,
@@ -15992,7 +16013,7 @@ impl SirioWorkspace {
             return Err(format!("the update card does not offer {}", action.name()));
         }
         self.on_update_card_action(action, cx);
-        Ok(self.control_read_update_card())
+        Ok(self.control_read_update_card(window))
     }
 
     fn control_update_card_inject(
@@ -16001,6 +16022,7 @@ impl SirioWorkspace {
         version: Option<String>,
         notes: Option<String>,
         message: Option<String>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let version = version.unwrap_or_else(|| "99.0.0".into());
@@ -16028,7 +16050,7 @@ impl SirioWorkspace {
         let mut next = self.live_update_state.clone();
         next.status = status;
         self.push_update_state(next, cx);
-        Ok(self.control_read_update_card())
+        Ok(self.control_read_update_card(window))
     }
 
     fn control_read_changes(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
@@ -22877,6 +22899,13 @@ fn merge_check_status(previous: &UiUpdateStatus, answer: UiUpdateStatus) -> UiUp
             previous.clone()
         }
         (UiUpdateStatus::ApplyFailed { .. }, UiUpdateStatus::Failed { .. }) => previous.clone(),
+        // A refused apply offers no retry, and its message names the path to
+        // restore by hand: an answer for that same version keeps it. A newer
+        // version replaces it.
+        (
+            UiUpdateStatus::ApplyFailed { version: failed, retryable: false, .. },
+            UiUpdateStatus::Available { ref version, .. } | UiUpdateStatus::Ready { ref version, .. },
+        ) if version == failed => previous.clone(),
         (_, answer) => answer,
     }
 }
@@ -34655,6 +34684,40 @@ done
         assert!(matches!(merged(failed, available_check("1.0.0")), UiUpdateStatus::Available { .. }));
     }
 
+    /// A refused apply offers no retry, and its message names the path to
+    /// restore by hand (macOS Rollback): an answer for that same version must
+    /// not replace it with *Restart to update* on a broken install. A newer
+    /// version still does.
+    #[test]
+    fn a_refused_apply_survives_an_answer_for_its_own_version() {
+        let refused = UiUpdateStatus::ApplyFailed {
+            version: "1.0.0".into(),
+            message: "restore the previous build by hand".into(),
+            retryable: false,
+        };
+        assert_eq!(merged(refused.clone(), available_check("1.0.0")), refused);
+        let ready = Ok(sirio_update::CheckResult::Ready(sirio_update::VerifiedUpdate {
+            version: "1.0.0".into(),
+            notes: String::new(),
+            path: PathBuf::from("sirio-update-1.0.0"),
+            platform: "linux-x86_64".into(),
+        }));
+        assert_eq!(merged(refused.clone(), ready), refused);
+    }
+
+    #[test]
+    fn a_newer_version_replaces_a_refused_apply() {
+        let refused = UiUpdateStatus::ApplyFailed {
+            version: "1.0.0".into(),
+            message: "restore the previous build by hand".into(),
+            retryable: false,
+        };
+        assert!(matches!(
+            merged(refused, available_check("1.1.0")),
+            UiUpdateStatus::Available { ref version, .. } if version == "1.1.0"
+        ));
+    }
+
     /// A host check outcome reaches both surfaces that render it: the
     /// status-bar indicator and the General settings detail (§4.1).
     #[gpui::test]
@@ -34812,6 +34875,40 @@ done
                 UiUpdateStatus::UpToDate,
                 "the next check repopulates the card after the opt-out"
             );
+        });
+    }
+
+    /// The status-bar indicator is drawn in Settings too, but the card is not:
+    /// bringing the card back from there has to leave Settings, or the
+    /// indicator does nothing (spec §2.3).
+    #[gpui::test]
+    async fn the_indicator_brings_the_card_back_from_settings(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
+        let window = cx.add_window(|_window, cx| update_host_test_fixture(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.push_update_state(
+                update_state_with(UiUpdateStatus::Ready {
+                    version: "0.7.0".into(),
+                    notes: String::new(),
+                }),
+                cx,
+            );
+            workspace.show_settings = true;
+            workspace.update_card_hidden = true;
+            workspace.show_update_card(cx);
+            assert!(!workspace.show_settings, "the indicator left Settings");
+            assert!(!workspace.update_card_hidden, "the indicator shows the card");
+            assert!(workspace.current_update_card().is_some(), "the card is drawn");
         });
     }
 
