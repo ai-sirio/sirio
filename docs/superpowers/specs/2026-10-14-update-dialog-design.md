@@ -203,7 +203,9 @@ method (served in every build; nothing in `Scripts/`, `docs/` or
 `surface changes confirm`; a release build answers "unknown method" and does
 not list it.
 
-- `read` — the card's `UpdateCardView` (or none) and the host's status.
+- `read` — the card's `UpdateCardView` (or none), the host's status, and
+  `a11yActive`: whether bezel's accessibility adapter is active, which the E2E's
+  duplicate-id guard needs (stage ui waits for `true` before the error captures).
 - `act later|restart|install|retry|hide|open` — presses that action through
   the same callbacks a click uses (`open` is the indicator).
 - `inject <status> [version] [notes] [message]` (sirioctl spells them

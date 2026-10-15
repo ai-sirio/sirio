@@ -47,12 +47,13 @@ set -euo pipefail
 # run also gets a private session bus and a private AT-SPI bus (never the user's),
 # with the two accessibility flags turned on there (under env -i they are off: no
 # desktop setting reaches the run), and stage ui notes whether this app holds a
-# connection on it (a note, not a check). Limitation: the run does not
-# prove that accesskit's adapter is active, which the duplicate-id guard (the
-# ping after each error capture) needs. Its activation (a change of the
-# screen-reader flag) opened no connection in three probes, so the guard can pass
-# without the adapter; docs/testing/update-card.md records this. Chain and ui note
-# whether a started sirio-host detached (a session leader); the note is not asserted.
+# connection on it (a note, not a check). The duplicate-id guard (the ping after
+# each error capture) means something only while bezel's accessibility adapter is
+# active: stage ui asserts the read's a11yActive (bezel's Window::is_a11y_active)
+# before the error captures. Whether the adapter opened its own connection on the
+# private AT-SPI bus is a note, not a check; docs/testing/update-card.md records
+# the runs. Chain and ui note whether a started sirio-host detached (a session
+# leader); the note is not asserted.
 #
 # The artifact: --out-dir DIR (default artifacts/update-ui-e2e-<stamp>-<pid>)
 # keeps transcript.log (every card read and expect reply, as JSON), the app
@@ -143,6 +144,19 @@ mkdir -p "$OUT_DIR/frames"
 exec > >(tee "$OUT_DIR/transcript.log") 2>&1
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# Every sirioctl call and every screen-capture tool is bounded: sirioctl waits up to
+# an hour for an answer, and a wedged app must fail the run, naming the call. A
+# timeout is raised inside $(...) too, where `exit` would end only the
+# substitution, so it signals the script (TERM, trapped here) and the script exits
+# through its EXIT cleanup.
+CALL_TIMEOUT=30
+IMPORT_TIMEOUT=15
+trap 'exit 1' TERM
+timed_out() { # what
+  echo "FAIL: $* did not answer within its time limit; the run is ended" >&2
+  kill -TERM $$ 2>/dev/null || true
+  exit 1
+}
 [ "$(uname -s)" = Linux ] || fail "this E2E runs on Linux (macOS and Windows rows: docs/testing/update-card.md)"
 command -v python3 >/dev/null || fail "python3 is required"
 command -v curl >/dev/null || fail "curl is required"
@@ -238,13 +252,29 @@ PY
 }
 
 ctl() {
-  local started
+  local started status=0
   started=$(date +%s%N)
   echo "+ sirioctl $*"
-  "$CTL" "$@"
+  timeout -k 5 "$CALL_TIMEOUT" "$CTL" "$@" || status=$?
+  case "$status" in 124 | 137) timed_out "sirioctl $* (${CALL_TIMEOUT} s)" ;; esac
+  [ "$status" -eq 0 ] || return "$status"
   echo "  answered in $(( ($(date +%s%N) - started) / 1000000 )) ms"
 }
-reply() { "$CTL" "$@" --json 2>/dev/null; }
+# sirioctl without the JSON flag, its stdout passed through: a call that does not
+# answer ends the run.
+call_ctl() {
+  local status=0
+  timeout -k 5 "$CALL_TIMEOUT" "$CTL" "$@" || status=$?
+  case "$status" in 124 | 137) timed_out "sirioctl $* (${CALL_TIMEOUT} s)" ;; esac
+  return "$status"
+}
+reply() {
+  local status=0
+  # The timeout's own message goes to the script's stderr; only sirioctl's is hidden.
+  timeout -k 5 "$CALL_TIMEOUT" "$CTL" "$@" --json 2>/dev/null || status=$?
+  case "$status" in 124 | 137) timed_out "sirioctl $* (${CALL_TIMEOUT} s)" ;; esac
+  return "$status"
+}
 field() { python3 -c 'import json, sys; print(json.load(sys.stdin)[0].get(sys.argv[1], ""))' "$1"; }
 # Every read of the card is logged to the transcript as JSON (stderr, which the
 # script sends to transcript.log), so the artifact shows what each check saw.
@@ -377,9 +407,15 @@ capture() { # name
   local window
   window=$(find_window)
   [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID for $1"
-  import -display "$DISPLAY_TARGET" -window "$window" "$OUT_DIR/frames/$1.png"
+  local status=0
+  timeout -k 5 "$IMPORT_TIMEOUT" import -display "$DISPLAY_TARGET" -window "$window" "$OUT_DIR/frames/$1.png" || status=$?
+  case "$status" in 124 | 137) fail "import of the $1 frame did not finish within ${IMPORT_TIMEOUT} s" ;; esac
+  [ "$status" -eq 0 ] || fail "import of the $1 frame failed (status $status)"
   local colours
-  colours=$(identify -format '%k' "$OUT_DIR/frames/$1.png")
+  status=0
+  colours=$(timeout -k 5 "$IMPORT_TIMEOUT" identify -format '%k' "$OUT_DIR/frames/$1.png") || status=$?
+  case "$status" in 124 | 137) fail "identify of the $1 frame did not finish within ${IMPORT_TIMEOUT} s" ;; esac
+  [ "$status" -eq 0 ] || fail "identify of the $1 frame failed (status $status)"
   [ "$colours" -ge 200 ] || fail "$1 is blank ($colours colours)"
   echo "FRAME: $1 ($colours colours)"
 }
@@ -397,7 +433,11 @@ PY
 
 # The decoded scrollback of a terminal pane (panel read answers base64).
 pane_text() { # pane
-  "$CTL" panel read "$1" | python3 -c 'import base64, sys; sys.stdout.write(base64.b64decode(sys.stdin.read().strip()).decode(errors="replace"))'
+  local raw status=0
+  raw=$(timeout -k 5 "$CALL_TIMEOUT" "$CTL" panel read "$1") || status=$?
+  case "$status" in 124 | 137) timed_out "sirioctl panel read $1 (${CALL_TIMEOUT} s)" ;; esac
+  [ "$status" -eq 0 ] || return "$status"
+  printf '%s' "$raw" | python3 -c 'import base64, sys; sys.stdout.write(base64.b64decode(sys.stdin.read().strip()).decode(errors="replace"))'
 }
 # Polls a pane's scrollback until `needle` is in it. Bounded: a missed keystroke
 # is a failure with the scrollback printed, not a fixed sleep that may be too short.
@@ -930,21 +970,29 @@ stage_ui() {
     # The card is up. The focus must not have moved, so the next marker has to reach
     # the same terminal, after the first one, in the scrollback.
     type_marker "$window" "$terminal" "$marker_two"
+    # Exit 3 is a sirioctl call that did not answer in time; 1 is the order check.
+    order=0
     python3 -c '
 import base64, subprocess, sys
-text = subprocess.run(["'"$CTL"'", "panel", "read", sys.argv[1]], capture_output=True, text=True).stdout
+try:
+    text = subprocess.run(["'"$CTL"'", "panel", "read", sys.argv[1]], capture_output=True, text=True, timeout='"$CALL_TIMEOUT"').stdout
+except subprocess.TimeoutExpired:
+    sys.exit(3)
 text = base64.b64decode(text.strip()).decode(errors="replace")
 one, two = text.rfind(sys.argv[2]), text.rfind(sys.argv[3])
 sys.exit(0 if 0 <= one < two else 1)
-' "$terminal" "$marker_one" "$marker_two" \
-      || fail "the markers did not reach the terminal in order: the card may have taken the keys"
+' "$terminal" "$marker_one" "$marker_two" || order=$?
+    if [ "$order" -eq 3 ]; then
+      timed_out "sirioctl panel read $terminal (${CALL_TIMEOUT} s)"
+    fi
+    [ "$order" -eq 0 ] || fail "the markers did not reach the terminal in order: the card may have taken the keys"
     echo "OK: focus stayed in the terminal: both markers reached it in order, with the card drawn between them"
   fi
 
   local agent
-  agent=$("$CTL" panel create --worktree "$project" --cmd cat)
+  agent=$(call_ctl panel create --worktree "$project" --cmd cat)
   [ -n "$agent" ] || fail "panel create returned no pane id"
-  "$CTL" notify --session "$agent" --status running
+  call_ctl notify --session "$agent" --status running
   wait_for agentsWorking 1 surface update read
   expect warning "1 agent is working — restarting will stop it."
   expect buttons "later:on,install:on,restart:on"
@@ -972,6 +1020,10 @@ sys.exit(0 if 0 <= one < two else 1)
   ctl surface update act --action hide
   expect visible false
   ctl surface update act --action open
+
+  # The duplicate-id guard below means something only while bezel's accessibility
+  # adapter is active, so that is asserted before the error captures, not noted.
+  wait_for a11yActive true surface update read
 
   # A failed apply and a refusal, drawn with the agent still at work: the card
   # carries the agent warning and the error together (spec 2.2). Both were once
