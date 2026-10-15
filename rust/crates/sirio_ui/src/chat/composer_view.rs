@@ -818,11 +818,6 @@ impl Chat {
     ) -> AnyElement {
         let _perf = sirio_perf::span("Chat.render_composer", cx.entity_id().as_u64());
         let typography = theme.typography;
-        let focused = self
-            .composer_field
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window);
         let bezel_theme = bezel::theme::Theme::of(cx).clone();
         let placeholder = self.composer_placeholder();
         if placeholder != self.composer_placeholder_shown {
@@ -1107,8 +1102,9 @@ impl Chat {
         // Bezel's field draws a frame of its own (fill, border, a 10px inset).
         // The shell is the one frame the composer has, so the field is laid
         // partly outside a clip box (`FIELD_CROP`, `FIELD_INSET`): its border
-        // and the focus ring are never drawn, and its fill is the shell's own
-        // (`PromptInput::custom`).
+        // and the focus ring are never drawn, and it paints no fill
+        // (`with_transparent_fill`), so the shell's themed surface shows
+        // through (`PromptInput::custom`).
         let input_box = div()
             .id("composer-input")
             .debug_selector(|| "composer-input".into())
@@ -1151,8 +1147,7 @@ impl Chat {
         let streaming = self.streaming;
         let mut prompt = PromptInput::custom("composer-shell", editor, can_send, move |_, cx| {
             send_entity.update(cx, |chat, cx| chat.send(cx));
-        })
-        .focused(focused);
+        });
         if streaming {
             // While a turn runs the send control is stop: the same path Escape
             // takes, and it leaves the draft alone.

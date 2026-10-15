@@ -1073,8 +1073,6 @@ dependencies = [
 [[package]]
 name = "bezel-ui"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55c4a9604fbe2d7c483778d247e8b0c357dacb0fdf433e93d478422f021c6689"
 dependencies = [
  "bezel-gpui",
  "bezel-motion",
