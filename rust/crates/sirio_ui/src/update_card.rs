@@ -475,7 +475,7 @@ impl RenderOnce for UpdateCard {
 mod tests {
     use super::*;
     use UpdateCardAction::*;
-    use gpui::{Context, Render, TestAppContext, VisualTestContext, Window, div, prelude::*};
+    use gpui::{Context, Render, TestAppContext, VisualTestContext, Window, div};
 
     /// The progress track: the card less its 14 px padding and the 1 px
     /// border on each side. The sweep must clear it at this width.
@@ -779,7 +779,7 @@ mod tests {
         cx.update(Theme::init);
         cx.update(crate::ely::init);
         let window = cx.add_window(move |_, _| CardHarness { view });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         cx
     }
