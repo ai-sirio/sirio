@@ -89,7 +89,6 @@ mod project;
 mod settings;
 mod skill;
 mod tab;
-mod ui;
 mod workspace;
 mod worktree;
 
@@ -122,6 +121,5 @@ pub use project::Project;
 pub use settings::SettingsPolicy;
 pub use skill::{SkillInstallCommand, agent_skill_install_command};
 pub use tab::{PaneRole, Tab, TabKind};
-pub use ui::{UpdateEvent, UpdateState};
 pub use workspace::{FilteredProject, FilteredTab, FilteredTree, FilteredWorktree, Workspace};
 pub use worktree::Worktree;

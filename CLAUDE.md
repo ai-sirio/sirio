@@ -32,6 +32,15 @@ Scripts/ci-linux.sh
 # prints each stage the probe reported.
 Scripts/Tests/test-update-e2e.sh   # -> prints "UPDATE E2E OK"
 
+# The update card in a real, isolated Sirio compiled as Nightly against a
+# loopback manifest: the launch card, Restart to update relaunching into the
+# swapped stand-in AppImage (stage chain), every card state, Later and the
+# indicator, the agent warning, the keyboard and focus (stage ui).
+# --stage chain|ui|all (all runs chain, then ui); --display :N is required
+# unless --state-only, and must be an Xvfb this user started, never $DISPLAY;
+# --out-dir DIR, --appearance light|dark.
+Scripts/Tests/test-update-ui-e2e.sh   # -> prints "UPDATE UI E2E OK"
+
 # The host foundation: a real sirio-host started detached, adopted, killed
 # around, idled out and drained across a protocol major; --out-dir DIR keeps
 # every host's log and state; SIRIO_HOST_E2E_VERBOSE=1 prints each probe line.

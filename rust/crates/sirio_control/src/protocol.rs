@@ -498,6 +498,42 @@ pub mod request {
         request("surface.changes.confirm", BTreeMap::new())
     }
 
+    /// The update card as the host would draw it. A release build does not
+    /// serve the `surface.update` family.
+    pub fn update_read() -> ControlRequest {
+        request("surface.update.read", BTreeMap::new())
+    }
+
+    /// Presses one of the update card's actions (`open` is the status bar's
+    /// indicator). It can install and restart Sirio, so a release build does
+    /// not serve it.
+    pub fn update_act(action: &str) -> ControlRequest {
+        request(
+            "surface.update.act",
+            BTreeMap::from([("action".to_string(), action.to_string())]),
+        )
+    }
+
+    /// Sets the host's update status for a state the network cannot reach on
+    /// demand. Debug builds only. `status` is one of `available`, `ready`,
+    /// `downloading`, `installing`, `installed`, `failed` (an apply failure,
+    /// read back as `apply-failed`; `apply-failed` is accepted too) or
+    /// `refused` (an apply refused as `InstallNotFound`).
+    pub fn update_inject(
+        status: &str,
+        version: Option<&str>,
+        notes: Option<&str>,
+        message: Option<&str>,
+    ) -> ControlRequest {
+        let mut params = BTreeMap::from([("status".to_string(), status.to_string())]);
+        for (key, value) in [("version", version), ("notes", notes), ("message", message)] {
+            if let Some(value) = value {
+                params.insert(key.to_string(), value.to_string());
+            }
+        }
+        request("surface.update.inject", params)
+    }
+
     pub fn settings_open(section: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::new();
         if let Some(section) = section {

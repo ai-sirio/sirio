@@ -200,6 +200,28 @@ impl Updater {
         now: SystemTime,
         metered: bool,
     ) -> Result<DownloadResult, UpdateError> {
+        self.download_inner(update, now, metered, true)
+    }
+
+    /// A download the user asked for (the update card's *Restart* or
+    /// *Retry*). The once-per-interval guard exists for automatic retries —
+    /// an 80 MB download retried in a loop is a battery bug — not for a
+    /// click, so this skips it; it still records the attempt, so the poll
+    /// loop's automatic download does not follow straight after.
+    pub fn download_requested(
+        &mut self,
+        update: &AvailableUpdate,
+    ) -> Result<DownloadResult, UpdateError> {
+        self.download_inner(update, SystemTime::now(), false, false)
+    }
+
+    fn download_inner(
+        &mut self,
+        update: &AvailableUpdate,
+        now: SystemTime,
+        metered: bool,
+        respect_attempt: bool,
+    ) -> Result<DownloadResult, UpdateError> {
         if !self.channel.updates_enabled() {
             return Ok(DownloadResult::SkippedAlreadyAttempted);
         }
@@ -208,7 +230,8 @@ impl Updater {
         }
 
         let interval = poll_interval(self.channel).ok_or(UpdateError::Disabled)?;
-        if let Some((version, attempted_at)) = &self.last_download_attempt
+        if respect_attempt
+            && let Some((version, attempted_at)) = &self.last_download_attempt
             && version == &update.version
             && now
                 .duration_since(*attempted_at)
@@ -595,6 +618,107 @@ mod tests {
             Ok(CheckResult::Disabled)
         ));
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    fn nightly_with_one_artifact(
+        name: &str,
+        bytes: Vec<u8>,
+        signer: &SigningKey,
+    ) -> (Updater, AvailableUpdate, Arc<AtomicUsize>) {
+        let manifest = signed_manifest(
+            "nightly",
+            signer,
+            &newer_version(),
+            "https://example.invalid/artifact",
+            &bytes,
+        );
+        let keys = sirio_release::AcceptedKeys::from_base64([
+            STANDARD.encode(SigningKey::from_bytes(&[9; 32]).verifying_key().as_bytes()),
+        ])
+        .unwrap();
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let observed = fetches.clone();
+        let mut updater =
+            Updater::for_test(ReleaseChannel::Nightly, temp_dir(name), keys, move |url| {
+                if url.ends_with("nightly.json") {
+                    Ok(manifest.clone())
+                } else {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    Ok(bytes.clone())
+                }
+            });
+        let CheckResult::Available(update) =
+            updater.check_at(SystemTime::UNIX_EPOCH, false).unwrap()
+        else {
+            panic!("expected an available update");
+        };
+        (updater, update, fetches)
+    }
+
+    #[test]
+    fn a_requested_download_ignores_an_earlier_automatic_attempt() {
+        let signer = SigningKey::from_bytes(&[9; 32]);
+        let (mut updater, update, fetches) =
+            nightly_with_one_artifact("requested-after-auto", b"signed release".to_vec(), &signer);
+        // The automatic attempt must be recent relative to the click, which
+        // reads the real clock: an attempt at the epoch is outside the
+        // interval and would pass the guard even if it were not bypassed.
+        assert!(matches!(
+            updater.download_at(&update, SystemTime::now(), false).unwrap(),
+            DownloadResult::Ready(_)
+        ));
+        assert!(matches!(
+            updater.download_requested(&update).unwrap(),
+            DownloadResult::Ready(_)
+        ));
+        assert_eq!(fetches.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn a_requested_download_still_blocks_the_next_automatic_one() {
+        let signer = SigningKey::from_bytes(&[9; 32]);
+        let (mut updater, update, fetches) =
+            nightly_with_one_artifact("auto-after-requested", b"signed release".to_vec(), &signer);
+        updater.download_requested(&update).unwrap();
+        assert_eq!(
+            updater.download(&update, false).unwrap(),
+            DownloadResult::SkippedAlreadyAttempted
+        );
+        assert_eq!(fetches.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_requested_download_is_still_verified() {
+        let wrong = SigningKey::from_bytes(&[7; 32]);
+        let (mut updater, update, _) =
+            nightly_with_one_artifact("requested-unverified", b"signed release".to_vec(), &wrong);
+        assert!(matches!(
+            updater.download_requested(&update),
+            Err(UpdateError::Verification(_))
+        ));
+    }
+
+    #[test]
+    fn a_requested_download_on_a_channel_without_updates_does_nothing() {
+        let mut updater = Updater::for_test(
+            ReleaseChannel::Dev,
+            temp_dir("requested-dev"),
+            empty_keys(),
+            |_| panic!("a Dev build never reaches the network"),
+        );
+        let update = AvailableUpdate {
+            version: newer_version(),
+            notes: String::new(),
+            artifact: sirio_release::ManifestArtifact {
+                url: "https://example.invalid/artifact".into(),
+                sha256: "00".repeat(32),
+                signature: format!("{}==", "A".repeat(86)),
+            },
+        };
+        assert_eq!(
+            updater.download_requested(&update).unwrap(),
+            DownloadResult::SkippedAlreadyAttempted
+        );
     }
 
     impl Updater {

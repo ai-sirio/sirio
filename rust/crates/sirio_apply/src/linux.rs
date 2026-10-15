@@ -56,7 +56,7 @@ pub fn apply(update: &VerifiedUpdate) -> Result<(), ApplyError> {
 
 /// Self-location for the real process: `$APPIMAGE` is set by the AppImage
 /// runtime to the path of the running image.
-fn self_locate() -> Result<PathBuf, ApplyError> {
+pub(crate) fn self_locate() -> Result<PathBuf, ApplyError> {
     self_locate_at(std::env::var_os("APPIMAGE").as_deref())
 }
 

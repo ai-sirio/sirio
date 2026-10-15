@@ -545,7 +545,7 @@ impl CiLogTab {
             }
             return panel()
                 .child(ely_ui::message(Severity::Info,
-                    "The log is not available until the job finishes.".into(), theme))
+                    "The log is not available until the job finishes.".into(), "ci-log-unavailable", theme))
                 .child(self.render_retry(false, entity))
                 .into_any_element();
         }
@@ -559,7 +559,7 @@ impl CiLogTab {
                 .child(ely_ui::message(Severity::Info, format!(
                     "Showing the last {} MiB of the log; {} MiB before it are on the forge.",
                     LOG_TAIL_BYTES / (1024 * 1024), (loaded.dropped + 524_288) / 1_048_576,
-                ), theme))
+                ), "ci-log-truncated", theme))
                 .child(ely_ui::text_button("ci-log-truncated-browser", "Open in browser", Some(IconName::ExternalLink),
                     ely_ui::ButtonState::enabled(url.is_some()), move |_, cx| {
                         if let Some(url) = &url { cx.open_url(url); }

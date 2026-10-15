@@ -3384,6 +3384,18 @@ impl Settings {
                     |stamp| format!("Checked {stamp} · update ready: {version}"),
                 ))
             }
+            UpdateStatus::Downloading { version } => Some(format!("Downloading {version}…")),
+            UpdateStatus::Installing { version } => Some(format!("Installing {version}…")),
+            UpdateStatus::Installed { version } => {
+                Some(format!("{version} installed — restart to use it"))
+            }
+            UpdateStatus::ApplyFailed { message, .. } => {
+                if message.trim().is_empty() {
+                    Some("Update failed".into())
+                } else {
+                    Some(format!("Update failed: {message}"))
+                }
+            }
             UpdateStatus::Failed { message } => {
                 let mut text = "Could not check for updates".to_string();
                 if let Some(stamp) = &self.update_state.last_checked {
@@ -3844,7 +3856,11 @@ impl Settings {
                 | UpdateStatus::NotDue
                 | UpdateStatus::Checking
                 | UpdateStatus::UpToDate
-                | UpdateStatus::Failed { .. } => {}
+                | UpdateStatus::Failed { .. }
+                | UpdateStatus::Downloading { .. }
+                | UpdateStatus::Installing { .. }
+                | UpdateStatus::Installed { .. }
+                | UpdateStatus::ApplyFailed { .. } => {}
             }
         }
 

@@ -44,6 +44,12 @@ pub fn init(cx: &mut App) {
         cx.observe_global::<Theme>(sync_theme_if_changed).detach();
     }
     sync_theme_if_changed(cx);
+    // The observer above is only activated at the next flush, and the app
+    // installs its theme in the same batch as this call. A theme set in that
+    // batch is folded into the notification already queued, which the
+    // observer misses, so a sync deferred to the flush reads the theme as it
+    // is then.
+    cx.defer(sync_theme_if_changed);
 }
 
 pub(crate) fn sync_theme_if_changed(cx: &mut App) {
@@ -127,6 +133,24 @@ mod tests {
             let ely = cx.global::<ElyTheme>();
             assert!(!ely.is_dark());
             assert_eq!(ely.colors, next.colors.ely, "Ely is not on Sirio's palette");
+        });
+    }
+
+    /// The app installs its theme in the same batch as `ely::init`: the saved
+    /// light mode is set before the first flush, and that flush must still
+    /// carry Ely to it. Swapping the theme in a later update passes; this does not.
+    #[gpui::test]
+    async fn a_theme_installed_in_the_startup_batch_reaches_ely(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            Theme::init(cx);
+            init(cx);
+            Theme::set_mode(ThemeMode::Light, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let ely = cx.global::<ElyTheme>();
+            assert!(!ely.is_dark(), "Ely stayed on the startup palette");
+            assert_eq!(ely.colors, Theme::get(cx).colors.ely, "Ely is not on Sirio's palette");
         });
     }
 

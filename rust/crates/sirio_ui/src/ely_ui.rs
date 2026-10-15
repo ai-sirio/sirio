@@ -11,7 +11,7 @@ use ely_gpui_component::{
     primitives::{Icon, IconName, Severity},
     theme::IconSize,
 };
-use gpui::{AnyElement, App, Context, Entity, IntoElement, Window, div, prelude::*, px};
+use gpui::{AnyElement, App, Context, ElementId, Entity, IntoElement, Window, div, prelude::*, px};
 use sirio_forge::ChangeState;
 use sirio_theme::Theme;
 
@@ -101,7 +101,16 @@ pub(crate) fn icon_button(
 /// A message in the severity's colour whose words can be selected and copied:
 /// a compact line, not Ely's titled `Callout`, whose fixed "Danger" heading
 /// would sit above every error.
-pub(crate) fn message(severity: Severity, text: String, theme: &Theme) -> AnyElement {
+///
+/// `id` names the words. Ids only need to differ among messages drawn together
+/// in one window: bezel's accessibility tree rejects a duplicate node id (a
+/// panic in debug builds), and alternative arms of a card may share one.
+pub(crate) fn message(
+    severity: Severity,
+    text: String,
+    id: impl Into<ElementId>,
+    theme: &Theme,
+) -> AnyElement {
     let tone = severity.color(&theme.ely);
     div()
         .flex()
@@ -115,7 +124,7 @@ pub(crate) fn message(severity: Severity, text: String, theme: &Theme) -> AnyEle
                 .pt(px(1.0))
                 .child(Icon::new(severity.icon()).size(IconSize::Sm).color(tone)),
         )
-        .child(div().min_w_0().child(selectable_text(text)))
+        .child(div().min_w_0().child(selectable_text(text).id(id)))
         .into_any_element()
 }
 

@@ -455,7 +455,7 @@ impl ChangeRequestTab {
             div()
                 .id("change-request-action-status")
                 .debug_selector(|| "change-request-action-status".into())
-                .child(crate::ely_ui::message(severity, text, theme))
+                .child(crate::ely_ui::message(severity, text, "change-request-action-text", theme))
                 .into_any_element(),
         )
     }
@@ -472,7 +472,7 @@ impl ChangeRequestTab {
             div()
                 .id("change-request-checkout-status")
                 .debug_selector(|| "change-request-checkout-status".into())
-                .child(crate::ely_ui::message(severity, text, theme))
+                .child(crate::ely_ui::message(severity, text, "change-request-checkout-text", theme))
                 .into_any_element(),
         )
     }
