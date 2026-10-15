@@ -37406,12 +37406,16 @@ done
         // No drain loop runs on a Dev-channel test build (the poll task
         // exits at attach), so the apply outcome waits in the shared queue
         // for the real process's loop. Drain it by hand, as that loop does.
+        // A build with a release channel compiled in (the release gate's)
+        // also runs the poll task, which parks its launch check in the same
+        // queue: only the apply's own outcomes are this test's.
         let outcomes: Vec<UpdateHostOutcome> = workspace.read_with(&cx.cx, |workspace, _| {
             workspace
                 .update_outcomes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .drain(..)
+                .filter(|outcome| matches!(outcome, UpdateHostOutcome::Apply { .. }))
                 .collect()
         });
         assert_eq!(outcomes.len(), 1, "the apply task parked exactly one outcome");
