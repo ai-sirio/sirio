@@ -735,6 +735,16 @@ impl ProjectCatalog {
                 catalog.settings.insert(id, settings);
             }
         }
+        // A project kept with its last-known worktrees because its disk is
+        // unplugged (see `restore_catalog`): label them until a rescan finds
+        // them again.
+        catalog.missing_worktrees = catalog
+            .projects
+            .iter()
+            .flat_map(|project| project.worktrees.iter())
+            .filter(|worktree| !worktree.path.is_dir())
+            .map(|worktree| canonical_path(&worktree.path))
+            .collect();
         catalog
     }
 
@@ -868,6 +878,12 @@ impl ProjectCatalog {
             .position(|project| project.id == id)
             .ok_or_else(|| format!("unknown project: {id}"))?;
         let root = self.projects[index].root_path.clone();
+        // An unplugged disk takes the root with it, and discovery would then
+        // read the project as a plain folder with one blank row. Leave it as
+        // it was until the root is back.
+        if !root.is_dir() {
+            return Err(format!("{} is not reachable", root.display()));
+        }
         let previous = self.projects[index].worktrees.clone();
         let discovered = discover_project(&root).map_err(|error| error.to_string())?;
         let mut replacement = catalog_project(&root, discovered);
@@ -1428,8 +1444,22 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
     for record in project_records {
         let root = PathBuf::from(&record.root_path);
         if !root.is_dir() {
+            // An unplugged disk or an unmounted share looks exactly like a
+            // deleted folder, and the startup normalization right after this
+            // deletes every project the catalog lacks -- with its worktrees,
+            // tabs and chats, by cascade. Keep the last-known state instead;
+            // only an explicit removal forgets a project.
+            let worktrees = db.worktrees_of_project(&record.id).unwrap_or_default();
+            // A plain folder's one synthesized row has no branch; a git
+            // worktree row always has one.
+            let is_git = worktrees.iter().any(|worktree| !worktree.branch.is_empty());
+            let project = degraded_catalog_project(&record, worktrees, is_git);
+            if seen_project_ids.insert(project.id.clone()) {
+                settings.insert(project.id.clone(), catalog_project_settings(&record));
+                projects.push(project);
+            }
             diagnostics.push(format!(
-                "project {} vanished: {}",
+                "project {} is not reachable, keeping its last-known state: {}",
                 record.name,
                 root.display()
             ));
@@ -1450,17 +1480,7 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
             Ok(discovered) => {
                 let project = catalog_project(&root, discovered);
                 if seen_project_ids.insert(project.id.clone()) {
-                    settings.insert(
-                        project.id.clone(),
-                        CatalogProjectSettings {
-                            color_hex: record.color_hex.clone(),
-                            display_name: record.display_name.clone(),
-                            icon_kind: record.icon_kind.clone(),
-                            icon_value: record.icon_value.clone(),
-                            default_worktree_base: record.default_worktree_base.clone(),
-                            worktree_location_override: record.worktree_location_override.clone(),
-                        },
-                    );
+                    settings.insert(project.id.clone(), catalog_project_settings(&record));
                     projects.push(project);
                 } else {
                     diagnostics.push(format!(
@@ -1487,19 +1507,9 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
                 // once the fault clears -- they just need the project to
                 // still be there to render into.
                 let worktrees = db.worktrees_of_project(&record.id).unwrap_or_default();
-                let project = degraded_catalog_project(&record, worktrees);
+                let project = degraded_catalog_project(&record, worktrees, true);
                 if seen_project_ids.insert(project.id.clone()) {
-                    settings.insert(
-                        project.id.clone(),
-                        CatalogProjectSettings {
-                            color_hex: record.color_hex.clone(),
-                            display_name: record.display_name.clone(),
-                            icon_kind: record.icon_kind.clone(),
-                            icon_value: record.icon_value.clone(),
-                            default_worktree_base: record.default_worktree_base.clone(),
-                            worktree_location_override: record.worktree_location_override.clone(),
-                        },
-                    );
+                    settings.insert(project.id.clone(), catalog_project_settings(&record));
                     projects.push(project);
                 }
                 diagnostics.push(format!(
@@ -1516,14 +1526,26 @@ pub fn restore_catalog(database: &Path) -> RestoredCatalog {
     }
 }
 
+fn catalog_project_settings(record: &ProjectRecord) -> CatalogProjectSettings {
+    CatalogProjectSettings {
+        color_hex: record.color_hex.clone(),
+        display_name: record.display_name.clone(),
+        icon_kind: record.icon_kind.clone(),
+        icon_value: record.icon_value.clone(),
+        default_worktree_base: record.default_worktree_base.clone(),
+        worktree_location_override: record.worktree_location_override.clone(),
+    }
+}
+
 /// Builds a [`CatalogProject`] straight from what was last persisted, for
-/// when a fresh `discover_project` failed (see the call site in
-/// [`restore_catalog`]). Unlike [`catalog_project`], this never shells out
-/// to git -- it is exactly the durable state the user last saw, not a
-/// rediscovery.
+/// when a fresh `discover_project` failed or the root is not reachable (see
+/// the call sites in [`restore_catalog`]). Unlike [`catalog_project`], this
+/// never shells out to git -- it is exactly the durable state the user last
+/// saw, not a rediscovery.
 fn degraded_catalog_project(
     record: &ProjectRecord,
     worktrees: Vec<WorktreeRecord>,
+    is_git: bool,
 ) -> CatalogProject {
     let root_path = PathBuf::from(&record.root_path);
     let mut worktrees: Vec<CatalogWorktree> = worktrees
@@ -1549,11 +1571,7 @@ fn degraded_catalog_project(
         id: record.id.clone(),
         name: record.name.clone(),
         root_path,
-        // A worktree row only ever gets persisted for a git project
-        // (`write_catalog` only writes worktrees `if project.is_git`), so
-        // reaching this function at all means the last-known state was a
-        // git repository.
-        is_git: true,
+        is_git,
         worktrees,
     }
 }
@@ -4400,41 +4418,146 @@ mod tests {
         assert_eq!(catalog.projects().len(), 1);
     }
 
-    #[test]
-    fn restore_skips_vanished_projects_and_keeps_surviving_projects() {
-        let dir = TempDir::new();
-        let surviving = dir.0.join("surviving");
-        let vanished = dir.0.join("vanished");
-        std::fs::create_dir_all(&surviving).expect("surviving dir");
-        std::fs::create_dir_all(&vanished).expect("vanished dir");
-        let db_path = dir.db_path("projects");
-        let store = SessionStore::open(&db_path);
-        store.schedule(SessionLayout {
-            working_directory: surviving.clone(),
-            branch: "main".into(),
-            tabs: vec![],
-            tab_states: vec![],
-        });
-        store.flush_now();
-        let mut catalog = ProjectCatalog::default();
-        catalog.add(&vanished).expect("discover vanished");
-        catalog.add(&surviving).expect("discover surviving");
+    /// A repository with one linked worktree beside it, both inside
+    /// `volume`, the way a project on a USB disk sits under `/Volumes/<disk>`.
+    fn repository_on_a_volume(volume: &Path) -> (PathBuf, PathBuf) {
+        let root = volume.join("repo");
+        let linked = volume.join("repo-feature");
+        std::fs::create_dir_all(&root).expect("repo dir");
+        run_git(&root, &["init", "--quiet", "-b", "main"]);
+        run_git(&root, &["config", "user.email", "sirio-tests@example.com"]);
+        run_git(&root, &["config", "user.name", "Sirio Tests"]);
+        std::fs::write(root.join("README"), "volume fixture\n").expect("fixture file");
+        run_git(&root, &["add", "README"]);
+        run_git(&root, &["commit", "--quiet", "-m", "fixture"]);
+        run_git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature",
+                &git_path_arg(&linked),
+            ],
+        );
+        (root, linked)
+    }
+
+    /// What `main()` does at every launch: restore the catalog, then write it
+    /// straight back as the startup normalization.
+    fn boot(db_path: &Path) -> ProjectCatalog {
+        let restored = restore_catalog(db_path);
+        let catalog = ProjectCatalog::from_restored(restored.projects, restored.settings);
+        let store = SessionStore::open(db_path);
         store.schedule_catalog(&catalog);
         store.flush_now();
-        std::fs::remove_dir_all(&vanished).expect("remove vanished directory");
+        catalog
+    }
 
-        let restored = restore_catalog(&db_path);
-        assert_eq!(restored.projects.len(), 1);
-        assert_eq!(
-            restored.projects[0].root_path,
-            surviving.canonicalize().unwrap()
-        );
+    /// The user launched Sirio with the disk that holds a project unplugged.
+    /// A missing root is indistinguishable from a deleted one, so the project
+    /// must survive the launch, its worktrees and tabs included, and come
+    /// back whole once the disk is plugged in again; only an explicit
+    /// removal forgets it.
+    #[test]
+    fn a_project_on_an_unplugged_volume_survives_a_launch_and_comes_back_whole() {
+        let dir = TempDir::new();
+        let volume = dir.0.join("volume");
+        let (root, linked) = repository_on_a_volume(&volume);
+        let elsewhere = dir.0.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere dir");
+        let db_path = dir.db_path("unplugged");
+        let store = SessionStore::open(&db_path);
+        let mut catalog = ProjectCatalog::default();
+        catalog.add(&root).expect("discover the repo on the volume");
+        catalog.add(&elsewhere).expect("discover the other project");
+        store.schedule_catalog(&catalog);
+        store.flush_now();
+        store.schedule(layout(&linked, three_tabs()));
+        store.flush_now();
+        drop(store);
+        let linked_id = AppDatabase::open(&db_path)
+            .expect("open database")
+            .worktree_by_path(&linked.to_string_lossy())
+            .expect("query by path")
+            .expect("the linked worktree has a row")
+            .id;
+
+        let unplugged = dir.0.join("volume-unplugged");
+        std::fs::rename(&volume, &unplugged).expect("unplug the volume");
+        let catalog = boot(&db_path);
+
+        let project = catalog
+            .projects()
+            .iter()
+            .find(|project| project.root_path == root)
+            .expect("a project on an unplugged volume must stay in the catalog");
+        assert!(project.is_git, "it must not degrade to a plain folder");
+        let paths: Vec<&Path> = project.worktrees.iter().map(|w| w.path.as_path()).collect();
+        assert_eq!(paths, vec![root.as_path(), linked.as_path()]);
         assert!(
-            restored
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.contains("vanished"))
+            catalog.is_worktree_missing(&root) && catalog.is_worktree_missing(&linked),
+            "its worktrees are shown as missing while the volume is away"
         );
+        assert_eq!(
+            catalog.projects().len(),
+            2,
+            "the other project is untouched"
+        );
+        let db = AppDatabase::open(&db_path).expect("reopen database");
+        assert_eq!(
+            db.tabs_of_worktree(&linked_id).expect("read tabs").len(),
+            3,
+            "the launch must not cascade-delete the linked worktree's tabs"
+        );
+        drop(db);
+
+        std::fs::rename(&unplugged, &volume).expect("plug the volume back in");
+        let catalog = boot(&db_path);
+
+        let project = catalog
+            .projects()
+            .iter()
+            .find(|project| project.root_path == root)
+            .expect("the project is back");
+        let paths: Vec<&Path> = project.worktrees.iter().map(|w| w.path.as_path()).collect();
+        assert_eq!(paths, vec![root.as_path(), linked.as_path()]);
+        assert!(!catalog.is_worktree_missing(&root) && !catalog.is_worktree_missing(&linked));
+        let db = AppDatabase::open(&db_path).expect("reopen database");
+        assert_eq!(
+            db.worktree_by_path(&linked.to_string_lossy())
+                .expect("query by path")
+                .expect("linked row")
+                .id,
+            linked_id,
+            "the linked worktree keeps its identity"
+        );
+        assert_eq!(db.tabs_of_worktree(&linked_id).expect("read tabs").len(), 3);
+    }
+
+    /// The disk is unplugged while Sirio runs: a rescan must not rewrite the
+    /// project as a plain folder with one blank row (which the next catalog
+    /// write would then persist over its real worktrees).
+    #[test]
+    fn rescanning_a_project_whose_volume_was_unplugged_leaves_it_as_it_was() {
+        let dir = TempDir::new();
+        let volume = dir.0.join("volume");
+        let (root, _linked) = repository_on_a_volume(&volume);
+        let mut catalog = ProjectCatalog::default();
+        catalog.add(&root).expect("discover the repo on the volume");
+        let before = catalog.clone();
+        let id = before.projects()[0].id.clone();
+
+        std::fs::rename(&volume, dir.0.join("volume-unplugged")).expect("unplug the volume");
+
+        assert!(catalog.refresh_project(&id).is_err());
+        assert!(
+            catalog
+                .refresh_project_with_mounted_worktrees(&id, &[root.clone()])
+                .is_err()
+        );
+        assert_eq!(catalog, before);
     }
 
     /// F-CHG-02/03/09: the shared root cause of three findings from a
