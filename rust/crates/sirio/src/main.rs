@@ -9764,6 +9764,62 @@ impl SirioWorkspace {
         cx.notify();
     }
 
+    /// The drop surface of `role`'s half, without its placement: the real
+    /// overlay covers its own pane, the ghost (`render_secondary_drop_ghost`)
+    /// covers where the Secondary pane would be. Both share the selector and
+    /// the handlers, so a drop lands through `drop_on_pane` either way.
+    fn pane_drop_surface(
+        &self,
+        role: PaneRole,
+        theme: Theme,
+        entity: Entity<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let targeted = self.pane_drop_target
+            == Some(PaneDropTarget {
+                pane: role,
+                anchor: None,
+            });
+        let selector = match role {
+            PaneRole::Primary => "pane-drop-overlay-primary",
+            PaneRole::Secondary => "pane-drop-overlay-secondary",
+        };
+        let move_entity = entity.clone();
+        div()
+            .id(selector)
+            .debug_selector(move || selector.to_owned())
+            .absolute()
+            .when(targeted, |this| {
+                let this = this
+                    .bg(theme.ely.active)
+                    .border_2()
+                    .border_color(theme.sirio.border_strong);
+                #[cfg(test)]
+                let this = this.child(
+                    div()
+                        .id(format!("{selector}-filled"))
+                        .debug_selector(move || format!("{selector}-filled"))
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_0(),
+                );
+                this
+            })
+            .on_drag_move::<RowDrag>(move |event, _, cx| {
+                let drag = *event.drag(cx);
+                let inside = event.bounds.contains(&event.event.position);
+                move_entity.update(cx, |workspace, _| {
+                    workspace.drag_over_pane(drag, role, None, inside);
+                });
+            })
+            .on_drop::<RowDrag>(move |drag, window, cx| {
+                let drag = *drag;
+                entity.update(cx, |workspace, cx| {
+                    workspace.drop_on_pane(drag, role, window, cx);
+                });
+            })
+    }
+
     /// Spec §5, "Drop on the other pane's body": while a movable tab is
     /// dragged, the half across the divider is covered by a drop surface —
     /// clear until the pointer is over it, then filled. Drawn last in its
@@ -9779,54 +9835,54 @@ impl SirioWorkspace {
         if self.pane_drop_overlay_role(cx) != Some(role) {
             return None;
         }
-        let targeted = self.pane_drop_target
-            == Some(PaneDropTarget {
-                pane: role,
-                anchor: None,
-            });
-        let selector = match role {
-            PaneRole::Primary => "pane-drop-overlay-primary",
-            PaneRole::Secondary => "pane-drop-overlay-secondary",
-        };
-        let move_entity = entity.clone();
         Some(
-            div()
-                .id(selector)
-                .debug_selector(move || selector.to_owned())
-                .absolute()
+            self.pane_drop_surface(role, theme, entity)
                 .top_0()
                 .left_0()
                 .size_full()
-                .when(targeted, |this| {
-                    let this = this
-                        .bg(theme.ely.active)
-                        .border_2()
-                        .border_color(theme.sirio.border_strong);
-                    #[cfg(test)]
-                    let this = this.child(
-                        div()
-                            .id(format!("{selector}-filled"))
-                            .debug_selector(move || format!("{selector}-filled"))
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_0(),
-                    );
-                    this
-                })
-                .on_drag_move::<RowDrag>(move |event, _, cx| {
-                    let drag = *event.drag(cx);
-                    let inside = event.bounds.contains(&event.event.position);
-                    move_entity.update(cx, |workspace, _| {
-                        workspace.drag_over_pane(drag, role, None, inside);
-                    });
-                })
-                .on_drop::<RowDrag>(move |drag, window, cx| {
-                    let drag = *drag;
-                    entity.update(cx, |workspace, cx| {
-                        workspace.drop_on_pane(drag, role, window, cx);
-                    });
-                })
+                .into_any_element(),
+        )
+    }
+
+    /// Spec 2026-10-15 §3: while a movable tab is dragged toward a Secondary
+    /// pane that is not drawn (empty, or hidden with tabs), a drop zone
+    /// covers the right of the Primary surface, as wide as the pane will be
+    /// after the drop. Nothing moves until the release.
+    fn render_secondary_drop_ghost(
+        &self,
+        theme: Theme,
+        entity: Entity<Self>,
+        window: &Window,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        if self.secondary_pane_visible()
+            || self.pane_drop_overlay_role(cx) != Some(PaneRole::Secondary)
+        {
+            return None;
+        }
+        let (_, Some(width)) = panel_layout::resolve_center_split(
+            self.center_available_width(window, theme),
+            self.center_split_ratio,
+            true,
+            CENTER_DIVIDER_WIDTH,
+        ) else {
+            return None;
+        };
+        Some(
+            self.pane_drop_surface(PaneRole::Secondary, theme, entity)
+                .top_0()
+                .right_0()
+                .h_full()
+                .w(px(width))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(theme.typography.footnote)
+                        .text_color(theme.ely.fg_muted)
+                        .child("Move to right pane"),
+                )
                 .into_any_element(),
         )
     }
@@ -20422,7 +20478,8 @@ impl SirioWorkspace {
             .w_full()
             .overflow_hidden()
             .child(primary_surface)
-            .children(self.render_pane_drop_overlay(PaneRole::Primary, *theme, entity.clone(), cx));
+            .children(self.render_pane_drop_overlay(PaneRole::Primary, *theme, entity.clone(), cx))
+            .children(self.render_secondary_drop_ghost(*theme, entity.clone(), window, cx));
         #[cfg(test)]
         let primary_surface = primary_surface
             .when_some(shell_paint_probe("centre-surface", cx), |this, probe| {
@@ -33544,6 +33601,96 @@ done
             cx.debug_bounds("tab-drop-indicator-3").is_none(),
             "the bar goes with the drag"
         );
+    }
+
+    /// Spec 2026-10-15 §3 (a): with no Secondary pane, dragging a terminal
+    /// toward the right shows a drop zone where the pane would be, and the
+    /// drop opens the pane with the tab in it.
+    #[gpui::test]
+    async fn drawn_drop_on_the_ghost_opens_the_secondary_pane_with_the_tab(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        assert!(
+            cx.debug_bounds("pane-secondary").is_none(),
+            "the fixture starts without one"
+        );
+        let source = cx.debug_bounds("workspace-tab-0").expect("tab 0").center();
+        let centre = cx.debug_bounds("centre-surface").expect("centre surface");
+        let right = point(centre.right() - px(40.0), centre.center().y);
+
+        begin_tab_drag(&mut cx, source, right);
+        let ghost = cx
+            .debug_bounds("pane-drop-overlay-secondary")
+            .expect("the ghost is drawn while dragging");
+        assert!(
+            ghost.right() >= centre.right() - px(1.0),
+            "anchored to the right edge"
+        );
+        assert!(
+            ghost.size.width < centre.size.width,
+            "narrower than the centre"
+        );
+        assert!(
+            cx.debug_bounds("pane-drop-overlay-secondary-filled")
+                .is_some()
+        );
+        release_tab_drag(&mut cx, right);
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![0]
+            );
+            assert!(workspace.secondary_pane_visible());
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+        });
+        assert!(cx.debug_bounds("pane-secondary").is_some());
+        assert!(
+            cx.debug_bounds("pane-drop-overlay-secondary").is_none(),
+            "gone with the drag"
+        );
+    }
+
+    /// Review Focus 3 (b): hidden with tabs, the ghost still takes a drop,
+    /// and the pane comes back with its tabs plus the moved one.
+    #[gpui::test]
+    async fn drawn_drop_on_the_ghost_of_a_hidden_pane_brings_its_tabs_back(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut cx, workspace) = drag_test_window(cx);
+        workspace.update(&mut cx, |workspace, cx| {
+            assert!(workspace.toggle_secondary_pane(cx));
+        });
+        cx.run_until_parked();
+        let source = cx.debug_bounds("workspace-tab-0").expect("tab 0").center();
+        let centre = cx.debug_bounds("centre-surface").expect("centre surface");
+        let right = point(centre.right() - px(40.0), centre.center().y);
+
+        begin_tab_drag(&mut cx, source, right);
+        assert!(cx.debug_bounds("pane-drop-overlay-secondary").is_some());
+        release_tab_drag(&mut cx, right);
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .center_split
+                    .tabs_for(PaneRole::Secondary, &workspace.tabs),
+                vec![2, 3, 0]
+            );
+            assert!(workspace.secondary_pane_visible());
+        });
     }
 
     /// Spec §5: the body overlay fills only over the body, not while a strip
