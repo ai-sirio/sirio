@@ -82,6 +82,12 @@ Scripts/Tests/test-forge-diff-e2e.sh   # -> prints "FORGE DIFF E2E OK"
 # plus --appearance light|dark.
 Scripts/Tests/test-changes-e2e.sh   # -> prints "CHANGES E2E OK"
 
+# The Secondary pane on demand and the right panel's Open list in a real,
+# isolated Sirio: one centre pane at launch, the list and its Chat
+# expansion, a pane that comes and goes with its tabs, across a quit and
+# relaunch; same flags as test-changes-e2e.sh.
+Scripts/Tests/test-open-list-e2e.sh   # -> prints "OPEN LIST E2E OK"
+
 # Acting on a change request: every write of sirio_forge on the wire (the token
 # transport and the real gh/glab), then the tab's actions in a real, isolated
 # Sirio driven by the debug-only `surface change-request act` verb. --stage NAME

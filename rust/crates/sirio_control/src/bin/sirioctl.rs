@@ -157,6 +157,8 @@ fn usage() {
            \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment|reply|resolve|unresolve|line-comment|edit-thread-comment|review-add|review-open-submit|review-submit|review-discard|review-discard-confirm|draft-edit|draft-delete|rerun-job|rerun-failed\n\
          \x20 panel show <id>                   show a session in a tab (app only)\n\
          \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
+         \x20 surface layout read               whether the right pane is drawn, each half's tabs, the right panel's view\n\
+         \x20 surface open-list open --entry show|chat|terminal|browser|changes|open-file|project-settings|other-agents|agent:<id>  (debug builds) click that row of the Open list\n\
          \x20 surface terminal open [--cmd c | --agent a]  (debug builds) open an app terminal tab running c, or agent a\n\
          \x20 surface host end-all             (debug builds) End All sessions without its dialog\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
@@ -997,6 +999,13 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             ),
         ),
         ("tabs", "read") => require_ok(socket, &sirio_control::protocol::request::tabs_read()),
+        ("layout", "read") => require_ok(socket, &sirio_control::protocol::request::layout_read()),
+        ("open-list", "open") => {
+            let entry = parsed
+                .value("entry")
+                .ok_or_else(|| "Missing --entry".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::open_list_open(entry))
+        }
         ("host", "end-all") => require_ok(
             socket,
             &sirio_control::protocol::request::host_end_all(),
@@ -1072,6 +1081,15 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             "review_dialog",
             "threads_pending",
             "suggestions",
+            "secondaryVisible",
+            "secondaryHidden",
+            "primaryTabs",
+            "secondaryTabs",
+            "secondaryKinds",
+            "secondaryPositions",
+            "rightPanelView",
+            "openListChatExpanded",
+            "openListAgents",
         ],
         parsed.flag("json"),
     );

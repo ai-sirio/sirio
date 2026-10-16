@@ -198,6 +198,18 @@ impl PanelView {
         }
     }
 
+    /// The view's name on the control socket (`surface.layout.read`).
+    pub fn name(self) -> &'static str {
+        match self {
+            PanelView::Files => "files",
+            PanelView::Diff => "diff",
+            PanelView::History => "history",
+            PanelView::References => "references",
+            PanelView::ChangeRequests => "change_requests",
+            PanelView::Open => "open",
+        }
+    }
+
     fn element_id(self) -> &'static str {
         match self {
             PanelView::Files => "right-panel-tab-files",

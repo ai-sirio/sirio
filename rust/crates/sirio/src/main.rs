@@ -1248,6 +1248,14 @@ enum ControlAction {
         confirmed: bool,
         reply: ControlReply,
     },
+    ReadLayout {
+        reply: ControlReply,
+    },
+    /// Debug-only: what a click on an Open list row does (`open_list_open`).
+    OpenListOpen {
+        entry: String,
+        reply: ControlReply,
+    },
     ReadFile {
         reply: ControlReply,
     },
@@ -2535,6 +2543,7 @@ impl ControlHandler for AppControlHandler {
                     "surface.tabs.read",
                     "surface.tabs.select",
                     "surface.tabs.close",
+                    "surface.layout.read",
                     "surface.file.read",
                     "settings.account.add",
                     "settings.account.select",
@@ -2548,6 +2557,7 @@ impl ControlHandler for AppControlHandler {
                 methods.extend(BROWSER_CAPABILITIES);
                 if cfg!(debug_assertions) {
                     methods.push("surface.change_request.act");
+                    methods.push("surface.open_list.open");
                     methods.push("surface.changes.confirm");
                     methods.push("surface.host.end_all");
                     methods.push("surface.terminal.open");
@@ -2961,6 +2971,13 @@ impl ControlHandler for AppControlHandler {
                 self.queue_action(request, move |reply| ControlAction::TerminalState { pane, reply })
             }
             "surface.tabs.read" => self.queue_action(request, |reply| ControlAction::ReadTabs { reply }),
+            "surface.layout.read" => self.queue_action(request, |reply| ControlAction::ReadLayout { reply }),
+            "surface.open_list.open" if cfg!(debug_assertions) => {
+                let Some(entry) = request.params.get("entry").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.open_list.open requires entry");
+                };
+                self.queue_action(request, move |reply| ControlAction::OpenListOpen { entry, reply })
+            }
             "surface.tabs.select" => {
                 let Some(position) = request
                     .params
@@ -5776,6 +5793,12 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::CloseListedTab { position, confirmed, reply } => {
                                     let _ = reply.send(workspace.control_close_listed_tab(position, confirmed, window, cx));
+                                }
+                                ControlAction::ReadLayout { reply } => {
+                                    let _ = reply.send(Ok(workspace.control_read_layout(cx)));
+                                }
+                                ControlAction::OpenListOpen { entry, reply } => {
+                                    let _ = reply.send(workspace.control_open_list(&entry, window, cx));
                                 }
                                 ControlAction::ReadFile { reply } => {
                                     let _ = reply.send(workspace.control_read_file(cx));
@@ -17673,6 +17696,115 @@ impl SirioWorkspace {
             _ => self.request_close_tab_by_id(id, window, cx),
         }
         Ok(self.control_read_tabs(cx))
+    }
+
+    /// `surface.layout.read` (spec 2026-10-15-secondary-on-demand §4).
+    /// `secondaryPositions` are 1-based positions in `control_read_tabs`'s
+    /// list, so a script can close a Secondary tab with `surface tabs close`.
+    fn control_read_layout(&self, cx: &Context<Self>) -> Vec<(String, String)> {
+        let secondary: Vec<(usize, &OpenTab)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.pane == PaneRole::Secondary)
+            .collect();
+        let join = |items: Vec<String>| items.join(",");
+        vec![
+            ("secondaryVisible".into(), self.secondary_pane_visible().to_string()),
+            ("secondaryHidden".into(), self.secondary_pane_hidden.to_string()),
+            (
+                "primaryTabs".into(),
+                (self.tabs.len() - secondary.len()).to_string(),
+            ),
+            ("secondaryTabs".into(), secondary.len().to_string()),
+            (
+                "secondaryKinds".into(),
+                join(
+                    secondary
+                        .iter()
+                        .map(|(_, tab)| session::persisted_kind(tab.kind).to_string())
+                        .collect(),
+                ),
+            ),
+            (
+                "secondaryPositions".into(),
+                join(
+                    secondary
+                        .iter()
+                        .map(|(index, _)| (index + 1).to_string())
+                        .collect(),
+                ),
+            ),
+            (
+                "rightPanelView".into(),
+                sirio_ui::right_panel::PanelView::get(cx).name().into(),
+            ),
+            (
+                "openListChatExpanded".into(),
+                self.right_panel.read(cx).open_list_chat_expanded().to_string(),
+            ),
+            (
+                "openListAgents".into(),
+                join(
+                    self.chat_agents()
+                        .into_iter()
+                        .map(|(id, _)| id.to_string())
+                        .collect(),
+                ),
+            ),
+        ]
+    }
+
+    /// Debug-only `surface.open_list.open`: does what a click on that row
+    /// does, refusing what the row refuses.
+    fn control_open_list(
+        &mut self,
+        entry: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        use sirio_ui::right_panel::{OpenSurface, PanelView};
+        if !self.has_current_worktree() {
+            return Err("no worktree is selected".into());
+        }
+        let facts = self.open_list_facts();
+        let surface = match entry {
+            "show" => {
+                PanelView::set(PanelView::Open, cx);
+                self.right_panel_visible = true;
+                self.right_panel.update(cx, |_, cx| cx.notify());
+                cx.notify();
+                return Ok(self.control_read_layout(cx));
+            }
+            "chat" => {
+                self.right_panel
+                    .update(cx, |panel, cx| panel.toggle_open_list_chat(cx));
+                return Ok(self.control_read_layout(cx));
+            }
+            "terminal" => OpenSurface::Terminal,
+            "other-agents" => OpenSurface::OtherAgents,
+            "browser" => OpenSurface::Browser,
+            "changes" => OpenSurface::Changes,
+            "open-file" => OpenSurface::OpenFile,
+            "project-settings" => OpenSurface::ProjectSettings,
+            other => match other
+                .strip_prefix("agent:")
+                .and_then(|id| facts.agents.iter().find(|(agent, _)| *agent == id))
+            {
+                Some((id, _)) => OpenSurface::Chat(*id),
+                None => return Err(format!("unknown Open list entry: {other}")),
+            },
+        };
+        let disabled = match surface {
+            OpenSurface::Changes => facts.changes_disabled,
+            OpenSurface::ProjectSettings => facts.project_settings_disabled,
+            _ => None,
+        };
+        if let Some(reason) = disabled {
+            return Err(reason.to_string());
+        }
+        self.open_surface(surface, window, cx);
+        Ok(self.control_read_layout(cx))
     }
 
     /// The active tab's file: its path, whether it is a read-only snapshot,
@@ -41069,6 +41201,8 @@ done
             | ControlAction::ReadTabs { reply }
             | ControlAction::SelectListedTab { reply, .. }
             | ControlAction::CloseListedTab { reply, .. }
+            | ControlAction::ReadLayout { reply }
+            | ControlAction::OpenListOpen { reply, .. }
             | ControlAction::ReadFile { reply }
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
@@ -41216,6 +41350,8 @@ done
             "surface.tabs.read" => request::tabs_read(),
             "surface.tabs.select" => request::tabs_select(1),
             "surface.tabs.close" => request::tabs_close(1),
+            "surface.layout.read" => request::layout_read(),
+            "surface.open_list.open" => request::open_list_open("show"),
             "surface.file.read" => request::file_read(),
             "settings.account.add" => {
                 request_with_params(method, &[("provider", "claude"), ("label", "test")])

@@ -265,19 +265,23 @@ Pane tile go with the tile.
 private Xvfb (Linux); `--state-only` runs without captures (macOS). Two
 control verbs are added:
 
-- `surface.layout.read` (every build, read-only): `secondary_visible`, the
-  right panel's view, and the tabs of each half.
+- `surface.layout.read` (every build, read-only): `secondaryVisible`,
+  `secondaryHidden`, `primaryTabs`, `secondaryTabs`, `secondaryKinds`, and
+  `secondaryPositions` (the 1-based positions in `surface tabs read`'s list,
+  so a script can close a Secondary tab), then `rightPanelView`,
+  `openListChatExpanded` and `openListAgents`.
 - `surface.open_list.open <entry>` (debug builds only, like
   `surface change-request act`): calls the handler a row's click calls.
 
 The script checks, in order:
 
 1. at launch the Secondary pane is not drawn;
-2. opening a terminal, then an agent's chat (a stub CLI on PATH), draws the
-   pane with the right tab;
-3. closing both removes the pane;
+2. opening a terminal draws the pane with it, and Chat's expansion with no
+   agent on PATH says so (agent chats are proven in-process);
+3. closing that terminal removes the pane;
 4. after quit and relaunch, a Secondary pane that held a tab comes back and an
-   empty one does not.
+   empty one does not;
+5. an unknown `agent:<id>` is refused.
 
 It ends with `OPEN LIST E2E OK`. Under `--out-dir` it leaves the socket
 transcript and PID-matched captures: the list collapsed, Chat expanded, the
