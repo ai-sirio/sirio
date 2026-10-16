@@ -3534,6 +3534,17 @@ fn agent_command_for(source: &sirio_registry::LaunchSource) -> Option<AgentComma
     }
 }
 
+/// Whether `agent_command_for(source)` is `Some`, without the PATH lookup.
+/// `agent_command_for` resolves a Builtin's program path through PATH but never
+/// refuses a Builtin, so the gate needs only the variant. That makes it safe in
+/// a render path, which runs on every frame.
+fn has_agent_command(source: &sirio_registry::LaunchSource) -> bool {
+    matches!(
+        source,
+        sirio_registry::LaunchSource::Builtin { .. } | sirio_registry::LaunchSource::Installed(_)
+    )
+}
+
 /// The [`LaunchSpec`] a resolved adapter launches, or `None` when there is
 /// nothing honest to launch. Claude is the one adapter with two transports:
 /// when the resolution found a `claude` new enough for the protocol this
@@ -4857,6 +4868,19 @@ impl TerminalShellEvidence {
     }
 }
 
+/// The project half of the Open list's facts, kept between frames. Those facts
+/// are pushed on every frame, and `current_catalog_project` canonicalizes any
+/// worktree path that is not equal to the working directory, which is
+/// filesystem work. The memo is keyed on the working directory and on the
+/// catalog's shape (each project's id, `is_git` and worktree paths), which are
+/// all read without I/O, so the lookup runs only when one of them changes.
+struct OpenListProjectMemo {
+    working_directory: PathBuf,
+    catalog: Vec<(String, bool, Vec<PathBuf>)>,
+    is_git: bool,
+    has_project: bool,
+}
+
 struct SirioWorkspace {
     titlebar: Entity<Titlebar>,
     sidebar: Entity<Sidebar>,
@@ -4870,6 +4894,9 @@ struct SirioWorkspace {
     outline: Entity<sirio_ui::outline::Outline>,
     sidebar_visible: bool,
     right_panel_visible: bool,
+    /// The project facts the Open list reads on every frame; see
+    /// `OpenListProjectMemo`. `None` until the first frame asks.
+    open_list_project_memo: std::cell::RefCell<Option<OpenListProjectMemo>>,
     /// Preferred width, not the drawn width: `panel_layout::resolve_panel_widths`
     /// narrows both of these to what the viewport can give, and the narrowed
     /// value is deliberately never written back here.
@@ -6042,6 +6069,7 @@ impl SirioWorkspace {
             outline,
             sidebar_visible: true,
             right_panel_visible: true,
+            open_list_project_memo: std::cell::RefCell::new(None),
             sidebar_width,
             right_panel_width,
             dragging_panel: None,
@@ -16705,6 +16733,9 @@ impl SirioWorkspace {
     /// through. Terminal and Chat are moved to the Secondary pane by
     /// `open_in_pane`; Browser, Changes, Open File and Project Settings live
     /// there by their home half; Other agents opens the Settings screen.
+    /// A Changes or Project Settings row that is disabled in the facts is
+    /// refused here as well: the action was queued under the facts of its
+    /// click, and they may have changed before the drain runs.
     fn open_surface(
         &mut self,
         surface: sirio_ui::right_panel::OpenSurface,
@@ -16712,6 +16743,19 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) {
         use sirio_ui::right_panel::OpenSurface;
+        let facts = self.open_list_facts();
+        let refused = match surface {
+            OpenSurface::Changes => facts.changes_disabled.is_some(),
+            OpenSurface::ProjectSettings => facts.project_settings_disabled.is_some(),
+            OpenSurface::Terminal
+            | OpenSurface::Chat(_)
+            | OpenSurface::OtherAgents
+            | OpenSurface::Browser
+            | OpenSurface::OpenFile => false,
+        };
+        if refused {
+            return;
+        }
         match surface {
             OpenSurface::Terminal => self.handle_launcher_action(
                 LauncherAction::NewTerminal(PaneRole::Secondary),
@@ -16782,27 +16826,73 @@ impl SirioWorkspace {
     fn chat_agents(&self) -> Vec<(&'static str, &'static str)> {
         AGENT_CATALOG
             .iter()
-            .filter(|adapter| agent_command_for(&self.launch_source_for(adapter.id())).is_some())
+            .filter(|adapter| has_agent_command(&self.launch_source_for(adapter.id())))
             .map(|adapter| (adapter.id(), adapter.display_name()))
             .collect()
     }
 
     /// What the right panel's Open list cannot know (spec 2026-10-15 §2),
-    /// with the reasons the launcher tiles used to give.
+    /// with the reasons the launcher tiles used to give. It is pushed on every
+    /// frame, so it does no filesystem work; see `open_list_project_facts`.
     fn open_list_facts(&self) -> sirio_ui::right_panel::OpenListFacts {
-        let project = self.current_catalog_project();
+        let (is_git, has_project) = self.open_list_project_facts();
         sirio_ui::right_panel::OpenListFacts {
             agents: self
                 .chat_agents()
                 .into_iter()
                 .map(|(id, name)| (id, name.into()))
                 .collect(),
-            changes_disabled: (!project.is_some_and(|project| project.is_git))
-                .then(|| "This worktree is not a git repository".into()),
-            project_settings_disabled: project
-                .is_none()
+            changes_disabled: (!is_git).then(|| "This worktree is not a git repository".into()),
+            project_settings_disabled: (!has_project)
                 .then(|| "This worktree belongs to no project".into()),
         }
+    }
+
+    /// Whether the working directory's catalog project is a git repository,
+    /// and whether it belongs to a project at all. `current_catalog_project`
+    /// canonicalizes paths, so the answer is memoized in
+    /// `open_list_project_memo` and recomputed only when the working directory
+    /// or the catalog's shape changes.
+    fn open_list_project_facts(&self) -> (bool, bool) {
+        let catalog: Vec<(String, bool, Vec<PathBuf>)> = self
+            .project_catalog
+            .projects()
+            .iter()
+            .map(|project| {
+                (
+                    project.id.clone(),
+                    project.is_git,
+                    project
+                        .worktrees
+                        .iter()
+                        .map(|worktree| worktree.path.clone())
+                        .collect(),
+                )
+            })
+            .collect();
+        let memoized = self
+            .open_list_project_memo
+            .borrow()
+            .as_ref()
+            .filter(|memo| {
+                memo.working_directory == self.working_directory && memo.catalog == catalog
+            })
+            .map(|memo| (memo.is_git, memo.has_project));
+        if let Some(facts) = memoized {
+            return facts;
+        }
+        let project = self.current_catalog_project();
+        let facts = (
+            project.is_some_and(|project| project.is_git),
+            project.is_some(),
+        );
+        *self.open_list_project_memo.borrow_mut() = Some(OpenListProjectMemo {
+            working_directory: self.working_directory.clone(),
+            catalog,
+            is_git: facts.0,
+            has_project: facts.1,
+        });
+        facts
     }
 
     /// The empty-state agent picker, drawn under the Chat tile of `target`'s
@@ -42373,6 +42463,11 @@ done
                 .max_by_key(|tab| tab.id)
                 .expect("a tab");
             assert_eq!(opened.kind, TabKind::AgentChat);
+            assert_eq!(
+                opened.agent_id.as_deref(),
+                Some("codex"),
+                "the picked row's agent is the chat's identity"
+            );
             assert_eq!(opened.pane, PaneRole::Secondary);
             assert_eq!(workspace.center_split.active(PaneRole::Primary), Some(0));
             assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
