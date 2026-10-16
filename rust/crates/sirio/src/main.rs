@@ -4644,13 +4644,13 @@ struct WorktreeContext {
 enum LauncherAction {
     /// Opens in the named half (spec 2026-09-24 §5).
     NewTerminal(PaneRole),
-    /// Opens in the named half (spec 2026-09-24 §5).
-    NewChat(PaneRole),
+    /// Opens the agent picker under the Primary launcher's Chat tile
+    /// (spec 2026-10-15 §1: the picker is Primary-only).
+    NewChat,
     NewBrowser,
     Changes,
     OpenFile,
     ProjectSettings,
-    HidePane,
 }
 
 /// Resolves the labels shown by the running shell from its selected checkout,
@@ -5036,8 +5036,8 @@ struct SirioWorkspace {
     overflow_menu_open: bool,
     tab_menu_open: bool,
     tab_menu_tab: Option<usize>,
-    /// Which half's empty-state agent picker is expanded, if any.
-    empty_chat_picker_open: Option<PaneRole>,
+    /// Whether the Primary launcher's agent picker is expanded.
+    empty_chat_picker_open: bool,
     tab_rename: Option<TabRename>,
     pending_title_prompt: Option<PendingTitlePrompt>,
     /// Blink state of the "Set Title" modal field's insertion caret, and
@@ -6144,7 +6144,7 @@ impl SirioWorkspace {
             overflow_menu_open: false,
             tab_menu_open: false,
             tab_menu_tab: None,
-            empty_chat_picker_open: None,
+            empty_chat_picker_open: false,
             tab_rename: None,
             pending_title_prompt: None,
             modal_field_blink: sirio_ui::caret::Blink::new(),
@@ -7448,9 +7448,19 @@ impl SirioWorkspace {
         cx.notify();
     }
 
-    /// #324: Ctrl+Shift+B, hiding or showing the Secondary pane.
-    fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) {
+    /// #324: Ctrl+Shift+B, hiding or showing the Secondary pane. Returns
+    /// whether it acted: with no worktree or no Secondary tab there is no
+    /// pane to hide or show (spec 2026-10-15 §1), and the caller lets the
+    /// key through rather than flipping a flag that would swallow the next
+    /// open.
+    fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.has_current_worktree()
+            || !self.tabs.iter().any(|tab| tab.pane == PaneRole::Secondary)
+        {
+            return false;
+        }
         self.set_secondary_pane_hidden(!self.secondary_pane_hidden, cx);
+        true
     }
 
     /// Spec 2026-09-24 §5: Ctrl+Shift+M moves the focused half's shown tab
@@ -7482,9 +7492,9 @@ impl SirioWorkspace {
 
     /// Hides or shows the Secondary pane, *keeping* its tabs, and persists
     /// the choice for the current worktree. Every gesture that closes the
-    /// pane lands here — Ctrl+Shift+B, the strip's `×`, the launcher's
-    /// Hide Pane tile — so they cannot drift apart. Without a worktree
-    /// there is nothing to own the flag, and nothing happens.
+    /// pane lands here — Ctrl+Shift+B and the strip's `×` — so they cannot
+    /// drift apart. Without a worktree there is nothing to own the flag, and
+    /// nothing happens.
     fn set_secondary_pane_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
         if !self.has_current_worktree() {
             return;
@@ -16624,75 +16634,6 @@ impl SirioWorkspace {
         }
     }
 
-    /// The Secondary pane's launcher: every surface that lives in that half —
-    /// plus a terminal and a chat, which may — then the pane's own close.
-    /// Changes needs git and Project Settings a project; each says why when it
-    /// cannot be used.
-    fn secondary_launcher_items(&self) -> Vec<LauncherItem<LauncherAction>> {
-        let project = self.current_catalog_project();
-        vec![
-            LauncherItem {
-                id: "launcher-terminal",
-                action: LauncherAction::NewTerminal(PaneRole::Secondary),
-                icon: Icon::SquareTerminal,
-                label: "Terminal".into(),
-                shortcut: None,
-                disabled: None,
-            },
-            LauncherItem {
-                id: "launcher-chat",
-                action: LauncherAction::NewChat(PaneRole::Secondary),
-                icon: Icon::MessageSquare,
-                label: "Chat".into(),
-                shortcut: None,
-                disabled: None,
-            },
-            LauncherItem {
-                id: "launcher-browser",
-                action: LauncherAction::NewBrowser,
-                icon: Icon::Browser,
-                label: "Browser".into(),
-                shortcut: None,
-                disabled: None,
-            },
-            LauncherItem {
-                id: "launcher-changes",
-                action: LauncherAction::Changes,
-                icon: Icon::Diff,
-                label: "Changes".into(),
-                shortcut: None,
-                disabled: (!project.is_some_and(|project| project.is_git))
-                    .then(|| "This worktree is not a git repository".into()),
-            },
-            LauncherItem {
-                id: "launcher-open-file",
-                action: LauncherAction::OpenFile,
-                icon: Icon::File,
-                label: "Open File".into(),
-                shortcut: None,
-                disabled: None,
-            },
-            LauncherItem {
-                id: "launcher-project-settings",
-                action: LauncherAction::ProjectSettings,
-                icon: Icon::Settings,
-                label: "Project Settings".into(),
-                shortcut: None,
-                disabled: project
-                    .is_none()
-                    .then(|| "This worktree belongs to no project".into()),
-            },
-            LauncherItem {
-                id: "launcher-hide-pane",
-                action: LauncherAction::HidePane,
-                icon: Icon::Close,
-                label: "Hide Pane".into(),
-                shortcut: None,
-                disabled: None,
-            },
-        ]
-    }
-
     /// The Primary pane's launcher. Chat opens the agent picker drawn under
     /// the row rather than guessing an agent.
     fn primary_launcher_items() -> Vec<LauncherItem<LauncherAction>> {
@@ -16707,7 +16648,7 @@ impl SirioWorkspace {
             },
             LauncherItem {
                 id: "empty-worktree-new-chat",
-                action: LauncherAction::NewChat(PaneRole::Primary),
+                action: LauncherAction::NewChat,
                 icon: Icon::MessageSquare,
                 label: "Chat".into(),
                 shortcut: None,
@@ -16734,11 +16675,8 @@ impl SirioWorkspace {
                 window,
                 cx,
             ),
-            LauncherAction::NewChat(pane) => {
-                self.empty_chat_picker_open = match self.empty_chat_picker_open {
-                    Some(open) if open == pane => None,
-                    _ => Some(pane),
-                };
+            LauncherAction::NewChat => {
+                self.empty_chat_picker_open = !self.empty_chat_picker_open;
                 cx.notify();
             }
             LauncherAction::NewBrowser => self.open_action(NewTabAction::NewBrowser, window, cx),
@@ -16752,7 +16690,6 @@ impl SirioWorkspace {
                     self.add_project_settings_tab(&project_id, cx);
                 }
             }
-            LauncherAction::HidePane => self.set_secondary_pane_hidden(true, cx),
         }
     }
 
@@ -16810,9 +16747,9 @@ impl SirioWorkspace {
         }
     }
 
-    /// Spec 2026-09-24 §5, "Secondary launcher": opens a tab through its
-    /// ordinary creation path — which puts it in its home half — then moves
-    /// it to `pane` in the same update, before any frame is drawn, so a
+    /// Spec 2026-09-24 §5: opens a tab through its ordinary creation path —
+    /// which puts it in its home half — then moves it to `pane` in the same
+    /// update, before any frame is drawn, so a
     /// terminal's PTY is sized once, where it will stay. `move_tab_to_pane`
     /// stays the only writer of a tab's half. A creation that opened nothing
     /// (a chat refused with a toast) moves nothing; `pane` being the home
@@ -16922,22 +16859,13 @@ impl SirioWorkspace {
     }
 
     /// The empty-state agent picker, drawn under the Chat tile of `target`'s
-    /// launcher while that half's picker is open. Both halves share it; the
-    /// right one's selectors carry a `secondary-` prefix so the two can
-    /// never be confused. Picking an agent opens its chat in `target`.
-    fn render_empty_chat_picker(
-        &self,
-        target: PaneRole,
-        theme: Theme,
-        entity: Entity<Self>,
-    ) -> Option<AnyElement> {
-        if self.empty_chat_picker_open != Some(target) {
+    /// launcher while the picker is open. Picking an agent opens its chat in
+    /// the Primary pane (spec 2026-10-15 §1: the picker is Primary-only).
+    fn render_empty_chat_picker(&self, theme: Theme, entity: Entity<Self>) -> Option<AnyElement> {
+        if !self.empty_chat_picker_open {
             return None;
         }
-        let prefix: &'static str = match target {
-            PaneRole::Primary => "empty-chat-",
-            PaneRole::Secondary => "secondary-empty-chat-",
-        };
+        let prefix: &'static str = "empty-chat-";
         // Only adapters with a concrete command are offered; see `chat_agents`.
         let available = self.chat_agents();
         let dismiss_entity = entity.clone();
@@ -16958,7 +16886,7 @@ impl SirioWorkspace {
             .text_size(theme.typography.footnote)
             .on_mouse_down_out(move |_, _, cx| {
                 dismiss_entity.update(cx, |workspace, cx| {
-                    workspace.empty_chat_picker_open = None;
+                    workspace.empty_chat_picker_open = false;
                     cx.notify();
                 });
             });
@@ -16978,7 +16906,7 @@ impl SirioWorkspace {
                     .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, _, cx| {
                         settings_entity.update(cx, |workspace, cx| {
-                            workspace.empty_chat_picker_open = None;
+                            workspace.empty_chat_picker_open = false;
                             workspace.open_settings(Some(SettingsCategory::Agents), cx);
                         });
                     })
@@ -17007,9 +16935,9 @@ impl SirioWorkspace {
                         .hover(|style| style.bg(theme.ely.hover))
                         .on_click(move |_, window, cx| {
                             row_entity.update(cx, |workspace, cx| {
-                                workspace.empty_chat_picker_open = None;
+                                workspace.empty_chat_picker_open = false;
                                 workspace.open_in_pane(
-                                    target,
+                                    PaneRole::Primary,
                                     |workspace, window, cx| {
                                         workspace.open_chat_agent(id, window, cx)
                                     },
@@ -17034,7 +16962,7 @@ impl SirioWorkspace {
                     .hover(|style| style.bg(theme.ely.hover))
                     .on_click(move |_, _, cx| {
                         other_entity.update(cx, |workspace, cx| {
-                            workspace.empty_chat_picker_open = None;
+                            workspace.empty_chat_picker_open = false;
                             workspace.open_settings(Some(SettingsCategory::Agents), cx);
                         });
                     })
@@ -18756,9 +18684,10 @@ impl SirioWorkspace {
         ))
     }
 
-    /// Renders the active tab surface of one centre pane, or that pane's
-    /// empty state: a launcher when the worktree has nothing open in it, a
-    /// placeholder when there is no worktree at all.
+    /// Renders the active tab surface of one centre pane, or the Primary
+    /// pane's empty state: a launcher when the worktree has nothing open in
+    /// it. The Secondary pane is not drawn while it is empty (spec
+    /// 2026-10-15 §1), so it never reaches the empty state.
     fn render_group_surfaces(
         &self,
         role: PaneRole,
@@ -18766,9 +18695,10 @@ impl SirioWorkspace {
         entity: Entity<Self>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // With no worktree selected the Secondary half shows its placeholder,
-        // never a tab left over from the worktree that was deselected --
-        // the Primary half gets the same treatment one level up (F-TERM-11).
+        // With no worktree selected no tab is shown, never one left over from
+        // the worktree that was deselected -- the Primary half gets the same
+        // treatment one level up (F-TERM-11). The Secondary half is not drawn
+        // at all without a worktree (spec 2026-10-15 §1).
         let shows_tabs = role == PaneRole::Primary || self.has_current_worktree();
         let surface = self
             .center_split
@@ -18792,49 +18722,9 @@ impl SirioWorkspace {
                     .into_any_element()
             })
             .unwrap_or_else(|| {
-                // No tab to show: the Secondary launcher and its
-                // no-worktree placeholder are drawn just below, the
-                // Primary launcher further below.
-                if role == PaneRole::Secondary && !self.has_current_worktree() {
-                    div()
-                        .id("secondary-no-worktree")
-                        .debug_selector(|| "secondary-no-worktree".to_owned())
-                        .flex_1()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(theme.ely.fg_subtle)
-                        .child("No worktree")
-                        .into_any_element()
-                } else if role == PaneRole::Secondary {
-                    let launcher_entity = entity.clone();
-                    div()
-                        .id("secondary-empty")
-                        .flex_1()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .p(theme.spacing.card_gap)
-                        .child(pane_launcher(
-                            "secondary-launcher",
-                            &self.secondary_launcher_items(),
-                            theme,
-                            move |action, window, cx| {
-                                launcher_entity.update(cx, |workspace, cx| {
-                                    workspace.handle_launcher_action(action, window, cx)
-                                });
-                            },
-                        ))
-                        .children(self.render_empty_chat_picker(
-                            PaneRole::Secondary,
-                            theme,
-                            entity.clone(),
-                        ))
-                        .into_any_element()
-                } else if role == PaneRole::Primary && self.has_current_worktree() {
+                // No tab to show: the Primary launcher below. An empty
+                // Secondary half is never drawn (spec 2026-10-15 §1).
+                if role == PaneRole::Primary && self.has_current_worktree() {
                     let launcher_entity = entity.clone();
                     let empty = div()
                         .id("empty-worktree")
@@ -18857,11 +18747,7 @@ impl SirioWorkspace {
                                 });
                             },
                         ))
-                        .children(self.render_empty_chat_picker(
-                            PaneRole::Primary,
-                            theme,
-                            entity.clone(),
-                        ));
+                        .children(self.render_empty_chat_picker(theme, entity.clone()));
                     empty.into_any_element()
                 } else if role == PaneRole::Primary
                     && let Some(prompt) = self.empty_pane_prompts.get(&0)
@@ -20122,15 +20008,14 @@ impl SirioWorkspace {
         )
     }
 
-    /// Whether the Secondary half is drawn: always, unless the user hid it
-    /// with `ctrl-shift-b` (#323). It no longer depends on holding tabs --
-    /// the pane is part of the layout from the first frame, and an empty one
-    /// shows its launcher.
+    /// Whether the Secondary half is drawn (spec 2026-10-15 §1): only while
+    /// a worktree is selected, the half holds a tab, and the user has not
+    /// hidden it. An empty pane is never drawn — what it used to offer lives
+    /// in the right panel's Open list.
     fn secondary_pane_visible(&self) -> bool {
-        if !self.has_current_worktree() {
-            return true;
-        }
-        !self.secondary_pane_hidden
+        self.has_current_worktree()
+            && !self.secondary_pane_hidden
+            && self.tabs.iter().any(|tab| tab.pane == PaneRole::Secondary)
     }
 
     /// #323: opening any Secondary surface opens the pane, even if it was
@@ -22451,7 +22336,9 @@ impl Render for SirioWorkspace {
                 workspace.toggle_right_panel(cx);
             }))
             .on_action(cx.listener(|workspace, _: &ToggleSecondaryPane, _, cx| {
-                workspace.toggle_secondary_pane(cx);
+                if !workspace.toggle_secondary_pane(cx) {
+                    cx.propagate();
+                }
             }))
             .on_action(cx.listener(Self::handle_move_tab_to_other_pane))
             .on_action(cx.listener(Self::handle_focus_pane_left))
@@ -33715,10 +33602,13 @@ done
     ) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| {
-            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 4);
             workspace.tabs[0].title = "A".into();
             workspace.tabs[1].title = "B".into();
             workspace.tabs[2].title = "C".into();
+            // The right body is drawn only while it holds a tab (spec
+            // 2026-10-15 §1), so the fixture gives it one.
+            workspace.move_tab_to_pane(3, PaneRole::Secondary, None, None, cx);
             workspace.select_tab(1, None, cx);
             workspace
         });
@@ -33766,6 +33656,7 @@ done
                 workspace
                     .tabs
                     .iter()
+                    .filter(|tab| tab.pane == PaneRole::Primary)
                     .map(|tab| tab.title.clone())
                     .collect::<Vec<_>>()
             }),
@@ -34524,11 +34415,14 @@ done
     #[gpui::test]
     fn moving_into_a_hidden_right_half_reveals_it(cx: &mut TestAppContext) {
         cx.new(|cx| {
-            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
-            workspace.set_secondary_pane_hidden(true, cx);
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
+            // Hide a half that holds a tab: an empty half is not drawn
+            // whatever its flag says (spec 2026-10-15 §1).
+            assert!(workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx));
+            assert!(workspace.toggle_secondary_pane(cx));
             assert!(!workspace.secondary_pane_visible());
 
-            assert!(workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx));
+            assert!(workspace.move_tab_to_pane(2, PaneRole::Secondary, None, None, cx));
 
             assert!(workspace.secondary_pane_visible());
             workspace
@@ -34584,7 +34478,7 @@ done
             workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
             assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
 
-            workspace.toggle_secondary_pane(cx);
+            assert!(workspace.toggle_secondary_pane(cx));
             assert!(!workspace.secondary_pane_visible());
             assert_eq!(workspace.center_split.focused(), PaneRole::Primary);
             assert!(
@@ -35846,10 +35740,9 @@ done
         // nothing actually needs.
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| {
-            let mut workspace = palette_test_workspace_with_tab_count(cx, 3);
-            // Measures the Primary pane alone; the Secondary one would halve it.
-            workspace.secondary_pane_hidden = true;
-            workspace
+            // No Secondary tab, so the Primary pane alone is drawn and takes
+            // the whole centre (spec 2026-10-15 §1).
+            palette_test_workspace_with_tab_count(cx, 3)
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.simulate_resize(size(px(1230.0), px(600.0)));
@@ -40339,6 +40232,16 @@ done
         cx.set_global(Theme::dark());
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // The pane is drawn only while it holds a tab (spec 2026-10-15 §1).
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_project_settings_tab("palette-project", cx)
+        });
         cx.run_until_parked();
 
         let center = cx.debug_bounds("shell-center-panel").expect("center panel");
@@ -40349,13 +40252,10 @@ done
              overlapping at most its one-pixel border: secondary={secondary:?}, center={center:?}"
         );
 
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-        workspace.update(&mut cx, |workspace, cx| workspace.toggle_secondary_pane(cx));
+        assert!(
+            workspace.update(&mut cx, |workspace, cx| workspace.toggle_secondary_pane(cx)),
+            "the pane holds a tab, so Ctrl+Shift+B acts"
+        );
         cx.run_until_parked();
         let center = cx.debug_bounds("shell-center-panel").expect("center panel");
         let primary = cx.debug_bounds("pane-primary").expect("primary pane");
@@ -42754,124 +42654,160 @@ done
         );
     }
 
-    /// Spec 2026-09-24 §5: the right launcher's Terminal tile opens a
-    /// terminal in the right half, focused there.
+    /// Spec 2026-10-15 §1 (a): no Secondary tab, no Secondary pane — the
+    /// Primary pane takes the centre to its right edge.
     #[gpui::test]
-    async fn drawn_right_terminal_tile_opens_a_terminal_on_the_right(cx: &mut TestAppContext) {
+    async fn a_worktree_without_secondary_tabs_draws_one_centre_pane(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
+        assert!(cx.debug_bounds("pane-secondary").is_none());
+        assert!(cx.debug_bounds("center-divider").is_none());
+        let center = cx.debug_bounds("shell-center-panel").expect("center panel");
+        let primary = cx.debug_bounds("pane-primary").expect("primary pane");
+        assert!(
+            primary.right() >= center.right() && primary.right() - center.right() <= px(1.0),
+            "primary={primary:?}, center={center:?}"
+        );
+    }
+
+    /// Spec 2026-10-15 §1 (b): closing the last Secondary tab takes the pane
+    /// away and gives focus back to Primary.
+    #[gpui::test]
+    async fn closing_the_last_secondary_tab_removes_the_pane(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
+            workspace
         });
-        let before = workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len());
-
-        let tile = cx
-            .debug_bounds("launcher-terminal")
-            .expect("the tile is drawn");
-        cx.simulate_click(tile.center(), Modifiers::none());
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-
+        assert!(cx.debug_bounds("pane-secondary").is_some());
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let index = workspace.tabs.iter().position(|tab| tab.id == 1).expect("tab 1");
+            workspace.close_tab(index, Some(window), cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-secondary").is_none());
         workspace.read_with(&cx.cx, |workspace, _| {
-            assert_eq!(workspace.tabs.len(), before + 1);
-            let opened = workspace
-                .tabs
-                .iter()
-                .max_by_key(|tab| tab.id)
-                .expect("a tab");
-            assert_eq!(opened.kind, TabKind::Terminal);
-            assert_eq!(opened.pane, PaneRole::Secondary);
-            assert_eq!(
-                workspace.center_split.active(PaneRole::Primary),
-                Some(0),
-                "opening on the right must leave the left half showing A"
-            );
-            assert_eq!(
-                workspace.center_split.active(PaneRole::Secondary),
-                Some(opened.id),
-                "the new terminal is shown on the right"
-            );
-            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert!(!workspace.secondary_pane_visible());
+            assert_eq!(workspace.center_split.focused(), PaneRole::Primary);
         });
     }
 
-    /// Spec 2026-09-24 §5: the right launcher's Chat tile opens the agent
-    /// picker under itself — not the left one's — and the picked chat opens
-    /// on the right.
+    /// Spec 2026-10-15 §1 (c): Ctrl+Shift+B with no Secondary tab neither
+    /// hides nor persists anything, so it cannot swallow the next open.
     #[gpui::test]
-    async fn drawn_right_chat_tile_opens_its_own_picker_and_a_chat_on_the_right(
+    async fn ctrl_shift_b_without_secondary_tabs_changes_nothing(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        cx.simulate_keystrokes("ctrl-shift-b");
+        cx.run_until_parked();
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert!(!workspace.secondary_pane_hidden);
+            assert!(
+                !workspace.session.secondary_pane_hidden_for(&workspace.working_directory),
+                "nothing is persisted"
+            );
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_project_settings_tab("palette-project", cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-secondary").is_some(), "the next open shows the pane");
+    }
+
+    /// Review Focus 2 (d): hidden with tabs, then emptied — opening from the
+    /// Open list must still show the pane.
+    #[gpui::test]
+    async fn a_hide_left_on_an_emptied_pane_does_not_swallow_the_next_open(
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
+            workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
+            workspace.toggle_secondary_pane(cx);
+            workspace
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
         let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
         });
-        // Drain the construction-time launch-source refresh before the
-        // override, as `drawn_selected_worktree_without_tabs_offers_new_chat_picker` does.
-        cx.run_until_parked();
-        workspace.update(&mut cx, |workspace, cx| {
-            workspace.select_tab(0, None, cx);
-            workspace.launch.sources.insert(
-                "codex".into(),
-                sirio_registry::LaunchSource::Builtin {
-                    program: "codex-acp".into(),
-                    args: Vec::new(),
-                },
-            );
-            cx.notify();
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            assert!(workspace.secondary_pane_hidden);
+            let index = workspace.tabs.iter().position(|tab| tab.id == 1).expect("tab 1");
+            workspace.close_tab(index, Some(window), cx);
+            workspace.open_surface(sirio_ui::right_panel::OpenSurface::ProjectSettings, window, cx);
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-secondary").is_some());
+    }
 
-        let tile = cx.debug_bounds("launcher-chat").expect("the tile is drawn");
-        cx.simulate_click(tile.center(), Modifiers::none());
+    /// Review Focus 1 (e): a chat refused at click time creates nothing, so
+    /// no empty Secondary pane appears.
+    #[gpui::test]
+    async fn a_refused_chat_from_the_open_list_leaves_no_secondary_pane(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        assert!(cx.debug_bounds("secondary-empty-chat-agent-menu").is_some());
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        // The construction-time launch-source refresh has drained; forget
+        // what it resolved, so Codex is refused the way a vanished agent is
+        // whatever the machine running the test has on PATH.
+        workspace.update(&mut cx, |workspace, _| workspace.launch.sources.clear());
         assert!(
-            cx.debug_bounds("empty-chat-agent-menu").is_none(),
-            "not the left picker"
+            workspace.read_with(&cx.cx, |workspace, _| {
+                !workspace.chat_agents().iter().any(|(id, _)| *id == "codex")
+            }),
+            "precondition: Codex has no command"
         );
-
-        let agent = cx
-            .debug_bounds("secondary-empty-chat-agent-codex")
-            .expect("the right picker lists Codex");
-        cx.simulate_click(agent.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        workspace.read_with(&cx.cx, |workspace, _| {
-            let opened = workspace
-                .tabs
-                .iter()
-                .max_by_key(|tab| tab.id)
-                .expect("a tab");
-            assert_eq!(opened.kind, TabKind::AgentChat);
-            assert_eq!(opened.pane, PaneRole::Secondary);
-            assert_eq!(
-                workspace.center_split.active(PaneRole::Primary),
-                Some(0),
-                "opening on the right must leave the left half showing A"
-            );
-            assert_eq!(
-                workspace.center_split.active(PaneRole::Secondary),
-                Some(opened.id),
-                "the new chat is shown on the right"
-            );
-            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
-            assert_eq!(workspace.empty_chat_picker_open, None, "the picker closes");
+        let before = workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len());
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_surface(sirio_ui::right_panel::OpenSurface::Chat("codex"), window, cx);
         });
+        cx.run_until_parked();
+        assert_eq!(workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len()), before);
+        assert!(cx.debug_bounds("pane-secondary").is_none());
+    }
+
+    /// Review Focus 5 (f): with the right panel hidden the Open list is out
+    /// of reach, and the `+` menu's Changes still opens on the right.
+    #[gpui::test]
+    async fn changes_from_the_new_tab_menu_shows_the_secondary_pane(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let repo = test_repo("changes-without-right-panel");
+        let window = cx.add_window(move |_window, cx| test_workspace_for_repo(cx, repo, false));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.right_panel_visible = false;
+            workspace.open_action(NewTabAction::NewChanges, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pane-secondary").is_some());
     }
 
     /// The strip's `×` closes the Secondary pane the way Ctrl+Shift+B does:
     /// the pane goes, its tabs stay, and bringing the pane back brings them
-    /// back rather than the launcher.
+    /// back.
     #[gpui::test]
     async fn the_secondary_close_hides_the_pane_and_keeps_its_tabs(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
@@ -42884,15 +42820,10 @@ done
                 .flatten()
                 .expect("workspace root")
         });
-        let project_settings = cx
-            .debug_bounds("launcher-project-settings")
-            .expect("the launcher offers Project Settings");
-        cx.simulate_click(project_settings.center(), Modifiers::none());
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.add_project_settings_tab("palette-project", cx)
+        });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("secondary-launcher").is_none(),
-            "the new settings tab replaces the launcher"
-        );
 
         let close = cx
             .debug_bounds("secondary-pane-close")
@@ -42915,45 +42846,15 @@ done
             );
         });
 
-        workspace.update(&mut cx, |workspace, cx| workspace.toggle_secondary_pane(cx));
+        assert!(
+            workspace.update(&mut cx, |workspace, cx| workspace.toggle_secondary_pane(cx)),
+            "the pane holds a tab, so Ctrl+Shift+B acts"
+        );
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("pane-secondary").is_some(),
             "Ctrl+Shift+B brings the pane back"
         );
-        assert!(
-            cx.debug_bounds("secondary-launcher").is_none(),
-            "with its settings tab, not the launcher"
-        );
-    }
-
-    /// The launcher's own Hide Pane tile hides the empty pane.
-    #[gpui::test]
-    async fn the_launcher_hide_tile_hides_the_empty_secondary_pane(cx: &mut TestAppContext) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-
-        let tile = cx
-            .debug_bounds("launcher-hide-pane")
-            .expect("the launcher offers Hide Pane");
-        cx.simulate_click(tile.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            cx.debug_bounds("pane-secondary").is_none(),
-            "the tile closes the pane"
-        );
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-        workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.secondary_pane_hidden, "closed is the persisted hide");
-        });
     }
 
     #[gpui::test]
@@ -42971,25 +42872,31 @@ done
                 .flatten()
                 .expect("workspace root")
         });
-        assert!(
-            cx.debug_bounds("launcher-browser").is_some(),
-            "the Secondary launcher is drawn"
-        );
-
+        // The palette opens from a terminal's focus, so it is opened before
+        // the worktree is emptied.
         open_palette_for_test(&mut cx, &workspace);
         // Filter every row away: a palette row is itself a button, and one
-        // that happened to lie over the tile — "New Browser Tab" does at
-        // this size — would open a Browser through the palette and hide the
-        // very leak this test is for. With no row left, a Browser tab can
-        // only come from the click reaching the launcher.
+        // that happened to lie over the tile would open a tab through the
+        // palette and hide the very leak this test is for. With no row left,
+        // a tab can only come from the click reaching the launcher.
         cx.simulate_input("no command matches this");
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("command-palette-empty").is_some(),
             "the palette shows no row to click"
         );
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs.clear();
+            workspace.rebuild_center_split();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("empty-worktree-new-terminal").is_some(),
+            "the Primary launcher is drawn beneath the palette"
+        );
         let launcher = cx
-            .debug_bounds("launcher-browser")
+            .debug_bounds("empty-worktree-new-terminal")
             .expect("the launcher is still drawn under the palette");
         let palette = cx
             .debug_bounds("command-palette")
@@ -43007,54 +42914,17 @@ done
 
         workspace.read_with(&cx.cx, |workspace, _| {
             assert!(
-                !workspace.tabs.iter().any(|tab| tab.kind == TabKind::Browser),
-                "clicking the palette must not open a Browser tab"
+                workspace.tabs.is_empty(),
+                "clicking the palette must not reach the Terminal tile"
             );
         });
     }
 
-    /// Changes needs a git repository; outside one the tile says so instead
-    /// of opening a surface that can only show an error.
+    /// With no worktree selected no Secondary pane is drawn, and a Secondary
+    /// tab left over from the deselected worktree must not stay on screen,
+    /// for the same reason F-TERM-11 covers the Primary one.
     #[gpui::test]
-    async fn the_changes_tile_is_disabled_outside_git(cx: &mut TestAppContext) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| {
-            let mut workspace = palette_test_workspace(cx);
-            let mut projects = workspace.project_catalog.projects().to_vec();
-            projects[0].is_git = false;
-            workspace.project_catalog = ProjectCatalog::from_projects(projects);
-            workspace
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("workspace root")
-        });
-
-        let changes = cx
-            .debug_bounds("launcher-changes")
-            .expect("the tile is still drawn");
-        cx.simulate_click(changes.center(), Modifiers::none());
-        cx.run_until_parked();
-
-        assert!(
-            workspace.read_with(&cx.cx, |workspace, _| {
-                workspace.tabs.iter().all(|tab| tab.kind != TabKind::Diff)
-            }),
-            "a disabled Changes tile opens nothing"
-        );
-    }
-
-    /// With no worktree selected the right pane is still drawn, and says so.
-    /// A Secondary tab left over from the deselected worktree must not stay
-    /// on screen, for the same reason F-TERM-11 covers the Primary one.
-    #[gpui::test]
-    async fn a_deselected_worktree_leaves_the_secondary_pane_on_its_placeholder(
-        cx: &mut TestAppContext,
-    ) {
+    async fn a_deselected_worktree_draws_no_secondary_pane(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
         let window = cx.add_window(|_window, cx| {
             let mut workspace = palette_test_workspace(cx);
@@ -43081,14 +42951,9 @@ done
         });
         cx.run_until_parked();
 
-        assert!(cx.debug_bounds("pane-secondary").is_some(), "still drawn");
         assert!(
-            cx.debug_bounds("secondary-no-worktree").is_some(),
-            "the right pane says there is no worktree"
-        );
-        assert!(
-            cx.debug_bounds("secondary-launcher").is_none(),
-            "nothing can be launched without a worktree"
+            cx.debug_bounds("pane-secondary").is_none(),
+            "no worktree, no Secondary pane"
         );
         assert!(
             cx.debug_bounds("secondary-pane-close").is_none(),
@@ -43979,19 +43844,19 @@ browser  profile  "
                 !workspace.has_current_worktree(),
                 "the fixture must have no worktree selected"
             );
-            // Hidden in the deselected worktree: the no-worktree state
-            // must still show the pane.
+            // Hidden in the deselected worktree: toggling must leave the
+            // flag alone, and no pane is drawn.
             workspace.secondary_pane_hidden = true;
             let before = workspace.secondary_pane_hidden;
-            workspace.toggle_secondary_pane(cx);
+            assert!(
+                !workspace.toggle_secondary_pane(cx),
+                "no worktree, nothing to toggle"
+            );
             assert_eq!(
                 workspace.secondary_pane_hidden, before,
                 "toggling with no worktree must not flip the flag"
             );
-            assert!(
-                workspace.secondary_pane_visible(),
-                "the pane shows by default with no worktree selected"
-            );
+            assert!(!workspace.secondary_pane_visible(), "no worktree, no pane");
             workspace
         });
     }
