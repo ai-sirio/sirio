@@ -57,10 +57,12 @@ Consequences:
   `move_tab_to_pane` / `open_secondary_pane` clear the hidden flag, and the
   new tab satisfies the predicate.
 - **Ctrl+Shift+B** (`ToggleSecondaryPane`) hides or shows a Secondary pane
-  that holds tabs. With no Secondary tabs it does nothing and calls
-  `cx.propagate()` (#227: a matched binding otherwise eats the key). It must
-  not set `secondary_pane_hidden = true` invisibly, which would swallow the
-  next open.
+  that holds tabs. With no Secondary tabs it does nothing, and it still
+  consumes the chord: `ctrl-shift-` chords are Sirio's even inside a
+  terminal (`YIELDS_TO_TERMINAL`), and with no Secondary tab being the
+  common state, propagating would send Ctrl+Shift+B to a focused terminal's
+  PTY. It must not set `secondary_pane_hidden = true` invisibly, which would
+  swallow the next open.
 - **The strip's `×`** keeps hiding the pane with its tabs, as today.
 - **No worktree.** The pane is not drawn. The `secondary-no-worktree`
   placeholder goes.
