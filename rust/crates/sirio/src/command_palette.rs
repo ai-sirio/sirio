@@ -625,8 +625,8 @@ mod tests {
 
     /// A chord is not discoverable on its own. Ctrl+Shift+B was bound but
     /// never listed, so a Secondary pane hidden by the strip's `×` had no
-    /// visible way back: the `×` and the launcher's Hide Pane go away with
-    /// the pane they hide.
+    /// visible way back. The chord is listed here, so the palette is that
+    /// way back.
     #[test]
     fn every_bound_window_command_is_listed_with_its_chord() {
         let commands = entries(&context());

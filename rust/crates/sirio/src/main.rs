@@ -7449,10 +7449,11 @@ impl SirioWorkspace {
     }
 
     /// #324: Ctrl+Shift+B, hiding or showing the Secondary pane. Returns
-    /// whether it acted: with no worktree or no Secondary tab there is no
-    /// pane to hide or show (spec 2026-10-15 §1), and the caller lets the
-    /// key through rather than flipping a flag that would swallow the next
-    /// open.
+    /// whether it acted. With no worktree or no Secondary tab there is no
+    /// pane to hide or show: it does nothing, the flag never flips (so the
+    /// next open is not swallowed), and the listener still consumes the
+    /// chord rather than passing it to a focused terminal (spec 2026-10-15
+    /// §1, amended).
     fn toggle_secondary_pane(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.has_current_worktree()
             || !self.tabs.iter().any(|tab| tab.pane == PaneRole::Secondary)
@@ -16657,9 +16658,10 @@ impl SirioWorkspace {
         ]
     }
 
-    /// One door for every launcher tile, in either pane. Each arm is the
-    /// path the same surface already opens through elsewhere — the `+`
-    /// menu, `ctrl-o`, the sidebar — never a second implementation.
+    /// One door for the Primary launcher's tiles and for the Open list's rows
+    /// that open the same surfaces. Each arm is the path the same surface
+    /// already opens through elsewhere — the `+` menu, `ctrl-o`, the sidebar
+    /// — never a second implementation.
     fn handle_launcher_action(
         &mut self,
         action: LauncherAction,
@@ -19987,8 +19989,9 @@ impl SirioWorkspace {
         );
     }
 
-    /// How wide one half of the center is. The Secondary half is drawn unless
-    /// hidden, so a Primary-only workspace still splits the centre.
+    /// How wide one half of the center is. The Secondary half is drawn only
+    /// while it holds a tab and is not hidden (spec 2026-10-15 §1); without
+    /// it the Primary half takes the whole centre and Secondary is 0.
     fn center_pane_width(&self, role: PaneRole, window: &Window, theme: Theme) -> f32 {
         let (primary, secondary) = self.center_pane_widths(window, theme);
         match role {
@@ -22336,9 +22339,9 @@ impl Render for SirioWorkspace {
                 workspace.toggle_right_panel(cx);
             }))
             .on_action(cx.listener(|workspace, _: &ToggleSecondaryPane, _, cx| {
-                if !workspace.toggle_secondary_pane(cx) {
-                    cx.propagate();
-                }
+                // Consumed even when nothing toggles: `ctrl-shift-` chords are
+                // Sirio's inside a terminal too (spec 2026-10-15 §1).
+                workspace.toggle_secondary_pane(cx);
             }))
             .on_action(cx.listener(Self::handle_move_tab_to_other_pane))
             .on_action(cx.listener(Self::handle_focus_pane_left))
@@ -41855,7 +41858,7 @@ done
             let mut workspace = test_workspace_for_repo(cx, repo, false);
             workspace.add_changes_tab(None, cx);
             let first_count = workspace.tabs.len();
-            workspace.toggle_secondary_pane(cx);
+            assert!(workspace.toggle_secondary_pane(cx));
             assert!(
                 !workspace.secondary_pane_visible(),
                 "the regression starts with an existing Changes tab in a closed Secondary"
@@ -41983,7 +41986,7 @@ done
         });
         cx.update(|_, cx| right_panel::PanelView::set(right_panel::PanelView::Diff, cx));
         workspace.update(&mut cx, |workspace, cx| {
-            workspace.toggle_secondary_pane(cx);
+            assert!(workspace.toggle_secondary_pane(cx));
             assert!(
                 !workspace.secondary_pane_visible(),
                 "the regression starts with an existing Changes tab in a closed Secondary"
@@ -42033,7 +42036,7 @@ done
         });
 
         workspace.update(&mut cx, |workspace, cx| {
-            workspace.toggle_secondary_pane(cx);
+            assert!(workspace.toggle_secondary_pane(cx));
             assert!(
                 !workspace.secondary_pane_visible(),
                 "the regression starts with an existing Changes tab in a closed Secondary"
@@ -42182,6 +42185,10 @@ done
                 .map(|tab| tab.title.clone())),
             Some("Codex".to_string()),
             "the new tab carries the picked agent's identity"
+        );
+        assert!(
+            !workspace.read_with(&cx.cx, |workspace, _| workspace.empty_chat_picker_open),
+            "picking an agent closes the picker"
         );
     }
 
@@ -42396,6 +42403,11 @@ done
             );
             assert_eq!(opened.pane, PaneRole::Secondary);
             assert_eq!(workspace.center_split.active(PaneRole::Primary), Some(0));
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Secondary),
+                Some(opened.id),
+                "the new chat is shown on the right"
+            );
             assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
         });
     }
@@ -42737,7 +42749,7 @@ done
         let window = cx.add_window(|_window, cx| {
             let mut workspace = palette_test_workspace_with_tab_count(cx, 2);
             workspace.move_tab_to_pane(1, PaneRole::Secondary, None, None, cx);
-            workspace.toggle_secondary_pane(cx);
+            assert!(workspace.toggle_secondary_pane(cx));
             workspace
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -43812,7 +43824,7 @@ browser  profile  "
             workspace.rebuild_center_split();
             let browser_id = workspace.tabs[1].id;
             workspace.select_tab(browser_id, None, cx);
-            workspace.toggle_secondary_pane(cx);
+            assert!(workspace.toggle_secondary_pane(cx));
             assert_eq!(
                 workspace.active_tab, 0,
                 "hiding must leave the active tab on the Primary pane"
