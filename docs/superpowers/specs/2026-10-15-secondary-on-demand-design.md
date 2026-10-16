@@ -1,7 +1,7 @@
 # The Secondary pane on demand, and the Open list
 
 **Date:** 2026-10-15
-**Status:** proposed
+**Status:** implemented
 **Supersedes:** #323's "the pane is part of the layout from the first frame,
 and an empty one shows its launcher", and the "Secondary launcher" of
 `2026-09-24-movable-conversation-tabs-design.md` §5. The rest of that spec
@@ -50,7 +50,7 @@ Consequences:
   had hidden it. The existing rule that a restored *active* Secondary tab
   clears the hidden flag (`main.rs`, the `restored_active_secondary` branch)
   stays.
-- **Last tab closed.** The pane disappears. `sync_center_split` already moves
+- **Last tab closed.** The pane disappears. `rebuild_center_split` already moves
   focus to Primary when the Secondary half has no tabs; nothing new is needed
   there.
 - **Opening a Secondary surface** shows the pane through the existing path:
@@ -178,7 +178,7 @@ pub struct OpenListFacts {
   only when the facts changed, so it cannot cause a render loop.
 
 The agent list is computed by the same filter the picker uses today
-(`AGENT_CATALOG` filtered by `agent_command_for(&launch_source_for(id))`),
+(`AGENT_CATALOG` filtered by `has_agent_command` — the truth table of `agent_command_for(..).is_some()`, without its PATH walk),
 moved into one function both callers share.
 
 ### In the host
