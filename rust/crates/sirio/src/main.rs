@@ -3539,10 +3539,15 @@ fn agent_command_for(source: &sirio_registry::LaunchSource) -> Option<AgentComma
 /// refuses a Builtin, so the gate needs only the variant. That makes it safe in
 /// a render path, which runs on every frame.
 fn has_agent_command(source: &sirio_registry::LaunchSource) -> bool {
-    matches!(
-        source,
-        sirio_registry::LaunchSource::Builtin { .. } | sirio_registry::LaunchSource::Installed(_)
-    )
+    // Exhaustive on purpose, like `agent_command_for`: a new variant must be
+    // decided here as well, not fall through a wildcard.
+    match source {
+        sirio_registry::LaunchSource::Builtin { .. } | sirio_registry::LaunchSource::Installed(_) => {
+            true
+        }
+        sirio_registry::LaunchSource::Installable { .. }
+        | sirio_registry::LaunchSource::Unavailable(_) => false,
+    }
 }
 
 /// The [`LaunchSpec`] a resolved adapter launches, or `None` when there is
@@ -4879,6 +4884,29 @@ struct OpenListProjectMemo {
     catalog: Vec<(String, bool, Vec<PathBuf>)>,
     is_git: bool,
     has_project: bool,
+}
+
+impl OpenListProjectMemo {
+    /// Whether this memo was computed for `working_directory` and a catalog of
+    /// the same shape. It compares the borrowed catalog in place, so a hit
+    /// allocates nothing.
+    fn describes(&self, working_directory: &Path, projects: &[session::CatalogProject]) -> bool {
+        self.working_directory.as_path() == working_directory
+            && self.catalog.len() == projects.len()
+            && self
+                .catalog
+                .iter()
+                .zip(projects)
+                .all(|((id, is_git, paths), project)| {
+                    *id == project.id
+                        && *is_git == project.is_git
+                        && paths.len() == project.worktrees.len()
+                        && paths
+                            .iter()
+                            .zip(&project.worktrees)
+                            .all(|(path, worktree)| *path == worktree.path)
+                })
+    }
 }
 
 struct SirioWorkspace {
@@ -16854,9 +16882,23 @@ impl SirioWorkspace {
     /// `open_list_project_memo` and recomputed only when the working directory
     /// or the catalog's shape changes.
     fn open_list_project_facts(&self) -> (bool, bool) {
-        let catalog: Vec<(String, bool, Vec<PathBuf>)> = self
-            .project_catalog
-            .projects()
+        let projects = self.project_catalog.projects();
+        let memoized = self
+            .open_list_project_memo
+            .borrow()
+            .as_ref()
+            .filter(|memo| memo.describes(&self.working_directory, projects))
+            .map(|memo| (memo.is_git, memo.has_project));
+        if let Some(facts) = memoized {
+            return facts;
+        }
+        let project = self.current_catalog_project();
+        let facts = (
+            project.is_some_and(|project| project.is_git),
+            project.is_some(),
+        );
+        // A miss is the only place the key is copied out of the catalog.
+        let catalog = projects
             .iter()
             .map(|project| {
                 (
@@ -16870,22 +16912,6 @@ impl SirioWorkspace {
                 )
             })
             .collect();
-        let memoized = self
-            .open_list_project_memo
-            .borrow()
-            .as_ref()
-            .filter(|memo| {
-                memo.working_directory == self.working_directory && memo.catalog == catalog
-            })
-            .map(|memo| (memo.is_git, memo.has_project));
-        if let Some(facts) = memoized {
-            return facts;
-        }
-        let project = self.current_catalog_project();
-        let facts = (
-            project.is_some_and(|project| project.is_git),
-            project.is_some(),
-        );
         *self.open_list_project_memo.borrow_mut() = Some(OpenListProjectMemo {
             working_directory: self.working_directory.clone(),
             catalog,
@@ -42509,6 +42535,222 @@ done
                 workspace.tabs.iter().all(|tab| tab.kind != TabKind::Diff)
             }),
             "a disabled Changes row opens nothing"
+        );
+    }
+
+    /// Opens the right panel's Open view through its rail button.
+    fn open_the_open_list(cx: &mut VisualTestContext) {
+        let open = cx
+            .debug_bounds("right-panel-tab-open")
+            .expect("the rail offers Open");
+        cx.simulate_click(open.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// Clicks one row of the Open list and lets its action reach the workspace.
+    fn click_open_list_row(cx: &mut VisualTestContext, id: &'static str) {
+        let row = cx
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} is drawn"));
+        cx.simulate_click(row.center(), Modifiers::none());
+        drain_workspace_actions(cx);
+    }
+
+    /// How many Changes (Diff) tabs the workspace holds.
+    fn diff_tab_count(workspace: &Entity<SirioWorkspace>, cx: &VisualTestContext) -> usize {
+        workspace.read_with(&cx.cx, |workspace, _| {
+            workspace
+                .tabs
+                .iter()
+                .filter(|tab| tab.kind == TabKind::Diff)
+                .count()
+        })
+    }
+
+    /// The Open list's project facts are memoized. A catalog change made after
+    /// a draw must reach them on the next draw: the row a git project drew
+    /// enabled is disabled once that project is not git, and a click on it
+    /// opens no Diff tab.
+    #[gpui::test]
+    async fn drawn_open_list_changes_follows_a_catalog_change_after_a_draw(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        open_the_open_list(&mut cx);
+
+        let before = diff_tab_count(&workspace, &cx);
+        click_open_list_row(&mut cx, "open-list-changes");
+        assert_eq!(
+            diff_tab_count(&workspace, &cx),
+            before + 1,
+            "drawn for a git project, the row is enabled and opens a Diff tab"
+        );
+
+        workspace.update(&mut cx, |workspace, cx| {
+            let mut projects = workspace.project_catalog.projects().to_vec();
+            projects[0].is_git = false;
+            workspace.project_catalog = ProjectCatalog::from_projects(projects);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace
+                .open_list_facts()
+                .changes_disabled
+                .is_some()),
+            "the facts follow the catalog, not the first draw"
+        );
+        let before = diff_tab_count(&workspace, &cx);
+        click_open_list_row(&mut cx, "open-list-changes");
+        assert_eq!(
+            diff_tab_count(&workspace, &cx),
+            before,
+            "drawn after the catalog changed, the disabled row opens no Diff tab"
+        );
+    }
+
+    /// The same memo, keyed on the working directory: a switch to a worktree
+    /// of a project that is not git makes the drawn row disabled.
+    #[gpui::test]
+    async fn drawn_open_list_changes_follows_a_worktree_switch_after_a_draw(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        // A second project that is not git, whose one worktree is another
+        // folder, beside the palette's git project.
+        let plain_path = workspace.update(&mut cx, |workspace, _| {
+            let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+            let plain_path = std::env::temp_dir().join(format!(
+                "sirio-open-list-plain-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&plain_path).expect("create the non-git fixture worktree");
+            let git = workspace.project_catalog.projects()[0].clone();
+            let plain = session::CatalogProject {
+                id: "plain-project".into(),
+                name: "Plain".into(),
+                root_path: plain_path.clone(),
+                is_git: false,
+                worktrees: vec![session::CatalogWorktree {
+                    branch: "plain".into(),
+                    path: plain_path.clone(),
+                    is_primary: true,
+                }],
+            };
+            workspace.project_catalog = ProjectCatalog::from_projects(vec![git, plain]);
+            // The switch checks the control socket's copy of the catalog too.
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &workspace.project_catalog,
+                &workspace.working_directory,
+            )));
+            plain_path
+        });
+        open_the_open_list(&mut cx);
+
+        let before = diff_tab_count(&workspace, &cx);
+        click_open_list_row(&mut cx, "open-list-changes");
+        assert_eq!(
+            diff_tab_count(&workspace, &cx),
+            before + 1,
+            "in the git project's worktree, the row is enabled and opens a Diff tab"
+        );
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace
+                .select_worktree(plain_path.clone(), None, cx)
+                .expect("switch to the non-git project's worktree");
+        });
+        cx.run_until_parked();
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace
+                .open_list_facts()
+                .changes_disabled
+                .is_some()),
+            "the facts follow the working directory, not the first draw"
+        );
+        let before = diff_tab_count(&workspace, &cx);
+        click_open_list_row(&mut cx, "open-list-changes");
+        assert_eq!(
+            diff_tab_count(&workspace, &cx),
+            before,
+            "after the switch the disabled row opens no Diff tab"
+        );
+    }
+
+    /// `open_surface` refuses a Changes row that the facts disable when the
+    /// queued action runs. The action was queued under the git facts of its
+    /// click, and the worktree turns non-git before the drain, so the refusal
+    /// has to come from the drain itself. A ProjectSettings action queued after
+    /// it shows the drain ran: the project still exists, so it is not refused.
+    #[gpui::test]
+    async fn open_list_refuses_a_queued_changes_action_when_the_worktree_turns_non_git(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let settings_tabs = |workspace: &Entity<SirioWorkspace>, cx: &VisualTestContext| {
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.kind == TabKind::ProjectSettings)
+                    .count()
+            })
+        };
+        let diffs_before = diff_tab_count(&workspace, &cx);
+        let settings_before = settings_tabs(&workspace, &cx);
+
+        workspace.update(&mut cx, |workspace, _| {
+            use sirio_ui::right_panel::OpenSurface;
+            workspace.queue_workspace_action(WorkspaceAction::OpenSurface(OpenSurface::Changes));
+            workspace.queue_workspace_action(WorkspaceAction::OpenSurface(
+                OpenSurface::ProjectSettings,
+            ));
+        });
+        workspace.update(&mut cx, |workspace, _| {
+            let mut projects = workspace.project_catalog.projects().to_vec();
+            projects[0].is_git = false;
+            workspace.project_catalog = ProjectCatalog::from_projects(projects);
+        });
+        drain_workspace_actions(&mut cx);
+
+        assert_eq!(
+            settings_tabs(&workspace, &cx),
+            settings_before + 1,
+            "the control action drained, so the drain did run"
+        );
+        assert_eq!(
+            diff_tab_count(&workspace, &cx),
+            diffs_before,
+            "the queued Changes is refused when it runs, not only when clicked"
         );
     }
 
