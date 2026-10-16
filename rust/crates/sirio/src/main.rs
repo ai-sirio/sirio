@@ -1501,6 +1501,9 @@ enum WorkspaceAction {
     /// (`ChangeRequestTabEvent::HandoffAsked`, the right panel's *Hand off*,
     /// and the control socket's `open_dialog`).
     OpenHandoffDialog(sirio_forge::Scope),
+    /// A row of the right panel's Open list (spec 2026-10-15 §2). Queued
+    /// because the panel's event arrives without a `Window`.
+    OpenSurface(sirio_ui::right_panel::OpenSurface),
     /// A hand-off's agent, started in `path` (the worktree it was checked out
     /// to). `asked` is the tab that asked, which reports the outcome.
     StartHandoffAgent {
@@ -5457,6 +5460,9 @@ impl SirioWorkspace {
                                 WorkspaceAction::OpenHandoffDialog(scope) => {
                                     let _ = workspace.open_handoff_dialog(scope, window, cx);
                                 }
+                                WorkspaceAction::OpenSurface(surface) => {
+                                    workspace.open_surface(surface, window, cx);
+                                }
                                 WorkspaceAction::StartHandoffAgent {
                                     path,
                                     agent,
@@ -7483,6 +7489,9 @@ impl SirioWorkspace {
                             let _ = tab.open_in_worktree(cx);
                         });
                     }
+                }
+                RightPanelActionEvent::OpenSurface(surface) => {
+                    workspace.queue_workspace_action(WorkspaceAction::OpenSurface(*surface))
                 }
             },
         )
@@ -16691,6 +16700,44 @@ impl SirioWorkspace {
         }
     }
 
+    /// One door for every row of the right panel's Open list (spec
+    /// 2026-10-15 §2). Each arm is the path the same surface already opens
+    /// through. Terminal and Chat are moved to the Secondary pane by
+    /// `open_in_pane`; Browser, Changes, Open File and Project Settings live
+    /// there by their home half; Other agents opens the Settings screen.
+    fn open_surface(
+        &mut self,
+        surface: sirio_ui::right_panel::OpenSurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use sirio_ui::right_panel::OpenSurface;
+        match surface {
+            OpenSurface::Terminal => self.handle_launcher_action(
+                LauncherAction::NewTerminal(PaneRole::Secondary),
+                window,
+                cx,
+            ),
+            OpenSurface::Chat(id) => self.open_in_pane(
+                PaneRole::Secondary,
+                |workspace, window, cx| workspace.open_chat_agent(id, window, cx),
+                window,
+                cx,
+            ),
+            OpenSurface::OtherAgents => self.open_settings(Some(SettingsCategory::Agents), cx),
+            OpenSurface::Browser => {
+                self.handle_launcher_action(LauncherAction::NewBrowser, window, cx)
+            }
+            OpenSurface::Changes => self.handle_launcher_action(LauncherAction::Changes, window, cx),
+            OpenSurface::OpenFile => {
+                self.handle_launcher_action(LauncherAction::OpenFile, window, cx)
+            }
+            OpenSurface::ProjectSettings => {
+                self.handle_launcher_action(LauncherAction::ProjectSettings, window, cx)
+            }
+        }
+    }
+
     /// Spec 2026-09-24 §5, "Secondary launcher": opens a tab through its
     /// ordinary creation path — which puts it in its home half — then moves
     /// it to `pane` in the same update, before any frame is drawn, so a
@@ -16729,6 +16776,35 @@ impl SirioWorkspace {
         }
     }
 
+    /// The agents a chat can open with today: only adapters with a concrete
+    /// command (Builtin or Installed), the gate the tab bar's New Chat picker
+    /// applies. Shared by the empty-pane picker and the Open list.
+    fn chat_agents(&self) -> Vec<(&'static str, &'static str)> {
+        AGENT_CATALOG
+            .iter()
+            .filter(|adapter| agent_command_for(&self.launch_source_for(adapter.id())).is_some())
+            .map(|adapter| (adapter.id(), adapter.display_name()))
+            .collect()
+    }
+
+    /// What the right panel's Open list cannot know (spec 2026-10-15 §2),
+    /// with the reasons the launcher tiles used to give.
+    fn open_list_facts(&self) -> sirio_ui::right_panel::OpenListFacts {
+        let project = self.current_catalog_project();
+        sirio_ui::right_panel::OpenListFacts {
+            agents: self
+                .chat_agents()
+                .into_iter()
+                .map(|(id, name)| (id, name.into()))
+                .collect(),
+            changes_disabled: (!project.is_some_and(|project| project.is_git))
+                .then(|| "This worktree is not a git repository".into()),
+            project_settings_disabled: project
+                .is_none()
+                .then(|| "This worktree belongs to no project".into()),
+        }
+    }
+
     /// The empty-state agent picker, drawn under the Chat tile of `target`'s
     /// launcher while that half's picker is open. Both halves share it; the
     /// right one's selectors carry a `secondary-` prefix so the two can
@@ -16746,14 +16822,8 @@ impl SirioWorkspace {
             PaneRole::Primary => "empty-chat-",
             PaneRole::Secondary => "secondary-empty-chat-",
         };
-        // The same resolved-source gate the tab bar's New Chat picker
-        // applies: only adapters with a concrete command today (Builtin or
-        // Installed) are offered as chats.
-        let available: Vec<(&'static str, &'static str)> = AGENT_CATALOG
-            .iter()
-            .filter(|adapter| agent_command_for(&self.launch_source_for(adapter.id())).is_some())
-            .map(|adapter| (adapter.id(), adapter.display_name()))
-            .collect();
+        // Only adapters with a concrete command are offered; see `chat_agents`.
+        let available = self.chat_agents();
         let dismiss_entity = entity.clone();
         let mut menu = div()
             .id(format!("{prefix}agent-menu"))
@@ -20554,8 +20624,13 @@ impl SirioWorkspace {
         // The History toolbar shapes itself from the panel's width, and the
         // view cannot measure its own container — push the resolved width
         // every frame. No-op unless a drag or window resize actually moved it.
+        // The Open list's facts (the agents a chat can open with, why Changes
+        // or Project Settings is unavailable) ride on the same per-frame push;
+        // the setter is a no-op when they are unchanged.
+        let open_list_facts = self.open_list_facts();
         self.right_panel.update(cx, |panel, cx| {
             panel.set_panel_width(right_width.unwrap_or(0.0), cx);
+            panel.set_open_list_facts(open_list_facts, cx);
         });
         // Same push for the sidebar, and it is not optional: its rows are
         // laid out to an explicit width, so without this they keep the
@@ -42191,6 +42266,154 @@ done
             "committing a tab insert must make the new tab the pane group's \
              own active tab, or its content surface keeps showing whatever \
              tab was active before"
+        );
+    }
+
+    /// The right panel's events reach the workspace through the 40 ms action
+    /// queue; a test window's timers fire only when the clock is advanced.
+    fn drain_workspace_actions(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(Duration::from_millis(40));
+        cx.run_until_parked();
+    }
+
+    /// Spec 2026-10-15 §2: the Open list's Terminal row opens a terminal in
+    /// the right half, focused there, leaving the left half as it was.
+    #[gpui::test]
+    async fn drawn_open_list_terminal_opens_a_terminal_on_the_right(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let before = workspace.read_with(&cx.cx, |workspace, _| workspace.tabs.len());
+
+        let open = cx
+            .debug_bounds("right-panel-tab-open")
+            .expect("the rail offers Open");
+        cx.simulate_click(open.center(), Modifiers::none());
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("open-list-terminal")
+            .expect("the list is drawn");
+        cx.simulate_click(row.center(), Modifiers::none());
+        drain_workspace_actions(&mut cx);
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(workspace.tabs.len(), before + 1);
+            let opened = workspace
+                .tabs
+                .iter()
+                .max_by_key(|tab| tab.id)
+                .expect("a tab");
+            assert_eq!(opened.kind, TabKind::Terminal);
+            assert_eq!(opened.pane, PaneRole::Secondary);
+            assert_eq!(workspace.center_split.active(PaneRole::Primary), Some(0));
+            assert_eq!(
+                workspace.center_split.active(PaneRole::Secondary),
+                Some(opened.id)
+            );
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+            assert!(workspace.secondary_pane_visible());
+        });
+    }
+
+    /// Spec 2026-10-15 §2: Chat expands inline with the agents the host
+    /// resolved, and the picked agent's chat opens on the right.
+    #[gpui::test]
+    async fn drawn_open_list_chat_opens_the_picked_agent_on_the_right(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 3));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        // Drain the construction-time launch-source refresh before the
+        // override, as the old Chat tile's test did.
+        cx.run_until_parked();
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_tab(0, None, cx);
+            workspace.launch.sources.insert(
+                "codex".into(),
+                sirio_registry::LaunchSource::Builtin {
+                    program: "codex-acp".into(),
+                    args: Vec::new(),
+                },
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        for id in ["right-panel-tab-open", "open-list-chat"] {
+            let bounds = cx
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id} is drawn"));
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            cx.run_until_parked();
+        }
+        let agent = cx
+            .debug_bounds("open-list-agent-codex")
+            .expect("the host's facts list Codex");
+        cx.simulate_click(agent.center(), Modifiers::none());
+        drain_workspace_actions(&mut cx);
+
+        workspace.read_with(&cx.cx, |workspace, _| {
+            let opened = workspace
+                .tabs
+                .iter()
+                .max_by_key(|tab| tab.id)
+                .expect("a tab");
+            assert_eq!(opened.kind, TabKind::AgentChat);
+            assert_eq!(opened.pane, PaneRole::Secondary);
+            assert_eq!(workspace.center_split.active(PaneRole::Primary), Some(0));
+            assert_eq!(workspace.center_split.focused(), PaneRole::Secondary);
+        });
+    }
+
+    /// Changes needs git: outside it the row says so and opens nothing.
+    #[gpui::test]
+    async fn the_open_list_changes_row_is_disabled_outside_git(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let mut projects = workspace.project_catalog.projects().to_vec();
+            projects[0].is_git = false;
+            workspace.project_catalog = ProjectCatalog::from_projects(projects);
+            workspace
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let open = cx
+            .debug_bounds("right-panel-tab-open")
+            .expect("the rail offers Open");
+        cx.simulate_click(open.center(), Modifiers::none());
+        cx.run_until_parked();
+        let changes = cx
+            .debug_bounds("open-list-changes")
+            .expect("the row is still drawn");
+        cx.simulate_click(changes.center(), Modifiers::none());
+        drain_workspace_actions(&mut cx);
+
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                workspace.tabs.iter().all(|tab| tab.kind != TabKind::Diff)
+            }),
+            "a disabled Changes row opens nothing"
         );
     }
 
