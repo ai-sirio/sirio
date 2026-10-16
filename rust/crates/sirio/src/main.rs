@@ -9855,19 +9855,24 @@ impl SirioWorkspace {
         window: &Window,
         cx: &App,
     ) -> Option<AnyElement> {
-        if self.secondary_pane_visible()
+        if !self.has_current_worktree()
+            || self.secondary_pane_visible()
             || self.pane_drop_overlay_role(cx) != Some(PaneRole::Secondary)
         {
             return None;
         }
-        let (_, Some(width)) = panel_layout::resolve_center_split(
-            self.center_available_width(window, theme),
+        // Evaluated as if the pane were open, the way the drop will leave it:
+        // the side panels give up room for the two floors only then.
+        // `resolve_center_split` is `Some` for an open pane, so the fallback
+        // is never taken.
+        let width = panel_layout::resolve_center_split(
+            self.center_available_width(window, theme, true),
             self.center_split_ratio,
             true,
             CENTER_DIVIDER_WIDTH,
-        ) else {
-            return None;
-        };
+        )
+        .1
+        .unwrap_or(0.0);
         Some(
             self.pane_drop_surface(PaneRole::Secondary, theme, entity)
                 .top_0()
@@ -20060,7 +20065,7 @@ impl SirioWorkspace {
     /// two widths from being resolved twice against different inputs.
     fn center_pane_widths(&self, window: &Window, theme: Theme) -> (f32, Option<f32>) {
         panel_layout::resolve_center_split(
-            self.center_available_width(window, theme),
+            self.center_available_width(window, theme, self.secondary_pane_visible()),
             self.center_split_ratio,
             self.secondary_pane_visible(),
             CENTER_DIVIDER_WIDTH,
@@ -20098,7 +20103,10 @@ impl SirioWorkspace {
         }
     }
 
-    fn center_available_width(&self, window: &Window, theme: Theme) -> f32 {
+    /// The centre column's width once the side panels have given up what the
+    /// centre needs. `secondary_open` is passed in rather than read from the
+    /// state, because the ghost sizes itself for the pane *after* a drop.
+    fn center_available_width(&self, window: &Window, theme: Theme, secondary_open: bool) -> f32 {
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
             f32::from(window.bounds().size.width),
             self.sidebar_visible.then_some(self.sidebar_width),
@@ -20106,7 +20114,7 @@ impl SirioWorkspace {
             self.dragging_panel,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
-            panel_layout::min_center_width(self.secondary_pane_visible(), CENTER_DIVIDER_WIDTH),
+            panel_layout::min_center_width(secondary_open, CENTER_DIVIDER_WIDTH),
         );
         center_available_width_for_shell(
             f32::from(window.bounds().size.width),
@@ -20926,7 +20934,8 @@ impl SirioWorkspace {
         let Some((grab_x, grab_ratio)) = self.center_drag_anchor else {
             return;
         };
-        let usable = self.center_available_width(window, theme) - CENTER_DIVIDER_WIDTH;
+        let usable = self.center_available_width(window, theme, self.secondary_pane_visible())
+            - CENTER_DIVIDER_WIDTH;
         if usable <= 0.0 {
             return;
         }
@@ -33691,6 +33700,43 @@ done
             );
             assert!(workspace.secondary_pane_visible());
         });
+    }
+
+    /// Spec 2026-10-15 §3: the ghost is as wide as the pane the drop opens,
+    /// also at a window narrow enough that the side panels give up room only
+    /// once the Secondary pane is there.
+    #[gpui::test]
+    async fn drawn_secondary_drop_ghost_is_as_wide_as_the_pane_it_opens(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 2));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(size(px(1000.0), px(600.0)));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-secondary").is_none(),
+            "the fixture starts without one"
+        );
+        let source = cx.debug_bounds("workspace-tab-0").expect("tab 0").center();
+        let centre = cx.debug_bounds("centre-surface").expect("centre surface");
+        let right = point(centre.right() - px(40.0), centre.center().y);
+
+        begin_tab_drag(&mut cx, source, right);
+        let ghost = cx
+            .debug_bounds("pane-drop-overlay-secondary")
+            .expect("the ghost is drawn while dragging");
+        release_tab_drag(&mut cx, right);
+
+        let pane = cx
+            .debug_bounds("pane-secondary")
+            .expect("the drop opens the pane");
+        assert!(
+            (f32::from(pane.size.width) - f32::from(ghost.size.width)).abs() <= 1.0,
+            "the ghost ({:?}) must be as wide as the pane it opens ({:?})",
+            ghost.size.width,
+            pane.size.width
+        );
     }
 
     /// Spec §5: the body overlay fills only over the body, not while a strip
