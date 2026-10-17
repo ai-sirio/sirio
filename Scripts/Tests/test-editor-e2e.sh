@@ -830,9 +830,15 @@ PY
 }
 # The fake language server logs each message it gets, as `request M` or
 # `notification M`: a line ending in M is the server being sent that method.
-lsp_asked() { # method
-  grep -q " $1\$" "$RUN_DIR/fake-lsp/requests.log" 2>/dev/null \
-    || fail "$SCENARIO: the language server was never asked $1"
+# A check reads only the lines after the mark its caller took before its verb
+# (lsp_mark), so a request an earlier scenario made cannot pass it.
+lsp_mark() { # the log's line count now
+  local log="$RUN_DIR/fake-lsp/requests.log"
+  if [ -f "$log" ]; then wc -l <"$log"; else echo 0; fi
+}
+lsp_asked() { # method mark
+  tail -n +"$(($2 + 1))" "$RUN_DIR/fake-lsp/requests.log" 2>/dev/null | grep -q " $1\$" \
+    || fail "$SCENARIO: the language server was never asked $1 after the verb"
   echo "OK: the language server was asked $1"
 }
 
@@ -849,21 +855,29 @@ scenario_diagnostics() {
   # The server holds its answers while the text moves, so the findings the
   # editor and the card read are the ones Ely moved, not a fresh publish.
   fake_lsp_answers publish_on_change false
+  local mark
+  mark="$(lsp_mark)"
   ctl surface editor select --ranges=0..0 >/dev/null
   ctl surface editor type --text=x >/dev/null
   expect_state dirty true
-  # The findings move with the text, the Error one byte later, and both stay.
+  # The findings move with the text: the Error one byte later, and both stay.
   expect_state diagnostics 2
+  # error_at is where line_7 is in the text now, read from the text and not from
+  # the findings: the check below proves the text moved one byte. That the Error
+  # moved with it is what the hover pair proves, since the card asks the editor's
+  # findings at the new place and at the old one.
   error_at="$(python3 "$TOOLS" offset "$(sfield text)" "line_7")"
   [ "$error_at" -eq $((old_at + 1)) ] \
     || fail "$SCENARIO: the Error is at $error_at, not one byte past $old_at, after the typed character"
   # The card reads the editor's findings, so the Error answers at its new place.
   ctl surface editor hover --offset="$error_at" >/dev/null
   expect_state hover "$FAKE_ERROR\\n$FAKE_HOVER"
+  # The verb rests the pointer at the window centre, so the card is drawn there,
+  # not beside the Error: this capture shows the squiggle and the card's text.
   capture diagnostics-hover
-  # At the Error's old place there is a space now: no finding, though Sirio's own
-  # copy of the findings still names that place. The card shows the server's
-  # answer alone.
+  # At the Error's old place there is a space now. Ely moved the finding, so
+  # nothing covers that place; Sirio's own copy of the findings still names it,
+  # but the card does not read that copy. The card shows the server's answer alone.
   ctl surface editor hover --offset="$old_at" >/dev/null
   expect_state hover "$FAKE_HOVER"
   # Undo restores the text. Ely clears its findings with the restored text, and
@@ -883,27 +897,29 @@ scenario_diagnostics() {
   done
   echo "undo: diagnostics seen over 2 s:$seen"
   expect_state diagnostics 2
-  lsp_asked textDocument/didChange
+  lsp_asked textDocument/didChange "$mark"
   echo "OK: the findings moved with the typed character, the card followed them, and undo's restore gave them back"
 }
 
 scenario_hover() {
   open_file "$WT/main.rs"
   expect_state state loaded
-  local at
+  local at mark
   at="$(python3 "$TOOLS" offset "$(sfield text)" "line_1")"
+  mark="$(lsp_mark)"
   ctl surface editor hover --offset="$at" >/dev/null
   # Nothing is under line_1 but the server's answer, which the card then shows.
   expect_state hover "$FAKE_HOVER"
-  lsp_asked textDocument/hover
+  lsp_asked textDocument/hover "$mark"
   echo "OK: the hover at line_1 is the server's answer"
 }
 
 scenario_definition() {
   open_file "$WT/calls.rs"
   expect_state state loaded
-  local at line_six
+  local at line_six mark
   at="$(python3 "$TOOLS" offset "$(sfield text)" "outer(1)")"
+  mark="$(lsp_mark)"
   ctl surface editor click --offset="$at" --platform=true >/dev/null
   expect_active_tab nested.rs
   expect_state path "$WT/nested.rs"
@@ -916,7 +932,7 @@ print(len("".join(line + "\n" for line in lines[:6]).encode("utf-8")))
 PY
 )"
   expect_state selections "$line_six..$line_six"
-  lsp_asked textDocument/definition
+  lsp_asked textDocument/definition "$mark"
   echo "OK: the definition opened nested.rs with the caret on its line 7"
 }
 

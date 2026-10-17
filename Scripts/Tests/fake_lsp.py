@@ -28,9 +28,12 @@ the editor's pointer features ask:
 - Any other request is answered with null; notifications are ignored.
 
 ANSWERS is read again for every message, so a test may rewrite it between
-requests. Every message is logged to LOG (default ANSWERS + ".log"), one line
-per message: `request <method>` or `notification <method>`. The E2E reads the
-log to show that the server was really asked.
+requests. Every message the client sends with a method is logged to LOG
+(default ANSWERS + ".log"), one line per message: `request <method>` or
+`notification <method>`. A client's answer to one of the server's requests is
+neither logged nor answered, and a malformed frame is logged as `skipped ...`
+and dropped, so the server keeps going. The E2E reads the log to show that the
+server was really asked.
 
 Python standard library only; run it as `python3 -I`.
 """
@@ -67,6 +70,10 @@ def main():
     incoming = sys.stdin.buffer
     outgoing = sys.stdout.buffer
 
+    def log_line(text):
+        log.write(text + "\n")
+        log.flush()
+
     def answers():
         with open(answers_path, "rb") as handle:
             return json.loads(handle.read().decode("utf-8"))
@@ -77,20 +84,35 @@ def main():
         outgoing.flush()
 
     def read_message():
-        length = None
+        # Headers, a blank line, then Content-Length bytes. A malformed header is
+        # logged and skipped, and a message with no usable length is logged and
+        # dropped, so a bad frame never ends the server; the next one is read.
         while True:
-            line = incoming.readline()
-            if not line:
-                return None
-            line = line.strip()
-            if not line:
-                break
-            name, _, value = line.partition(b":")
-            if name.strip().lower() == b"content-length":
-                length = int(value.strip())
-        if length is None:
-            return None
-        return json.loads(incoming.read(length).decode("utf-8"))
+            length = None
+            while True:
+                line = incoming.readline()
+                if not line:
+                    return None
+                line = line.strip()
+                if not line:
+                    break
+                name, separator, value = line.partition(b":")
+                if not separator:
+                    log_line(f"skipped a header without a colon: {line!r}")
+                elif name.strip().lower() == b"content-length":
+                    try:
+                        length = int(value.strip())
+                    except ValueError:
+                        log_line(f"skipped a malformed Content-Length: {value.strip()!r}")
+                        length = None
+            if length is not None and length >= 0:
+                body = incoming.read(length)
+                try:
+                    return json.loads(body.decode("utf-8"))
+                except ValueError:
+                    log_line("skipped a message that is not JSON")
+                    continue
+            log_line("skipped a message without a usable Content-Length")
 
     def diagnostics_for(uri, text, config):
         if uri.rsplit("/", 1)[-1] != config.get("diagnostics_file", ""):
@@ -131,9 +153,11 @@ def main():
         if message is None:
             break
         method = message.get("method", "")
-        is_request = "id" in message
-        log.write(f"{'request' if is_request else 'notification'} {method}\n")
-        log.flush()
+        # A client's answer to one of this server's requests carries an id and no
+        # method: it is neither logged as a message nor answered.
+        is_request = "id" in message and "method" in message
+        if "method" in message:
+            log_line(f"{'request' if is_request else 'notification'} {method}")
         params = message.get("params") or {}
         if method == "initialize":
             send({
