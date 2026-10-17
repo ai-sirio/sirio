@@ -262,6 +262,7 @@ where
 mod account_login;
 mod claude_transport;
 mod cli_install;
+mod cli_path;
 mod command_palette;
 /// The X11-vs-Wayland decision, and the only place that touches the display
 /// environment. Linux-only by construction: the variables it reads and writes
@@ -25619,6 +25620,9 @@ fn main() {
         login.as_deref(),
         cli_prefix.as_deref(),
     ));
+    // The login PATH the PATH link checks, recorded once so nothing runs the
+    // login shell a second time (cli_path.rs).
+    cli_path::set_login_path(login);
 
     sirio_perf::init();
     // bezel's icons are `svg().path("icons/…")`; without an asset source

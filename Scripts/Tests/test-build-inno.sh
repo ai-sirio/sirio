@@ -87,6 +87,13 @@ grep -Fq "InstallWebView2RuntimeIfAbsent" "$ISS" \
   || fail "no conditional WebView2 bootstrap entry"
 grep -Fq "except" "$ISS" || fail "a failed download must be swallowed, not fatal"
 
+# The app puts sirioctl's directory on the user's Path at startup (spec §5.2),
+# in HKCU, so the uninstaller takes that entry back out of the same value.
+grep -Fq "CurUninstallStepChanged" "$ISS" \
+  || fail ".iss must remove sirioctl's PATH entry on uninstall"
+grep -Fq "RegQueryStringValue(HKCU, 'Environment', 'Path'" "$ISS" \
+  || fail "the uninstaller must read the user's Path from HKCU\\Environment"
+
 # The generator reads the AppId from the identity source; it must not carry a
 # literal of it (#304's rule, applied to the new script).
 if grep -Fq "581478B4" "$GEN"; then

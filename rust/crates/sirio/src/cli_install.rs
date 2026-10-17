@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use crate::cli_path::{LinkOutcome, link_on_path, recorded_login_path};
+
 /// The control CLI's file name: `sirioctl.exe` on Windows, bare on unix.
 ///
 /// The extension is part of the name here because this module does not
@@ -343,9 +345,14 @@ fn remove_aside_copies(dir: &Path) {
 
 static STARTUP_COPY: OnceLock<Result<(PathBuf, CopyOutcome), String>> = OnceLock::new();
 
-/// Makes the stable copy on a background thread at startup, so no launch waits
-/// for it. The outcome is kept for `resolve_for_pane`, which uses it once it is
-/// `Ok`.
+/// The PATH link the startup thread made after the copy. Set before
+/// `STARTUP_COPY`, so a reader that sees the copy finished sees the link too.
+static STARTUP_LINK: OnceLock<LinkOutcome> = OnceLock::new();
+
+/// Makes the stable copy, then the PATH link to it, on a background thread at
+/// startup, so no launch waits for either. The copy's outcome is kept for
+/// `resolve_for_pane`, which uses it once it is `Ok`. The login PATH the link
+/// checks is the one `main` recorded before this call.
 pub(crate) fn ensure_at_startup(current_exe: PathBuf, environment: BTreeMap<String, String>) {
     let spawned = std::thread::Builder::new()
         .name("sirio-cli-copy".into())
@@ -354,6 +361,18 @@ pub(crate) fn ensure_at_startup(current_exe: PathBuf, environment: BTreeMap<Stri
             if let Err(error) = &outcome {
                 eprintln!("[sirio] sirioctl: {error}");
             }
+            let link = startup_link(&outcome, &environment);
+            // `NeedsAdmin` is the usual state of a macOS user with no writable
+            // directory on the login PATH: not a failure, so not logged each launch.
+            if matches!(
+                link,
+                LinkOutcome::Failed(_)
+                    | LinkOutcome::Foreign { .. }
+                    | LinkOutcome::NotOnLoginPath(_)
+            ) {
+                eprintln!("[sirio] sirioctl on PATH: {link:?}");
+            }
+            let _ = STARTUP_LINK.set(link);
             let _ = STARTUP_COPY.set(outcome);
         });
     if let Err(error) = spawned {
@@ -361,9 +380,42 @@ pub(crate) fn ensure_at_startup(current_exe: PathBuf, environment: BTreeMap<Stri
     }
 }
 
+/// The link the startup thread makes to the copy it just made. A debug build
+/// keeps its own copy and leaves the user's PATH alone.
+fn startup_link(
+    copy: &Result<(PathBuf, CopyOutcome), String>,
+    environment: &BTreeMap<String, String>,
+) -> LinkOutcome {
+    if stable_is_debug() {
+        return LinkOutcome::Skipped("debug build");
+    }
+    if release_sirioctl_path(environment).is_none() {
+        return LinkOutcome::Skipped("no data directory");
+    }
+    let home = sirio_env::installed()
+        .and_then(|user| user.get("HOME"))
+        .or_else(|| environment.get("HOME"))
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute());
+    let Some(home) = home else {
+        return LinkOutcome::Skipped("no home directory");
+    };
+    match copy {
+        Ok((stable, _)) => link_on_path(stable, &home, recorded_login_path(), false),
+        Err(error) => LinkOutcome::Failed(error.clone()),
+    }
+}
+
 /// What the startup copy made, once it has finished; `None` while it runs.
 pub(crate) fn last_copy_outcome() -> Option<&'static Result<(PathBuf, CopyOutcome), String>> {
     STARTUP_COPY.get()
+}
+
+/// What the startup link did, once the startup copy has finished; `None` while it
+/// runs. Nothing reads it until the Settings card does.
+#[allow(dead_code)]
+pub(crate) fn last_link_outcome() -> Option<&'static LinkOutcome> {
+    STARTUP_LINK.get()
 }
 
 /// The stable copy a pane starts with. It reads no contents: once the startup

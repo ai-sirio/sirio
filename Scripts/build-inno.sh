@@ -120,6 +120,52 @@ begin
       Result := False;
     end;
 end;
+
+// The app adds sirioctl's directory to the user's Path at startup (cli_path.rs).
+// Only that entry comes out; the other entries keep their order and spelling.
+procedure RemoveSirioBinFromUserPath;
+var
+  UserPath, Entry, Item, Kept, Remaining: String;
+  Cut: Integer;
+  Found: Boolean;
+begin
+  if not RegQueryStringValue(HKCU, 'Environment', 'Path', UserPath) then
+    Exit;
+  Entry := ExpandConstant('{localappdata}\Sirio\bin');
+  Found := False;
+  Kept := '';
+  Remaining := UserPath;
+  while Remaining <> '' do
+  begin
+    Cut := Pos(';', Remaining);
+    if Cut = 0 then
+    begin
+      Item := Remaining;
+      Remaining := '';
+    end
+    else
+    begin
+      Item := Copy(Remaining, 1, Cut - 1);
+      Remaining := Copy(Remaining, Cut + 1, Length(Remaining) - Cut);
+    end;
+    if CompareText(Item, Entry) = 0 then
+      Found := True
+    else if Item <> '' then
+    begin
+      if Kept <> '' then
+        Kept := Kept + ';';
+      Kept := Kept + Item;
+    end;
+  end;
+  if Found then
+    RegWriteExpandStringValue(HKCU, 'Environment', 'Path', Kept);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RemoveSirioBinFromUserPath;
+end;
 EOF
 
 echo "$ISS_PATH"
