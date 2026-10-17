@@ -19,7 +19,8 @@ pub struct HostConfig {
     pub idle_grace: Duration,
     pub start_delay: Duration,
     pub version: String,
-    /// Advertise `term.env_exact` (SP2 §3). Only a debug build turns it off.
+    /// Advertise `term.env_exact` (docs/superpowers/specs/2026-10-17-ade-programme-design.md
+    /// §5.3). Only a debug build turns it off.
     pub env_exact: bool,
 }
 

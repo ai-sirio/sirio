@@ -458,7 +458,8 @@ pub fn login_shell() -> (String, Vec<String>) {
 
 /// The login shell a session runs when it names no program: the `SHELL` in
 /// the session's own environment. A session built from a client's environment
-/// (`env_exact`, SP2 §3) runs that client's shell, never the host's.
+/// (`env_exact`, docs/superpowers/specs/2026-10-17-ade-programme-design.md
+/// §5.3) runs that client's shell, never the host's.
 #[cfg(not(windows))]
 pub fn session_login_shell(env: &BTreeMap<String, String>) -> (String, Vec<String>) {
     match env.get("SHELL") {

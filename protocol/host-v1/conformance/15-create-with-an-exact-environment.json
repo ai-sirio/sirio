@@ -9,6 +9,10 @@
     {
       "send": { "id": 2, "method": "term.create", "params": { "session_id": "pane-15", "cwd": "/", "command": { "type": "shell" }, "env": { "PATH": "/usr/bin:/bin" }, "env_exact": true, "size": { "cols": 80, "rows": 24 }, "origin": "control" }, "generation": "$generation" },
       "expect": { "id": 2, "result": { "session_id": "pane-15" } }
+    },
+    {
+      "send": { "id": 3, "method": "term.close", "params": { "session_id": "pane-15" }, "generation": "$generation" },
+      "expect": { "id": 3, "result": {} }
     }
   ]
 }

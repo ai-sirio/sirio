@@ -356,7 +356,9 @@ pub(crate) fn random_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sirio_term_session::session_login_shell;
+    use sirio_host_protocol::messages::HostMode;
+    use sirio_term_session::{Format, session_login_shell};
+    use std::time::{Duration, Instant};
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -397,5 +399,58 @@ mod tests {
         let host = map(&[("SHELL", "/host/only/shell")]);
         let env = spawn_env(map(&[("PATH", "/client/bin")]), &host, true);
         assert_ne!(session_login_shell(&env).0, "/host/only/shell");
+    }
+
+    /// The production path, not `spawn_env`: `create` must hand the session
+    /// its client's environment alone. The fallback carries `LEAK`, which the
+    /// program prints back when it is present.
+    #[cfg(unix)]
+    #[test]
+    fn an_exact_session_is_spawned_without_the_hosts_variables() {
+        let root = std::env::temp_dir().join(format!("sirio-host-exact-{}", random_token()));
+        let log = Arc::new(Log::new(root.join("host.log")));
+        let core = HostCore::new(
+            "test".into(),
+            1,
+            HostMode::OnDemand,
+            "generation".into(),
+            "host".into(),
+            log,
+        );
+        let fallback = map(&[("LEAK", "present"), ("PATH", "/usr/bin:/bin")]);
+        let params = CreateParams {
+            session_id: Some("pane-1".into()),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            command: TermCommand::Program {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), r#"printf '%s' "${LEAK-absent}""#.into()],
+            },
+            env: map(&[("PATH", "/usr/bin:/bin")]),
+            size: TermSize { cols: 80, rows: 24 },
+            origin: Origin::Control,
+            parent: None,
+            prelude: None,
+            env_exact: true,
+        };
+        core.sessions
+            .create(params, &fallback)
+            .expect("the session is created");
+        let entry = core.sessions.get("pane-1").expect("the session is listed");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let screen = loop {
+            let screen =
+                String::from_utf8_lossy(&entry.session.read(Format::Text, None)).into_owned();
+            if screen.contains("absent") || screen.contains("present") || Instant::now() >= deadline
+            {
+                break screen;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        core.sessions.close("pane-1");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            screen.contains("absent") && !screen.contains("present"),
+            "the session saw the host's variable: {screen:?}"
+        );
     }
 }

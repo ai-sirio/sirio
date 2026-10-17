@@ -39,7 +39,13 @@ impl TermClient {
     }
 
     pub fn create(&self, params: &CreateParams) -> Result<Created, CallError> {
-        let value = serde_json::to_value(params).map_err(decode_error)?;
+        // A host without `term.env_exact` would extend its own environment, so
+        // this client never claims an exactness it cannot get.
+        let mut params = params.clone();
+        if !self.env_exact() {
+            params.env_exact = false;
+        }
+        let value = serde_json::to_value(&params).map_err(decode_error)?;
         self.call_typed(method::TERM_CREATE, value, true, CALL_TIMEOUT)
     }
 
