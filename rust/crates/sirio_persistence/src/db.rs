@@ -20,7 +20,7 @@ use crate::error::PersistenceError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChangeRequestLinkRecord,
-    ChatSessionSummary, HandoffChoiceRecord, ChatTranscript,
+    ChatSessionSummary, EditorCursorShape, EditorLineNumbers, HandoffChoiceRecord, ChatTranscript,
     ChatTurn, ClosedChatSummary, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
     SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
 };
@@ -1229,6 +1229,52 @@ impl AppDatabase {
         if let Some(value) = self.setting_value(settings_keys::FORGE_HOSTS)? {
             defaults.forge_hosts = value;
         }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_MINIMAP)? {
+            defaults.editor_minimap = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_STICKY_SCROLL)? {
+            defaults.editor_sticky_scroll = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_INDENT_GUIDES)? {
+            defaults.editor_indent_guides = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_RAINBOW_BRACKETS)? {
+            defaults.editor_rainbow_brackets = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_CODE_LENS)? {
+            defaults.editor_code_lens = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_INLAY_HINTS)? {
+            defaults.editor_inlay_hints = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_WHITESPACE)? {
+            defaults.editor_whitespace = parse_bool_setting(&value, false);
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_RULER)? {
+            defaults.editor_ruler = parse_bool_setting(&value, false);
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_RULER_COLUMN)? {
+            defaults.editor_ruler_column = clamp_setting(
+                &value,
+                crate::model::settings_ranges::EDITOR_RULER_COLUMN,
+                defaults.editor_ruler_column,
+            );
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_LINE_NUMBERS)? {
+            defaults.editor_line_numbers =
+                EditorLineNumbers::parse(&value).unwrap_or(defaults.editor_line_numbers);
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_CURSOR_SHAPE)? {
+            defaults.editor_cursor_shape =
+                EditorCursorShape::parse(&value).unwrap_or(defaults.editor_cursor_shape);
+        }
+        if let Some(value) = self.setting_value(settings_keys::EDITOR_TAB_SIZE)? {
+            defaults.editor_tab_size = clamp_setting(
+                &value,
+                crate::model::settings_ranges::EDITOR_TAB_SIZE,
+                defaults.editor_tab_size,
+            );
+        }
         if let Some(value) = self.setting_value(settings_keys::TRANSLUCENCY)? {
             defaults.translucency = parse_bool_setting(&value, false);
         }
@@ -1406,6 +1452,66 @@ impl AppDatabase {
             &settings.markdown_plantuml_server,
         )?;
         set_setting(&transaction, settings_keys::FORGE_HOSTS, &settings.forge_hosts)?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_MINIMAP,
+            &settings.editor_minimap.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_STICKY_SCROLL,
+            &settings.editor_sticky_scroll.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_INDENT_GUIDES,
+            &settings.editor_indent_guides.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_RAINBOW_BRACKETS,
+            &settings.editor_rainbow_brackets.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_CODE_LENS,
+            &settings.editor_code_lens.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_INLAY_HINTS,
+            &settings.editor_inlay_hints.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_WHITESPACE,
+            &settings.editor_whitespace.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_RULER,
+            &settings.editor_ruler.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_RULER_COLUMN,
+            &settings.editor_ruler_column.to_string(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_LINE_NUMBERS,
+            settings.editor_line_numbers.raw(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_CURSOR_SHAPE,
+            settings.editor_cursor_shape.raw(),
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::EDITOR_TAB_SIZE,
+            &settings.editor_tab_size.to_string(),
+        )?;
         set_setting(
             &transaction,
             settings_keys::TRANSLUCENCY,

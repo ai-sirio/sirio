@@ -2,6 +2,7 @@
 
 use crate::caret;
 use crate::controls;
+use crate::editor_prefs::EditorPrefs;
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
@@ -360,6 +361,9 @@ pub struct SettingsSnapshot {
     /// The Markdown Preview's PlantUML server (design §6). Empty means none;
     /// the host trims it. Persisted as `markdown.plantumlServer`.
     pub plantuml_server: String,
+    /// The code editor's preferences (`editor.*`). No control on this surface
+    /// edits them yet; the value is carried through so a save keeps it.
+    pub editor: EditorPrefs,
 }
 
 impl Default for SettingsSnapshot {
@@ -387,6 +391,7 @@ impl Default for SettingsSnapshot {
             translucency: false,
             lsp_silenced_languages: Vec::new(),
             plantuml_server: String::new(),
+            editor: EditorPrefs::default(),
         }
     }
 }
@@ -935,6 +940,9 @@ pub struct Settings {
     plantuml_server: String,
     /// Focus handle for the server field.
     plantuml_server_focus: FocusHandle,
+    /// The code editor's preferences, carried through unchanged: this surface
+    /// does not edit them, but a save writes the whole snapshot back.
+    editor: EditorPrefs,
     /// The local `plantuml`, looked up once when the surface opens.
     plantuml_path: Option<std::path::PathBuf>,
     /// Where the cookie is saved: the app's own on-disk store (macOS uses
@@ -1107,6 +1115,7 @@ impl Settings {
             opencode_override_focus: cx.focus_handle(),
             plantuml_server: initial.plantuml_server,
             plantuml_server_focus: cx.focus_handle(),
+            editor: initial.editor,
             plantuml_path: sirio_diagram::find_plantuml(),
             credential_store: CredentialStore::from_env().ok(),
             browser_origins: BTreeSet::new(),
@@ -1625,6 +1634,7 @@ impl Settings {
             translucency: self.translucency,
             lsp_silenced_languages: self.lsp_servers.silenced.iter().cloned().collect(),
             plantuml_server: self.plantuml_server.clone(),
+            editor: self.editor.clone(),
         }
     }
 

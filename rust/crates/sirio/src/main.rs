@@ -45,6 +45,7 @@ use sirio_ui::{
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
+    editor_prefs::EditorPrefs,
     file_context_menu::{FileContextFacts, MissingServer},
     file_view::{FileView, FileViewEvent, SnapshotOrigin},
     loading,
@@ -6074,6 +6075,10 @@ impl SirioWorkspace {
                 .status_bar
                 .update(cx, |bar, cx| bar.apply_preferences(prefs, cx));
             workspace.apply_terminal_font_size(snapshot.terminal_font_size, cx);
+            // The code editor's view options, live. `apply` refreshes the
+            // windows only when a value changed, so a notify that changes
+            // nothing repaints nothing.
+            EditorPrefs::apply(snapshot.editor, cx);
         })
         .detach();
         // Task 8: how every agent launches is resolved state, held here and
@@ -24407,6 +24412,8 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
             }
         };
 
+    let editor = EditorPrefs::from_settings(&settings);
+
     SettingsSnapshot {
         theme: theme_mode(settings.appearance),
         interface_font_size: settings.ui_font_size.clamp(12, 18) as i32,
@@ -24437,6 +24444,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         lsp_silenced_languages: serde_json::from_str(&settings.lsp_silenced_languages)
             .unwrap_or_default(),
         plantuml_server: settings.markdown_plantuml_server,
+        editor,
     }
 }
 
@@ -24480,6 +24488,20 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         // Not in the Settings snapshot: `ForgeHub` owns it. Callers re-apply
         // the stored value — see `app_settings_for_settings_save`.
         forge_hosts: AppSettings::default().forge_hosts,
+        // The snapshot carries the editor preferences, so a save writes back
+        // the values the surface was built from.
+        editor_minimap: snapshot.editor.minimap,
+        editor_sticky_scroll: snapshot.editor.sticky_scroll,
+        editor_indent_guides: snapshot.editor.indent_guides,
+        editor_rainbow_brackets: snapshot.editor.rainbow_brackets,
+        editor_code_lens: snapshot.editor.code_lens,
+        editor_inlay_hints: snapshot.editor.inlay_hints,
+        editor_whitespace: snapshot.editor.whitespace,
+        editor_ruler: snapshot.editor.ruler,
+        editor_ruler_column: snapshot.editor.ruler_column as i64,
+        editor_line_numbers: snapshot.editor.line_numbers,
+        editor_cursor_shape: snapshot.editor.cursor_shape,
+        editor_tab_size: snapshot.editor.tab_size as i64,
     }
 }
 
@@ -25808,6 +25830,8 @@ fn main() {
             &saved_settings.markdown_plantuml_server,
             cx,
         );
+        // The code editor's view options, before the first editor opens.
+        EditorPrefs::apply(EditorPrefs::from_settings(&saved_settings), cx);
         // The window below is opened with the material resolved from the
         // persisted preference; the theme's surfaces must fade to match from
         // the first frame, not only once the toggle is next flipped, or a
@@ -26419,6 +26443,7 @@ mod tests {
     use super::*;
     // Only the tests address a parked tab by its row id; the app addresses
     // one by its pill, so this import lives here rather than at the top.
+    use sirio_persistence::{EditorCursorShape, EditorLineNumbers};
     use sirio_ui::sidebar::{SidebarView, parked_tab_row_id};
 
     /// `panel.state` tells a caller whether a pane's session outlives the
@@ -37894,10 +37919,26 @@ done
             lsp_silenced_languages: "[]".to_string(),
             markdown_plantuml_server: "http://plantuml.test".into(),
             forge_hosts: "[]".to_string(),
+            editor_minimap: false,
+            editor_sticky_scroll: false,
+            editor_indent_guides: false,
+            editor_rainbow_brackets: false,
+            editor_code_lens: false,
+            editor_inlay_hints: false,
+            editor_whitespace: true,
+            editor_ruler: true,
+            editor_ruler_column: 120,
+            editor_line_numbers: EditorLineNumbers::Relative,
+            editor_cursor_shape: EditorCursorShape::Block,
+            editor_tab_size: 2,
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
         assert_eq!(snapshot.theme, sirio_theme::ThemeMode::Dark);
+        assert!(!snapshot.editor.minimap);
+        assert!(snapshot.editor.ruler);
+        assert_eq!(snapshot.editor.ruler_column, 120);
+        assert_eq!(snapshot.editor.line_numbers, EditorLineNumbers::Relative);
         assert_eq!(snapshot.interface_font_size, 17);
         assert_eq!(snapshot.terminal_font_size, 16);
         assert!(!snapshot.control_socket_enabled);
@@ -37958,6 +37999,18 @@ done
             persisted.opencode_workspace_id_override
         );
         assert_eq!(restored.translucency, persisted.translucency);
+        assert_eq!(restored.editor_minimap, persisted.editor_minimap);
+        assert_eq!(restored.editor_sticky_scroll, persisted.editor_sticky_scroll);
+        assert_eq!(restored.editor_indent_guides, persisted.editor_indent_guides);
+        assert_eq!(restored.editor_rainbow_brackets, persisted.editor_rainbow_brackets);
+        assert_eq!(restored.editor_code_lens, persisted.editor_code_lens);
+        assert_eq!(restored.editor_inlay_hints, persisted.editor_inlay_hints);
+        assert_eq!(restored.editor_whitespace, persisted.editor_whitespace);
+        assert_eq!(restored.editor_ruler, persisted.editor_ruler);
+        assert_eq!(restored.editor_ruler_column, persisted.editor_ruler_column);
+        assert_eq!(restored.editor_line_numbers, persisted.editor_line_numbers);
+        assert_eq!(restored.editor_cursor_shape, persisted.editor_cursor_shape);
+        assert_eq!(restored.editor_tab_size, persisted.editor_tab_size);
 
         let mut invalid_summarizer = persisted;
         invalid_summarizer.summarizer_agent = "not-a-supported-agent".into();
