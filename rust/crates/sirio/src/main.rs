@@ -1299,6 +1299,22 @@ enum ControlAction {
         value: String,
         reply: ControlReply,
     },
+    /// The pointer verbs: a hover at `offset`, a click there (a platform click
+    /// or a plain caret placement), and a right press there with a menu action.
+    EditorHover {
+        offset: usize,
+        reply: ControlReply,
+    },
+    EditorClick {
+        offset: usize,
+        platform: bool,
+        reply: ControlReply,
+    },
+    EditorContext {
+        offset: usize,
+        action: sirio_ui::file_context_menu::FileContextAction,
+        reply: ControlReply,
+    },
     AddAgentAccount {
         provider: String,
         label: String,
@@ -2604,6 +2620,9 @@ impl ControlHandler for AppControlHandler {
                     methods.push("surface.editor.type");
                     methods.push("surface.editor.keys");
                     methods.push("surface.editor.select");
+                    methods.push("surface.editor.hover");
+                    methods.push("surface.editor.click");
+                    methods.push("surface.editor.context");
                     methods.push("surface.editor.save");
                     methods.push("surface.editor.conflict");
                     methods.push("surface.editor.mode");
@@ -2794,6 +2813,41 @@ impl ControlHandler for AppControlHandler {
                     return ControlResponse::failure(&request.id, "surface.editor.select requires ranges");
                 };
                 self.queue_action(request, move |reply| ControlAction::EditorSelect { ranges, reply })
+            }
+            "surface.editor.hover" if cfg!(debug_assertions) => {
+                let Some(offset) = request.params.get("offset").and_then(|offset| offset.parse::<usize>().ok()) else {
+                    return ControlResponse::failure(&request.id, "surface.editor.hover requires offset");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorHover { offset, reply })
+            }
+            "surface.editor.click" if cfg!(debug_assertions) => {
+                let offset = request.params.get("offset").and_then(|offset| offset.parse::<usize>().ok());
+                let platform = match request.params.get("platform").map(String::as_str) {
+                    Some("true") => Some(true),
+                    Some("false") => Some(false),
+                    _ => None,
+                };
+                let (Some(offset), Some(platform)) = (offset, platform) else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.click requires offset and platform=true or platform=false",
+                    );
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorClick { offset, platform, reply })
+            }
+            "surface.editor.context" if cfg!(debug_assertions) => {
+                let offset = request.params.get("offset").and_then(|offset| offset.parse::<usize>().ok());
+                let action = request
+                    .params
+                    .get("action")
+                    .and_then(|action| sirio_ui::file_context_menu::FileContextAction::from_kebab(action));
+                let (Some(offset), Some(action)) = (offset, action) else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.context requires offset and a menu action such as copy or go-to-definition",
+                    );
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorContext { offset, action, reply })
             }
             "surface.editor.save" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::EditorSave { reply })
@@ -5940,6 +5994,15 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::EditorPref { key, value, reply } => {
                                     let _ = reply.send(workspace.control_editor_pref(&key, &value, cx));
+                                }
+                                ControlAction::EditorHover { offset, reply } => {
+                                    let _ = reply.send(workspace.control_editor_hover(offset, window, cx));
+                                }
+                                ControlAction::EditorClick { offset, platform, reply } => {
+                                    let _ = reply.send(workspace.control_editor_click(offset, platform, cx));
+                                }
+                                ControlAction::EditorContext { offset, action, reply } => {
+                                    let _ = reply.send(workspace.control_editor_context(offset, action, window, cx));
                                 }
                                 ControlAction::AddAgentAccount {
                                     provider,
@@ -17990,8 +18053,13 @@ impl SirioWorkspace {
             (None, None) => "loading",
         };
         let text = editor
-            .map(|editor| editor.buffer().replace('\\', "\\\\").replace('\n', "\\n"))
+            .map(|editor| Self::escaped_field(editor.buffer()))
             .unwrap_or_default();
+        // The card and the message as the user reads them; the findings the code
+        // editor draws, which the card reads too.
+        let hover = Self::escaped_field(view.hover_card().unwrap_or_default());
+        let message = Self::escaped_field(&view.message_text().unwrap_or_default());
+        let diagnostics = code.map_or(0, |code| code.diagnostics().len());
         let selections = code.map(|code| {
             Self::joined_selections(
                 code.selections()
@@ -18032,6 +18100,9 @@ impl SirioWorkspace {
             ),
             ("conflict".to_string(), conflict.to_string()),
             ("mode".to_string(), mode.to_string()),
+            ("hover".to_string(), hover),
+            ("message".to_string(), message),
+            ("diagnostics".to_string(), diagnostics.to_string()),
             ("prefs".to_string(), EditorPrefs::current(cx).describe()),
         ])
     }
@@ -18165,6 +18236,99 @@ impl SirioWorkspace {
         Ok(vec![("selections".to_string(), selections)])
     }
 
+    /// The active file view for a pointer verb. Its code editor must be drawn,
+    /// and `offset` must name a character boundary of its text.
+    fn editor_pointer_target(&self, offset: usize, cx: &App) -> Result<Entity<FileView>, String> {
+        let view_entity = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let view = view_entity.read(cx);
+        if !view.code_shown() {
+            return Err("the code editor is not drawn: the file is loading or in Preview".to_string());
+        }
+        let text = view
+            .code_editor()
+            .ok_or_else(|| "the file is still loading".to_string())?
+            .read(cx)
+            .text();
+        if offset > text.len() || !text.is_char_boundary(offset) {
+            return Err(format!("{offset} is not a character boundary in {} bytes", text.len()));
+        }
+        Ok(view_entity)
+    }
+
+    /// The middle of the window. A debug verb's pointer rests there, where the
+    /// file view's text is in the usual layout.
+    fn window_centre(window: &Window) -> gpui::Point<gpui::Pixels> {
+        let size = window.viewport_size();
+        point(size.width / 2., size.height / 2.)
+    }
+
+    /// The active file's selections as `a..b` pairs, for a pointer verb's reply.
+    fn selections_reply(view: &Entity<FileView>, cx: &App) -> Result<Vec<(String, String)>, String> {
+        let selections = view.read(cx).code_editor().map(|code| {
+            Self::joined_selections(
+                code.read(cx)
+                    .selections()
+                    .iter()
+                    .map(|selection| (selection.anchor, selection.head)),
+            )
+        });
+        Ok(vec![("selections".to_string(), selections.unwrap_or_default())])
+    }
+
+    /// `surface.editor.hover offset=`: the pointer rests at `offset`, as the code
+    /// editor's `Pointer` event reports it. The card shows the diagnostics there
+    /// now and the server's answer after the hover delay.
+    fn control_editor_hover(
+        &mut self,
+        offset: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self.editor_pointer_target(offset, cx)?;
+        let at = Self::window_centre(window);
+        view.update(cx, |view, cx| view.hover_moved(offset, at, cx));
+        Ok(Vec::new())
+    }
+
+    /// `surface.editor.click offset= platform=`: a platform click at `offset`, as
+    /// Ely's `PlatformClick` makes it (a link, or go to definition), or a plain
+    /// caret placement. Answers the selections.
+    fn control_editor_click(
+        &mut self,
+        offset: usize,
+        platform: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self.editor_pointer_target(offset, cx)?;
+        view.update(cx, |view, cx| {
+            if platform {
+                view.platform_click_at(offset, cx);
+            } else {
+                view.place_caret_at(offset, cx);
+            }
+        });
+        Self::selections_reply(&view, cx)
+    }
+
+    /// `surface.editor.context offset= action=`: a right press at `offset`, then
+    /// the menu's `action`, as the menu runs it. Answers the selections.
+    fn control_editor_context(
+        &mut self,
+        offset: usize,
+        action: sirio_ui::file_context_menu::FileContextAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self.editor_pointer_target(offset, cx)?;
+        let at = Self::window_centre(window);
+        view.update(cx, |view, cx| {
+            view.context_action_at(offset, at, action, window, cx)
+        });
+        Self::selections_reply(&view, cx)
+    }
+
     /// Saves the active file tab through `FileView::save`, the call Save makes.
     /// A failed save is the reply's error.
     fn control_editor_save(
@@ -18243,6 +18407,12 @@ impl SirioWorkspace {
                 Ok(number(start)?..number(end)?)
             })
             .collect()
+    }
+
+    /// A value on one `key=value` line: a backslash and a newline are escaped,
+    /// as `surface.file.read` escapes its text.
+    fn escaped_field(text: &str) -> String {
+        text.replace('\\', "\\\\").replace('\n', "\\n")
     }
 
     /// The selections as `a..b` pairs of (anchor, head), joined by `;`.
@@ -41722,6 +41892,9 @@ done
             | ControlAction::EditorConflict { reply, .. }
             | ControlAction::EditorMode { reply, .. }
             | ControlAction::EditorPref { reply, .. }
+            | ControlAction::EditorHover { reply, .. }
+            | ControlAction::EditorClick { reply, .. }
+            | ControlAction::EditorContext { reply, .. }
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
@@ -41881,6 +42054,13 @@ done
             "surface.editor.mode" => request_with_params(method, &[("mode", "code")]),
             "surface.editor.pref" => {
                 request_with_params(method, &[("key", "minimap"), ("value", "true")])
+            }
+            "surface.editor.hover" => request_with_params(method, &[("offset", "0")]),
+            "surface.editor.click" => {
+                request_with_params(method, &[("offset", "0"), ("platform", "true")])
+            }
+            "surface.editor.context" => {
+                request_with_params(method, &[("offset", "0"), ("action", "copy")])
             }
             "settings.account.add" => {
                 request_with_params(method, &[("provider", "claude"), ("label", "test")])

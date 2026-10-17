@@ -27,6 +27,7 @@ use super::{
 };
 use crate::editor::{Language, LoadStatus, Selection, markdown_links_in_line};
 use crate::editor_prefs::EditorPrefs;
+use crate::file_context_menu::FileContextAction;
 
 impl FileView {
     /// The code editor: `None` until the file has loaded and a frame has drawn
@@ -181,6 +182,37 @@ impl FileView {
             }
         }
         self.open_context_menu(position, window, cx);
+    }
+
+    /// The debug verbs' platform click at `offset`: the path Ely's
+    /// `PlatformClick` takes (`code_platform_click`).
+    pub fn platform_click_at(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if let Some(code) = self.code_editor.clone() {
+            self.code_platform_click(offset, &code, cx);
+        }
+    }
+
+    /// The debug verbs' plain click: the caret moves to `offset`, without a scroll.
+    pub fn place_caret_at(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if let Some(code) = &self.code_editor {
+            code.update(cx, |code, cx| code.select_in_place([offset..offset], cx));
+        }
+    }
+
+    /// The debug verbs' right press at `offset`, then the menu's `action`:
+    /// `code_secondary_click`, then `handle_context_action`, as the menu runs it.
+    pub fn context_action_at(
+        &mut self,
+        offset: usize,
+        position: Point<Pixels>,
+        action: FileContextAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(code) = self.code_editor.clone() {
+            self.code_secondary_click(Some(offset), position, &code, window, cx);
+            self.handle_context_action(action, window, cx);
+        }
     }
 
     /// Pushes the app's editor settings into the code editor when they differ

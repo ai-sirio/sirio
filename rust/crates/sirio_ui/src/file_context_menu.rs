@@ -33,6 +33,29 @@ pub enum FileContextAction {
     InstallLanguageServer,
 }
 
+impl FileContextAction {
+    /// The action a debug verb names, in kebab case (`copy-and-trim`,
+    /// `go-to-definition`). `None` for a name no action has.
+    pub fn from_kebab(name: &str) -> Option<Self> {
+        Some(match name {
+            "send-to-agent" => Self::SendToAgent,
+            "cut" => Self::Cut,
+            "copy" => Self::Copy,
+            "copy-and-trim" => Self::CopyAndTrim,
+            "paste" => Self::Paste,
+            "reveal-in-file-manager" => Self::RevealInFileManager,
+            "open-in-terminal" => Self::OpenInTerminal,
+            "open-markdown-preview" => Self::OpenMarkdownPreview,
+            "copy-permalink" => Self::CopyPermalink,
+            "view-file-history" => Self::ViewFileHistory,
+            "go-to-definition" => Self::GoToDefinition,
+            "find-references" => Self::FindReferences,
+            "install-language-server" => Self::InstallLanguageServer,
+            _ => return None,
+        })
+    }
+}
+
 /// `View` is served by `FileView` itself; `App` leaves as a `FileViewEvent`
 /// for the workspace to apply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

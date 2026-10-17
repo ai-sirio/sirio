@@ -858,6 +858,33 @@ pub mod request {
         )
     }
 
+    pub fn editor_hover(offset: usize) -> ControlRequest {
+        request(
+            "surface.editor.hover",
+            BTreeMap::from([("offset".to_string(), offset.to_string())]),
+        )
+    }
+
+    pub fn editor_click(offset: usize, platform: bool) -> ControlRequest {
+        request(
+            "surface.editor.click",
+            BTreeMap::from([
+                ("offset".to_string(), offset.to_string()),
+                ("platform".to_string(), platform.to_string()),
+            ]),
+        )
+    }
+
+    pub fn editor_context(offset: usize, action: &str) -> ControlRequest {
+        request(
+            "surface.editor.context",
+            BTreeMap::from([
+                ("offset".to_string(), offset.to_string()),
+                ("action".to_string(), action.to_string()),
+            ]),
+        )
+    }
+
     pub fn editor_save() -> ControlRequest {
         request("surface.editor.save", BTreeMap::new())
     }

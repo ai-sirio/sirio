@@ -168,6 +168,9 @@ fn usage() {
          \x20 surface editor type --text=t      (debug builds) type t through the code editor's input handler\n\
          \x20 surface editor keys --keys=K...   (debug builds) dispatch space-separated keystrokes (ctrl-z) to the window\n\
          \x20 surface editor select --ranges=a..b;c..d  (debug builds) select byte ranges\n\
+         \x20 surface editor hover --offset=n   (debug builds) rest the pointer at byte n: the card shows its diagnostics, then the server's answer\n\
+         \x20 surface editor click --offset=n --platform=true|false  (debug builds) a platform click at n (a link, go to definition), or a plain caret placement\n\
+         \x20 surface editor context --offset=n --action=a  (debug builds) a right press at n, then the menu action a (copy, cut, paste, go-to-definition, ...)\n\
          \x20 surface editor save               (debug builds) save the active file tab\n\
          \x20 surface editor conflict --action=reload|keep  (debug builds) answer a disk conflict\n\
          \x20 surface editor mode --mode=code|preview  (debug builds) switch the Markdown mode\n\
@@ -805,6 +808,14 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
     }
 }
 
+/// The byte offset `surface editor hover|click|context` take as `--offset`.
+fn editor_offset(parsed: &ParsedArgs) -> Result<usize, String> {
+    parsed
+        .require("offset")?
+        .parse::<usize>()
+        .map_err(|_| "--offset must be a byte offset".to_string())
+}
+
 fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
     let surface = parsed
         .positional
@@ -1084,6 +1095,27 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ("editor", "select") => require_ok(
             socket,
             &sirio_control::protocol::request::editor_select(&parsed.require("ranges")?),
+        ),
+        ("editor", "hover") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_hover(editor_offset(parsed)?),
+        ),
+        ("editor", "click") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_click(
+                editor_offset(parsed)?,
+                parsed
+                    .require("platform")?
+                    .parse::<bool>()
+                    .map_err(|_| "--platform must be true or false".to_string())?,
+            ),
+        ),
+        ("editor", "context") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_context(
+                editor_offset(parsed)?,
+                &parsed.require("action")?,
+            ),
         ),
         ("editor", "save") => require_ok(socket, &sirio_control::protocol::request::editor_save()),
         ("editor", "conflict") => require_ok(
