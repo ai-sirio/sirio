@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 use gpui::{ClipboardItem, Context, ScrollStrategy};
 
@@ -392,6 +392,7 @@ impl CodeEditor {
         if !self.editable() {
             return;
         }
+        let text = lf_text(text);
         let lines: Vec<&str> = text.split('\n').collect();
         let edits = if lines.len() == self.selections.len() && lines.len() > 1 {
             self.in_order()
@@ -416,6 +417,15 @@ impl CodeEditor {
         all.sort_by_key(|selection| selection.range().start);
         all
     }
+}
+
+/// `text` with each `\r\n` and each lone `\r` read as `\n`, the buffer's only
+/// line break. Borrowed when there is no carriage return to change.
+pub(crate) fn lf_text(text: &str) -> Cow<'_, str> {
+    if !text.contains('\r') {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
 }
 
 /// Edits sorted, with overlapping ranges joined; the first text of a joined run is kept.

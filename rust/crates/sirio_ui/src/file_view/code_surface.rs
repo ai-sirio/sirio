@@ -8,14 +8,16 @@
 //! The two are kept equal after every such event.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 
 use ely_gpui_component::editor::{CodeEditor, EditorEvent};
 use gpui::{App, AppContext as _, Context, Entity, FocusHandle, Focusable, HighlightStyle, Window};
 use sirio_theme::Theme;
 
 use super::{CodeSpan, FileView, MarkdownMode, code_spans, line_highlights};
-use crate::editor::{Language, LineEnding, LoadStatus, Selection, markdown_links_in_line};
+use crate::editor::{Language, LoadStatus, Selection, markdown_links_in_line};
 use crate::editor_prefs::EditorPrefs;
 
 impl FileView {
@@ -41,10 +43,11 @@ impl FileView {
         let text = editor.buffer().to_owned();
         let read_only = self.snapshot.is_some();
         let prefs = EditorPrefs::current(cx).view_options();
+        let spans = self.span_cache.clone();
         let code = cx.new(|cx| {
             let mut code = CodeEditor::new(text, window, cx)
                 .language(language.name())
-                .highlighter(code_highlighter(language))
+                .highlighter(code_highlighter(language, spans))
                 .without_breakpoints();
             if read_only {
                 code = code.read_only();
@@ -81,17 +84,23 @@ impl FileView {
 
     /// The code editor's text changed. The `Editor` takes it unless it already
     /// holds it (a `reset` or a format op that wrote the `Editor` first). The
-    /// `Editor` is LF-only, so a pasted CRLF is normalised there; a code
-    /// editor still holding that carriage return is then brought back to the
-    /// `Editor`'s text, which keeps the two offsets equal.
+    /// code editor never holds a carriage return (Ely reads each one as a line
+    /// break), so after `replace_all` the two texts agree; a carriage return
+    /// that got through is a bug, reported by its lengths and left as it is.
     fn code_changed(&mut self, code: Entity<CodeEditor>, cx: &mut Context<Self>) {
-        let text = code.read(cx).text().to_owned();
         if let Some(editor) = self.editor_mut()
-            && editor.buffer() != text
+            && editor.buffer() != code.read(cx).text()
         {
-            editor.replace_all(&text);
+            let text = code.read(cx).text();
+            editor.replace_all(text);
+            if text.contains('\r') && editor.buffer() != text {
+                eprintln!(
+                    "[files] code editor kept a carriage return: editor {} bytes, code {} bytes",
+                    editor.buffer().len(),
+                    text.len()
+                );
+            }
         }
-        self.sync_code_from_editor(cx);
         cx.notify();
     }
 
@@ -132,8 +141,8 @@ impl FileView {
     }
 
     /// Brings the code editor to the `Editor`'s text after the model changed
-    /// it on its own. The caret keeps its offset, clamped to the new text and
-    /// moved back to a character boundary. Does nothing when the texts agree.
+    /// it on its own. The cursors keep their places and the view stays where
+    /// it is (`reset_keeping_view`). Does nothing when the texts agree.
     pub(super) fn sync_code_from_editor(&mut self, cx: &mut Context<Self>) {
         let Some(code) = self.code_editor.clone() else {
             return;
@@ -146,12 +155,7 @@ impl FileView {
             return;
         }
         let text = text.to_owned();
-        let head = code.read(cx).primary().head;
-        code.update(cx, |code, cx| {
-            code.reset(text, cx);
-            let at = floor_char_boundary(code.text(), head);
-            code.select([at..at], cx);
-        });
+        code.update(cx, |code, cx| code.reset_keeping_view(text, cx));
         cx.notify();
     }
 
@@ -182,7 +186,8 @@ impl FileView {
         let Some(code) = self.code_editor.clone() else {
             return;
         };
-        let text = LineEnding::normalize(text);
+        // `edit` takes text as it is; the code editor's own paste reads these too.
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         code.update(cx, |code, cx| {
             let range = code.primary().range();
             code.edit([(range, text)], cx);
@@ -195,6 +200,14 @@ impl FileView {
         let Some(line) = self.pending_reveal else {
             return;
         };
+        // A code editor left over from before a load has the old text; the
+        // reveal waits for the loaded one.
+        if self
+            .editor()
+            .is_none_or(|editor| editor.status() != &LoadStatus::Loaded)
+        {
+            return;
+        }
         let Some(code) = self.code_editor.clone() else {
             return;
         };
@@ -208,28 +221,62 @@ impl FileView {
     }
 }
 
-/// The code editor's colours for each line: the grammar's spans and the
-/// Markdown link rules, read from the theme at each call so a theme switch
-/// recolours. The spans of a line are memoized by its index. An entry is
-/// reused only while the line's text is the same, and the table is bounded by
-/// the file's line count. The minimap asks for every row on every render, so
-/// a cache keyed by a fixed count would clear and re-run the grammar on every
-/// caret blink.
+/// The grammar's spans per line text, in two generations. A lookup hits the
+/// current generation; failing that it takes the entry from the previous one;
+/// failing that it runs the grammar. A new generation starts each time the
+/// file view renders (`FileView::render`). The minimap asks for every row
+/// during the editor's own render, so after an edit or a caret move every row
+/// comes back through the previous generation, and a row that stops being
+/// drawn is dropped one generation later. Keyed by text, so a line that moves
+/// (an Enter above it) keeps its spans, and a caret blink, which renders the
+/// editor alone, hits. Bounded: cleared when the current generation holds more
+/// than eight entries per line of the file, and at least `MIN_CACHED_LINES`.
+#[derive(Default)]
+pub(super) struct SpanCache {
+    current: HashMap<String, Vec<CodeSpan>>,
+    previous: HashMap<String, Vec<CodeSpan>>,
+    highest: usize,
+}
+
+/// The most lines a span cache keeps, whatever the length of the file.
+const MIN_CACHED_LINES: usize = 65_536;
+
+impl SpanCache {
+    /// Starts a new generation: what was current becomes the previous one, and
+    /// what was only in the previous one is dropped.
+    pub(super) fn rotate(&mut self) {
+        self.previous = std::mem::take(&mut self.current);
+    }
+
+    /// The spans of `line`, which is line `index`.
+    fn spans(&mut self, index: usize, language: Language, line: &str) -> &[CodeSpan] {
+        self.highest = self.highest.max(index);
+        let bound = (8 * (self.highest + 1)).max(MIN_CACHED_LINES);
+        if self.current.len() > bound {
+            self.current.clear();
+            self.previous.clear();
+        }
+        if !self.current.contains_key(line) {
+            let (key, spans) = match self.previous.remove_entry(line) {
+                Some(entry) => entry,
+                None => (line.to_owned(), code_spans(language, line)),
+            };
+            self.current.insert(key, spans);
+        }
+        &self.current[line]
+    }
+}
+
+/// The code editor's colours for each line: the grammar's spans (from `cache`)
+/// and the Markdown link rules, read from the theme at each call so a theme
+/// switch recolours.
 fn code_highlighter(
     language: Language,
+    cache: Rc<RefCell<SpanCache>>,
 ) -> impl Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)> + 'static {
-    let cache: RefCell<Vec<Option<(String, Vec<CodeSpan>)>>> = RefCell::new(Vec::new());
     move |index, line, cx| {
         let mut cache = cache.borrow_mut();
-        if cache.len() <= index {
-            cache.resize_with(index + 1, || None);
-        }
-        if !matches!(&cache[index], Some((text, _)) if text == line) {
-            cache[index] = Some((line.to_owned(), code_spans(language, line)));
-        }
-        let Some((_, spans)) = &cache[index] else {
-            return Vec::new();
-        };
+        let spans = cache.spans(index, language, line);
         let links: Vec<(Range<usize>, String)> = if language == Language::Markdown {
             markdown_links_in_line(line)
                 .into_iter()
@@ -256,11 +303,3 @@ fn line_start_offset(text: &str, line: usize) -> usize {
     }
 }
 
-/// `offset` clamped to `text` and moved back onto a character boundary.
-fn floor_char_boundary(text: &str, offset: usize) -> usize {
-    let mut at = offset.min(text.len());
-    while !text.is_char_boundary(at) {
-        at -= 1;
-    }
-    at
-}

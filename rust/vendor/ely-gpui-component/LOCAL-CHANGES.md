@@ -470,3 +470,26 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
   `select` scrolls only when it changes the selection, so a host that places
   the caret where it already is (the start of a line it was asked to show) calls
   this after `select`. Sirio's `file_view` does exactly that.
+
+### Carriage returns and silent resets (Task 6 fix round 1)
+
+- `src/editor/edit.rs`: `lf_text` reads each `\r\n` and each lone `\r` as `\n`,
+  the buffer's only line break; it borrows when there is nothing to change.
+  `CodeEditor::paste` applies it before it splits the text into lines, so a
+  pasted CRLF is one ordinary undo step with the caret after the pasted text.
+- `src/editor/ime.rs`: `replace_text_in_range` and `replace_and_mark_text_in_range`
+  apply `lf_text` to the committed text before it becomes an edit (the
+  composition path), so text entered through an input method carries no `\r`
+  either.
+- `src/editor/state.rs`: `CodeEditor::reset_keeping_view(text, cx)`. It is
+  `reset` for a change the owner makes on its own (a reload, a disk adoption):
+  the new buffer, history and folds cleared, the marks and blink as `reset`
+  leaves them, `Changed` emitted. The cursors keep their places, each end
+  clamped to the new text and floored to a character boundary, and cursors
+  that now share an offset are joined. The scroll handle is not touched, so
+  the view does not move. `reset` stays for a host that wants a caret at 0.
+- `src/editor/tests/mod.rs`: `a_crlf_paste_lands_as_lf_with_the_caret_after_it`,
+  `a_composed_text_with_a_crlf_lands_as_lf`,
+  `a_silent_reset_keeps_its_cursors_clamped_and_its_history_empty`,
+  `a_silent_reset_moves_a_cursor_inside_a_character_back_onto_it`.
+  `cargo nextest run -p ely-gpui-component --features test-support` runs 124 tests, all passed.

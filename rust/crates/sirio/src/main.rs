@@ -26595,6 +26595,8 @@ mod tests {
     #[cfg(unix)]
     #[gpui::test]
     async fn an_opened_document_reaches_the_server_with_its_text(cx: &mut TestAppContext) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-didopen-{}-{}",
             std::process::id(),
@@ -26711,6 +26713,8 @@ mod tests {
     #[cfg(unix)]
     #[gpui::test]
     async fn an_edit_after_the_open_reaches_the_server(cx: &mut TestAppContext) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-didchange-{}-{}",
             std::process::id(),
@@ -27002,6 +27006,8 @@ done
     async fn a_language_server_that_is_not_installed_says_nothing_until_asked(
         cx: &mut TestAppContext,
     ) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let tag = "uninstalled";
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-{}-{}-{}",
@@ -27342,6 +27348,8 @@ done
     #[cfg(unix)]
     #[gpui::test]
     async fn an_install_reaches_every_open_tab_of_that_language(cx: &mut TestAppContext) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let tag = "revive-language";
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-{tag}-{}-{}",
@@ -44266,6 +44274,7 @@ browser  profile  "
     #[gpui::test]
     async fn layout_captures_the_open_editors_path(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
         let path = std::env::temp_dir().join(format!(
             "sirio-editor-capture-{}-{}.rs",
             std::process::id(),

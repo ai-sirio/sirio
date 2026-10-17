@@ -34,6 +34,7 @@ use sirio_diagram::{DiagramError, DiagramKind, Palette};
 use sirio_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use sirio_project::resolve_file_link;
 use sirio_theme::Theme;
+use std::cell::RefCell;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -203,6 +204,9 @@ pub struct FileView {
     /// its focus (which re-checks the disk, as `focus_subscription` does for
     /// `editor_focus`).
     code_subscriptions: Vec<Subscription>,
+    /// The colours of the code's lines, shared with the code editor's
+    /// highlighter. Rotated once per render of this view (see `render`).
+    span_cache: Rc<RefCell<code_surface::SpanCache>>,
     /// Focus target for everything that is not the code: Loading, the
     /// notices and the Markdown Preview. The code editor takes the keyboard
     /// while it draws the file (see `focus_target`).
@@ -415,6 +419,7 @@ impl FileView {
             markdown_mode: MarkdownMode::Preview,
             code_editor: None,
             code_subscriptions: Vec::new(),
+            span_cache: Rc::default(),
             editor_focus: cx.focus_handle().tab_stop(true),
             focus_subscription: None,
             scroll: SurfaceScroll::new(Painter::of(cx)),
@@ -1326,6 +1331,10 @@ impl Render for FileView {
         // The code editor is made the first frame the file is loaded, then
         // kept to the app's editor settings and handed the keyboard whenever
         // the mode or its existence changes under the focus.
+        // A new generation of line colours per render: the code editor's
+        // minimap asks for every row, so this frame's rows come back from the
+        // previous generation and nothing a frame still shows is dropped.
+        self.span_cache.borrow_mut().rotate();
         self.ensure_code_editor(window, cx);
         self.sync_code_prefs(cx);
         self.hand_over_focus(window, cx);
@@ -1927,6 +1936,7 @@ fn render_content(
     source
         .child(
             div()
+                .id("file-text-scroll")
                 .flex_1()
                 .min_h(px(0.0))
                 .relative()

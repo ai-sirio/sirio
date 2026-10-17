@@ -189,6 +189,15 @@ impl Focusable for CodeEditor {
     }
 }
 
+/// `offset` clamped to `text` and moved back onto a character boundary.
+fn floor_boundary(text: &str, offset: usize) -> usize {
+    let mut at = offset.min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
 /// Whether a mark the owner sent fits the text; one that does not is logged and dropped.
 fn kept(fits: bool, what: &str) -> bool {
     if !fits {
@@ -386,6 +395,28 @@ impl CodeEditor {
     pub fn reset(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.buffer = Buffer::new(text);
         self.selections = vec![Selection::caret(0)];
+        self.history = History::default();
+        self.folded.clear();
+        (self.marked, self.composing) = (None, None);
+        anchors::clear(&mut self.marks);
+        cx.emit(EditorEvent::Changed);
+        self.restart_blink(cx);
+    }
+
+    /// New text like `reset`, but the view stays where it is and each cursor keeps its place: both ends are clamped to the new text and moved back onto a character, and cursors that now share an offset are joined. History and folds are cleared, as `reset` clears them. For a change the owner makes on its own (a reload, a disk adoption), so the reader is not moved.
+    pub fn reset_keeping_view(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.buffer = Buffer::new(text);
+        let text = self.buffer.text();
+        let kept: Vec<Selection> = self
+            .selections
+            .iter()
+            .map(|selection| Selection {
+                anchor: floor_boundary(text, selection.anchor),
+                head: floor_boundary(text, selection.head),
+                goal: None,
+            })
+            .collect();
+        self.selections = merged(kept);
         self.history = History::default();
         self.folded.clear();
         (self.marked, self.composing) = (None, None);
