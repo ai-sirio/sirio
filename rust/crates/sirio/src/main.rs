@@ -1798,6 +1798,16 @@ impl ControlState {
         self.current.and_then(|index| self.workspaces.get(index))
     }
 
+    /// The id `worktree-set --worktree` accepts for the worktree a selector
+    /// names: the value a terminal of that worktree exports as
+    /// `SIRIO_WORKTREE_ID` (spec §5.3).
+    fn worktree_id(&self, selector: &str) -> Option<String> {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == selector || workspace.path == selector)
+            .map(|workspace| workspace.id.clone())
+    }
+
     fn path_for_selector(&self, selector: &str) -> Option<PathBuf> {
         self.workspaces
             .iter()
@@ -2091,7 +2101,17 @@ impl AppControlHandler {
                         working_directory.to_string_lossy().into_owned(),
                     );
                 }
-                let response = self.host_request(&request);
+                // A pane created for a named worktree carries its id, as a
+                // terminal of that worktree does (spec §5.3).
+                let extra_env = match request.params.get("worktree") {
+                    Some(selector) if request.method == "panel.create" => self
+                        .state()
+                        .worktree_id(selector)
+                        .map(|id| BTreeMap::from([("SIRIO_WORKTREE_ID".to_string(), id)]))
+                        .unwrap_or_default(),
+                    _ => BTreeMap::new(),
+                };
+                let response = self.host_request(&request, &extra_env);
                 self.refresh_control();
                 response
             }
@@ -2116,7 +2136,7 @@ impl AppControlHandler {
                 if self.host_terminal.client().is_none() {
                     return Self::pane_error(request, self.panes.missing_pane_error(&id));
                 }
-                let response = self.host_request(request);
+                let response = self.host_request(request, &BTreeMap::new());
                 if method == "panel.close" {
                     self.refresh_control();
                 }
@@ -2173,26 +2193,32 @@ impl AppControlHandler {
     fn host_call<T>(
         &self,
         read_only: bool,
+        extra_env: &BTreeMap<String, String>,
         call: impl Fn(&sirio_control::host_panels::HostPanels) -> Result<T, sirio_control::host_panels::Failure>,
     ) -> Result<T, sirio_control::host_panels::Failure> {
         use sirio_control::host_panels::{Failure, HostPanels};
         let Some(client) = self.host_terminal.client() else {
             return Err(Failure::Unreached("the host is not running".to_string()));
         };
-        match call(&HostPanels::new(client)) {
+        let panels = |client| HostPanels::new(client).with_extra_env(extra_env.clone());
+        match call(&panels(client)) {
             Err(Failure::Unreached(message)) if read_only => match self.host_terminal.reconnect() {
-                Some(fresh) => call(&HostPanels::new(fresh)),
+                Some(fresh) => call(&panels(fresh)),
                 None => Err(Failure::Unreached(message)),
             },
             other => other,
         }
     }
 
-    /// Forwards one `panel.*` request to the host; a lost connection is
-    /// reported, not guessed at.
-    fn host_request(&self, request: &ControlRequest) -> ControlResponse {
+    /// Forwards one `panel.*` request to the host, with `extra_env` for any pane
+    /// it creates; a lost connection is reported, not guessed at.
+    fn host_request(
+        &self,
+        request: &ControlRequest,
+        extra_env: &BTreeMap<String, String>,
+    ) -> ControlResponse {
         let read_only = sirio_control::host_panels::HostPanels::is_read_only(&request.method);
-        match self.host_call(read_only, |host| host.answer(request)) {
+        match self.host_call(read_only, extra_env, |host| host.answer(request)) {
             Ok(response) => response,
             Err(_) => ControlResponse::failure(&request.id, "Sirio could not reach its host"),
         }
@@ -2201,7 +2227,9 @@ impl AppControlHandler {
     /// Brings the registry's control sessions up to the host's listing, so
     /// the sidebar and `panel.list` see what the host holds.
     fn refresh_control(&self) {
-        if let Ok(sessions) = self.host_call(true, |host| host.control_sessions()) {
+        if let Ok(sessions) =
+            self.host_call(true, &BTreeMap::new(), |host| host.control_sessions())
+        {
             if let Err(error) = self.panes.set_control_sessions(sessions) {
                 eprintln!("[control] failed to register control sessions: {error}");
             }
@@ -4467,6 +4495,23 @@ fn paths_name_the_same_document(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The variables a terminal of the worktree that holds `directory` starts
+/// with: `SIRIO_WORKTREE_ID`, the id `worktree-set --worktree` accepts (spec
+/// §5.3), which is the id the control state names the worktree by. The deepest
+/// worktree holding `directory` wins; empty when no known worktree holds it.
+fn worktree_environment_in(control: &ControlState, directory: &Path) -> BTreeMap<String, String> {
+    control
+        .workspaces
+        .iter()
+        .filter(|workspace| {
+            let worktree = Path::new(&workspace.path);
+            directory.starts_with(worktree) || paths_name_the_same_document(worktree, directory)
+        })
+        .max_by_key(|workspace| workspace.path.len())
+        .map(|workspace| BTreeMap::from([("SIRIO_WORKTREE_ID".to_string(), workspace.id.clone())]))
+        .unwrap_or_default()
+}
+
 /// `open_paths` only ever contains this workspace's own already-open tabs
 /// (`add_file_tab` builds it from `self.tabs`, one `SirioWorkspace` per
 /// worktree), so this dedup is worktree-scoped by construction -- the same
@@ -6009,7 +6054,13 @@ impl SirioWorkspace {
                 .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
                 .collect::<Vec<PathBuf>>(),
         );
-        Self::bind_terminal_tabs(&tabs, &known_worktrees, cx);
+        let worktree_environment = worktree_environment_in(
+            &control_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &working_directory,
+        );
+        Self::bind_terminal_tabs(&tabs, &known_worktrees, &worktree_environment, cx);
         Self::apply_terminal_font_size_to_tabs(&tabs, terminal_font_size, cx);
         // `bind_file_tabs` needs `&mut self`, which does not exist yet, so
         // collect the restored file views here and adopt them just below,
@@ -8473,18 +8524,48 @@ impl SirioWorkspace {
         }
     }
 
+    /// The environment a terminal of the worktree holding `directory` starts
+    /// with (see [`worktree_environment_in`]).
+    fn worktree_environment(&self, directory: &Path) -> BTreeMap<String, String> {
+        let control = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        worktree_environment_in(&control, directory)
+    }
+
+    /// Gives a new terminal the environment of the worktree holding
+    /// `directory`, before its first open.
+    fn adopt_worktree_environment(
+        &self,
+        terminal: &Entity<TerminalView>,
+        directory: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        let environment = self.worktree_environment(directory);
+        terminal.update(cx, |terminal, _| terminal.set_extra_env(environment));
+    }
+
     fn bind_terminal_tabs(
         tabs: &[OpenTab],
         known_worktrees: &std::sync::Arc<[PathBuf]>,
+        worktree_environment: &BTreeMap<String, String>,
         cx: &mut Context<Self>,
     ) {
-        Self::bind_terminal_tabs_with_reused(tabs, None, known_worktrees, cx);
+        Self::bind_terminal_tabs_with_reused(
+            tabs,
+            None,
+            known_worktrees,
+            worktree_environment,
+            cx,
+        );
     }
 
     fn bind_terminal_tabs_with_reused(
         tabs: &[OpenTab],
         reused_terminal_panes: Option<&HashSet<usize>>,
         known_worktrees: &std::sync::Arc<[PathBuf]>,
+        worktree_environment: &BTreeMap<String, String>,
         cx: &mut Context<Self>,
     ) {
         for tab in tabs {
@@ -8500,6 +8581,7 @@ impl SirioWorkspace {
                     view.update(cx, |terminal, _| {
                         terminal.set_restored();
                         terminal.set_known_worktrees(known_worktrees.clone());
+                        terminal.set_extra_env(worktree_environment.clone());
                     });
                     Self::bind_terminal(view, tab_id, pane_id, cx);
                 }
@@ -11071,6 +11153,7 @@ impl SirioWorkspace {
                 &new_tabs,
                 Some(&reused_terminal_panes),
                 &known_worktrees,
+                &self.worktree_environment(&selected_path),
                 cx,
             );
             Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
@@ -11515,7 +11598,8 @@ impl SirioWorkspace {
             );
             Self::apply_terminal_font_size_to_tabs(&tabs, self.terminal_font_size, cx);
             let known_worktrees = std::sync::Arc::from(self.known_worktree_paths());
-            Self::bind_terminal_tabs(&tabs, &known_worktrees, cx);
+            let worktree_environment = self.worktree_environment(&self.working_directory);
+            Self::bind_terminal_tabs(&tabs, &known_worktrees, &worktree_environment, cx);
             let worktree = self.working_directory.clone();
             self.bind_file_tabs(&tabs, &worktree, cx);
             Self::bind_change_request_tabs(&tabs, cx);
@@ -13544,6 +13628,7 @@ impl SirioWorkspace {
                 terminal.set_attached();
             }
         });
+        self.adopt_worktree_environment(&terminal, &self.working_directory, cx);
         Self::bind_terminal(&terminal, tab_id, leaf, cx);
         self.tabs.push(OpenTab {
             id: tab_id,
@@ -13897,6 +13982,7 @@ impl SirioWorkspace {
         terminal.update(cx, |terminal, cx| {
             terminal.set_font_size(self.terminal_font_size, cx)
         });
+        self.adopt_worktree_environment(&terminal, &self.working_directory, cx);
         Self::bind_terminal(&terminal, tab_id, pane_id, cx);
         self.tabs.push(OpenTab {
             id: tab_id,
@@ -18248,6 +18334,7 @@ impl SirioWorkspace {
             split
         };
         if split {
+            self.adopt_worktree_environment(&terminal, &self.working_directory, cx);
             Self::bind_terminal(&terminal, tab_id, pane_id, cx);
             if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                 tab.session_state.pane_events.push(PaneEvent::Split {
@@ -45063,6 +45150,7 @@ browser  profile  "
                 attach_only: false,
                 restore: false,
                 known_worktrees: std::sync::Arc::from(Vec::new()),
+                extra_env: BTreeMap::new(),
             }
         }
 
@@ -45171,6 +45259,7 @@ browser  profile  "
             attach_only: false,
             restore: false,
             known_worktrees: std::sync::Arc::from(Vec::new()),
+            extra_env: BTreeMap::new(),
         };
         let started = Instant::now();
         assert!(matches!(factory.open(probe), OpenOutcome::Pending));

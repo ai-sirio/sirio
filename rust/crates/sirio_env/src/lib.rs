@@ -133,6 +133,28 @@ pub fn absent_from_user() -> Vec<String> {
         .collect()
 }
 
+/// The environment a host session is created with (`term.create`'s `env`).
+///
+/// With `exact` the host takes this map as the session's whole environment
+/// (`term.env_exact`). Without it the host extends its own environment with
+/// the map, so each name the user environment lacks is sent blank: the host's
+/// copy of that variable is emptied, as far as a best-effort host can manage.
+pub fn host_create_env(
+    exact: bool,
+    user: &BTreeMap<String, String>,
+    extra: &BTreeMap<String, String>,
+    absent: &[String],
+) -> BTreeMap<String, String> {
+    let mut environment = user.clone();
+    environment.extend(extra.iter().map(|(name, value)| (name.clone(), value.clone())));
+    if !exact {
+        for name in absent {
+            environment.entry(name.clone()).or_default();
+        }
+    }
+    environment
+}
+
 /// Whether the user environment holds `name`. Windows variable names are
 /// case-insensitive, so `Path` and `PATH` are one variable there.
 fn user_has(user: &BTreeMap<String, String>, name: &str) -> bool {
@@ -389,6 +411,43 @@ mod tests {
             !installed()
                 .expect("installed")
                 .contains_key("SIRIO_PANE_HOST_HOME")
+        );
+    }
+
+    /// `term.env_exact`: the host takes the map as the whole environment, so
+    /// nothing the app has and the user lacks reaches the session, and the
+    /// caller's extras are added to the user's own variables.
+    #[test]
+    fn host_create_is_exact_when_the_host_supports_it() {
+        let user = map(&[("PATH", "/usr/bin"), ("HOME", "/h")]);
+        let extra = map(&[("SIRIO_WORKTREE_ID", "wt-1")]);
+        let absent = ["LD_LIBRARY_PATH".to_string()];
+        assert_eq!(
+            host_create_env(true, &user, &extra, &absent),
+            map(&[
+                ("PATH", "/usr/bin"),
+                ("HOME", "/h"),
+                ("SIRIO_WORKTREE_ID", "wt-1"),
+            ])
+        );
+    }
+
+    /// A host without `term.env_exact` extends its own environment with the
+    /// map, so every name the user environment lacks is sent blank, which
+    /// empties the host's copy. An extra the caller set is never blanked.
+    #[test]
+    fn old_host_gets_blanks_for_what_the_user_environment_lacks() {
+        let user = map(&[("PATH", "/usr/bin")]);
+        let extra = map(&[("SIRIO_WORKTREE_ID", "wt-1"), ("LEFT_OVER", "kept")]);
+        let absent = ["LD_LIBRARY_PATH".to_string(), "LEFT_OVER".to_string()];
+        assert_eq!(
+            host_create_env(false, &user, &extra, &absent),
+            map(&[
+                ("PATH", "/usr/bin"),
+                ("SIRIO_WORKTREE_ID", "wt-1"),
+                ("LD_LIBRARY_PATH", ""),
+                ("LEFT_OVER", "kept"),
+            ])
         );
     }
 }

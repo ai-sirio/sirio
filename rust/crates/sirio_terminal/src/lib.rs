@@ -5,7 +5,7 @@
 //! ceiling per #31), strikethrough, inverse, faint, invisible.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -1734,6 +1734,7 @@ impl TerminalHandle {
             attach_only: false,
             restore: false,
             known_worktrees: std::sync::Arc::from(Vec::new()),
+            extra_env: BTreeMap::new(),
         };
         let link = LocalLink::open(&request).map_err(|message| anyhow::anyhow!("{message}"))?;
         Ok(Self::new_with_link(Box::new(link)))
@@ -2213,6 +2214,9 @@ pub struct TerminalView {
     restored: bool,
     /// The worktrees the app knows, handed to a restore's open (fix batch 5, N3).
     known_worktrees: std::sync::Arc<[std::path::PathBuf]>,
+    /// The variables this view's sessions add over the user environment, set
+    /// by [`Self::set_extra_env`] and carried by every open ([`OpenRequest`]).
+    extra_env: BTreeMap<String, String>,
     context_menu: Option<Point<Pixels>>,
     /// #259: the running autoscroll, armed only while a drag is held outside
     /// the pane. Cancel-on-drop, so releasing the button or coming back
@@ -2394,6 +2398,7 @@ impl TerminalView {
             attached: false,
             restored: false,
             known_worktrees: std::sync::Arc::from(Vec::new()),
+            extra_env: BTreeMap::new(),
             terminal: TerminalState::Pending,
             spawn,
             view_mode: TerminalViewMode::default(),
@@ -2432,6 +2437,7 @@ impl TerminalView {
             attached: false,
             restored: false,
             known_worktrees: std::sync::Arc::from(Vec::new()),
+            extra_env: BTreeMap::new(),
             terminal: TerminalState::Pending,
             spawn: SpawnParams {
                 working_directory,
@@ -2493,6 +2499,7 @@ impl TerminalView {
             attached: false,
             restored: false,
             known_worktrees: std::sync::Arc::from(Vec::new()),
+            extra_env: BTreeMap::new(),
             terminal: TerminalState::Failed {
                 message: message.into(),
             },
@@ -2587,6 +2594,13 @@ impl TerminalView {
     /// 5, N3). Set on a restored view with [`Self::set_restored`].
     pub fn set_known_worktrees(&mut self, worktrees: std::sync::Arc<[std::path::PathBuf]>) {
         self.known_worktrees = worktrees;
+    }
+
+    /// The variables this view's session adds over the user environment, such
+    /// as `SIRIO_WORKTREE_ID`. Taken by the next open, so it is set before the
+    /// view starts.
+    pub fn set_extra_env(&mut self, environment: BTreeMap<String, String>) {
+        self.extra_env = environment;
     }
 
     /// Marks the view as showing a session it did not create (Show session).
@@ -2824,6 +2838,7 @@ impl TerminalView {
             attach_only: self.attached,
             restore: self.restored,
             known_worktrees: self.known_worktrees.clone(),
+            extra_env: self.extra_env.clone(),
         }
     }
 

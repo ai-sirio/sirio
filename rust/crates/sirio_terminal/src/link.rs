@@ -116,6 +116,10 @@ pub struct OpenRequest {
     /// 5, N3): a listed session of another known worktree is not this tab's.
     /// Empty when nothing is known, which lets every listed session through.
     pub known_worktrees: std::sync::Arc<[std::path::PathBuf]>,
+    /// Variables this terminal adds over the user environment (`for_child()`),
+    /// such as `SIRIO_WORKTREE_ID` for a terminal of a worktree. A host session
+    /// is created with them in its environment too.
+    pub extra_env: BTreeMap<String, String>,
 }
 
 pub enum OpenOutcome {
@@ -217,9 +221,11 @@ impl LocalLink {
                 Some((program.clone(), args.clone()))
             }
         };
-        // The app's full environment. `Session::spawn` exports the pane id
-        // (`SIRIO_PANE_ID`, `TILLER_PANE_ID`) from `spec.id` on top of this.
-        let env: BTreeMap<String, String> = std::env::vars().collect();
+        // The user's environment, not the launcher's: an AppImage launch would
+        // otherwise hand its mount paths to the shell. `Session::spawn` exports
+        // the pane id (`SIRIO_PANE_ID`, `TILLER_PANE_ID`) from `spec.id` on top.
+        let mut env = sirio_env::for_child();
+        env.extend(request.extra_env.clone());
         let (events_tx, events_rx) = mpsc::channel();
         let session = Session::spawn(
             SpawnSpec {
@@ -521,11 +527,20 @@ impl HostLink {
             )));
         }
         let created_pid = if plan == OpenPlan::Create {
+            // The session starts in the user's environment. A host without
+            // `term.env_exact` only extends its own, so it is sent the blanks
+            // that empty what the app had and the user lacks (`host_create_env`).
+            let exact = client.env_exact();
             let params = CreateParams {
                 session_id: Some(request.session_id.clone()),
                 cwd: request.cwd.to_string_lossy().into_owned(),
                 command: term_command(&request.shell),
-                env: std::env::vars().collect(),
+                env: sirio_env::host_create_env(
+                    exact,
+                    &sirio_env::for_child(),
+                    &request.extra_env,
+                    &sirio_env::absent_from_user(),
+                ),
                 size: TermSize {
                     cols: request.cols,
                     rows: request.rows,
@@ -537,7 +552,7 @@ impl HostLink {
                 } else {
                     Some(b64_encode(&request.prelude))
                 },
-                env_exact: false,
+                env_exact: exact,
             };
             match client.create(&params) {
                 Ok(created) => Some(created.pid),
@@ -1091,6 +1106,7 @@ mod tests {
             attach_only: false,
             restore: false,
             known_worktrees: std::sync::Arc::from(Vec::new()),
+            extra_env: BTreeMap::new(),
         }
     }
 
@@ -1286,6 +1302,80 @@ mod tests {
             LinkChunk::Lost => "Lost",
         }
     }
+
+    /// Unix: a local session starts in the user environment. `env` prints what
+    /// the session was given: no name the user environment lacks reaches it,
+    /// and the request's own variables do.
+    #[cfg(unix)]
+    #[test]
+    fn local_link_session_gets_the_user_environment() {
+        // The launcher's variable: in this process, absent from the user
+        // environment installed below.
+        // SAFETY: a test process of its own under nextest; nothing else reads
+        // the environment concurrently.
+        unsafe { std::env::set_var("SIRIO_LINK_TEST_LAUNCHER_ONLY", "1") };
+        sirio_env::install(BTreeMap::from([(
+            "PATH".to_string(),
+            "/usr/bin:/bin".to_string(),
+        )]));
+        let absent = sirio_env::absent_from_user();
+        assert!(
+            absent.iter().any(|name| name == "SIRIO_LINK_TEST_LAUNCHER_ONLY"),
+            "the fixture must hold a name the user environment lacks"
+        );
+        let directory = test_directory("user-environment");
+        let mut request = open_request(
+            "pane-9104",
+            directory.clone(),
+            TerminalShell::WithArguments {
+                program: "/usr/bin/env".to_string(),
+                args: Vec::new(),
+            },
+        );
+        request.extra_env =
+            BTreeMap::from([("SIRIO_WORKTREE_ID".to_string(), "wt-link".to_string())]);
+        let link = LocalLink::open(&request).expect("open the in-process session");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        let needle = "SIRIO_WORKTREE_ID=wt-link";
+        while std::time::Instant::now() < deadline
+            && !String::from_utf8_lossy(&seen).contains(needle)
+        {
+            if let Ok(LinkChunk::Output(bytes)) =
+                link.chunks().recv_timeout(Duration::from_millis(200))
+            {
+                seen.extend_from_slice(&bytes);
+            }
+        }
+        link.end();
+        let _ = std::fs::remove_dir_all(directory);
+        let text = String::from_utf8_lossy(&seen).into_owned();
+        assert!(
+            text.contains(needle),
+            "the request's variable must reach the session: {text:?}"
+        );
+        // The names the session sets itself (`Session::spawn`), and `SHELL`,
+        // which `portable-pty` sets whenever the environment lacks it.
+        const SESSION_OWNED: [&str; 6] = [
+            "TERM",
+            "COLORTERM",
+            "PI_FORCE_IMAGE_PROTOCOL",
+            "SIRIO_PANE_ID",
+            "TILLER_PANE_ID",
+            "SHELL",
+        ];
+        for name in absent
+            .iter()
+            .filter(|name| !SESSION_OWNED.contains(&name.as_str()))
+        {
+            assert!(
+                !text
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(&format!("{name}="))),
+                "{name} is absent from the user environment yet reached the session"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1328,6 +1418,7 @@ mod attach_only_tests {
             attach_only: true,
             restore: false,
             known_worktrees: std::sync::Arc::from(Vec::new()),
+            extra_env: BTreeMap::new(),
         };
         let refused = LocalLink::open(&request);
         assert!(
