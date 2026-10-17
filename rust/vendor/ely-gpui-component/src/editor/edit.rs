@@ -1,8 +1,9 @@
 use std::ops::Range;
 
-use gpui::{ClipboardItem, Context};
+use gpui::{ClipboardItem, Context, ScrollStrategy};
 
 use super::{
+    anchors,
     buffer::Buffer,
     cursor::{Motion, Selection, merged, replace_each},
     state::CodeEditor,
@@ -39,6 +40,10 @@ impl CodeEditor {
         let before = self.snapshot();
         let primary = self.primary().range().start;
         let edits = joined(edits);
+        let spans: Vec<(Range<usize>, usize)> = edits
+            .iter()
+            .map(|(range, text)| (range.clone(), text.len()))
+            .collect();
         let lead = edits
             .iter()
             .rposition(|(range, _)| range.start <= primary)
@@ -48,6 +53,7 @@ impl CodeEditor {
         carets.push(lead);
         self.selections = merged(carets);
         self.marked = None;
+        anchors::shift(&mut self.marks, &spans);
         self.commit(before, typing, cx);
         self.reveal(true, cx);
     }
@@ -423,4 +429,69 @@ fn joined(mut edits: Vec<(Range<usize>, String)>) -> Vec<(Range<usize>, String)>
         }
     }
     out
+}
+
+impl CodeEditor {
+    /// Selects these ranges, the last one primary.
+    pub fn select(
+        &mut self,
+        ranges: impl IntoIterator<Item = Range<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        let chosen: Vec<Selection> = ranges
+            .into_iter()
+            .filter(|range| {
+                let whole = self.whole(range);
+                if !whole {
+                    log::error!(
+                        "code editor: no selection {range:?} in {} bytes",
+                        self.buffer.len()
+                    );
+                }
+                whole
+            })
+            .map(|range| Selection {
+                anchor: range.start,
+                head: range.end,
+                goal: None,
+            })
+            .collect();
+        if chosen.is_empty() {
+            return;
+        }
+        if merged(chosen.clone()) == self.selections {
+            return;
+        }
+        self.set_selections(chosen, cx);
+        self.scroll
+            .scroll_to_item(self.primary_row(), ScrollStrategy::Center);
+    }
+
+    /// Replaces ranges of the text at once, as one undo step; read-only text refuses.
+    pub fn edit(
+        &mut self,
+        edits: impl IntoIterator<Item = (Range<usize>, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        let edits: Vec<(Range<usize>, String)> = edits.into_iter().collect();
+        let mut starts: Vec<&Range<usize>> = edits.iter().map(|(range, _)| range).collect();
+        starts.sort_by_key(|range| range.start);
+        let apart = starts.windows(2).all(|pair| pair[0].end <= pair[1].start);
+        let forward = edits.iter().all(|(range, _)| range.start <= range.end);
+        if !apart || !forward || !edits.iter().all(|(range, _)| self.whole(range)) {
+            log::error!(
+                "code editor: edits {:?} do not fit {} bytes; none made",
+                starts,
+                self.buffer.len()
+            );
+            return;
+        }
+        self.apply(edits, false, cx);
+    }
+
+    /// Whether both ends of `range` fall between whole characters of the text.
+    fn whole(&self, range: &Range<usize>) -> bool {
+        let text = self.buffer.text();
+        text.is_char_boundary(range.start) && text.is_char_boundary(range.end)
+    }
 }

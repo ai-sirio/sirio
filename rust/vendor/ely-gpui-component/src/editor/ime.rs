@@ -82,17 +82,20 @@ impl CodeEditor {
         let Row::Line(line) = *row else {
             return None;
         };
-        Some(self.offset_in(line, position.x, cx))
+        self.offset_in(line, position.x, cx)
     }
 
-    /// The offset nearest window x on a line.
-    pub(crate) fn offset_in(&self, line: usize, x: Pixels, cx: &App) -> usize {
+    /// The offset nearest window x on a line; none for a line the text has since lost.
+    pub(crate) fn offset_in(&self, line: usize, x: Pixels, cx: &App) -> Option<usize> {
+        if line >= self.buffer.lines() {
+            return None;
+        }
         let text = self.row_text(line);
         let shown = Shown::new(text, self.notes(line, cx), Vec::new());
         let column = ((x - self.metrics.left) / self.metrics.advance)
             .round()
             .max(0.0) as usize;
-        self.buffer.offset(line, shown.back(text, column))
+        Some(self.buffer.offset(line, shown.back(text, column)))
     }
 
     fn utf16_range(&self, range: &Range<usize>) -> Range<usize> {

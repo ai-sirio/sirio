@@ -220,7 +220,8 @@ Vendored files:
 
 - `src/editor/{buffer,cursor,edit,keys,moves,line,row,view,layout,gutter,decor,syntax,ime,find,status,state}.rs`:
   verbatim, except the two local changes listed below.
-- `src/editor/tests.rs`: verbatim, gated `cfg(all(test, feature = "test-support"))`
+- `src/editor/tests/mod.rs` (was `tests.rs`; moved by the `b29d66c` port
+  below): verbatim, gated `cfg(all(test, feature = "test-support"))`
   as upstream. Nothing was removed: none of its 15 tests names a module this
   crate does not declare.
 - `src/editor/mod.rs`: local. It declares only the files above. Upstream's
@@ -252,7 +253,8 @@ Local changes:
   submits, but no visible control reaches it. A host must not call
   `set_chat(Some(..))` until a chat widget is vendored.
 - `src/editor/line.rs`: `charts::tint` becomes `compat::tint`. Nothing else in
-  this file changed.
+  this file changed by that vendoring; the `b29d66c` port below changes its
+  pointer callers.
 - Warnings, not suppressed, following the precedent of the unused re-exports
   above: `keys::bind_keys` has no caller until `init_editor` (Task 1c) calls it,
   and `layout::stack` and `syntax::colors` (re-exported as `code_colors`) have
@@ -282,3 +284,23 @@ applied as upstream wrote it or was rewritten against the vendored code.
   files were identical to upstream's parent. Adds the window test
   `escape_in_the_find_query_closes_the_box`, which fails without the
   `find.rs` hunk.
+- `b29d66c` "Panics · P17 Editor: owner offsets ride the text's edits, stale
+  ranges, rows and globs log instead of panicking": applied verbatim to
+  `src/editor/{anchors (new), edit, ime, line, moves, state, view}.rs`, whose
+  upstream parents were identical to the vendored files (`line.rs` differs
+  only by `compat::tint`, which the hunks do not touch). `anchors.rs` comes
+  with its inline test `offsets_ride_their_edits`. `select` and `edit` moved
+  from `state.rs` to `edit.rs` and log and ignore a bad range; `offset_in`
+  returns `None` for a line the text has lost. `tests.rs` moved to
+  `tests/mod.rs` (`mod stale;`, and `editor` made `pub(super)`).
+  `src/editor/mod.rs` is local, so the port adds only `mod anchors;`; the four
+  warnings recorded above move down one line (mod.rs:28, 29, 35).
+  `tests/stale.rs` is verbatim except two tests, dropped because they name
+  code in modules this crate does not vendor:
+  `an_output_channel_gone_from_its_list_draws` (`console::OutputPanel`) and
+  `a_glob_too_big_for_a_regex_matches_nothing` (`filters::passes`). The seven
+  stale-state tests that remain pass.
+  Skipped, not vendored: `src/editor/console.rs` (the output panel's shown
+  channel), `src/editor/filters.rs` (the glob size limit) and
+  `tasks/panics.md`. Their panics are not ported: the output panel and globs
+  are outside the closure.

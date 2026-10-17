@@ -353,7 +353,9 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
-        let at = self.offset_in(line, event.position.x, cx);
+        let Some(at) = self.offset_in(line, event.position.x, cx) else {
+            return;
+        };
         let chosen = match event.click_count {
             2 => {
                 let word = self.buffer.word_at(at);
@@ -396,7 +398,9 @@ impl CodeEditor {
         if !self.dragging || !event.dragging() {
             return;
         }
-        let at = self.offset_in(line, event.position.x, cx);
+        let Some(at) = self.offset_in(line, event.position.x, cx) else {
+            return;
+        };
         let mut all = self.selections.clone();
         let primary = all.last_mut().expect("an editor keeps a cursor");
         if primary.head == at {

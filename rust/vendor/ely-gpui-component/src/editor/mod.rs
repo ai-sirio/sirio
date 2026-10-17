@@ -1,3 +1,4 @@
+mod anchors;
 mod buffer;
 mod cursor;
 mod decor;

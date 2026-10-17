@@ -1,3 +1,5 @@
+mod stale;
+
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 use gpui::{
@@ -8,7 +10,7 @@ use gpui::{
 use super::{CodeEditor, GhostText, InlayHint, LineNumbers, layout::Row};
 use crate::theme::Theme;
 
-fn editor<'a>(
+pub(super) fn editor<'a>(
     text: &str,
     cx: &'a mut TestAppContext,
 ) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {

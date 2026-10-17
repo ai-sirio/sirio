@@ -85,6 +85,9 @@ impl CodeEditor {
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     window.prevent_default();
                     jump.update(cx, |editor, cx| {
+                        if line >= editor.buffer.lines() {
+                            return;
+                        }
                         let at = editor.buffer.line_range(line).start + editor.buffer.indent(line);
                         let cursor = at..at;
                         editor.select([cursor], cx);
@@ -219,23 +222,23 @@ impl CodeEditor {
 
 impl Render for CodeEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sticky = if self.options.sticky {
-            self.sticky(cx)
-        } else {
-            None
-        };
         let theme = cx.theme();
         let colors = theme.colors.clone();
+        let mono_family = theme.mono_family.clone();
         let size = theme.text_size(TextSize::Sm);
         let pixels = size.to_pixels(window.rem_size());
         let mono = window
             .text_system()
             .resolve_font(&font(theme.mono_family.clone()));
-        let advance = window
-            .text_system()
-            .advance(mono, pixels, 'm')
-            .expect("the code font has an m")
-            .width;
+        let advance = match window.text_system().advance(mono, pixels, 'm') {
+            Ok(advance) => advance.width,
+            Err(error) => {
+                log::error!(
+                    "code editor: no advance for the code font: {error:#}; columns guessed"
+                );
+                pixels * 0.6
+            }
+        };
         let line = (pixels * LEADING).round();
         let found = folds(&self.buffer);
         let hide = hidden(self.buffer.lines(), &found, &self.folded);
@@ -260,6 +263,11 @@ impl Render for CodeEditor {
         };
         self.metrics.advance = advance;
         self.metrics.line = line;
+        let sticky = if self.options.sticky {
+            self.sticky(cx)
+        } else {
+            None
+        };
         let count = self.frame.rows.len();
         let list = uniform_list(
             "editor-rows",
@@ -311,7 +319,7 @@ impl Render for CodeEditor {
             .flex_col()
             .overflow_hidden()
             .bg(colors.surface)
-            .font_family(theme.mono_family.clone())
+            .font_family(mono_family)
             .text_size(size)
             .text_color(colors.fg)
             .on_mouse_up(

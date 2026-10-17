@@ -1,11 +1,12 @@
 use std::{collections::BTreeSet, ops::Range, time::Duration};
 
 use gpui::{
-    App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, Pixels, ScrollStrategy,
-    SharedString, Subscription, Task, UniformListScrollHandle, Window,
+    App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
+    Subscription, Task, UniformListScrollHandle, Window,
 };
 
 use super::{
+    anchors,
     buffer::Buffer,
     cursor::{Selection, merged},
     decor::{CodeLens, Diagnostic, DiffHunk, GhostText, GitMark, InlayHint},
@@ -127,6 +128,14 @@ impl Focusable for CodeEditor {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
+}
+
+/// Whether a mark the owner sent fits the text; one that does not is logged and dropped.
+fn kept(fits: bool, what: &str) -> bool {
+    if !fits {
+        log::error!("code editor: {what} lies off the text; dropped");
+    }
+    fits
 }
 
 impl CodeEditor {
@@ -291,6 +300,8 @@ impl CodeEditor {
         self.buffer = Buffer::new(text);
         self.selections = vec![Selection::caret(0)];
         self.folded.clear();
+        (self.marked, self.composing) = (None, None);
+        anchors::clear(&mut self.marks);
         self.commit(before, false, cx);
     }
 
@@ -310,37 +321,10 @@ impl CodeEditor {
         cx.notify();
     }
 
-    /// Selects these ranges, the last one primary.
-    pub fn select(
-        &mut self,
-        ranges: impl IntoIterator<Item = Range<usize>>,
-        cx: &mut Context<Self>,
-    ) {
-        let chosen: Vec<Selection> = ranges
-            .into_iter()
-            .map(|range| {
-                assert!(
-                    range.end <= self.buffer.len()
-                        && self.buffer.text().is_char_boundary(range.start)
-                        && self.buffer.text().is_char_boundary(range.end),
-                    "a selection covers whole characters of the text"
-                );
-                Selection {
-                    anchor: range.start,
-                    head: range.end,
-                    goal: None,
-                }
-            })
-            .collect();
-        if merged(chosen.clone()) == self.selections {
-            return;
-        }
-        self.set_selections(chosen, cx);
-        self.scroll
-            .scroll_to_item(self.primary_row(), ScrollStrategy::Center);
-    }
-
-    pub fn set_diagnostics(&mut self, diagnostics: Vec<Diagnostic>, cx: &mut Context<Self>) {
+    pub fn set_diagnostics(&mut self, mut diagnostics: Vec<Diagnostic>, cx: &mut Context<Self>) {
+        let text = self.buffer.text();
+        diagnostics
+            .retain(|diagnostic| kept(anchors::fits(text, &diagnostic.range), "a diagnostic"));
         if self.marks.diagnostics == diagnostics {
             return;
         }
@@ -350,9 +334,11 @@ impl CodeEditor {
 
     pub fn set_backgrounds(
         &mut self,
-        ranges: Vec<(Range<usize>, gpui::Hsla)>,
+        mut ranges: Vec<(Range<usize>, gpui::Hsla)>,
         cx: &mut Context<Self>,
     ) {
+        let text = self.buffer.text();
+        ranges.retain(|(range, _)| kept(anchors::fits(text, range), "a background"));
         if self.marks.backgrounds == ranges {
             return;
         }
@@ -360,7 +346,9 @@ impl CodeEditor {
         cx.notify();
     }
 
-    pub fn set_inlay_hints(&mut self, hints: Vec<InlayHint>, cx: &mut Context<Self>) {
+    pub fn set_inlay_hints(&mut self, mut hints: Vec<InlayHint>, cx: &mut Context<Self>) {
+        let text = self.buffer.text();
+        hints.retain(|hint| kept(text.is_char_boundary(hint.offset), "an inlay hint"));
         self.marks.hints = hints;
         self.marks.hints.sort_by_key(|hint| hint.offset);
         cx.notify();
@@ -373,7 +361,9 @@ impl CodeEditor {
 
     /// Suggested text at an offset, in grey until Tab takes it.
     pub fn set_ghost_text(&mut self, ghost: Option<GhostText>, cx: &mut Context<Self>) {
-        self.marks.ghost = ghost;
+        let text = self.buffer.text();
+        self.marks.ghost =
+            ghost.filter(|ghost| kept(text.is_char_boundary(ghost.offset), "ghost text"));
         cx.notify();
     }
 
@@ -412,22 +402,6 @@ impl CodeEditor {
         cx.notify();
     }
 
-    /// Replaces ranges of the text at once, as one undo step; read-only text refuses.
-    pub fn edit(
-        &mut self,
-        edits: impl IntoIterator<Item = (Range<usize>, String)>,
-        cx: &mut Context<Self>,
-    ) {
-        let edits: Vec<(Range<usize>, String)> = edits.into_iter().collect();
-        assert!(
-            edits.iter().all(|(range, _)| range.end <= self.buffer.len()
-                && self.buffer.text().is_char_boundary(range.start)
-                && self.buffer.text().is_char_boundary(range.end)),
-            "an edit covers whole characters of the text"
-        );
-        self.apply(edits, false, cx);
-    }
-
     pub(crate) fn set_selections(&mut self, selections: Vec<Selection>, cx: &mut Context<Self>) {
         self.selections = merged(selections);
         self.unfold_cursors();
@@ -446,6 +420,7 @@ impl CodeEditor {
         self.selections = snapshot.selections;
         self.marked = None;
         self.composing = None;
+        anchors::clear(&mut self.marks);
         cx.emit(EditorEvent::Changed);
         self.restart_blink(cx);
     }

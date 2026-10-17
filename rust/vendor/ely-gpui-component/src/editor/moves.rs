@@ -150,14 +150,14 @@ impl CodeEditor {
         });
     }
 
-    /// The row the primary cursor draws on.
+    /// The row the primary cursor draws on, or the fold header above it when a fold hides it.
     pub(crate) fn primary_row(&self) -> usize {
         let line = self.buffer.line_of(self.primary().head);
         let hide = hidden(self.buffer.lines(), &folds(&self.buffer), &self.folded);
         rows(&self.buffer, &hide, &self.marks)
             .iter()
-            .position(|row| *row == Row::Line(line))
-            .expect("the primary cursor sits on a shown line")
+            .rposition(|row| matches!(row, Row::Line(shown) if *shown <= line))
+            .unwrap_or(0)
     }
 
     /// Scrolls the primary cursor into view: from below when moving down, from above when moving up.
