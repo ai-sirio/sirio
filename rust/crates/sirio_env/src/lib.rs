@@ -45,22 +45,34 @@ pub fn launch_environment(process: &BTreeMap<String, String>) -> BTreeMap<String
 }
 
 /// The environment every child of Sirio starts in: the launch environment with
-/// `PATH` rebuilt as `cli_dir`, then the login shell's entries, then the
-/// launch's own. Empty entries are dropped and the first occurrence wins.
+/// `PATH` rebuilt as `cli_dir` (when there is one), then the login shell's
+/// entries, then the launch's own. Empty entries are dropped and the first
+/// occurrence wins. Without a `cli_dir` nothing is prefixed.
 pub fn user_environment_from(
     launch: &BTreeMap<String, String>,
     login_path: Option<&OsStr>,
-    cli_dir: &Path,
+    cli_dir: Option<&Path>,
 ) -> BTreeMap<String, String> {
-    // Windows reports the variable as `Path`, and a child sees one variable
-    // whatever the case, so every spelling is folded into `PATH` here.
-    let launch_path = launch
-        .iter()
-        .find(|(name, _)| is_path_name(name))
-        .map_or("", |(_, value)| value.as_str());
+    // An exact `PATH` is the variable a child reads. Windows reports it as
+    // `Path` and a child sees one variable whatever the case, so every
+    // spelling is folded into `PATH` there. Elsewhere another spelling is a
+    // different variable and stays as it is, unless there is no `PATH` at all
+    // to take its value.
+    let exact = launch.get("PATH");
+    let fold_all = cfg!(windows) || exact.is_none();
+    let launch_path = exact
+        .or_else(|| {
+            launch
+                .iter()
+                .find(|(name, _)| is_path_name(name))
+                .map(|(_, value)| value)
+        })
+        .map_or("", String::as_str);
     let login_entries = login_path.into_iter().flat_map(std::env::split_paths);
     let mut entries: Vec<PathBuf> = Vec::new();
-    for entry in std::iter::once(cli_dir.to_path_buf())
+    for entry in cli_dir
+        .into_iter()
+        .map(Path::to_path_buf)
         .chain(login_entries)
         .chain(std::env::split_paths(launch_path))
     {
@@ -72,7 +84,9 @@ pub fn user_environment_from(
         .map(|joined| joined.to_string_lossy().into_owned())
         .unwrap_or_else(|_| launch_path.to_string());
     let mut environment = launch.clone();
-    environment.retain(|name, _| !is_path_name(name));
+    if fold_all {
+        environment.retain(|name, _| !is_path_name(name));
+    }
     environment.insert("PATH".to_string(), path);
     environment
 }
@@ -323,8 +337,17 @@ mod tests {
     #[test]
     fn cli_dir_comes_first_and_only_once() {
         let launch = map(&[("PATH", "/usr/bin:/cli/bin:/bin")]);
-        let environment = user_environment_from(&launch, None, Path::new("/cli/bin"));
+        let environment = user_environment_from(&launch, None, Some(Path::new("/cli/bin")));
         assert_eq!(environment["PATH"], "/cli/bin:/usr/bin:/bin");
+    }
+
+    /// No directory to lead with (no absolute data home, or one that is not
+    /// ours): PATH is the login's and the launch's, and nothing is prefixed.
+    #[test]
+    fn without_a_cli_dir_path_has_no_prefix() {
+        let launch = map(&[("PATH", "/usr/bin:/bin")]);
+        let environment = user_environment_from(&launch, Some(OsStr::new("/opt/bin")), None);
+        assert_eq!(environment["PATH"], "/opt/bin:/usr/bin:/bin");
     }
 
     #[test]
@@ -333,7 +356,7 @@ mod tests {
         let environment = user_environment_from(
             &launch,
             Some(OsStr::new("/opt/homebrew/bin:/usr/bin")),
-            Path::new("/cli"),
+            Some(Path::new("/cli")),
         );
         assert_eq!(environment["PATH"], "/cli:/opt/homebrew/bin:/usr/bin:/bin");
     }
@@ -341,8 +364,11 @@ mod tests {
     #[test]
     fn empty_path_entries_are_dropped() {
         let launch = map(&[("PATH", "/usr/bin::/bin:")]);
-        let environment =
-            user_environment_from(&launch, Some(OsStr::new("::/opt:")), Path::new("/cli"));
+        let environment = user_environment_from(
+            &launch,
+            Some(OsStr::new("::/opt:")),
+            Some(Path::new("/cli")),
+        );
         assert_eq!(environment["PATH"], "/cli:/opt:/usr/bin:/bin");
     }
 
@@ -351,7 +377,7 @@ mod tests {
         // Windows reports the variable as `Path`; a child must get one PATH,
         // starting with the sirioctl directory, and not a second spelling of it.
         let launch = map(&[("Path", "/usr/bin")]);
-        let environment = user_environment_from(&launch, None, Path::new("/cli"));
+        let environment = user_environment_from(&launch, None, Some(Path::new("/cli")));
         let path_names: Vec<&str> = environment
             .keys()
             .map(String::as_str)
@@ -359,6 +385,18 @@ mod tests {
             .collect();
         assert_eq!(path_names, ["PATH"]);
         assert_eq!(environment["PATH"], "/cli:/usr/bin");
+    }
+
+    /// On Unix `PATH` and `path` are two variables: a child that reads the
+    /// lowercase one must still get it, and the exact `PATH` is the one that
+    /// is rebuilt. Folding is for Windows, where the spellings are one name.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_lowercase_path_variable_survives_on_unix() {
+        let launch = map(&[("PATH", "/usr/bin"), ("path", "/lower/bin")]);
+        let environment = user_environment_from(&launch, None, Some(Path::new("/cli")));
+        assert_eq!(environment["PATH"], "/cli:/usr/bin");
+        assert_eq!(environment["path"], "/lower/bin");
     }
 
     #[cfg(unix)]

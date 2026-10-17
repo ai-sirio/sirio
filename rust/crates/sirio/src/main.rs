@@ -261,6 +261,7 @@ where
 
 mod account_login;
 mod claude_transport;
+mod cli_install;
 mod command_palette;
 /// The X11-vs-Wayland decision, and the only place that touches the display
 /// environment. Linux-only by construction: the variables it reads and writes
@@ -17167,13 +17168,19 @@ impl SirioWorkspace {
                 settings.set_hooks_install_report(Some(text), cx);
             });
         };
-        let sirioctl_path = match resolve_sirioctl_for_process() {
-            Ok(path) => path.to_string_lossy().into_owned(),
-            Err(error) => {
-                report(self, format!("sirioctl not found: {error}"), cx);
-                return;
-            }
+        // User-global hooks always name the release copy, from any build. A
+        // release build makes that copy first, on the background executor.
+        let environment: BTreeMap<String, String> = std::env::vars().collect();
+        let Some(sirioctl_path) = cli_install::release_sirioctl_path(&environment) else {
+            report(
+                self,
+                "sirioctl not found: no absolute data directory (XDG_DATA_HOME, HOME or LOCALAPPDATA)"
+                    .into(),
+                cx,
+            );
+            return;
         };
+        let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();
         let Some(home) = user_home_dir() else {
             report(
                 self,
@@ -17182,19 +17189,33 @@ impl SirioWorkspace {
             );
             return;
         };
-        let environment: BTreeMap<String, String> = std::env::vars().collect();
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        let make_release_copy = !cli_install::stable_is_debug();
         cx.spawn(async move |this, cx| {
-            let reports = cx
+            let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    sirio_agents::install_global_hooks(&home, &environment, &sirioctl_path)
+                    if make_release_copy
+                        && let Err(error) =
+                            cli_install::ensure_stable_copy(&current_exe, &environment, false)
+                    {
+                        return Err(error);
+                    }
+                    Ok(sirio_agents::install_global_hooks(
+                        &home,
+                        &environment,
+                        &sirioctl_path,
+                    ))
                 })
                 .await;
-            let summary = reports
-                .iter()
-                .map(sirio_agents::GlobalHookReport::summary_line)
-                .collect::<Vec<_>>()
-                .join("\n");
+            let summary = match outcome {
+                Ok(reports) => reports
+                    .iter()
+                    .map(sirio_agents::GlobalHookReport::summary_line)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Err(error) => format!("sirioctl not found: {error}"),
+            };
             let _ = this.update(cx, |workspace, cx| report(workspace, summary, cx));
         })
         .detach();
@@ -24166,91 +24187,13 @@ fn new_worktree_path(project: &str, branch: &str) -> PathBuf {
         .join(format!("{project}-{branch}-{}", std::process::id()))
 }
 
-/// The control CLI's file name: `sirioctl.exe` on Windows, bare on unix.
-///
-/// The extension is part of the name here because this resolver does not
-/// *search* for the binary the way a shell does — it stats a path it built
-/// itself (a sibling of the app executable, or the install destination), and
-/// a stat needs the exact spelling the toolchain emitted. That is a property
-/// of direct path probing, not of the platform: cmd.exe would happily
-/// resolve a bare `sirioctl` by appending `.EXE` from PATHEXT, and so does
-/// the PATH search in `sirio_agents::find_executable_in_path`. Neither of
-/// those runs here.
-///
-/// One definition feeds both the sibling-dir candidate and the install
-/// subpath so the two cannot disagree on which name to look for.
-fn sirioctl_binary_name() -> &'static str {
-    #[cfg(windows)]
-    {
-        "sirioctl.exe"
-    }
-    #[cfg(not(windows))]
-    {
-        "sirioctl"
-    }
-}
-
-/// Install subpath of the control CLI under `XDG_DATA_HOME` (or its
-/// per-platform fallbacks).
-fn sirioctl_install_subpath() -> PathBuf {
-    Path::new("Sirio").join("bin").join(sirioctl_binary_name())
-}
-
-/// Resolve the control CLI used by worktree-local agent hooks.
-///
-/// The installed path is deliberately app-owned and XDG-correct rather than
-/// relying on the login shell's PATH. A development build supplies the
-/// sibling binary from `target/debug`; an installed build may supply an
-/// already-installed copy or a PATH entry. In all cases hooks receive the
-/// absolute app-owned path, so the shell that an agent starts cannot lose the
-/// control CLI merely because it has a different PATH.
-fn resolve_sirioctl_path(
-    current_exe: &Path,
-    environment: &BTreeMap<String, String>,
-) -> Result<PathBuf, String> {
-    let destination = xdg_data_home_for(environment).join(sirioctl_install_subpath());
-    #[cfg(unix)]
-    if is_executable_file(&destination) {
-        return Ok(destination);
-    }
-
-    let mut candidates = Vec::new();
-    if let Some(parent) = current_exe.parent() {
-        candidates.push(parent.join(sirioctl_binary_name()));
-    }
-    if let Some(path) = environment.get("PATH")
-        && let Some(path) =
-            sirio_agents::find_executable_in_path("sirioctl", std::ffi::OsStr::new(path))
-    {
-        candidates.push(path);
-    }
-
-    let source = match candidates
-        .iter()
-        .find(|candidate| is_executable_file(candidate))
-        .map(|candidate| {
-            std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf())
-        }) {
-        Some(source) => source,
-        None if is_executable_file(&destination) => return Ok(destination),
-        None => {
-            return Err(format!(
-                "sirioctl is unavailable: checked {} and PATH; build or install the control CLI before launching an agent",
-                current_exe
-                    .parent()
-                    .map(|path| path.join(sirioctl_binary_name()).display().to_string())
-                    .unwrap_or_else(|| "the app executable directory".to_string())
-            ));
-        }
-    };
-
-    install_sirioctl(&source, &destination, environment).map(|()| destination)
-}
-
+/// The stable copy of `sirioctl`, made current first (`cli_install`). Hooks,
+/// PATH links and panes name the path this returns.
 fn resolve_sirioctl_for_process() -> Result<PathBuf, String> {
     let current_exe = std::env::current_exe().unwrap_or_default();
     let environment: BTreeMap<String, String> = std::env::vars().collect();
-    resolve_sirioctl_path(&current_exe, &environment)
+    cli_install::ensure_stable_copy(&current_exe, &environment, cli_install::stable_is_debug())
+        .map(|(path, _)| path)
 }
 
 /// The user's home directory, or `None` when the environment offers no
@@ -24310,170 +24253,6 @@ fn xdg_data_home_for(environment: &BTreeMap<String, String>) -> PathBuf {
             }
         })
         .unwrap_or_else(|| std::env::temp_dir().join(".local/share"))
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn installed_copy_is_stale(source: &Path, destination: &Path) -> bool {
-    let Ok(source_metadata) = std::fs::metadata(source) else {
-        return false;
-    };
-    let Ok(destination_metadata) = std::fs::metadata(destination) else {
-        return true;
-    };
-
-    source_metadata.len() != destination_metadata.len()
-        || matches!(
-            (source_metadata.modified(), destination_metadata.modified()),
-            (Ok(source_modified), Ok(destination_modified))
-                if source_modified > destination_modified
-        )
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SirioctlInstallKind {
-    Symlink,
-    Copy,
-}
-
-fn sirioctl_install_kind(environment: &BTreeMap<String, String>) -> SirioctlInstallKind {
-    match environment.get("APPIMAGE") {
-        Some(path) if !path.is_empty() => SirioctlInstallKind::Copy,
-        _ => SirioctlInstallKind::Symlink,
-    }
-}
-
-fn install_sirioctl(
-    source: &Path,
-    destination: &Path,
-    _environment: &BTreeMap<String, String>,
-) -> Result<(), String> {
-    let parent = destination.parent().ok_or_else(|| {
-        format!(
-            "sirioctl install path has no parent: {}",
-            destination.display()
-        )
-    })?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
-
-    let destination_is_executable = is_executable_file(destination);
-    #[cfg(unix)]
-    let install_kind = sirioctl_install_kind(_environment);
-    #[cfg(unix)]
-    if destination_is_executable
-        && (matches!(install_kind, SirioctlInstallKind::Symlink)
-            || !std::fs::symlink_metadata(destination)
-                .map(|metadata| metadata.file_type().is_symlink())
-                .unwrap_or(false))
-    {
-        return Ok(());
-    }
-    #[cfg(not(unix))]
-    if destination_is_executable && !installed_copy_is_stale(source, destination) {
-        return Ok(());
-    }
-
-    // `symlink_metadata` describes the link itself and `is_executable_file`
-    // follows it, so the two disagree on exactly one thing: a link whose
-    // target is gone. That is our own install after a rebuild moved or
-    // cleaned `target/`, and replacing it is the whole point of an installer.
-    // A real file is somebody else's and still refuses to be clobbered.
-    match std::fs::symlink_metadata(destination) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            std::fs::remove_file(destination).map_err(|error| {
-                format!(
-                    "could not replace the stale sirioctl install at {}: {error}",
-                    destination.display()
-                )
-            })?;
-        }
-        Ok(_) if !destination_is_executable => {
-            return Err(format!(
-                "cannot install sirioctl at {}: a non-executable file already exists",
-                destination.display()
-            ));
-        }
-        Ok(_) | Err(_) => {}
-    }
-
-    #[cfg(unix)]
-    match install_kind {
-        SirioctlInstallKind::Symlink => {
-            std::os::unix::fs::symlink(source, destination).map_err(|error| {
-                format!(
-                    "could not install sirioctl at {}: {error}",
-                    destination.display()
-                )
-            })
-        }
-        SirioctlInstallKind::Copy => {
-            std::fs::copy(source, destination).map_err(|error| {
-                format!(
-                    "could not install sirioctl at {}: {error}",
-                    destination.display()
-                )
-            })?;
-
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(destination)
-                .map_err(|error| {
-                    format!(
-                        "could not read installed sirioctl at {}: {error}",
-                        destination.display()
-                    )
-                })?
-                .permissions();
-            permissions.set_mode(permissions.mode() | 0o111);
-            std::fs::set_permissions(destination, permissions).map_err(|error| {
-                format!(
-                    "could not make installed sirioctl at {} executable: {error}",
-                    destination.display()
-                )
-            })
-        }
-    }?;
-
-    #[cfg(not(unix))]
-    if let Err(error) = std::fs::copy(source, destination) {
-        // A running-exe lock can make Windows refuse to refresh the copy. Keep
-        // the usable old binary and retry on the next launch; only fail when
-        // there is no executable at the destination at all.
-        if is_executable_file(destination) {
-            return Ok(());
-        }
-        return Err(format!(
-            "could not install sirioctl at {}: {error}",
-            destination.display()
-        ));
-    }
-
-    if is_executable_file(destination) {
-        Ok(())
-    } else {
-        Err(format!(
-            "installed sirioctl at {} is not executable",
-            destination.display()
-        ))
-    }
 }
 
 fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapshot {
@@ -25820,15 +25599,22 @@ fn main() {
     session::export_pane_host_root();
 
     // After the app's variables for its children are in the process, so
-    // `sirio_env` can copy them into the user environment. `cli_dir` leads
-    // PATH: the sirioctl Sirio installs there is the one a child finds first.
-    let cli_dir = xdg_data_home_for(&process_environment)
-        .join("Sirio")
-        .join("bin");
+    // `sirio_env` can copy them into the user environment. The sirioctl
+    // directory leads PATH, but only when a child can safely be given it: an
+    // absolute data home, owned by this user and not writable by others. It is
+    // created here, so the first launch already has it.
+    let install_dir =
+        cli_install::sirioctl_install_dir(&process_environment, cli_install::stable_is_debug());
+    if let Some(dir) = &install_dir
+        && let Err(error) = cli_install::create_install_dir(dir)
+    {
+        eprintln!("[sirio] could not create {}: {error}", dir.display());
+    }
+    let cli_prefix = install_dir.filter(|dir| cli_install::safe_path_prefix(dir));
     sirio_env::install(sirio_env::user_environment_from(
         &launch,
         login.as_deref(),
-        &cli_dir,
+        cli_prefix.as_deref(),
     ));
 
     sirio_perf::init();
@@ -25883,11 +25669,20 @@ fn main() {
         // come. `migrate_file` touches only the path, never pane ids,
         // arguments, unrelated hooks, or other JSON keys; an unchanged or
         // unparseable file is a no-op.
-        if let Ok(sirioctl_path) = resolve_sirioctl_for_process() {
-            let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();
-            for project in project_catalog.projects() {
-                for worktree in &project.worktrees {
-                    let settings_path = worktree.path.join(".claude").join("settings.local.json");
+        // The stable copy is made on a background thread, and the repair waits
+        // for it: a launch never reads or copies sirioctl itself.
+        let worktree_paths: Vec<PathBuf> = project_catalog
+            .projects()
+            .iter()
+            .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
+            .collect();
+        cli_install::ensure_at_startup(
+            std::env::current_exe().unwrap_or_default(),
+            std::env::vars().collect(),
+            move |sirioctl_path| {
+                let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();
+                for worktree_path in worktree_paths {
+                    let settings_path = worktree_path.join(".claude").join("settings.local.json");
                     if settings_path.is_file() {
                         sirio_agents::ClaudeHookMigrator::migrate_file(
                             &settings_path,
@@ -25895,8 +25690,8 @@ fn main() {
                         );
                     }
                 }
-            }
-        }
+            },
+        );
         let session_store = SessionStore::open(&database_path);
         // Restore is tolerant of old path-based project ids; rewrite the
         // canonical catalog immediately so every later layout save sees one
@@ -38159,331 +37954,6 @@ done
         );
     }
 
-    fn stale_copy_test_files(name: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "sirio-sirioctl-stale-copy-{}-{}-{}",
-            name,
-            std::process::id(),
-            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("create stale-copy fixture");
-        let source = root.join("source");
-        let destination = root.join("destination");
-        (root, source, destination)
-    }
-
-    fn set_modified(path: &Path, seconds: u64) {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .expect("open fixture for timestamp update")
-            .set_times(
-                std::fs::FileTimes::new()
-                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(seconds)),
-            )
-            .expect("set fixture timestamp");
-    }
-
-    #[test]
-    fn installed_copy_different_size_is_stale() {
-        let (root, source, destination) = stale_copy_test_files("different-size");
-        std::fs::write(&source, b"new source").expect("write source fixture");
-        std::fs::write(&destination, b"old").expect("write destination fixture");
-
-        assert!(installed_copy_is_stale(&source, &destination));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn installed_copy_same_size_with_newer_source_is_stale() {
-        let (root, source, destination) = stale_copy_test_files("same-size-newer-source");
-        std::fs::write(&source, b"source").expect("write source fixture");
-        std::fs::write(&destination, b"copy!!").expect("write destination fixture");
-        set_modified(&destination, 1);
-        set_modified(&source, 2);
-
-        assert!(installed_copy_is_stale(&source, &destination));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn non_empty_appimage_selects_a_sirioctl_copy() {
-        let environment = BTreeMap::from([(
-            String::from("APPIMAGE"),
-            String::from("/tmp/Sirio.AppImage"),
-        )]);
-
-        assert_eq!(
-            sirioctl_install_kind(&environment),
-            SirioctlInstallKind::Copy
-        );
-    }
-
-    #[test]
-    fn empty_appimage_selects_a_sirioctl_symlink() {
-        let environment = BTreeMap::from([(String::from("APPIMAGE"), String::new())]);
-
-        assert_eq!(
-            sirioctl_install_kind(&environment),
-            SirioctlInstallKind::Symlink
-        );
-    }
-
-    #[test]
-    fn sirioctl_resolver_installs_the_sibling_binary_in_xdg_data_bin() {
-        // The fixture names the binary exactly the way the platform ships
-        // it (`sirioctl.exe` on Windows, bare `sirioctl` on unix); the
-        // resolver has to look for that name, not the other one.
-        let root = std::env::temp_dir().join(format!(
-            "sirio-sirioctl-resolution-{}-{}",
-            std::process::id(),
-            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let executable_dir = root.join("target/debug");
-        let data_home = root.join("data");
-        std::fs::create_dir_all(&executable_dir).expect("create executable fixture");
-        let current_exe = executable_dir.join("sirio");
-        let sirioctl = executable_dir.join(sirioctl_binary_name());
-        std::fs::write(&current_exe, b"sirio").expect("write app fixture");
-        std::fs::write(&sirioctl, b"sirioctl").expect("write sirioctl fixture");
-        make_executable(&current_exe);
-        make_executable(&sirioctl);
-
-        let environment = BTreeMap::from([
-            (
-                "XDG_DATA_HOME".to_string(),
-                data_home.to_string_lossy().into_owned(),
-            ),
-            (
-                "HOME".to_string(),
-                root.join("home").to_string_lossy().into_owned(),
-            ),
-            (
-                "PATH".to_string(),
-                root.join("empty-path").to_string_lossy().into_owned(),
-            ),
-        ]);
-
-        let resolved = resolve_sirioctl_path(&current_exe, &environment)
-            .expect("sibling sirioctl should be installed");
-        assert_eq!(resolved, data_home.join(sirioctl_install_subpath()));
-        assert!(resolved.is_absolute());
-        assert_installed_from(&resolved, &sirioctl);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// Windows regression: the build emits `sirioctl.exe`, and the
-    /// resolver must look for exactly that name. An extensionless `sirioctl`
-    /// next to the app is not a real Windows artifact (and does not exist on
-    /// a normal build), so it may not satisfy the resolution — otherwise
-    /// every agent tab would fail to open on Windows, which is the bug this
-    /// test pins.
-    #[cfg(windows)]
-    #[test]
-    fn sirioctl_resolver_requires_the_exe_sibling_on_windows() {
-        let root = std::env::temp_dir().join(format!(
-            "sirio-sirioctl-exe-resolution-{}-{}",
-            std::process::id(),
-            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let executable_dir = root.join("target/debug");
-        let data_home = root.join("data");
-        std::fs::create_dir_all(&executable_dir).expect("create executable fixture");
-        let current_exe = executable_dir.join("sirio.exe");
-        std::fs::write(&current_exe, b"sirio").expect("write app fixture");
-        // An extensionless twin is the Windows mistake in fixture form:
-        // present, but not the artifact the resolver must find.
-        std::fs::write(executable_dir.join("sirioctl"), b"wrong artifact")
-            .expect("write extensionless decoy");
-        std::fs::create_dir_all(root.join("empty-path")).expect("create empty PATH dir");
-
-        let environment = BTreeMap::from([
-            (
-                "XDG_DATA_HOME".to_string(),
-                data_home.to_string_lossy().into_owned(),
-            ),
-            (
-                "PATH".to_string(),
-                root.join("empty-path").to_string_lossy().into_owned(),
-            ),
-        ]);
-
-        let error = resolve_sirioctl_path(&current_exe, &environment)
-            .expect_err("an extensionless sirioctl must not satisfy the resolver");
-        assert!(error.contains("sirioctl is unavailable"), "got {error}");
-
-        let sirioctl = executable_dir.join("sirioctl.exe");
-        std::fs::write(&sirioctl, b"sirioctl").expect("write the real artifact");
-        let resolved = resolve_sirioctl_path(&current_exe, &environment)
-            .expect("the .exe sibling must resolve");
-        assert_eq!(
-            resolved,
-            data_home.join("Sirio").join("bin").join("sirioctl.exe")
-        );
-        assert_installed_from(&resolved, &sirioctl);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn sirioctl_resolver_falls_back_to_path_and_reports_missing_binary() {
-        let root = std::env::temp_dir().join(format!(
-            "sirio-sirioctl-path-resolution-{}-{}",
-            std::process::id(),
-            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let executable_dir = root.join("app");
-        let path_dir = root.join("path");
-        let data_home = root.join("data");
-        std::fs::create_dir_all(&executable_dir).expect("create app fixture");
-        std::fs::create_dir_all(&path_dir).expect("create PATH fixture");
-        let current_exe = executable_dir.join("sirio");
-        // The PATH entry is named the way the platform ships it, exactly as
-        // in the sibling-directory fixture above: the Windows build emits
-        // `sirioctl.exe` and `find_executable_in_path` deliberately probes
-        // the PATHEXT spellings only, never the bare name (see
-        // `sirioctl_binary_name`).
-        let path_sirioctl = path_dir.join(sirioctl_binary_name());
-        std::fs::write(&current_exe, b"sirio").expect("write app fixture");
-        std::fs::write(&path_sirioctl, b"sirioctl").expect("write PATH fixture");
-        make_executable(&current_exe);
-        make_executable(&path_sirioctl);
-
-        let mut environment = BTreeMap::from([
-            (
-                "XDG_DATA_HOME".to_string(),
-                data_home.to_string_lossy().into_owned(),
-            ),
-            ("PATH".to_string(), path_dir.to_string_lossy().into_owned()),
-        ]);
-        let resolved = resolve_sirioctl_path(&current_exe, &environment)
-            .expect("PATH sirioctl should be installed");
-        assert_eq!(resolved, data_home.join(sirioctl_install_subpath()));
-        assert_installed_from(&resolved, &path_sirioctl);
-
-        environment.insert(
-            "XDG_DATA_HOME".into(),
-            root.join("missing-data").display().to_string(),
-        );
-        environment.insert(
-            "PATH".into(),
-            root.join("missing-path").display().to_string(),
-        );
-        let error = resolve_sirioctl_path(&root.join("missing/sirio"), &environment)
-            .expect_err("missing sirioctl must be surfaced");
-        assert!(error.contains("sirioctl is unavailable"));
-        assert!(!error.contains("using bare sirioctl"));
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// A stale install is the ordinary end state of a rebuild: the symlink in
-    /// `XDG_DATA_HOME` outlives the `target/` directory it points into. The
-    /// resolver has to heal that itself. `symlink_metadata` succeeds for a
-    /// broken link, so the guard that keeps a real file from being clobbered
-    /// used to reject it as "a non-executable file already exists" -- and
-    /// because every agent launch funnels through `resolve_sirioctl_for_process`,
-    /// the app then refused to start any agent at all until a human deleted
-    /// the link by hand.
-    #[cfg(unix)]
-    #[test]
-    fn sirioctl_resolver_replaces_a_stale_install_symlink() {
-        let root = std::env::temp_dir().join(format!(
-            "sirio-sirioctl-stale-link-{}-{}",
-            std::process::id(),
-            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let path_dir = root.join("path");
-        let data_home = root.join("data");
-        std::fs::create_dir_all(&path_dir).expect("create PATH fixture");
-        let destination = data_home.join(sirioctl_install_subpath());
-        std::fs::create_dir_all(destination.parent().expect("install parent"))
-            .expect("create install dir");
-        let path_sirioctl = path_dir.join("sirioctl");
-        std::fs::write(&path_sirioctl, b"sirioctl").expect("write PATH fixture");
-        make_executable(&path_sirioctl);
-
-        // The previous build's binary, now deleted: a link pointing at nothing.
-        std::os::unix::fs::symlink(root.join("deleted-target/debug/sirioctl"), &destination)
-            .expect("create the stale install symlink");
-        assert!(
-            std::fs::symlink_metadata(&destination).is_ok(),
-            "the fixture must be a dangling link, not an absent path"
-        );
-        assert!(
-            std::fs::metadata(&destination).is_err(),
-            "the fixture's link must resolve to nothing"
-        );
-
-        let environment = BTreeMap::from([
-            (
-                "XDG_DATA_HOME".to_string(),
-                data_home.to_string_lossy().into_owned(),
-            ),
-            ("PATH".to_string(), path_dir.to_string_lossy().into_owned()),
-        ]);
-
-        let resolved = resolve_sirioctl_path(&root.join("app/sirio"), &environment)
-            .expect("a stale link must be replaced, not treated as a fatal conflict");
-        assert_eq!(resolved, destination);
-        assert_eq!(
-            std::fs::canonicalize(&resolved).expect("healed installation exists"),
-            std::fs::canonicalize(&path_sirioctl).expect("PATH source exists")
-        );
-
-        // Negative control: a real file at the destination is somebody else's,
-        // and must still refuse to be clobbered.
-        std::fs::remove_file(&destination).expect("clear the healed link");
-        std::fs::write(&destination, b"not ours").expect("write conflicting file");
-        let error = resolve_sirioctl_path(&root.join("app/sirio"), &environment)
-            .expect_err("a real non-executable file must not be replaced");
-        assert!(error.contains("already exists"), "got {error}");
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    fn make_executable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = std::fs::metadata(path)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("make fixture executable");
-    }
-
-    #[cfg(not(unix))]
-    fn make_executable(_path: &Path) {}
-
-    /// The installed control CLI must be the very artifact the resolver
-    /// picked, and `install_sirioctl` reaches that end state by two
-    /// different transports: a symlink on unix, a byte copy on Windows
-    /// (`std::fs::copy`, because a link is not a primitive a plain user may
-    /// create there). Carrying the source's bytes is the claim both
-    /// transports make and is therefore asserted on every platform; the
-    /// symlink's stronger claim — one file, reachable under two names — is
-    /// asserted where the installer actually makes it.
-    fn assert_installed_from(installed: &Path, source: &Path) {
-        #[cfg(unix)]
-        assert_eq!(
-            std::fs::canonicalize(installed).expect("installed sirioctl exists"),
-            std::fs::canonicalize(source).expect("source sirioctl exists"),
-            "a unix install must be a symlink back to the source"
-        );
-        assert_eq!(
-            std::fs::read(installed).expect("read the installed sirioctl"),
-            std::fs::read(source).expect("read the source sirioctl"),
-            "the installed sirioctl must carry the source artifact's bytes"
-        );
-    }
-
     #[test]
     fn restoring_launch_snapshot_adds_missing_tabs_without_replacing_current_tabs() {
         let snapshot = vec![
@@ -41938,6 +41408,27 @@ done
             std::process::id()
         ));
         let _ = std::fs::create_dir_all(&worktree);
+        // The shell needs a stable sirioctl, and a debug build keeps its own
+        // copy under XDG_DATA_HOME. A fixture copy keeps this test off the
+        // machine's install, which a debug build never uses. Nextest runs each
+        // test in its own process, so the variable is this test's alone.
+        let data_home = std::env::temp_dir().join(format!(
+            "sirio-f-set-04-data-{}",
+            std::process::id()
+        ));
+        let copy = data_home
+            .join("Sirio")
+            .join("bin-debug")
+            .join(cli_install::sirioctl_binary_name());
+        std::fs::create_dir_all(copy.parent().expect("copy dir")).expect("create the copy dir");
+        std::fs::write(&copy, b"sirioctl").expect("write the copy");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755))
+                .expect("make the copy executable");
+        }
+        unsafe { std::env::set_var("XDG_DATA_HOME", &data_home) };
 
         // Gate ON shape: `resumable` carries this pane's saved session ref
         // (mirrors `saved_session_refs_for_restore` / `load_session_refs()`
@@ -41971,6 +41462,7 @@ done
         );
 
         let _ = std::fs::remove_dir_all(&worktree);
+        let _ = std::fs::remove_dir_all(&data_home);
     }
 
     #[gpui::test]

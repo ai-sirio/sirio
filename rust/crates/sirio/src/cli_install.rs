@@ -1,0 +1,925 @@
+//! The one stable copy of `sirioctl` that hooks, the PATH link and every pane
+//! name. It lives in the app's data directory and is kept current by content:
+//! a copy whose bytes differ from the binary bundled beside the app is written
+//! again, through a temporary file and a `rename`, so a hook running the old
+//! copy keeps running it and a second Sirio racing the first leaves one whole
+//! file.
+
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// The control CLI's file name: `sirioctl.exe` on Windows, bare on unix.
+///
+/// The extension is part of the name here because this module does not
+/// *search* for the binary the way a shell does: it stats a path it built
+/// itself (a sibling of the app executable, or the stable copy), and a stat
+/// needs the exact spelling the toolchain emitted. Cmd.exe would resolve a bare
+/// `sirioctl` by appending `.EXE` from PATHEXT, and so does the PATH search in
+/// `sirio_agents::find_executable_in_path`, but neither runs here.
+///
+/// One definition feeds both the sibling candidate and the stable copy, so the
+/// two cannot disagree on which name to look for.
+pub(crate) fn sirioctl_binary_name() -> &'static str {
+    #[cfg(windows)]
+    {
+        "sirioctl.exe"
+    }
+    #[cfg(not(windows))]
+    {
+        "sirioctl"
+    }
+}
+
+/// `<data>/Sirio/bin`, or `bin-debug` for a debug build's own copy. `<data>` is
+/// `XDG_DATA_HOME` when it is absolute; otherwise `HOME/.local/share` on unix,
+/// or `LOCALAPPDATA` on Windows, which is where an existing install lives.
+///
+/// `None` when no base is absolute. There is deliberately no temp-directory
+/// fallback: a copy in a temp directory is cleared by the cleaner, and a PATH
+/// entry there is writable by anyone on the machine.
+pub(crate) fn sirioctl_install_dir(
+    environment: &BTreeMap<String, String>,
+    debug: bool,
+) -> Option<PathBuf> {
+    let absolute = |name: &str| {
+        environment
+            .get(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let data = absolute("XDG_DATA_HOME").or_else(|| {
+        #[cfg(windows)]
+        {
+            absolute("LOCALAPPDATA")
+        }
+        #[cfg(not(windows))]
+        {
+            absolute("HOME").map(|home| home.join(".local/share"))
+        }
+    })?;
+    Some(
+        data.join("Sirio")
+            .join(if debug { "bin-debug" } else { "bin" }),
+    )
+}
+
+/// The copy user-global hooks name. They name the release copy from any build,
+/// so a debug build's *Install Hooks* never points into a checkout.
+pub(crate) fn release_sirioctl_path(environment: &BTreeMap<String, String>) -> Option<PathBuf> {
+    sirioctl_install_dir(environment, false).map(|dir| dir.join(sirioctl_binary_name()))
+}
+
+/// Whether `dir` may lead a child's PATH. On unix it must be a directory this
+/// user owns that no other user can write to: a file dropped there would
+/// otherwise shadow a command in every pane. Windows checks only that it exists.
+pub(crate) fn safe_path_prefix(dir: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(dir) else {
+        return false;
+    };
+    if !metadata.is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: `getuid` takes no arguments and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        metadata.uid() == uid && metadata.mode() & 0o022 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Creates the stable directory. A directory this call creates is `0755`; an
+/// existing one keeps its mode.
+pub(crate) fn create_install_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// `SIRIO_CLI_AS_RELEASE=1` makes a debug build keep the release copy, so the
+/// copy and its PATH entry can be exercised as an installed user has them.
+pub(crate) fn cli_as_release() -> bool {
+    cfg!(debug_assertions) && std::env::var("SIRIO_CLI_AS_RELEASE").as_deref() == Ok("1")
+}
+
+/// Whether this process keeps its copy in `bin-debug`.
+pub(crate) fn stable_is_debug() -> bool {
+    cfg!(debug_assertions) && !cli_as_release()
+}
+
+/// What `ensure_stable_copy` did with the copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CopyOutcome {
+    /// There was no copy, and the bundled binary was written.
+    Installed,
+    /// The copy was a different file, or not a plain executable file. It was
+    /// replaced.
+    Replaced,
+    /// The copy already holds the bundled binary's bytes. Nothing was written.
+    Current,
+    /// No bundled binary was found beside the app or on PATH. A copy that is
+    /// there is kept.
+    SourceMissing,
+}
+
+/// Makes the stable copy current for this process and returns its path.
+///
+/// The source is the binary beside `current_exe`, else a PATH hit that is not
+/// the destination itself. The bytes are compared; a copy that is not a plain
+/// file, or lacks the executable bit, or differs, is replaced.
+pub(crate) fn ensure_stable_copy(
+    current_exe: &Path,
+    environment: &BTreeMap<String, String>,
+    debug: bool,
+) -> Result<(PathBuf, CopyOutcome), String> {
+    let dir = sirioctl_install_dir(environment, debug).ok_or_else(|| {
+        "sirioctl has no stable directory: XDG_DATA_HOME, HOME and LOCALAPPDATA are all unset or not absolute"
+            .to_string()
+    })?;
+    let destination = dir.join(sirioctl_binary_name());
+    let Some(source) = find_source(current_exe, environment, &destination) else {
+        // Nothing to copy from, but a copy that is there still works.
+        if is_executable_file(&destination) {
+            return Ok((destination, CopyOutcome::SourceMissing));
+        }
+        return Err(format!(
+            "sirioctl is unavailable: checked {} and PATH; build or install the control CLI before launching an agent",
+            current_exe
+                .parent()
+                .map(|path| path.join(sirioctl_binary_name()).display().to_string())
+                .unwrap_or_else(|| "the app executable directory".to_string())
+        ));
+    };
+    create_install_dir(&dir)
+        .map_err(|error| format!("could not create {}: {error}", dir.display()))?;
+    if is_current(&source, &destination) {
+        return Ok((destination, CopyOutcome::Current));
+    }
+    // `symlink_metadata` sees a dangling link too, which is a copy to replace.
+    let existed = std::fs::symlink_metadata(&destination).is_ok();
+    replace_copy(&source, &destination)?;
+    let outcome = if existed {
+        CopyOutcome::Replaced
+    } else {
+        CopyOutcome::Installed
+    };
+    Ok((destination, outcome))
+}
+
+/// The binary to copy: the one beside the app, else the first PATH hit. The
+/// stable copy itself is never a source, so a PATH entry that names it cannot
+/// make the copy copy itself.
+fn find_source(
+    current_exe: &Path,
+    environment: &BTreeMap<String, String>,
+    destination: &Path,
+) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(parent) = current_exe.parent() {
+        candidates.push(parent.join(sirioctl_binary_name()));
+    }
+    if let Some(path) = environment.get("PATH")
+        && let Some(found) = sirio_agents::find_executable_in_path("sirioctl", OsStr::new(path))
+    {
+        candidates.push(found);
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| is_executable_file(candidate) && !is_stable_copy(candidate, destination))
+}
+
+/// Whether `candidate` is the stable copy under another name: a regular file
+/// that a path resolves to the destination's file.
+fn is_stable_copy(candidate: &Path, destination: &Path) -> bool {
+    let Ok(copy) = std::fs::symlink_metadata(destination) else {
+        return false;
+    };
+    copy.file_type().is_file()
+        && std::fs::canonicalize(candidate).ok() == std::fs::canonicalize(destination).ok()
+}
+
+/// Whether `destination` is already a plain executable file holding the bytes
+/// of `source`. A link is never current, even one that resolves to them: the
+/// stable copy is a file.
+fn is_current(source: &Path, destination: &Path) -> bool {
+    let Ok(copy) = std::fs::symlink_metadata(destination) else {
+        return false;
+    };
+    if !copy.file_type().is_file() || !is_executable_file(destination) {
+        return false;
+    }
+    let Ok(source_metadata) = std::fs::metadata(source) else {
+        return false;
+    };
+    if source_metadata.len() != copy.len() {
+        return false;
+    }
+    match (std::fs::read(source), std::fs::read(destination)) {
+        (Ok(source_bytes), Ok(copy_bytes)) => source_bytes == copy_bytes,
+        _ => false,
+    }
+}
+
+/// Distinguishes the temporary and aside names of calls in one process.
+static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Writes `source` over `destination` through a temporary file in the same
+/// directory, so no reader sees a partial copy: on unix a `rename` replaces the
+/// file atomically and a reader of the old copy keeps reading it. Windows will
+/// not overwrite a running `.exe`, so the old file is renamed aside first and
+/// removed by a later call.
+fn replace_copy(source: &Path, destination: &Path) -> Result<(), String> {
+    let dir = destination.parent().ok_or_else(|| {
+        format!(
+            "sirioctl install path has no parent: {}",
+            destination.display()
+        )
+    })?;
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = dir.join(format!(".sirioctl-{}-{sequence}.tmp", std::process::id()));
+    #[cfg(windows)]
+    remove_aside_copies(dir);
+
+    let result = (|| -> std::io::Result<()> {
+        std::fs::copy(source, &temporary)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
+        }
+        #[cfg(windows)]
+        if std::fs::symlink_metadata(destination).is_ok() {
+            let aside = dir.join(format!(
+                "sirioctl.old-{}-{sequence}.exe",
+                std::process::id()
+            ));
+            std::fs::rename(destination, aside)?;
+        }
+        std::fs::rename(&temporary, destination)
+    })();
+    result.map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        format!(
+            "could not install sirioctl at {}: {error}",
+            destination.display()
+        )
+    })
+}
+
+/// Removes the old copies a Windows replacement left aside. One still in use
+/// cannot be removed, and is tried again on a later call.
+#[cfg(windows)]
+fn remove_aside_copies(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("sirioctl.old-") && name.ends_with(".exe") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+static STARTUP_COPY: OnceLock<Result<(PathBuf, CopyOutcome), String>> = OnceLock::new();
+
+/// Makes the stable copy on a background thread at startup, so it is current
+/// before any agent launches, and no launch waits for it. `then` runs on that
+/// thread with the copy's path when there is one.
+pub(crate) fn ensure_at_startup(
+    current_exe: PathBuf,
+    environment: BTreeMap<String, String>,
+    then: impl FnOnce(&Path) + Send + 'static,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("sirio-cli-copy".into())
+        .spawn(move || {
+            let outcome = ensure_stable_copy(&current_exe, &environment, stable_is_debug());
+            match &outcome {
+                Ok((path, _)) => then(path.as_path()),
+                Err(error) => eprintln!("[sirio] sirioctl: {error}"),
+            }
+            let _ = STARTUP_COPY.set(outcome);
+        });
+    if let Err(error) = spawned {
+        eprintln!("[sirio] sirioctl copy not started: {error}");
+    }
+}
+
+/// What the startup copy made, once it has finished.
+#[allow(dead_code)] // The CLI status reads it; nothing shows it yet.
+pub(crate) fn last_copy_outcome() -> Option<&'static Result<(PathBuf, CopyOutcome), String>> {
+    STARTUP_COPY.get()
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    fn fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "sirio-cli-install-{name}-{}-{}",
+            std::process::id(),
+            FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create the fixture root");
+        root
+    }
+
+    /// A data home under `root` and a PATH that holds no `sirioctl`.
+    fn environment_under(root: &Path) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            (
+                "XDG_DATA_HOME".to_string(),
+                root.join("data").to_string_lossy().into_owned(),
+            ),
+            (
+                "PATH".to_string(),
+                root.join("no-path").to_string_lossy().into_owned(),
+            ),
+        ])
+    }
+
+    /// The release copy a test under `root` expects.
+    fn stable_path(root: &Path) -> PathBuf {
+        root.join("data")
+            .join("Sirio")
+            .join("bin")
+            .join(sirioctl_binary_name())
+    }
+
+    /// An app executable with a `sirioctl` beside it holding `bytes`: the
+    /// source the resolver finds first. Returns the app's path.
+    fn app_beside(root: &Path, app: &str, bytes: &[u8]) -> PathBuf {
+        let dir = root.join(app);
+        std::fs::create_dir_all(&dir).expect("create the app fixture");
+        let current_exe = dir.join("sirio");
+        std::fs::write(&current_exe, b"sirio").expect("write the app fixture");
+        std::fs::write(dir.join(sirioctl_binary_name()), bytes).expect("write the source");
+        make_executable(&current_exe);
+        make_executable(&dir.join(sirioctl_binary_name()));
+        current_exe
+    }
+
+    fn write_stable(root: &Path, bytes: &[u8]) -> PathBuf {
+        let stable = stable_path(root);
+        std::fs::create_dir_all(stable.parent().expect("stable parent"))
+            .expect("create the stable directory");
+        std::fs::write(&stable, bytes).expect("write the existing copy");
+        stable
+    }
+
+    fn set_modified(path: &Path, seconds: u64) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open the fixture for a timestamp")
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
+            )
+            .expect("set the fixture timestamp");
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("make the fixture executable");
+    }
+
+    #[cfg(not(unix))]
+    fn make_executable(_path: &Path) {}
+
+    #[test]
+    fn no_absolute_base_gives_no_install_dir() {
+        let relative = BTreeMap::from([
+            ("XDG_DATA_HOME".to_string(), "relative/data".to_string()),
+            ("HOME".to_string(), "relative/home".to_string()),
+        ]);
+        assert_eq!(sirioctl_install_dir(&relative, false), None);
+        assert_eq!(sirioctl_install_dir(&BTreeMap::new(), true), None);
+        assert_eq!(release_sirioctl_path(&BTreeMap::new()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_world_writable_dir_is_not_a_path_prefix() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture("world-writable");
+        let dir = root.join("bin");
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+            .expect("make it world-writable");
+        assert!(!safe_path_prefix(&dir));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775))
+            .expect("make it group-writable");
+        assert!(!safe_path_prefix(&dir));
+        assert!(!safe_path_prefix(&root.join("missing")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dir_of_our_own_is_a_path_prefix() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture("own-dir");
+        let dir = root.join("bin");
+        std::fs::create_dir_all(&dir).expect("create the directory");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+            .expect("make it ours");
+        assert!(safe_path_prefix(&dir));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn different_bytes_are_replaced_even_when_the_copy_is_newer() {
+        let root = fixture("newer-copy");
+        let environment = environment_under(&root);
+        // Equal lengths: a comparison by size alone would call them current.
+        let current_exe = app_beside(&root, "app", b"new build!");
+        let source = current_exe
+            .parent()
+            .expect("app dir")
+            .join(sirioctl_binary_name());
+        set_modified(&source, 1_000_000);
+        let stable = write_stable(&root, b"old build!");
+        make_executable(&stable);
+        set_modified(&stable, 2_000_000);
+
+        let (path, outcome) =
+            ensure_stable_copy(&current_exe, &environment, false).expect("the copy is refreshed");
+        assert_eq!(outcome, CopyOutcome::Replaced);
+        assert_eq!(path, stable);
+        assert_eq!(
+            std::fs::read(&stable).expect("read the copy"),
+            b"new build!"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn same_bytes_leave_the_copy_untouched() {
+        let root = fixture("same-bytes");
+        let environment = environment_under(&root);
+        let current_exe = app_beside(&root, "app", b"same build");
+        let source = current_exe
+            .parent()
+            .expect("app dir")
+            .join(sirioctl_binary_name());
+        ensure_stable_copy(&current_exe, &environment, false).expect("the first install");
+        let stable = stable_path(&root);
+        // The source is newer, so a timestamp check would rewrite the copy.
+        set_modified(&stable, 1_000_000);
+        set_modified(&source, 2_000_000);
+        let before = std::fs::metadata(&stable).expect("copy metadata");
+
+        let (_, outcome) =
+            ensure_stable_copy(&current_exe, &environment, false).expect("the copy is current");
+        assert_eq!(outcome, CopyOutcome::Current);
+        let after = std::fs::metadata(&stable).expect("copy metadata");
+        assert_eq!(
+            after.modified().expect("mtime"),
+            before.modified().expect("mtime")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(after.ino(), before.ino(), "the copy was not rewritten");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_bytes_without_the_executable_bit_are_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture("not-executable");
+        let environment = environment_under(&root);
+        let current_exe = app_beside(&root, "app", b"same build");
+        let stable = write_stable(&root, b"same build");
+        std::fs::set_permissions(&stable, std::fs::Permissions::from_mode(0o644))
+            .expect("drop the executable bit");
+
+        let (_, outcome) =
+            ensure_stable_copy(&current_exe, &environment, false).expect("the copy is repaired");
+        assert_eq!(outcome, CopyOutcome::Replaced);
+        assert!(is_executable_file(&stable));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reader_of_the_old_copy_keeps_reading_it() {
+        let root = fixture("old-reader");
+        let environment = environment_under(&root);
+        let old = app_beside(&root, "old", b"old build");
+        ensure_stable_copy(&old, &environment, false).expect("the first install");
+        let mut reader = std::fs::File::open(stable_path(&root)).expect("open the old copy");
+
+        let new = app_beside(&root, "new", b"new build");
+        let (_, outcome) = ensure_stable_copy(&new, &environment, false).expect("the replacement");
+        assert_eq!(outcome, CopyOutcome::Replaced);
+        let mut old_bytes = Vec::new();
+        reader
+            .read_to_end(&mut old_bytes)
+            .expect("read the old copy to its end");
+        assert_eq!(old_bytes, b"old build");
+        assert_eq!(
+            std::fs::read(stable_path(&root)).expect("read the copy"),
+            b"new build"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn two_concurrent_installs_leave_one_whole_file() {
+        let root = fixture("concurrent");
+        let environment = environment_under(&root);
+        // Large enough that a write in place takes long enough to be seen half
+        // done by a reader.
+        const SIZE: usize = 8 << 20;
+        let first_bytes = vec![b'a'; SIZE];
+        let second_bytes = vec![b'b'; SIZE];
+        let first = app_beside(&root, "first", &first_bytes);
+        let second = app_beside(&root, "second", &second_bytes);
+        let stable = stable_path(&root);
+        let barrier = std::sync::Barrier::new(3);
+        let finished = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            for exe in [&first, &second] {
+                let (environment, barrier, finished) = (&environment, &barrier, &finished);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..12 {
+                        ensure_stable_copy(exe, environment, false)
+                            .expect("every concurrent install succeeds");
+                    }
+                    finished.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+            // Every read of the copy while the installs run is one source,
+            // whole. Before the first install there is no copy to read.
+            let (stable, barrier, finished) = (&stable, &barrier, &finished);
+            let (first_bytes, second_bytes) = (&first_bytes, &second_bytes);
+            scope.spawn(move || {
+                barrier.wait();
+                while finished.load(Ordering::SeqCst) < 2 {
+                    match std::fs::read(stable) {
+                        Ok(bytes) => assert!(
+                            bytes == *first_bytes || bytes == *second_bytes,
+                            "a reader saw a partial copy of {} bytes",
+                            bytes.len()
+                        ),
+                        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+                    }
+                }
+            });
+        });
+        let installed = std::fs::read(&stable).expect("read the copy");
+        assert!(
+            installed == first_bytes || installed == second_bytes,
+            "the copy must be one source, whole"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_source_keeps_a_present_copy() {
+        let root = fixture("missing-source");
+        let environment = environment_under(&root);
+        let stable = write_stable(&root, b"kept build");
+        make_executable(&stable);
+
+        let (path, outcome) = ensure_stable_copy(&root.join("nowhere/sirio"), &environment, false)
+            .expect("a present copy is kept");
+        assert_eq!(path, stable);
+        assert_eq!(outcome, CopyOutcome::SourceMissing);
+        assert_eq!(
+            std::fs::read(&stable).expect("read the copy"),
+            b"kept build"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_source_and_copy_is_an_error() {
+        let root = fixture("missing-both");
+        let environment = environment_under(&root);
+        let error = ensure_stable_copy(&root.join("nowhere/sirio"), &environment, false)
+            .expect_err("nothing to install from");
+        assert!(error.contains("sirioctl is unavailable"), "got {error}");
+        assert!(!stable_path(&root).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn debug_and_release_copies_live_apart() {
+        let root = fixture("debug-release");
+        let environment = environment_under(&root);
+        let release_exe = app_beside(&root, "release", b"release build");
+        let debug_exe = app_beside(&root, "debug", b"debug build");
+
+        let (release, _) =
+            ensure_stable_copy(&release_exe, &environment, false).expect("the release copy");
+        let (debug, _) =
+            ensure_stable_copy(&debug_exe, &environment, true).expect("the debug copy");
+        assert_eq!(release, stable_path(&root));
+        assert_eq!(
+            debug,
+            root.join("data")
+                .join("Sirio")
+                .join("bin-debug")
+                .join(sirioctl_binary_name())
+        );
+        assert_eq!(std::fs::read(&release).expect("read"), b"release build");
+        assert_eq!(std::fs::read(&debug).expect("read"), b"debug build");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_foreign_file_at_the_stable_path_is_replaced() {
+        // Spec §5.1: the stable path lies inside Sirio's own data directory,
+        // so whatever sits there is Sirio's to replace.
+        let root = fixture("foreign-file");
+        let environment = environment_under(&root);
+        let current_exe = app_beside(&root, "app", b"bundled build");
+        write_stable(&root, b"not sirioctl at all");
+
+        let (path, outcome) =
+            ensure_stable_copy(&current_exe, &environment, false).expect("the copy is replaced");
+        assert_eq!(outcome, CopyOutcome::Replaced);
+        assert_eq!(std::fs::read(&path).expect("read"), b"bundled build");
+        assert!(is_executable_file(&path));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_stable_path_becomes_a_copy() {
+        // A link to a build with identical bytes is still not the copy: the
+        // stable copy is a file, never a link into a checkout or a mount.
+        let root = fixture("symlink-copy");
+        let environment = environment_under(&root);
+        let linked = root.join("target").join(sirioctl_binary_name());
+        // A link's own length is its target's path length. The bytes are sized
+        // to that length, so a check that reads the link itself cannot tell it
+        // from a copy of the same bytes.
+        let payload = vec![b'x'; linked.as_os_str().len()];
+        let current_exe = app_beside(&root, "app", &payload);
+        std::fs::create_dir_all(linked.parent().expect("target dir")).expect("create target");
+        std::fs::write(&linked, &payload).expect("write the linked build");
+        make_executable(&linked);
+        std::fs::create_dir_all(stable_path(&root).parent().expect("stable dir"))
+            .expect("create the stable directory");
+        std::os::unix::fs::symlink(&linked, stable_path(&root)).expect("link the stable path");
+
+        let (path, outcome) =
+            ensure_stable_copy(&current_exe, &environment, false).expect("the link is replaced");
+        assert_eq!(outcome, CopyOutcome::Replaced);
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("the stable path")
+                .file_type()
+                .is_file(),
+            "the stable copy must be a file, not a link"
+        );
+        assert_eq!(std::fs::read(&path).expect("read"), payload);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn user_global_hooks_name_the_release_path_from_a_debug_build() {
+        // The release path does not depend on the build that writes the hooks:
+        // a debug build names `bin`, never its own `bin-debug`.
+        let data = std::env::temp_dir().join("sirio-cli-install-hooks-data");
+        let environment = BTreeMap::from([(
+            "XDG_DATA_HOME".to_string(),
+            data.to_string_lossy().into_owned(),
+        )]);
+        let release = release_sirioctl_path(&environment);
+        assert_eq!(
+            release,
+            Some(data.join("Sirio").join("bin").join(sirioctl_binary_name()))
+        );
+        assert_eq!(
+            release,
+            sirioctl_install_dir(&environment, false).map(|dir| dir.join(sirioctl_binary_name()))
+        );
+        assert_ne!(
+            release,
+            sirioctl_install_dir(&environment, true).map(|dir| dir.join(sirioctl_binary_name()))
+        );
+    }
+
+    /// The installed control CLI must carry the bytes of the artifact the
+    /// resolver picked. The stable copy is a file on every platform.
+    fn assert_copied_from(installed: &Path, source: &Path) {
+        assert_eq!(
+            std::fs::read(installed).expect("read the installed sirioctl"),
+            std::fs::read(source).expect("read the source sirioctl"),
+            "the installed sirioctl must carry the source artifact's bytes"
+        );
+        #[cfg(unix)]
+        assert!(
+            std::fs::symlink_metadata(installed)
+                .expect("the installed sirioctl")
+                .file_type()
+                .is_file(),
+            "the stable copy is a copy, never a symlink"
+        );
+    }
+
+    #[test]
+    fn sirioctl_resolver_installs_the_sibling_binary_in_xdg_data_bin() {
+        // The fixture names the binary the way the platform ships it, and the
+        // resolver has to look for that name.
+        let root = fixture("sibling");
+        let executable_dir = root.join("target/debug");
+        std::fs::create_dir_all(&executable_dir).expect("create the executable fixture");
+        let current_exe = executable_dir.join("sirio");
+        let sirioctl = executable_dir.join(sirioctl_binary_name());
+        std::fs::write(&current_exe, b"sirio").expect("write the app fixture");
+        std::fs::write(&sirioctl, b"sirioctl").expect("write the sibling");
+        make_executable(&current_exe);
+        make_executable(&sirioctl);
+        let environment = BTreeMap::from([
+            (
+                "XDG_DATA_HOME".to_string(),
+                root.join("data").to_string_lossy().into_owned(),
+            ),
+            (
+                "PATH".to_string(),
+                root.join("empty-path").to_string_lossy().into_owned(),
+            ),
+        ]);
+
+        let (resolved, outcome) = ensure_stable_copy(&current_exe, &environment, false)
+            .expect("the sibling sirioctl is installed");
+        assert_eq!(resolved, stable_path(&root));
+        assert!(resolved.is_absolute());
+        assert_eq!(outcome, CopyOutcome::Installed);
+        assert_copied_from(&resolved, &sirioctl);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Windows regression: the build emits `sirioctl.exe`, and the resolver
+    /// must look for exactly that name. An extensionless `sirioctl` next to
+    /// the app is not a real Windows artifact and may not satisfy it.
+    #[cfg(windows)]
+    #[test]
+    fn sirioctl_resolver_requires_the_exe_sibling_on_windows() {
+        let root = fixture("exe-sibling");
+        let executable_dir = root.join("target/debug");
+        std::fs::create_dir_all(&executable_dir).expect("create the executable fixture");
+        let current_exe = executable_dir.join("sirio.exe");
+        std::fs::write(&current_exe, b"sirio").expect("write the app fixture");
+        std::fs::write(executable_dir.join("sirioctl"), b"wrong artifact")
+            .expect("write the extensionless decoy");
+        std::fs::create_dir_all(root.join("empty-path")).expect("create the empty PATH dir");
+        let environment = BTreeMap::from([
+            (
+                "XDG_DATA_HOME".to_string(),
+                root.join("data").to_string_lossy().into_owned(),
+            ),
+            (
+                "PATH".to_string(),
+                root.join("empty-path").to_string_lossy().into_owned(),
+            ),
+        ]);
+
+        let error = ensure_stable_copy(&current_exe, &environment, false)
+            .expect_err("an extensionless sirioctl must not satisfy the resolver");
+        assert!(error.contains("sirioctl is unavailable"), "got {error}");
+
+        let sirioctl = executable_dir.join("sirioctl.exe");
+        std::fs::write(&sirioctl, b"sirioctl").expect("write the real artifact");
+        let (resolved, _) = ensure_stable_copy(&current_exe, &environment, false)
+            .expect("the .exe sibling must resolve");
+        assert_eq!(
+            resolved,
+            root.join("data")
+                .join("Sirio")
+                .join("bin")
+                .join("sirioctl.exe")
+        );
+        assert_copied_from(&resolved, &sirioctl);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sirioctl_resolver_falls_back_to_path_and_reports_missing_binary() {
+        let root = fixture("path-fallback");
+        let executable_dir = root.join("app");
+        let path_dir = root.join("path");
+        std::fs::create_dir_all(&executable_dir).expect("create the app fixture");
+        std::fs::create_dir_all(&path_dir).expect("create the PATH fixture");
+        let current_exe = executable_dir.join("sirio");
+        let path_sirioctl = path_dir.join(sirioctl_binary_name());
+        std::fs::write(&current_exe, b"sirio").expect("write the app fixture");
+        std::fs::write(&path_sirioctl, b"sirioctl").expect("write the PATH fixture");
+        make_executable(&current_exe);
+        make_executable(&path_sirioctl);
+
+        let mut environment = BTreeMap::from([
+            (
+                "XDG_DATA_HOME".to_string(),
+                root.join("data").to_string_lossy().into_owned(),
+            ),
+            ("PATH".to_string(), path_dir.to_string_lossy().into_owned()),
+        ]);
+        let (resolved, _) = ensure_stable_copy(&current_exe, &environment, false)
+            .expect("the PATH sirioctl is installed");
+        assert_eq!(resolved, stable_path(&root));
+        assert_copied_from(&resolved, &path_sirioctl);
+
+        environment.insert(
+            "XDG_DATA_HOME".into(),
+            root.join("missing-data").display().to_string(),
+        );
+        environment.insert(
+            "PATH".into(),
+            root.join("missing-path").display().to_string(),
+        );
+        let error = ensure_stable_copy(&root.join("missing/sirio"), &environment, false)
+            .expect_err("a missing sirioctl must be surfaced");
+        assert!(error.contains("sirioctl is unavailable"), "got {error}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A dangling link at the stable path is the ordinary end state of a
+    /// rebuild: the link outlives the `target/` it pointed into. It is replaced
+    /// by a copy rather than refused.
+    #[cfg(unix)]
+    #[test]
+    fn sirioctl_resolver_replaces_a_stale_install_symlink() {
+        let root = fixture("stale-link");
+        let path_dir = root.join("path");
+        std::fs::create_dir_all(&path_dir).expect("create the PATH fixture");
+        let path_sirioctl = path_dir.join("sirioctl");
+        std::fs::write(&path_sirioctl, b"sirioctl").expect("write the PATH fixture");
+        make_executable(&path_sirioctl);
+        let destination = stable_path(&root);
+        std::fs::create_dir_all(destination.parent().expect("install parent"))
+            .expect("create the install dir");
+        std::os::unix::fs::symlink(root.join("deleted-target/debug/sirioctl"), &destination)
+            .expect("create the dangling link");
+        assert!(std::fs::metadata(&destination).is_err());
+        let environment = BTreeMap::from([
+            (
+                "XDG_DATA_HOME".to_string(),
+                root.join("data").to_string_lossy().into_owned(),
+            ),
+            ("PATH".to_string(), path_dir.to_string_lossy().into_owned()),
+        ]);
+
+        let (resolved, outcome) = ensure_stable_copy(&root.join("app/sirio"), &environment, false)
+            .expect("a dangling link is replaced, not refused");
+        assert_eq!(resolved, destination);
+        assert_eq!(outcome, CopyOutcome::Replaced);
+        assert_copied_from(&resolved, &path_sirioctl);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

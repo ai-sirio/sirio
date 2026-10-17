@@ -61,6 +61,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # `_NET_WM_ICON`. `png` is the only format the asset set needs.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 
+# The owner check on the directory that leads a child's PATH (`cli_install`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "windows")'.build-dependencies]
 # Compiles `build.rs`'s generated `1 ICON "app-icon.ico"` resource with the
 # MSVC `rc.exe`. The gpui Windows backend loads resource ID 1 once via
