@@ -5,11 +5,12 @@ set -eEuo pipefail
 # isolated debug Sirio on a private Xvfb, driven through the debug-only
 # `sirioctl surface editor` verbs, the window's own keystrokes, the Settings
 # page, and the files on disk. Every check compares a whole value against the
-# value it expects and says what it expected when it differs.
+# value it expects and says what it expected when it differs. Linux and X11
+# only: its keys are ctrl- and alt-based, and its captures are X windows.
 #
 # Scenarios, in the order they run (the Settings page hides the editor, so it
 # runs last):
-#   load_states       each fixture opens to the state and error the app gives it
+#   load_states       each fixture opens to the state, error and path the app gives it
 #   edit_save         typing, undo, redo, a two-range edit and save, byte for byte
 #   crlf              a CRLF file keeps its line endings through an edit and a save
 #   conflict          a clean disk change is adopted; a dirty one asks, then Keep
@@ -21,10 +22,16 @@ set -eEuo pipefail
 #                     pasted back, which reads the clipboard through the editor
 #   pane_keys         shift-alt-down adds a cursor; ctrl-alt-down moves focus to the
 #                     pane below, shown by a pane close that spares the file
-#   prefs             every Editor switch, both line-number modes other than
-#                     absolute, both cursor shapes other than line and the ruler at
-#                     40, each seen in a capture; then Settings → Editor, and its
-#                     ruler column field's resync across a Blur
+#   prefs             the Editor switches on nested.rs. Each switch with a visible
+#                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
+#                     stickyScroll, lineNumbers, cursorShape, and the ruler at
+#                     column 20) is captured in each of its states, and the two
+#                     captures must differ byte for byte: a switch that draws
+#                     nothing the capture can see fails here. codeLens and
+#                     inlayHints have no Ely view option and no language server
+#                     runs in this test, so their state is checked and no capture
+#                     is claimed for them. Then Settings → Editor, and its ruler
+#                     column field's resync across a Blur
 #
 # The artifact: --out-dir DIR (default artifacts/editor-e2e-<stamp>-<pid>) keeps
 # transcript.log, app.log, the probe answers and the PID-matched window captures
@@ -34,9 +41,9 @@ set -eEuo pipefail
 #          [--out-dir DIR] [--appearance light|dark]
 #
 #   --xvfb        start a private Xvfb on a free display between :90 and :99
-#   --display :N  use an Xvfb this user started (never $DISPLAY)
-#   --state-only  take no window captures; the window still draws, so the
-#                 editor's state is read from a drawn app
+#   --display :N  use an Xvfb this user started (never your own $DISPLAY)
+#   --state-only  take no window captures and no capture comparisons; the window
+#                 still draws, so the editor's state is read from a drawn app
 #   --appearance  seed light or dark (default dark)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -76,7 +83,7 @@ trap 'echo "FAIL: unexpected error at line $LINENO" >&2' ERR
 # Tools the checks use: xdotool focuses the window and clicks Settings fields,
 # xwininfo and xprop find the app's window, import and identify take the
 # captures. Every X tool is pointed at this run's display, never at $DISPLAY.
-for tool in python3 git xdotool xwininfo xprop; do
+for tool in python3 git xdotool xwininfo xprop xdpyinfo; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
 if [ "$STATE_ONLY" -eq 0 ]; then
@@ -86,6 +93,7 @@ if [ "$STATE_ONLY" -eq 0 ]; then
 fi
 [ "$(id -u)" -ne 0 ] || fail "run as a user, not root: root reads a chmod 000 file, so 'unreadable' would not be unreadable"
 [ -n "$DISPLAY_TARGET" ] || [ "$START_XVFB" -eq 1 ] || fail "no display; pass --xvfb or --display :N (the editor draws, even with --state-only)"
+[ -z "$DISPLAY_TARGET" ] || [ "$DISPLAY_TARGET" != "${DISPLAY:-}" ] || fail "--display $DISPLAY_TARGET is your own \$DISPLAY; pass --xvfb, or an Xvfb you started on another number"
 
 # ---------------------------------------------------------------- build
 
@@ -113,23 +121,39 @@ is_a_host() {
   comm="$(cat "/proc/$1/comm" 2>/dev/null || true)"
   case "$comm" in *sirio-host*) return 0 ;; *) return 1 ;; esac
 }
+# Ends a child of this script: TERM, then KILL if it has not exited within 5 s.
+# The watchdog's sleep writes nowhere, so it does not hold the transcript's pipe.
+terminate() { # pid
+  kill -TERM "$1" 2>/dev/null || return 0
+  (sleep 5; kill -KILL "$1" 2>/dev/null) >/dev/null 2>&1 &
+  local watchdog=$!
+  wait "$1" 2>/dev/null || true
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+}
 stop_hosts() {
-  # Only the hosts whose state files are in this run's own host root.
-  local file pid
+  # Only the hosts whose state files are in this run's own host root. A host is
+  # detached, so it is not this shell's child: its exit is polled, for 5 s, then
+  # it is killed.
+  local file pid tries
   for file in "$RUN_DIR"/host/host-v*.json; do
     [ -f "$file" ] || continue
     pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$file" | head -n 1)"
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && is_a_host "$pid" && kill -TERM "$pid" 2>/dev/null || true
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && is_a_host "$pid" || continue
+    kill -TERM "$pid" 2>/dev/null || true
+    tries=0
+    while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 50 ]; do
+      tries=$((tries + 1))
+      sleep 0.1
+    done
+    kill -KILL "$pid" 2>/dev/null || true
   done
 }
 cleanup() {
   local rc=$?
-  if [ -n "$APP_PID" ]; then
-    kill "$APP_PID" 2>/dev/null || true
-    wait "$APP_PID" 2>/dev/null || true
-  fi
+  [ -z "$APP_PID" ] || terminate "$APP_PID"
   stop_hosts
-  [ -z "$XVFB_PID" ] || { kill "$XVFB_PID" 2>/dev/null || true; wait "$XVFB_PID" 2>/dev/null || true; }
+  [ -z "$XVFB_PID" ] || terminate "$XVFB_PID"
   cp "$RUN_DIR"/app.log "$OUT_DIR/" 2>/dev/null || true
   [ -d "$RUN_DIR/host/log" ] && cp -R "$RUN_DIR/host/log" "$OUT_DIR/" 2>/dev/null || true
   rm -rf "$RUN_DIR"
@@ -191,6 +215,18 @@ elif command == "offset":
     sys.stdout.write(str(len(text[:index].encode("utf-8"))))
 elif command == "length":
     sys.stdout.write(str(len(unescape(sys.argv[2]).encode("utf-8"))))
+elif command == "line-after":
+    # line-after ESCAPED_TEXT NEEDLE LINES: the byte offset of the start of the line
+    # LINES lines below the line NEEDLE is on.
+    text = unescape(sys.argv[2])
+    index = text.find(sys.argv[3])
+    if index < 0:
+        sys.exit(f"'{sys.argv[3]}' is not in the text")
+    lines = text.split("\n")
+    line = text[:index].count("\n") + int(sys.argv[4])
+    if line >= len(lines):
+        sys.exit(f"the text has no line {line}")
+    sys.stdout.write(str(len("".join(piece + "\n" for piece in lines[:line]).encode("utf-8"))))
 elif command == "with-suffix":
     # with-suffix ESCAPED SUFFIX: the escaped text of the unescaped text plus SUFFIX.
     sys.stdout.write(escape(unescape(sys.argv[2]) + sys.argv[3]))
@@ -274,6 +310,45 @@ write("binary.bin", b"\x00\x01\x02binary\x00data\xff\xfe")
 big = b"".join(f"line {n} of the big file\n".encode("utf-8") for n in range(1, 200000))
 write("big.txt", big[:1153434])
 write("unreadable.txt", b"secret\n")
+# nested.rs: bodies indented by 4, 8 and 12 spaces, and one impl block of about
+# 80 lines, longer than the pane; one of its lines runs past 60 columns.
+nested = [
+    "// nested.rs: bodies indented by 4, 8 and 12 spaces, and one impl block\n",
+    "// longer than the pane.\n",
+    "struct Thing {\n",
+    "    id: u32,\n",
+    "}\n",
+    "\n",
+    "fn outer(seed: u32) -> u32 {\n",
+    "    let value = {\n",
+    "        let inner = {\n",
+    "            seed + 7\n",
+    "        };\n",
+    "        inner * 2\n",
+    "    };\n",
+    "    value\n",
+    "}\n",
+    "\n",
+    "impl Thing {\n",
+]
+for n in range(1, 9):
+    body = [
+        f"    fn method_{n}(&self) -> u32 {{\n",
+        "        let base = {\n",
+        "            let scaled = {\n",
+        f"                self.id + {n}\n",
+        "            };\n",
+        "            scaled\n",
+        "        };\n",
+        "        base\n",
+        "    }\n",
+        "\n",
+    ]
+    if n == 1:
+        body.insert(1, '        let label = "one line here runs well past the sixty columns the pane shows";\n')
+    nested += body
+nested += ["}\n"]
+write("nested.rs", "".join(nested).encode("utf-8"))
 PY
 git -C "$WT" add -A
 git -C "$WT" commit -q -m first
@@ -374,17 +449,29 @@ if best:
     print(best[1])
 PY
 }
-capture() { # name: frames/<name>.png, once the window has drawn the state just read
-  [ "$STATE_ONLY" -eq 0 ] || return 0
-  sleep 2
-  local window colours
-  window="$(find_window)"
-  [ -n "$window" ] || fail "$SCENARIO: no window with _NET_WM_PID=$APP_PID for $1"
-  import -display "$DISPLAY_TARGET" -window "$window" "$OUT_DIR/frames/$1.png"
+capture_window() { # name window: frames/<name>.png from that window, taken now
+  local colours
+  [ -n "$2" ] || fail "$SCENARIO: no window with _NET_WM_PID=$APP_PID for $1"
+  import -display "$DISPLAY_TARGET" -window "$2" "$OUT_DIR/frames/$1.png"
   [ -s "$OUT_DIR/frames/$1.png" ] || fail "$SCENARIO: $1.png is empty"
   colours="$(identify -format '%k' "$OUT_DIR/frames/$1.png")"
   [ "$colours" -ge 200 ] || fail "$SCENARIO: $1 is blank ($colours colours)"
   echo "FRAME: $1 ($colours colours)"
+}
+capture() { # name: frames/<name>.png, once the window has drawn the state just read
+  [ "$STATE_ONLY" -eq 0 ] || return 0
+  sleep 2
+  capture_window "$1" "$(find_window)"
+}
+# Two captures of one switch, in its two states, must differ: byte-identical
+# frames mean the switch drew nothing the capture can see. Skipped under
+# --state-only, which takes no captures.
+must_differ() { # label capture capture
+  [ "$STATE_ONLY" -eq 0 ] || return 0
+  if cmp -s "$OUT_DIR/frames/$2.png" "$OUT_DIR/frames/$3.png"; then
+    fail "$SCENARIO: $1 captures are identical ($2.png and $3.png): the switch drew nothing the capture can see"
+  fi
+  echo "DIFFERS: $1 $2.png and $3.png"
 }
 # A click in the app's window at (X, Y), counted from the window's corner. The
 # coordinates below are the Settings → Editor page's own fields in a window of
@@ -445,6 +532,7 @@ scenario_load_states() {
     "nonl.txt|loaded|"
     "wide.txt|loaded|"
     "notes.md|loaded|"
+    "nested.rs|loaded|"
     "binary.bin|error|This file appears to be binary and cannot be shown as text."
     "big.txt|error|This file is too large to open (1153434 bytes; limit is 1048576 bytes)."
     "unreadable.txt|error|This file cannot be read (Permission denied (os error 13)): @WT@/unreadable.txt"
@@ -462,6 +550,7 @@ scenario_load_states() {
     echo "load_state $name state=$got_state error=$got_error"
     [ "$got_state" = "$want_state" ] || fail "$SCENARIO: $name state expected $want_state, got $got_state"
     [ "$got_error" = "$want_error" ] || fail "$SCENARIO: $name error expected '$want_error', got '$got_error'"
+    expect_state path "$WT/$name"
   done
   echo "OK: every fixture opens to the state the app gives it"
 }
@@ -627,6 +716,7 @@ scenario_copy_propagates() {
   expect_state text "$(python3 "$TOOLS" with-suffix "$before" "fn line_2")"
   ctl surface editor keys --keys=ctrl-z >/dev/null
   expect_state text "$before"
+  expect_state dirty false
   echo "OK: the empty copy left the clipboard as it was; the selection's copy is what pastes"
 }
 
@@ -651,6 +741,9 @@ scenario_pane_keys() {
   ctl surface editor select --ranges=0..0 >/dev/null
   ctl surface editor keys --keys=ctrl-alt-down >/dev/null
   sleep 1
+  # The file is the tab's only file pane, so state names it whichever pane has
+  # focus. Where focus is shows only in the close below.
+  expect_state path "$WT/main.rs"
   # Focus has moved to the pane below only if a close now takes that pane and
   # leaves the file: otherwise the close takes the file's pane and the file goes.
   ctl pane close >/dev/null
@@ -675,38 +768,86 @@ set_pref() { # key value: the verb, then the state's whole prefs line
 }
 on_off() { if [ "$1" = true ]; then echo on; else echo off; fi; }
 
+# A switch with a visible effect: captured in its on and off states, which must differ.
+switch_pref() { # key
+  local key="$1" value
+  if [ "${PREF[$key]}" = true ]; then value=false; else value=true; fi
+  set_pref "$key" "$value"
+  capture "prefs-$key-$(on_off "$value")"
+  if [ "$value" = true ]; then value=false; else value=true; fi
+  set_pref "$key" "$value"
+  capture "prefs-$key-$(on_off "$value")"
+  must_differ "$key" "prefs-$key-on" "prefs-$key-off"
+}
+
 scenario_prefs() {
   declare -gA PREF=(
     [minimap]=false [stickyScroll]=true [indentGuides]=true [rainbowBrackets]=true
     [codeLens]=true [inlayHints]=true [whitespace]=false [ruler]=false
     [rulerColumn]=100 [lineNumbers]=absolute [cursorShape]=line [tabSize]=4
   )
-  open_file "$WT/main.rs"
+  open_file "$WT/nested.rs"
   expect_state state loaded
   expect_state prefs "$(prefs_line)"
-  local key value
-  for key in minimap stickyScroll indentGuides rainbowBrackets codeLens inlayHints whitespace ruler; do
-    if [ "${PREF[$key]}" = true ]; then value=false; else value=true; fi
-    set_pref "$key" "$value"
-    capture "prefs-$key-$(on_off "$value")"
-    if [ "$value" = true ]; then value=false; else value=true; fi
-    set_pref "$key" "$value"
-    capture "prefs-$key-$(on_off "$value")"
+  local key value window at buffer
+
+  # The ruler first, at column 20, well inside the pane.
+  set_pref rulerColumn 20
+  set_pref ruler true
+  capture prefs-ruler-on
+  set_pref ruler false
+  capture prefs-ruler-off
+  must_differ ruler prefs-ruler-on prefs-ruler-off
+
+  # The switches read at the top of nested.rs, where indented bodies start.
+  for key in minimap whitespace rainbowBrackets indentGuides; do
+    switch_pref "$key"
   done
-  for value in relative hidden absolute; do
-    set_pref lineNumbers "$value"
-    [ "$value" = absolute ] || capture "prefs-lineNumbers-$value"
+  # codeLens and inlayHints: no view option and no language server here, so only
+  # their state is checked. Both start on.
+  for key in codeLens inlayHints; do
+    set_pref "$key" false
+    set_pref "$key" true
   done
+  capture prefs-lineNumbers-absolute
+  set_pref lineNumbers relative
+  capture prefs-lineNumbers-relative
+  set_pref lineNumbers hidden
+  capture prefs-lineNumbers-hidden
+  set_pref lineNumbers absolute
+  must_differ lineNumbers prefs-lineNumbers-absolute prefs-lineNumbers-relative
+  must_differ lineNumbers prefs-lineNumbers-absolute prefs-lineNumbers-hidden
+  must_differ lineNumbers prefs-lineNumbers-relative prefs-lineNumbers-hidden
+
+  # The caret 50 lines into impl Thing. select centres it, so the impl line leaves
+  # the top of the pane and sticky scroll has a header to pin.
+  read_state
+  buffer="$(sfield text)"
+  at="$(python3 "$TOOLS" line-after "$buffer" "impl Thing {" 50)"
+  ctl surface editor select --ranges="$at..$at" >/dev/null
+  expect_state selections "$at..$at"
+  switch_pref stickyScroll
+
+  # Each cursor shape, with the caret in its blink-on phase: two harmless keys
+  # focus the editor, the select restarts the blink, and the capture follows
+  # within a quarter second.
   for value in block underline line; do
     set_pref cursorShape "$value"
-    [ "$value" = line ] || capture "prefs-cursorShape-$value"
+    window=""
+    [ "$STATE_ONLY" -eq 1 ] || window="$(find_window)"
+    ctl surface editor keys --keys=right >/dev/null
+    ctl surface editor keys --keys=left >/dev/null
+    ctl surface editor select --ranges="$at..$at" >/dev/null
+    if [ "$STATE_ONLY" -eq 0 ]; then
+      sleep 0.25
+      capture_window "prefs-cursorShape-$value" "$window"
+    fi
   done
-  set_pref ruler true
-  set_pref rulerColumn 40
-  capture prefs-rulerColumn-40
-  set_pref rulerColumn 100
-  set_pref ruler false
-  echo "OK: every Editor switch, line-number mode and cursor shape reached the state and was captured"
+  must_differ cursorShape prefs-cursorShape-block prefs-cursorShape-underline
+  must_differ cursorShape prefs-cursorShape-block prefs-cursorShape-line
+  must_differ cursorShape prefs-cursorShape-underline prefs-cursorShape-line
+
+  echo "OK: every Editor switch reached the state, and each visible one drew captures that differ"
   scenario_settings_resync
 }
 
