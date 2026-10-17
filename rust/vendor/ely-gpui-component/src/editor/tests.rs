@@ -283,3 +283,38 @@ fn only_a_focused_editor_blinks(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(redraws.get() > 2, "a focused one blinks");
 }
+
+#[gpui::test]
+fn escape_in_the_find_query_closes_the_box(cx: &mut TestAppContext) {
+    use gpui::{
+        AppContext as _, Focusable as _, IntoElement, ParentElement as _, Render, Styled as _,
+        Window, div,
+    };
+
+    use crate::forms::TextInput;
+
+    struct Host {
+        query: Entity<TextInput>,
+        closed: Rc<Cell<bool>>,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            let closed = self.closed.clone();
+            let find = super::FindWidget::new("find", &self.query, None, 0)
+                .on_close(move |_, _| closed.set(true));
+            div().size_full().child(find)
+        }
+    }
+    cx.update(Theme::init);
+    let closed = Rc::new(Cell::new(false));
+    let shut = closed.clone();
+    let (host, cx) = cx.add_window_view(move |window, cx| Host {
+        query: cx.new(|cx| TextInput::new(window, cx)),
+        closed: shut,
+    });
+    let field = host.read_with(cx, |host, cx| host.query.focus_handle(cx));
+    cx.update(|window, cx| window.focus(&field, cx));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    assert!(closed.get(), "escape closes the find box");
+}

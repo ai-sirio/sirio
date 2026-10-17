@@ -270,3 +270,15 @@ Without `--features test-support` the test target does not compile, at HEAD
 as well: `overlays/mod.rs` gates its tests on `cfg(test)` alone, and they
 import `gpui::TestAppContext`. That gate is outside this change and was left
 as it is.
+
+### Ports from upstream `main` (Task 1b)
+
+Fixes the editor gained on upstream `main` after `e17e31a6`, one commit each,
+in this order. `e17e31a6` is not on `main`, so each port records whether it
+applied as upstream wrote it or was rewritten against the vendored code.
+
+- `617a8d6` "Editor · FindWidget: Escape from the query closes the box":
+  applied verbatim to `src/editor/find.rs` and `src/editor/tests.rs`; both
+  files were identical to upstream's parent. Adds the window test
+  `escape_in_the_find_query_closes_the_box`, which fails without the
+  `find.rs` hunk.

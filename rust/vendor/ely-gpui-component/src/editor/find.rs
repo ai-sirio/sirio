@@ -206,6 +206,15 @@ impl RenderOnce for FindWidget {
             .bg(colors.overlay)
             .shadow(theme.elevation(Elevation::Floating))
             .text_size(theme.text_size(TextSize::Xs))
+            // Escape from the query closes the box.
+            .when_some(self.on_close.clone(), |el, close| {
+                el.on_key_down(move |event, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        close(window, cx);
+                    }
+                })
+            })
             .child(
                 row()
                     .children(self.on_toggle_replace.clone().map(|fold| {
