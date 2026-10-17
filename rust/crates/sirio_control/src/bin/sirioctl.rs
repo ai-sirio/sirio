@@ -172,6 +172,10 @@ fn usage() {
          \x20 surface editor click --offset=n --platform=true|false  (debug builds) a platform click at n (a link, go to definition), or a plain caret placement\n\
          \x20 surface editor context --offset=n --action=a  (debug builds) a right press at n, then the menu action a (copy, cut, paste, go-to-definition, ...)\n\
          \x20 surface editor git-mark --line=n  (debug builds) press the git mark at line n: draw its hunk in place, or close it; answers diff_open\n\
+         \x20 surface editor find [--query=q] [--case=true] [--word=true] [--regex=true] [--replace=r]  (debug builds) open find; --replace opens the replace row; answers find_matches, find_current, find_error\n\
+         \x20 surface editor find-step [--forward=false]  (debug builds) the next find match, or the previous\n\
+         \x20 surface editor replace [--all=true]  (debug builds) replace the current match, or every one, with the replace row's text\n\
+         \x20 surface editor find-close         (debug builds) close find\n\
          \x20 surface editor save               (debug builds) save the active file tab\n\
          \x20 surface editor conflict --action=reload|keep  (debug builds) answer a disk conflict\n\
          \x20 surface editor mode --mode=code|preview  (debug builds) switch the Markdown mode\n\
@@ -817,6 +821,17 @@ fn editor_offset(parsed: &ParsedArgs) -> Result<usize, String> {
         .map_err(|_| "--offset must be a byte offset".to_string())
 }
 
+/// A true/false option of an editor verb: `--k=true`, `--k=false`, or `--k`
+/// alone for true; false when it is not given.
+fn editor_bool(parsed: &ParsedArgs, key: &str) -> Result<bool, String> {
+    match parsed.value(key) {
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(_) => Err(format!("--{key} must be true or false")),
+        None => Ok(parsed.flag(key)),
+    }
+}
+
 fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
     let surface = parsed
         .positional
@@ -1126,6 +1141,35 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                     .parse::<usize>()
                     .map_err(|_| "--line must be a line number".to_string())?,
             ),
+        ),
+        ("editor", "find") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_find(
+                parsed.value("query"),
+                editor_bool(parsed, "case")?,
+                editor_bool(parsed, "word")?,
+                editor_bool(parsed, "regex")?,
+                parsed.value("replace"),
+            ),
+        ),
+        ("editor", "find-step") => {
+            let forward = if parsed.flag("forward") || parsed.value("forward").is_some() {
+                editor_bool(parsed, "forward")?
+            } else {
+                true
+            };
+            require_ok(
+                socket,
+                &sirio_control::protocol::request::editor_find_step(forward),
+            )
+        }
+        ("editor", "replace") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_replace(editor_bool(parsed, "all")?),
+        ),
+        ("editor", "find-close") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_find_close(),
         ),
         ("editor", "save") => require_ok(socket, &sirio_control::protocol::request::editor_save()),
         ("editor", "conflict") => require_ok(

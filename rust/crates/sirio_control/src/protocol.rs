@@ -892,6 +892,47 @@ pub mod request {
         )
     }
 
+    /// Opens find. `query` and `replace` are left out of the request when `None`
+    /// (the open find keeps them); the three options are always sent.
+    pub fn editor_find(
+        query: Option<&str>,
+        case: bool,
+        word: bool,
+        regex: bool,
+        replace: Option<&str>,
+    ) -> ControlRequest {
+        let mut params = BTreeMap::from([
+            ("case".to_string(), case.to_string()),
+            ("word".to_string(), word.to_string()),
+            ("regex".to_string(), regex.to_string()),
+        ]);
+        if let Some(query) = query {
+            params.insert("query".to_string(), query.to_string());
+        }
+        if let Some(replace) = replace {
+            params.insert("replace".to_string(), replace.to_string());
+        }
+        request("surface.editor.find", params)
+    }
+
+    pub fn editor_find_step(forward: bool) -> ControlRequest {
+        request(
+            "surface.editor.find_step",
+            BTreeMap::from([("forward".to_string(), forward.to_string())]),
+        )
+    }
+
+    pub fn editor_replace(all: bool) -> ControlRequest {
+        request(
+            "surface.editor.replace",
+            BTreeMap::from([("all".to_string(), all.to_string())]),
+        )
+    }
+
+    pub fn editor_find_close() -> ControlRequest {
+        request("surface.editor.find_close", BTreeMap::new())
+    }
+
     pub fn editor_save() -> ControlRequest {
         request("surface.editor.save", BTreeMap::new())
     }

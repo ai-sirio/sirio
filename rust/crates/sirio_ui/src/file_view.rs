@@ -42,6 +42,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use ely_gpui_component::editor::{CodeEditor, SingleCursor};
+// `sirio` has no Ely dependency; `open_find` takes these, and the socket verbs build them.
+pub use ely_gpui_component::editor::FindOptions;
 use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection,
@@ -3714,6 +3716,7 @@ mod tests {
     fn replace_matches(view: &gpui::Entity<FileView>, all: bool, cx: &mut VisualTestContext) {
         cx.update(|window, app| {
             view.update(app, |view, cx| view.replace_matches(all, window, cx))
+                .expect("replacing is accepted")
         });
         cx.run_until_parked();
     }

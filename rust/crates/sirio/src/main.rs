@@ -48,7 +48,7 @@ use sirio_ui::{
     editor::{Conflict, LineEnding},
     editor_prefs::EditorPrefs,
     file_context_menu::{FileContextFacts, MissingServer},
-    file_view::{FileView, FileViewEvent, MarkdownMode, SnapshotOrigin},
+    file_view::{FileView, FileViewEvent, FindOptions, MarkdownMode, SnapshotOrigin},
     loading,
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     orbit::{EMPTY_SURFACE_MARK, orbit},
@@ -1318,6 +1318,27 @@ enum ControlAction {
     /// A press on the gutter's git mark at `line`: draws or closes its hunk.
     EditorGitMark {
         line: usize,
+        reply: ControlReply,
+    },
+    /// Find and replace: open find (`replace` present opens the replace row with
+    /// that text), step between matches, replace one or all, close.
+    EditorFind {
+        query: Option<String>,
+        case: bool,
+        word: bool,
+        regex: bool,
+        replace: Option<String>,
+        reply: ControlReply,
+    },
+    EditorFindStep {
+        forward: bool,
+        reply: ControlReply,
+    },
+    EditorReplace {
+        all: bool,
+        reply: ControlReply,
+    },
+    EditorFindClose {
         reply: ControlReply,
     },
     AddAgentAccount {
@@ -2629,6 +2650,10 @@ impl ControlHandler for AppControlHandler {
                     methods.push("surface.editor.click");
                     methods.push("surface.editor.context");
                     methods.push("surface.editor.git_mark");
+                    methods.push("surface.editor.find");
+                    methods.push("surface.editor.find_step");
+                    methods.push("surface.editor.replace");
+                    methods.push("surface.editor.find_close");
                     methods.push("surface.editor.save");
                     methods.push("surface.editor.conflict");
                     methods.push("surface.editor.mode");
@@ -2860,6 +2885,31 @@ impl ControlHandler for AppControlHandler {
                     return ControlResponse::failure(&request.id, "surface.editor.git_mark requires line");
                 };
                 self.queue_action(request, move |reply| ControlAction::EditorGitMark { line, reply })
+            }
+            "surface.editor.find" if cfg!(debug_assertions) => {
+                let query = request.params.get("query").cloned();
+                let replace = request.params.get("replace").cloned();
+                let on = |key: &str| request.params.get(key).is_some_and(|value| value == "true");
+                let (case, word, regex) = (on("case"), on("word"), on("regex"));
+                self.queue_action(request, move |reply| ControlAction::EditorFind {
+                    query,
+                    case,
+                    word,
+                    regex,
+                    replace,
+                    reply,
+                })
+            }
+            "surface.editor.find_step" if cfg!(debug_assertions) => {
+                let forward = request.params.get("forward").is_none_or(|value| value != "false");
+                self.queue_action(request, move |reply| ControlAction::EditorFindStep { forward, reply })
+            }
+            "surface.editor.replace" if cfg!(debug_assertions) => {
+                let all = request.params.get("all").is_some_and(|value| value == "true");
+                self.queue_action(request, move |reply| ControlAction::EditorReplace { all, reply })
+            }
+            "surface.editor.find_close" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::EditorFindClose { reply })
             }
             "surface.editor.save" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::EditorSave { reply })
@@ -6018,6 +6068,21 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::EditorGitMark { line, reply } => {
                                     let _ = reply.send(workspace.control_editor_git_mark(line, cx));
+                                }
+                                ControlAction::EditorFind { query, case, word, regex, replace, reply } => {
+                                    let options = FindOptions { case, word, regex };
+                                    let _ = reply.send(workspace.control_editor_find(
+                                        query, options, replace, window, cx,
+                                    ));
+                                }
+                                ControlAction::EditorFindStep { forward, reply } => {
+                                    let _ = reply.send(workspace.control_editor_find_step(forward, window, cx));
+                                }
+                                ControlAction::EditorReplace { all, reply } => {
+                                    let _ = reply.send(workspace.control_editor_replace(all, window, cx));
+                                }
+                                ControlAction::EditorFindClose { reply } => {
+                                    let _ = reply.send(workspace.control_editor_find_close(window, cx));
                                 }
                                 ControlAction::AddAgentAccount {
                                     provider,
@@ -18146,7 +18211,7 @@ impl SirioWorkspace {
             MarkdownMode::Code => "code",
             MarkdownMode::Preview => "preview",
         };
-        Ok(vec![
+        let mut fields = vec![
             ("path".to_string(), display_absolute_path(view.path())),
             ("state".to_string(), state.to_string()),
             ("error".to_string(), error.unwrap_or_default()),
@@ -18172,7 +18237,9 @@ impl SirioWorkspace {
             ("git_marks".to_string(), view.git_marks_text()),
             ("diff_open".to_string(), Self::open_hunk_text(view)),
             ("prefs".to_string(), EditorPrefs::current(cx).describe()),
-        ])
+        ];
+        fields.extend(Self::find_fields(view));
+        Ok(fields)
     }
 
     /// Opens `path` as a file tab, as the shell opens a file, and answers with
@@ -18412,6 +18479,92 @@ impl SirioWorkspace {
         view.update(cx, |view, cx| view.toggle_hunk(line, cx));
         let open = Self::open_hunk_text(view.read(cx));
         Ok(vec![("diff_open".to_string(), open)])
+    }
+
+    /// The active file's find state as the find verbs and `state` answer it:
+    /// `find_matches` and `find_current` (0-based) are `none` while find is
+    /// closed, `find_current` also with no match; `find_error` is the pattern's
+    /// error, empty when there is none.
+    fn find_fields(view: &FileView) -> Vec<(String, String)> {
+        let number = |value: Option<usize>| value.map_or_else(|| "none".to_string(), |n| n.to_string());
+        vec![
+            ("find_matches".to_string(), number(view.find_matches())),
+            ("find_current".to_string(), number(view.find_current())),
+            (
+                "find_error".to_string(),
+                Self::escaped_field(view.find_error().unwrap_or_default()),
+            ),
+        ]
+    }
+
+    /// `surface.editor.find query= case= word= regex= replace=`: opens find as
+    /// the Find key does, or brings the open one back to its query. `replace`
+    /// opens the replace row with that text. Answers the find state.
+    fn control_editor_find(
+        &mut self,
+        query: Option<String>,
+        options: FindOptions,
+        replace: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let opened = view.update(cx, |view, cx| view.open_find(query, options, replace, window, cx));
+        if !opened {
+            return Err("the code editor is not drawn: the file is loading or in Preview".to_string());
+        }
+        Ok(Self::find_fields(view.read(cx)))
+    }
+
+    /// `surface.editor.find_step forward=`: the next match, or the previous one.
+    fn control_editor_find_step(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        if view.read(cx).find_matches().is_none() {
+            return Err("find is not open".to_string());
+        }
+        view.update(cx, |view, cx| view.find_step(forward, window, cx));
+        Ok(Self::find_fields(view.read(cx)))
+    }
+
+    /// `surface.editor.replace all=`: replaces the current match or every one,
+    /// with the replace row's text. A refusal (find closed, a read-only file) is
+    /// the error; nothing to replace answers `replaced=0`.
+    fn control_editor_replace(
+        &mut self,
+        all: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let replaced = view.update(cx, |view, cx| view.replace_matches(all, window, cx))?;
+        let mut fields = vec![("replaced".to_string(), replaced.to_string())];
+        fields.extend(Self::find_fields(view.read(cx)));
+        Ok(fields)
+    }
+
+    /// `surface.editor.find_close`: closes find, as Escape does. Closing one
+    /// that is not open does nothing.
+    fn control_editor_find_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        view.update(cx, |view, cx| view.close_find(window, cx));
+        Ok(Self::find_fields(view.read(cx)))
     }
 
     /// The line of the hunk drawn in place, or `none`.
@@ -41987,6 +42140,10 @@ done
             | ControlAction::EditorClick { reply, .. }
             | ControlAction::EditorContext { reply, .. }
             | ControlAction::EditorGitMark { reply, .. }
+            | ControlAction::EditorFind { reply, .. }
+            | ControlAction::EditorFindStep { reply, .. }
+            | ControlAction::EditorReplace { reply, .. }
+            | ControlAction::EditorFindClose { reply }
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
@@ -42155,6 +42312,10 @@ done
                 request_with_params(method, &[("offset", "0"), ("action", "copy")])
             }
             "surface.editor.git_mark" => request_with_params(method, &[("line", "0")]),
+            "surface.editor.find" => request_with_params(method, &[("query", "x")]),
+            "surface.editor.find_step" => request_with_params(method, &[("forward", "true")]),
+            "surface.editor.replace" => request_with_params(method, &[("all", "false")]),
+            "surface.editor.find_close" => request_with_params(method, &[]),
             "settings.account.add" => {
                 request_with_params(method, &[("provider", "claude"), ("label", "test")])
             }

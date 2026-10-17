@@ -287,16 +287,26 @@ impl FileView {
     /// so one undo. After replacing one, the next match becomes current: the
     /// first one that starts at or after the end of the text just written (so
     /// a replacement that holds the query is not found again), wrapping to the
-    /// first. Does nothing without a match or when the code takes no edits.
-    pub fn replace_matches(&mut self, all: bool, _window: &mut Window, cx: &mut Context<Self>) {
+    /// first. Answers how many matches were replaced: `Ok(0)` when there was
+    /// none to replace, `Err` when the call is refused: find is not open, or
+    /// the code takes no edits.
+    pub fn replace_matches(
+        &mut self,
+        all: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<usize, &'static str> {
+        if self.find.is_none() {
+            return Err("find is not open");
+        }
         if !self.find_can_replace(cx) {
-            return;
+            return Err("the file is read-only");
         }
         let Some(code) = self.code_editor.clone() else {
-            return;
+            return Err("the code editor is not drawn");
         };
         let Some(find) = self.find.as_ref() else {
-            return;
+            return Err("find is not open");
         };
         // `edit` takes text as it is, and the code never holds a carriage return.
         let with = find
@@ -315,15 +325,17 @@ impl FileView {
                 .collect()
         };
         let Some(first) = chosen.first() else {
-            return;
+            return Ok(0);
         };
         let resume = (!all).then(|| first.start + with.len());
+        let replaced = chosen.len();
         let edits: Vec<(Range<usize>, String)> = chosen
             .into_iter()
             .map(|range| (range, with.clone()))
             .collect();
         code.update(cx, |code, cx| code.edit(edits, cx));
         self.find_recompute(resume, resume.is_some(), cx);
+        Ok(replaced)
     }
 
     /// Closes find: its washes go, and the keyboard goes back to the code.
@@ -477,7 +489,9 @@ impl FileView {
                     });
                 })
                 .on_replace(move |all, window, cx| {
-                    replace.update(cx, |view, cx| view.replace_matches(all, window, cx));
+                    replace.update(cx, |view, cx| {
+                        let _ = view.replace_matches(all, window, cx);
+                    });
                 });
             if find.replace_open {
                 widget = widget.replace(&find.replacement);
@@ -490,18 +504,29 @@ impl FileView {
         // asked for text the box hides and the code's cursor does not show
         // through; the wheel still scrolls the code. A card drawn before the
         // pointer slid onto the box goes with the first move on it.
+        // The strip spans the code's width and passes the pointer through; the
+        // box is its right-aligned child and gives way (it shrinks) in a pane
+        // narrower than its own width, rather than running off the left edge.
         Some(
             div()
-                .id("file-find")
-                .debug_selector(|| "file-find".into())
                 .absolute()
                 .top(px(8.0))
+                .left(px(12.0))
                 .right(minimap_inset(code, window, cx) + px(12.0))
-                .block_mouse_except_scroll()
-                .on_mouse_move(cx.listener(|view, _, _, cx| view.dismiss_hover(cx)))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                .child(widget)
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .id("file-find")
+                        .debug_selector(|| "file-find".into())
+                        .flex()
+                        .min_w_0()
+                        .block_mouse_except_scroll()
+                        .on_mouse_move(cx.listener(|view, _, _, cx| view.dismiss_hover(cx)))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .child(widget),
+                )
                 .into_any_element(),
         )
     }
