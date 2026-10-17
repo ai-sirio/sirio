@@ -3,7 +3,7 @@ use std::ops::Range;
 use gpui::{
     AnyElement, Context, FontWeight, HighlightStyle, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Stateful, Styled, StyledText,
-    UnderlineStyle, Window, canvas, div, prelude::*,
+    UnderlineStyle, Window, canvas, div, px, prelude::*,
 };
 
 use super::{
@@ -228,15 +228,16 @@ impl CodeEditor {
         } else {
             Default::default()
         };
+        // A one-pixel fill, not a zero-width box with a border: gpui paints
+        // nothing for a box of no width, whatever border it carries.
         let rulers = self.options.rulers.iter().map(|column| {
             div()
                 .absolute()
                 .top_0()
                 .left(grid(*column))
                 .h(height)
-                .w_0()
-                .border_l_1()
-                .border_color(colors.border.opacity(0.6))
+                .w(px(1.))
+                .bg(colors.border.opacity(0.6))
         });
         let guides = guides.into_iter().map(|column| {
             let strong = active == Some(column);
@@ -245,9 +246,8 @@ impl CodeEditor {
                 .top_0()
                 .left(grid(column))
                 .h(height)
-                .w_0()
-                .border_l_1()
-                .border_color(if strong {
+                .w(px(1.))
+                .bg(if strong {
                     colors.border_strong
                 } else {
                     colors.border.opacity(0.6)

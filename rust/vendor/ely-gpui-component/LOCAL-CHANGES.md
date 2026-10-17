@@ -493,3 +493,11 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
   `a_silent_reset_keeps_its_cursors_clamped_and_its_history_empty`,
   `a_silent_reset_moves_a_cursor_inside_a_character_back_onto_it`.
   `cargo nextest run -p ely-gpui-component --features test-support` runs 124 tests, all passed.
+
+### Rulers and indent guides drawn (Task 6d fix 1)
+
+- `src/editor/line.rs`: a ruler and an indent guide are a one-pixel fill
+  (`w(px(1.))` with `bg`), not a zero-width box with a left border. gpui paints
+  nothing for a box of no width, so the upstream form never showed on screen.
+  The colours are unchanged: the ruler and the plain guide use `border` at 60%
+  opacity, the guide of the active block `border_strong`.
