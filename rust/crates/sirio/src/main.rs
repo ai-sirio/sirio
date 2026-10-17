@@ -17949,19 +17949,22 @@ impl SirioWorkspace {
         Ok(self.control_read_layout(cx))
     }
 
-    /// The active tab's first file view: the one the `surface.editor.*` verbs
-    /// act on, and the one `surface.file.read` reads.
+    /// The active tab's focused file view, or its first one when the focused
+    /// pane is not a file: the one the `surface.editor.*` verbs act on, and the
+    /// one `surface.file.read` reads.
     fn active_file_view(&self) -> Option<Entity<FileView>> {
         let tab = self.tabs.get(self.active_tab)?;
-        let mut found = None;
-        tab.panes.for_each(&mut |_, content| {
-            if found.is_none()
-                && let TabContent::File { view } = content
-            {
-                found = Some(view.clone());
+        let mut focused = None;
+        let mut first = None;
+        tab.panes.for_each(&mut |id, content| {
+            if let TabContent::File { view } = content {
+                if id == tab.focused_pane {
+                    focused = Some(view.clone());
+                }
+                first.get_or_insert_with(|| view.clone());
             }
         });
-        found
+        focused.or(first)
     }
 
     /// The active file tab's editor. The text is escaped as `surface.file.read`
@@ -18253,16 +18256,12 @@ impl SirioWorkspace {
     /// The active tab's file: its path, whether it is a read-only snapshot,
     /// and its text with backslashes and newlines escaped.
     fn control_read_file(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
-        let tab = self.tabs.get(self.active_tab).ok_or_else(|| "no active tab".to_string())?;
-        let mut found = None;
-        tab.panes.for_each(&mut |_, content| {
-            if found.is_none()
-                && let TabContent::File { view } = content
-            {
-                found = Some(view.clone());
-            }
-        });
-        let view = found.ok_or_else(|| "the active tab is not a file".to_string())?;
+        if self.tabs.get(self.active_tab).is_none() {
+            return Err("no active tab".to_string());
+        }
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "the active tab is not a file".to_string())?;
         let view = view.read(cx);
         let text = view
             .editor()
