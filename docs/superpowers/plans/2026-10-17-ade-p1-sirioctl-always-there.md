@@ -55,10 +55,11 @@
   - `pub const LAUNCHER_ONLY: [&str; 5] = ["APPIMAGE", "APPDIR", "ARGV0", "OWD", LAUNCH_SNAPSHOT_VAR];`
   - `pub fn launch_environment(process: &BTreeMap<String, String>) -> BTreeMap<String, String>` — the decoded snapshot when `SIRIO_LAUNCH_ENV` is present and decodes, else `process`; `LAUNCHER_ONLY` removed in both cases.
   - `pub fn user_environment_from(launch: &BTreeMap<String, String>, login_path: Option<&OsStr>, cli_dir: &Path) -> BTreeMap<String, String>` — `PATH` = `cli_dir`, then the login entries, then the launch entries, deduplicated, empties dropped (the order `login_path::merge_paths` uses today, with `cli_dir` first and removed from later positions).
-  - `pub fn install(user: BTreeMap<String, String>)` — sets a `OnceLock`; a second call is ignored.
+  - `pub const FOR_CHILDREN: [&str; 1] = ["SIRIO_PANE_HOST_HOME"];` — variables the app exports *for* its children (`session::export_pane_host_root`), copied from the process onto the user environment at `install` time. Every other `set_var`/`remove_var` in `sirio` is app-only and stays out: `GDK_BACKEND` and the `WAYLAND_DISPLAY` removal (`display_backend.rs:100,107`), `GPUI_DISABLE_DIRECT_COMPOSITION` (`main.rs:25704`); `PATH` is handled by `user_environment_from`.
+  - `pub fn install(user: BTreeMap<String, String>)` — sets a `OnceLock`, after overlaying `FOR_CHILDREN` from the process; a second call is ignored.
   - `pub fn installed() -> Option<&'static BTreeMap<String, String>>`
   - `pub fn for_child() -> BTreeMap<String, String>` — the installed map, else `std::env::vars()`.
-  - `pub fn apply(command: &mut std::process::Command)` — when installed: `env_clear()` then `envs(map)`; otherwise nothing.
+  - `pub fn command(program: impl AsRef<OsStr>) -> std::process::Command` — `Command::new(program)`, then, when installed, `env_clear()` + `envs(map)`. **The only way a site applies the user environment**, so a site's own `.env(..)` calls (git's `LC_ALL=C`, the remote flags) always come after the clear and survive it. There is deliberately no `apply(&mut Command)`.
   - `pub fn absent_from_user() -> Vec<String>` — names in `std::env::vars()` not in the installed map (empty when not installed).
 - Produces (in `sirio`): `login_path::login_shell_path() -> Option<OsString>` becomes `pub(crate)`; `adopt_login_shell_path(login: Option<&OsStr>)` takes it instead of computing it.
 
@@ -72,14 +73,22 @@
   - `launch_environment_is_taken_before_the_app_changes_its_own` — a process map without `WAYLAND_DISPLAY` but a snapshot with it → kept (the reason `main` captures first).
   - `cli_dir_comes_first_and_only_once` — launch `PATH` already containing `cli_dir` in the middle → `cli_dir` first, no duplicate.
   - `login_entries_precede_launch_entries`, `empty_path_entries_are_dropped`.
-  - `apply_without_install_leaves_the_command_alone` (spawn `/usr/bin/env` under `#[cfg(unix)]`, compare with the process).
+  - `command_without_install_inherits_the_process` (spawn `/usr/bin/env` under `#[cfg(unix)]`, compare with the process).
+  - `env_set_after_command_survives_the_clear` (install a map without `LC_ALL`; `command("/usr/bin/env").env("LC_ALL", "C")` → output has `LC_ALL=C` and nothing outside the map). nextest runs each test in its own process, so installing the global in a test is safe.
+  - `for_children_variables_reach_the_user_environment` (process has `SIRIO_PANE_HOST_HOME=/h`, the map lacks it → installed map has it).
 - [ ] **Step 2: Run** `cargo nextest run -p sirio_env` — expected: compile failure (crate empty).
 - [ ] **Step 3: Implement** the functions above. Hex decode by hand; split on `\0`, then at the first `=`.
 - [ ] **Step 4: Run** `cargo nextest run -p sirio_env` — expected: all pass.
-- [ ] **Step 5: AppRun as a file.** Move the heredoc body of `build-appimage.sh:228-247` verbatim into `Scripts/appimage/AppRun` and `cp` it into `$APPDIR/AppRun`. Add, **as the first statement after the shebang and comments**:
-  `export SIRIO_LAUNCH_ENV="$(env -0 | od -An -tx1 -v | tr -d ' \n')"`
-  In `Scripts/Tests/test-build-appimage.sh`, assert the built `AppRun` contains `SIRIO_LAUNCH_ENV=` on a line before the first `export PATH=`.
-- [ ] **Step 6: Wire `main`.** At the very top of `fn main` (before `display_backend::prepare_environment()`), compute `let launch = sirio_env::launch_environment(&std::env::vars().collect())`. Keep the order of the existing mutations. Replace `adopt_login_shell_path()` with `let login = login_path::login_shell_path(); login_path::adopt_login_shell_path(login.as_deref());` and then `sirio_env::install(sirio_env::user_environment_from(&launch, login.as_deref(), &cli_dir))`, where `cli_dir` is the stable copy's directory for this build (Task 4's `sirioctl_install_dir`; until Task 4 lands, use the current `xdg_data_home_for(..).join("Sirio/bin")`). Add `sirio_env` to `sirio`'s `Cargo.toml`.
+- [ ] **Step 5: AppRun as a file.** Move the heredoc body of `build-appimage.sh:228-247` verbatim into `Scripts/appimage/AppRun` and `cp` it into `$APPDIR/AppRun`. Add, **as the first statements after the shebang and comments**, the snapshot — taken **only when none is inherited**, because *Restart to update* (`main.rs:6746`, gpui `cx.restart()`) and any relaunch from the app start the new AppRun in the old app's environment, which already carries the old mount's prefixes and the original snapshot; re-snapshotting it would bring the dead mount back and nest the old snapshot inside the new one until `exec` fails with E2BIG. A snapshot above 100 KiB is not exported (a large nix or direnv environment must never stop the launch; the app then falls back to its process environment):
+  ```sh
+  if [ -z "${SIRIO_LAUNCH_ENV:-}" ]; then
+    snapshot="$(env -0 | od -An -tx1 -v | tr -d ' \n')"
+    if [ "${#snapshot}" -le 204800 ]; then export SIRIO_LAUNCH_ENV="$snapshot"; fi
+    unset snapshot
+  fi
+  ```
+  `sirio_apply` and the restart keep the app's environment (so the snapshot travels with them). In `Scripts/Tests/test-build-appimage.sh`, assert the built `AppRun` contains `SIRIO_LAUNCH_ENV` before the first `export PATH=`.
+- [ ] **Step 6: Wire `main`.** At the very top of `fn main` (before `display_backend::prepare_environment()`), compute `let launch = sirio_env::launch_environment(&std::env::vars().collect())`. Keep the order of the existing mutations. Replace `adopt_login_shell_path()` with `let login = login_path::login_shell_path(); login_path::adopt_login_shell_path(login.as_deref());`, and **after** `session::export_pane_host_root()` (`main.rs:25723`, so `FOR_CHILDREN` is in the process) call `sirio_env::install(sirio_env::user_environment_from(&launch, login.as_deref(), &cli_dir))`, where `cli_dir` is the stable copy's directory for this build (Task 4's `sirioctl_install_dir`; until Task 4 lands, use the current `xdg_data_home_for(..).join("Sirio/bin")`). Add `sirio_env` to `sirio`'s `Cargo.toml`.
 - [ ] **Step 7: Run** `cargo build -p sirio && cargo nextest run -p sirio login_path` and `bash Scripts/Tests/test-build-appimage.sh` — expected: pass.
 - [ ] **Step 8: Commit** — `feat(env): capture the user environment before the app changes its own`
 
@@ -114,11 +123,11 @@
 - Modify: `rust/crates/sirio_control/src/host_panels.rs:90-116,291-300`
 - Modify (host launch): `rust/crates/sirio_host_client/src/detach.rs` (`DetachedSpawn`, Linux `spawn` `:88-140`, macOS `plist_xml` call `:540`), `src/ensure.rs:27-33,299-320`, `rust/crates/sirio/src/main.rs:25432,25500-25509`
 - Modify (chats): `rust/crates/sirio_acp/src/lib.rs:1298-1301`, `rust/crates/sirio_acp/src/claude/worker.rs:335-341`
-- Modify (the audit, one `sirio_env::apply(&mut cmd)` each): `sirio_git/src/git.rs:268-290,563-590`, `sirio_project/src/git.rs:166`, `sirio_forge/src/transport.rs:498`, `sirio_lsp/src/server.rs:36-41`, `sirio_registry/src/installer.rs:248`, `sirio_usage/src/claude_native.rs:96-103`, `sirio_usage/src/claude.rs:1069`, `sirio_usage/src/http.rs:55`, `sirio_ui/src/editor.rs:1154-1164`, `sirio/src/main.rs:3779-3837` (desktop notifications), `:3932` (summarizer), `sirio/src/claude_transport.rs:125`
+- Modify (the audit: `Command::new(x)` → `sirio_env::command(x)`, keeping each site's own `.env(..)` calls after it): `sirio_git/src/git.rs:268-290,563-590`, `sirio_project/src/git.rs:166`, `sirio_forge/src/transport.rs:498`, `sirio_lsp/src/server.rs:36-41`, `sirio_registry/src/installer.rs:248`, `sirio_usage/src/claude_native.rs:96-103`, `sirio_usage/src/claude.rs:1069`, `sirio_usage/src/http.rs:55`, `sirio_ui/src/editor.rs:1154-1164`, `sirio/src/main.rs:3779-3837` (desktop notifications), `:3932` (summarizer), `sirio/src/claude_transport.rs:125`
 - Test: `rust/crates/sirio_terminal/src/link.rs` tests, `rust/crates/sirio_acp` tests
 
 **Interfaces:**
-- Consumes: `sirio_env::{for_child, apply, absent_from_user, installed}` (Task 1); `CreateParams.env_exact`, `TermClient::env_exact()` (Task 2).
+- Consumes: `sirio_env::{for_child, command, absent_from_user, installed}` (Task 1); `CreateParams.env_exact`, `TermClient::env_exact()` (Task 2).
 - Produces: `OpenRequest.extra_env: BTreeMap<String, String>` (per-terminal variables layered over `for_child()`); `HostPanels::with_extra_env(self, BTreeMap<String, String>) -> Self`; `DetachedSpawn.env: Option<BTreeMap<String, String>>`; `EnsureOptions.host_environment: BTreeMap<String, String>`.
 - Produces: the app sets `extra_env["SIRIO_WORKTREE_ID"]` to the worktree's id (`sirio_persistence::model`'s id, the value `worktree-set --worktree` accepts) for every terminal it opens in a worktree, and for `panel.create --worktree`.
 
@@ -134,7 +143,8 @@
   - Terminals: `LocalLink` and `HostLink` build their env from `for_child()` + `extra_env`; `HostPanels` likewise (in `sirioctl`, nothing is installed, so `for_child()` is its own pane environment — correct).
   - Host launch: `DetachedSpawn.env = Some(host_environment)`; Linux: `env_clear()` + `envs()` on the `systemd-run` and the direct `Command`; macOS: pass it to `plist_xml` instead of `std::env::vars_os()`; Windows: unchanged (no launcher there).
   - ACP (cannot clear env): on unix, when `absent_from_user()` is non-empty, launch `/usr/bin/env` with `-u NAME` for each, then `--`, then the program and its args; always add `.env(k, v)` for the user map. Claude native: `env_clear()` + `envs(for_child())` before the line's own env.
-  - The audit list above: one `sirio_env::apply(&mut command)` per `std::process::Command`; for `async_process` in `sirio_lsp`, the same with `installed()`. Each touched crate gains the `sirio_env` dependency.
+  - The audit list above: each `std::process::Command::new(x)` becomes `sirio_env::command(x)`; for `async_process` in `sirio_lsp`, `env_clear()` + `envs(installed map)` **on the line right after** `Command::new`, before anything else touches the command. Each touched crate gains the `sirio_env` dependency.
+  - Add `git_output_stays_unlocalized_under_the_user_environment` in `sirio_git` (install a map with `LANG=de_DE.UTF-8`; a `git status` run through the crate's runner still sees `LC_ALL=C` — read it back with a `git -c alias.e='!env' e` call or an equivalent that prints the child's environment).
 - [ ] **Step 4: Run** `cargo build --workspace --all-targets && cargo nextest run -p sirio_terminal -p sirio_acp -p sirio_control -p sirio_host_client` — expected: pass.
 - [ ] **Step 5: Commit** — `fix: start every child process in the user's environment, not the launcher's`
 
@@ -230,7 +240,7 @@
 **Files:**
 - Modify: `rust/crates/sirio_agents/src/codex.rs`, `src/pi.rs` (`skill_markdown`, `prepare` calls `install_skill`), `src/lib.rs:326-360`
 - Create: `rust/crates/sirio_agents/src/user_skill.rs`
-- Modify: `rust/crates/sirio/src/main.rs:22783-22795` (after `prepare`: `sirio_git::exclude(worktree, ".agents/skills/sirio/")`), `:17068-17077` and `:3753-3764` (Install Skill no longer opens a terminal), `rust/crates/sirio_ui/src/settings.rs:1851-1857,3696-3725`
+- Modify: `rust/crates/sirio/src/main.rs:22783-22795` and `:22923` (after **both** `prepare` calls — `fresh_agent_shell` and `restored_agent_shell`: `sirio_git::exclude(worktree, ".agents/skills/sirio/")`, a failure logged, never fatal), `:17068-17077` and `:3753-3764` (Install Skill no longer opens a terminal), `rust/crates/sirio_ui/src/settings.rs:1851-1857,3696-3725`
 - Delete: `rust/crates/sirio_project/src/skill.rs` and its re-export (`sirio_project/src/lib.rs:122`), the tests `skill_install_runs_the_path_resolved_program` (`main.rs:28056`) and `install_skill_opens_its_terminal_in_front_of_settings` (`main.rs:32851`)
 - Test: `rust/crates/sirio_agents/src/user_skill.rs` tests
 
@@ -268,7 +278,7 @@
 - [ ] **Step 1: Write the failing test** `every_command_the_skill_names_is_served_by_a_release_build`:
   - read `skills/sirio/SKILL.md` via `env!("CARGO_MANIFEST_DIR")`; collect lines inside ```` ``` ```` blocks whose first word is `sirioctl`;
   - cut each at the first unquoted `||`, `|`, `;`, `&&`; replace `"$NAME"` with `placeholder`; split on whitespace honouring single and double quotes;
-  - run `env!("CARGO_BIN_EXE_sirioctl")` with `--dry-run` and those args; assert exit 0 and that the printed `method` is in `served_methods(false)`;
+  - run `env!("CARGO_BIN_EXE_sirioctl")` with `--dry-run` and those args, in a pane-like environment (`SIRIO_PANE_ID=pane-placeholder`, `SIRIO_WORKTREE_ID=worktree-placeholder`), so commands that read them (`identify`, `browser_workspace`, `require`) do not fail for the wrong reason; assert exit 0 and that the printed `method` is in `served_methods(false)`;
   - assert at least 20 lines were checked (a zero-match parse must not pass green).
   - plus `dry_run_contacts_nothing` (`SIRIO_SOCKET` pointing at a missing path → still exit 0).
 - [ ] **Step 2: Run** `cargo nextest run -p sirio_control --test skill_is_served` — FAIL.
@@ -309,6 +319,8 @@ Cases (spec §5.8), each `echo "step N: …"` / `echo "OK: …"`:
 2. Replace: rebuild-free swap — copy a different `sirioctl` (the built one with a byte appended) beside the app binary in `RUN_DIR/app/`, launch from there while `sleep 30 < old-copy` holds the old file open; after launch `cmp` shows the new bytes; the held descriptor still reads the old size.
 3. A foreign `~/.local/bin/sirioctl` (a script) is unchanged after a `SIRIO_CLI_AS_RELEASE=1` launch, and the card's line names it.
 4. Launcher: a fake mount `RUN_DIR/mnt` with `usr/bin/{sirio,sirioctl}` and `Scripts/appimage/AppRun` copied as `mnt/AppRun`, an `apprun-hooks/gtk.sh` exporting `GTK_THEME=leak`; launch through `mnt/AppRun` with `WAYLAND_DISPLAY=wayland-test` set. Open a terminal (`surface.terminal.open cmd="env -0 > $OUT/env/terminal.env; sleep 300"`), a `panel create --worktree` session (same command), and a chat opened through the debug `surface.open_list.open` Chat row (as `test-open-list-e2e.sh` does) with `SIRIO_ACP_PROGRAM` pointing at a stub that dumps its env before speaking ACP's `initialize`. Assert in each dump: `PATH` starts with the stable directory, no entry under `RUN_DIR/mnt`, no `LD_LIBRARY_PATH` entry under it, no `GTK_THEME`, no `APPIMAGE`/`SIRIO_LAUNCH_ENV`, `WAYLAND_DISPLAY=wayland-test`, `SIRIO_WORKTREE_ID` non-empty; the app's own `/proc/<pid>/environ` still has `GTK_THEME=leak`. Repeat the terminal half with `SIRIO_HOST_NO_ENV_EXACT=1` (a fresh host): `GTK_THEME` and `LD_LIBRARY_PATH` present but empty.
+   **The shells users run:** the `cmd=` terminals run under `sh -c`; real tabs run the user's login shell and agents `$SHELL -lc`, whose profiles can reassign or reorder `PATH` (Debian's `/etc/profile`, macOS `path_helper`). So also open a default shell tab and `panel write` `env -0 > $OUT/env/login-shell.env; command -v sirioctl > $OUT/env/login-shell.which` into it, with the isolated `HOME` holding a `.profile` that assigns `PATH=/usr/bin:/bin`. Assert no mount entry anywhere and that `sirioctl` still resolves — to the stable directory or to the `~/.local/bin` link (run this half with `SIRIO_CLI_AS_RELEASE=1`). Record which; Task 13 writes the outcome into spec §5.3 (where the prefix does not survive a login profile, the PATH link is what keeps `sirioctl` in panes).
+   **Restart into an update:** launch `mnt2/AppRun` (a second fake mount) from the environment the first app has (`tr '\0' '\n' < /proc/$APP_PID/environ`), as *Restart to update* does; a terminal opened by the relaunched app has no entry under `mnt` **or** `mnt2`, and the app's `SIRIO_LAUNCH_ENV` has the same length as before the relaunch (no nesting).
 5. Quit, `rm -rf RUN_DIR/mnt`, relaunch without the launcher: in the terminal opened before the quit, `panel write` `sirioctl ping > $OUT/ping.out` and the file says `pong` (or the ping reply), proving the stable path survives the mount.
 6. Hooks: put `Scripts/Tests/stubs/hook-agents` first on the app's `PATH`; for each agent `surface.terminal.open agent=<id>`; read its pane id from `$HOOK_STUB_OUT`; after each `go`, `surface.terminal.state pane=<id>` shows the expected `agentStatus` (`running` then `done` for Claude; `needs-input` for Codex; per stub for OpenCode/omp, or `SKIP` recorded when `node`/`bun` is missing; `none` for Pi). Then `surface.settings.act action=install-hooks` (Task 10) into the private `HOME` and run the global Claude `Stop` command from `~/.claude/settings.json` inside a pane (no `--session`) → that pane's status changes; run it outside a pane → exit 0, no change. Repeat the Claude worktree-local hook after case 2's replacement.
 7. Skill: every adapter's worktree file equals `skills/sirio/SKILL.md` (the marker included); `cargo nextest run -p sirio_control --test skill_is_served` passes (run from the script, output in the transcript).
