@@ -1315,6 +1315,11 @@ enum ControlAction {
         action: sirio_ui::file_context_menu::FileContextAction,
         reply: ControlReply,
     },
+    /// A press on the gutter's git mark at `line`: draws or closes its hunk.
+    EditorGitMark {
+        line: usize,
+        reply: ControlReply,
+    },
     AddAgentAccount {
         provider: String,
         label: String,
@@ -2623,6 +2628,7 @@ impl ControlHandler for AppControlHandler {
                     methods.push("surface.editor.hover");
                     methods.push("surface.editor.click");
                     methods.push("surface.editor.context");
+                    methods.push("surface.editor.git_mark");
                     methods.push("surface.editor.save");
                     methods.push("surface.editor.conflict");
                     methods.push("surface.editor.mode");
@@ -2848,6 +2854,12 @@ impl ControlHandler for AppControlHandler {
                     );
                 };
                 self.queue_action(request, move |reply| ControlAction::EditorContext { offset, action, reply })
+            }
+            "surface.editor.git_mark" if cfg!(debug_assertions) => {
+                let Some(line) = request.params.get("line").and_then(|line| line.parse::<usize>().ok()) else {
+                    return ControlResponse::failure(&request.id, "surface.editor.git_mark requires line");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorGitMark { line, reply })
             }
             "surface.editor.save" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::EditorSave { reply })
@@ -6004,6 +6016,9 @@ impl SirioWorkspace {
                                 ControlAction::EditorContext { offset, action, reply } => {
                                     let _ = reply.send(workspace.control_editor_context(offset, action, window, cx));
                                 }
+                                ControlAction::EditorGitMark { line, reply } => {
+                                    let _ = reply.send(workspace.control_editor_git_mark(line, cx));
+                                }
                                 ControlAction::AddAgentAccount {
                                     provider,
                                     label,
@@ -7834,6 +7849,10 @@ impl SirioWorkspace {
                     // The one moment a freshly opened tab has text to describe.
                     FileViewEvent::Loaded(path) => {
                         workspace.sync_document_with_server(path, &view, cx);
+                        workspace.refresh_git_diff(path, &view, cx);
+                    }
+                    FileViewEvent::GitDiffStale(path) => {
+                        workspace.refresh_git_diff(path, &view, cx);
                     }
                     FileViewEvent::RevealInFileManager(path) => {
                         if let Some(mut command) = reveal_command(path) {
@@ -7903,6 +7922,51 @@ impl SirioWorkspace {
             },
         )
         .detach();
+    }
+
+    /// Fetches the diff of `path` against HEAD, with no context lines, off the
+    /// GPUI thread, and shows it in `view`: the gutter's git marks and the hunk a
+    /// mark opens. A file outside a repository, or a clean one, has none.
+    fn refresh_git_diff(&self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        let ticket = view.update(cx, |view, _| view.begin_git_diff());
+        let repository = self
+            .worktree_root_for(path)
+            .filter(|root| is_git_repository(root))
+            .and_then(|root| {
+                let relative = path.strip_prefix(&root).ok()?.to_path_buf();
+                Some((root, relative))
+            });
+        let Some((root, relative)) = repository else {
+            view.update(cx, |view, cx| view.land_git_diff(ticket, None, cx));
+            return;
+        };
+        let path = path.to_path_buf();
+        let view = view.downgrade();
+        cx.spawn(async move |_, cx| {
+            let result = cx
+                .background_spawn(async move { Self::head_diff(&root, &relative) })
+                .await;
+            // A view closed while the fetch ran has no answer to take.
+            let _ = view.update(cx, |view, cx| {
+                let diff = result.unwrap_or_else(|error| {
+                    eprintln!("[git] the diff of {} could not be read: {error}", path.display());
+                    None
+                });
+                view.land_git_diff(ticket, diff, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The diff of `relative` against HEAD with no context lines, or `None` when
+    /// git lists the file as clean. `status` reads the whole worktree; the file's
+    /// own entry is the only one kept.
+    fn head_diff(root: &Path, relative: &Path) -> Result<Option<sirio_git::FileDiff>, GitError> {
+        let snapshot = sirio_git::status(root)?;
+        let Some(entry) = snapshot.entries.iter().find(|entry| entry.path == relative) else {
+            return Ok(None);
+        };
+        sirio_git::diff_entry(root, entry, 0).map(Some)
     }
 
     /// The context-menu facts only this workspace can answer. `in_git_repo`
@@ -18103,6 +18167,8 @@ impl SirioWorkspace {
             ("hover".to_string(), hover),
             ("message".to_string(), message),
             ("diagnostics".to_string(), diagnostics.to_string()),
+            ("git_marks".to_string(), view.git_marks_text()),
+            ("diff_open".to_string(), Self::open_hunk_text(view)),
             ("prefs".to_string(), EditorPrefs::current(cx).describe()),
         ])
     }
@@ -18328,6 +18394,28 @@ impl SirioWorkspace {
             view.context_action_at(offset, at, action, window, cx)
         })?;
         Self::selections_reply(&view, cx)
+    }
+
+    /// `surface.editor.git_mark line=`: a press on the gutter's git mark at
+    /// `line`, as the code editor's `GitMarkPressed` makes it. Answers the
+    /// `diff_open` the press leaves.
+    fn control_editor_git_mark(
+        &mut self,
+        line: usize,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        view.update(cx, |view, cx| view.toggle_hunk(line, cx));
+        let open = Self::open_hunk_text(view.read(cx));
+        Ok(vec![("diff_open".to_string(), open)])
+    }
+
+    /// The line of the hunk drawn in place, or `none`.
+    fn open_hunk_text(view: &FileView) -> String {
+        view.open_hunk_line()
+            .map_or_else(|| "none".to_string(), |line| line.to_string())
     }
 
     /// Saves the active file tab through `FileView::save`, the call Save makes.
@@ -41896,6 +41984,7 @@ done
             | ControlAction::EditorHover { reply, .. }
             | ControlAction::EditorClick { reply, .. }
             | ControlAction::EditorContext { reply, .. }
+            | ControlAction::EditorGitMark { reply, .. }
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
@@ -42063,6 +42152,7 @@ done
             "surface.editor.context" => {
                 request_with_params(method, &[("offset", "0"), ("action", "copy")])
             }
+            "surface.editor.git_mark" => request_with_params(method, &[("line", "0")]),
             "settings.account.add" => {
                 request_with_params(method, &[("provider", "claude"), ("label", "test")])
             }

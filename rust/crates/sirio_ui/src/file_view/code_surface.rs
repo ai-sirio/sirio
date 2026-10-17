@@ -141,12 +141,43 @@ impl FileView {
         cx.notify();
     }
 
+    /// Starts a fetch of this file's diff and returns its ticket. The answer
+    /// lands through `land_git_diff`, which drops it when a later fetch began.
+    pub fn begin_git_diff(&mut self) -> u64 {
+        self.git_diff_ticket += 1;
+        self.git_diff_ticket
+    }
+
+    /// Shows the diff a fetch found, unless a later fetch began since `ticket`.
+    pub fn land_git_diff(&mut self, ticket: u64, diff: Option<FileDiff>, cx: &mut Context<Self>) {
+        if ticket == self.git_diff_ticket {
+            self.set_git_diff(diff, cx);
+        }
+    }
+
     /// The gutter marks of the diff: each changed line of the file, sorted.
     pub fn git_mark_lines(&self) -> Vec<(usize, GitMark)> {
         self.git_diff
             .as_ref()
             .map(git_marks::marks)
             .unwrap_or_default()
+    }
+
+    /// The gutter marks as the editor's state reports them: `line:kind` pairs,
+    /// sorted, joined by commas (`3:added,5:modified`), empty when there are none.
+    pub fn git_marks_text(&self) -> String {
+        self.git_mark_lines()
+            .iter()
+            .map(|(line, mark)| {
+                let kind = match mark {
+                    GitMark::Added => "added",
+                    GitMark::Modified => "modified",
+                    GitMark::Deleted => "deleted",
+                };
+                format!("{line}:{kind}")
+            })
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     /// The gutter line of the hunk drawn in place, if one is open.

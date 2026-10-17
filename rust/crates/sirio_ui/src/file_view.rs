@@ -239,6 +239,9 @@ pub struct FileView {
     /// drawn. It is their opening line (`git_marks::opening_line`), a line that
     /// carries one of their marks, so `diff_open` names a line the gutter does.
     open_hunk: Option<usize>,
+    /// The number of the latest diff fetch this file began (`begin_git_diff`).
+    /// A fetch that lands with an older number answers a diff already superseded.
+    git_diff_ticket: u64,
     /// The offset the pointer is resting on, the frame point it rests at,
     /// and the timer that will turn that rest into a question. Replacing
     /// the `Task` cancels it, which is the whole of dwell cancellation.
@@ -309,6 +312,11 @@ pub enum FileViewEvent {
     /// `editor()` before this arrives sees `None`. Telling a language server
     /// about a file at that moment describes it as empty.
     Loaded(PathBuf),
+    /// The file on disk changed, or was saved or reloaded, so its diff against
+    /// HEAD (the git marks) is out of date. Emitted once per such change: after
+    /// a save or a reload that succeeded, and after a check that adopted a
+    /// change from disk or found one.
+    GitDiffStale(PathBuf),
     SendSelectionToAgent {
         path: PathBuf,
         lines: (usize, usize),
@@ -439,6 +447,7 @@ impl FileView {
             diagnostics: Vec::new(),
             git_diff: None,
             open_hunk: None,
+            git_diff_ticket: 0,
             hover_offset: None,
             hover_point: point(px(0.), px(0.)),
             hover_task: None,
@@ -965,12 +974,31 @@ impl FileView {
         if self.snapshot.is_some() {
             return;
         }
+        let before = self.buffer_and_conflict();
         if let Some(editor) = self.editor_mut() {
             editor.check_external();
             cx.notify();
         }
         // A silent adoption of the disk's text lands in the code editor too.
         self.sync_code_from_editor(cx);
+        // The git marks compare the file on disk with HEAD, so they go stale when
+        // the buffer adopted a change from disk, when a conflict began or ended,
+        // and while one stands, since the disk may have moved again under it. A
+        // check that finds nothing new is silent: the monitor also reports Sirio's
+        // own save, and that save has already asked for the diff.
+        let after = self.buffer_and_conflict();
+        let conflicted = after
+            .as_ref()
+            .is_some_and(|(_, conflict)| *conflict != Conflict::None);
+        if before != after || conflicted {
+            cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
+        }
+    }
+
+    /// The buffer's text and its conflict: what a disk check can change.
+    fn buffer_and_conflict(&self) -> Option<(String, Conflict)> {
+        self.editor()
+            .map(|editor| (editor.buffer().to_owned(), editor.conflict()))
     }
 
     /// Applies one inotify event from this file's monitor. The monitor is
@@ -1013,6 +1041,9 @@ impl FileView {
             Some(editor) => editor.save(),
             None => Err("the file is still loading".to_string()),
         };
+        if result.is_ok() {
+            cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
+        }
         cx.notify();
         result
     }
@@ -1027,6 +1058,9 @@ impl FileView {
             None => Err("the file is still loading".to_string()),
         };
         self.sync_code_from_editor(cx);
+        if result.is_ok() {
+            cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
+        }
         cx.notify();
         result
     }

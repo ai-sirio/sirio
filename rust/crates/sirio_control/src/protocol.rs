@@ -885,6 +885,13 @@ pub mod request {
         )
     }
 
+    pub fn editor_git_mark(line: usize) -> ControlRequest {
+        request(
+            "surface.editor.git_mark",
+            BTreeMap::from([("line".to_string(), line.to_string())]),
+        )
+    }
+
     pub fn editor_save() -> ControlRequest {
         request("surface.editor.save", BTreeMap::new())
     }

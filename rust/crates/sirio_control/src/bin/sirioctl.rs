@@ -171,6 +171,7 @@ fn usage() {
          \x20 surface editor hover --offset=n   (debug builds) rest the pointer at byte n: the card shows its diagnostics, then the server's answer\n\
          \x20 surface editor click --offset=n --platform=true|false  (debug builds) a platform click at n (a link, go to definition), or a plain caret placement\n\
          \x20 surface editor context --offset=n --action=a  (debug builds) a right press at n, then the menu action a (copy, cut, paste, go-to-definition, ...)\n\
+         \x20 surface editor git-mark --line=n  (debug builds) press the git mark at line n: draw its hunk in place, or close it; answers diff_open\n\
          \x20 surface editor save               (debug builds) save the active file tab\n\
          \x20 surface editor conflict --action=reload|keep  (debug builds) answer a disk conflict\n\
          \x20 surface editor mode --mode=code|preview  (debug builds) switch the Markdown mode\n\
@@ -1115,6 +1116,15 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             &sirio_control::protocol::request::editor_context(
                 editor_offset(parsed)?,
                 &parsed.require("action")?,
+            ),
+        ),
+        ("editor", "git-mark") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_git_mark(
+                parsed
+                    .require("line")?
+                    .parse::<usize>()
+                    .map_err(|_| "--line must be a line number".to_string())?,
             ),
         ),
         ("editor", "save") => require_ok(socket, &sirio_control::protocol::request::editor_save()),
