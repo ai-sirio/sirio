@@ -1154,14 +1154,14 @@ pub mod fs_actions {
     pub fn open_command(target: &OsStr) -> Command {
         #[cfg(target_os = "macos")]
         {
-            let mut command = Command::new("open");
+            let mut command = sirio_env::command("open");
             command.args(["--"]).arg(target);
             command
         }
 
         #[cfg(target_os = "linux")]
         {
-            let mut command = Command::new("xdg-open");
+            let mut command = sirio_env::command("xdg-open");
             command.arg(target);
             command
         }

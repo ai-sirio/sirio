@@ -123,7 +123,7 @@ pub fn resolve(inputs: Inputs) -> Resolution {
 /// background executor, beside the rest of `compute_launch_sources`.
 #[must_use]
 pub fn probe_version(program: &std::path::Path) -> Option<String> {
-    let mut child = std::process::Command::new(program)
+    let mut child = sirio_env::command(program)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

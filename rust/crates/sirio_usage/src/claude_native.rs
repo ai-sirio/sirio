@@ -97,7 +97,7 @@ impl NativeUsageFetcher {
         // pipe this loop already reads.
         line.args.push("--permission-prompt-tool".to_string());
         line.args.push("stdio".to_string());
-        let mut child = match Command::new(program)
+        let mut child = match sirio_env::command(program)
             .args(&line.args)
             .envs(line.env)
             .envs(PROBE_ENV.iter().copied())

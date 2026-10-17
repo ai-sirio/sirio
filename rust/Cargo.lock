@@ -7442,6 +7442,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1_smol",
+ "sirio_env",
  "sirio_perf",
  "thiserror 2.0.20",
  "ureq",
@@ -7452,6 +7453,7 @@ name = "sirio_git"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "sirio_env",
  "sirio_perf",
 ]
 
@@ -7514,6 +7516,7 @@ dependencies = [
  "lsp-types",
  "serde",
  "serde_json",
+ "sirio_env",
  "sirio_perf",
  "toml 0.8.23",
 ]
@@ -7559,6 +7562,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sirio_env",
 ]
 
 [[package]]
@@ -7570,6 +7574,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sirio_env",
  "tar",
  "thiserror 2.0.20",
  "ureq",
@@ -7688,6 +7693,7 @@ dependencies = [
  "sirio_acp",
  "sirio_agents",
  "sirio_diagram",
+ "sirio_env",
  "sirio_forge",
  "sirio_git",
  "sirio_icons",
@@ -7735,6 +7741,7 @@ dependencies = [
  "portable-pty",
  "serde_json",
  "sirio_claude",
+ "sirio_env",
 ]
 
 [[package]]

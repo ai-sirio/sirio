@@ -11,6 +11,7 @@ publish.workspace = true
 # grandchildren holding the output pipes), and process-group signals are not
 # exposed by std — Zed's own process wrapper does the same.
 [dependencies]
+sirio_env = { path = "../sirio_env" }
 libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true

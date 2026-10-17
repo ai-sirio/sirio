@@ -6,7 +6,7 @@
 //! Neither reads the answer — `graphql::execute` does that once for both.
 
 use std::io::{Read as _, Write as _};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -495,7 +495,7 @@ fn run_bounded(
     limit: Option<u64>,
 ) -> Result<CliOutput, RunError> {
     let exceeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut child = Command::new(program.command())
+    let mut child = sirio_env::command(program.command())
         .args(args)
         .stdin(if stdin.is_some() {
             Stdio::piped()

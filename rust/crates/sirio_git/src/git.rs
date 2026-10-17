@@ -38,7 +38,7 @@
 //! test can set it at any point in its process.
 
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -275,7 +275,7 @@ impl GitRunner {
     where
         F: FnMut(String),
     {
-        let mut command = Command::new(binary);
+        let mut command = sirio_env::command(binary);
         command
             .args(args)
             .current_dir(cwd)
@@ -572,7 +572,7 @@ fn run_configured(
     timeout: Duration,
     remote: bool,
 ) -> Result<GitOutput, GitError> {
-    let mut command = Command::new(GIT_BINARY);
+    let mut command = sirio_env::command(GIT_BINARY);
     command
         .args(args)
         .current_dir(cwd)
@@ -786,6 +786,8 @@ pub(crate) fn run_accepting_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Proves the timeout fires for real: a fake `git` script that sleeps for
@@ -1030,6 +1032,58 @@ mod tests {
             path_arg(Path::new("plain\\relative\\path")),
             "plain\\relative\\path",
             "a backslash path without the prefix must pass through"
+        );
+    }
+
+    /// The user's environment reaches git, and the streaming runner's own
+    /// `LC_ALL=C` still wins over the user's locale: its parsers match git's
+    /// English progress lines. `alias.e=!env` makes git run `env`, so the
+    /// child's own environment comes back through that runner.
+    #[cfg(unix)]
+    #[test]
+    fn git_output_stays_unlocalized_under_the_user_environment() {
+        let repo = std::env::temp_dir().join(format!("sirio-git-env-{}", std::process::id()));
+        std::fs::create_dir_all(&repo).expect("create the scratch repository");
+        let initialised = Command::new(GIT_BINARY)
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .expect("run git init");
+        assert!(initialised.success(), "git init failed");
+
+        let mut user = std::collections::BTreeMap::new();
+        for name in ["PATH", "HOME"] {
+            if let Some(value) = std::env::var_os(name) {
+                user.insert(name.to_string(), value.to_string_lossy().into_owned());
+            }
+        }
+        user.insert("LANG".to_string(), "de_DE.UTF-8".to_string());
+        sirio_env::install(user);
+
+        // The streaming runner is the one that sets `LC_ALL=C` itself. The
+        // timed runner that `git status` goes through does not, so this test
+        // pins the streaming one.
+        let output = run_streaming(&["-c", "alias.e=!env", "e"], &repo, |_| {});
+        let _ = std::fs::remove_dir_all(&repo);
+        let stdout = output.expect("run git through the runner").stdout;
+        // Only the two names are compared: the whole environment is not
+        // printed, because it holds whatever the developer's shell exports.
+        let environment = String::from_utf8_lossy(&stdout).into_owned();
+        let locale = |name: &str| {
+            environment
+                .lines()
+                .find(|line| line.starts_with(&format!("{name}=")))
+                .map(str::to_string)
+        };
+        assert_eq!(
+            locale("LANG").as_deref(),
+            Some("LANG=de_DE.UTF-8"),
+            "git must run in the user's environment"
+        );
+        assert_eq!(
+            locale("LC_ALL").as_deref(),
+            Some("LC_ALL=C"),
+            "the crate's own LC_ALL must survive the user's environment"
         );
     }
 

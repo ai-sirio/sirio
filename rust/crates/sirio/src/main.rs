@@ -79,6 +79,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -3818,11 +3819,11 @@ fn post_desktop_notification(payload: &NotificationPayload) {
             apple_script_string_literal(&payload.body),
             apple_script_string_literal(&payload.title),
         );
-        Command::new("osascript").args(["-e", &script]).spawn()
+        sirio_env::command("osascript").args(["-e", &script]).spawn()
     };
 
     #[cfg(target_os = "linux")]
-    let result = Command::new("notify-send")
+    let result = sirio_env::command("notify-send")
         .arg("--app-name=Sirio")
         .arg(&payload.title)
         .arg(&payload.body)
@@ -3856,7 +3857,7 @@ fn post_desktop_notification(payload: &NotificationPayload) {
             powershell_single_quote_literal(&payload.title),
             powershell_single_quote_literal(&payload.body),
         );
-        Command::new("powershell")
+        sirio_env::command("powershell")
             .args(["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command"])
             .arg(&script)
             .spawn()
@@ -3953,7 +3954,7 @@ fn summarizer_candidate_commands(
 /// Blocking: callers run this on a background executor, never the UI thread.
 fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration) -> Option<String> {
     let (shell_program, shell_args) = command_shell_invocation(command);
-    let mut spawn = std::process::Command::new(&shell_program);
+    let mut spawn = sirio_env::command(&shell_program);
     // command_shell_invocation's output has TWO consumers with DIFFERENT
     // transports, and only one tolerates std's quoting. The terminal-pane
     // path feeds alacritty's Windows PTY, which concatenates the pieces RAW
