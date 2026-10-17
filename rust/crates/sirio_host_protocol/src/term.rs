@@ -42,6 +42,12 @@ pub struct CreateParams {
     /// Base64; fed into the VT and the journal before the child's first byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prelude: Option<String>,
+    /// With `true`, `env` is the session's whole environment and the host's own
+    /// variables are not added to it. A host without `term.env_exact` ignores
+    /// this field and extends its own environment with `env`, so a client sends
+    /// `true` only after the capability is in the host's `Welcome`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub env_exact: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -263,6 +269,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!((p.session_id, p.prelude, p.env.len()), (None, None, 0));
+    }
+
+    #[test]
+    fn env_exact_false_is_not_serialized() {
+        let mut params = CreateParams {
+            session_id: None,
+            cwd: "/".into(),
+            command: TermCommand::Shell,
+            env: Default::default(),
+            size: TermSize { cols: 80, rows: 24 },
+            origin: Origin::Control,
+            parent: None,
+            prelude: None,
+            env_exact: false,
+        };
+        let unset = serde_json::to_value(&params).unwrap();
+        assert!(unset.get("env_exact").is_none(), "{unset}");
+        assert!(!serde_json::from_value::<CreateParams>(unset).unwrap().env_exact);
+
+        params.env_exact = true;
+        let set = serde_json::to_value(&params).unwrap();
+        assert_eq!(set["env_exact"], true);
     }
 
     #[test]

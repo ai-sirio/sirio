@@ -339,6 +339,7 @@ fn term_create(paths: &HostPaths, major: u32, majors: &[u32], args: &[String]) {
             origin,
             parent: None,
             prelude,
+            env_exact: false,
         })
         .expect("term.create");
     println!("session={}", created.session_id);

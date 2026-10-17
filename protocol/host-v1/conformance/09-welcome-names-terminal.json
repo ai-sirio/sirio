@@ -4,7 +4,7 @@
   "steps": [
     {
       "send": { "id": 1, "method": "host.hello", "params": { "client_version": "conformance", "majors": [1], "minor": 1 } },
-      "expect": { "id": 1, "result": { "type": "welcome", "protocol": { "major": 1, "minor": 1 }, "capabilities": ["host.v1", "terminal"] } }
+      "expect": { "id": 1, "result": { "type": "welcome", "protocol": { "major": 1, "minor": 2 }, "capabilities": ["host.v1", "terminal", "term.env_exact"] } }
     }
   ]
 }

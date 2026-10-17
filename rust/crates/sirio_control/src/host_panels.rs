@@ -298,6 +298,7 @@ fn create_params(cwd: String, command: Option<&String>, parent: Option<String>) 
         origin: Origin::Control,
         parent,
         prelude: None,
+        env_exact: false,
     }
 }
 

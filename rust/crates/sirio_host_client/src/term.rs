@@ -26,6 +26,12 @@ impl TermClient {
         mux.has_terminal().then_some(Self { mux })
     }
 
+    /// Whether the host behind this client reads `CreateParams::env_exact`
+    /// (`term.env_exact`). Send `env_exact: true` only when this is true.
+    pub fn env_exact(&self) -> bool {
+        self.mux.has_env_exact()
+    }
+
     /// Whether the connection behind this client has closed (the host went
     /// away, or ended the connection). A closed client never answers again.
     pub fn closed(&self) -> bool {

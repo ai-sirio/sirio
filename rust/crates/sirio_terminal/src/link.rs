@@ -537,6 +537,7 @@ impl HostLink {
                 } else {
                     Some(b64_encode(&request.prelude))
                 },
+                env_exact: false,
             };
             match client.create(&params) {
                 Ok(created) => Some(created.pid),

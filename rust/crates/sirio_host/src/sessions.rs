@@ -151,8 +151,7 @@ impl SessionTable {
             TermCommand::Shell => None,
             TermCommand::Program { program, args } => Some((program, args)),
         };
-        let mut env = env_fallback.clone();
-        env.extend(params.env);
+        let env = spawn_env(params.env, env_fallback, params.env_exact);
         let (events_tx, events_rx) = mpsc::channel();
         let session = Session::spawn(
             SpawnSpec {
@@ -308,6 +307,23 @@ fn pump_events(
     });
 }
 
+/// The environment a session starts with. `env_exact` means the client built
+/// it from its own environment, so none of the host's variables may reach the
+/// session. Otherwise the host's environment is the base that the client's map
+/// extends, as sessions always were: `host_probe` depends on it.
+fn spawn_env(
+    client: BTreeMap<String, String>,
+    env_fallback: &BTreeMap<String, String>,
+    env_exact: bool,
+) -> BTreeMap<String, String> {
+    if env_exact {
+        return client;
+    }
+    let mut env = env_fallback.clone();
+    env.extend(client);
+    env
+}
+
 pub(crate) fn exit_status(exit: Exit) -> ExitStatus {
     match exit {
         Exit::Success => ExitStatus::Success,
@@ -335,4 +351,51 @@ pub(crate) fn random_token() -> String {
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
     hasher.write_u64(first);
     format!("{first:016x}{:016x}", hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sirio_term_session::session_login_shell;
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn exact_env_excludes_the_hosts_own_variables() {
+        let host = map(&[("LEAK", "1"), ("PATH", "/host/bin")]);
+        let client = map(&[("PATH", "/client/bin"), ("HOME", "/home/user")]);
+        let env = spawn_env(client.clone(), &host, true);
+        assert_eq!(env, client);
+    }
+
+    #[test]
+    fn without_exact_env_the_fallback_is_extended_as_before() {
+        let host = map(&[("LEAK", "1"), ("PATH", "/host/bin")]);
+        let client = map(&[("PATH", "/client/bin"), ("HOME", "/home/user")]);
+        let env = spawn_env(client, &host, false);
+        assert_eq!(env.get("LEAK").map(String::as_str), Some("1"));
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/client/bin"));
+        assert_eq!(env.get("HOME").map(String::as_str), Some("/home/user"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn exact_env_shell_comes_from_the_clients_map() {
+        let host = map(&[("SHELL", "/bin/bash")]);
+        let env = spawn_env(map(&[("SHELL", "/bin/zsh")]), &host, true);
+        assert_eq!(session_login_shell(&env).0, "/bin/zsh");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn exact_env_without_a_shell_does_not_take_the_hosts() {
+        let host = map(&[("SHELL", "/host/only/shell")]);
+        let env = spawn_env(map(&[("PATH", "/client/bin")]), &host, true);
+        assert_ne!(session_login_shell(&env).0, "/host/only/shell");
+    }
 }
