@@ -37,6 +37,16 @@ set -eEuo pipefail
 #                     place, Escape closes it; a file restored to HEAD, a commit made
 #                     elsewhere (cleared when the editor takes focus), a file outside
 #                     the repository and a clean file have no marks
+#   find              Find over findme.txt: the match count against grep (case-insensitive,
+#                     then case-sensitive), two steps forward and one back, a pattern that
+#                     does not compile, close; captured with the replace row open and the
+#                     minimap on
+#   replace           one occurrence replaced, then every one; a single undo returns the
+#                     text from before the replace-all, a second the original
+#   multibyte         an emoji found twice, replaced one at a time and all at once,
+#                     byte for byte
+#   escape            Escape closes find from the code, and from the query field with a
+#                     real X key, after which a typed key lands in the code
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
 #                     stickyScroll, lineNumbers, cursorShape, and the ruler at
@@ -246,6 +256,15 @@ elif command == "line-after":
 elif command == "with-suffix":
     # with-suffix ESCAPED SUFFIX: the escaped text of the unescaped text plus SUFFIX.
     sys.stdout.write(escape(unescape(sys.argv[2]) + sys.argv[3]))
+elif command == "sub":
+    # sub SRC DST NEEDLE WITH COUNT NOCASE: SRC with NEEDLE replaced by WITH, the
+    # first COUNT occurrences (0 for all), ignoring case when NOCASE is 1.
+    import re
+    text = read(sys.argv[2])
+    flags = re.IGNORECASE if sys.argv[7] == "1" else 0
+    text = re.sub(re.escape(sys.argv[4]), lambda _: sys.argv[5], text, count=int(sys.argv[6]), flags=flags)
+    with open(sys.argv[3], "wb") as handle:
+        handle.write(text.encode("utf-8"))
 elif command == "same-bytes":
     # same-bytes ACTUAL EXPECTED: exit 0 only when the two files are byte-identical;
     # otherwise both byte strings are printed, so the failure says what differs.
@@ -367,6 +386,18 @@ for n in range(1, 9):
     nested += body
 nested += ["}\n"]
 write("nested.rs", "".join(nested).encode("utf-8"))
+# findme.txt: what the find scenarios search. "fn" four times in three cases
+# ("fnord" counts), an emoji twice, and filler to make the minimap draw.
+findme = [
+    "fn first() {}\n",
+    'let smile = "\U0001F600";\n',
+    "Fn third\n",
+    "FN fourth\n",
+    "// \U0001F600 once more and fnord\n",
+    "let x = 1;\n",
+]
+findme += [f"plain filler line {n}\n" for n in range(1, 71)]
+write("findme.txt", "".join(findme).encode("utf-8"))
 PY
 git -C "$WT" add -A
 git -C "$WT" commit -q -m first
@@ -1137,6 +1168,195 @@ switch_pref() { # key
   must_differ "$key" "prefs-$key-on" "prefs-$key-off"
 }
 
+# The occurrences of NEEDLE in findme.txt as grep counts them (-i: ignoring case).
+grep_count() { # flags needle
+  grep -o"$1" -- "$2" "$WT/findme.txt" | wc -l | tr -d ' '
+}
+# Reads the state and fails unless KEY is not empty.
+expect_state_set() { # key
+  read_state
+  [ -n "$(sfield "$1")" ] || fail "$SCENARIO: $1 expected a value, got none"
+  echo "OK: $1 is set: $(sfield "$1" | cut -c1-120)"
+}
+
+scenario_find() {
+  local fixture="$WT/findme.txt" all cased
+  open_file "$fixture"
+  expect_state state loaded
+  expect_state find_matches none
+  expect_state find_current none
+  all="$(grep_count i fn)"
+  cased="$(grep_count "" fn)"
+  [ "$all" != "$cased" ] || fail "$SCENARIO: the fixture has no Fn or FN ($all matches either way)"
+
+  # The caret at 0, before the first match, so the current match is the first.
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor find --query=fn >/dev/null
+  expect_state find_matches "$all"
+  expect_state find_current 0
+  expect_state find_error ""
+  ctl surface editor find-step >/dev/null
+  ctl surface editor find-step >/dev/null
+  expect_state find_current 2
+  ctl surface editor find-step --forward=false >/dev/null
+  expect_state find_current 1
+  echo "OK: $all matches ignoring case; two steps forward and one back stand on the second"
+
+  ctl surface editor find --query=fn --case=true >/dev/null
+  expect_state find_matches "$cased"
+  echo "OK: $cased matches with the case: it differs from the $all ignoring it"
+
+  # A pattern that does not compile finds nothing and says why.
+  ctl surface editor find --query='(' --regex=true >/dev/null
+  expect_state find_matches 0
+  expect_state_set find_error
+  ctl surface editor find --query=fn --case=false >/dev/null
+  expect_state find_matches "$all"
+  expect_state find_error ""
+
+  # The capture: the replace row open, the minimap on, the third match ("FN" on
+  # line 4) current, below the box that covers the first lines.
+  ctl surface editor pref --key=minimap --value=true >/dev/null
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor find --query=fn --replace=Y >/dev/null
+  ctl surface editor find-step >/dev/null
+  ctl surface editor find-step >/dev/null
+  expect_state find_current 2
+  capture find-open
+  ctl surface editor pref --key=minimap --value=false >/dev/null
+
+  ctl surface editor find-close >/dev/null
+  expect_state find_matches none
+  expect_state find_current none
+  echo "OK: closing find leaves no count"
+}
+
+scenario_replace() {
+  local fixture="$WT/findme.txt" all
+  open_file "$fixture"
+  expect_state state loaded
+  all="$(grep_count i fn)"
+  cp "$fixture" "$RUN_DIR/replace-0.txt"
+  python3 "$TOOLS" sub "$fixture" "$RUN_DIR/replace-1.txt" fn Y 1 1
+  python3 "$TOOLS" sub "$RUN_DIR/replace-1.txt" "$RUN_DIR/replace-2.txt" fn Y 0 1
+
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor find --query=fn --replace=Y >/dev/null
+  expect_state find_matches "$all"
+  ctl surface editor replace --all=false >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/replace-1.txt")"
+  expect_state find_matches "$((all - 1))"
+  expect_state dirty true
+  echo "OK: replacing one changed exactly one occurrence"
+
+  ctl surface editor replace --all=true >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/replace-2.txt")"
+  expect_state find_matches 0
+  echo "OK: replacing all left none"
+
+  # One undo, one step: the text from before the replace-all comes back whole.
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/replace-1.txt")"
+  echo "OK: one undo restored every replaced occurrence"
+
+  # Back to the file on disk, so later scenarios see it clean.
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/replace-0.txt")"
+  expect_state dirty false
+  ctl surface editor find-close >/dev/null
+  expect_state find_matches none
+}
+
+scenario_multibyte() {
+  local fixture="$WT/findme.txt" smiles
+  open_file "$fixture"
+  expect_state state loaded
+  smiles="$(grep_count "" "😀")"
+  [ "$smiles" = 2 ] || fail "$SCENARIO: the fixture has $smiles emoji, not 2"
+  cp "$fixture" "$RUN_DIR/multi-0.txt"
+  python3 "$TOOLS" sub "$fixture" "$RUN_DIR/multi-1.txt" "😀" x 1 0
+  python3 "$TOOLS" sub "$fixture" "$RUN_DIR/multi-2.txt" "😀" x 0 0
+
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor find --query="😀" --replace=x >/dev/null
+  expect_state find_matches 2
+  ctl surface editor replace --all=false >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/multi-1.txt")"
+  expect_state find_matches 1
+  ctl surface editor replace --all=false >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/multi-2.txt")"
+  expect_state find_matches 0
+  echo "OK: both emoji were replaced one at a time, byte for byte"
+
+  # Undo both, then once more from the start: all at once.
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/multi-0.txt")"
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor find --query="😀" --replace=x >/dev/null
+  expect_state find_matches 2
+  ctl surface editor replace --all=true >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/multi-2.txt")"
+  expect_state find_matches 0
+  echo "OK: both emoji were replaced at once, byte for byte"
+
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/multi-0.txt")"
+  expect_state dirty false
+  ctl surface editor find-close >/dev/null
+}
+
+# A real key at the app's window: the key the X server gives the window that
+# has X input focus, never a call into the app.
+x_key() { # key
+  DISPLAY="$DISPLAY_TARGET" xdotool key "$1" \
+    || fail "$SCENARIO: xdotool could not send $1"
+}
+
+scenario_escape() {
+  local fixture="$WT/findme.txt" xs
+  open_file "$fixture"
+  expect_state state loaded
+  cp "$fixture" "$RUN_DIR/escape-0.txt"
+  python3 "$TOOLS" sub "$fixture" "$RUN_DIR/escape-q.txt" "fn first" "qfn first" 1 0
+  python3 "$TOOLS" sub "$fixture" "$RUN_DIR/escape-x.txt" "let x" "let q" 1 0
+
+  # (i) Escape with the keyboard in the code closes find. The keys verb gives
+  # the code the keyboard first, as a click on it would.
+  ctl surface editor find --query=fn >/dev/null
+  expect_state find_matches "$(grep_count i fn)"
+  ctl surface editor keys --keys=escape >/dev/null
+  expect_state find_matches none
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor type --text=q >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/escape-q.txt")"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/escape-0.txt")"
+  echo "OK: Escape in the code closes find, and a typed q lands at the caret"
+
+  # (ii) Escape with the keyboard in the query field, by real X keys. Opening
+  # find gives the query the keyboard; a typed x replaces its selected text,
+  # which shows where the key went: the count becomes the file's x's, and the
+  # code selects the first of them (`let x`), which the q typed after Escape
+  # then replaces.
+  focus_window
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor find --query=fn >/dev/null
+  xs="$(grep_count i x)"
+  [ "$xs" != "$(grep_count i fn)" ] || fail "$SCENARIO: the fixture has as many x as fn"
+  x_key x
+  expect_state find_matches "$xs"
+  expect_state text "$(escaped "$RUN_DIR/escape-0.txt")"
+  x_key Escape
+  expect_state find_matches none
+  x_key q
+  expect_state text "$(escaped "$RUN_DIR/escape-x.txt")"
+  echo "OK: Escape in the query closes find, and the next key lands in the code"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/escape-0.txt")"
+  expect_state dirty false
+}
+
 scenario_prefs() {
   declare -gA PREF=(
     [minimap]=false [stickyScroll]=true [indentGuides]=true [rainbowBrackets]=true
@@ -1251,6 +1471,10 @@ scenario definition scenario_definition
 scenario link scenario_link
 scenario context scenario_context
 scenario git_marks scenario_git_marks
+scenario find scenario_find
+scenario replace scenario_replace
+scenario multibyte scenario_multibyte
+scenario escape scenario_escape
 scenario prefs scenario_prefs
 
 stop_hosts
