@@ -38,7 +38,7 @@ struct LastTheme(Option<(Theme, bool)>);
 impl Global for LastTheme {}
 
 pub fn init(cx: &mut App) {
-    ely_gpui_component::init_chat(cx);
+    ely_gpui_component::init_editor(cx);
     if !cx.has_global::<LastTheme>() {
         cx.set_global(LastTheme::default());
         cx.observe_global::<Theme>(sync_theme_if_changed).detach();

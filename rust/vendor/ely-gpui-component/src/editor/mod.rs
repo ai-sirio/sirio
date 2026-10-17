@@ -27,10 +27,9 @@ pub use decor::{
 };
 pub use find::{FindOptions, FindWidget, find_all};
 pub(crate) use keys::bind_keys;
-pub(crate) use layout::stack;
+pub use keys::SingleCursor;
 pub use state::{CodeEditor, CursorShape, EditorEvent, LineNumbers};
 pub use status::{
     BranchIndicator, CursorPosition, Encoding, IndentSettings, LanguageMode, LineEnding, LspState,
     LspStatus, NotificationBell,
 };
-pub(crate) use syntax::colors as code_colors;

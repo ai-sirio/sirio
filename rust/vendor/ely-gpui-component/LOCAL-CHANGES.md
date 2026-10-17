@@ -1,4 +1,4 @@
-# Ely chat integration
+# Ely integration (chat and editor)
 
 Upstream: https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components
 (formerly https://github.com/ZacharyZhang-NY/Ely-GPUI-Components; the
@@ -26,7 +26,8 @@ terminal/webview/editor dependencies and Gallery runtime are excluded.
 
 - `src/lib.rs`: idempotent `init_chat` initializes Ely's distinct theme and
   scoped `ElyInput` text actions. It registers no global Tab binding and no
-  editor/document/terminal actions. Eager asset validation belongs to the
+  document/terminal actions. `init_editor` (below) binds the editor's keys in
+  the `ElyEditor` context only. Eager asset validation belongs to the
   native probe, allowing Sirio's existing asset-free GPUI test contexts.
 - `src/assets.rs` and `src/primitives/icon.rs`: offline icons use the `ely/`
   namespace in both lookup/list and references. Icon geometry is unchanged;
@@ -151,10 +152,10 @@ what each check does and does not prove.
 - **One GPUI.** `cargo metadata --locked` resolves 30 `gpui`/`zed` packages, none
   with more than one version. This crate depends on `bezel-gpui =0.3.8` and
   `bezel-gpui-platform =0.3.8`, the packages Sirio pins.
-- **This crate:** `cargo test -p ely-gpui-component --features test-support`,
-  79 passed (77 without the feature: two fit tests need it). Its own
-  warnings — unused `pub(crate)` re-exports of the parts of Ely this chat does
-  not use — are upstream's subset, not suppressed.
+- **This crate:** `cargo nextest run -p ely-gpui-component --features test-support`,
+  120 passed with the editor (78 before it). The test target compiles only with
+  `--features test-support`; see the Editor section. Its warnings, in the parts
+  of Ely this chat does not use, are upstream's subset, not suppressed.
 - **The chat on top of it:** 205 chat tests, the real-app runner (11 scenarios,
   each on an isolated instance), the five agent marks in dark and light.
 - **Platforms:** Linux X11 only (isolated Xvfb, software Mesa). macOS, Windows
@@ -214,12 +215,16 @@ follow the picker's own state rather than drift from it.
 
 Sirio's file editor on Ely's `CodeEditor`, vendored from the same revision,
 `e17e31a6`. Design: `docs/superpowers/specs/2026-10-17-ely-code-editor-design.md`.
-Every file below is verbatim unless its entry says otherwise.
+Every file below is verbatim from `e17e31a6` unless its entry says otherwise;
+the ports below change the files they name.
 
 Vendored files:
 
 - `src/editor/{buffer,cursor,edit,keys,moves,line,row,view,layout,gutter,decor,syntax,ime,find,status,state}.rs`:
-  verbatim, except the two local changes listed below.
+  verbatim, except the local changes listed below, the ports in "Ports from
+  upstream `main`" (which change `buffer`, `edit`, `ime`, `line`, `moves`,
+  `state` and `view`) and the key bindings of `keys.rs` in "Keys and hosting
+  hooks" below.
 - `src/editor/tests/mod.rs` (was `tests.rs`; moved by the `b29d66c` port
   below): verbatim, gated `cfg(all(test, feature = "test-support"))`
   as upstream. Nothing was removed: none of its 15 tests names a module this
@@ -229,6 +234,8 @@ Vendored files:
   `hover`, `keybindings`, `preview`, `problems`, `refactor`, `search`,
   `settings`, `symbols`, `tasks` and `welcome`, all excluded, and their
   re-exports with them. `anchors` and `measure` arrive from `main` in Task 1b.
+  Task 1c adds `pub use keys::SingleCursor;` and deletes two dead re-exports;
+  see "Keys and hosting hooks".
 - `src/navigation/breadcrumb.rs`: verbatim. `src/navigation/mod.rs` declares
   it and re-exports `Breadcrumb` and `Crumb`.
 - `src/shell/bars.rs`: only `StatusBarItem`, its `ClickHandler` alias and the
@@ -238,7 +245,8 @@ Vendored files:
 - `src/compat.rs`: `tint`, copied verbatim from upstream `charts/paint.rs`,
   with the `Hsla` and `Palette` imports it needs. `code_colors` and its users
   are unchanged.
-- `src/lib.rs`: declares `pub mod editor;` and `pub mod shell;`.
+- `src/lib.rs`: declares `pub mod editor;` and `pub mod shell;`, and defines
+  `init_editor` (Task 1c).
 
 Local changes:
 
@@ -253,12 +261,12 @@ Local changes:
   submits, but no visible control reaches it. A host must not call
   `set_chat(Some(..))` until a chat widget is vendored.
 - `src/editor/line.rs`: `charts::tint` becomes `compat::tint`. Nothing else in
-  this file changed by that vendoring; the `b29d66c` port below changes its
-  pointer callers.
-- Warnings, not suppressed, following the precedent of the unused re-exports
-  above: `keys::bind_keys` has no caller until `init_editor` (Task 1c) calls it,
-  and `layout::stack` and `syntax::colors` (re-exported as `code_colors`) have
-  no user inside this crate yet.
+  this file changed by that vendoring; the ports in "Ports from upstream
+  `main`" below change it further.
+- No warnings from the editor: `init_editor` calls `keys::bind_keys`, and the
+  two unused re-exports recorded in Task 1a are deleted in Task 1c. None come
+  from `src/editor/`, `src/shell/` or `navigation/breadcrumb.rs`; the rest are
+  upstream's chat-era items in other modules, not suppressed.
 
 gpui adaptations: none. The closure compiled against the pinned Bezel GPUI
 unchanged, so no hover, focus or scroll shim was needed.
@@ -293,8 +301,7 @@ applied as upstream wrote it or was rewritten against the vendored code.
   from `state.rs` to `edit.rs` and log and ignore a bad range; `offset_in`
   returns `None` for a line the text has lost. `tests.rs` moved to
   `tests/mod.rs` (`mod stale;`, and `editor` made `pub(super)`).
-  `src/editor/mod.rs` is local, so the port adds only `mod anchors;`; the four
-  warnings recorded above move down one line (mod.rs:28, 29, 35).
+  `src/editor/mod.rs` is local, so the port adds only `mod anchors;`.
   `tests/stale.rs` is verbatim except two tests, dropped because they name
   code in modules this crate does not vendor:
   `an_output_channel_gone_from_its_list_draws` (`console::OutputPanel`) and
@@ -306,12 +313,13 @@ applied as upstream wrote it or was rewritten against the vendored code.
   are outside the closure.
 - `9fb607b` "Code editor: columns sit where gpui lays them out": `ime.rs`,
   `measure.rs` (new) and `tests/wide.rs` (new) are verbatim. `state.rs`,
-  `line.rs`, `state.rs`, `view.rs`, `mod.rs` and `tests/mod.rs` did not apply:
+  `line.rs`, `view.rs`, `mod.rs` and `tests/mod.rs` did not apply:
   their context named upstream code from commits between `b29d66c` and this
   one that the vendored copy does not have (the typewriter, `Metrics::height`,
   `line.rs`'s imports, and the `preview`, `chinese` and `history` modules,
-  which are not vendored). Their added lines were typed in by hand. Hand-applied
-  pieces: `Metrics::size` (after `line`); `self.metrics.size = pixels` after
+  which are not vendored). Their added lines were typed in by hand. Upstream's
+  `secondary_press` hunk in `line.rs` had nothing to apply to: that function is
+  absent on `e17e31a6`. Hand-applied pieces: `Metrics::size` (after `line`); `self.metrics.size = pixels` after
   `self.metrics.line = line`; in `line.rs` the `measure::Measured` import, the
   `styles` visibility becoming `pub(super)` (`ime.rs` calls it), the new
   `whitespace` (hidden marks, arrows and dots drawn as a `StyledText`), the
@@ -332,3 +340,33 @@ applied as upstream wrote it or was rewritten against the vendored code.
   `styles`, which here calls `syntax::colors` where upstream's `main` calls
   `line_colors`. Nothing else in `line.rs` changed.
   Skipped: none; the commit touches no unvendored file.
+
+### Keys and hosting hooks (Task 1c)
+
+- `src/lib.rs`: `init_editor(cx)` runs `init_chat`, then `editor::bind_keys`,
+  behind its own guard: a private `EditorKeysBound` global, checked first, so a
+  second call binds nothing. A host that ran `init_chat` first still gets the
+  editor's keys, because `init_chat`'s guard (the theme) is separate and
+  unchanged. `sirio_ui::ely::init` calls `init_editor` where it called
+  `init_chat`.
+- `src/editor/keys.rs`, non-macOS: add-cursor is `shift-alt-up` and
+  `shift-alt-down`. `ctrl-alt-up` and `ctrl-alt-down` are Sirio's
+  `FocusPaneAbove` and `FocusPaneBelow` (`rust/crates/sirio/src/panes.rs:108-109`).
+  macOS keeps `cmd-alt-up` and `cmd-alt-down`.
+- `src/editor/keys.rs`, `Copy` (`secondary-c`): when every selection is empty it
+  calls `cx.propagate()` and does nothing else, so Sirio's `CopySelectedText`
+  (`!Terminal`) gets the chord. With a selection the editor copies exactly as
+  upstream does. `Cut` (`secondary-x`) is unchanged: with empty selections
+  upstream cuts the current line, which is an edit, so the chord is not handed on.
+- `src/editor/keys.rs`, Escape: `SingleCursor` stays bound to `escape` in
+  `ElyEditor`, and it does not propagate. A host that needs Escape for its own
+  surface while the editor has focus can `capture_action` `editor::SingleCursor`.
+  Sirio does not capture it yet.
+- `src/editor/mod.rs`: `pub use keys::SingleCursor;` (new). The dead re-exports
+  `pub(crate) use layout::stack;` and `pub(crate) use syntax::colors as
+  code_colors;` are deleted: nothing in the vendored closure used them. `line.rs`
+  imports `stack` from `layout` directly, and the chat keeps its own
+  `compat::code_colors`, which is unchanged.
+
+Evidence: `cargo nextest run -p ely-gpui-component --features test-support`
+runs 120 tests after Task 1c, all passed.
