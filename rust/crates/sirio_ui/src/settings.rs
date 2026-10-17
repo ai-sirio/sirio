@@ -26,7 +26,7 @@ use sirio_usage::{
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
-use std::{collections::BTreeSet, path::PathBuf, process::Command};
+use std::{collections::BTreeSet, path::PathBuf};
 
 /// How long an account action error stays visible before it self-dismisses.
 const ACCOUNT_ERROR_DISMISS: Duration = Duration::from_secs(4);
@@ -526,7 +526,7 @@ fn discover_provider_account(provider: UsageProvider) -> ProviderAccountStatus {
 }
 
 fn discover_claude_identity() -> Option<String> {
-    let output = Command::new("claude")
+    let output = sirio_env::command("claude")
         .args(["auth", "status"])
         .output()
         .ok()?;
@@ -544,7 +544,7 @@ fn discover_codex_identity() -> Option<String> {
     if !codex_auth_file_path().is_file() {
         return None;
     }
-    let output = Command::new("codex")
+    let output = sirio_env::command("codex")
         .args(["login", "status"])
         .output()
         .ok()?;

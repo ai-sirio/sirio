@@ -1035,13 +1035,15 @@ mod tests {
         );
     }
 
-    /// The user's environment reaches git, and the streaming runner's own
-    /// `LC_ALL=C` still wins over the user's locale: its parsers match git's
-    /// English progress lines. `alias.e=!env` makes git run `env`, so the
-    /// child's own environment comes back through that runner.
+    /// Covers the streaming runner: `run_streaming_cancellable`, reached through
+    /// `run_streaming`, the one that sets `LC_ALL=C` itself. The user's
+    /// environment reaches git, and that `LC_ALL=C` still wins over the user's
+    /// locale: its parsers match git's English progress lines. `alias.e=!env`
+    /// makes git run `env`, so the child's own environment comes back through
+    /// that runner. It does not cover the timed runner that `git status` uses.
     #[cfg(unix)]
     #[test]
-    fn git_output_stays_unlocalized_under_the_user_environment() {
+    fn streaming_git_stays_unlocalized_under_the_user_environment() {
         let repo = std::env::temp_dir().join(format!("sirio-git-env-{}", std::process::id()));
         std::fs::create_dir_all(&repo).expect("create the scratch repository");
         let initialised = Command::new(GIT_BINARY)

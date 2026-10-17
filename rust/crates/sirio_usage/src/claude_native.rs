@@ -10,7 +10,7 @@
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
@@ -241,7 +241,7 @@ fn candidates() -> [&'static str; 1] {
 /// Runs `program --version`, bounded. `None` when it cannot be spawned,
 /// hangs, or prints nothing a version can be read from.
 fn probe_version(program: &Path, timeout: Duration) -> Option<ClaudeVersion> {
-    let mut child = Command::new(program)
+    let mut child = sirio_env::command(program)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
