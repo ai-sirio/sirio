@@ -8,14 +8,20 @@ set -euo pipefail
 # geometry the probe prints.
 #
 # It proves real pixels (a frame needs at least 200 colours and an exact
-# #ff00ff, the highlighter's colour, on line 3), the right window (input and
-# captures go only to the window whose _NET_WM_PID is the probe's), and these
-# events, each from a real xdotool gesture: Pointer over line 3 with an offset
-# inside that line; GitMarkPressed for the git bar of line 5; no breakpoint
-# toggle from a click in the breakpoint slot of line 7 (the breakpoint set
-# stays empty); SecondaryClick from a right click on line 3; PlatformClick from
-# a Super-held click on line 3 at its own offset. Not covered here: `reset`
-# and the view options' effect on the frame (see docs/testing/).
+# #ff00ff, the highlighter's colour, on line 3), that a highlighter keeps Ely's
+# lexer out: no exact keyword colour, and the bracket run on line 4 drawn
+# differently from the lexer's own run (the lexer paints brackets in Ely's
+# punctuation colour; exact pixels of that grey never appear, so the two runs
+# are compared), the right window (input and captures go only to the window
+# whose _NET_WM_PID is the probe's), and these events, each from a real xdotool
+# gesture: Pointer over line 3 with an offset inside that line; Pointer over
+# line 5's git bar with no offset (the gutter is not the code); GitMarkPressed
+# for that git bar; no breakpoint toggle from a click in the breakpoint slot
+# of line 7 (the breakpoint set stays empty), with a control run that does
+# toggle when breakpoints are on; SecondaryClick from a right click on line 3;
+# no PlatformClick from a plain click on line 3, but one from a Super-held
+# click on it at its own offset. Not covered here: `reset`, the view options'
+# effect on the frame, and a pointer past the last row (see docs/testing/).
 #
 # The artifact: --out-dir DIR (default ${SIRIO_E2E_TMP:-$HOME/.cache/sirio-e2e}/ely-editor-probe)
 # keeps transcript.log, probe-main.log and probe-breakpoints-on.log (the
@@ -45,7 +51,16 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$OUT_DIR" ] || OUT_DIR="${SIRIO_E2E_TMP:-$HOME/.cache/sirio-e2e}/ely-editor-probe"
+DEFAULT_OUT_DIR="${SIRIO_E2E_TMP:-$HOME/.cache/sirio-e2e}/ely-editor-probe"
+[ -n "$OUT_DIR" ] || OUT_DIR="$DEFAULT_OUT_DIR"
+# A run starts from an empty out dir. The default one is removed whole; any other
+# dir loses only the files this script writes, so nothing outside OUT_DIR goes.
+if [ "$OUT_DIR" = "$DEFAULT_OUT_DIR" ] && [ "$(basename "$OUT_DIR")" = "ely-editor-probe" ]; then
+  rm -rf -- "$OUT_DIR"
+else
+  rm -f -- "$OUT_DIR/transcript.log" "$OUT_DIR/probe.log" "$OUT_DIR"/probe-*.log \
+    "$OUT_DIR/xvfb.log" "$OUT_DIR/histogram.txt" "$OUT_DIR"/frames/*.png
+fi
 mkdir -p "$OUT_DIR/frames"
 exec > >(tee "$OUT_DIR/transcript.log") 2>&1
 
@@ -112,12 +127,14 @@ PY
 
 WINDOW=""
 LOG=""
-launch() { # run-name breakpoints (off, or on for the control run)
-  LOG="$OUT_DIR/probe-$1.log"
+launch() { # run-name [VAR=value ...]: a run of the probe; breakpoints stay off unless a run sets them
+  local name="$1"
+  shift
+  LOG="$OUT_DIR/probe-$name.log"
   : >"$LOG"
   # env execs the probe, so $! is the probe's own pid, the one in _NET_WM_PID.
   env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" "${VULKAN_ENV[@]}" \
-    ELY_PROBE_APPEARANCE=dark ELY_PROBE_UI_SIZE=13 ELY_PROBE_BREAKPOINTS="$2" "$PROBE" >"$LOG" 2>&1 &
+    ELY_PROBE_APPEARANCE=dark ELY_PROBE_UI_SIZE=13 ELY_PROBE_BREAKPOINTS=off "$@" "$PROBE" >"$LOG" 2>&1 &
   PROBE_PID=$!
   WINDOW=""
   for _ in $(seq 1 100); do
@@ -130,6 +147,16 @@ launch() { # run-name breakpoints (off, or on for the control run)
   for _ in $(seq 1 100); do grep -q '^geometry ' "$LOG" && break; sleep 0.1; done
   grep -q '^geometry ' "$LOG" || fail "the probe printed no geometry; see $LOG"
   echo "probe: pid $PROBE_PID, window $WINDOW"
+}
+# Pixels that differ between two frames inside a crop (WxH+X+Y), printed as a count.
+crop_pixels_differ() { # a b geometry
+  magick "$OUT_DIR/frames/$1.png" -crop "$3" +repage "$OUT_DIR/scratch-a.png"
+  magick "$OUT_DIR/frames/$2.png" -crop "$3" +repage "$OUT_DIR/scratch-b.png"
+  local pixels
+  # compare prints the count first, sometimes in scientific notation; awk reads both.
+  pixels=$(compare -metric AE "$OUT_DIR/scratch-a.png" "$OUT_DIR/scratch-b.png" null: 2>&1 | awk '{printf "%d", $1}' || true)
+  rm -f "$OUT_DIR/scratch-a.png" "$OUT_DIR/scratch-b.png"
+  echo "${pixels:-0}"
 }
 stop() {
   kill "$PROBE_PID" 2>/dev/null || true
@@ -170,6 +197,19 @@ print(f"ROW5={row(5)}")
 print(f"ROW7={row(7)}")
 print(f"LINE3_START={line3.group(1)}")
 print(f"LINE3_END={line3.group(2)}")
+hues = re.search(r"^hues keyword=(#[0-9A-Fa-f]{6}) punctuation=(#[0-9A-Fa-f]{6})$", text, re.M)
+if not hues:
+    sys.exit("the probe printed no hues")
+print(f"KEYWORD_HEX={hues.group(1)}")
+bracket = re.search(r"^brackets line=4 columns=(\d+)\.\.(\d+)$", text, re.M)
+if not bracket:
+    sys.exit("the probe printed no bracket run")
+start, end = int(bracket.group(1)), int(bracket.group(2))
+# The bracket run on line 4 sits between text columns start and end.
+print(f"BRACKET_X={round((columns + 1 + start) * advance)}")
+print(f"BRACKET_Y={round(4 * line_height)}")
+print(f"BRACKET_W={round((end - start) * advance)}")
+print(f"BRACKET_H={round(line_height)}")
 PY
 }
 
@@ -192,8 +232,12 @@ while time.time() < end:
 print("EVENT: none arrived")
 sys.exit(1)
 '
-echo "step 1: as drawn, with the highlighter's colour on line 3"
-launch main off
+echo "step 1: as drawn, with the highlighter's colour on line 3, and the lexer's colours kept out"
+# The control run keeps code's own lexer, which paints the brackets in Ely's punctuation colour.
+launch lexer-on ELY_PROBE_LEXER=on
+capture lexer-on
+stop
+launch main
 eval "$(targets)"
 echo "targets: slot x=$SLOT_X, git bar x=$BAR_X, text x=$TEXT_X, rows 3/5/7 at y=$ROW3/$ROW5/$ROW7, line 3 bytes $LINE3_START..$LINE3_END"
 xd mousemove --window "$WINDOW" 600 580   # a neutral spot, away from every target
@@ -201,6 +245,13 @@ capture initial
 timeout 30 magick "$OUT_DIR/frames/initial.png" -format '%c' histogram:info:"$OUT_DIR/histogram.txt" || fail "no histogram of the frame"
 grep -qi '#FF00FF' "$OUT_DIR/histogram.txt" || fail "the frame has no #ff00ff pixel: the highlighter's colour did not draw"
 echo "COLOUR: #ff00ff is in the frame"
+grep -qi "$KEYWORD_HEX" "$OUT_DIR/histogram.txt" && fail "Ely's keyword colour $KEYWORD_HEX is in the frame: a highlighter set leaves the lexer's keyword colour out"
+echo "KEYWORD: no exact keyword colour ($KEYWORD_HEX) in the frame"
+# Exact pixels of Ely's punctuation grey never appear here: its strokes are anti-aliased. So the bracket run
+# is compared with the lexer's own run instead. With a highlighter set, the brackets must not keep the lexer's colour.
+brackets=$(crop_pixels_differ lexer-on initial "${BRACKET_W}x${BRACKET_H}+${BRACKET_X}+${BRACKET_Y}")
+[ "$brackets" -gt 0 ] || fail "the bracket run on line 4 is drawn exactly as the lexer draws it: Ely's punctuation colour is still applied with a highlighter set"
+echo "BRACKETS: the bracket run on line 4 differs from the lexer's run ($brackets pixels)"
 
 echo "step 2: a pointer over line 3 reports an offset inside that line"
 before=$(grep -c '^event Pointer ' "$LOG" || true)
@@ -209,6 +260,15 @@ python3 -c "$EVENT_PY" "$LOG" '^event Pointer offset=(?:Some\()?(\d+)' "$before"
   || fail "Pointer over line 3 did not report an offset inside $LINE3_START..$LINE3_END"
 
 echo "step 3: a click on line 5's git bar reports GitMarkPressed"
+before=$(grep -c '^event Pointer offset=None$' "$LOG" || true)
+xd mousemove --window "$WINDOW" "$BAR_X" "$ROW5"
+for _ in $(seq 1 25); do
+  [ "$(grep -c '^event Pointer offset=None$' "$LOG" || true)" -gt "$before" ] && break
+  sleep 0.2
+done
+[ "$(grep -c '^event Pointer offset=None$' "$LOG" || true)" -gt "$before" ] \
+  || fail "the pointer over line 5's git bar reported an offset: the gutter is not the code"
+echo "GUTTER: the pointer over the git bar has no offset"
 before=$(grep -c '^event GitMarkPressed ' "$LOG" || true)
 xd mousemove --window "$WINDOW" "$BAR_X" "$ROW5" click 1
 python3 -c "$EVENT_PY" "$LOG" '^event GitMarkPressed line=(\d+)$' "$before" 5 5 5 \
@@ -227,7 +287,13 @@ xd mousemove --window "$WINDOW" "$TEXT_X" "$ROW3" click 3
 python3 -c "$EVENT_PY" "$LOG" '^event SecondaryClick offset=(?:Some\()?(\d+)' "$before" "$LINE3_START" "$LINE3_END" 5 \
   || fail "the right click on line 3 did not report SecondaryClick inside line 3"
 
-echo "step 6: a Super-held click on line 3 reports PlatformClick at its own offset"
+echo "step 6: a plain click on line 3 reports no PlatformClick; a Super-held one does, at its own offset"
+before=$(grep -c '^event PlatformClick ' "$LOG" || true)
+xd mousemove --window "$WINDOW" "$TEXT_X" "$ROW3" click 1
+sleep 1
+[ "$(grep -c '^event PlatformClick ' "$LOG" || true)" -eq "$before" ] \
+  || fail "a plain click on line 3 reported PlatformClick"
+echo "PLAIN: a plain click on line 3 reported no PlatformClick"
 before=$(grep -c '^event PlatformClick ' "$LOG" || true)
 xd keydown Super_L
 xd mousemove --window "$WINDOW" "$TEXT_X" "$ROW3" click 1
@@ -237,7 +303,7 @@ python3 -c "$EVENT_PY" "$LOG" '^event PlatformClick offset=(?:Some\()?(\d+)' "$b
 stop
 
 echo "step 7: control: with breakpoints on, the click in line 7's slot toggles line 7"
-launch breakpoints-on on
+launch breakpoints-on ELY_PROBE_BREAKPOINTS=on
 eval "$(targets)"
 xd mousemove --window "$WINDOW" "$SLOT_X" "$ROW7" click 1
 for _ in $(seq 1 25); do grep -qx 'breakpoints {7}' "$LOG" && break; sleep 0.2; done

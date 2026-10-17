@@ -11,7 +11,7 @@ use super::{
     gutter::Cell,
     layout::{Shown, stack},
     measure::Measured,
-    state::{CodeEditor, CursorShape, EditorEvent},
+    state::{CodeEditor, CursorShape, EditorEvent, Press},
 };
 use crate::{
     compat::tint,
@@ -33,7 +33,7 @@ impl CodeEditor {
         let touches = |span: &Range<usize>| {
             span.start < range.end.max(range.start + 1) && range.start < span.end
         };
-        let mut spans = self.line_colors(line, self.row_text(line), cx);
+        let mut spans = self.piece_colors(line, 0, self.row_text(line), cx);
         // Offsets found in an older text are left out.
         let fresh = self.frame.stamp == self.buffer.stamp();
         let brackets = self
@@ -43,8 +43,11 @@ impl CodeEditor {
             .filter(|bracket| fresh && range.contains(&bracket.offset));
         for bracket in brackets {
             let at = bracket.offset - range.start;
+            // With the owner's highlighter its colors stand; only rainbow brackets recolour them.
             let color = if self.options.rainbow {
                 tint(colors, bracket.depth % 3)
+            } else if self.options.highlighter.is_some() {
+                continue;
             } else {
                 colors.syntax.punctuation
             };
@@ -389,7 +392,11 @@ impl CodeEditor {
         let Some(at) = self.offset_in(line, event.position.x, window, cx) else {
             return;
         };
-        self.pressed = Some((at, event.modifiers.platform));
+        self.pressed = Some(Press {
+            offset: at,
+            platform: event.modifiers.platform,
+            single: event.click_count == 1 && !event.modifiers.shift && !event.modifiers.alt,
+        });
         let chosen = match event.click_count {
             2 => {
                 let word = self.buffer.word_at(at);
@@ -451,7 +458,7 @@ impl CodeEditor {
         self.set_selections(all, cx);
     }
 
-    /// A release ends a press. Pressed and released at one offset, with the platform modifier held on either, it is a platform click: the caret stays and no drag selection is left.
+    /// A release ends a press. A single press with neither Shift nor Alt, released at its own offset with the platform modifier held on either, is a platform click: the caret stays and no drag selection is left. Any other press keeps Ely's selection.
     pub(crate) fn release(
         &mut self,
         event: &MouseUpEvent,
@@ -459,13 +466,14 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         self.dragging = false;
-        let Some((down, platform_down)) = self.pressed.take() else {
+        let Some(press) = self.pressed.take() else {
             return;
         };
-        let Some(up) = self.offset_at(event.position, window, cx) else {
+        let Some(up) = self.offset_over_code(event.position, window, cx) else {
             return;
         };
-        if up != down || !(platform_down || event.modifiers.platform) {
+        let plain = press.single && !event.modifiers.shift && !event.modifiers.alt;
+        if !plain || up != press.offset || !(press.platform || event.modifiers.platform) {
             return;
         }
         self.set_selections(vec![Selection::caret(up)], cx);

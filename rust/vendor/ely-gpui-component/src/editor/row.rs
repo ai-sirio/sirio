@@ -119,14 +119,7 @@ impl CodeEditor {
             let line = self.buffer.line_of(ghost.offset);
             let range = self.buffer.line_range(line);
             let rest = self.buffer.text()[ghost.offset..range.end].to_string();
-            // The owner's colors are per line: the rest takes the spans past the ghost.
-            let from = ghost.offset - range.start;
-            let styles: Vec<_> = self
-                .line_colors(line, self.buffer.line(line), cx)
-                .into_iter()
-                .filter(|(span, _)| span.end > from)
-                .map(|(span, style)| (span.start.max(from) - from..span.end - from, style))
-                .collect();
+            let styles = self.piece_colors(line, ghost.offset - range.start, &rest, cx);
             StyledText::new(rest).with_highlights(styles)
         });
         base.child(self.gutter(Cell::Blank, ix, cx))

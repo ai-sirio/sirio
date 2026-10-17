@@ -383,16 +383,28 @@ runs 120 tests after Task 1c, all passed.
   (`prose.rs` `line_colors`), but the signature differs: the line index comes
   first and the spans are `HighlightStyle`, not `forms::Highlight`. `prose.rs`
   and `forms::Highlight` are not vendored.
-- `state.rs`, `line_colors(line, text, cx)`: the one private helper every colour
-  of the code goes through. Without a highlighter it is `syntax::colors`, so
-  upstream's behaviour is unchanged. With one, its spans are clipped to the
-  text, and a span that cuts a character is dropped; either is logged.
-- The helper replaces `syntax::colors` at `line.rs` (`styles`), `view.rs`
-  (sticky headers and the minimap) and, a fourth site, `row.rs` (the ghost
-  row's tail). The ruling named three; upstream `main` routes the ghost tail
-  through `line_colors` as well (`row.rs:135`). The tail asks for the whole
-  line and keeps the spans that reach past the ghost's offset, so the host
-  sees line indices and never a suffix.
+- The contract the host sees: the highlighter is called with a line's index and
+  the line's whole text, whatever part of the line is shown, and its spans are
+  byte offsets into that text. A span past the text is clipped; a span that cuts
+  a character is dropped; either is logged.
+- `state.rs`, `piece_colors(line, from, piece, cx)`: the one private helper every
+  colour of the code goes through. `piece` is the part of `line` that starts
+  `from` bytes in. Without a highlighter it is `syntax::colors(piece)`, which is
+  upstream's call on the same text, so upstream's behaviour is unchanged. With
+  one, the highlighter gets the whole line and the spans are cut to the piece.
+- The helper replaces `syntax::colors` at `line.rs` (`styles`, on the row's
+  text), `view.rs` (sticky headers and the minimap, on whole lines) and, a
+  fourth site, `row.rs` (the ghost row's tail, `from` the ghost's offset).
+  The ruling named three; upstream `main` routes the ghost tail through its
+  line colours as well (`row.rs:135`).
+- `line.rs`, bracket loop (deviation from upstream): with a highlighter set, the
+  pass no longer recolours a bracket with `syntax.punctuation`, so the host's
+  colour stands. Rainbow tints still apply when `rainbow_brackets` is on, and
+  bracket-match styling (background and bold) is unchanged. Upstream `main` has
+  the unconditional loop. Known limitation: bracket positions come from Ely's
+  bracket finder (`syntax::brackets`, over `forms::code::lex`), so a bracket
+  inside a block comment, or after a Rust lifetime, may still be tinted when
+  rainbow is on.
 - `state.rs`, `ViewOptions` (`Clone, Debug, PartialEq`), `set_view_options` and
   `view_options`: they map onto the existing `Options` fields. A tab size of
   zero is raised to one and logged (the `tab_size` builder still asserts).
@@ -407,18 +419,23 @@ runs 120 tests after Task 1c, all passed.
 - `EditorEvent` gains `Pointer { offset, position }` and `SecondaryClick
   { offset, position }`, both emitted from one handler on the list's `body`
   (`view.rs`, render), so a move or a press emits once. The offset comes from
-  `offset_at`, so it is `None` past the last row and on a row that is not text
-  (a lens, a removed line, ghost text or the chat). `Pointer` fires only without
-  a button down.
+  `offset_over_code` (`view.rs`), which is `None` left of the code column (the
+  gutter, the breakpoint slot and the git bar), and otherwise `offset_at`, which
+  is `None` past the last row and on a row that is not text (a lens, a removed
+  line, ghost text or the chat). `offset_at` itself is unchanged; IME uses it.
+  `Pointer` fires only without a button down.
 - `EditorEvent::PlatformClick { offset }`: `press()` records
-  `pressed: Option<(usize, bool)>` (the offset and whether the platform modifier
-  was held); `release()` (`line.rs`, from the root's `on_mouse_up(Left)`)
-  emits when the release is at the same offset and the modifier was held on
-  press or release, then collapses the selection to the caret there. A press
-  under the modifier still selects by drag, as before; only the click collapses.
-  The gesture is the one `file_view.rs` uses for go-to-definition (~2969,
-  ~3034), with no click-count check, as there. `on_mouse_up_out` clears
-  `pressed`.
+  `pressed: Option<Press>` (`Press` in `state.rs`: the offset, whether the
+  platform modifier was held, and `single`, which is `click_count == 1` with
+  neither Shift nor Alt). `release()` (`line.rs`, from the root's
+  `on_mouse_up(Left)`) emits only for a `single` press with neither Shift nor
+  Alt on the release, released at the same offset (through `offset_over_code`),
+  with the platform modifier held on press or release. It then collapses the
+  selection to that caret. A press under the modifier still selects by drag, as
+  before; only the click collapses. Double and triple clicks, and shift- or
+  alt-extended presses, keep Ely's selection. The gesture is the one
+  `file_view.rs` uses for go-to-definition (~2969, ~3034); it has no click-count
+  check there, and it gets one here. `on_mouse_up_out` clears `pressed`.
 - `EditorEvent::GitMarkPressed { line }`: in `gutter.rs` the git bar's hit area
   is 4px wide (the 2px bar sits inside it, at the same x) and takes a press only
   on a line where a mark is drawn. That press calls `prevent_default`.
@@ -428,11 +445,16 @@ runs 120 tests after Task 1c, all passed.
   and that `text_selection::on_copy` declines while the editor has focus.
   Behaviour is unchanged.
 - `sirio_ui/examples/ely_editor_probe.rs` and
-  `Scripts/Tests/test-ely-editor-probe.sh` prove the events, the gutter's
-  geometry, the highlighter's colour and the breakpoint slot (with a control run
-  that turns breakpoints on). Not proven by the probe: `reset`, the effect of
-  the view options on the frame, a `None` pointer offset past the last row, and
-  the `Pointer` offset on a lens or ghost row.
+  `Scripts/Tests/test-ely-editor-probe.sh` prove the highlighter's colour on
+  line 3, that the lexer's keyword colour is kept out and the bracket run on
+  line 4 is drawn differently from the lexer's own run (with a `lexer-on`
+  control run), the gutter's geometry, the pointer's offset over the code and
+  over the git bar, `GitMarkPressed`, the breakpoint slot (with a `breakpoints-on`
+  control run), `SecondaryClick`, that a plain click emits no `PlatformClick`,
+  and that a Super-held click does. Not proven by the probe: `reset`, the effect
+  of the view options on the frame, a `None` pointer offset past the last row,
+  the `Pointer` offset on a lens or ghost row, and the ghost tail and the
+  clipping of out-of-range spans.
 
 Evidence: `cargo nextest run -p ely-gpui-component --features test-support`
 runs 120 tests, all passed (no unit test added; the probe is the proof).

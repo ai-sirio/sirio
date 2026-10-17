@@ -25,7 +25,7 @@ use ely_gpui_component::{
     theme::{ActiveTheme, TextSize},
 };
 use gpui::{
-    App, Bounds, Context, Entity, HighlightStyle, Subscription, Window, WindowBounds,
+    App, Bounds, Context, Entity, HighlightStyle, Hsla, Rgba, Subscription, Window, WindowBounds,
     WindowOptions, div, font, prelude::*, px, rgb, size,
 };
 
@@ -33,14 +33,19 @@ use gpui::{
 const LINES: usize = 60;
 /// The line whose text the host colours magenta.
 const HIGHLIGHTED: usize = 3;
+/// The line of square brackets, which Ely's lexer would colour with punctuation.
+const BRACKETS: usize = 4;
 /// Rows of code a row's height holds, as leading (`view.rs`).
 const LEADING: f32 = 1.6;
 
-/// Sixty lines of Rust; line 3 is a run of pipes, whose stems are solid.
+/// Sixty lines of Rust. Line 3 is a run of pipes, whose stems are solid; line 4
+/// is a run of square brackets, whose stems are straight, so Ely's punctuation
+/// colour shows on full pixels when the lexer paints them.
 fn fixture() -> String {
     (0..LINES)
         .map(|line| match line {
             HIGHLIGHTED => "    let bars = \"||||||||||||||||\";".to_string(),
+            BRACKETS => "    let nest = [[[[[[[[[[[[[[[[]]]]]]]]]]]]]]];".to_string(),
             _ => format!("    let value_{line:02} = compute({line});"),
         })
         .collect::<Vec<_>>()
@@ -51,6 +56,13 @@ fn fixture() -> String {
 fn bytes_of(text: &str, line: usize) -> Range<usize> {
     let start: usize = text.split('\n').take(line).map(|line| line.len() + 1).sum();
     start..start + text.split('\n').nth(line).unwrap_or_default().len()
+}
+
+/// A colour as `#RRGGBB`, the form the frame's histogram prints.
+fn hex(color: Hsla) -> String {
+    let rgb = Rgba::from(color);
+    let channel = |value: f32| (value * 255.0).round() as u8;
+    format!("#{:02X}{:02X}{:02X}", channel(rgb.r), channel(rgb.g), channel(rgb.b))
 }
 
 /// The event as one transcript line: the offsets and lines the script checks.
@@ -76,9 +88,12 @@ impl Probe {
         let text = fixture();
         let highlighted = bytes_of(&text, HIGHLIGHTED);
         let editor = cx.new(|cx| {
-            let editor = CodeEditor::new(text.clone(), window, cx)
-                .language("Rust")
-                .highlighter(|line, row: &str, _| {
+            let editor = CodeEditor::new(text.clone(), window, cx).language("Rust");
+            // The control run keeps code's own lexer, to show its colours do reach the frame.
+            let editor = if std::env::var("ELY_PROBE_LEXER").as_deref() == Ok("on") {
+                editor
+            } else {
+                editor.highlighter(|line, row: &str, _| {
                     if line != HIGHLIGHTED {
                         return Vec::new();
                     }
@@ -87,7 +102,8 @@ impl Probe {
                         ..HighlightStyle::default()
                     };
                     vec![(0..row.len(), style)]
-                });
+                })
+            };
             let mut editor = if std::env::var("ELY_PROBE_BREAKPOINTS").as_deref() == Ok("on") {
                 editor
             } else {
@@ -166,6 +182,18 @@ fn print_geometry(window: &mut Window, cx: &App) {
         f32::from(line_height),
         digits + 6
     );
+    // Ely's own colours for a keyword and for punctuation: the frame must not show them with a highlighter set.
+    let syntax = &theme.colors.syntax;
+    println!(
+        "hues keyword={} punctuation={}",
+        hex(syntax.keyword),
+        hex(syntax.punctuation)
+    );
+    // The square brackets on line 4, as character columns: the run the script compares.
+    let bracket_line = fixture().split('\n').nth(BRACKETS).unwrap_or_default().to_string();
+    let start = bracket_line.find('[').unwrap_or_default();
+    let end = bracket_line.rfind(']').map_or(start, |at| at + 1);
+    println!("brackets line={BRACKETS} columns={start}..{end}");
 }
 
 impl Render for Probe {

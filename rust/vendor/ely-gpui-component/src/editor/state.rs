@@ -64,12 +64,12 @@ pub enum EditorEvent {
     ChatClosed,
     /// The read-only banner's action.
     Unlock,
-    /// The pointer moved with no button down: the offset of the code under it, `None` past the text.
+    /// The pointer moved with no button down: the offset of the code under it; `None` over the gutter, past the text, or on a row that is not text.
     Pointer {
         offset: Option<usize>,
         position: Point<Pixels>,
     },
-    /// A right-button press over the code: the offset under it, `None` past the text.
+    /// A right-button press over the code: the offset under it; `None` over the gutter, past the text, or on a row that is not text.
     SecondaryClick {
         offset: Option<usize>,
         position: Point<Pixels>,
@@ -80,7 +80,7 @@ pub enum EditorEvent {
     GitMarkPressed { line: usize },
 }
 
-/// Colors for one line of text, given the line's index. Its spans are byte offsets into that text.
+/// Colors for one line of text, given the line's index and its whole text. Its spans are byte offsets into that text.
 type Paint = dyn Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)>;
 
 /// The owner's colors for each line, in place of code's lexer.
@@ -126,6 +126,14 @@ pub(crate) struct Marks {
     pub chat: Option<usize>,
 }
 
+/// A left press in progress: where it began, whether the platform modifier was held on it, and whether it was a single press with neither Shift nor Alt, the only kind a platform click can be.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Press {
+    pub offset: usize,
+    pub platform: bool,
+    pub single: bool,
+}
+
 /// The text and cursors one undo step returns to.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Snapshot {
@@ -161,8 +169,8 @@ pub struct CodeEditor {
     pub(crate) composing: Option<Snapshot>,
     pub(crate) metrics: Metrics,
     pub(crate) dragging: bool,
-    /// The offset a left press began at, and whether the platform modifier was held then.
-    pub(crate) pressed: Option<(usize, bool)>,
+    /// The left press in progress, if any.
+    pub(crate) pressed: Option<Press>,
     pub(crate) caret_on: bool,
     /// Blink runs only while focused, or unseen cursors redraw forever.
     focused: bool,
@@ -317,7 +325,7 @@ impl CodeEditor {
         self
     }
 
-    /// Colors each line with the owner's highlighter in place of code's lexer. It is called with each line's index and text.
+    /// Colors each line with the owner's highlighter in place of code's lexer. It is called with a line's index and the line's whole text, whatever part of the line is shown; its spans are byte offsets into that text.
     pub fn highlighter(
         mut self,
         highlight: impl Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)> + 'static,
@@ -386,7 +394,7 @@ impl CodeEditor {
         self.restart_blink(cx);
     }
 
-    /// Replaces the owner's colors for each line, in place of code's lexer.
+    /// Replaces the owner's colors for each line, in place of code's lexer; see `highlighter` for what it is called with.
     pub fn set_highlighter(
         &mut self,
         highlight: impl Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)> + 'static,
@@ -590,33 +598,38 @@ impl CodeEditor {
         !self.options.read_only
     }
 
-    /// A line's colors: the owner's highlighter's when it set one, else code's lexer's. The owner's spans past the line's text are clipped, and one that cuts a character is dropped; either is logged.
-    pub(crate) fn line_colors(
+    /// Colors for `piece`, the part of `line` that starts `from` bytes into it. With the owner's highlighter, it is called with the line's index and the line's whole text, and the spans are cut to the piece; without one, code's lexer reads the piece as it is, as upstream does. The owner's spans past the line's text are clipped, and one that cuts a character is dropped; either is logged.
+    pub(crate) fn piece_colors(
         &self,
         line: usize,
-        text: &str,
+        from: usize,
+        piece: &str,
         cx: &App,
     ) -> Vec<(Range<usize>, HighlightStyle)> {
         let Some(LineHighlighter(highlight)) = &self.options.highlighter else {
-            return syntax::colors(text, cx);
+            return syntax::colors(piece, cx);
         };
+        let whole = self.buffer.line(line);
         let mut off = 0;
-        let spans = highlight(line, text, cx)
+        let spans: Vec<_> = highlight(line, whole, cx)
             .into_iter()
             .filter_map(|(span, style)| {
-                if span.start > span.end || span.end > text.len() {
+                if span.start > span.end || span.end > whole.len() {
                     off += 1;
                 }
-                let start = span.start.min(text.len());
-                let end = span.end.min(text.len());
+                let start = span.start.min(whole.len());
+                let end = span.end.min(whole.len());
                 if start >= end {
                     return None;
                 }
-                if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                if !whole.is_char_boundary(start) || !whole.is_char_boundary(end) {
                     off += 1;
                     return None;
                 }
-                Some((start..end, style))
+                // The part of the span the piece shows, in the piece's own offsets.
+                let start = start.max(from);
+                let end = end.min(from + piece.len());
+                (start < end).then(|| (start - from..end - from, style))
             })
             .collect();
         if off > 0 {

@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Bounds, Context, ElementInputHandler, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render, Styled,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Styled,
     StyledText, Window, canvas, div, fill, font, point, size, uniform_list,
 };
 
@@ -75,7 +75,7 @@ impl CodeEditor {
         }
         let rows = headers.into_iter().map(|line| {
             let text = self.buffer.line(line).to_string();
-            let styles = self.line_colors(line, &text, cx);
+            let styles = self.piece_colors(line, 0, &text, cx);
             let jump = cx.entity();
             div()
                 .id(("sticky", line))
@@ -133,7 +133,7 @@ impl CodeEditor {
             .map(|row| match row {
                 Row::Line(at) => {
                     let text = self.buffer.line(*at);
-                    self.line_colors(*at, text, cx)
+                    self.piece_colors(*at, 0, text, cx)
                         .into_iter()
                         .filter_map(|(range, style)| {
                             let start = text[..range.start].chars().count();
@@ -205,6 +205,20 @@ impl CodeEditor {
                 }
             })
             .into_any_element()
+    }
+
+    /// The offset under a window point over the code column: none over the gutter, past the text, or on a row that is not text.
+    pub(super) fn offset_over_code(
+        &self,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<usize> {
+        // The code column begins one advance before the text, past the gutter.
+        if position.x < self.metrics.left - self.metrics.advance {
+            return None;
+        }
+        self.offset_at(position, window, cx)
     }
 
     /// Scrolls so the row under a minimap point sits in the middle of the view.
@@ -318,7 +332,7 @@ impl Render for CodeEditor {
                 if event.dragging() {
                     return;
                 }
-                let offset = editor.offset_at(event.position, window, cx);
+                let offset = editor.offset_over_code(event.position, window, cx);
                 cx.emit(EditorEvent::Pointer {
                     offset,
                     position: event.position,
@@ -327,7 +341,7 @@ impl Render for CodeEditor {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|editor, event: &MouseDownEvent, window, cx| {
-                    let offset = editor.offset_at(event.position, window, cx);
+                    let offset = editor.offset_over_code(event.position, window, cx);
                     cx.emit(EditorEvent::SecondaryClick {
                         offset,
                         position: event.position,
