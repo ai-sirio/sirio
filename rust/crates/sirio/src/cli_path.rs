@@ -78,11 +78,21 @@ pub(crate) fn link_on_path(
     admin: bool,
 ) -> LinkOutcome {
     let fallback = fallback_search_path();
-    link_on_path_with(stable, home, login_path, fallback.as_deref(), admin)
+    link_on_path_with(
+        stable,
+        home,
+        login_path,
+        fallback.as_deref(),
+        admin,
+        Path::new(SYSTEM_BIN_DIR),
+    )
 }
 
-/// `link_on_path` with the PATH to fall back on named. The fallback is consulted
-/// only when the login PATH is unknown, and a test can name it.
+/// `link_on_path` with the PATH to fall back on, and the system bin, named. The
+/// fallback is consulted only when the login PATH is unknown. `system_bin` is
+/// the directory macOS may write to; production passes `SYSTEM_BIN_DIR`, and a
+/// test passes a directory that does not exist, so it never touches the real
+/// `/usr/local/bin`. Only the macOS arm reads it.
 #[cfg(target_os = "macos")]
 pub(crate) fn link_on_path_with(
     stable: &Path,
@@ -90,14 +100,9 @@ pub(crate) fn link_on_path_with(
     login_path: Option<&OsStr>,
     fallback: Option<&OsStr>,
     admin: bool,
+    system_bin: &Path,
 ) -> LinkOutcome {
-    link_on_macos(
-        stable,
-        home,
-        login_path.or(fallback),
-        admin,
-        Path::new(SYSTEM_BIN_DIR),
-    )
+    link_on_macos(stable, home, login_path.or(fallback), admin, system_bin)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -107,6 +112,7 @@ pub(crate) fn link_on_path_with(
     login_path: Option<&OsStr>,
     fallback: Option<&OsStr>,
     _admin: bool,
+    _system_bin: &Path,
 ) -> LinkOutcome {
     link_in_user_bin(stable, home, login_path.or(fallback))
 }
@@ -118,6 +124,7 @@ pub(crate) fn link_on_path_with(
     _login_path: Option<&OsStr>,
     _fallback: Option<&OsStr>,
     _admin: bool,
+    _system_bin: &Path,
 ) -> LinkOutcome {
     link_on_windows_path(stable)
 }
@@ -133,7 +140,6 @@ fn fallback_search_path() -> Option<OsString> {
 
 /// The directory macOS puts `sirioctl` in when it may: Homebrew on Intel makes
 /// it writable, and VS Code's `code` command goes there too.
-#[cfg(any(target_os = "macos", test))]
 const SYSTEM_BIN_DIR: &str = "/usr/local/bin";
 
 /// `~/.local/bin/sirioctl`, the user's own directory. A link there always works
@@ -630,6 +636,26 @@ mod tests {
         .expect("join the login PATH")
     }
 
+    /// Links with a system bin that does not exist under `home`, so no test
+    /// touches the real `/usr/local/bin`. On macOS the policy then falls through
+    /// to `~/.local/bin`, which is what the expectations describe on every platform.
+    #[cfg(unix)]
+    fn link_for_test(
+        stable: &Path,
+        home: &Path,
+        login: Option<&OsStr>,
+        fallback: Option<&OsStr>,
+    ) -> LinkOutcome {
+        link_on_path_with(
+            stable,
+            home,
+            login,
+            fallback,
+            false,
+            &home.join("no-system-bin"),
+        )
+    }
+
     #[cfg(unix)]
     #[test]
     fn links_into_local_bin_and_reports_it() {
@@ -638,7 +664,7 @@ mod tests {
         let login = login_path_with_local_bin(&home);
         let place = home.join(".local/bin/sirioctl");
 
-        let outcome = link_on_path(&stable, &home, Some(login.as_os_str()), false);
+        let outcome = link_for_test(&stable, &home, Some(login.as_os_str()), None);
 
         assert_eq!(outcome, LinkOutcome::Linked(place.clone()));
         assert_eq!(
@@ -658,7 +684,7 @@ mod tests {
         std::fs::create_dir_all(place.parent().expect("a parent")).expect("create the bin dir");
         symlink(&stable, &place).expect("make the link");
 
-        let outcome = link_on_path(&stable, &home, Some(login.as_os_str()), false);
+        let outcome = link_for_test(&stable, &home, Some(login.as_os_str()), None);
 
         assert_eq!(outcome, LinkOutcome::AlreadyLinked(place.clone()));
         assert_eq!(
@@ -679,7 +705,7 @@ mod tests {
 
         std::fs::write(&place, b"someone else's").expect("write a foreign file");
         assert_eq!(
-            link_on_path(&stable, &home, Some(login.as_os_str()), false),
+            link_for_test(&stable, &home, Some(login.as_os_str()), None),
             LinkOutcome::Foreign {
                 place: place.clone(),
                 points_to: None,
@@ -696,7 +722,7 @@ mod tests {
         std::fs::write(&elsewhere, b"another copy").expect("write the other copy");
         symlink(&elsewhere, &place).expect("make a foreign link");
         assert_eq!(
-            link_on_path(&stable, &home, Some(login.as_os_str()), false),
+            link_for_test(&stable, &home, Some(login.as_os_str()), None),
             LinkOutcome::Foreign {
                 place: place.clone(),
                 points_to: Some(elsewhere.clone()),
@@ -717,7 +743,7 @@ mod tests {
         let login = OsString::from("/usr/bin:/bin");
         let place = home.join(".local/bin/sirioctl");
 
-        let outcome = link_on_path(&stable, &home, Some(login.as_os_str()), false);
+        let outcome = link_for_test(&stable, &home, Some(login.as_os_str()), None);
 
         assert_eq!(outcome, LinkOutcome::NotOnLoginPath(place.clone()));
         assert_eq!(
@@ -737,7 +763,7 @@ mod tests {
         let user_path = login_path_with_local_bin(&home);
         let place = home.join(".local/bin/sirioctl");
 
-        let outcome = link_on_path_with(&stable, &home, None, Some(user_path.as_os_str()), false);
+        let outcome = link_for_test(&stable, &home, None, Some(user_path.as_os_str()));
 
         assert_eq!(outcome, LinkOutcome::Linked(place.clone()));
         assert_eq!(
@@ -760,7 +786,7 @@ mod tests {
         symlink(&removed, &place).expect("make the dangling link");
         assert!(!removed.exists());
 
-        let outcome = link_on_path(&stable, &home, Some(login.as_os_str()), false);
+        let outcome = link_for_test(&stable, &home, Some(login.as_os_str()), None);
 
         assert_eq!(outcome, LinkOutcome::Linked(place.clone()));
         assert_eq!(
@@ -783,7 +809,7 @@ mod tests {
         let escaping = root.join("data/Sirio/../elsewhere/sirioctl");
         symlink(&escaping, &place).expect("make the escaping link");
 
-        let outcome = link_on_path(&stable, &home, Some(login.as_os_str()), false);
+        let outcome = link_for_test(&stable, &home, Some(login.as_os_str()), None);
 
         assert_eq!(
             outcome,

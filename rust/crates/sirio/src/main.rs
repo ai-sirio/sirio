@@ -17173,12 +17173,12 @@ impl SirioWorkspace {
         // release build makes that copy first, on the background executor.
         let environment: BTreeMap<String, String> = std::env::vars().collect();
         let Some(sirioctl_path) = cli_install::release_sirioctl_path(&environment) else {
-            report(
-                self,
-                "sirioctl not found: no absolute data directory (XDG_DATA_HOME, HOME or LOCALAPPDATA)"
-                    .into(),
-                cx,
-            );
+            let missing = if cfg!(windows) {
+                "sirioctl not found: no absolute data directory (LOCALAPPDATA)"
+            } else {
+                "sirioctl not found: no absolute data directory (XDG_DATA_HOME or HOME)"
+            };
+            report(self, missing.into(), cx);
             return;
         };
         let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();

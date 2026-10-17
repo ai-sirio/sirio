@@ -160,8 +160,13 @@ pub(crate) fn ensure_stable_copy(
 ) -> Result<(PathBuf, CopyOutcome), String> {
     let _install = INSTALL.lock().unwrap_or_else(PoisonError::into_inner);
     let dir = sirioctl_install_dir(environment, debug).ok_or_else(|| {
-        "sirioctl has no stable directory: XDG_DATA_HOME, HOME and LOCALAPPDATA are all unset or not absolute"
-            .to_string()
+        // Only the base `sirioctl_install_dir` reads on this platform counts.
+        let reason = if cfg!(windows) {
+            "sirioctl has no stable directory: LOCALAPPDATA is not an absolute path"
+        } else {
+            "sirioctl has no stable directory: neither XDG_DATA_HOME nor HOME is an absolute path"
+        };
+        reason.to_string()
     })?;
     let destination = dir.join(sirioctl_binary_name());
     let Some(source) = find_source(current_exe, environment, &destination) else {
