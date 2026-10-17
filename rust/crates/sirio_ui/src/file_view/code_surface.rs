@@ -13,16 +13,17 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-use ely_gpui_component::editor::{CodeEditor, Diagnostic, EditorEvent};
+use ely_gpui_component::editor::{CodeEditor, Diagnostic, EditorEvent, GitMark};
 use ely_gpui_component::primitives::Severity;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, HighlightStyle, Pixels, Point,
     Window,
 };
+use sirio_git::FileDiff;
 use sirio_theme::Theme;
 
 use super::{
-    CodeSpan, DiagnosticSeverity, FileDiagnostic, FileView, MarkdownMode, code_spans,
+    CodeSpan, DiagnosticSeverity, FileDiagnostic, FileView, MarkdownMode, code_spans, git_marks,
     line_highlights,
 };
 use crate::editor::{Language, LoadStatus, Selection, markdown_links_in_line};
@@ -80,6 +81,7 @@ impl FileView {
                     EditorEvent::SecondaryClick { offset, position } => {
                         view.code_secondary_click(*offset, *position, code, window, cx);
                     }
+                    EditorEvent::GitMarkPressed { line } => view.toggle_hunk(*line, cx),
                     // The read-only banner's "Make editable" unlocks the code
                     // editor. A snapshot stays read-only, so the lock goes back on
                     // before any key can reach it.
@@ -108,6 +110,7 @@ impl FileView {
         self.code_editor = Some(code);
         // Diagnostics may have arrived before the first draw.
         self.push_diagnostics(cx);
+        self.push_git(cx);
         self.apply_pending_reveal(cx);
     }
 
@@ -120,6 +123,87 @@ impl FileView {
         };
         let drawn = ely_diagnostics(&self.diagnostics, code.read(cx).text());
         code.update(cx, |code, cx| code.set_diagnostics(drawn, cx));
+    }
+
+    /// The file's diff against HEAD, as the app last pushed it. The gutter
+    /// marks it, and a hunk drawn in place stays open while the new diff still
+    /// opens one on the same line. A snapshot shows a revision, not the working
+    /// file, so it keeps no diff and no marks: a diff against HEAD would
+    /// describe a text the snapshot is not.
+    pub fn set_git_diff(&mut self, diff: Option<FileDiff>, cx: &mut Context<Self>) {
+        self.git_diff = if self.is_snapshot() { None } else { diff };
+        self.open_hunk = self.open_hunk.filter(|open| {
+            self.git_diff
+                .as_ref()
+                .and_then(|diff| git_marks::hunk_at(diff, *open))
+                .is_some_and(|hunk| git_marks::opening_line(&hunk) == *open)
+        });
+        self.push_git(cx);
+        cx.notify();
+    }
+
+    /// The gutter marks of the diff: each changed line of the file, sorted.
+    pub fn git_mark_lines(&self) -> Vec<(usize, GitMark)> {
+        self.git_diff
+            .as_ref()
+            .map(git_marks::marks)
+            .unwrap_or_default()
+    }
+
+    /// The gutter line of the hunk drawn in place, if one is open.
+    pub fn open_hunk_line(&self) -> Option<usize> {
+        self.open_hunk
+    }
+
+    /// A press on the gutter at `line` (`EditorEvent::GitMarkPressed`). A line
+    /// that opens a hunk draws it in place, or closes it when it is the hunk
+    /// already drawn. A line that opens no hunk changes nothing.
+    pub fn toggle_hunk(&mut self, line: usize, cx: &mut Context<Self>) {
+        let Some(hunk) = self
+            .git_diff
+            .as_ref()
+            .and_then(|diff| git_marks::hunk_at(diff, line))
+        else {
+            return;
+        };
+        let opening = git_marks::opening_line(&hunk);
+        self.open_hunk = if self.open_hunk == Some(opening) {
+            None
+        } else {
+            Some(opening)
+        };
+        self.push_git(cx);
+        cx.notify();
+    }
+
+    /// Closes the hunk drawn in place, if one is open.
+    pub(super) fn close_hunk(&mut self, cx: &mut Context<Self>) {
+        self.open_hunk = None;
+        self.push_git(cx);
+        cx.notify();
+    }
+
+    /// Hands the code editor the gutter marks and the hunk drawn in place, for
+    /// the text it holds now. Called when either changes, and once the editor
+    /// exists. A gap past the last line is drawn above that line (`fit`).
+    pub(super) fn push_git(&self, cx: &mut Context<Self>) {
+        let Some(code) = &self.code_editor else {
+            return;
+        };
+        let lines = code.read(cx).text().matches('\n').count() + 1;
+        let hunk = self
+            .open_hunk
+            .and_then(|open| {
+                self.git_diff
+                    .as_ref()
+                    .and_then(|diff| git_marks::hunk_at(diff, open))
+            })
+            .map(|hunk| git_marks::fit(hunk, lines));
+        let marks = self.git_mark_lines();
+        code.update(cx, |code, cx| {
+            code.set_git_marks(marks, cx);
+            code.set_diff(hunk.into_iter().collect(), cx);
+        });
     }
 
     /// A left press and release with the platform modifier at `offset`. A

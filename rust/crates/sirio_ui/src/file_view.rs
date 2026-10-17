@@ -31,6 +31,7 @@ use gpui::{
     canvas, deferred, div, point, prelude::*, px,
 };
 use sirio_diagram::{DiagramError, DiagramKind, Palette};
+use sirio_git::FileDiff;
 use sirio_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use sirio_project::resolve_file_link;
 use sirio_theme::Theme;
@@ -40,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use ely_gpui_component::editor::CodeEditor;
+use ely_gpui_component::editor::{CodeEditor, SingleCursor};
 use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection,
@@ -55,6 +56,7 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
 mod code_surface;
+mod git_marks;
 mod sync;
 
 use sync::minimal_edit;
@@ -229,6 +231,14 @@ pub struct FileView {
     /// terms. Replaced wholesale on every publish — an empty list is how a
     /// server says the errors are gone, so it must clear, not be ignored.
     diagnostics: Vec<FileDiagnostic>,
+    /// The file's diff against HEAD, as the app last pushed it (`set_git_diff`):
+    /// the gutter's marks and the hunk drawn in place. `None` for a file that is
+    /// not in a repository, is clean, or is a snapshot.
+    git_diff: Option<FileDiff>,
+    /// The gutter line that opens the hunk drawn in place, `None` when none is
+    /// drawn. It is the hunk's opening line (`git_marks::opening_line`), a line
+    /// that carries one of its marks, so `diff_open` names a line the gutter does.
+    open_hunk: Option<usize>,
     /// The offset the pointer is resting on, the frame point it rests at,
     /// and the timer that will turn that rest into a question. Replacing
     /// the `Task` cancels it, which is the whole of dwell cancellation.
@@ -427,6 +437,8 @@ impl FileView {
             definition_gesture: None,
             shell_facts: FileContextFacts::default(),
             diagnostics: Vec::new(),
+            git_diff: None,
+            open_hunk: None,
             hover_offset: None,
             hover_point: point(px(0.), px(0.)),
             hover_task: None,
@@ -1501,6 +1513,15 @@ impl Render for FileView {
             .flex()
             .flex_col()
             .bg(theme.ely.bg)
+            // Escape closes a hunk drawn in place and goes no further, so the
+            // code keeps its cursors. With no hunk drawn it passes on, and Ely
+            // collapses the cursors as it always has.
+            .capture_action(cx.listener(|view, _: &SingleCursor, _window, cx| {
+                if view.open_hunk.is_some() {
+                    view.close_hunk(cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
@@ -3375,6 +3396,76 @@ mod tests {
                 )
                 .child(div().flex_1().h_full().child(self.view.clone()))
         }
+    }
+
+    /// A diff that opens one hunk, on line 1, which adds a line after line 1.
+    fn one_added_line() -> sirio_git::FileDiff {
+        sirio_git::parse_diff("@@ -1,0 +2 @@\n+let z = 0;\n", Path::new("main.rs"))
+    }
+
+    /// How many cursors the code editor holds.
+    fn cursor_count(view: &gpui::Entity<FileView>, cx: &VisualTestContext) -> usize {
+        view.read_with(&cx.cx, |view, app| {
+            view.code_editor()
+                .expect("the code editor is drawn once the file has loaded")
+                .read(app)
+                .selections()
+                .len()
+        })
+    }
+
+    #[gpui::test]
+    async fn escape_closes_a_hunk_drawn_in_place_and_leaves_the_cursors_until_none_is_drawn(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Escape is Ely's `SingleCursor`, which collapses the cursors. With a
+        // hunk drawn in place it closes that hunk and stops, so both cursors
+        // stay. With none drawn it reaches Ely, which collapses them.
+        let file = TempFile::with_extension("rs", "let x = 1;\nlet y = 2;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_git_diff(Some(one_added_line()), cx);
+            view.toggle_hunk(1, cx);
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.open_hunk_line()),
+            Some(1),
+            "the press on the mark draws the hunk"
+        );
+        cx.update(|window, cx| {
+            focus_code(&view, window, cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.update(|_, app| {
+            let code = view
+                .read(app)
+                .code_editor()
+                .cloned()
+                .expect("the code editor is drawn once the file has loaded");
+            code.update(app, |code, cx| code.select([0..0, 11..11], cx));
+        });
+        assert_eq!(cursor_count(&view, &cx), 2, "two cursors before the key");
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.open_hunk_line()),
+            None,
+            "Escape closes the hunk drawn in place"
+        );
+        assert_eq!(
+            cursor_count(&view, &cx),
+            2,
+            "that Escape stops at the hunk, so the cursors stay"
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            cursor_count(&view, &cx),
+            1,
+            "with no hunk drawn, Escape reaches Ely and collapses the cursors"
+        );
     }
 
     #[gpui::test]
