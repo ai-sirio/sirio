@@ -10,6 +10,7 @@ members = [
     "vendor/ely-palette",
     "vendor/ely-gpui-component",
     "crates/sirio_perf",
+    "crates/sirio_env",
     "crates/sirio",
     "crates/sirio_theme",
     "crates/sirio_ui",

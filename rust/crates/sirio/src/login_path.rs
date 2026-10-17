@@ -11,22 +11,27 @@ use std::process::{Command, Stdio};
 const BEGIN: &str = "SIRIO_PATH_BEGIN";
 const END: &str = "SIRIO_PATH_END";
 
-/// Merge the login shell's PATH into this process's environment.
-///
-/// Must run before any thread exists: `set_var` is only sound single-threaded.
-pub(crate) fn adopt_login_shell_path() {
+/// The login shell's PATH, or `None` when the shell cannot run or prints none.
+pub(crate) fn login_shell_path() -> Option<OsString> {
     let (program, args) = sirio_terminal::command_shell_invocation(&format!(
         "printf '%s' {BEGIN}; printenv PATH; printf '%s' {END}"
     ));
-    let Some(login) = login_shell_path(&program, &args) else {
+    run_login_shell(&program, &args)
+}
+
+/// Merge the login shell's PATH into this process's environment.
+///
+/// Must run before any thread exists: `set_var` is only sound single-threaded.
+pub(crate) fn adopt_login_shell_path(login: Option<&OsStr>) {
+    let Some(login) = login else {
         return;
     };
     let current = std::env::var_os("PATH").unwrap_or_default();
     // SAFETY: called from the top of `main`, before any thread exists.
-    unsafe { std::env::set_var("PATH", merge_paths(&login, &current)) };
+    unsafe { std::env::set_var("PATH", merge_paths(login, &current)) };
 }
 
-fn login_shell_path(program: &str, args: &[String]) -> Option<OsString> {
+fn run_login_shell(program: &str, args: &[String]) -> Option<OsString> {
     // ponytail: no timeout; stdin is closed so the shell cannot block on a read.
     let output = Command::new(program)
         .args(args)
@@ -105,7 +110,7 @@ mod tests {
         std::fs::set_permissions(&fake_shell, std::fs::Permissions::from_mode(0o755))
             .expect("make fake shell executable");
 
-        let path = login_shell_path(
+        let path = run_login_shell(
             &fake_shell.to_string_lossy(),
             &["-lc".to_string(), "ignored".to_string()],
         );
@@ -116,6 +121,6 @@ mod tests {
 
     #[test]
     fn login_shell_path_is_none_when_the_shell_cannot_run() {
-        assert_eq!(login_shell_path("/definitely/missing/shell", &[]), None);
+        assert_eq!(run_login_shell("/definitely/missing/shell", &[]), None);
     }
 }

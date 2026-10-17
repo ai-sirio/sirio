@@ -7332,6 +7332,7 @@ dependencies = [
  "sirio_apply",
  "sirio_claude",
  "sirio_control",
+ "sirio_env",
  "sirio_forge",
  "sirio_git",
  "sirio_host_client",
@@ -7426,6 +7427,10 @@ dependencies = [
  "sha2 0.10.9",
  "ureq",
 ]
+
+[[package]]
+name = "sirio_env"
+version = "0.1.0"
 
 [[package]]
 name = "sirio_forge"

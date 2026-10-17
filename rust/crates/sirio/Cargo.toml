@@ -15,6 +15,7 @@ perf-native = ["gpui/profiler", "dep:perf_scheduler"]
 [dependencies]
 perf_scheduler = { package = "bezel-zed-scheduler", version = "=0.3.8", optional = true }
 sirio_perf = { path = "../sirio_perf" }
+sirio_env = { path = "../sirio_env" }
 sirio_lsp = { path = "../sirio_lsp" }
 notify.workspace = true
 # Sirio uses bezel's UI components; its Geist faces ship from `rust/assets/fonts`.

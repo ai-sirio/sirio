@@ -25665,11 +25665,18 @@ fn ensure_host_in_background(
 }
 
 fn main() {
-    // First statement in the process, and it has to stay first. `gpui`
-    // decides X11 vs Wayland by reading the environment
-    // (`guess_compositor`), so the environment has to be right before
-    // `application()` constructs anything — and `set_var` is only sound while
-    // this is still a single-threaded process. See `display_backend`.
+    // Read before anything below changes the environment: children get the
+    // user's environment (`sirio_env`), and `display_backend` and the Windows
+    // `set_var` both rewrite values here (`GDK_BACKEND`, `WAYLAND_DISPLAY`)
+    // that the children must keep as the user set them.
+    let process_environment: BTreeMap<String, String> = std::env::vars().collect();
+    let launch = sirio_env::launch_environment(&process_environment);
+
+    // The first statement that changes the environment, and it has to stay
+    // first among those. `gpui` decides X11 vs Wayland by reading the
+    // environment (`guess_compositor`), so the environment has to be right
+    // before `application()` constructs anything — and `set_var` is only sound
+    // while this is still a single-threaded process. See `display_backend`.
     #[cfg(target_os = "linux")]
     display_backend::prepare_environment();
 
@@ -25708,9 +25715,14 @@ fn main() {
     // Same single-threaded window, same reason: a Finder/Dock launch carries
     // launchd's minimal PATH, and everything that resolves a binary — agent
     // discovery, ACP server spawns, the npm installer — reads this process's
-    // environment rather than a login shell's.
+    // environment rather than a login shell's. The login PATH is read here,
+    // once, so the user environment below can merge it as well.
     #[cfg(not(windows))]
-    login_path::adopt_login_shell_path();
+    let login = login_path::login_shell_path();
+    #[cfg(not(windows))]
+    login_path::adopt_login_shell_path(login.as_deref());
+    #[cfg(windows)]
+    let login: Option<std::ffi::OsString> = None;
 
     // #364: after the env setup above (which must stay single-threaded and
     // before `application()`), before any logging or window exists.
@@ -25721,6 +25733,18 @@ fn main() {
     // resolved here, before the host, the sirioctl of every pane or anything
     // else asks for it; a pane receives it as SIRIO_PANE_HOST_HOME.
     session::export_pane_host_root();
+
+    // After the app's variables for its children are in the process, so
+    // `sirio_env` can copy them into the user environment. `cli_dir` leads
+    // PATH: the sirioctl Sirio installs there is the one a child finds first.
+    let cli_dir = xdg_data_home_for(&process_environment)
+        .join("Sirio")
+        .join("bin");
+    sirio_env::install(sirio_env::user_environment_from(
+        &launch,
+        login.as_deref(),
+        &cli_dir,
+    ));
 
     sirio_perf::init();
     // bezel's icons are `svg().path("icons/…")`; without an asset source

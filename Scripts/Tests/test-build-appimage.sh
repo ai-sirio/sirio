@@ -162,6 +162,14 @@ fi
 grep -q 'cd "\$HERE"' "$APPDIR/AppRun" || fail "AppRun must chdir into the AppDir (webkit ././ paths resolve from there)"
 grep -q 'exec "\$HERE/usr/bin/sirio"' "$APPDIR/AppRun" || fail "AppRun must exec the bundled sirio"
 grep -q 'apprun-hooks' "$APPDIR/AppRun" || fail "AppRun must source the gtk plugin's hook"
+# The launch environment is snapshotted before the launcher's first PATH
+# export, so sirio_env can give every child the user's own PATH.
+snapshot_line=$(grep -n -m1 'export SIRIO_LAUNCH_ENV=' "$APPDIR/AppRun" | cut -d: -f1 || true)
+path_line=$(grep -n -m1 '^export PATH=' "$APPDIR/AppRun" | cut -d: -f1 || true)
+[ -n "$snapshot_line" ] || fail "AppRun must export SIRIO_LAUNCH_ENV (the launch snapshot)"
+if [ -z "$path_line" ] || [ "$snapshot_line" -ge "$path_line" ]; then
+  fail "AppRun must snapshot SIRIO_LAUNCH_ENV before its first export PATH="
+fi
 
 # -- Failure modes ------------------------------------------------------------
 if SIRIO_TOOLS_DIR="$FAKE_TOOLS" SIRIO_WEBKIT_ROOT="$WEBKIT_ROOT" \
