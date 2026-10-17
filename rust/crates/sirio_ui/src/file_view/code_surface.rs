@@ -89,6 +89,19 @@ impl FileView {
                 }
             }),
             cx.on_focus(&focus, window, |view, _window, cx| view.check_external(cx)),
+            // Any key on the code dismisses the hover card. An observer, not a
+            // key-down listener: gpui runs a bound key's action (arrows, Enter,
+            // Backspace) before key-down listeners and stops there, capture
+            // phase included, so only an observer sees every key.
+            cx.observe_keystrokes(|view, _, window, cx| {
+                let focused = view
+                    .code_editor
+                    .as_ref()
+                    .is_some_and(|code| code.read(cx).focus_handle(cx).is_focused(window));
+                if focused {
+                    view.dismiss_hover(cx);
+                }
+            }),
         ];
         self.code_subscriptions.extend(subscriptions);
         self.code_editor = Some(code);
@@ -146,6 +159,11 @@ impl FileView {
     /// the word under the pointer. A press inside the selection keeps it, and
     /// a press on the gutter (`offset` is `None`) moves nothing. The menu opens
     /// either way, at the pointer.
+    ///
+    /// "Inside" is the primary selection only. A press inside a secondary
+    /// cursor's selection, but outside the primary's, moves the caret too, so
+    /// it collapses every cursor to one caret at the press. That is harmless:
+    /// a right press edits nothing, and the menu acts at a single point.
     fn code_secondary_click(
         &mut self,
         offset: Option<usize>,
@@ -384,7 +402,7 @@ fn code_highlighter(
         };
         let theme = Theme::get(cx);
         let palette = theme.syntax_palette();
-        line_highlights(spans, &links, &[], theme, &palette)
+        line_highlights(spans, &links, theme, &palette)
     }
 }
 
@@ -548,14 +566,32 @@ mod tests {
 
     #[test]
     fn findings_of_one_severity_keep_their_order() {
-        let found = ely_diagnostics(
-            &[
-                finding(0..3, DiagnosticSeverity::Warning, "first"),
-                finding(2..5, DiagnosticSeverity::Warning, "second"),
-            ],
-            "let x = 1;",
-        );
-        assert_eq!(messages(&found), vec!["first", "second"]);
+        // Forty findings, every third one Danger and the rest Warnings. The
+        // standard library's unstable sort keeps a short slice in order, so a
+        // handful would not show that the sort is stable.
+        let input: Vec<(DiagnosticSeverity, String)> = (0..40)
+            .map(|i| {
+                let severity = if i % 3 == 2 {
+                    DiagnosticSeverity::Error
+                } else {
+                    DiagnosticSeverity::Warning
+                };
+                (severity, format!("finding {i:02}"))
+            })
+            .collect();
+        let findings: Vec<FileDiagnostic> = input
+            .iter()
+            .map(|(severity, message)| finding(0..3, *severity, message))
+            .collect();
+        // Warnings first, then Danger, each in the order it came in.
+        let expected: Vec<String> = input
+            .iter()
+            .filter(|(severity, _)| *severity == DiagnosticSeverity::Warning)
+            .chain(input.iter().filter(|(severity, _)| *severity == DiagnosticSeverity::Error))
+            .map(|(_, message)| message.clone())
+            .collect();
+        let found = ely_diagnostics(&findings, "let x = 1;");
+        assert_eq!(messages(&found), expected);
     }
 
     #[test]

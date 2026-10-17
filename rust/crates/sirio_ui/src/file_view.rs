@@ -2236,23 +2236,16 @@ fn markdown_document(path: &Path, text: &str) -> Option<Document> {
 }
 
 /// Every styled run one source line hands to the code editor: the grammar's
-/// colours (`spans`, from [`code_spans`]), the Markdown link rules, and any
-/// squiggles passed in `underlines`. The code editor draws the findings
-/// itself now (`code_surface::ely_diagnostics`), so the highlighter passes none.
+/// colours (`spans`, from [`code_spans`]) and the Markdown link rules. The
+/// code editor draws the findings itself (`code_surface::ely_diagnostics`), so
+/// the highlighter has no squiggles to add.
 ///
-/// The three sets are merged with [`gpui::combine_highlights`] rather than
-/// sorted. `with_highlights` ends in `compute_runs`, which walks the ranges
-/// assuming each begins at or after the previous one's end — true while
-/// only syntax and links were in play, since `code_spans` fires for
-/// non-Markdown and `links` for Markdown and the two never met. A
-/// diagnostic sits *on* a coloured token by definition, so a sort is no
-/// longer enough; `combine_highlights` splits the overlap into disjoint
-/// runs and folds the styles. Syntax writes `color` and a diagnostic writes
-/// `underline`, so the fold never has to choose between them.
+/// The runs are sorted by start, because `with_highlights` ends in
+/// `compute_runs`, which walks the ranges assuming each begins at or after the
+/// previous one's end.
 fn line_highlights(
     spans: &[CodeSpan],
     links: &[(Range<usize>, String)],
-    underlines: &[(Range<usize>, DiagnosticSeverity)],
     theme: &Theme,
     syntax_palette: &bezel::theme::SyntaxPalette,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
@@ -2284,45 +2277,7 @@ fn line_highlights(
         )
     }));
     painted.sort_by_key(|(range, _)| range.start);
-    if underlines.is_empty() {
-        return painted;
-    }
-    gpui::combine_highlights(painted, underline_highlights(underlines, theme)).collect()
-}
-
-/// Dresses each span as the squiggle its severity earns.
-///
-/// Only `underline` is set. The glyphs keep whatever the grammar painted
-/// them: a diagnostic says "look here", not "this is a keyword now", and
-/// leaving `color` empty is also what lets `combine_highlights` merge this
-/// with the syntax runs in either order and land on the same result.
-fn underline_highlights(
-    spans: &[(Range<usize>, DiagnosticSeverity)],
-    theme: &Theme,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    spans
-        .iter()
-        .map(|(range, severity)| {
-            let color = match severity {
-                DiagnosticSeverity::Error => theme.ely.danger,
-                DiagnosticSeverity::Warning => theme.ely.warning,
-                DiagnosticSeverity::Information | DiagnosticSeverity::Hint => theme.ely.fg_subtle,
-            };
-            (
-                range.clone(),
-                HighlightStyle {
-                    underline: Some(UnderlineStyle {
-                        thickness: px(1.0),
-                        color: Some(color),
-                        // Wavy, not straight: a straight rule is already
-                        // the Markdown link style in this same surface.
-                        wavy: true,
-                    }),
-                    ..Default::default()
-                },
-            )
-        })
-        .collect()
+    painted
 }
 
 #[cfg(test)]
@@ -3224,24 +3179,59 @@ mod tests {
         );
     }
 
-    /// Tests for `underline_highlights` — the severity-to-style mapping and
-    /// its interaction with the syntax colours it is painted over.
-    mod underline_styles {
-        use super::*;
+    #[gpui::test]
+    async fn a_key_on_the_code_dismisses_a_resting_hover_card_and_still_reaches_the_editor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A key is not a pointer move, so the card is dismissed by the key
+        // itself; the caret moving proves the key still reached Ely.
+        let file = TempFile::with_extension("rs", "let x = 1;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic {
+                    line: 0,
+                    range: 4..5,
+                    severity: DiagnosticSeverity::Error,
+                    message: "boom".into(),
+                }],
+                cx,
+            );
+            view.hover_moved(4, point(px(10.), px(10.)), cx);
+        });
+        cx.update(|window, cx| {
+            focus_code(&view, window, cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.update(|_, app| select_code(&view, app, 0..0));
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned)).as_deref(),
+            Some("boom"),
+            "the card is showing before the key"
+        );
 
-        #[test]
-        fn an_underline_sets_no_colour_of_its_own() {
-            // The glyphs keep whatever the grammar painted them; only the
-            // rule underneath is the diagnostic's.
-            let styled = underline_highlights(&[(0..1, DiagnosticSeverity::Error)], &Theme::dark());
-            assert!(styled[0].1.color.is_none(),
-                "an error must not repaint the token it sits under");
-        }
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
+
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned)),
+            None,
+            "a key on the code dismisses the card"
+        );
+        let caret = cx.update(|_, app| {
+            let code = view
+                .read(app)
+                .code_editor()
+                .cloned()
+                .expect("the code editor is drawn once the file has loaded");
+            code.read(app).primary().range()
+        });
+        assert_eq!(caret, 1..1, "the arrow key still moved the caret in the editor");
     }
 
     /// Tests for `line_highlights` — the composition the code editor's highlighter hands
-    /// to `StyledText`, where the syntax colours and the diagnostic
-    /// squiggles finally meet.
+    /// to `StyledText`, where the syntax colours and the Markdown link rules
+    /// meet.
     mod line_style {
         use super::*;
 
@@ -3257,62 +3247,6 @@ mod tests {
         }
 
         #[test]
-        fn a_diagnostic_squiggles_its_span_without_disturbing_the_keyword() {
-            let theme = Theme::dark();
-            let palette = theme.syntax_palette();
-            let line = "let x = 1;";
-            let highlights = line_highlights(
-                &code_spans(Language::Rust, line),
-                &[],
-                &[(4..5, DiagnosticSeverity::Warning)],
-                &theme,
-                &palette,
-            );
-
-            let marked = style_at(&highlights, 4);
-            let underline = marked.underline.expect("the diagnostic span underlines");
-            assert!(underline.wavy);
-            assert_eq!(underline.color, Some(theme.ely.warning));
-
-            let keyword = style_at(&highlights, 0);
-            assert!(
-                keyword.underline.is_none(),
-                "`let` carries no diagnostic, so it carries no squiggle"
-            );
-            assert!(
-                keyword.color.is_some(),
-                "and it keeps the colour the grammar gave it"
-            );
-        }
-
-        /// `compute_runs` — what `with_highlights` ultimately feeds — walks
-        /// the ranges assuming each starts at or after the previous one's
-        /// end. A diagnostic sitting on a coloured token breaks that
-        /// assumption, which is why `combine_highlights` replaced the plain
-        /// sort this function used to do.
-        #[test]
-        fn the_runs_come_out_disjoint_and_ascending() {
-            let theme = Theme::dark();
-            let palette = theme.syntax_palette();
-            let highlights = line_highlights(
-                &code_spans(Language::Rust, "let x = 1;"),
-                &[],
-                &[(0..6, DiagnosticSeverity::Error)],
-                &theme,
-                &palette,
-            );
-            for pair in highlights.windows(2) {
-                assert!(
-                    pair[0].0.end <= pair[1].0.start,
-                    "overlapping runs reach compute_runs as garbage offsets: \
-                     {:?} then {:?}",
-                    pair[0].0,
-                    pair[1].0
-                );
-            }
-        }
-
-        #[test]
         fn a_markdown_link_still_underlines_straight_when_nothing_is_wrong() {
             let theme = Theme::dark();
             let palette = theme.syntax_palette();
@@ -3322,7 +3256,7 @@ mod tests {
                 .map(|span| (span.label_range, span.target))
                 .collect::<Vec<_>>();
             let highlights =
-                line_highlights(&code_spans(Language::Markdown, line), &links, &[], &theme, &palette);
+                line_highlights(&code_spans(Language::Markdown, line), &links, &theme, &palette);
             let label = style_at(&highlights, 1);
             let underline = label.underline.expect("a link underlines");
             assert!(!underline.wavy, "a link is a straight rule; only a diagnostic waves");
