@@ -28,12 +28,11 @@
 
 use std::ops::Range;
 
-use ely_gpui_component::editor::{CodeEditor, FindOptions, FindWidget, find_all};
+use ely_gpui_component::editor::{FindOptions, FindWidget, find_all};
 use ely_gpui_component::forms::{InputEvent, TextInput};
-use ely_gpui_component::theme::{ActiveTheme as _, TextSize};
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, Pixels, SharedString,
-    Subscription, Window, div, font, prelude::*, px,
+    AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, SharedString,
+    Subscription, Window, div, prelude::*, px,
 };
 use sirio_theme::Theme;
 
@@ -75,25 +74,6 @@ fn washes(cx: &App) -> (Hsla, Hsla) {
 /// pattern above it, and only that last line fits the widget's count slot.
 fn last_line(message: &str) -> &str {
     message.lines().last().unwrap_or(message).trim()
-}
-
-/// How far the code editor's minimap reaches in from the right edge, for the
-/// widget to stay clear of it. Ely sizes the minimap at 12 columns of its
-/// code font (`MINIMAP` in its `editor/view.rs`, which is private).
-fn minimap_inset(code: &Entity<CodeEditor>, window: &Window, cx: &App) -> Pixels {
-    if !code.read(cx).view_options().minimap {
-        return px(0.0);
-    }
-    let theme = cx.theme();
-    let size = theme.text_size(TextSize::Sm).to_pixels(window.rem_size());
-    let mono = window
-        .text_system()
-        .resolve_font(&font(theme.mono_family.clone()));
-    let advance = window
-        .text_system()
-        .advance(mono, size, 'm')
-        .map_or(size * 0.6, |advance| advance.width);
-    advance * 12.0
 }
 
 impl FileView {
@@ -432,18 +412,14 @@ impl FileView {
         self.find.as_ref().and_then(|find| find.error.as_deref())
     }
 
-    /// The find widget over the top-right of the code, when find is open and
-    /// the code is shown. It sits left of the minimap.
-    pub(super) fn render_find(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    /// The find bar docked above the code, when find is open and the code is
+    /// shown. The code below it is as much shorter as the bar is tall, so the
+    /// bar covers none of the text, the minimap or the read-only banner.
+    pub(super) fn render_find(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let find = self.find.as_ref()?;
         if !self.code_shown() {
             return None;
         }
-        let code = self.code_editor.as_ref()?;
         let entity = cx.entity();
         let options = {
             let entity = entity.clone();
@@ -498,33 +474,36 @@ impl FileView {
             }
         }
         // The press stops here: the tab's own press hands the keyboard to the
-        // code, which would take it back from the field the press was for.
-        // The box blocks the pointer from the code under it (gpui's hit test
-        // reaches through anything that does not), so no card or hover is
-        // asked for text the box hides and the code's cursor does not show
-        // through; the wheel still scrolls the code. A card drawn before the
-        // pointer slid onto the box goes with the first move on it.
-        // The strip spans the code's width and passes the pointer through; the
-        // box is its right-aligned child and gives way (it shrinks) in a pane
-        // narrower than its own width, rather than running off the left edge.
+        // code, which would take it back from the field the press was for. A
+        // pointer that slides from the code onto the bar drops the code's
+        // hover card, which the bar would otherwise leave drawn.
+        // The bar spans the code's width with the widget right-aligned in it;
+        // the widget shrinks in a pane narrower than its own fixed width
+        // rather than running off the left edge, and the bar's padding is
+        // small so the query field keeps what the widget's other controls
+        // leave of a narrow pane.
+        let theme = Theme::get(cx);
         Some(
             div()
-                .absolute()
-                .top(px(8.0))
-                .left(px(12.0))
-                .right(minimap_inset(code, window, cx) + px(12.0))
+                .id("file-find-bar")
+                .debug_selector(|| "file-find-bar".into())
+                .w_full()
                 .flex()
                 .justify_end()
+                .px(px(4.0))
+                .py(px(4.0))
+                .bg(theme.ely.surface)
+                .border_b_1()
+                .border_color(theme.ely.border)
+                .on_mouse_move(cx.listener(|view, _, _, cx| view.dismiss_hover(cx)))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .child(
                     div()
                         .id("file-find")
                         .debug_selector(|| "file-find".into())
                         .flex()
                         .min_w_0()
-                        .block_mouse_except_scroll()
-                        .on_mouse_move(cx.listener(|view, _, _, cx| view.dismiss_hover(cx)))
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                         .child(widget),
                 )
                 .into_any_element(),

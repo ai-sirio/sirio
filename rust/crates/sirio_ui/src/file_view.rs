@@ -1426,7 +1426,7 @@ impl FileView {
                             theme,
                             entity.clone(),
                             self.code_editor.as_ref(),
-                            self.render_find(window, cx),
+                            self.render_find(cx),
                             &self.scroll,
                             preview,
                         ))
@@ -2090,25 +2090,35 @@ fn render_content(
     }
     // The code editor draws and scrolls the source itself; the selector is the
     // one the drawn-frame tests use to ask whether the source is on screen.
+    // The find bar, when open, is the first row of this column and the code
+    // takes what it leaves, so nothing is drawn over the code.
     source
         .child(
             div()
-                .id("file-text-scroll")
                 .flex_1()
                 .min_h(px(0.0))
-                .relative()
-                .debug_selector(|| "file-text-scroll".into())
-                .when_some(code.cloned(), |this, code| {
-                    // A right press on the code is the code editor's own
-                    // `SecondaryClick`, which opens the menu. Stopping it here
-                    // keeps the view's listener above from opening it a second
-                    // time. The stop is in bubble order, after the editor's
-                    // listener has run.
-                    this.on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                        .child(code)
-                })
-                // Over the code's top-right, left of its minimap.
-                .when_some(find, |this, find| this.child(find)),
+                .flex()
+                .flex_col()
+                .when_some(find, |this, find| this.child(find))
+                .child(
+                    div()
+                        .id("file-text-scroll")
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .relative()
+                        .debug_selector(|| "file-text-scroll".into())
+                        .when_some(code.cloned(), |this, code| {
+                            // A right press on the code is the code editor's own
+                            // `SecondaryClick`, which opens the menu. Stopping it
+                            // here keeps the view's listener above from opening it
+                            // a second time. The stop is in bubble order, after
+                            // the editor's listener has run.
+                            this.on_mouse_down(MouseButton::Right, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .child(code)
+                        }),
+                ),
         )
         .into_any_element()
 }
@@ -3849,9 +3859,11 @@ mod tests {
 
     // How Find can fail around the box and the query (task 9b, from 9a's review):
     //
-    // - The pointer resting on the box reaches the code under it: a diagnostic
-    //   line pops its card for text the box hides, and a card already drawn
-    //   stays when the pointer slides onto the box.
+    // - A card already drawn for the code stays when the pointer slides from the
+    //   code onto the find bar.
+    // - The bar floats over the code instead of sitting above it: it hides the
+    //   first lines (and the read-only banner at the top of the code), and
+    //   closing it leaves the code at a different height than it had.
     // - Find pressed while typing in the query takes the code's selection as
     //   the query, which after any step is the current match, and so replaces
     //   a pattern such as `fo+` with the text it matched.
@@ -3881,7 +3893,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_pointer_on_the_find_box_does_not_reach_the_code_under_it(
+    async fn the_pointer_sliding_from_the_code_onto_the_find_bar_drops_the_card(
         cx: &mut gpui::TestAppContext,
     ) {
         // Long lines and one finding over all of them, so any point of the code
@@ -3910,14 +3922,14 @@ mod tests {
         let line_bounds = cx
             .debug_bounds("code-editor-line-0")
             .expect("the first line is drawn");
-        // Past the gutter, and left of the box, which sits at the right.
+        // Past the gutter.
         let on_code = point(line_bounds.origin.x + px(300.), line_bounds.center().y);
         cx.simulate_mouse_move(on_code, None, Modifiers::none());
         cx.run_until_parked();
         assert_eq!(
             card(&cx).as_deref(),
             Some("boom"),
-            "resting on the code away from the box shows the diagnostic"
+            "resting on the code shows the diagnostic"
         );
 
         let find = cx.debug_bounds("file-find").expect("the find box is drawn");
@@ -3926,8 +3938,69 @@ mod tests {
         assert_eq!(
             card(&cx),
             None,
-            "the pointer on the box neither shows the card of the code under it nor keeps the old one"
+            "the pointer on the find bar does not keep the card of the code it left"
         );
+    }
+
+    #[gpui::test]
+    async fn the_find_bar_sits_above_the_code_and_the_code_gets_its_height_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A snapshot, so the code's read-only banner is drawn at its top too.
+        cx.update(|cx| {
+            Theme::init(cx);
+            ::editor::init(cx);
+            crate::ely::init(cx);
+        });
+        let text = (0..40).map(|n| format!("line {n}\n")).collect::<String>();
+        let window = cx.add_window(|_window, cx| {
+            FileView::snapshot(snapshot_origin_for_tests(), text.into_bytes(), cx)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let view = cx.update(|window, _| window.root::<FileView>().flatten().expect("root"));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        let code_height = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("file-text-scroll")
+                .expect("the code is drawn")
+                .size
+                .height
+        };
+        let before = code_height(&mut cx);
+
+        open_find(&view, "line", None, &mut cx);
+        let bar = cx.debug_bounds("file-find-bar").expect("the find bar is drawn");
+        let code = cx.debug_bounds("file-text-scroll").expect("the code is drawn");
+        let first = cx
+            .debug_bounds("code-editor-line-0")
+            .expect("the first line is drawn");
+        assert!(
+            bar.bottom() <= code.top(),
+            "the bar ends ({:?}) before the code begins ({:?})",
+            bar.bottom(),
+            code.top()
+        );
+        assert!(
+            first.top() >= bar.bottom(),
+            "the first line (below the read-only banner) is not under the bar"
+        );
+        assert_eq!(
+            code.size.height + bar.size.height,
+            before,
+            "the code is as much shorter as the bar is tall"
+        );
+        assert_eq!(bar.size.width, code.size.width, "the bar spans the code's width");
+
+        view.update(&mut cx.cx, |view, _| view.find = None);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+        assert!(cx.debug_bounds("file-find-bar").is_none(), "closed find draws no bar");
+        assert_eq!(code_height(&mut cx), before, "closing find gives the code its height back");
     }
 
     #[gpui::test]
