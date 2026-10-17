@@ -1798,16 +1798,6 @@ impl ControlState {
         self.current.and_then(|index| self.workspaces.get(index))
     }
 
-    /// The id `worktree-set --worktree` accepts for the worktree a selector
-    /// names: the value a terminal of that worktree exports as
-    /// `SIRIO_WORKTREE_ID` (spec §5.3).
-    fn worktree_id(&self, selector: &str) -> Option<String> {
-        self.workspaces
-            .iter()
-            .find(|workspace| workspace.id == selector || workspace.path == selector)
-            .map(|workspace| workspace.id.clone())
-    }
-
     fn path_for_selector(&self, selector: &str) -> Option<PathBuf> {
         self.workspaces
             .iter()
@@ -2101,17 +2091,10 @@ impl AppControlHandler {
                         working_directory.to_string_lossy().into_owned(),
                     );
                 }
-                // A pane created for a named worktree carries its id, as a
-                // terminal of that worktree does (spec §5.3).
-                let extra_env = match request.params.get("worktree") {
-                    Some(selector) if request.method == "panel.create" => self
-                        .state()
-                        .worktree_id(selector)
-                        .map(|id| BTreeMap::from([("SIRIO_WORKTREE_ID".to_string(), id)]))
-                        .unwrap_or_default(),
-                    _ => BTreeMap::new(),
-                };
-                let response = self.host_request(&request, &extra_env);
+                // The pane carries the id of the worktree its directory is in,
+                // as a terminal of that worktree does (spec §5.3); `host_call`
+                // reads it per pane, from the directory each one starts in.
+                let response = self.host_request(&request);
                 self.refresh_control();
                 response
             }
@@ -2136,7 +2119,7 @@ impl AppControlHandler {
                 if self.host_terminal.client().is_none() {
                     return Self::pane_error(request, self.panes.missing_pane_error(&id));
                 }
-                let response = self.host_request(request, &BTreeMap::new());
+                let response = self.host_request(request);
                 if method == "panel.close" {
                     self.refresh_control();
                 }
@@ -2189,18 +2172,20 @@ impl AppControlHandler {
 
     /// Runs one call against the host, off the GPUI thread. A lost connection
     /// is `Unreached`; a read (`read_only`) is run once more over a connection
-    /// rebuilt by the factory's reconnect, a write never is.
+    /// rebuilt by the factory's reconnect, a write never is. Each pane the call
+    /// creates gets the variables of the worktree its directory is in.
     fn host_call<T>(
         &self,
         read_only: bool,
-        extra_env: &BTreeMap<String, String>,
         call: impl Fn(&sirio_control::host_panels::HostPanels) -> Result<T, sirio_control::host_panels::Failure>,
     ) -> Result<T, sirio_control::host_panels::Failure> {
         use sirio_control::host_panels::{Failure, HostPanels};
         let Some(client) = self.host_terminal.client() else {
             return Err(Failure::Unreached("the host is not running".to_string()));
         };
-        let panels = |client| HostPanels::new(client).with_extra_env(extra_env.clone());
+        let panels = |client| {
+            HostPanels::new(client).with_worktree_environment(self.worktree_environment_resolver())
+        };
         match call(&panels(client)) {
             Err(Failure::Unreached(message)) if read_only => match self.host_terminal.reconnect() {
                 Some(fresh) => call(&panels(fresh)),
@@ -2210,15 +2195,26 @@ impl AppControlHandler {
         }
     }
 
-    /// Forwards one `panel.*` request to the host, with `extra_env` for any pane
-    /// it creates; a lost connection is reported, not guessed at.
-    fn host_request(
+    /// The variables of the worktree that holds a directory, read from the
+    /// control state each time a pane is created. The guard lives only inside
+    /// the closure, so no host call runs while the state is locked.
+    fn worktree_environment_resolver(
         &self,
-        request: &ControlRequest,
-        extra_env: &BTreeMap<String, String>,
-    ) -> ControlResponse {
+    ) -> Arc<dyn Fn(&Path) -> BTreeMap<String, String> + Send + Sync> {
+        let state = Arc::clone(&self.state);
+        Arc::new(move |directory: &Path| {
+            let control = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            worktree_environment_in(&control, directory)
+        })
+    }
+
+    /// Forwards one `panel.*` request to the host; a lost connection is
+    /// reported, not guessed at.
+    fn host_request(&self, request: &ControlRequest) -> ControlResponse {
         let read_only = sirio_control::host_panels::HostPanels::is_read_only(&request.method);
-        match self.host_call(read_only, extra_env, |host| host.answer(request)) {
+        match self.host_call(read_only, |host| host.answer(request)) {
             Ok(response) => response,
             Err(_) => ControlResponse::failure(&request.id, "Sirio could not reach its host"),
         }
@@ -2227,9 +2223,7 @@ impl AppControlHandler {
     /// Brings the registry's control sessions up to the host's listing, so
     /// the sidebar and `panel.list` see what the host holds.
     fn refresh_control(&self) {
-        if let Ok(sessions) =
-            self.host_call(true, &BTreeMap::new(), |host| host.control_sessions())
-        {
+        if let Ok(sessions) = self.host_call(true, |host| host.control_sessions()) {
             if let Err(error) = self.panes.set_control_sessions(sessions) {
                 eprintln!("[control] failed to register control sessions: {error}");
             }

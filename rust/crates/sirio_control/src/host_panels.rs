@@ -49,29 +49,37 @@ impl From<String> for Failure {
 
 pub struct HostPanels {
     client: TermClient,
-    /// Variables every pane this translation creates gets over the user
-    /// environment (`SIRIO_WORKTREE_ID`, when the app names a worktree).
-    extra_env: BTreeMap<String, String>,
+    /// The variables a pane gets over the user environment, from the directory
+    /// it starts in (`SIRIO_WORKTREE_ID`, from the app's worktree that holds
+    /// it). `None`, as sirioctl's fallback has it, gives every pane none.
+    worktree_environment: Option<
+        std::sync::Arc<dyn Fn(&std::path::Path) -> BTreeMap<String, String> + Send + Sync>,
+    >,
 }
 
 impl HostPanels {
     pub fn new(client: TermClient) -> Self {
         Self {
             client,
-            extra_env: BTreeMap::new(),
+            worktree_environment: None,
         }
     }
 
-    /// The panes this translation creates get `extra_env` over the user
-    /// environment, whichever side answered.
-    pub fn with_extra_env(mut self, extra_env: BTreeMap<String, String>) -> Self {
-        self.extra_env = extra_env;
+    /// The panes this translation creates get the variables `resolve` names
+    /// for the directory each one starts in, whichever side answered. `resolve`
+    /// runs once per pane, at the moment it is created.
+    pub fn with_worktree_environment(
+        mut self,
+        resolve: std::sync::Arc<dyn Fn(&std::path::Path) -> BTreeMap<String, String> + Send + Sync>,
+    ) -> Self {
+        self.worktree_environment = Some(resolve);
         self
     }
 
     /// The `term.create` of a pane, in the user's environment. `env_exact` is
     /// what the host can honour: `TermClient::create` clears it for a host
-    /// without the capability, and the blanks then stand in for it.
+    /// without the capability, and the blanks then stand in for it. A split
+    /// passes its parent's `cwd`, so a split resolves from the same directory.
     fn create_params(
         &self,
         cwd: String,
@@ -79,6 +87,10 @@ impl HostPanels {
         parent: Option<String>,
     ) -> CreateParams {
         let exact = self.client.env_exact();
+        let extra = self
+            .worktree_environment
+            .as_ref()
+            .map_or_else(BTreeMap::new, |resolve| resolve(std::path::Path::new(&cwd)));
         CreateParams {
             session_id: None,
             cwd,
@@ -86,7 +98,7 @@ impl HostPanels {
             env: sirio_env::host_create_env(
                 exact,
                 &sirio_env::for_child(),
-                &self.extra_env,
+                &extra,
                 &sirio_env::absent_from_user(),
             ),
             size: CONTROL_SIZE,

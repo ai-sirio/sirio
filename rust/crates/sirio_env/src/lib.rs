@@ -24,6 +24,9 @@ pub const LAUNCHER_ONLY: [&str; 5] = ["APPIMAGE", "APPDIR", "ARGV0", "OWD", LAUN
 /// Every other `set_var` or `remove_var` in `sirio` is for the app alone.
 pub const FOR_CHILDREN: [&str; 1] = ["SIRIO_PANE_HOST_HOME"];
 
+/// Set per pane by whoever opens it, so never inherited.
+pub const PER_PANE: [&str; 1] = ["SIRIO_WORKTREE_ID"];
+
 static INSTALLED: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
 /// The environment the user launched with, without the launcher's own variables.
@@ -82,6 +85,11 @@ fn is_path_name(name: &str) -> bool {
 /// `main`, after the exports for its children and before `application()`; a
 /// second call is ignored.
 pub fn install(mut user: BTreeMap<String, String>) {
+    // A pane's variables come from the pane, never from the launch that
+    // started the app or a sirioctl run inside a pane.
+    for name in PER_PANE {
+        user.remove(name);
+    }
     // The app's own decision wins: a variable it exported is in the process,
     // and one it removed must not survive from the launch snapshot.
     for name in FOR_CHILDREN {
@@ -105,9 +113,11 @@ pub fn installed() -> Option<&'static BTreeMap<String, String>> {
 /// The environment for a child that a site starts through something other than
 /// `command`: the user environment once installed, else this process's.
 pub fn for_child() -> BTreeMap<String, String> {
-    installed()
-        .cloned()
-        .unwrap_or_else(|| std::env::vars().collect())
+    installed().cloned().unwrap_or_else(|| {
+        std::env::vars()
+            .filter(|(name, _)| !PER_PANE.contains(&name.as_str()))
+            .collect()
+    })
 }
 
 /// `Command::new(program)` in the user environment. This is the only way a site
@@ -139,6 +149,7 @@ pub fn absent_from_user() -> Vec<String> {
 /// (`term.env_exact`). Without it the host extends its own environment with
 /// the map, so each name the user environment lacks is sent blank: the host's
 /// copy of that variable is emptied, as far as a best-effort host can manage.
+/// `SHELL` is the exception, left for the PTY layer to default.
 pub fn host_create_env(
     exact: bool,
     user: &BTreeMap<String, String>,
@@ -149,7 +160,11 @@ pub fn host_create_env(
     environment.extend(extra.iter().map(|(name, value)| (name.clone(), value.clone())));
     if !exact {
         for name in absent {
-            environment.entry(name.clone()).or_default();
+            // portable-pty fills SHELL only when the key is missing, so a blank
+            // one would empty the pane's $SHELL.
+            if name != "SHELL" {
+                environment.entry(name.clone()).or_default();
+            }
         }
     }
     environment
@@ -383,6 +398,29 @@ mod tests {
         }
     }
 
+    /// A pane's id is set per pane by whoever opens it. A variable the app's
+    /// own launch carries (a sirioctl run from a pane, say) must not reach a
+    /// child that starts without `install`.
+    #[test]
+    fn for_child_never_carries_an_inherited_worktree_id() {
+        // SAFETY: a test process of its own under nextest, as above.
+        unsafe { std::env::set_var("SIRIO_WORKTREE_ID", "wt-inherited") };
+        assert!(!for_child().contains_key("SIRIO_WORKTREE_ID"));
+    }
+
+    #[test]
+    fn install_drops_a_worktree_id_the_user_map_carries() {
+        install(map(&[
+            ("PATH", "/usr/bin"),
+            ("SIRIO_WORKTREE_ID", "wt-inherited"),
+        ]));
+        assert!(
+            !installed()
+                .expect("installed")
+                .contains_key("SIRIO_WORKTREE_ID")
+        );
+    }
+
     #[test]
     fn for_children_variables_reach_the_user_environment() {
         // SAFETY: a test process of its own under nextest; nothing else reads
@@ -448,6 +486,17 @@ mod tests {
                 ("LD_LIBRARY_PATH", ""),
                 ("LEFT_OVER", "kept"),
             ])
+        );
+        // `SHELL` is never blanked: portable-pty fills it only when the key is
+        // missing, so a blank one would empty the pane's $SHELL.
+        assert_eq!(
+            host_create_env(
+                false,
+                &user,
+                &BTreeMap::new(),
+                &["SHELL".to_string(), "APPDIR".to_string()],
+            ),
+            map(&[("PATH", "/usr/bin"), ("APPDIR", "")])
         );
     }
 }
