@@ -1,0 +1,92 @@
+# Local override of the published `bezel-markdown` crate (release 0.1.4), substituted in via the
+# `[patch.crates-io]` section of ../../Cargo.toml. See ../README.md for what changed and why.
+# Everything below mirrors the released manifest field-for-field except the `[workspace]` table
+# (so this path resolves as an independent workspace root rather than an implicit member of the
+# enclosing one) and `publish = false`. `[package] name` stays `bezel-markdown` so this path matches
+# the crates.io package name the `[patch.crates-io]` entry targets; `[lib] name` stays `markdown`.
+
+[workspace]
+
+[package]
+edition = "2024"
+publish = false
+rust-version = "1.85"
+name = "bezel-markdown"
+version = "0.1.4"
+authors = ["clearloop <tianyi.gc@gmail.com>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "A Notion-style block document model for gpui — markdown in, markdown out"
+homepage = "https://github.com/crabtalk/bezel"
+readme = "README.md"
+keywords = [
+    "gpui",
+    "gui",
+    "ui",
+    "components",
+]
+categories = ["gui"]
+license = "MIT"
+repository = "https://github.com/crabtalk/bezel"
+resolver = "2"
+
+[lib]
+name = "markdown"
+path = "src/lib.rs"
+
+[[test]]
+name = "blocks"
+path = "tests/blocks.rs"
+
+[[test]]
+name = "clipboard"
+path = "tests/clipboard.rs"
+
+[[test]]
+name = "doc"
+path = "tests/doc.rs"
+
+[[test]]
+name = "edit"
+path = "tests/edit.rs"
+
+[[test]]
+name = "format"
+path = "tests/format.rs"
+
+[[test]]
+name = "parse"
+path = "tests/parse.rs"
+
+[[test]]
+name = "render"
+path = "tests/render.rs"
+
+[[test]]
+name = "select"
+path = "tests/select.rs"
+
+[[test]]
+name = "serialize"
+path = "tests/serialize.rs"
+
+[dependencies.gpui]
+version = "0.3.8"
+package = "bezel-gpui"
+
+[dependencies.pulldown-cmark]
+version = "0.13"
+default-features = false
+
+[dependencies.theme]
+version = "0.1.4"
+package = "bezel-theme"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+priority = 0
+check-cfg = ['cfg(feature, values("cargo-clippy"))']

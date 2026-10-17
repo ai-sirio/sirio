@@ -109,6 +109,12 @@ Scripts/Tests/test-change-request-handoff-e2e.sh   # -> prints "HANDOFF E2E OK"
 # dark and light (docs/testing/ely-forge-probe.md).
 Scripts/Tests/test-ely-forge-probe.sh --xvfb   # -> prints "ELY FORGE PROBE OK"
 
+# The selection bezel-markdown paints (a chat response, the Markdown Preview):
+# a selected document whose rows soft-wrap, break and wrap a code span, on a
+# private Xvfb; fails when any row's wash starts after its first glyph, the
+# defect the vendored bezel_markdown fixes (rust/vendor/README.md).
+Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SELECTION PROBE OK"
+
 # Iterate on one crate only
 cd rust && cargo test -p <crate>
 
