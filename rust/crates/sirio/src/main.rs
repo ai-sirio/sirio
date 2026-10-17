@@ -24192,8 +24192,7 @@ fn new_worktree_path(project: &str, branch: &str) -> PathBuf {
 fn resolve_sirioctl_for_process() -> Result<PathBuf, String> {
     let current_exe = std::env::current_exe().unwrap_or_default();
     let environment: BTreeMap<String, String> = std::env::vars().collect();
-    cli_install::ensure_stable_copy(&current_exe, &environment, cli_install::stable_is_debug())
-        .map(|(path, _)| path)
+    cli_install::resolve_for_pane(&current_exe, &environment, cli_install::stable_is_debug())
 }
 
 /// The user's home directory, or `None` when the environment offers no
@@ -25610,6 +25609,10 @@ fn main() {
     {
         eprintln!("[sirio] could not create {}: {error}", dir.display());
     }
+    // The stable path the hook repair names: the same on every launch of this build.
+    let stable_sirioctl = install_dir
+        .as_ref()
+        .map(|dir| dir.join(cli_install::sirioctl_binary_name()));
     let cli_prefix = install_dir.filter(|dir| cli_install::safe_path_prefix(dir));
     sirio_env::install(sirio_env::user_environment_from(
         &launch,
@@ -25669,20 +25672,14 @@ fn main() {
         // come. `migrate_file` touches only the path, never pane ids,
         // arguments, unrelated hooks, or other JSON keys; an unchanged or
         // unparseable file is a no-op.
-        // The stable copy is made on a background thread, and the repair waits
-        // for it: a launch never reads or copies sirioctl itself.
-        let worktree_paths: Vec<PathBuf> = project_catalog
-            .projects()
-            .iter()
-            .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
-            .collect();
-        cli_install::ensure_at_startup(
-            std::env::current_exe().unwrap_or_default(),
-            std::env::vars().collect(),
-            move |sirioctl_path| {
-                let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();
-                for worktree_path in worktree_paths {
-                    let settings_path = worktree_path.join(".claude").join("settings.local.json");
+        // The repair runs here, synchronously, and names the stable path, which
+        // does not depend on the copy having been made yet. Only the copy itself
+        // is made on a background thread, below.
+        if let Some(sirioctl_path) = stable_sirioctl {
+            let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();
+            for project in project_catalog.projects() {
+                for worktree in &project.worktrees {
+                    let settings_path = worktree.path.join(".claude").join("settings.local.json");
                     if settings_path.is_file() {
                         sirio_agents::ClaudeHookMigrator::migrate_file(
                             &settings_path,
@@ -25690,7 +25687,14 @@ fn main() {
                         );
                     }
                 }
-            },
+            }
+        }
+        // The copy is made off this thread, and nothing waits for it. A pane that
+        // starts before it finishes uses the copy that is there, and makes one
+        // only when there is none (`resolve_sirioctl_for_process`).
+        cli_install::ensure_at_startup(
+            std::env::current_exe().unwrap_or_default(),
+            std::env::vars().collect(),
         );
         let session_store = SessionStore::open(&database_path);
         // Restore is tolerant of old path-based project ids; rewrite the

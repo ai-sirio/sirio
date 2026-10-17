@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// The control CLI's file name: `sirioctl.exe` on Windows, bare on unix.
 ///
@@ -76,7 +76,9 @@ pub(crate) fn release_sirioctl_path(environment: &BTreeMap<String, String>) -> O
 /// user owns that no other user can write to: a file dropped there would
 /// otherwise shadow a command in every pane. Windows checks only that it exists.
 pub(crate) fn safe_path_prefix(dir: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(dir) else {
+    // `symlink_metadata`, so a link is never a directory here: what a link
+    // names can change under the check, and a PATH entry must not.
+    let Ok(metadata) = std::fs::symlink_metadata(dir) else {
         return false;
     };
     if !metadata.is_dir() {
@@ -136,18 +138,28 @@ pub(crate) enum CopyOutcome {
     /// No bundled binary was found beside the app or on PATH. A copy that is
     /// there is kept.
     SourceMissing,
+    /// A copy exists and runs, but could not be replaced; the reason was logged.
+    Stale,
 }
+
+/// Serializes this process's installs. The startup copy, a pane's first resolve
+/// and Install Hooks can all reach `ensure_stable_copy` at once, and on Windows
+/// two calls moving the copy aside would race each other.
+static INSTALL: Mutex<()> = Mutex::new(());
 
 /// Makes the stable copy current for this process and returns its path.
 ///
 /// The source is the binary beside `current_exe`, else a PATH hit that is not
 /// the destination itself. The bytes are compared; a copy that is not a plain
-/// file, or lacks the executable bit, or differs, is replaced.
+/// file, or lacks the executable bit, or differs, is replaced. A copy that
+/// cannot be replaced but still runs is kept as `Stale`, and the reason is
+/// logged.
 pub(crate) fn ensure_stable_copy(
     current_exe: &Path,
     environment: &BTreeMap<String, String>,
     debug: bool,
 ) -> Result<(PathBuf, CopyOutcome), String> {
+    let _install = INSTALL.lock().unwrap_or_else(PoisonError::into_inner);
     let dir = sirioctl_install_dir(environment, debug).ok_or_else(|| {
         "sirioctl has no stable directory: XDG_DATA_HOME, HOME and LOCALAPPDATA are all unset or not absolute"
             .to_string()
@@ -173,7 +185,13 @@ pub(crate) fn ensure_stable_copy(
     }
     // `symlink_metadata` sees a dangling link too, which is a copy to replace.
     let existed = std::fs::symlink_metadata(&destination).is_ok();
-    replace_copy(&source, &destination)?;
+    if let Err(reason) = replace_copy(&source, &destination) {
+        if is_executable_file(&destination) {
+            eprintln!("[sirioctl] {reason}; the copy that is there is kept");
+            return Ok((destination, CopyOutcome::Stale));
+        }
+        return Err(reason);
+    }
     let outcome = if existed {
         CopyOutcome::Replaced
     } else {
@@ -243,7 +261,8 @@ static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// directory, so no reader sees a partial copy: on unix a `rename` replaces the
 /// file atomically and a reader of the old copy keeps reading it. Windows will
 /// not overwrite a running `.exe`, so the old file is renamed aside first and
-/// removed by a later call.
+/// removed by a later call. If the install then fails, the old file is renamed
+/// back, so the copy that ran stays where it was.
 fn replace_copy(source: &Path, destination: &Path) -> Result<(), String> {
     let dir = destination.parent().ok_or_else(|| {
         format!(
@@ -255,31 +274,55 @@ fn replace_copy(source: &Path, destination: &Path) -> Result<(), String> {
     let temporary = dir.join(format!(".sirioctl-{}-{sequence}.tmp", std::process::id()));
     #[cfg(windows)]
     remove_aside_copies(dir);
-
-    let result = (|| -> std::io::Result<()> {
-        std::fs::copy(source, &temporary)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))?;
-        }
-        #[cfg(windows)]
-        if std::fs::symlink_metadata(destination).is_ok() {
-            let aside = dir.join(format!(
-                "sirioctl.old-{}-{sequence}.exe",
-                std::process::id()
-            ));
-            std::fs::rename(destination, aside)?;
-        }
-        std::fs::rename(&temporary, destination)
-    })();
-    result.map_err(|error| {
+    let failed = |error: std::io::Error| {
         let _ = std::fs::remove_file(&temporary);
         format!(
             "could not install sirioctl at {}: {error}",
             destination.display()
         )
-    })
+    };
+    if let Err(error) = write_temporary(source, &temporary) {
+        return Err(failed(error));
+    }
+    #[cfg(windows)]
+    let aside = match move_aside(destination, dir, sequence) {
+        Ok(aside) => aside,
+        Err(error) => return Err(failed(error)),
+    };
+    if let Err(error) = std::fs::rename(&temporary, destination) {
+        #[cfg(windows)]
+        if let Some(aside) = &aside {
+            let _ = std::fs::rename(aside, destination);
+        }
+        return Err(failed(error));
+    }
+    Ok(())
+}
+
+/// Copies `source` to `temporary`, executable.
+fn write_temporary(source: &Path, temporary: &Path) -> std::io::Result<()> {
+    std::fs::copy(source, temporary)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temporary, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+/// Renames the copy out of the way, so Windows accepts the new one. `None` when
+/// there was no copy to move: it was moved already.
+#[cfg(windows)]
+fn move_aside(destination: &Path, dir: &Path, sequence: u64) -> std::io::Result<Option<PathBuf>> {
+    let aside = dir.join(format!(
+        "sirioctl.old-{}-{sequence}.exe",
+        std::process::id()
+    ));
+    match std::fs::rename(destination, &aside) {
+        Ok(()) => Ok(Some(aside)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Removes the old copies a Windows replacement left aside. One still in use
@@ -300,21 +343,16 @@ fn remove_aside_copies(dir: &Path) {
 
 static STARTUP_COPY: OnceLock<Result<(PathBuf, CopyOutcome), String>> = OnceLock::new();
 
-/// Makes the stable copy on a background thread at startup, so it is current
-/// before any agent launches, and no launch waits for it. `then` runs on that
-/// thread with the copy's path when there is one.
-pub(crate) fn ensure_at_startup(
-    current_exe: PathBuf,
-    environment: BTreeMap<String, String>,
-    then: impl FnOnce(&Path) + Send + 'static,
-) {
+/// Makes the stable copy on a background thread at startup, so no launch waits
+/// for it. The outcome is kept for `resolve_for_pane`, which uses it once it is
+/// `Ok`.
+pub(crate) fn ensure_at_startup(current_exe: PathBuf, environment: BTreeMap<String, String>) {
     let spawned = std::thread::Builder::new()
         .name("sirio-cli-copy".into())
         .spawn(move || {
             let outcome = ensure_stable_copy(&current_exe, &environment, stable_is_debug());
-            match &outcome {
-                Ok((path, _)) => then(path.as_path()),
-                Err(error) => eprintln!("[sirio] sirioctl: {error}"),
+            if let Err(error) = &outcome {
+                eprintln!("[sirio] sirioctl: {error}");
             }
             let _ = STARTUP_COPY.set(outcome);
         });
@@ -323,10 +361,30 @@ pub(crate) fn ensure_at_startup(
     }
 }
 
-/// What the startup copy made, once it has finished.
-#[allow(dead_code)] // The CLI status reads it; nothing shows it yet.
+/// What the startup copy made, once it has finished; `None` while it runs.
 pub(crate) fn last_copy_outcome() -> Option<&'static Result<(PathBuf, CopyOutcome), String>> {
     STARTUP_COPY.get()
+}
+
+/// The stable copy a pane starts with. It reads no contents: once the startup
+/// copy is `Ok` its path is named, and until then, or after it failed, a copy
+/// that is there and executable is named as it is. Only with no executable copy
+/// at all is one made here, which is the first launch.
+pub(crate) fn resolve_for_pane(
+    current_exe: &Path,
+    environment: &BTreeMap<String, String>,
+    debug: bool,
+) -> Result<PathBuf, String> {
+    if let Some(Ok((path, _))) = last_copy_outcome() {
+        return Ok(path.clone());
+    }
+    if let Some(stable) =
+        sirioctl_install_dir(environment, debug).map(|dir| dir.join(sirioctl_binary_name()))
+        && is_executable_file(&stable)
+    {
+        return Ok(stable);
+    }
+    ensure_stable_copy(current_exe, environment, debug).map(|(path, _)| path)
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -352,7 +410,6 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -474,6 +531,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_dir_is_not_a_path_prefix() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture("symlinked-dir");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).expect("create the directory");
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755))
+            .expect("make it ours");
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("link the directory");
+        assert!(safe_path_prefix(&real), "the directory itself is a prefix");
+        assert!(
+            !safe_path_prefix(&link),
+            "a link to a directory is not a prefix: the link can be retargeted"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn different_bytes_are_replaced_even_when_the_copy_is_newer() {
         let root = fixture("newer-copy");
@@ -553,6 +629,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_reader_of_the_old_copy_keeps_reading_it() {
+        use std::io::Read;
         let root = fixture("old-reader");
         let environment = environment_under(&root);
         let old = app_beside(&root, "old", b"old build");
@@ -920,6 +997,89 @@ mod tests {
         assert_eq!(resolved, destination);
         assert_eq!(outcome, CopyOutcome::Replaced);
         assert_copied_from(&resolved, &path_sirioctl);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A pane starts with the copy that is there. Its contents are not read or
+    /// compared: the source has different bytes, and the copy keeps its own.
+    #[test]
+    fn resolving_for_a_pane_reads_no_contents_once_a_copy_exists() {
+        let root = fixture("resolve-for-pane");
+        let environment = environment_under(&root);
+        let current_exe = app_beside(&root, "app", b"copy build");
+        ensure_stable_copy(&current_exe, &environment, false).expect("the first install");
+        // Same length, different bytes: a compare-and-replace would replace it.
+        std::fs::write(
+            current_exe
+                .parent()
+                .expect("app dir")
+                .join(sirioctl_binary_name()),
+            b"other buil",
+        )
+        .expect("write the newer source");
+
+        let resolved =
+            resolve_for_pane(&current_exe, &environment, false).expect("a pane resolves");
+        assert_eq!(resolved, stable_path(&root));
+        assert_eq!(
+            std::fs::read(&resolved).expect("read the copy"),
+            b"copy build",
+            "resolving must not replace the copy"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A copy that runs but cannot be replaced is kept, and the outcome says
+    /// so: the install failed, but a pane can still start with the copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_cannot_be_replaced_is_kept_as_stale() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: `getuid` takes no arguments and cannot fail.
+        if unsafe { libc::getuid() } == 0 {
+            // Root ignores the directory mode, so the refusal cannot happen.
+            return;
+        }
+        let root = fixture("stale-copy");
+        let environment = environment_under(&root);
+        let first = app_beside(&root, "first", b"old build");
+        ensure_stable_copy(&first, &environment, false).expect("the first install");
+        let stable = stable_path(&root);
+        let directory = stable.parent().expect("stable dir").to_path_buf();
+        let newer = app_beside(&root, "newer", b"new build");
+
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555))
+            .expect("make the directory read-only");
+        let result = ensure_stable_copy(&newer, &environment, false);
+        // Restored before any assertion, so the fixture can be removed.
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
+            .expect("restore the directory mode");
+
+        let (path, outcome) = result.expect("a copy that runs is kept, not an error");
+        assert_eq!(outcome, CopyOutcome::Stale);
+        assert_eq!(path, stable);
+        assert_eq!(
+            std::fs::read(&stable).expect("read the copy"),
+            b"old build",
+            "the copy that runs keeps its bytes"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The first launch has no copy at all: the pane needs one now.
+    #[test]
+    fn resolving_for_a_pane_makes_the_first_copy_when_none_exists() {
+        let root = fixture("resolve-first-copy");
+        let environment = environment_under(&root);
+        let current_exe = app_beside(&root, "app", b"first build");
+
+        let resolved =
+            resolve_for_pane(&current_exe, &environment, false).expect("a pane resolves");
+        assert_eq!(resolved, stable_path(&root));
+        assert_eq!(
+            std::fs::read(&resolved).expect("read the copy"),
+            b"first build"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }
