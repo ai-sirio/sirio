@@ -26847,6 +26847,8 @@ done
         PathBuf,
         Vec<PathBuf>,
     ) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-{}-{}-{}",
             tag,
@@ -27088,8 +27090,8 @@ done
         // missing, which is how this shipped.
         use sirio_ui::file_context_menu::{FileContextAction, ItemState};
         let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
-        let states: Vec<ItemState> = view.read_with(&cx.cx, |view, _| {
-            view.context_menu_items()
+        let states: Vec<ItemState> = view.read_with(&cx.cx, |view, app| {
+            view.context_menu_items(app)
                 .into_iter()
                 .filter(|item| {
                     matches!(
@@ -27150,6 +27152,8 @@ done
         PathBuf,
         Vec<PathBuf>,
     ) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-{tag}-{}-{}",
             std::process::id(),
@@ -36319,6 +36323,7 @@ done
     #[gpui::test]
     async fn drawn_save_failure_is_visible_without_hiding_the_file(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
         let path = PathBuf::from("/proc/self/status");
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -36372,6 +36377,7 @@ done
         let path = std::env::temp_dir().join(format!("sirio-dirty-tab-{}.txt", std::process::id()));
         std::fs::write(&path, "clean\n").expect("write dirty-tab fixture");
         cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();

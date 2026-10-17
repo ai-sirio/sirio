@@ -170,4 +170,12 @@ impl CodeEditor {
         self.scroll.scroll_to_item(self.primary_row(), strategy);
         cx.notify();
     }
+
+    /// Scrolls the row of the primary cursor to the centre, whether or not the
+    /// selection moved. `select` scrolls only when it changes the selection, so
+    /// a host that places the caret where it already is calls this after it.
+    pub fn reveal_primary(&mut self, cx: &mut Context<Self>) {
+        self.scroll.scroll_to_item(self.primary_row(), ScrollStrategy::Center);
+        cx.notify();
+    }
 }

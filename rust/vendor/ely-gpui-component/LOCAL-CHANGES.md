@@ -459,3 +459,14 @@ runs 120 tests after Task 1c, all passed.
 Evidence: `cargo nextest run -p ely-gpui-component --features test-support`
 runs 120 tests, all passed (no unit test added; the probe is the proof).
 `Scripts/Tests/test-ely-editor-probe.sh --xvfb` prints `ELY EDITOR PROBE OK`.
+
+### File tab hosting (Task 6b1)
+
+- `src/editor/row.rs`: a `Row::Line(line)` row carries the debug selector
+  `code-editor-line-{line}` (a no-op in release builds), so a test can find the
+  row of a buffer line. Nothing else in the row changes.
+- `src/editor/moves.rs`: `CodeEditor::reveal_primary(cx)` scrolls the primary
+  cursor's row to the centre and notifies, beside the crate-private `reveal`.
+  `select` scrolls only when it changes the selection, so a host that places
+  the caret where it already is (the start of a line it was asked to show) calls
+  this after `select`. Sirio's `file_view` does exactly that.

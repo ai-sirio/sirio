@@ -5,8 +5,6 @@ use std::ops::Range;
 /// The smallest edit that turns `old` into `new`: the byte range of `old` to
 /// replace and the text to put there. Applying it to `old` gives `new`.
 /// `None` when the two texts are equal.
-// used by the code surface (Task 6b)
-#[allow(dead_code)]
 pub(crate) fn minimal_edit(old: &str, new: &str) -> Option<(Range<usize>, String)> {
     if old == new {
         return None;
