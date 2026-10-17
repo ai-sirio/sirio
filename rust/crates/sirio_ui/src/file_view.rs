@@ -55,6 +55,8 @@ use crate::markdown_preview::{
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
+mod sync;
+
 /// The rendered-markdown column: the frozen 720px content column (waku
 /// `CONTENT_MAX_WIDTH`). Prose sits on the same measured column as the
 /// transcript (P32 moved it from an unrecorded 800).
