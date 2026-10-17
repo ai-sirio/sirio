@@ -332,8 +332,12 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
     if let Ok(mut held) = shared.session_id.lock() {
         *held = Some(session_id.clone());
     }
+    // The user's environment, not the launcher's: `env_clear` first, so the
+    // line's own variables below come after it and survive it.
     let mut std_command = std::process::Command::new(&launch.program);
     std_command
+        .env_clear()
+        .envs(sirio_env::for_child())
         .args(&launch.prefix_args)
         .args(&line.args)
         .current_dir(&cwd);

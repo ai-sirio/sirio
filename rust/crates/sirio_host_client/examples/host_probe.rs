@@ -61,6 +61,7 @@ fn main() {
         client_version: env!("CARGO_PKG_VERSION").into(),
         current_exe: std::env::current_exe().unwrap(),
         environment: env.clone(),
+        host_environment: env.clone(),
         major,
     };
     match args.first().map(String::as_str) {

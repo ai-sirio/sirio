@@ -7365,6 +7365,7 @@ dependencies = [
  "libc",
  "serde_json",
  "sirio_claude",
+ "sirio_env",
  "sirio_persistence",
 ]
 

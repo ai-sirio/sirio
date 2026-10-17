@@ -25530,6 +25530,9 @@ fn host_ensure_options(
         client_version: sirio_control::VERSION.to_string(),
         current_exe,
         environment,
+        // The host and its sessions run in the user's environment, not the
+        // launcher's (`sirio_env::install` ran before the first ensure).
+        host_environment: sirio_env::for_child(),
         major,
     })
 }

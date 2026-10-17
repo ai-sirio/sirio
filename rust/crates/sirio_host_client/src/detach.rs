@@ -2,6 +2,7 @@
 //! (spec §5.4). Each arm names what it protects against; the probe in
 //! `examples/detach_probe.rs` is what proves it.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
@@ -18,6 +19,9 @@ pub struct DetachedSpawn {
     /// job label carries a hash of it, so each data root has its own job.
     /// Ignored elsewhere.
     pub launchd_dir: PathBuf,
+    /// The environment the program starts in, when it is not the caller's.
+    /// `None` keeps the caller's, as the probes need. Windows ignores it.
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,12 +36,15 @@ pub enum DetachMethod {
 /// Starts `spec.program` so that it outlives the caller, its process group,
 /// its systemd scope, its macOS coalition and its Windows job.
 ///
-/// The child inherits the caller's full environment on every platform. On
-/// macOS that means the environment is written into the plist, because
-/// launchd starts a job with its own, not the caller's; the plist is private
-/// to the user and is deleted as soon as launchd has loaded it. A variable
-/// whose name or value a plist cannot carry (not UTF-8, or a character XML
-/// 1.0 forbids) is left out of the host's environment on macOS only.
+/// The child starts in `spec.env` when that is given, else in the caller's
+/// environment. On Linux a given `spec.env` replaces what the child would
+/// inherit, on both the `systemd-run` and the direct spawn. On macOS the
+/// environment is written into the plist, because launchd starts a job with
+/// its own, not the caller's; the plist is private to the user and is deleted
+/// as soon as launchd has loaded it. A variable whose name or value a plist
+/// cannot carry (not UTF-8, or a character XML 1.0 forbids) is left out of the
+/// host's environment on macOS only. Windows always hands the child the
+/// caller's environment.
 ///
 /// `Ok` means the platform's mechanism accepted the process: on Linux
 /// `SystemdScope` additionally means `systemd-run` did not fail within
@@ -124,12 +131,17 @@ mod imp {
         matches!(exits.recv_timeout(SYSTEMD_RUN_GRACE), Ok(Ok(status)) if !status.success())
     }
 
+    /// Both spawns come through here, so the environment reaches the
+    /// `systemd-run` and the direct `Command` alike.
     fn spawn_setsid(mut command: Command, spec: &DetachedSpawn) -> io::Result<Exits> {
         command
             .current_dir(&spec.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(environment) = &spec.env {
+            command.env_clear().envs(environment);
+        }
         // SAFETY: setsid is async-signal-safe and touches no Rust state.
         unsafe {
             command.pre_exec(|| {
@@ -278,6 +290,7 @@ mod plist {
                 cwd: "/work".into(),
                 label: "sirio-host-v1".into(),
                 launchd_dir: "/launchd".into(),
+                env: None,
             }
         }
 
@@ -537,7 +550,14 @@ mod imp {
         // SAFETY: getuid has no preconditions and cannot fail.
         let uid = unsafe { libc::getuid() };
         let label = super::launchd_label::label(&spec.label, &spec.launchd_dir);
-        let xml = plist_xml(&label, spec, std::env::vars_os())?;
+        let environment: Vec<(OsString, OsString)> = match &spec.env {
+            Some(environment) => environment
+                .iter()
+                .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+                .collect(),
+            None => std::env::vars_os().collect(),
+        };
+        let xml = plist_xml(&label, spec, environment)?;
         let domain = format!("gui/{uid}");
         let target = format!("{domain}/{label}");
         // Two clients that both saw `Absent` both arrive here, so a job under

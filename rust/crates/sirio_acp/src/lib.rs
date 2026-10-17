@@ -1246,6 +1246,31 @@ fn command_for_process(command: AgentCommand) -> AgentCommand {
     command
 }
 
+/// The agent's program started through `/usr/bin/env`, which unsets each name
+/// the user environment lacks before it execs the program. `AcpAgentConfig`
+/// can add variables to the child but cannot remove the launcher's, and
+/// `env -u` is the one way left to do it. Nothing is wrapped when the user
+/// environment holds every name the process has (or is not installed).
+#[cfg(unix)]
+fn in_user_environment(command: AgentCommand) -> AgentCommand {
+    let absent = sirio_env::absent_from_user();
+    if absent.is_empty() {
+        return command;
+    }
+    let mut args = Vec::with_capacity(2 * absent.len() + 2 + command.args.len());
+    for name in absent {
+        args.push("-u".to_string());
+        args.push(name);
+    }
+    args.push("--".to_string());
+    args.push(command.program.to_string_lossy().into_owned());
+    args.extend(command.args);
+    AgentCommand {
+        program: PathBuf::from("/usr/bin/env"),
+        args,
+    }
+}
+
 // Pre-existing wiring, not a J4-ci change: bundling these into a params struct is a real
 // refactor of the connection's call sites and out of scope for the CI-gate slice that found
 // this lint newly enforced. Silencing it here is the minimal, behavior-preserving fix.
@@ -1295,9 +1320,12 @@ fn run_connection(
     let activity: ActivityClock = Arc::new(Mutex::new(std::time::Instant::now()));
     let attempted_program = command.program.clone();
     let command = command_for_process(command);
+    #[cfg(unix)]
+    let command = in_user_environment(command);
     let agent = AcpAgent::new(
         AcpAgentConfig::new(command.program)
             .args(command.args)
+            .envs(sirio_env::for_child())
             .env("TERM", "xterm-256color"),
     );
 
@@ -3124,6 +3152,53 @@ mod tests {
             format!("{error:#}").contains("Login"),
             "auth guidance should name the advertised method, got {error:#}"
         );
+    }
+
+    /// The launcher's environment never reaches an agent Sirio starts, and the
+    /// user's does. `sirio_env::install` is once per process, so nextest runs
+    /// this alone in its own process.
+    #[cfg(unix)]
+    #[test]
+    fn acp_agent_does_not_inherit_what_the_user_environment_lacks() {
+        const LAUNCHER_ONLY: &str = "SIRIO_ACP_LAUNCHER_ONLY";
+        const USER_ONLY: &str = "SIRIO_ACP_USER_ONLY";
+        // SAFETY: this is the only test in its process, so nothing else reads or
+        // writes the environment while it runs.
+        unsafe { std::env::set_var(LAUNCHER_ONLY, "from-launcher") };
+        let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        sirio_env::install(std::collections::BTreeMap::from([
+            ("PATH".to_string(), path),
+            (USER_ONLY.to_string(), "from-user".to_string()),
+        ]));
+
+        // The stub is a script under the temp dir (TMPDIR), which writes the
+        // environment it was started with to the path it is given, then exits.
+        let scratch = std::env::temp_dir().join(format!("sirio-acp-env-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        let script = scratch.join("agent.sh");
+        std::fs::write(&script, "#!/bin/sh\n/usr/bin/env > \"$1\"\n").expect("stub agent");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("executable stub agent");
+        let written = scratch.join("environment.txt");
+        let command = AgentCommand::new(script).arg(written.to_string_lossy());
+
+        let result = AcpClient::launch_with_timeout(command, &scratch, FIXTURE_STARTUP_TIMEOUT);
+        // The stub answers no protocol message, so the handshake cannot finish;
+        // what it wrote before it exited is the evidence.
+        assert!(result.is_err(), "a stub that answers nothing must not start a session");
+        let environment = std::fs::read_to_string(&written)
+            .expect("the stub agent ran and wrote its environment");
+        let agent: std::collections::BTreeMap<&str, &str> = environment
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect();
+        assert!(!agent.contains_key(LAUNCHER_ONLY), "the launcher's variable reached the agent");
+        assert_eq!(
+            agent.get(USER_ONLY),
+            Some(&"from-user"),
+            "the user's variable did not reach the agent"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[cfg(unix)]
