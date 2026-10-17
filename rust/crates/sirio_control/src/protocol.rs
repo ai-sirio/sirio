@@ -824,6 +824,68 @@ pub mod request {
         request("surface.file.read", BTreeMap::new())
     }
 
+    /// The `surface.editor.*` verbs drive the active file tab's code editor.
+    /// Debug builds only: a release build answers "unknown method".
+    pub fn editor_open(path: &str) -> ControlRequest {
+        request(
+            "surface.editor.open",
+            BTreeMap::from([("path".to_string(), path.to_string())]),
+        )
+    }
+
+    pub fn editor_state() -> ControlRequest {
+        request("surface.editor.state", BTreeMap::new())
+    }
+
+    pub fn editor_type(text: &str) -> ControlRequest {
+        request(
+            "surface.editor.type",
+            BTreeMap::from([("text".to_string(), text.to_string())]),
+        )
+    }
+
+    pub fn editor_keys(keys: &str) -> ControlRequest {
+        request(
+            "surface.editor.keys",
+            BTreeMap::from([("keys".to_string(), keys.to_string())]),
+        )
+    }
+
+    pub fn editor_select(ranges: &str) -> ControlRequest {
+        request(
+            "surface.editor.select",
+            BTreeMap::from([("ranges".to_string(), ranges.to_string())]),
+        )
+    }
+
+    pub fn editor_save() -> ControlRequest {
+        request("surface.editor.save", BTreeMap::new())
+    }
+
+    pub fn editor_conflict(action: &str) -> ControlRequest {
+        request(
+            "surface.editor.conflict",
+            BTreeMap::from([("action".to_string(), action.to_string())]),
+        )
+    }
+
+    pub fn editor_mode(mode: &str) -> ControlRequest {
+        request(
+            "surface.editor.mode",
+            BTreeMap::from([("mode".to_string(), mode.to_string())]),
+        )
+    }
+
+    pub fn editor_pref(key: &str, value: &str) -> ControlRequest {
+        request(
+            "surface.editor.pref",
+            BTreeMap::from([
+                ("key".to_string(), key.to_string()),
+                ("value".to_string(), value.to_string()),
+            ]),
+        )
+    }
+
     /// Opens the non-drawing chat surface for a worktree.
     pub fn chat_open(worktree: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::new();

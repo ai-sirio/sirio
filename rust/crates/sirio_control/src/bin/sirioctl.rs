@@ -163,6 +163,15 @@ fn usage() {
          \x20 surface host end-all             (debug builds) End All sessions without its dialog\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
+         \x20 surface editor open --path p      (debug builds) open a file as a tab; prints its editor state\n\
+         \x20 surface editor state [--json]     (debug builds) the active file tab's editor state, one key=value per line\n\
+         \x20 surface editor type --text=t      (debug builds) type t through the code editor's input handler\n\
+         \x20 surface editor keys --keys=K...   (debug builds) dispatch space-separated keystrokes (ctrl-z) to the window\n\
+         \x20 surface editor select --ranges=a..b;c..d  (debug builds) select byte ranges\n\
+         \x20 surface editor save               (debug builds) save the active file tab\n\
+         \x20 surface editor conflict --action=reload|keep  (debug builds) answer a disk conflict\n\
+         \x20 surface editor mode --mode=code|preview  (debug builds) switch the Markdown mode\n\
+         \x20 surface editor pref --key=k --value=v  (debug builds) set one Editor setting, as Settings does\n\
          \x20 browser open <url> [--id-format uuids|both] [--json]\n\
          \x20 browser navigate <surface> <back|forward|reload>\n\
          \x20 browser get <surface> <url|text|html> [--selector s] [--json]\n\
@@ -375,6 +384,19 @@ fn print_result(response: &ControlResponse, columns: &[&str], as_json: bool) {
         .filter_map(|column| result.get(*column).map(String::as_str))
         .collect();
     println!("{}", line.join("\t"));
+}
+
+/// A `surface editor` answer as `key=value` lines, sorted by key, or the whole
+/// answer as JSON with `--json`: a value may hold a tab, which a column cannot.
+fn print_editor_result(response: &ControlResponse, as_json: bool) {
+    let result = response.result.clone().unwrap_or_default();
+    if as_json {
+        println!("{}", rows::encode(&[result]));
+        return;
+    }
+    for (key, value) in &result {
+        println!("{key}={value}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,8 +1068,45 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             require_ok(socket, &request)
         }
         ("file", "read") => require_ok(socket, &sirio_control::protocol::request::file_read()),
+        ("editor", "open") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_open(&parsed.require("path")?),
+        ),
+        ("editor", "state") => require_ok(socket, &sirio_control::protocol::request::editor_state()),
+        ("editor", "type") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_type(&parsed.require("text")?),
+        ),
+        ("editor", "keys") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_keys(&parsed.require("keys")?),
+        ),
+        ("editor", "select") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_select(&parsed.require("ranges")?),
+        ),
+        ("editor", "save") => require_ok(socket, &sirio_control::protocol::request::editor_save()),
+        ("editor", "conflict") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_conflict(&parsed.require("action")?),
+        ),
+        ("editor", "mode") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_mode(&parsed.require("mode")?),
+        ),
+        ("editor", "pref") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_pref(
+                &parsed.require("key")?,
+                &parsed.require("value")?,
+            ),
+        ),
         _ => return Err(format!("unknown surface action '{surface} {action}'")),
     };
+    if surface == "editor" {
+        print_editor_result(&response, parsed.flag("json"));
+        return Ok(());
+    }
     print_result(
         &response,
         &[

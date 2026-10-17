@@ -2,10 +2,10 @@
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DefiniteLength, DragMoveEvent, Entity,
-    FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, Modifiers,
-    MouseButton, PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement,
-    StyleRefinement, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, deferred,
-    div, point, prelude::*, px, size,
+    EntityInputHandler, FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding,
+    KeyDownEvent, Keystroke, Modifiers, MouseButton, PathPromptOptions, PromptLevel, Render,
+    StatefulInteractiveElement, StyleRefinement, Task, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, actions, deferred, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
 use notify::{
@@ -45,9 +45,10 @@ use sirio_ui::{
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
+    editor::{Conflict, LineEnding},
     editor_prefs::EditorPrefs,
     file_context_menu::{FileContextFacts, MissingServer},
-    file_view::{FileView, FileViewEvent, SnapshotOrigin},
+    file_view::{FileView, FileViewEvent, MarkdownMode, SnapshotOrigin},
     loading,
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     orbit::{EMPTY_SURFACE_MARK, orbit},
@@ -1258,6 +1259,44 @@ enum ControlAction {
         reply: ControlReply,
     },
     ReadFile {
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.editor.*` verbs. Most drive the active file tab's
+    /// code editor, as the user's own gestures would; `pref` writes the
+    /// Settings page's Editor values.
+    EditorOpen {
+        path: String,
+        reply: ControlReply,
+    },
+    EditorState {
+        reply: ControlReply,
+    },
+    EditorType {
+        text: String,
+        reply: ControlReply,
+    },
+    EditorKeys {
+        keys: String,
+        reply: ControlReply,
+    },
+    EditorSelect {
+        ranges: String,
+        reply: ControlReply,
+    },
+    EditorSave {
+        reply: ControlReply,
+    },
+    EditorConflict {
+        action: String,
+        reply: ControlReply,
+    },
+    EditorMode {
+        mode: String,
+        reply: ControlReply,
+    },
+    EditorPref {
+        key: String,
+        value: String,
         reply: ControlReply,
     },
     AddAgentAccount {
@@ -2560,6 +2599,15 @@ impl ControlHandler for AppControlHandler {
                     methods.push("surface.change_request.act");
                     methods.push("surface.open_list.open");
                     methods.push("surface.changes.confirm");
+                    methods.push("surface.editor.open");
+                    methods.push("surface.editor.state");
+                    methods.push("surface.editor.type");
+                    methods.push("surface.editor.keys");
+                    methods.push("surface.editor.select");
+                    methods.push("surface.editor.save");
+                    methods.push("surface.editor.conflict");
+                    methods.push("surface.editor.mode");
+                    methods.push("surface.editor.pref");
                     methods.push("surface.host.end_all");
                     methods.push("surface.terminal.open");
                     methods.push("surface.terminal.restart");
@@ -2719,6 +2767,68 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.changes.confirm" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::ChangesConfirm { reply })
+            }
+            "surface.editor.open" if cfg!(debug_assertions) => {
+                let Some(path) = request.params.get("path").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.editor.open requires path");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorOpen { path, reply })
+            }
+            "surface.editor.state" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::EditorState { reply })
+            }
+            "surface.editor.type" if cfg!(debug_assertions) => {
+                let Some(text) = request.params.get("text").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.editor.type requires text");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorType { text, reply })
+            }
+            "surface.editor.keys" if cfg!(debug_assertions) => {
+                let Some(keys) = request.params.get("keys").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.editor.keys requires keys");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorKeys { keys, reply })
+            }
+            "surface.editor.select" if cfg!(debug_assertions) => {
+                let Some(ranges) = request.params.get("ranges").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.editor.select requires ranges");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorSelect { ranges, reply })
+            }
+            "surface.editor.save" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::EditorSave { reply })
+            }
+            "surface.editor.conflict" if cfg!(debug_assertions) => {
+                let action = request.params.get("action").cloned().unwrap_or_default();
+                if action != "reload" && action != "keep" {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.conflict requires action: reload or keep",
+                    );
+                }
+                self.queue_action(request, move |reply| ControlAction::EditorConflict { action, reply })
+            }
+            "surface.editor.mode" if cfg!(debug_assertions) => {
+                let mode = request.params.get("mode").cloned().unwrap_or_default();
+                if mode != "code" && mode != "preview" {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.mode requires mode: code or preview",
+                    );
+                }
+                self.queue_action(request, move |reply| ControlAction::EditorMode { mode, reply })
+            }
+            "surface.editor.pref" if cfg!(debug_assertions) => {
+                let (Some(key), Some(value)) = (
+                    request.params.get("key").cloned(),
+                    request.params.get("value").cloned(),
+                ) else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.pref requires key and value",
+                    );
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorPref { key, value, reply })
             }
             "surface.update.read" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::UpdateCardRead { reply })
@@ -5803,6 +5913,33 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::ReadFile { reply } => {
                                     let _ = reply.send(workspace.control_read_file(cx));
+                                }
+                                ControlAction::EditorOpen { path, reply } => {
+                                    let _ = reply.send(workspace.control_editor_open(&path, cx));
+                                }
+                                ControlAction::EditorState { reply } => {
+                                    let _ = reply.send(workspace.control_editor_state(cx));
+                                }
+                                ControlAction::EditorType { text, reply } => {
+                                    let _ = reply.send(workspace.control_editor_type(&text, window, cx));
+                                }
+                                ControlAction::EditorKeys { keys, reply } => {
+                                    workspace.control_editor_keys(&keys, reply, window, cx);
+                                }
+                                ControlAction::EditorSelect { ranges, reply } => {
+                                    let _ = reply.send(workspace.control_editor_select(&ranges, cx));
+                                }
+                                ControlAction::EditorSave { reply } => {
+                                    let _ = reply.send(workspace.control_editor_save(cx));
+                                }
+                                ControlAction::EditorConflict { action, reply } => {
+                                    let _ = reply.send(workspace.control_editor_conflict(&action, cx));
+                                }
+                                ControlAction::EditorMode { mode, reply } => {
+                                    let _ = reply.send(workspace.control_editor_mode(&mode, cx));
+                                }
+                                ControlAction::EditorPref { key, value, reply } => {
+                                    let _ = reply.send(workspace.control_editor_pref(&key, &value, cx));
                                 }
                                 ControlAction::AddAgentAccount {
                                     provider,
@@ -17810,6 +17947,307 @@ impl SirioWorkspace {
         }
         self.open_surface(surface, window, cx);
         Ok(self.control_read_layout(cx))
+    }
+
+    /// The active tab's first file view: the one the `surface.editor.*` verbs
+    /// act on, and the one `surface.file.read` reads.
+    fn active_file_view(&self) -> Option<Entity<FileView>> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let mut found = None;
+        tab.panes.for_each(&mut |_, content| {
+            if found.is_none()
+                && let TabContent::File { view } = content
+            {
+                found = Some(view.clone());
+            }
+        });
+        found
+    }
+
+    /// The active file tab's editor. The text is escaped as `surface.file.read`
+    /// escapes it; the selections are `a..b` byte offsets, anchor first, joined
+    /// by `;`. `state` is `loaded` only once the code editor exists, so a
+    /// caller that waits for it never races the first frame.
+    fn control_editor_state(&self, cx: &App) -> Result<Vec<(String, String)>, String> {
+        let view_entity = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let view = view_entity.read(cx);
+        let editor = view.editor();
+        let code = view.code_editor().map(|code| code.read(cx));
+        // A file that failed to load, or a snapshot that did, is in error. A
+        // file still loading, and one whose code editor is not drawn yet, is not.
+        let error = view
+            .snapshot_error()
+            .map(str::to_owned)
+            .or_else(|| editor.and_then(|editor| editor.load_message()));
+        let state = match (&error, code) {
+            (Some(_), _) => "error",
+            (None, Some(_)) => "loaded",
+            (None, None) => "loading",
+        };
+        let text = editor
+            .map(|editor| editor.buffer().replace('\\', "\\\\").replace('\n', "\\n"))
+            .unwrap_or_default();
+        let selections = code.map(|code| {
+            Self::joined_selections(
+                code.selections()
+                    .iter()
+                    .map(|selection| (selection.anchor, selection.head)),
+            )
+        });
+        let line_ending = match editor.map(|editor| editor.line_ending()) {
+            Some(LineEnding::Crlf) => "crlf",
+            _ => "lf",
+        };
+        let conflict = match view.conflict() {
+            Conflict::None => "none",
+            Conflict::ChangedOnDisk => "changed",
+            Conflict::DeletedOnDisk => "deleted",
+        };
+        let mode = match view.effective_mode() {
+            MarkdownMode::Code => "code",
+            MarkdownMode::Preview => "preview",
+        };
+        Ok(vec![
+            ("path".to_string(), display_absolute_path(view.path())),
+            ("state".to_string(), state.to_string()),
+            ("error".to_string(), error.unwrap_or_default()),
+            ("text".to_string(), text),
+            ("dirty".to_string(), view.is_dirty().to_string()),
+            (
+                "language".to_string(),
+                editor
+                    .map(|editor| editor.language().name().to_string())
+                    .unwrap_or_default(),
+            ),
+            ("line_ending".to_string(), line_ending.to_string()),
+            ("selections".to_string(), selections.unwrap_or_default()),
+            (
+                "read_only".to_string(),
+                code.map_or(view.is_snapshot(), |code| code.is_read_only()).to_string(),
+            ),
+            ("conflict".to_string(), conflict.to_string()),
+            ("mode".to_string(), mode.to_string()),
+            ("prefs".to_string(), EditorPrefs::current(cx).describe()),
+        ])
+    }
+
+    /// Opens `path` as a file tab, as the shell opens a file, and answers with
+    /// its state. The load may still be running; `state` says so. `path` is
+    /// absolute, as a shell's would be.
+    fn control_editor_open(
+        &mut self,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        self.add_file_tab(PathBuf::from(path), cx);
+        self.control_editor_state(cx)
+    }
+
+    /// Types `text` through the code editor's input handler, so read-only,
+    /// multi-cursor and undo grouping behave as for typed text. Refused while
+    /// the code editor is not drawn (the file is loading, or in Preview).
+    fn control_editor_type(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let (code, focus) = {
+            let view = view.read(cx);
+            if !view.code_shown() {
+                return Err(
+                    "the code editor is not drawn: the file is loading or in Preview".to_string(),
+                );
+            }
+            let code = view
+                .code_editor()
+                .cloned()
+                .ok_or_else(|| "the file is still loading".to_string())?;
+            (code, view.focus_target(cx))
+        };
+        focus.focus(window, cx);
+        code.update(cx, |code, cx| code.replace_text_in_range(None, text, window, cx));
+        Ok(Vec::new())
+    }
+
+    /// Dispatches each keystroke to the window, as the user's keys reach it.
+    /// The keystrokes run after this action returns: one may be a workspace
+    /// action, and this action holds the workspace. Every keystroke is parsed
+    /// first, so one that does not parse dispatches none of them.
+    fn control_editor_keys(
+        &mut self,
+        keys: &str,
+        reply: ControlReply,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let parsed = keys
+            .split_whitespace()
+            .map(|key| {
+                Keystroke::parse(key)
+                    .map_err(|error| format!("'{key}' is not a keystroke: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let keystrokes = match parsed {
+            Ok(keystrokes) if !keystrokes.is_empty() => keystrokes,
+            Ok(_) => {
+                let _ = reply.send(Err("surface.editor.keys requires keys".to_string()));
+                return;
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        let Some(view) = self.active_file_view() else {
+            let _ = reply.send(Err("no file tab is active".to_string()));
+            return;
+        };
+        let focus = view.read(cx).focus_target(cx);
+        focus.focus(window, cx);
+        window.defer(cx, move |window, cx| {
+            for keystroke in keystrokes {
+                window.dispatch_keystroke(keystroke, cx);
+            }
+            let _ = reply.send(Ok(Vec::new()));
+        });
+    }
+
+    /// Selects the ranges `a..b;c..d`, the last one primary. A reversed range,
+    /// one past the text or one that splits a character is an error: the code
+    /// editor would drop it silently.
+    fn control_editor_select(
+        &mut self,
+        ranges: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let code = view
+            .read(cx)
+            .code_editor()
+            .cloned()
+            .ok_or_else(|| "the file is still loading".to_string())?;
+        let ranges = Self::editor_ranges(ranges)?;
+        {
+            let text = code.read(cx).text();
+            for range in &ranges {
+                let whole = range.start <= range.end
+                    && range.end <= text.len()
+                    && text.is_char_boundary(range.start)
+                    && text.is_char_boundary(range.end);
+                if !whole {
+                    return Err(format!(
+                        "{}..{} is not a range of whole characters in {} bytes",
+                        range.start,
+                        range.end,
+                        text.len()
+                    ));
+                }
+            }
+        }
+        code.update(cx, |code, cx| code.select(ranges, cx));
+        let selections = Self::joined_selections(
+            code.read(cx)
+                .selections()
+                .iter()
+                .map(|selection| (selection.anchor, selection.head)),
+        );
+        Ok(vec![("selections".to_string(), selections)])
+    }
+
+    /// Saves the active file tab through `FileView::save`, the call Save makes.
+    /// A failed save is the reply's error.
+    fn control_editor_save(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        view.update(cx, |view, cx| view.save(cx))?;
+        self.control_editor_state(cx)
+    }
+
+    /// Answers the disk conflict as the banner's Reload and Keep do.
+    fn control_editor_conflict(
+        &mut self,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        match action {
+            "reload" => view.update(cx, |view, cx| view.reload(cx))?,
+            "keep" => view.update(cx, |view, cx| view.keep(cx)),
+            other => return Err(format!("unknown conflict action '{other}'")),
+        }
+        self.control_editor_state(cx)
+    }
+
+    /// Switches the Markdown mode, as the switcher does. A file that is not
+    /// Markdown keeps drawing its code, and `state` says what is drawn.
+    fn control_editor_mode(
+        &mut self,
+        mode: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let mode = match mode {
+            "code" => MarkdownMode::Code,
+            "preview" => MarkdownMode::Preview,
+            other => return Err(format!("unknown mode '{other}'")),
+        };
+        view.update(cx, |view, cx| view.set_markdown_mode(mode, cx));
+        self.control_editor_state(cx)
+    }
+
+    /// Sets one Editor setting through the Settings page's own path: the page's
+    /// `set_editor_prefs` saves the settings, and the workspace's observer
+    /// applies them. Like the page, it needs no file tab. Answers the
+    /// preferences it set; `state` reads what is in force.
+    fn control_editor_pref(
+        &mut self,
+        key: &str,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut prefs = self.settings.read(cx).snapshot().editor;
+        prefs.set_from_text(key, value)?;
+        let described = prefs.describe();
+        self.settings
+            .update(cx, |settings, cx| settings.set_editor_prefs(prefs, cx));
+        Ok(vec![("prefs".to_string(), described)])
+    }
+
+    /// `a..b;c..d` as byte ranges, in the order given.
+    fn editor_ranges(ranges: &str) -> Result<Vec<std::ops::Range<usize>>, String> {
+        ranges
+            .split(';')
+            .map(|range| {
+                let not_a_range = || format!("'{range}' is not a range a..b");
+                let (start, end) = range.split_once("..").ok_or_else(not_a_range)?;
+                let number = |text: &str| text.parse::<usize>().map_err(|_| not_a_range());
+                Ok(number(start)?..number(end)?)
+            })
+            .collect()
+    }
+
+    /// The selections as `a..b` pairs of (anchor, head), joined by `;`.
+    fn joined_selections(pairs: impl Iterator<Item = (usize, usize)>) -> String {
+        pairs
+            .map(|(anchor, head)| format!("{anchor}..{head}"))
+            .collect::<Vec<_>>()
+            .join(";")
     }
 
     /// The active tab's file: its path, whether it is a read-only snapshot,
@@ -41276,6 +41714,15 @@ done
             | ControlAction::ReadLayout { reply }
             | ControlAction::OpenListOpen { reply, .. }
             | ControlAction::ReadFile { reply }
+            | ControlAction::EditorOpen { reply, .. }
+            | ControlAction::EditorState { reply }
+            | ControlAction::EditorType { reply, .. }
+            | ControlAction::EditorKeys { reply, .. }
+            | ControlAction::EditorSelect { reply, .. }
+            | ControlAction::EditorSave { reply }
+            | ControlAction::EditorConflict { reply, .. }
+            | ControlAction::EditorMode { reply, .. }
+            | ControlAction::EditorPref { reply, .. }
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
@@ -41425,6 +41872,17 @@ done
             "surface.layout.read" => request::layout_read(),
             "surface.open_list.open" => request::open_list_open("show"),
             "surface.file.read" => request::file_read(),
+            "surface.editor.open" => request_with_params(method, &[("path", "x.rs")]),
+            "surface.editor.state" => request::editor_state(),
+            "surface.editor.type" => request_with_params(method, &[("text", "x")]),
+            "surface.editor.keys" => request_with_params(method, &[("keys", "ctrl-z")]),
+            "surface.editor.select" => request_with_params(method, &[("ranges", "0..0")]),
+            "surface.editor.save" => request::editor_save(),
+            "surface.editor.conflict" => request_with_params(method, &[("action", "keep")]),
+            "surface.editor.mode" => request_with_params(method, &[("mode", "code")]),
+            "surface.editor.pref" => {
+                request_with_params(method, &[("key", "minimap"), ("value", "true")])
+            }
             "settings.account.add" => {
                 request_with_params(method, &[("provider", "claude"), ("label", "test")])
             }

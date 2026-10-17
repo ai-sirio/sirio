@@ -1768,10 +1768,22 @@ impl Settings {
     pub fn set_editor_prefs(&mut self, prefs: EditorPrefs, cx: &mut Context<Self>) {
         self.editor = prefs;
         if let Some(inputs) = &self.editor_inputs {
+            // A field drawn before this call still shows its old number, and
+            // its next Blur would commit that number back over the change.
             let ruler_on = self.editor.ruler;
-            inputs
-                .ruler_column
-                .update(cx, |input, cx| input.set_disabled(!ruler_on, cx));
+            let ruler_column = self.editor.ruler_column.to_string();
+            let tab_size = self.editor.tab_size.to_string();
+            inputs.ruler_column.update(cx, |input, cx| {
+                input.set_disabled(!ruler_on, cx);
+                if input.text() != ruler_column {
+                    input.set_text(ruler_column, cx);
+                }
+            });
+            inputs.tab_size.update(cx, |input, cx| {
+                if input.text() != tab_size {
+                    input.set_text(tab_size, cx);
+                }
+            });
         }
         self.changed();
         cx.notify();

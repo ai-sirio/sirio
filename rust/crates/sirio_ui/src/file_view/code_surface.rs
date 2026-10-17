@@ -113,7 +113,7 @@ impl FileView {
 
     /// Whether the code editor is what the tab shows right now: the file is
     /// loaded, the mode is Code and the editor exists.
-    fn code_shown(&self) -> bool {
+    pub fn code_shown(&self) -> bool {
         self.code_editor.is_some()
             && self
                 .editor()
@@ -123,7 +123,7 @@ impl FileView {
 
     /// The handle the keyboard goes to: the code editor's while it draws the
     /// file, otherwise the view's own.
-    pub(super) fn focus_target(&self, cx: &App) -> FocusHandle {
+    pub fn focus_target(&self, cx: &App) -> FocusHandle {
         match &self.code_editor {
             Some(code) if self.code_shown() => code.read(cx).focus_handle(cx),
             _ => self.editor_focus.clone(),

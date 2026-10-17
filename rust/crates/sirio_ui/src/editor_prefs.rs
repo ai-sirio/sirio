@@ -10,7 +10,9 @@ use std::ops::RangeInclusive;
 
 use ely_gpui_component::editor::{CursorShape, LineNumbers, ViewOptions};
 use gpui::App;
-use sirio_persistence::{AppSettings, EditorCursorShape, EditorLineNumbers, settings_ranges};
+use sirio_persistence::{
+    AppSettings, EditorCursorShape, EditorLineNumbers, settings_keys, settings_ranges,
+};
 
 /// The code editor's preferences, as the Settings snapshot carries them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +110,85 @@ impl EditorPrefs {
                 EditorCursorShape::Underline => CursorShape::Underline,
             },
         }
+    }
+
+    /// The twelve settings as `key=value` pairs, comma-separated, in the order
+    /// Global Constraints lists them, each key without its `editor.` prefix.
+    pub fn describe(&self) -> String {
+        [
+            format!("minimap={}", self.minimap),
+            format!("stickyScroll={}", self.sticky_scroll),
+            format!("indentGuides={}", self.indent_guides),
+            format!("rainbowBrackets={}", self.rainbow_brackets),
+            format!("codeLens={}", self.code_lens),
+            format!("inlayHints={}", self.inlay_hints),
+            format!("whitespace={}", self.whitespace),
+            format!("ruler={}", self.ruler),
+            format!("rulerColumn={}", self.ruler_column),
+            format!("lineNumbers={}", self.line_numbers.raw()),
+            format!("cursorShape={}", self.cursor_shape.raw()),
+            format!("tabSize={}", self.tab_size),
+        ]
+        .join(",")
+    }
+
+    /// Sets one setting from its text, as the Settings → Editor page stores it.
+    /// `key` is the stored key (`editor.minimap`) or its suffix (`minimap`). An
+    /// unknown key, a value that does not parse and a number outside its range
+    /// are errors: nothing is clamped.
+    pub fn set_from_text(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let stored = if key.starts_with("editor.") {
+            key.to_string()
+        } else {
+            format!("editor.{key}")
+        };
+        let flag = || {
+            value
+                .parse::<bool>()
+                .map_err(|_| format!("{key} takes true or false, not '{value}'"))
+        };
+        let number = |range: RangeInclusive<i64>| {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|number| range.contains(number))
+                .map(|number| number as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "{key} takes a number from {} to {}, not '{value}'",
+                        range.start(),
+                        range.end()
+                    )
+                })
+        };
+        match stored.as_str() {
+            settings_keys::EDITOR_MINIMAP => self.minimap = flag()?,
+            settings_keys::EDITOR_STICKY_SCROLL => self.sticky_scroll = flag()?,
+            settings_keys::EDITOR_INDENT_GUIDES => self.indent_guides = flag()?,
+            settings_keys::EDITOR_RAINBOW_BRACKETS => self.rainbow_brackets = flag()?,
+            settings_keys::EDITOR_CODE_LENS => self.code_lens = flag()?,
+            settings_keys::EDITOR_INLAY_HINTS => self.inlay_hints = flag()?,
+            settings_keys::EDITOR_WHITESPACE => self.whitespace = flag()?,
+            settings_keys::EDITOR_RULER => self.ruler = flag()?,
+            settings_keys::EDITOR_RULER_COLUMN => {
+                self.ruler_column = number(settings_ranges::EDITOR_RULER_COLUMN)?
+            }
+            settings_keys::EDITOR_LINE_NUMBERS => {
+                self.line_numbers = EditorLineNumbers::parse(value).ok_or_else(|| {
+                    format!("{key} takes absolute, relative or hidden, not '{value}'")
+                })?
+            }
+            settings_keys::EDITOR_CURSOR_SHAPE => {
+                self.cursor_shape = EditorCursorShape::parse(value).ok_or_else(|| {
+                    format!("{key} takes line, block or underline, not '{value}'")
+                })?
+            }
+            settings_keys::EDITOR_TAB_SIZE => {
+                self.tab_size = number(settings_ranges::EDITOR_TAB_SIZE)?
+            }
+            _ => return Err(format!("unknown editor setting '{key}'")),
+        }
+        Ok(())
     }
 }
 

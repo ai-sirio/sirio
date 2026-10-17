@@ -1061,7 +1061,7 @@ impl FileView {
     /// renders source even if Preview was requested, until the unlock
     /// happens — the switcher highlights this effective mode so the mark
     /// never lies about what is on screen.
-    fn effective_mode(&self) -> MarkdownMode {
+    pub fn effective_mode(&self) -> MarkdownMode {
         match self.editor() {
             Some(editor)
                 if editor.language() == Language::Markdown
