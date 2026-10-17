@@ -11,6 +11,7 @@ mod change_requests;
 mod files;
 mod history;
 mod history_toolbar;
+mod open_list;
 mod references;
 
 use gpui::{
@@ -26,6 +27,7 @@ use change_requests::{ChangeRequestList, ChangeRequestListEvent};
 use history::{GitHistory, GitHistoryEvent};
 
 pub use change_requests::{filter_word, parse_filter};
+pub use open_list::{OpenListFacts, OpenSurface};
 pub use references::{GroupedRow, ReferenceRow, ReferencesState, group_by_file, summary};
 use references::{ReferencesEvent, ReferencesList};
 
@@ -68,6 +70,9 @@ pub enum RightPanelActionEvent {
         reference: sirio_forge::ChangeRef,
         title: String,
     },
+    /// A row of the Open list (spec 2026-10-15 §2): open this surface in
+    /// the Secondary pane. The host owns every surface it names.
+    OpenSurface(OpenSurface),
 }
 
 /// Which view the right panel is showing.
@@ -79,6 +84,7 @@ pub enum PanelView {
     History,
     References,
     ChangeRequests,
+    Open,
 }
 
 /// A settled Files tree, handed to the host on the way out of a worktree so
@@ -172,12 +178,13 @@ impl ShowHiddenFilesSetting {
 
 impl PanelView {
     /// Rail order, left to right.
-    const ORDER: [PanelView; 5] = [
+    const ORDER: [PanelView; 6] = [
         PanelView::Files,
         PanelView::Diff,
         PanelView::History,
         PanelView::References,
         PanelView::ChangeRequests,
+        PanelView::Open,
     ];
 
     fn icon(self) -> Icon {
@@ -187,6 +194,19 @@ impl PanelView {
             PanelView::History => Icon::GitGraph,
             PanelView::References => Icon::MagnifyingGlass,
             PanelView::ChangeRequests => Icon::PullRequest,
+            PanelView::Open => Icon::SquarePlus,
+        }
+    }
+
+    /// The view's name on the control socket (`surface.layout.read`).
+    pub fn name(self) -> &'static str {
+        match self {
+            PanelView::Files => "files",
+            PanelView::Diff => "diff",
+            PanelView::History => "history",
+            PanelView::References => "references",
+            PanelView::ChangeRequests => "change_requests",
+            PanelView::Open => "open",
         }
     }
 
@@ -197,6 +217,7 @@ impl PanelView {
             PanelView::History => "right-panel-tab-history",
             PanelView::References => "right-panel-tab-references",
             PanelView::ChangeRequests => "right-panel-tab-change-requests",
+            PanelView::Open => "right-panel-tab-open",
         }
     }
 
@@ -297,6 +318,12 @@ pub struct RightPanel {
     /// The resolved right-panel width, pushed in by the host every render.
     /// The History toolbar shapes itself from it; see [`GitHistory::panel_width`].
     panel_width: f32,
+    /// What only the host knows about the Open view; see
+    /// [`RightPanel::set_open_list_facts`].
+    open_list_facts: open_list::OpenListFacts,
+    /// Whether the Open view's Chat row shows its agents. Lost on a
+    /// worktree switch with the rest of the entity, by design.
+    open_list_chat_expanded: bool,
     is_stale: bool,
     updating: bool,
 }
@@ -339,6 +366,8 @@ impl RightPanel {
             change_requests: None,
             change_requests_subscription: None,
             panel_width: 320.0,
+            open_list_facts: open_list::OpenListFacts::default(),
+            open_list_chat_expanded: false,
             is_stale: false,
             updating: false,
         }
@@ -871,6 +900,7 @@ impl Render for RightPanel {
                 PanelView::Diff => self.render_diff(theme, cx).into_any_element(),
                 PanelView::History => self.render_history(theme, cx).into_any_element(),
                 PanelView::References => self.render_references(theme, cx).into_any_element(),
+                PanelView::Open => self.render_open_list(entity.clone(), theme),
                 PanelView::ChangeRequests if self.project_is_git => {
                     self.render_change_requests(cx).into_any_element()
                 }

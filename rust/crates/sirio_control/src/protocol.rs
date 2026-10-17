@@ -734,6 +734,24 @@ pub mod request {
         request("surface.tabs.read", BTreeMap::new())
     }
 
+    /// `surface.layout.read`: whether the Secondary pane is drawn, each
+    /// half's tabs and the right panel's view (spec 2026-10-15 §4).
+    pub fn layout_read() -> ControlRequest {
+        request("surface.layout.read", BTreeMap::new())
+    }
+
+    /// Debug-only `surface.open_list.open`: what a click on `entry` of the
+    /// right panel's Open list does. `show` selects the Open view, `chat`
+    /// expands or collapses Chat, `agent:<id>` opens that agent's chat; the
+    /// rest name a row (`terminal`, `browser`, `changes`, `open-file`,
+    /// `project-settings`, `other-agents`).
+    pub fn open_list_open(entry: &str) -> ControlRequest {
+        request(
+            "surface.open_list.open",
+            BTreeMap::from([("entry".to_string(), entry.to_string())]),
+        )
+    }
+
     /// Selects the `position`th tab of `tabs_read`'s list (1-based), whichever
     /// half of the center it is in — unlike `tab_select`, which counts only
     /// the focused half's tabs.
