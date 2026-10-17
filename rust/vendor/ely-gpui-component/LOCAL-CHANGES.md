@@ -323,3 +323,12 @@ applied as upstream wrote it or was rewritten against the vendored code.
   `src/documents/tree/tests.rs`.
   `tests/wide.rs` passes unchanged. `offset_in` keeps its `None` for a lost
   line and now takes `window` and `cx`.
+- `cd61653` "Code editor: measure with the current text; the line end is a
+  stop": `buffer.rs` (the text stamp, and equality that ignores it), `view.rs`
+  (`Frame::stamp`), `measure.rs` (`column` picks the nearer of a glyph start
+  and the line end) and `tests/wide.rs` (two new tests) are verbatim, applied
+  from the upstream commit. `line.rs` is hand-applied: the `fresh` gate on the
+  brackets, occurrences and matched pair, and the two comments, go onto
+  `styles`, which here calls `syntax::colors` where upstream's `main` calls
+  `line_colors`. Nothing else in `line.rs` changed.
+  Skipped: none; the commit touches no unvendored file.
