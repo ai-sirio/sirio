@@ -3844,6 +3844,192 @@ mod tests {
         assert!(code_focused(&mut cx), "and the keyboard goes back to the code");
     }
 
+    // How Find can fail around the box and the query (task 9b, from 9a's review):
+    //
+    // - The pointer resting on the box reaches the code under it: a diagnostic
+    //   line pops its card for text the box hides, and a card already drawn
+    //   stays when the pointer slides onto the box.
+    // - Find pressed while typing in the query takes the code's selection as
+    //   the query, which after any step is the current match, and so replaces
+    //   a pattern such as `fo+` with the text it matched.
+    // - A selection seeds the query of a regular expression verbatim, so `f(`
+    //   is an error and `a.b` finds more than was selected.
+
+    /// The text of find's query field, `None` while find is closed.
+    fn find_query(view: &gpui::Entity<FileView>, cx: &VisualTestContext) -> Option<String> {
+        view.read_with(&cx.cx, |view, app| {
+            view.find
+                .as_ref()
+                .map(|find| find.query.read(app).text().to_owned())
+        })
+    }
+
+    fn query_focused(view: &gpui::Entity<FileView>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, app| {
+            let query = view
+                .read(app)
+                .find
+                .as_ref()
+                .expect("find is open")
+                .query
+                .clone();
+            query.read(app).focus_handle(app).is_focused(window)
+        })
+    }
+
+    #[gpui::test]
+    async fn the_pointer_on_the_find_box_does_not_reach_the_code_under_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Long lines and one finding over all of them, so any point of the code
+        // the pointer can reach is a point the card would answer.
+        let line = "x".repeat(400);
+        let text = format!("{line}\n{line}\n{line}\n");
+        let file = TempFile::with_extension("rs", &text);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let whole = 0..text.len();
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic {
+                    line: 0,
+                    range: whole,
+                    severity: DiagnosticSeverity::Error,
+                    message: "boom".into(),
+                }],
+                cx,
+            );
+        });
+        open_find(&view, "x", None, &mut cx);
+        let card = |cx: &VisualTestContext| {
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned))
+        };
+
+        let line_bounds = cx
+            .debug_bounds("code-editor-line-0")
+            .expect("the first line is drawn");
+        // Past the gutter, and left of the box, which sits at the right.
+        let on_code = point(line_bounds.origin.x + px(300.), line_bounds.center().y);
+        cx.simulate_mouse_move(on_code, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            card(&cx).as_deref(),
+            Some("boom"),
+            "resting on the code away from the box shows the diagnostic"
+        );
+
+        let find = cx.debug_bounds("file-find").expect("the find box is drawn");
+        cx.simulate_mouse_move(find.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            card(&cx),
+            None,
+            "the pointer on the box neither shows the card of the code under it nor keeps the old one"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_find_key_in_the_query_selects_it_and_never_reseeds_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "foo fooo foo\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|_, app| init(app));
+        let options = ely_gpui_component::editor::FindOptions {
+            regex: true,
+            ..Default::default()
+        };
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.open_find(Some("fo+".into()), options, None, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx), (Some(3), Some(0)));
+        assert!(query_focused(&view, &mut cx), "open_find puts the keyboard in the query");
+
+        // `open_find` selected the first match in the code, `foo`: the text a
+        // seed would take.
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(
+            find_query(&view, &cx).as_deref(),
+            Some("fo+"),
+            "Find in the query field does not replace the pattern with the code's selection"
+        );
+        assert!(query_focused(&view, &mut cx), "and the keyboard stays in the query");
+        assert_eq!(found(&view, &cx), (Some(3), Some(0)));
+    }
+
+    #[gpui::test]
+    async fn a_selection_that_is_the_current_match_is_not_a_new_query(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "foo fooo foo\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|_, app| init(app));
+        let options = ely_gpui_component::editor::FindOptions {
+            regex: true,
+            ..Default::default()
+        };
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.open_find(Some("fo+".into()), options, None, window, cx);
+                view.find_step(true, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx), (Some(3), Some(1)), "`fooo` is current and selected");
+
+        cx.update(|window, app| focus_code(&view, window, app));
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(
+            find_query(&view, &cx).as_deref(),
+            Some("fo+"),
+            "the code's selection is the match the query found, not a new query"
+        );
+        assert_eq!(found(&view, &cx), (Some(3), Some(1)));
+    }
+
+    #[gpui::test]
+    async fn a_selection_seeds_a_regular_expression_query_literally(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "f(x) a.b axb\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|_, app| init(app));
+        let options = ely_gpui_component::editor::FindOptions {
+            regex: true,
+            ..Default::default()
+        };
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.open_find(Some("zzz".into()), options, None, window, cx)
+            });
+            focus_code(&view, window, app);
+            select_code(&view, app, 0..2);
+        });
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(
+            find_query(&view, &cx).as_deref(),
+            Some(r"f\("),
+            "the selected `f(` is escaped for a pattern"
+        );
+        assert_eq!(found(&view, &cx), (Some(1), Some(0)));
+        assert_eq!(view.read_with(&cx.cx, |view, _| view.find_error().map(str::to_owned)), None);
+
+        // `a.b` selected: the escaped dot does not match `axb`.
+        cx.update(|window, app| {
+            focus_code(&view, window, app);
+            select_code(&view, app, 5..8);
+        });
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(find_query(&view, &cx).as_deref(), Some(r"a\.b"));
+        assert_eq!(found(&view, &cx), (Some(1), Some(0)), "`axb` is not a match of `a.b`");
+    }
+
     #[gpui::test]
     async fn the_context_menu_paints_at_the_click_point_behind_a_non_zero_origin(
         cx: &mut gpui::TestAppContext,

@@ -20,6 +20,11 @@
 //!   Escape that should collapse the cursors once nothing is open.
 //! - Escape in the query field closes find but leaves the keyboard in
 //!   nothing, so the next key goes nowhere.
+//! - The pointer on the box reaches the code under it: a diagnostic line pops
+//!   its card for hidden text, and a card already drawn stays.
+//! - Find pressed in the query field, or with the current match selected in
+//!   the code, replaces the pattern being typed with the text it matched.
+//! - A selection seeds a regular expression verbatim, so `f(` is an error.
 
 use std::ops::Range;
 
@@ -331,10 +336,17 @@ impl FileView {
         cx.notify();
     }
 
-    /// The tab's Find and Replace keys. The primary selection becomes the query
-    /// when it is not empty and holds no line break; otherwise the query stays.
-    /// Replace opens the row only where the code takes edits, and falls back to
-    /// Find where it does not.
+    /// The tab's Find and Replace keys.
+    ///
+    /// With the keyboard in the query or the replacement field they only select
+    /// the query's text and bring the keyboard back to it (and, for Replace,
+    /// open the row where the code takes edits): seeding there would replace
+    /// what is being typed with the code's selection, which after any step is
+    /// the current match. From the code, the primary selection becomes the query
+    /// when it is not empty, holds no line break and is not the current match
+    /// itself; under a regular expression it is escaped, so it is searched as
+    /// the text it is. Otherwise the query stays. Replace opens the row only
+    /// where the code takes edits, and falls back to Find where it does not.
     pub(super) fn find_from_key(
         &mut self,
         replace: bool,
@@ -344,13 +356,45 @@ impl FileView {
         let Some(code) = self.code_editor.clone() else {
             return;
         };
+        let can_replace = self.find_can_replace(cx);
+        if let Some(find) = self.find.as_mut() {
+            let in_fields = find.query.read(cx).focus_handle(cx).contains_focused(window, cx)
+                || find
+                    .replacement
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains_focused(window, cx);
+            if in_fields {
+                if replace && can_replace {
+                    find.replace_open = true;
+                }
+                let query = find.query.clone();
+                let length = query.read(cx).text().len();
+                query.update(cx, |field, cx| field.select(0..length, cx));
+                query.read(cx).focus_handle(cx).focus(window, cx);
+                cx.notify();
+                return;
+            }
+        }
+        let options = self.find.as_ref().map_or_else(FindOptions::default, |find| find.options);
         let query = {
             let code = code.read(cx);
-            let selected = &code.text()[code.primary().range()];
-            (!selected.is_empty() && !selected.contains('\n')).then(|| selected.to_owned())
+            let range = code.primary().range();
+            let is_current_match = self
+                .find
+                .as_ref()
+                .and_then(|find| find.current.and_then(|ix| find.matches.get(ix)))
+                .is_some_and(|hit| *hit == range);
+            let selected = &code.text()[range];
+            (!selected.is_empty() && !selected.contains('\n') && !is_current_match).then(|| {
+                if options.regex {
+                    regex::escape(selected)
+                } else {
+                    selected.to_owned()
+                }
+            })
         };
-        let options = self.find.as_ref().map_or_else(FindOptions::default, |find| find.options);
-        let replace = (replace && self.find_can_replace(cx)).then(|| {
+        let replace = (replace && can_replace).then(|| {
             self.find
                 .as_ref()
                 .map_or_else(String::new, |find| find.replacement.read(cx).text().to_owned())
@@ -441,6 +485,11 @@ impl FileView {
         }
         // The press stops here: the tab's own press hands the keyboard to the
         // code, which would take it back from the field the press was for.
+        // The box blocks the pointer from the code under it (gpui's hit test
+        // reaches through anything that does not), so no card or hover is
+        // asked for text the box hides and the code's cursor does not show
+        // through; the wheel still scrolls the code. A card drawn before the
+        // pointer slid onto the box goes with the first move on it.
         Some(
             div()
                 .id("file-find")
@@ -448,6 +497,8 @@ impl FileView {
                 .absolute()
                 .top(px(8.0))
                 .right(minimap_inset(code, window, cx) + px(12.0))
+                .block_mouse_except_scroll()
+                .on_mouse_move(cx.listener(|view, _, _, cx| view.dismiss_hover(cx)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .child(widget)
