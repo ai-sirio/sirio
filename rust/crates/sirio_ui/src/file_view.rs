@@ -726,7 +726,11 @@ impl FileView {
     /// clears them on an undo or a reload, so the card agrees with the
     /// squiggles. Before it exists, the view's own copy is all there is.
     fn diagnostics_at(&self, offset: usize, cx: &App) -> Vec<String> {
-        let covers = |range: &Range<usize>| range.contains(&offset) || range.start == offset;
+        // Both ends count. A zero-width finding at a line's end is drawn over
+        // the character before it (`marked_range` widens it to `x-1..x`), and
+        // Ely answers a pointer past that character with the boundary `x`, so
+        // the card must still show the finding at its end.
+        let covers = |range: &Range<usize>| range.start <= offset && offset <= range.end;
         let Some(code) = &self.code_editor else {
             let mut found: Vec<_> = self
                 .diagnostics
@@ -804,6 +808,29 @@ impl FileView {
     fn dismiss_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu.take().is_some() {
             cx.notify();
+        }
+    }
+
+    /// What a click on the menu's row for `action` does now. Both the row's
+    /// click and the debug verb `surface.editor.context` take this path, so the
+    /// verb refuses exactly where a click does. A row that is not offered has
+    /// no click (`not offered`). An unavailable row refuses with its reason. A
+    /// redirected row does what it redirects to, not the action it is labelled
+    /// with: a missing language server is installed, not searched for.
+    fn context_effect(
+        &self,
+        action: FileContextAction,
+        cx: &App,
+    ) -> Result<FileContextAction, String> {
+        let items = self.context_menu_items(cx);
+        let item = items
+            .iter()
+            .find(|item| item.action == action)
+            .ok_or_else(|| "not offered".to_string())?;
+        match &item.state {
+            ItemState::Ready => Ok(item.action),
+            ItemState::Unavailable(reason) => Err(reason.clone()),
+            ItemState::Redirected { to, .. } => Ok(*to),
         }
     }
 
@@ -1380,12 +1407,7 @@ impl Render for FileView {
                 let debug_selector = selector.clone();
                 let state = item.state.clone();
                 let is_disabled = matches!(state, ItemState::Unavailable(_));
-                // A redirected row acts on what is missing, not on what it
-                // is labelled with; an unavailable row acts on nothing.
-                let effect = match &state {
-                    ItemState::Ready | ItemState::Unavailable(_) => item.action,
-                    ItemState::Redirected { to, .. } => *to,
-                };
+                let action = item.action;
                 let note = match &state {
                     ItemState::Ready => None,
                     ItemState::Unavailable(reason) => Some(reason.clone()),
@@ -1412,7 +1434,9 @@ impl Render for FileView {
                                 .hover(|style| style.bg(theme.ely.hover))
                                 .on_click(move |_, window, cx| {
                                     item_entity.update(cx, |view, cx| {
-                                        view.handle_context_action(effect, window, cx);
+                                        if let Ok(effect) = view.context_effect(action, cx) {
+                                            view.handle_context_action(effect, window, cx);
+                                        }
                                     });
                                 })
                         })

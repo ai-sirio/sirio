@@ -185,9 +185,12 @@ impl FileView {
     }
 
     /// The debug verbs' platform click at `offset`: the path Ely's
-    /// `PlatformClick` takes (`code_platform_click`).
+    /// `PlatformClick` takes (`code_platform_click`). Ely puts the caret at the
+    /// release before it emits the click (`line.rs`), so the caret goes there
+    /// first, as it does for a real click.
     pub fn platform_click_at(&mut self, offset: usize, cx: &mut Context<Self>) {
         if let Some(code) = self.code_editor.clone() {
+            code.update(cx, |code, cx| code.select_in_place([offset..offset], cx));
             self.code_platform_click(offset, &code, cx);
         }
     }
@@ -199,8 +202,12 @@ impl FileView {
         }
     }
 
-    /// The debug verbs' right press at `offset`, then the menu's `action`:
-    /// `code_secondary_click`, then `handle_context_action`, as the menu runs it.
+    /// The debug verbs' right press at `offset`, then the menu row's click for
+    /// `action`: `code_secondary_click`, then `context_effect` and the effect it
+    /// names, as the menu runs them. The press comes first because it changes
+    /// what the row can do (a press off the selection collapses it). A row the
+    /// click would refuse answers its reason, and the menu stays open as it
+    /// does after a click on a disabled row.
     pub fn context_action_at(
         &mut self,
         offset: usize,
@@ -208,11 +215,15 @@ impl FileView {
         action: FileContextAction,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        if let Some(code) = self.code_editor.clone() {
-            self.code_secondary_click(Some(offset), position, &code, window, cx);
-            self.handle_context_action(action, window, cx);
-        }
+    ) -> Result<(), String> {
+        let code = self
+            .code_editor
+            .clone()
+            .ok_or_else(|| "the code editor is not drawn".to_string())?;
+        self.code_secondary_click(Some(offset), position, &code, window, cx);
+        let effect = self.context_effect(action, cx)?;
+        self.handle_context_action(effect, window, cx);
+        Ok(())
     }
 
     /// Pushes the app's editor settings into the code editor when they differ

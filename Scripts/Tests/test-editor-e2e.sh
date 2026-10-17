@@ -940,6 +940,19 @@ scenario_context() {
   local before first
   before="$(sfield text)"
   first="$(python3 "$TOOLS" offset "$before" "line_2")"
+  # Refused: with no selection the press leaves Copy unavailable, so the row's
+  # click refuses with its reason, and the verb answers that reason as its error.
+  # The press itself still moves the caret to where it landed.
+  local refused=""
+  if refused="$(ctl surface editor context --offset="$first" --action=copy 2>&1)"; then
+    fail "$SCENARIO: copy with no selection was accepted; the verb answered: $refused"
+  fi
+  case "$refused" in
+    *"sirioctl: Select some text first"*) ;;
+    *) fail "$SCENARIO: copy with no selection answered '$refused', expected 'Select some text first'" ;;
+  esac
+  expect_state selections "$first..$first"
+  echo "OK: copy with no selection is refused: Select some text first"
   ctl surface editor select --ranges="$first..$((first + 6))" >/dev/null
   # A right press inside the selection keeps it; the menu's Copy copies it.
   ctl surface editor context --offset=$((first + 2)) --action=copy >/dev/null

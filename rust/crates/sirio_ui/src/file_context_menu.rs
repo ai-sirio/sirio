@@ -34,25 +34,35 @@ pub enum FileContextAction {
 }
 
 impl FileContextAction {
-    /// The action a debug verb names, in kebab case (`copy-and-trim`,
-    /// `go-to-definition`). `None` for a name no action has.
+    /// The action's name in kebab case (`copy-and-trim`, `go-to-definition`),
+    /// as a debug verb names it. No `_` arm: a new action has a name or the
+    /// build breaks, and `from_kebab` finds it through this name.
+    pub fn kebab(self) -> &'static str {
+        match self {
+            Self::SendToAgent => "send-to-agent",
+            Self::Cut => "cut",
+            Self::Copy => "copy",
+            Self::CopyAndTrim => "copy-and-trim",
+            Self::Paste => "paste",
+            Self::RevealInFileManager => "reveal-in-file-manager",
+            Self::OpenInTerminal => "open-in-terminal",
+            Self::OpenMarkdownPreview => "open-markdown-preview",
+            Self::CopyPermalink => "copy-permalink",
+            Self::ViewFileHistory => "view-file-history",
+            Self::GoToDefinition => "go-to-definition",
+            Self::FindReferences => "find-references",
+            Self::InstallLanguageServer => "install-language-server",
+        }
+    }
+
+    /// The action a debug verb names, by `kebab`. `None` for a name no action
+    /// has. The table's actions, then the one the table never draws.
     pub fn from_kebab(name: &str) -> Option<Self> {
-        Some(match name {
-            "send-to-agent" => Self::SendToAgent,
-            "cut" => Self::Cut,
-            "copy" => Self::Copy,
-            "copy-and-trim" => Self::CopyAndTrim,
-            "paste" => Self::Paste,
-            "reveal-in-file-manager" => Self::RevealInFileManager,
-            "open-in-terminal" => Self::OpenInTerminal,
-            "open-markdown-preview" => Self::OpenMarkdownPreview,
-            "copy-permalink" => Self::CopyPermalink,
-            "view-file-history" => Self::ViewFileHistory,
-            "go-to-definition" => Self::GoToDefinition,
-            "find-references" => Self::FindReferences,
-            "install-language-server" => Self::InstallLanguageServer,
-            _ => return None,
-        })
+        ITEMS
+            .iter()
+            .map(|item| item.action)
+            .chain([Self::InstallLanguageServer])
+            .find(|action| action.kebab() == name)
     }
 }
 

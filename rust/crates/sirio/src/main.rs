@@ -18313,7 +18313,8 @@ impl SirioWorkspace {
     }
 
     /// `surface.editor.context offset= action=`: a right press at `offset`, then
-    /// the menu's `action`, as the menu runs it. Answers the selections.
+    /// the menu row's click for `action`, as the menu runs it. A row the click
+    /// refuses answers its reason as the error. Answers the selections.
     fn control_editor_context(
         &mut self,
         offset: usize,
@@ -18325,7 +18326,7 @@ impl SirioWorkspace {
         let at = Self::window_centre(window);
         view.update(cx, |view, cx| {
             view.context_action_at(offset, at, action, window, cx)
-        });
+        })?;
         Self::selections_reply(&view, cx)
     }
 
