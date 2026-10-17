@@ -9,6 +9,8 @@
 //! (Windows). Something Sirio did not make at a link's place is never replaced.
 
 use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 #[cfg(unix)]
@@ -64,38 +66,69 @@ pub(crate) fn recorded_login_path() -> Option<&'static OsStr> {
 /// searches (see the module doc), or on Windows the stable copy's directory on
 /// the user's `Path`.
 ///
-/// `login_path` is the login shell's PATH. `None` (the shell could not be read)
-/// counts as not on it, so the outcome says so rather than claiming success.
-/// `admin` asks macOS for the administrator's password when no directory is
-/// writable; no other platform reads it.
-#[cfg(target_os = "macos")]
+/// `login_path` is the login shell's PATH. When it could not be read, the PATH
+/// to check against is the user environment's, else this process's, so a link
+/// the user's shell would find is never reported as off the PATH. `admin` asks
+/// macOS for the administrator's password when no directory is writable; no
+/// other platform reads it.
 pub(crate) fn link_on_path(
     stable: &Path,
     home: &Path,
     login_path: Option<&OsStr>,
     admin: bool,
 ) -> LinkOutcome {
-    link_on_macos(stable, home, login_path, admin, Path::new(SYSTEM_BIN_DIR))
+    let fallback = fallback_search_path();
+    link_on_path_with(stable, home, login_path, fallback.as_deref(), admin)
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn link_on_path(
+/// `link_on_path` with the PATH to fall back on named. The fallback is consulted
+/// only when the login PATH is unknown, and a test can name it.
+#[cfg(target_os = "macos")]
+pub(crate) fn link_on_path_with(
     stable: &Path,
     home: &Path,
     login_path: Option<&OsStr>,
+    fallback: Option<&OsStr>,
+    admin: bool,
+) -> LinkOutcome {
+    link_on_macos(
+        stable,
+        home,
+        login_path.or(fallback),
+        admin,
+        Path::new(SYSTEM_BIN_DIR),
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn link_on_path_with(
+    stable: &Path,
+    home: &Path,
+    login_path: Option<&OsStr>,
+    fallback: Option<&OsStr>,
     _admin: bool,
 ) -> LinkOutcome {
-    link_in_user_bin(stable, home, login_path)
+    link_in_user_bin(stable, home, login_path.or(fallback))
 }
 
 #[cfg(windows)]
-pub(crate) fn link_on_path(
+pub(crate) fn link_on_path_with(
     stable: &Path,
     _home: &Path,
     _login_path: Option<&OsStr>,
+    _fallback: Option<&OsStr>,
     _admin: bool,
 ) -> LinkOutcome {
     link_on_windows_path(stable)
+}
+
+/// The PATH a new shell would search, when the login shell's could not be read:
+/// the user environment's, and failing that this process's.
+fn fallback_search_path() -> Option<OsString> {
+    sirio_env::installed()
+        .and_then(|user| user.get("PATH"))
+        .map(OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
 }
 
 /// The directory macOS puts `sirioctl` in when it may: Homebrew on Intel makes
@@ -113,15 +146,13 @@ fn link_in_user_bin(stable: &Path, home: &Path, login_path: Option<&OsStr>) -> L
     }
     let dir = home.join(".local/bin");
     let place = dir.join(sirioctl_binary_name());
-    let made = match inspect_place(&place, stable, sirio_data_root(stable)) {
+    let state = match inspect_place(&place, stable, sirio_data_root(stable)) {
+        Ok(state) => state,
         Err(outcome) => return outcome,
-        Ok(Place::Current) => false,
-        Ok(Place::Free | Place::Replaceable) => {
-            if let Err(outcome) = write_link(&place, stable) {
-                return outcome;
-            }
-            true
-        }
+    };
+    let made = match write_placed(&place, stable, state) {
+        Ok(made) => made,
+        Err(outcome) => return outcome,
     };
     settle(&dir, place, made, login_path)
 }
@@ -191,7 +222,7 @@ fn inspect_place(
     if target
         .as_deref()
         .zip(sirio_root)
-        .is_some_and(|(target, root)| target.starts_with(root))
+        .is_some_and(|(target, root)| within_sirio_data(target, root))
     {
         return Ok(Place::Replaceable);
     }
@@ -201,29 +232,80 @@ fn inspect_place(
     })
 }
 
-/// Makes `place` a link to `stable`. The link is made beside `place` and renamed
-/// over it, so a link already there is replaced whole, never removed first.
+/// Whether `target` lies in Sirio's data root, read lexically. A `..` anywhere in
+/// it makes it someone else's: `<data>/Sirio/../x` starts with the root's spelling
+/// and names another directory.
 #[cfg(unix)]
-fn write_link(place: &Path, stable: &Path) -> Result<(), LinkOutcome> {
-    let failed = |error: std::io::Error| {
-        LinkOutcome::Failed(format!("could not link {}: {error}", place.display()))
-    };
+fn within_sirio_data(target: &Path, root: &Path) -> bool {
+    target.starts_with(root)
+        && !target
+            .components()
+            .any(|component| component == Component::ParentDir)
+}
+
+#[cfg(unix)]
+fn link_failed(place: &Path, error: std::io::Error) -> LinkOutcome {
+    LinkOutcome::Failed(format!("could not link {}: {error}", place.display()))
+}
+
+/// Writes the link for a place that `inspect_place` found in `state`. Returns
+/// whether a link was written, which is `false` only for a link already in place.
+#[cfg(unix)]
+fn write_placed(place: &Path, stable: &Path, state: Place) -> Result<bool, LinkOutcome> {
+    match state {
+        Place::Current => Ok(false),
+        Place::Free => create_link(place, stable),
+        Place::Replaceable => replace_link(place, stable).map(|()| true),
+    }
+}
+
+/// Creates the link where nothing was. `symlink` never replaces: a file that
+/// appeared since the inspection is looked at again and reported as it is.
+#[cfg(unix)]
+fn create_link(place: &Path, stable: &Path) -> Result<bool, LinkOutcome> {
     let Some(dir) = place.parent() else {
         return Err(LinkOutcome::Failed(format!(
             "{} has no directory",
             place.display()
         )));
     };
-    std::fs::create_dir_all(dir).map_err(failed)?;
+    std::fs::create_dir_all(dir).map_err(|error| link_failed(place, error))?;
+    match std::os::unix::fs::symlink(stable, place) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match inspect_place(place, stable, sirio_data_root(stable))? {
+                Place::Current => Ok(false),
+                Place::Replaceable => replace_link(place, stable).map(|()| true),
+                Place::Free => Err(LinkOutcome::Failed(format!(
+                    "{} changed while it was being linked; try again",
+                    place.display()
+                ))),
+            }
+        }
+        Err(error) => Err(link_failed(place, error)),
+    }
+}
+
+/// Replaces a link into Sirio's own data with one to `stable`. The new link is
+/// made beside `place` and renamed over it, so the old one is replaced whole,
+/// never removed first.
+#[cfg(unix)]
+fn replace_link(place: &Path, stable: &Path) -> Result<(), LinkOutcome> {
+    let Some(dir) = place.parent() else {
+        return Err(LinkOutcome::Failed(format!(
+            "{} has no directory",
+            place.display()
+        )));
+    };
     let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = dir.join(format!(
         ".sirioctl-link-{}-{sequence}.tmp",
         std::process::id()
     ));
-    std::os::unix::fs::symlink(stable, &temporary).map_err(failed)?;
+    std::os::unix::fs::symlink(stable, &temporary).map_err(|error| link_failed(place, error))?;
     std::fs::rename(&temporary, place).map_err(|error| {
         let _ = std::fs::remove_file(&temporary);
-        failed(error)
+        link_failed(place, error)
     })
 }
 
@@ -240,10 +322,12 @@ fn on_login_path(dir: &Path, login_path: Option<&OsStr>) -> bool {
 }
 
 /// macOS: `/usr/local/bin` when it is writable without a password, else
-/// `~/.local/bin` when the login PATH searches it, else `NeedsAdmin`. With
-/// `admin`, the directory is written through the administrator's prompt instead.
-/// `system_bin` is a parameter so the policy can be tested against a stand-in.
-#[cfg(target_os = "macos")]
+/// `~/.local/bin` when the PATH searches it, else `NeedsAdmin`. With `admin`, the
+/// directory is written through the administrator's prompt instead. A file Sirio
+/// did not make at `/usr/local/bin/sirioctl` does not block a usable
+/// `~/.local/bin`; it is reported only when no place is usable. `system_bin` is a
+/// parameter so the policy can be tested against a stand-in.
+#[cfg(all(unix, any(target_os = "macos", test)))]
 fn link_on_macos(
     stable: &Path,
     home: &Path,
@@ -252,18 +336,25 @@ fn link_on_macos(
     system_bin: &Path,
 ) -> LinkOutcome {
     let place = system_bin.join(sirioctl_binary_name());
-    // The system place decides first: a file that is not Sirio's stays the
-    // answer, whatever the user directory holds.
-    match inspect_place(&place, stable, sirio_data_root(stable)) {
-        Err(outcome) => return outcome,
-        Ok(Place::Current) => return settle(system_bin, place, false, login_path),
-        Ok(_) if is_writable_dir(system_bin) => {
-            return match write_link(&place, stable) {
-                Ok(()) => settle(system_bin, place, true, login_path),
-                Err(outcome) => outcome,
+    let state = match inspect_place(&place, stable, sirio_data_root(stable)) {
+        Ok(state) => state,
+        Err(foreign @ LinkOutcome::Foreign { .. }) => {
+            return if on_login_path(&home.join(".local/bin"), login_path) {
+                link_in_user_bin(stable, home, login_path)
+            } else {
+                foreign
             };
         }
-        Ok(_) => {}
+        Err(outcome) => return outcome,
+    };
+    if matches!(state, Place::Current) {
+        return settle(system_bin, place, false, login_path);
+    }
+    if is_writable_dir(system_bin) {
+        return match write_placed(&place, stable, state) {
+            Ok(made) => settle(system_bin, place, made, login_path),
+            Err(outcome) => outcome,
+        };
     }
     if admin {
         return link_with_administrator(stable, login_path);
@@ -275,7 +366,7 @@ fn link_on_macos(
 }
 
 /// Whether `dir` exists and this user may write into it without a prompt.
-#[cfg(target_os = "macos")]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 fn is_writable_dir(dir: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
 
@@ -290,7 +381,7 @@ fn is_writable_dir(dir: &Path) -> bool {
 /// Makes `/usr/local/bin/sirioctl` through macOS's administrator prompt. The
 /// call returns once the prompt is answered, so the caller runs it off the UI
 /// thread.
-#[cfg(target_os = "macos")]
+#[cfg(all(unix, any(target_os = "macos", test)))]
 fn link_with_administrator(stable: &Path, login_path: Option<&OsStr>) -> LinkOutcome {
     if stable.to_str().is_none() {
         return LinkOutcome::Failed(format!(
@@ -450,13 +541,8 @@ fn update_user_path(
         }
         other => return Err(format!("could not read the user's Path: error {other}")),
     };
-    if current.split(';').any(|item| same_directory(item, entry)) {
+    let Some(value) = path_with_entry(&current, entry) else {
         return Ok(false);
-    }
-    let value = if current.is_empty() {
-        entry.to_string()
-    } else {
-        format!("{current};{entry}")
     };
     let data = wide(&value);
     // SAFETY: `data` is NUL-terminated and `size` in bytes covers all of it.
@@ -476,8 +562,24 @@ fn update_user_path(
     Ok(true)
 }
 
+/// The user's `Path` with `entry` appended, or `None` when `entry` is there
+/// already. The check ignores case and a trailing separator, and nothing is
+/// appended after a `current` that already ends in `;`, so no `;;` is written.
+#[cfg(any(windows, test))]
+fn path_with_entry(current: &str, entry: &str) -> Option<String> {
+    if current.split(';').any(|item| same_directory(item, entry)) {
+        return None;
+    }
+    let current = current.trim_end_matches(';');
+    if current.is_empty() {
+        Some(entry.to_string())
+    } else {
+        Some(format!("{current};{entry}"))
+    }
+}
+
 /// Windows paths compare without case and without a trailing separator.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn same_directory(left: &str, right: &str) -> bool {
     left.trim_end_matches('\\')
         .eq_ignore_ascii_case(right.trim_end_matches('\\'))
@@ -625,6 +727,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The login shell could not be read, so the user environment's PATH is what
+    /// the link is checked against: `~/.local/bin` on it makes the link `Linked`.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_login_path_falls_back_to_the_user_path() {
+        let root = fixture("fallback-path");
+        let (stable, home) = stable_and_home(&root);
+        let user_path = login_path_with_local_bin(&home);
+        let place = home.join(".local/bin/sirioctl");
+
+        let outcome = link_on_path_with(&stable, &home, None, Some(user_path.as_os_str()), false);
+
+        assert_eq!(outcome, LinkOutcome::Linked(place.clone()));
+        assert_eq!(
+            std::fs::read_link(&place).expect("the link is there"),
+            stable
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_dangling_sirio_link_is_replaced() {
@@ -648,11 +770,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[cfg(target_os = "macos")]
+    /// A target that climbs out of Sirio's data with `..` is not Sirio's, even
+    /// though its spelling starts with the data root's.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_escaping_the_data_root_with_dotdot_is_foreign() {
+        let root = fixture("dotdot");
+        let (stable, home) = stable_and_home(&root);
+        let login = login_path_with_local_bin(&home);
+        let place = home.join(".local/bin/sirioctl");
+        std::fs::create_dir_all(place.parent().expect("a parent")).expect("create the bin dir");
+        let escaping = root.join("data/Sirio/../elsewhere/sirioctl");
+        symlink(&escaping, &place).expect("make the escaping link");
+
+        let outcome = link_on_path(&stable, &home, Some(login.as_os_str()), false);
+
+        assert_eq!(
+            outcome,
+            LinkOutcome::Foreign {
+                place: place.clone(),
+                points_to: Some(escaping.clone()),
+            }
+        );
+        assert_eq!(
+            std::fs::read_link(&place).expect("the escaping link is still there"),
+            escaping
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Whether the tests run as root. A root process writes into a `0555`
+    /// stand-in, so a permission-based test cannot tell the cases apart there.
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        // SAFETY: `getuid` takes no arguments and cannot fail.
+        unsafe { libc::getuid() == 0 }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn macos_never_asks_without_admin() {
         use std::os::unix::fs::PermissionsExt;
 
+        if running_as_root() {
+            return;
+        }
         let root = fixture("macos-admin");
         let (stable, home) = stable_and_home(&root);
         let system_bin = root.join("usr-local-bin");
@@ -665,10 +827,70 @@ mod tests {
 
         let outcome = link_on_macos(&stable, &home, Some(login.as_os_str()), false, &system_bin);
 
-        assert_eq!(outcome, LinkOutcome::NeedsAdmin);
-        assert!(!system_bin.join("sirioctl").exists());
+        let linked_anyway = system_bin.join("sirioctl").exists();
+        // Restored before any assertion, so a failure cannot leave a fixture
+        // that the next run cannot remove.
         std::fs::set_permissions(&system_bin, std::fs::Permissions::from_mode(0o755))
             .expect("restore the stand-in");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(outcome, LinkOutcome::NeedsAdmin);
+        assert!(!linked_anyway);
+    }
+
+    /// A file Sirio did not make at `/usr/local/bin/sirioctl` does not block a
+    /// usable `~/.local/bin`: the link goes there, and the file stays as it was.
+    #[cfg(unix)]
+    #[test]
+    fn macos_falls_back_past_a_foreign_system_file() {
+        let root = fixture("macos-foreign-system");
+        let (stable, home) = stable_and_home(&root);
+        let system_bin = root.join("usr-local-bin");
+        std::fs::create_dir_all(&system_bin).expect("create the stand-in");
+        let foreign = system_bin.join("sirioctl");
+        std::fs::write(&foreign, b"someone else's").expect("write a foreign file");
+        let login = login_path_with_local_bin(&home);
+        let place = home.join(".local/bin/sirioctl");
+
+        let outcome = link_on_macos(&stable, &home, Some(login.as_os_str()), false, &system_bin);
+
+        assert_eq!(outcome, LinkOutcome::Linked(place.clone()));
+        assert_eq!(
+            std::fs::read_link(&place).expect("the link is there"),
+            stable
+        );
+        assert_eq!(
+            std::fs::read(&foreign).expect("the foreign file is still there"),
+            b"someone else's"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The foreign file is reported only when no other place is usable: the
+    /// login PATH does not search `~/.local/bin` here.
+    #[cfg(unix)]
+    #[test]
+    fn macos_reports_a_foreign_system_file_when_no_place_is_usable() {
+        let root = fixture("macos-foreign-only");
+        let (stable, home) = stable_and_home(&root);
+        let system_bin = root.join("usr-local-bin");
+        std::fs::create_dir_all(&system_bin).expect("create the stand-in");
+        let foreign = system_bin.join("sirioctl");
+        std::fs::write(&foreign, b"someone else's").expect("write a foreign file");
+        let login = OsString::from("/usr/bin:/bin");
+
+        let outcome = link_on_macos(&stable, &home, Some(login.as_os_str()), false, &system_bin);
+
+        assert_eq!(
+            outcome,
+            LinkOutcome::Foreign {
+                place: foreign.clone(),
+                points_to: None,
+            }
+        );
+        assert_eq!(
+            std::fs::read(&foreign).expect("the foreign file is still there"),
+            b"someone else's"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -679,6 +901,44 @@ mod tests {
         assert_eq!(
             admin_link_script(stable),
             r#"do shell script "mkdir -p /usr/local/bin && ln -sfn '/home/u/My \"Data\"/it'\\''s\\bin/sirioctl' /usr/local/bin/sirioctl" with administrator privileges"#
+        );
+    }
+
+    #[test]
+    fn path_with_entry_appends_once() {
+        let first = path_with_entry(
+            r"C:\Windows;C:\Tools",
+            r"C:\Users\u\AppData\Local\Sirio\bin",
+        )
+        .expect("the entry is new");
+        assert_eq!(
+            first,
+            r"C:\Windows;C:\Tools;C:\Users\u\AppData\Local\Sirio\bin"
+        );
+        assert_eq!(
+            path_with_entry(&first, r"c:\users\U\appdata\local\sirio\BIN"),
+            None
+        );
+    }
+
+    #[test]
+    fn path_with_entry_handles_a_trailing_separator() {
+        assert_eq!(
+            path_with_entry(r"C:\Windows;", r"C:\Sirio\bin").as_deref(),
+            Some(r"C:\Windows;C:\Sirio\bin")
+        );
+        assert_eq!(path_with_entry(r"C:\Sirio\bin\", r"C:\Sirio\bin"), None);
+    }
+
+    #[test]
+    fn path_with_entry_on_an_empty_path() {
+        assert_eq!(
+            path_with_entry("", r"C:\Sirio\bin").as_deref(),
+            Some(r"C:\Sirio\bin")
+        );
+        assert_eq!(
+            path_with_entry(";", r"C:\Sirio\bin").as_deref(),
+            Some(r"C:\Sirio\bin")
         );
     }
 }

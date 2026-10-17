@@ -35,9 +35,11 @@ pub(crate) fn sirioctl_binary_name() -> &'static str {
     }
 }
 
-/// `<data>/Sirio/bin`, or `bin-debug` for a debug build's own copy. `<data>` is
-/// `XDG_DATA_HOME` when it is absolute; otherwise `HOME/.local/share` on unix,
-/// or `LOCALAPPDATA` on Windows, which is where an existing install lives.
+/// `<data>/Sirio/bin`, or `bin-debug` for a debug build's own copy. On unix
+/// `<data>` is `XDG_DATA_HOME` when it is absolute, else `HOME/.local/share`. On
+/// Windows it is `LOCALAPPDATA` alone, never `XDG_DATA_HOME`: the Inno uninstaller
+/// removes `{localappdata}\Sirio\bin` from the user's Path, so this must be that
+/// directory (ruling R15).
 ///
 /// `None` when no base is absolute. There is deliberately no temp-directory
 /// fallback: a copy in a temp directory is cleared by the cleaner, and a PATH
@@ -52,16 +54,11 @@ pub(crate) fn sirioctl_install_dir(
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
-    let data = absolute("XDG_DATA_HOME").or_else(|| {
-        #[cfg(windows)]
-        {
-            absolute("LOCALAPPDATA")
-        }
-        #[cfg(not(windows))]
-        {
-            absolute("HOME").map(|home| home.join(".local/share"))
-        }
-    })?;
+    #[cfg(windows)]
+    let data = absolute("LOCALAPPDATA")?;
+    #[cfg(not(windows))]
+    let data = absolute("XDG_DATA_HOME")
+        .or_else(|| absolute("HOME").map(|home| home.join(".local/share")))?;
     Some(
         data.join("Sirio")
             .join(if debug { "bin-debug" } else { "bin" }),
@@ -392,18 +389,28 @@ fn startup_link(
     if release_sirioctl_path(environment).is_none() {
         return LinkOutcome::Skipped("no data directory");
     }
-    let home = sirio_env::installed()
-        .and_then(|user| user.get("HOME"))
-        .or_else(|| environment.get("HOME"))
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute());
-    let Some(home) = home else {
-        return LinkOutcome::Skipped("no home directory");
+    // The copy's failure is already logged by the startup thread; the link
+    // does not repeat it.
+    let Ok((stable, _)) = copy else {
+        return LinkOutcome::Skipped("the copy failed");
     };
-    match copy {
-        Ok((stable, _)) => link_on_path(stable, &home, recorded_login_path(), false),
-        Err(error) => LinkOutcome::Failed(error.clone()),
-    }
+    // Only the unix arms read a home; the Windows arm names none, so a Windows
+    // launch (which never sets HOME) reaches the link.
+    #[cfg(unix)]
+    let home = {
+        let home = sirio_env::installed()
+            .and_then(|user| user.get("HOME"))
+            .or_else(|| environment.get("HOME"))
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute());
+        match home {
+            Some(home) => home,
+            None => return LinkOutcome::Skipped("no home directory"),
+        }
+    };
+    #[cfg(windows)]
+    let home = PathBuf::new();
+    link_on_path(stable, &home, recorded_login_path(), false)
 }
 
 /// What the startup copy made, once it has finished; `None` while it runs.
@@ -466,6 +473,13 @@ mod tests {
 
     static FIXTURE: AtomicU64 = AtomicU64::new(0);
 
+    /// The variable that holds the data root here: `LOCALAPPDATA` on Windows,
+    /// `XDG_DATA_HOME` elsewhere.
+    #[cfg(windows)]
+    const DATA_BASE: &str = "LOCALAPPDATA";
+    #[cfg(not(windows))]
+    const DATA_BASE: &str = "XDG_DATA_HOME";
+
     fn fixture(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "sirio-cli-install-{name}-{}-{}",
@@ -481,7 +495,7 @@ mod tests {
     fn environment_under(root: &Path) -> BTreeMap<String, String> {
         BTreeMap::from([
             (
-                "XDG_DATA_HOME".to_string(),
+                DATA_BASE.to_string(),
                 root.join("data").to_string_lossy().into_owned(),
             ),
             (
@@ -551,6 +565,26 @@ mod tests {
         assert_eq!(sirioctl_install_dir(&relative, false), None);
         assert_eq!(sirioctl_install_dir(&BTreeMap::new(), true), None);
         assert_eq!(release_sirioctl_path(&BTreeMap::new()), None);
+    }
+
+    /// The Inno uninstaller removes `{localappdata}\Sirio\bin` from the user's
+    /// Path, so the app's copy must sit there whatever `XDG_DATA_HOME` says.
+    #[cfg(windows)]
+    #[test]
+    fn windows_install_dir_ignores_xdg_data_home() {
+        let with_xdg = BTreeMap::from([
+            ("XDG_DATA_HOME".to_string(), r"C:\xdg".to_string()),
+            (
+                "LOCALAPPDATA".to_string(),
+                r"C:\Users\u\AppData\Local".to_string(),
+            ),
+        ]);
+        assert_eq!(
+            sirioctl_install_dir(&with_xdg, false),
+            Some(PathBuf::from(r"C:\Users\u\AppData\Local\Sirio\bin"))
+        );
+        let xdg_only = BTreeMap::from([("XDG_DATA_HOME".to_string(), r"C:\xdg".to_string())]);
+        assert_eq!(sirioctl_install_dir(&xdg_only, false), None);
     }
 
     #[cfg(unix)]
@@ -864,10 +898,8 @@ mod tests {
         // The release path does not depend on the build that writes the hooks:
         // a debug build names `bin`, never its own `bin-debug`.
         let data = std::env::temp_dir().join("sirio-cli-install-hooks-data");
-        let environment = BTreeMap::from([(
-            "XDG_DATA_HOME".to_string(),
-            data.to_string_lossy().into_owned(),
-        )]);
+        let environment =
+            BTreeMap::from([(DATA_BASE.to_string(), data.to_string_lossy().into_owned())]);
         let release = release_sirioctl_path(&environment);
         assert_eq!(
             release,
@@ -916,7 +948,7 @@ mod tests {
         make_executable(&sirioctl);
         let environment = BTreeMap::from([
             (
-                "XDG_DATA_HOME".to_string(),
+                DATA_BASE.to_string(),
                 root.join("data").to_string_lossy().into_owned(),
             ),
             (
@@ -950,7 +982,7 @@ mod tests {
         std::fs::create_dir_all(root.join("empty-path")).expect("create the empty PATH dir");
         let environment = BTreeMap::from([
             (
-                "XDG_DATA_HOME".to_string(),
+                DATA_BASE.to_string(),
                 root.join("data").to_string_lossy().into_owned(),
             ),
             (
@@ -994,7 +1026,7 @@ mod tests {
 
         let mut environment = BTreeMap::from([
             (
-                "XDG_DATA_HOME".to_string(),
+                DATA_BASE.to_string(),
                 root.join("data").to_string_lossy().into_owned(),
             ),
             ("PATH".to_string(), path_dir.to_string_lossy().into_owned()),
@@ -1005,7 +1037,7 @@ mod tests {
         assert_copied_from(&resolved, &path_sirioctl);
 
         environment.insert(
-            "XDG_DATA_HOME".into(),
+            DATA_BASE.into(),
             root.join("missing-data").display().to_string(),
         );
         environment.insert(
@@ -1038,7 +1070,7 @@ mod tests {
         assert!(std::fs::metadata(&destination).is_err());
         let environment = BTreeMap::from([
             (
-                "XDG_DATA_HOME".to_string(),
+                DATA_BASE.to_string(),
                 root.join("data").to_string_lossy().into_owned(),
             ),
             ("PATH".to_string(), path_dir.to_string_lossy().into_owned()),

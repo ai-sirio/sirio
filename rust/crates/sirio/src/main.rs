@@ -41436,7 +41436,13 @@ done
             std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755))
                 .expect("make the copy executable");
         }
-        unsafe { std::env::set_var("XDG_DATA_HOME", &data_home) };
+        // The data root the copy is resolved under: `LOCALAPPDATA` on Windows.
+        let data_base = if cfg!(windows) {
+            "LOCALAPPDATA"
+        } else {
+            "XDG_DATA_HOME"
+        };
+        unsafe { std::env::set_var(data_base, &data_home) };
 
         // Gate ON shape: `resumable` carries this pane's saved session ref
         // (mirrors `saved_session_refs_for_restore` / `load_session_refs()`
