@@ -103,12 +103,18 @@ pub fn diff_entry(
     // A user's `diff.interHunkContext` makes git merge nearby hunks and print the
     // lines between them as context, even at zero context. A zero-context reader
     // (`sirio_ui`'s git marks) cannot tell those lines from changes, so it is pinned.
-    let inter_hunk = (context_lines == 0).then_some("--inter-hunk-context=0");
+    // It also numbers hunks in the raw buffer's lines, which a `textconv` driver would
+    // convert out from under it, so the driver is skipped.
+    let zero_context: &[&str] = if context_lines == 0 {
+        &["--inter-hunk-context=0", "--no-textconv"]
+    } else {
+        &[]
+    };
     let result = if entry.is_untracked() || !has_head(repo) {
         let absolute = git::path_arg(&repo.join(&entry.path));
         let mut args: Vec<&str> =
             vec!["diff", "--no-color", "--no-ext-diff", "--no-index", &unified];
-        args.extend(inter_hunk);
+        args.extend(zero_context);
         args.extend(["--", "/dev/null", absolute.as_str()]);
         git::run_accepting(&args, repo, &[0, 1])
     } else {
@@ -123,7 +129,7 @@ pub fn diff_entry(
             "--no-ext-diff".to_string(),
             unified,
         ];
-        args.extend(inter_hunk.map(str::to_string));
+        args.extend(zero_context.iter().map(|arg| arg.to_string()));
         args.extend(["HEAD".to_string(), "--".to_string()]);
         args.extend(pathspecs);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
