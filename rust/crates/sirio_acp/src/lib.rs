@@ -17,6 +17,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, ErrorCode, Lines,
+    is_incoming_transport_closed,
 };
 use anyhow::{Result, anyhow};
 use async_process::Child;
@@ -1253,7 +1254,17 @@ fn command_for_process(command: AgentCommand) -> AgentCommand {
 /// environment holds every name the process has (or is not installed).
 #[cfg(unix)]
 fn in_user_environment(command: AgentCommand) -> AgentCommand {
-    let absent = sirio_env::absent_from_user();
+    // `AgentCommand` carries its arguments as text, so a program path that is
+    // not UTF-8 cannot be handed to `env`; it starts without the wrapper.
+    let Some(program) = command.program.to_str().map(str::to_owned) else {
+        return command;
+    };
+    // `run_connection` sets TERM on the agent after this wrapper, so unsetting
+    // it here would strip the value the agent is given.
+    let absent: Vec<String> = sirio_env::absent_from_user()
+        .into_iter()
+        .filter(|name| name != "TERM")
+        .collect();
     if absent.is_empty() {
         return command;
     }
@@ -1263,7 +1274,7 @@ fn in_user_environment(command: AgentCommand) -> AgentCommand {
         args.push(name);
     }
     args.push("--".to_string());
-    args.push(command.program.to_string_lossy().into_owned());
+    args.push(program);
     args.extend(command.args);
     AgentCommand {
         program: PathBuf::from("/usr/bin/env"),
@@ -1943,13 +1954,21 @@ fn run_connection(
                     .unwrap_or_default();
                 AcpError::AuthRequired { methods }
             } else {
-                AcpError::Transport(
-                    connection_result
-                        .as_ref()
-                        .err()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "ACP worker exited before initialization".into()),
-                )
+                // The agent went away before the handshake finished. Its exit
+                // status and its stderr are the diagnosis; the closed transport
+                // is only the symptom, so a closure is named as a failed launch
+                // instead, which the chat offers as Retry rather than Restart.
+                block_on(wait_for_stderr_drain(&stderr_drained));
+                let report = stderr_tail_report(&stderr_tail);
+                let exit = block_on(child_exit_report(&child, &exit_status));
+                let detail = match connection_result.as_ref() {
+                    Err(error) if is_incoming_transport_closed(error) => {
+                        format!("could not launch `{}`", attempted_program.display())
+                    }
+                    Err(error) => error.to_string(),
+                    Ok(()) => "ACP worker exited before initialization".into(),
+                };
+                AcpError::Transport(format!("{detail}{exit}{report}"))
             };
         let _ = worker_tx.send(WorkerSignal::Startup(Err(error)));
     } else if !clean_shutdown.load(Ordering::Acquire) {
@@ -3164,7 +3183,11 @@ mod tests {
         const USER_ONLY: &str = "SIRIO_ACP_USER_ONLY";
         // SAFETY: this is the only test in its process, so nothing else reads or
         // writes the environment while it runs.
-        unsafe { std::env::set_var(LAUNCHER_ONLY, "from-launcher") };
+        unsafe {
+            std::env::set_var(LAUNCHER_ONLY, "from-launcher");
+            // A value the site overrides: the agent must see the site's, not this.
+            std::env::set_var("TERM", "dumb");
+        }
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
         sirio_env::install(std::collections::BTreeMap::from([
             ("PATH".to_string(), path),
@@ -3198,7 +3221,49 @@ mod tests {
             Some(&"from-user"),
             "the user's variable did not reach the agent"
         );
+        assert_eq!(
+            agent.get("TERM"),
+            Some(&"xterm-256color"),
+            "the variable the launch sets itself was unset by the wrapper"
+        );
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A program that does not exist fails inside the `/usr/bin/env` wrapper,
+    /// which exits 127 and names the program on stderr. That is the diagnosis,
+    /// and it must reach the error the user reads, phrased as a launch failure
+    /// rather than as a dead transport: the chat classifies "transport closed"
+    /// as a disconnected agent, which offers Restart rather than Retry.
+    #[cfg(unix)]
+    #[test]
+    fn missing_agent_program_is_reported_as_a_launch_failure() {
+        // The map holds PATH only, so the wrapper is used for every other name.
+        // SAFETY: this is the only test in its process (nextest), so nothing else
+        // reads or writes the environment while it runs.
+        unsafe { std::env::set_var("SIRIO_ACP_LAUNCHER_ONLY", "from-launcher") };
+        let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        sirio_env::install(std::collections::BTreeMap::from([("PATH".to_string(), path)]));
+
+        let result = AcpClient::launch_with_timeout(
+            AgentCommand::new("/nonexistent-sirio-agent/agent"),
+            std::env::temp_dir(),
+            FIXTURE_STARTUP_TIMEOUT,
+        );
+        let error = match result {
+            Ok((mut client, _events)) => {
+                let _ = client.shutdown();
+                panic!("a program that does not exist unexpectedly started a session")
+            }
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains("nonexistent-sirio-agent"),
+            "the launch error must name the program, got {error}"
+        );
+        assert!(
+            !error.to_ascii_lowercase().contains("transport closed"),
+            "the launch error must not read as a dead transport, got {error}"
+        );
     }
 
     #[cfg(unix)]

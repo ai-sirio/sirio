@@ -93,7 +93,7 @@ mod imp {
     const SYSTEMD_RUN_GRACE: Duration = Duration::from_millis(300);
 
     pub fn spawn(spec: &DetachedSpawn) -> io::Result<DetachMethod> {
-        if systemd_user_available() {
+        if systemd_user_available(spec.env.as_ref()) {
             let mut command = Command::new("systemd-run");
             command
                 .args(["--user", "--scope", "--quiet", "--collect"])
@@ -154,13 +154,18 @@ mod imp {
         Ok(reap_in_background(command.spawn()?))
     }
 
-    fn systemd_user_available() -> bool {
-        let Ok(output) = Command::new("systemctl")
+    /// `environment` is the one the host will start in, so the manager is asked
+    /// over the same bus `systemd-run` will use; `None` is the caller's own.
+    fn systemd_user_available(environment: Option<&BTreeMap<String, String>>) -> bool {
+        let mut command = Command::new("systemctl");
+        command
             .args(["--user", "is-system-running"])
             .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-        else {
+            .stderr(Stdio::null());
+        if let Some(environment) = environment {
+            command.env_clear().envs(environment);
+        }
+        let Ok(output) = command.output() else {
             return false;
         };
         // The manager's state is on stdout. `degraded` exits non-zero but the
@@ -169,10 +174,14 @@ mod imp {
         // prints nothing on stdout, and `offline` / `unknown` mean none --
         // judging by the exit code alone would pick `systemd-run` where it
         // cannot work, and a spawn that never started would read as success.
+        let runtime_dir = match environment {
+            Some(environment) => environment.contains_key("XDG_RUNTIME_DIR"),
+            None => std::env::var_os("XDG_RUNTIME_DIR").is_some(),
+        };
         matches!(
             String::from_utf8_lossy(&output.stdout).trim(),
             "running" | "degraded" | "starting" | "initializing"
-        ) && std::env::var_os("XDG_RUNTIME_DIR").is_some()
+        ) && runtime_dir
     }
 }
 
