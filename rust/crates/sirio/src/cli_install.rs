@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, PoisonError};
+
+use sirio_ui::settings::CliStatus;
 
 use crate::cli_path::{LinkOutcome, link_on_path, recorded_login_path};
 
@@ -345,17 +347,34 @@ fn remove_aside_copies(dir: &Path) {
     }
 }
 
-static STARTUP_COPY: OnceLock<Result<(PathBuf, CopyOutcome), String>> = OnceLock::new();
+type CopyResult = Result<(PathBuf, CopyOutcome), String>;
 
-/// The PATH link the startup thread made after the copy. Set before
-/// `STARTUP_COPY`, so a reader that sees the copy finished sees the link too.
-static STARTUP_LINK: OnceLock<LinkOutcome> = OnceLock::new();
+/// The copy and the PATH link as the last job left them: the startup job's, then
+/// each Install in PATH's, which replaces both. One lock, so a reader never pairs
+/// one job's copy with another's link. `None` until the startup job has finished.
+static CLI_OUTCOMES: Mutex<Option<(CopyResult, LinkOutcome)>> = Mutex::new(None);
+
+fn store_outcomes(copy: CopyResult, link: LinkOutcome) {
+    *CLI_OUTCOMES.lock().unwrap_or_else(PoisonError::into_inner) = Some((copy, link));
+}
+
+fn stored_outcomes() -> Option<(CopyResult, LinkOutcome)> {
+    CLI_OUTCOMES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
 
 /// Makes the stable copy, then the PATH link to it, on a background thread at
-/// startup, so no launch waits for either. The copy's outcome is kept for
-/// `resolve_for_pane`, which uses it once it is `Ok`. The login PATH the link
-/// checks is the one `main` recorded before this call.
-pub(crate) fn ensure_at_startup(current_exe: PathBuf, environment: BTreeMap<String, String>) {
+/// startup, so no launch waits for either. The outcomes are kept for
+/// `resolve_for_pane` and the Settings card. The login PATH the link checks is
+/// the one `main` recorded before this call. The receiver resolves once the
+/// outcomes are stored, so the card can ask for them then.
+pub(crate) fn ensure_at_startup(
+    current_exe: PathBuf,
+    environment: BTreeMap<String, String>,
+) -> futures::channel::oneshot::Receiver<()> {
+    let (sender, started) = futures::channel::oneshot::channel();
     let spawned = std::thread::Builder::new()
         .name("sirio-cli-copy".into())
         .spawn(move || {
@@ -363,7 +382,7 @@ pub(crate) fn ensure_at_startup(current_exe: PathBuf, environment: BTreeMap<Stri
             if let Err(error) = &outcome {
                 eprintln!("[sirio] sirioctl: {error}");
             }
-            let link = startup_link(&outcome, &environment);
+            let link = link_copy(&outcome, &environment, false);
             // `NeedsAdmin` is the usual state of a macOS user with no writable
             // directory on the login PATH: not a failure, so not logged each launch.
             if matches!(
@@ -374,19 +393,23 @@ pub(crate) fn ensure_at_startup(current_exe: PathBuf, environment: BTreeMap<Stri
             ) {
                 eprintln!("[sirio] sirioctl on PATH: {link:?}");
             }
-            let _ = STARTUP_LINK.set(link);
-            let _ = STARTUP_COPY.set(outcome);
+            store_outcomes(outcome, link);
+            // The receiver is gone only if the app is, and then nothing is left to tell.
+            let _ = sender.send(());
         });
     if let Err(error) = spawned {
         eprintln!("[sirio] sirioctl copy not started: {error}");
     }
+    started
 }
 
-/// The link the startup thread makes to the copy it just made. A debug build
-/// keeps its own copy and leaves the user's PATH alone.
-fn startup_link(
-    copy: &Result<(PathBuf, CopyOutcome), String>,
+/// The link to the copy just made, from the startup job or Install in PATH. A
+/// debug build keeps its own copy and leaves the user's PATH alone. `admin` lets
+/// macOS ask for the administrator's password, which only Install in PATH allows.
+fn link_copy(
+    copy: &CopyResult,
     environment: &BTreeMap<String, String>,
+    admin: bool,
 ) -> LinkOutcome {
     if stable_is_debug() {
         return LinkOutcome::Skipped("debug build");
@@ -415,19 +438,79 @@ fn startup_link(
     };
     #[cfg(windows)]
     let home = PathBuf::new();
-    link_on_path(stable, &home, recorded_login_path(), false)
+    link_on_path(stable, &home, recorded_login_path(), admin)
 }
 
-/// What the startup copy made, once it has finished; `None` while it runs.
-pub(crate) fn last_copy_outcome() -> Option<&'static Result<(PathBuf, CopyOutcome), String>> {
-    STARTUP_COPY.get()
+/// Settings → Install in PATH: makes the stable copy if it is missing, then the
+/// PATH link, and keeps both outcomes for `card_status`. On macOS the link may
+/// wait for the administrator's password, so the caller runs this off the UI
+/// thread.
+pub(crate) fn install_from_settings(current_exe: &Path, environment: &BTreeMap<String, String>) {
+    let copy = ensure_stable_copy(current_exe, environment, stable_is_debug());
+    if let Err(error) = &copy {
+        eprintln!("[sirio] sirioctl: {error}");
+    }
+    let link = link_copy(&copy, environment, true);
+    store_outcomes(copy, link);
 }
 
-/// What the startup link did, once the startup copy has finished; `None` while it
-/// runs. Nothing reads it until the Settings card does.
-#[allow(dead_code)]
-pub(crate) fn last_link_outcome() -> Option<&'static LinkOutcome> {
-    STARTUP_LINK.get()
+/// The Settings card's words for sirioctl's copy and PATH link, from the stored
+/// outcomes. `None` until the startup job has finished, so the card shows no CLI
+/// rows before then.
+pub(crate) fn card_status() -> Option<CliStatus> {
+    let (copy, link) = stored_outcomes()?;
+    Some(status_for(&copy, &link))
+}
+
+fn status_for(copy: &CopyResult, link: &LinkOutcome) -> CliStatus {
+    let (stable_path, version_matches) = match copy {
+        Ok((path, outcome)) => (
+            path.display().to_string(),
+            matches!(
+                outcome,
+                CopyOutcome::Installed | CopyOutcome::Replaced | CopyOutcome::Current
+            ),
+        ),
+        Err(error) => (format!("Not installed: {error}"), false),
+    };
+    CliStatus {
+        stable_path,
+        version_matches,
+        path_line: path_line(link),
+    }
+}
+
+/// The card's line for the PATH link. Not every case is reachable on every
+/// platform, but each one has its words.
+fn path_line(link: &LinkOutcome) -> String {
+    match link {
+        LinkOutcome::Linked(place) | LinkOutcome::AlreadyLinked(place) => {
+            format!("On PATH at {}", place.display())
+        }
+        LinkOutcome::NotOnLoginPath(place) => {
+            let dir = place.parent().unwrap_or(place);
+            format!(
+                "Linked at {}, but your login shell does not search {}",
+                place.display(),
+                dir.display()
+            )
+        }
+        LinkOutcome::Foreign {
+            place,
+            points_to: Some(target),
+        } => format!(
+            "{} is not Sirio's ({})— left as it is",
+            place.display(),
+            target.display()
+        ),
+        LinkOutcome::Foreign {
+            place,
+            points_to: None,
+        } => format!("{} is not Sirio's — left as it is", place.display()),
+        LinkOutcome::NeedsAdmin => "Not on PATH — Install in PATH asks for your password".into(),
+        LinkOutcome::Skipped(reason) => format!("Not installed: {reason}"),
+        LinkOutcome::Failed(error) => format!("Could not link: {error}"),
+    }
 }
 
 /// The stable copy a pane starts with. It reads no contents: once the startup
@@ -439,8 +522,8 @@ pub(crate) fn resolve_for_pane(
     environment: &BTreeMap<String, String>,
     debug: bool,
 ) -> Result<PathBuf, String> {
-    if let Some(Ok((path, _))) = last_copy_outcome() {
-        return Ok(path.clone());
+    if let Some((Ok((path, _)), _)) = stored_outcomes() {
+        return Ok(path);
     }
     if let Some(stable) =
         sirioctl_install_dir(environment, debug).map(|dir| dir.join(sirioctl_binary_name()))

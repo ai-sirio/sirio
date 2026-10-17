@@ -1531,6 +1531,10 @@ enum WorkspaceAction {
     /// sirioctl hooks (`sirio_agents::install_global_hooks`) off the UI
     /// thread and reports each outcome back to the Settings card.
     InstallHooks,
+    /// Settings → Install in PATH: makes sirioctl's stable copy if it is
+    /// missing, then puts it on the user's PATH (the macOS administrator
+    /// prompt included), off the UI thread, and reports the result to the card.
+    InstallCli,
     OpenSettings,
     /// Brings the update card back from the status-bar indicator (spec §2.3);
     /// it never starts an update operation itself.
@@ -5595,6 +5599,9 @@ impl SirioWorkspace {
                                 }
                                 WorkspaceAction::InstallHooks => {
                                     workspace.begin_global_hooks_install(cx);
+                                }
+                                WorkspaceAction::InstallCli => {
+                                    workspace.begin_cli_install(cx);
                                 }
                                 WorkspaceAction::OpenSettings => {
                                     workspace.open_settings(None, cx);
@@ -17222,6 +17229,27 @@ impl SirioWorkspace {
         .detach();
     }
 
+    /// Settings → Install in PATH: the copy and the link are made on the
+    /// background executor (the link may wait for the administrator's
+    /// password), then the card is told what they came to.
+    fn begin_cli_install(&mut self, cx: &mut Context<Self>) {
+        let environment: BTreeMap<String, String> = std::env::vars().collect();
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    cli_install::install_from_settings(&current_exe, &environment);
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.settings.update(cx, |settings, cx| {
+                    settings.set_cli_status(cli_install::card_status(), cx);
+                });
+            });
+        })
+        .detach();
+    }
+
     fn open_settings(&mut self, section: Option<SettingsCategory>, cx: &mut Context<Self>) {
         // The install offer's own "Don't ask again" writes `lsp.silencedLanguages`
         // straight to the session store, so the surface is re-synced from the
@@ -25361,6 +25389,25 @@ fn route_connect(route: Arc<HostRoute>) -> HostConnect {
 /// the factory flips to the route's `HostSessions`, which wakes every
 /// `Connecting` view (Task 9). A later open re-ensures through the route when
 /// its client has closed (finding 6).
+/// Gives the sirioctl card its first state. The startup job reports once it has
+/// stored its copy and link, and until then the card shows no CLI rows.
+fn show_cli_status_when_started(
+    settings: Entity<Settings>,
+    started: futures::channel::oneshot::Receiver<()>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        if started.await.is_ok() {
+            let _ = cx.update(|cx| {
+                settings.update(cx, |settings, cx| {
+                    settings.set_cli_status(cli_install::card_status(), cx);
+                });
+            });
+        }
+    })
+    .detach();
+}
+
 fn ensure_host_in_background(
     settings: Entity<Settings>,
     workspace_slot: Arc<Mutex<Option<Entity<SirioWorkspace>>>>,
@@ -25442,6 +25489,15 @@ fn ensure_host_in_background(
             let control = handle.term();
             (client, reconnect, sessions, control)
         });
+        // A host without `term.env_exact` extends its own environment, so the
+        // terminals it opened before a restart keep the launcher's. A host with
+        // no terminals has none of those to name.
+        let line = match &term_data {
+            Some((client, ..)) if !client.env_exact() => format!(
+                "{line} — terminals opened before it restarts keep Sirio's launcher environment"
+            ),
+            _ => line,
+        };
         Ok((handle, line, term_data))
     };
     let spawned = std::thread::Builder::new()
@@ -25696,7 +25752,7 @@ fn main() {
         // The copy is made off this thread, and nothing waits for it. A pane that
         // starts before it finishes uses the copy that is there, and makes one
         // only when there is none (`resolve_sirioctl_for_process`).
-        cli_install::ensure_at_startup(
+        let cli_started = cli_install::ensure_at_startup(
             std::env::current_exe().unwrap_or_default(),
             std::env::vars().collect(),
         );
@@ -26024,6 +26080,14 @@ fn main() {
                                 }
                             }
                         })
+                        .on_install_cli({
+                            let pending_actions = pending_for_settings.clone();
+                            move || {
+                                if let Ok(mut actions) = pending_actions.lock() {
+                                    actions.push(WorkspaceAction::InstallCli);
+                                }
+                            }
+                        })
                         .on_change(move |snapshot| {
                             let plantuml_server = snapshot.plantuml_server.clone();
                             let translucency = snapshot.translucency;
@@ -26062,6 +26126,7 @@ fn main() {
                     panes_for_host_link.clone(),
                     cx,
                 );
+                show_cli_status_when_started(settings.clone(), cli_started, cx);
                 let workspace = cx.new(|cx| {
                     let sidebar = cx.new(|cx| {
                         let mut sidebar = Sidebar::from_projects(catalog_for_sidebar, cx);

@@ -745,6 +745,19 @@ pub enum InstallState {
     Failed(String),
 }
 
+/// Where sirioctl's stable copy is, and whether the login PATH reaches it, as
+/// the sirioctl card says it. The host decides the words from its own outcomes;
+/// this crate only lays them out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CliStatus {
+    /// The copy's path, or why there is none.
+    pub stable_path: String,
+    /// Whether the copy is the build this Sirio carries.
+    pub version_matches: bool,
+    /// The PATH link's verdict in words.
+    pub path_line: String,
+}
+
 pub struct Settings {
     category: SettingsCategory,
     detail_scroll: ScrollHandle,
@@ -859,6 +872,17 @@ pub struct Settings {
     /// [`Settings::set_host_status`]. `None` until `ensure_host` answers,
     /// which renders as "Starting…".
     host_status: Option<String>,
+    /// sirioctl's copy and PATH link, from the host's startup job and the
+    /// last Install in PATH. `None` until the startup job has reported; the
+    /// card shows no CLI rows until then.
+    cli_status: Option<CliStatus>,
+    /// Host callback for the sirioctl card's Install in PATH button. Unset,
+    /// the button renders muted and inert, like the other host callbacks.
+    on_install_cli: Option<Rc<dyn Fn()>>,
+    /// Set by a click that reaches `on_install_cli`. The button stays
+    /// disabled until the host's next [`Settings::set_cli_status`], which is
+    /// the job's report.
+    cli_install_running: bool,
     /// The resolved launch source per adapter id (Task 9). The Agents
     /// screen's pill, version and Install/Update buttons render from this —
     /// a resolved fact — instead of the compiled claim they replaced.
@@ -1080,6 +1104,9 @@ impl Settings {
             hooks_install_launched: false,
             hooks_install_report: None,
             host_status: None,
+            cli_status: None,
+            on_install_cli: None,
+            cli_install_running: false,
             launch_sources: Vec::new(),
             registry_versions: BTreeMap::new(),
             transport_notes: BTreeMap::new(),
@@ -1426,6 +1453,24 @@ impl Settings {
     /// fills it once `ensure_host` answers.
     pub fn set_host_status(&mut self, status: Option<String>, cx: &mut Context<Self>) {
         self.host_status = status;
+        cx.notify();
+    }
+
+    /// Installs the host callback that makes sirioctl's stable copy and puts
+    /// it on the user's PATH (the sirioctl card's Install in PATH button).
+    /// Unset, the button renders muted and inert — see
+    /// [`Settings::on_install_cli`].
+    pub fn on_install_cli(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_install_cli = Some(Rc::new(callback));
+        self
+    }
+
+    /// The host's report on sirioctl's copy and PATH link. `None` clears the
+    /// card back to having no CLI rows. Every push ends an Install in PATH in
+    /// progress, so the button is enabled again.
+    pub fn set_cli_status(&mut self, status: Option<CliStatus>, cx: &mut Context<Self>) {
+        self.cli_status = status;
+        self.cli_install_running = false;
         cx.notify();
     }
 
@@ -1866,6 +1911,92 @@ impl Settings {
         if let Some(handler) = self.on_install_hooks.clone() {
             handler();
         }
+    }
+
+    /// Handles the sirioctl card's Install in PATH button: hands the job to
+    /// the host and disables the button until the host reports back.
+    fn install_cli_clicked(&mut self, cx: &mut Context<Self>) {
+        self.cli_install_running = true;
+        cx.notify();
+        if let Some(handler) = self.on_install_cli.clone() {
+            handler();
+        }
+    }
+
+    /// The sirioctl card's rows once the host has reported: where the copy is
+    /// and which build it is, then the login PATH's verdict with Install in
+    /// PATH beside it. The read-only words are selectable and sit outside the
+    /// button, which is clickable.
+    fn cli_card_rows(&self, status: &CliStatus, entity: Entity<Self>, theme: Theme) -> gpui::Div {
+        let version = if status.version_matches {
+            "Same build as Sirio"
+        } else {
+            "Older than this Sirio — it could not be replaced"
+        };
+        let place_label = div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .flex_1()
+            .text_size(theme.typography.headline)
+            .text_color(theme.ely.fg)
+            .child(selectable_text("sirioctl").id("settings-cli-title"))
+            .child(
+                div()
+                    .debug_selector(|| "settings-cli-path".into())
+                    .mt(px(2.0))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.ely.fg_muted)
+                    .child(selectable_text(status.stable_path.clone()).id("settings-cli-path-text"))
+                    .child(selectable_text(version).id("settings-cli-version")),
+            );
+        let install_entity = entity.clone();
+        let install_handler =
+            (self.on_install_cli.is_some() && !self.cli_install_running).then(|| {
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                    install_entity.update(cx, |settings, cx| settings.install_cli_clicked(cx));
+                }
+            });
+        let link_label = div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .flex_1()
+            .text_size(theme.typography.headline)
+            .text_color(theme.ely.fg)
+            .child(selectable_text("PATH").id("settings-cli-link-title"))
+            .child(
+                div()
+                    .debug_selector(|| "settings-cli-link".into())
+                    .mt(px(2.0))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.ely.fg_muted)
+                    .child(selectable_text(status.path_line.clone()).id("settings-cli-link-text")),
+            );
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(
+                controls::row_view(place_label, div(), theme)
+                    .id("settings-cli-path-row")
+                    .debug_selector(|| "settings-cli-path-row".into()),
+            )
+            .child(controls::separator(theme))
+            .child(
+                controls::row_view(
+                    link_label,
+                    controls::button_maybe(
+                        "general-install-cli",
+                        "Install in PATH",
+                        theme,
+                        install_handler,
+                    ),
+                    theme,
+                )
+                .id("settings-cli-link-row")
+                .debug_selector(|| "settings-cli-link-row".into()),
+            )
     }
 
     fn refresh_provider_accounts(&mut self, cx: &mut Context<Self>) {
@@ -3647,7 +3778,12 @@ impl Settings {
         // command" is not offered: no install mechanism exists on this
         // platform (F-CTRL-CLI-02 is its own absent row), so there is no
         // real command to copy — a button that copied a made-up one would
-        // lie (P58, F-SET-08).
+        // lie (P58, F-SET-08). Where the copy is and whether the PATH reaches
+        // it are the host's report, and show only once it has made one.
+        let cli_rows = self
+            .cli_status
+            .as_ref()
+            .map(|status| self.cli_card_rows(status, entity.clone(), theme));
         let control = controls::card(theme)
             .child(
                 controls::row_view(socket_label, socket, theme)
@@ -3665,6 +3801,9 @@ impl Settings {
                 theme,
             ))
             .child(controls::separator(theme))
+            .when_some(cli_rows, |card, rows| {
+                card.child(rows).child(controls::separator(theme))
+            })
             .child(controls::row_view(
                 host_label,
                 {
@@ -6267,6 +6406,55 @@ mod tests {
             cx.debug_bounds("general-install-hooks-status").is_none(),
             "the in-flight line is gone once the host has answered"
         );
+    }
+
+    /// The sirioctl card, once the host has reported: the copy's place, the
+    /// login PATH's verdict as words, and Install in PATH, which hands the
+    /// job to the host once. The verdict is read back through the clipboard,
+    /// the way every selectable row is proven.
+    #[gpui::test]
+    async fn cli_card_reports_a_link_off_the_login_path(cx: &mut gpui::TestAppContext) {
+        let installs = Rc::new(Cell::new(0usize));
+        let recorder = installs.clone();
+        let (settings, _, cx) = crate::text_selection::testing::host(cx, move |_, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_install_cli(move || recorder.set(recorder.get() + 1))
+        });
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let path_line = "Linked at /home/me/.local/bin/sirioctl, but your login shell does not \
+                         search /home/me/.local/bin";
+        settings.update(cx, |settings, cx| {
+            settings.set_cli_status(
+                Some(CliStatus {
+                    stable_path: "/home/me/.local/share/Sirio/bin/sirioctl".into(),
+                    version_matches: true,
+                    path_line: path_line.into(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            crate::text_selection::testing::copy_span(cx, "settings-cli-link", px(1.0)).as_deref(),
+            Some(path_line),
+            "the link row says where the link is and why the login shell will not find it"
+        );
+
+        let install = cx
+            .debug_bounds("general-install-cli")
+            .expect("Install in PATH renders");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(installs.get(), 1, "the click reaches the host once");
     }
 
     /// F-SET-14: clicking a provider card's Add Account button hands the
