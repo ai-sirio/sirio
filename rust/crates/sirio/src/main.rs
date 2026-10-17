@@ -26765,14 +26765,19 @@ mod tests {
             wait_for_wire(&mut cx, &log, |wire| wire.contains("textDocument/didOpen")).await;
         assert!(opened, "the open must land before the edit is meaningful");
 
-        // Edit through the view the way the shell's own edit path does.
+        // Edit through the code editor, the way a keystroke reaches the view:
+        // its change lands in the buffer and the view notifies, and that
+        // notify is what sends it on.
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
         let view = workspace.update(&mut cx, |workspace, cx| first_open_file_view(workspace, cx));
-        view.update(&mut cx, |view, cx| {
-            view.editor_mut()
-                .expect("the editor is loaded by now")
-                .replace(sirio_ui::editor::Selection { start: 3, end: 9 }, "renamed")
-                .expect("the replacement applies");
-            cx.notify();
+        let code = view
+            .read_with(&cx.cx, |view, _| view.code_editor().cloned())
+            .expect("the file tab has drawn its code editor");
+        code.update(&mut cx, |code, cx| {
+            code.edit([(3..9, "renamed".to_owned())], cx);
         });
 
         let changed = wait_for_wire(&mut cx, &log, |wire| {

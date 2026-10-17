@@ -198,7 +198,7 @@ pub struct FileView {
     markdown_mode: MarkdownMode,
     /// The file's code, drawn and edited by Ely's `CodeEditor`. Created in
     /// `render` once the file is loaded, because building one needs a window;
-    /// snapshot reloads and disk adoptions reuse it through `reset`.
+    /// snapshot reloads and disk adoptions reuse it through `reset_keeping_view`.
     code_editor: Option<Entity<CodeEditor>>,
     /// The code editor's text changes (kept in step with the `Editor`) and
     /// its focus (which re-checks the disk, as `focus_subscription` does for
@@ -2421,7 +2421,7 @@ mod tests {
     use super::*;
 
     use crate::editor::markdown_links_in_line;
-    use gpui::{Modifiers, VisualTestContext};
+    use gpui::{Focusable, Modifiers, VisualTestContext};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Sets the code editor's selection to `range`, as a drag or a keystroke
@@ -2433,6 +2433,16 @@ mod tests {
             .cloned()
             .expect("the code editor is drawn once the file has loaded");
         code.update(cx, |code, cx| code.select([range], cx));
+    }
+
+    /// Gives the keyboard to the code editor, as a click on the code does.
+    fn focus_code(view: &gpui::Entity<FileView>, window: &mut Window, cx: &mut gpui::App) {
+        let code = view
+            .read(cx)
+            .code_editor()
+            .cloned()
+            .expect("the code editor is drawn once the file has loaded");
+        code.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     struct TempFile(PathBuf);
@@ -2625,17 +2635,30 @@ mod tests {
         );
     }
 
+    /// The keyboard reaches the code editor through the view's focus, with no
+    /// click and no hand-focusing of the code editor. The view takes focus
+    /// before any frame is drawn; the frame that creates the code editor hands
+    /// the keyboard over to it (`hand_over_focus`), so a file that opens takes
+    /// typing at once.
     #[gpui::test]
     async fn keyboard_input_edits_the_buffer_through_the_focused_file_view(
         cx: &mut gpui::TestAppContext,
     ) {
         let file = TempFile::new("keyboard-input", "hello\n");
-        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
+        let (mut cx, view) =
+            mounted_file_view_with(cx, file.path().to_path_buf(), |view, window, cx| {
+                view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            });
+        let code = view
+            .read_with(&cx.cx, |view, _| view.code_editor().cloned())
+            .expect("the frame that loaded the file drew the code editor");
+        cx.update(|window, app| {
+            assert!(
+                code.read(app).focus_handle(app).is_focused(window),
+                "the keyboard went to the code editor without any click"
+            );
+        });
 
-        let line = cx
-            .debug_bounds("file-source-line-0")
-            .expect("the source line is drawn");
-        cx.simulate_click(line.center(), Modifiers::none());
         cx.simulate_keystrokes("home");
         cx.simulate_input("typed ");
         cx.simulate_keystrokes("end");
@@ -2658,6 +2681,11 @@ mod tests {
                 .to_owned()
         });
         assert_eq!(buffer, "replacement\nex\n");
+        assert_eq!(
+            code.read_with(&cx.cx, |code, _| code.text().to_owned()),
+            buffer,
+            "the code editor shows what the keys wrote"
+        );
         assert!(cx.update(|window, cx| {
             window
                 .root::<FileView>()
@@ -3200,7 +3228,7 @@ mod tests {
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
 
         assert!(
-            cx.debug_bounds("file-source-line-350").is_none(),
+            cx.debug_bounds("code-editor-line-350").is_none(),
             "line 350 starts off screen, or the test proves nothing"
         );
         view.update(&mut cx.cx, |view, cx| view.reveal_at(350, cx));
@@ -3210,7 +3238,7 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("file-source-line-350").is_some(),
+            cx.debug_bounds("code-editor-line-350").is_some(),
             "reveal scrolls the line into view"
         );
     }
@@ -3258,7 +3286,7 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("file-source-line-350").is_some(),
+            cx.debug_bounds("code-editor-line-350").is_some(),
             "the reveal was held until the content existed, not dropped"
         );
     }
@@ -3505,6 +3533,17 @@ mod tests {
         cx: &mut gpui::TestAppContext,
         path: PathBuf,
     ) -> (VisualTestContext, gpui::Entity<FileView>) {
+        mounted_file_view_with(cx, path, |_, _, _| {})
+    }
+
+    /// `mounted_file_view`, with `before_frames` run as soon as the window
+    /// exists, before the load finishes and before any frame is drawn: the
+    /// frame that creates the code editor comes after it.
+    fn mounted_file_view_with(
+        cx: &mut gpui::TestAppContext,
+        path: PathBuf,
+        before_frames: impl FnOnce(&gpui::Entity<FileView>, &mut Window, &mut gpui::App),
+    ) -> (VisualTestContext, gpui::Entity<FileView>) {
         cx.update(|cx| {
             Theme::init(cx);
             ::editor::init(cx);
@@ -3512,6 +3551,10 @@ mod tests {
         });
         let window = cx.add_window(|_window, cx| FileView::new(path, cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, app| {
+            let view = window.root::<FileView>().flatten().expect("file view root");
+            before_frames(&view, window, app);
+        });
         cx.cx.executor().allow_parking();
         for _ in 0..600 {
             let loaded = cx.update(|window, app| {
@@ -3696,7 +3739,7 @@ mod tests {
         let file = TempFile::with_extension("rs", "alpha beta\n");
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
         cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            focus_code(&view, window, cx);
             window.simulate_next_frame(cx);
         });
 
@@ -3757,7 +3800,7 @@ mod tests {
         let file = TempFile::with_extension("rs", SOURCE);
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
         cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            focus_code(&view, window, cx);
             window.simulate_next_frame(cx);
         });
         let whole = Some(Selection {
@@ -3784,11 +3827,14 @@ mod tests {
     ) {
         let file = TempFile::with_extension("md", "# Title\n\nHello.\n");
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        // The keyboard starts in the code, then the reader switches to the
+        // preview. The code editor hands the keyboard back to the view, so the
+        // paste below reaches neither the code editor nor the buffer.
         cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.set_markdown_mode(MarkdownMode::Preview, cx);
-                view.editor_focus.focus(window, cx);
-            });
+            view.update(cx, |view, cx| view.set_markdown_mode(MarkdownMode::Code, cx));
+            window.simulate_next_frame(cx);
+            focus_code(&view, window, cx);
+            view.update(cx, |view, cx| view.set_markdown_mode(MarkdownMode::Preview, cx));
             window.simulate_next_frame(cx);
         });
         assert_eq!(
@@ -3796,6 +3842,12 @@ mod tests {
             MarkdownMode::Preview,
             "the fixture must actually be showing the preview"
         );
+        cx.update(|window, app| {
+            assert!(
+                view.read(app).editor_focus.is_focused(window),
+                "the preview has the keyboard, not the hidden code editor"
+            );
+        });
 
         cx.update(|_, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string("intruder".to_string()));
@@ -3890,7 +3942,7 @@ mod tests {
         );
 
         cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            focus_code(&view, window, cx);
             window.simulate_next_frame(cx);
         });
         cx.simulate_keystrokes("ctrl-end");
@@ -4063,9 +4115,9 @@ mod tests {
         });
 
         cx.update(|window, app| {
-            view.update(app, |view, cx| view.editor_focus.focus(window, cx));
+            focus_code(&view, window, app);
+            window.simulate_next_frame(app);
         });
-        cx.update(|window, app| window.simulate_next_frame(app));
         #[cfg(target_os = "macos")]
         cx.simulate_keystrokes("cmd-a");
         #[cfg(not(target_os = "macos"))]
@@ -4085,6 +4137,9 @@ mod tests {
             );
         }
 
+        let code = view
+            .read_with(&cx.cx, |view, _| view.code_editor().cloned())
+            .expect("the code editor is drawn in Code mode");
         let mut previous = view.read_with(&cx.cx, |view, _| {
             view.editor().expect("editor loaded").buffer().to_owned()
         });
@@ -4112,6 +4167,11 @@ mod tests {
                     .to_owned()
             });
             assert_ne!(current, previous, "{selector} changes Markdown source");
+            assert_eq!(
+                code.read_with(&cx.cx, |code, _| code.text().to_owned()),
+                current,
+                "{selector} shows its change in the code editor"
+            );
             previous = current;
         }
     }
@@ -4635,11 +4695,84 @@ mod tests {
         }
     }
 
+    /// The snapshot is drawn read-only, so the keyboard can type and paste into
+    /// it and nothing changes. The banner's "Make editable" unlocks the code
+    /// editor for a moment; the view takes the lock back before a key arrives.
     #[gpui::test]
-    async fn a_snapshot_shows_the_revisions_text_and_refuses_every_edit(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let view = cx.new(|cx| FileView::snapshot(snapshot_origin_for_tests(), b"hello\nworld\n".to_vec(), cx));
-        view.update(cx, |view, cx| {
+    async fn a_snapshot_shows_the_revisions_text_and_refuses_every_edit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use ely_gpui_component::editor::EditorEvent;
+
+        cx.update(|cx| {
+            Theme::init(cx);
+            ::editor::init(cx);
+            crate::ely::init(cx);
+        });
+        let window = cx.add_window(|_window, cx| {
+            FileView::snapshot(
+                snapshot_origin_for_tests(),
+                b"hello\nworld\n".to_vec(),
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let view = cx.update(|window, _| window.root::<FileView>().flatten().expect("root"));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        let code = view
+            .read_with(&cx.cx, |view, _| view.code_editor().cloned())
+            .expect("the snapshot's code editor is drawn");
+        assert!(
+            cx.debug_bounds("code-editor-line-0").is_some(),
+            "the revision's text is on screen"
+        );
+        assert!(
+            code.read_with(&cx.cx, |code, _| code.is_read_only()),
+            "the code editor is drawn read-only"
+        );
+
+        cx.update(|window, cx| focus_code(&view, window, cx));
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("intruder".to_string()));
+        });
+        cx.simulate_input("X");
+        cx.simulate_keystrokes(&clipboard_chord("v"));
+        cx.run_until_parked();
+        assert_eq!(
+            buffer_of(&view, &cx),
+            "hello\nworld\n",
+            "typing and pasting leave a snapshot alone"
+        );
+        assert_eq!(
+            code.read_with(&cx.cx, |code, _| code.text().to_owned()),
+            "hello\nworld\n",
+            "and the code editor still shows the revision"
+        );
+
+        // What the banner's "Make editable" does: unlock, then announce it.
+        code.update(&mut cx.cx, |code, cx| {
+            code.set_read_only(false, cx);
+            cx.emit(EditorEvent::Unlock);
+        });
+        cx.run_until_parked();
+        assert!(
+            code.read_with(&cx.cx, |code, _| code.is_read_only()),
+            "a snapshot takes its read-only lock back when it is unlocked"
+        );
+        cx.simulate_input("Y");
+        cx.simulate_keystrokes(&clipboard_chord("v"));
+        cx.run_until_parked();
+        assert_eq!(
+            buffer_of(&view, &cx),
+            "hello\nworld\n",
+            "an unlock does not let a snapshot be edited"
+        );
+
+        view.update(&mut cx.cx, |view, cx| {
             assert!(view.is_snapshot());
             assert_eq!(view.editor().expect("loaded").buffer(), "hello\nworld\n");
             assert_eq!(
@@ -4744,7 +4877,7 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("file-source-line-350").is_some(),
+            cx.debug_bounds("code-editor-line-350").is_some(),
             "the held reveal scrolls the line into view once the retry lands"
         );
     }

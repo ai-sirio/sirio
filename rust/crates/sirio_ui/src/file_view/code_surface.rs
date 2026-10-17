@@ -3,8 +3,9 @@
 //! The `Editor` owns the text, the disk state and the Markdown operations;
 //! the code editor owns what is on screen and what the keyboard does. Text
 //! flows `CodeEditor` → `Editor` on every `Changed` event (the user's own
-//! edits), and `Editor` → `CodeEditor` through `reset` whenever the model
-//! changed the text on its own (a reload, a disk adoption, a Markdown op).
+//! edits), and `Editor` → `CodeEditor` through `reset_keeping_view` whenever
+//! the model changed the text on its own (a reload, a disk adoption, a
+//! snapshot retry), or through `edit` for a Markdown op, as one undo step.
 //! The two are kept equal after every such event.
 
 use std::cell::RefCell;
@@ -57,10 +58,15 @@ impl FileView {
         });
         let focus = code.read(cx).focus_handle(cx);
         let subscriptions = [
-            cx.subscribe(&code, |view, code, event: &EditorEvent, cx| {
-                if *event == EditorEvent::Changed {
-                    view.code_changed(code, cx);
+            cx.subscribe(&code, |view, code, event: &EditorEvent, cx| match event {
+                EditorEvent::Changed => view.code_changed(code, cx),
+                // The read-only banner's "Make editable" unlocks the code
+                // editor. A snapshot stays read-only, so the lock goes back on
+                // before any key can reach it.
+                EditorEvent::Unlock if view.is_snapshot() => {
+                    code.update(cx, |code, cx| code.set_read_only(true, cx));
                 }
+                _ => {}
             }),
             cx.on_focus(&focus, window, |view, _window, cx| view.check_external(cx)),
         ];
@@ -83,10 +89,11 @@ impl FileView {
     }
 
     /// The code editor's text changed. The `Editor` takes it unless it already
-    /// holds it (a `reset` or a format op that wrote the `Editor` first). The
-    /// code editor never holds a carriage return (Ely reads each one as a line
-    /// break), so after `replace_all` the two texts agree; a carriage return
-    /// that got through is a bug, reported by its lengths and left as it is.
+    /// holds it (a `reset_keeping_view` or a format op that wrote the `Editor`
+    /// first). The code editor never holds a carriage return (Ely reads each
+    /// one as a line break), so after `replace_all` the two texts agree; a
+    /// carriage return that got through is a bug, reported by its lengths and
+    /// left as it is.
     fn code_changed(&mut self, code: Entity<CodeEditor>, cx: &mut Context<Self>) {
         if let Some(editor) = self.editor_mut()
             && editor.buffer() != code.read(cx).text()
