@@ -254,12 +254,19 @@ current skill already says this; project 2 makes it possible for every tab.
 - On unix the stable copy is a **copy** under the AppImage and a symlink
   only when the source is itself a stable file (a package install, a
   checkout's `target/`). It never points into a mount.
-- A file at the stable path that Sirio did not put there is refused, as
-  today, and the Settings card says so.
+- *Claude's call:* **the stable path belongs to Sirio.** It lies inside
+  Sirio's own data directory, so whatever is there is replaced when its
+  content differs from the bundled binary — including the user's unmarked
+  2026-09-12 copy, which is exactly the copy that must be fixed. (Nothing
+  checks ownership there today, contrary to what an earlier draft said; no
+  marker is introduced.) The "never replace a foreign file" rule of §5.2 and
+  §6 applies to the PATH link's place, which is the user's directory.
 - *Claude's call:* **a debug build uses its own copy**,
   `<data>/Sirio/bin-debug/sirioctl`, mirroring `host-debug`, and never
-  touches the release copy or the user's PATH. Hooks a debug build writes
-  name the debug copy.
+  touches the release copy or the user's PATH. Worktree-local hooks a debug
+  build writes name the debug copy; **user-global hooks always name the
+  release stable path**, from any build, so a debug build's *Install Hooks*
+  never leaves the user's global hooks pointing into a checkout.
 
 ### §5.2 On the user's PATH — at startup and from a button
 
@@ -306,10 +313,32 @@ environment** (§2), with:
 
 How the user environment is known: the packaging wrapper records it. AppRun
 saves, before it changes anything, the original value — or the absence — of
-every variable it or the gtk hooks set, in variables of its own; the app
-restores them and removes the recording. The app does not guess by matching
-`/tmp/.mount_*` paths. Without a wrapper (macOS, Windows, a checkout), the
-app's environment is the user environment.
+every variable it or the gtk hooks set, in variables of its own. The app
+does not guess by matching `/tmp/.mount_*` paths. Without a wrapper (macOS,
+Windows, a checkout), the app's environment is the user environment.
+
+*Claude's call:* **the restore is for children only.** The app's own process
+keeps AppRun's environment: its browser pane (wry/WebKit) dlopens the WPE
+backend through AppRun's `LD_LIBRARY_PATH` and resolves its helpers through
+`././` paths (`Scripts/build-appimage.sh:199-208`), and gdk-pixbuf and GIO
+load modules lazily from the gtk variables. One function computes the user
+environment from the recording, and every spawn site passes it explicitly:
+the host launch, `CreateParams.env` from the terminal link and from
+`panel.create` (`sirio_control/src/host_panels.rs`), the `LocalLink`
+fallback, chat agents, and whatever the audit below moves.
+
+**The host must be able to honour it.** Today a session's environment is the
+host's own `std::env::vars()` *extended* by `CreateParams.env`
+(`sirio_host/src/router.rs:238`, `sessions.rs:153-155`), so a client cannot
+make a variable absent, and an adopted host launched by an older app still
+carries the dead mount's variables. *Claude's call:* `CreateParams` gains an
+additive, capability-advertised way to say "this map is the whole
+environment" (the exact field and its ledger entry in `protocol/host-v1/`
+are the builder's); a host that advertises it builds the session from the
+client's map alone; with a host that does not — one adopted from before this
+change — the app keeps today's behaviour, and that gap lasts until the host
+is next started, which the Settings host status says. The host itself is
+launched in the user environment, so its fallback is clean too.
 
 *Left to the builder:* the full list of other processes Sirio starts (git,
 language servers, `plantuml`, `gh`/`glab`) — each is audited and either moved
@@ -358,9 +387,12 @@ worktree, observed through `sirioctl` — and SKIPs without the binary or its
 credentials, like `sirio_agents/tests/initial_prompt_live.rs`; it sits off
 both gates. Pi has no hooks and is exercised through Layer B as today.
 
-Files `prepare` writes inside a worktree must not show in `git status`;
-where they do today, they are excluded through the common directory's
-`info/exclude`, as the hand-off's `.sirio/handoff` already is.
+*Claude's call:* the **new** files project 1 has `prepare` write (the Codex
+and Pi skills) are excluded through the common directory's `info/exclude`
+when untracked, as the hand-off's `.sirio/handoff` already is. A file a
+project already **tracks** (a committed `.claude/settings.local.json`, say)
+keeps today's behaviour — merged and shown as modified — which this project
+does not change.
 
 ### §5.7 The skill, true and everywhere
 
@@ -396,7 +428,11 @@ stub agent CLIs on PATH). Cases:
    alone and reported.
 4. A pane under a simulated AppImage launcher: `PATH` starts with the stable
    directory, no recorded-mount entry in `PATH`, `LD_LIBRARY_PATH`,
-   `XDG_DATA_DIRS` or the gtk variables, `SIRIO_WORKTREE_ID` set.
+   `XDG_DATA_DIRS` or the gtk variables, `SIRIO_WORKTREE_ID` set — for a
+   terminal tab, for `panel.create`, and for a chat agent's process; and the
+   app's own process still carries the launcher's variables. Run against a
+   fresh host, and against an adopted host that predates the capability
+   (old behaviour, reported).
 5. Quit, remove the simulated mount, relaunch: a pane opened before the quit
    still runs `sirioctl` successfully.
 6. Hooks, worktree-local and user-global, for each adapter (§5.6), including
@@ -404,7 +440,8 @@ stub agent CLIs on PATH). Cases:
 7. The skill: written by `prepare` for all five adapters, identical to the
    bundled one; *Install Skill* writes the user-level copies in the private
    `HOME`; every command it names is accepted (§4.4).
-8. A debug build never touches the release copy or the PATH link.
+8. A debug build never touches the release copy or the PATH link, and its
+   *Install Hooks* writes user-global hooks naming the release stable path.
 
 Linux runs the whole script. macOS and Windows run the cases that do not need
 a display in `macos-check.yml` and `windows-check.yml`, and the macOS bundle
@@ -420,8 +457,9 @@ done, like the host's detach probe.
   keeps it.
 - **Anti-goal:** a startup step that asks for a password, shows a dialog or
   blocks the launch.
-- **Anti-goal:** replacing a file Sirio did not create — at the stable path,
-  at a PATH link, or a skill without the marker.
+- **Anti-goal:** replacing a file Sirio did not create in the user's own
+  places — at a PATH link's place, or a skill without the marker. (The
+  stable path, inside Sirio's data directory, is Sirio's, §5.1.)
 - **Anti-goal:** a skill whose commands the installed build does not serve.
 
 ## §7 Left to the builder
@@ -442,7 +480,16 @@ done, like the host's detach probe.
 ## §8 Calls Claude made, for the user to check
 
 - Forge writes stay debug-only even for the director (§4.1).
-- A debug build has its own `sirioctl` copy and never touches PATH (§5.1).
+- The stable path is Sirio's: its content is replaced whenever it differs,
+  with no ownership marker (§5.1).
+- A debug build has its own `sirioctl` copy and never touches PATH; user-global
+  hooks always name the release copy (§5.1).
+- The environment restore applies to child processes only; the app keeps
+  AppRun's for its webview (§5.3).
+- The host gains an additive "whole environment" form of `term.create`; an
+  adopted older host keeps today's behaviour until restarted (§5.3).
+- Files a project already tracks keep today's behaviour under `prepare`
+  (§5.6).
 - macOS at startup never asks for a password; it links only where it can
   without one (§5.2).
 - Only the CLI link is installed at startup; hooks and first-time skill
