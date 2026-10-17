@@ -319,8 +319,9 @@ applied as upstream wrote it or was rewritten against the vendored code.
   `line.rs`'s imports, and the `preview`, `chinese` and `history` modules,
   which are not vendored). Their added lines were typed in by hand. Upstream's
   `secondary_press` hunk in `line.rs` had nothing to apply to: that function is
-  absent on `e17e31a6`. Hand-applied pieces: `Metrics::size` (after `line`); `self.metrics.size = pixels` after
-  `self.metrics.line = line`; in `line.rs` the `measure::Measured` import, the
+  absent on `e17e31a6`. Hand-applied pieces: `Metrics::size` (after `line`);
+  `self.metrics.size = pixels` after `self.metrics.line = line`; in `line.rs`
+  the `measure::Measured` import, the
   `styles` visibility becoming `pub(super)` (`ime.rs` calls it), the new
   `whitespace` (hidden marks, arrows and dots drawn as a `StyledText`), the
   `line_row` closures `x` (laid out) and `grid` (rulers and guides), selection
@@ -356,8 +357,10 @@ applied as upstream wrote it or was rewritten against the vendored code.
 - `src/editor/keys.rs`, `Copy` (`secondary-c`): when every selection is empty it
   calls `cx.propagate()` and does nothing else, so Sirio's `CopySelectedText`
   (`!Terminal`) gets the chord. With a selection the editor copies exactly as
-  upstream does. `Cut` (`secondary-x`) is unchanged: with empty selections
-  upstream cuts the current line, which is an edit, so the chord is not handed on.
+  upstream does. Upstream's copy of the current line with no selection is
+  dropped on purpose (spec §5.4; the plan's `copy_propagates`). `Cut`
+  (`secondary-x`) is unchanged: with no selection upstream still cuts the
+  current line, which is an edit, so the chord is not handed on.
 - `src/editor/keys.rs`, Escape: `SingleCursor` stays bound to `escape` in
   `ElyEditor`, and it does not propagate. A host that needs Escape for its own
   surface while the editor has focus can `capture_action` `editor::SingleCursor`.
@@ -370,3 +373,67 @@ applied as upstream wrote it or was rewritten against the vendored code.
 
 Evidence: `cargo nextest run -p ely-gpui-component --features test-support`
 runs 120 tests after Task 1c, all passed.
+
+### Hosting hooks (Task 2)
+
+- `src/editor/state.rs`, highlighter: `LineHighlighter(Rc<Paint>)` with a
+  manual `Debug`, held in `Options::highlighter`. `CodeEditor::highlighter`
+  (builder) and `set_highlighter` take `Fn(usize, &str, &App) ->
+  Vec<(Range<usize>, HighlightStyle)>`. Modelled on upstream `main`'s `2b6f551`
+  (`prose.rs` `line_colors`), but the signature differs: the line index comes
+  first and the spans are `HighlightStyle`, not `forms::Highlight`. `prose.rs`
+  and `forms::Highlight` are not vendored.
+- `state.rs`, `line_colors(line, text, cx)`: the one private helper every colour
+  of the code goes through. Without a highlighter it is `syntax::colors`, so
+  upstream's behaviour is unchanged. With one, its spans are clipped to the
+  text, and a span that cuts a character is dropped; either is logged.
+- The helper replaces `syntax::colors` at `line.rs` (`styles`), `view.rs`
+  (sticky headers and the minimap) and, a fourth site, `row.rs` (the ghost
+  row's tail). The ruling named three; upstream `main` routes the ghost tail
+  through `line_colors` as well (`row.rs:135`). The tail asks for the whole
+  line and keeps the spans that reach past the ghost's offset, so the host
+  sees line indices and never a suffix.
+- `state.rs`, `ViewOptions` (`Clone, Debug, PartialEq`), `set_view_options` and
+  `view_options`: they map onto the existing `Options` fields. A tab size of
+  zero is raised to one and logged (the `tab_size` builder still asserts).
+  `editor/mod.rs` exports `ViewOptions`.
+- `state.rs`, `without_breakpoints` clears `Options::breakpoints`. In
+  `gutter.rs` the breakpoint slot keeps its width and still draws the severity
+  icon, but draws no breakpoint dot, takes no press and has no pointer cursor.
+- `state.rs`, `reset(text, cx)`: ported from upstream `main`'s `prose.rs`
+  (~line 38), placed in `state.rs` as the ruling says. New buffer, caret at 0,
+  history cleared, folds cleared, `marked` and `composing` cleared, marks
+  cleared by `anchors::clear`, `EditorEvent::Changed`, blink restarted.
+- `EditorEvent` gains `Pointer { offset, position }` and `SecondaryClick
+  { offset, position }`, both emitted from one handler on the list's `body`
+  (`view.rs`, render), so a move or a press emits once. The offset comes from
+  `offset_at`, so it is `None` past the last row and on a row that is not text
+  (a lens, a removed line, ghost text or the chat). `Pointer` fires only without
+  a button down.
+- `EditorEvent::PlatformClick { offset }`: `press()` records
+  `pressed: Option<(usize, bool)>` (the offset and whether the platform modifier
+  was held); `release()` (`line.rs`, from the root's `on_mouse_up(Left)`)
+  emits when the release is at the same offset and the modifier was held on
+  press or release, then collapses the selection to the caret there. A press
+  under the modifier still selects by drag, as before; only the click collapses.
+  The gesture is the one `file_view.rs` uses for go-to-definition (~2969,
+  ~3034), with no click-count check, as there. `on_mouse_up_out` clears
+  `pressed`.
+- `EditorEvent::GitMarkPressed { line }`: in `gutter.rs` the git bar's hit area
+  is 4px wide (the 2px bar sits inside it, at the same x) and takes a press only
+  on a line where a mark is drawn. That press calls `prevent_default`.
+- `EditorEvent` drops `Eq`: `Point<Pixels>` is not `Eq`. Nothing outside the
+  editor matched on it; `sirio_ui` does not use the editor yet.
+- `keys.rs`, `Copy`: the comment says the chord is handed on, never swallowed,
+  and that `text_selection::on_copy` declines while the editor has focus.
+  Behaviour is unchanged.
+- `sirio_ui/examples/ely_editor_probe.rs` and
+  `Scripts/Tests/test-ely-editor-probe.sh` prove the events, the gutter's
+  geometry, the highlighter's colour and the breakpoint slot (with a control run
+  that turns breakpoints on). Not proven by the probe: `reset`, the effect of
+  the view options on the frame, a `None` pointer offset past the last row, and
+  the `Pointer` offset on a lens or ghost row.
+
+Evidence: `cargo nextest run -p ely-gpui-component --features test-support`
+runs 120 tests, all passed (no unit test added; the probe is the proof).
+`Scripts/Tests/test-ely-editor-probe.sh --xvfb` prints `ELY EDITOR PROBE OK`.

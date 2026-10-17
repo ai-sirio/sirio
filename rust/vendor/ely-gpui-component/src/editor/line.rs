@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Context, FontWeight, HighlightStyle, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, Stateful, Styled, StyledText, UnderlineStyle,
-    Window, canvas, div, prelude::*,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Stateful, Styled, StyledText,
+    UnderlineStyle, Window, canvas, div, prelude::*,
 };
 
 use super::{
@@ -11,8 +11,7 @@ use super::{
     gutter::Cell,
     layout::{Shown, stack},
     measure::Measured,
-    state::{CodeEditor, CursorShape},
-    syntax,
+    state::{CodeEditor, CursorShape, EditorEvent},
 };
 use crate::{
     compat::tint,
@@ -34,7 +33,7 @@ impl CodeEditor {
         let touches = |span: &Range<usize>| {
             span.start < range.end.max(range.start + 1) && range.start < span.end
         };
-        let mut spans = syntax::colors(self.row_text(line), cx);
+        let mut spans = self.line_colors(line, self.row_text(line), cx);
         // Offsets found in an older text are left out.
         let fresh = self.frame.stamp == self.buffer.stamp();
         let brackets = self
@@ -390,6 +389,7 @@ impl CodeEditor {
         let Some(at) = self.offset_in(line, event.position.x, window, cx) else {
             return;
         };
+        self.pressed = Some((at, event.modifiers.platform));
         let chosen = match event.click_count {
             2 => {
                 let word = self.buffer.word_at(at);
@@ -449,5 +449,26 @@ impl CodeEditor {
         primary.head = at;
         primary.goal = None;
         self.set_selections(all, cx);
+    }
+
+    /// A release ends a press. Pressed and released at one offset, with the platform modifier held on either, it is a platform click: the caret stays and no drag selection is left.
+    pub(crate) fn release(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dragging = false;
+        let Some((down, platform_down)) = self.pressed.take() else {
+            return;
+        };
+        let Some(up) = self.offset_at(event.position, window, cx) else {
+            return;
+        };
+        if up != down || !(platform_down || event.modifiers.platform) {
+            return;
+        }
+        self.set_selections(vec![Selection::caret(up)], cx);
+        cx.emit(EditorEvent::PlatformClick { offset: up });
     }
 }

@@ -264,8 +264,9 @@ pub(crate) fn listen<E: InteractiveElement>(root: E, cx: &mut Context<CodeEditor
     let root = on!(root, Redo, |e, _, cx| e.redo(cx));
     let root = on!(root, SelectAll, |e, _, cx| e.select_all(cx));
     let root = on!(root, Copy, |e, _, cx| {
-        // With no selection the chord is not the editor's to take: Sirio's
-        // copy of selected text (`text_selection`) gets it.
+        // With no selection the chord is handed on, never swallowed: the
+        // host's own copy of selected text gets it. `text_selection::on_copy`
+        // declines while the editor has focus, so it is not blocked either.
         if e.selections().iter().all(|selection| selection.is_empty()) {
             cx.propagate()
         } else {
