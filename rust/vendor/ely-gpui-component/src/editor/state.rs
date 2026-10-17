@@ -353,6 +353,12 @@ impl CodeEditor {
         self.buffer.text()
     }
 
+    /// The findings the owner set, as they stand for the current text: an
+    /// edit moves their ranges, and an undo, a reset or a `set_text` clears them.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.marks.diagnostics
+    }
+
     pub fn selections(&self) -> &[Selection] {
         &self.selections
     }

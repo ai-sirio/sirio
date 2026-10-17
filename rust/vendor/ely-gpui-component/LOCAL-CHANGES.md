@@ -515,3 +515,12 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
   selections through the same `chosen` and notifies, but does not scroll. Sirio's
   file tab uses it when a right press places the caret under the pointer, so the
   view stays where it was.
+
+### Reading the diagnostics back (Task 7b)
+
+- `src/editor/state.rs`: `CodeEditor::diagnostics(&self) -> &[Diagnostic]`, the
+  findings the owner set, as Ely holds them now. An edit moves their ranges
+  (`anchors::shift`), and an undo, `reset`, `reset_keeping_view` and `set_text`
+  clear them. Sirio's hover card reads them from here, so the card and the
+  squiggles agree after an edit, an undo or a reload. Until the next publish
+  after a clear, the card shows no diagnostic either.

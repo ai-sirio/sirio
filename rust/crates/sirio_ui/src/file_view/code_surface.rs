@@ -472,7 +472,7 @@ fn ely_severity(severity: DiagnosticSeverity) -> Severity {
 }
 
 /// The order `ely_diagnostics` sorts by: Ely's `Severity` has none of its own.
-fn severity_rank(severity: Severity) -> u8 {
+pub(super) fn severity_rank(severity: Severity) -> u8 {
     match severity {
         Severity::Info | Severity::Success => 0,
         Severity::Warning => 1,

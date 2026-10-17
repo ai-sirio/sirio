@@ -658,11 +658,7 @@ impl FileView {
         // The diagnostic half of the card is already here, so it shows
         // immediately — no round trip, and a server with no hoverProvider
         // still shows its errors. The reply joins it later in `set_hover`.
-        let local = self
-            .diagnostics_at(offset)
-            .iter()
-            .map(|found| found.message.clone())
-            .collect::<Vec<_>>();
+        let local = self.diagnostics_at(offset, cx);
         self.hover_card = (!local.is_empty()).then(|| local.join("\n"));
         if had_card || self.hover_card.is_some() {
             cx.notify();
@@ -685,12 +681,10 @@ impl FileView {
         if seq != self.hover_seq {
             return;
         }
-        let local = self.hover_offset.map(|offset| {
-            self.diagnostics_at(offset)
-                .iter()
-                .map(|found| found.message.clone())
-                .collect::<Vec<_>>()
-        }).unwrap_or_default();
+        let local = self
+            .hover_offset
+            .map(|offset| self.diagnostics_at(offset, cx))
+            .unwrap_or_default();
         let mut parts = local;
         parts.extend(text);
         self.hover_card = (!parts.is_empty()).then(|| parts.join("\n"));
@@ -727,15 +721,30 @@ impl FileView {
         });
     }
 
-    /// Every message covering a byte offset, worst first.
-    fn diagnostics_at(&self, offset: usize) -> Vec<&FileDiagnostic> {
-        let mut found: Vec<_> = self
-            .diagnostics
+    /// Every message covering a byte offset, worst first. Once the code
+    /// editor exists it holds the findings: Ely moves them with each edit and
+    /// clears them on an undo or a reload, so the card agrees with the
+    /// squiggles. Before it exists, the view's own copy is all there is.
+    fn diagnostics_at(&self, offset: usize, cx: &App) -> Vec<String> {
+        let covers = |range: &Range<usize>| range.contains(&offset) || range.start == offset;
+        let Some(code) = &self.code_editor else {
+            let mut found: Vec<_> = self
+                .diagnostics
+                .iter()
+                .filter(|d| covers(&d.range))
+                .collect();
+            found.sort_by_key(|d| d.severity);
+            return found.iter().map(|d| d.message.clone()).collect();
+        };
+        let mut found: Vec<_> = code
+            .read(cx)
+            .diagnostics()
             .iter()
-            .filter(|d| d.range.contains(&offset) || d.range.start == offset)
+            .filter(|d| covers(&d.range))
             .collect();
-        found.sort_by_key(|d| d.severity);
-        found
+        // Worst first: the reverse of the order `ely_diagnostics` draws them in.
+        found.sort_by_key(|d| std::cmp::Reverse(code_surface::severity_rank(d.severity)));
+        found.iter().map(|d| d.message.to_string()).collect()
     }
 
     fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
