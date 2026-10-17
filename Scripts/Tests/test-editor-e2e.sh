@@ -22,6 +22,16 @@ set -eEuo pipefail
 #                     pasted back, which reads the clipboard through the editor
 #   pane_keys         shift-alt-down adds a cursor; ctrl-alt-down moves focus to the
 #                     pane below, shown by a pane close that spares the file
+#   diagnostics       the fake language server's two findings (an Error and a
+#                     Warning, Scripts/Tests/fake_lsp.py) are counted and captured;
+#                     a character typed before them moves them with the text, and
+#                     the hover card follows them; undo clears them until the
+#                     server publishes again, which the sequence shows
+#   hover             a rested pointer asks the server, and its answer is the card
+#   definition        a platform click on a call opens the definition's file at its
+#                     line (the reveal)
+#   link              a platform click on a Markdown link's label opens its target
+#   context           the menu's Copy, run by a right press, reaches the clipboard
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
 #                     stickyScroll, lineNumbers, cursorShape, and the ruler at
@@ -155,6 +165,7 @@ cleanup() {
   stop_hosts
   [ -z "$XVFB_PID" ] || terminate "$XVFB_PID"
   cp "$RUN_DIR"/app.log "$OUT_DIR/" 2>/dev/null || true
+  cp "$RUN_DIR/fake-lsp/requests.log" "$OUT_DIR/lsp-requests.log" 2>/dev/null || true
   [ -d "$RUN_DIR/host/log" ] && cp -R "$RUN_DIR/host/log" "$OUT_DIR/" 2>/dev/null || true
   rm -rf "$RUN_DIR"
   exit "$rc"
@@ -310,6 +321,8 @@ write("binary.bin", b"\x00\x01\x02binary\x00data\xff\xfe")
 big = b"".join(f"line {n} of the big file\n".encode("utf-8") for n in range(1, 200000))
 write("big.txt", big[:1153434])
 write("unreadable.txt", b"secret\n")
+# calls.rs: one call, to outer() in nested.rs, which a definition click lands on.
+write("calls.rs", b"fn caller() -> u32 {\n    outer(1)\n}\n")
 # nested.rs: bodies indented by 4, 8 and 12 spaces, and one impl block of about
 # 80 lines, longer than the pane; one of its lines runs past 60 columns.
 nested = [
@@ -353,6 +366,33 @@ PY
 git -C "$WT" add -A
 git -C "$WT" commit -q -m first
 chmod 000 "$WT/unreadable.txt"
+
+# The language server for .rs: the fake one (Scripts/Tests/fake_lsp.py), never a
+# real rust-analyzer. Its answers name the text they point at, so the findings
+# follow the file through every edit. The hover and the messages are the words
+# the diagnostics and hover scenarios look for.
+FAKE_HOVER="fake hover: a function that returns a number"
+FAKE_ERROR="fake error: line_7 is wrong"
+FAKE_WARNING="fake warning: line_12 is unused"
+mkdir -p "$XDG_CONFIG_HOME/sirio" "$RUN_DIR/fake-lsp"
+cat >"$RUN_DIR/fake-lsp/answers.json" <<JSON
+{
+  "hover": "$FAKE_HOVER",
+  "diagnostics_file": "main.rs",
+  "diagnostics": [
+    {"needle": "line_7", "severity": 1, "message": "$FAKE_ERROR"},
+    {"needle": "line_12", "severity": 2, "message": "$FAKE_WARNING"}
+  ],
+  "definition": {"path": "$WT/nested.rs", "needle": "fn outer"}
+}
+JSON
+cat >"$XDG_CONFIG_HOME/sirio/languages.toml" <<TOML
+[[language]]
+name = "rust"
+extensions = ["rs"]
+command = "python3"
+args = ["-I", "$ROOT/Scripts/Tests/fake_lsp.py", "$RUN_DIR/fake-lsp/answers.json", "$RUN_DIR/fake-lsp/requests.log"]
+TOML
 
 # ---------------------------------------------------------------- the app
 
@@ -755,6 +795,169 @@ scenario_pane_keys() {
   echo "OK: shift-alt-down added a cursor; ctrl-alt-down moved focus to the pane below"
 }
 
+# The title of the active tab, from `surface tabs read --json`: tab.N is
+# "kind|snapshot|title", and active is N.
+active_tab_title() {
+  "$CTL" surface tabs read --json | python3 -c '
+import json, sys
+report = json.load(sys.stdin)[0]
+print(report["tab." + report["active"]].split("|", 2)[2])'
+}
+expect_active_tab() { # title
+  local tries=0 got=""
+  while [ "$tries" -lt 150 ]; do
+    got="$(active_tab_title)"
+    [ "$got" = "$1" ] && { echo "OK: the active tab is $1"; return 0; }
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$SCENARIO: the active tab is '$got', expected '$1'"
+}
+# Sets one key of the fake language server's answers. It reads them again for
+# each message, so the next message sees the new value; the file is replaced
+# whole, so the server never reads half of it.
+fake_lsp_answers() { # key json-value
+  python3 - "$RUN_DIR/fake-lsp/answers.json" "$1" "$2" <<'PY'
+import json, os, sys
+path, key, value = sys.argv[1:4]
+with open(path, encoding="utf-8") as handle:
+    answers = json.load(handle)
+answers[key] = json.loads(value)
+with open(path + ".tmp", "w", encoding="utf-8") as handle:
+    json.dump(answers, handle)
+os.replace(path + ".tmp", path)
+PY
+}
+# The fake language server logs each message it gets, as `request M` or
+# `notification M`: a line ending in M is the server being sent that method.
+lsp_asked() { # method
+  grep -q " $1\$" "$RUN_DIR/fake-lsp/requests.log" 2>/dev/null \
+    || fail "$SCENARIO: the language server was never asked $1"
+  echo "OK: the language server was asked $1"
+}
+
+scenario_diagnostics() {
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  # The server publishes its two findings for the text it holds: an Error on the
+  # name line_7 and a Warning on line_12.
+  expect_state diagnostics 2
+  capture diagnostics
+  local before old_at error_at
+  before="$(sfield text)"
+  old_at="$(python3 "$TOOLS" offset "$before" "line_7")"
+  # The server holds its answers while the text moves, so the findings the
+  # editor and the card read are the ones Ely moved, not a fresh publish.
+  fake_lsp_answers publish_on_change false
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor type --text=x >/dev/null
+  expect_state dirty true
+  # The findings move with the text, the Error one byte later, and both stay.
+  expect_state diagnostics 2
+  error_at="$(python3 "$TOOLS" offset "$(sfield text)" "line_7")"
+  [ "$error_at" -eq $((old_at + 1)) ] \
+    || fail "$SCENARIO: the Error is at $error_at, not one byte past $old_at, after the typed character"
+  # The card reads the editor's findings, so the Error answers at its new place.
+  ctl surface editor hover --offset="$error_at" >/dev/null
+  expect_state hover "$FAKE_ERROR\\n$FAKE_HOVER"
+  capture diagnostics-hover
+  # At the Error's old place there is a space now: no finding, though Sirio's own
+  # copy of the findings still names that place. The card shows the server's
+  # answer alone.
+  ctl surface editor hover --offset="$old_at" >/dev/null
+  expect_state hover "$FAKE_HOVER"
+  # Undo restores the text. Ely clears its findings with the restored text, and
+  # the server publishes them again for it. The sequence shows the clear, if the
+  # read catches it, and the count then comes back to 2.
+  fake_lsp_answers publish_on_change true
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state dirty false
+  expect_state text "$before"
+  local seen="" count tries=0
+  while [ "$tries" -lt 20 ]; do
+    read_state
+    count="$(sfield diagnostics)"
+    case " $seen " in *" $count "*) ;; *) seen="$seen $count" ;; esac
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  echo "undo: diagnostics seen over 2 s:$seen"
+  expect_state diagnostics 2
+  lsp_asked textDocument/didChange
+  echo "OK: the findings moved with the typed character, the card followed them, and undo's restore gave them back"
+}
+
+scenario_hover() {
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  local at
+  at="$(python3 "$TOOLS" offset "$(sfield text)" "line_1")"
+  ctl surface editor hover --offset="$at" >/dev/null
+  # Nothing is under line_1 but the server's answer, which the card then shows.
+  expect_state hover "$FAKE_HOVER"
+  lsp_asked textDocument/hover
+  echo "OK: the hover at line_1 is the server's answer"
+}
+
+scenario_definition() {
+  open_file "$WT/calls.rs"
+  expect_state state loaded
+  local at line_six
+  at="$(python3 "$TOOLS" offset "$(sfield text)" "outer(1)")"
+  ctl surface editor click --offset="$at" --platform=true >/dev/null
+  expect_active_tab nested.rs
+  expect_state path "$WT/nested.rs"
+  # The server's definition is the line "fn outer" begins; the reveal puts the
+  # caret at the start of that line, which is the selection the file reads.
+  line_six="$(python3 - "$WT/nested.rs" <<'PY'
+import sys
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+print(len("".join(line + "\n" for line in lines[:6]).encode("utf-8")))
+PY
+)"
+  expect_state selections "$line_six..$line_six"
+  lsp_asked textDocument/definition
+  echo "OK: the definition opened nested.rs with the caret on its line 7"
+}
+
+scenario_link() {
+  open_file "$WT/notes.md"
+  expect_state state loaded
+  ctl surface editor mode --mode=code >/dev/null
+  expect_state mode code
+  local at
+  at="$(python3 "$TOOLS" offset "$(sfield text)" "link")"
+  # A click inside the label, not on the (target) beside it.
+  ctl surface editor click --offset=$((at + 1)) --platform=true >/dev/null
+  expect_active_tab main.rs
+  expect_state path "$WT/main.rs"
+  echo "OK: the link's label opened main.rs"
+}
+
+scenario_context() {
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  local before first
+  before="$(sfield text)"
+  first="$(python3 "$TOOLS" offset "$before" "line_2")"
+  ctl surface editor select --ranges="$first..$((first + 6))" >/dev/null
+  # A right press inside the selection keeps it; the menu's Copy copies it.
+  ctl surface editor context --offset=$((first + 2)) --action=copy >/dev/null
+  expect_state selections "$first..$((first + 6))"
+  # The clipboard, read as copy_propagates reads it: a paste into the empty
+  # scratch file, then undone, so the fixture is left as it was.
+  open_file "$WT/empty.txt"
+  expect_state state loaded
+  ctl surface editor keys --keys=ctrl-v >/dev/null
+  expect_state text "line_2"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text ""
+  expect_state dirty false
+  echo "OK: the menu's Copy reached the clipboard: the paste read line_2"
+  # Send to agent is not run here: no agent chat can be opened in this world (see
+  # the report), and a chat is what the selection would go to.
+}
+
 prefs_line() {
   printf 'minimap=%s,stickyScroll=%s,indentGuides=%s,rainbowBrackets=%s,codeLens=%s,inlayHints=%s,whitespace=%s,ruler=%s,rulerColumn=%s,lineNumbers=%s,cursorShape=%s,tabSize=%s' \
     "${PREF[minimap]}" "${PREF[stickyScroll]}" "${PREF[indentGuides]}" "${PREF[rainbowBrackets]}" \
@@ -888,6 +1091,11 @@ scenario markdown scenario_markdown
 scenario colour scenario_colour
 scenario copy_propagates scenario_copy_propagates
 scenario pane_keys scenario_pane_keys
+scenario diagnostics scenario_diagnostics
+scenario hover scenario_hover
+scenario definition scenario_definition
+scenario link scenario_link
+scenario context scenario_context
 scenario prefs scenario_prefs
 
 stop_hosts
