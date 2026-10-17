@@ -667,15 +667,17 @@ impl Editor {
     /// Replaces `range` with `text` (an empty range inserts), then
     /// recomputes dirty state. Rejects selections that would split a
     /// multibyte character. F-EDIT-04's edit half. CRLF in `text` (a paste)
-    /// becomes LF, so the buffer stays LF-only.
-    pub fn replace(&mut self, range: Selection, text: &str) -> Result<(), String> {
+    /// becomes LF, so the buffer stays LF-only. Returns the byte offset just
+    /// past the text actually inserted, which is where the caret belongs: the
+    /// LF form is shorter than `text` when it had CRLF.
+    pub fn replace(&mut self, range: Selection, text: &str) -> Result<usize, String> {
         if !self.buffer.is_char_boundary(range.start) || !self.buffer.is_char_boundary(range.end) {
             return Err("selection splits a multibyte character".to_string());
         }
-        self.buffer
-            .replace_range(range.start..range.end, &LineEnding::normalize(text));
+        let inserted = LineEnding::normalize(text);
+        self.buffer.replace_range(range.start..range.end, &inserted);
         self.sync_document_from_buffer();
-        Ok(())
+        Ok(range.start + inserted.len())
     }
 
     /// Replaces the whole buffer with `text` (LF or CRLF; the buffer keeps
@@ -698,13 +700,14 @@ impl Editor {
     }
 
     /// Inserts `text` at a caret offset. F-EDIT-04's edit half, for the
-    /// common "type at the caret" case.
-    pub fn insert(&mut self, at: usize, text: &str) -> Result<(), String> {
+    /// common "type at the caret" case. Returns the caret after the text, as
+    /// [`Editor::replace`] does.
+    pub fn insert(&mut self, at: usize, text: &str) -> Result<usize, String> {
         self.replace(Selection::point(at), text)
     }
 
     /// Inserts the four-space indent unit (F-EDIT-07) at a caret offset.
-    pub fn insert_indent(&mut self, at: usize) -> Result<(), String> {
+    pub fn insert_indent(&mut self, at: usize) -> Result<usize, String> {
         self.insert(at, INDENT_UNIT)
     }
 
@@ -1374,8 +1377,19 @@ mod tests {
     /// - switching the ending does not mark the editor dirty, so a later
     ///   close or save silently drops the choice;
     /// - a mixed file reads as dirty, or saves with some lines CRLF and some LF;
-    /// - a lone carriage return is treated as a line break and disappears.
-    mod line_endings {
+    /// - a lone carriage return is treated as a line break and disappears;
+    /// - a pasted CRLF leaves the caret short of the inserted text, inside the
+    ///   next multi-byte character, so the next Home or End panics;
+    /// - an untouched CRLF file reads as changed through `check_external`:
+    ///   adopted with its `\r`s under a clean editor, a conflict under a dirty
+    ///   one (the disk compared as raw bytes against the LF baseline);
+    /// - an external CRLF edit under a dirty editor is not a conflict, or
+    ///   `keep` then `save` does not write CRLF;
+    /// - an external CRLF edit under a clean editor is not adopted, or is
+    ///   adopted with `\r`s in the buffer or with the wrong ending;
+    /// - a single-line CRLF file saved with `Crlf` reads back as changed on the
+    ///   next `check_external`, and its ending reverts to LF.
+    mod crlf_line_endings {
         use super::*;
 
         #[test]
@@ -1433,6 +1447,80 @@ mod tests {
             let file = TempFile::new("lone-cr", "a\rb\n");
             let editor = Editor::open(file.path());
             assert_eq!(editor.buffer(), "a\rb\n");
+            assert_eq!(editor.line_ending(), LineEnding::Lf);
+            assert!(!editor.is_dirty());
+        }
+
+        #[test]
+        fn a_crlf_paste_leaves_the_caret_on_a_character_boundary() {
+            // "é" is two bytes: a caret left at byte 3 would sit inside it.
+            let file = TempFile::new("crlf-paste-caret", "é\r\n");
+            let mut editor = Editor::open(file.path());
+            let caret = editor
+                .replace(Selection::point(0), "x\r\n")
+                .expect("paste applies");
+            assert_eq!(caret, 2, "the caret goes just past the inserted \"x\\n\"");
+            assert!(editor.buffer().is_char_boundary(caret));
+            assert_eq!(&editor.buffer()[caret..], "é\n");
+        }
+
+        #[test]
+        fn an_untouched_crlf_file_is_clean_through_check_external() {
+            let file = TempFile::new("crlf-untouched", "a\r\nb\r\n");
+            let mut editor = Editor::open(file.path());
+            assert_eq!(editor.check_external(), Conflict::None);
+            assert_eq!(editor.buffer(), "a\nb\n");
+            assert_eq!(editor.line_ending(), LineEnding::Crlf);
+            assert!(!editor.is_dirty());
+        }
+
+        #[test]
+        fn an_external_crlf_edit_conflicts_with_a_dirty_editor_and_keep_saves_crlf() {
+            let file = TempFile::new("crlf-conflict", "a\r\nb\r\n");
+            let mut editor = Editor::open(file.path());
+            editor.replace_all("a\nlocal\n");
+            assert_eq!(
+                editor.check_external(),
+                Conflict::None,
+                "an untouched file is not a conflict, even under a dirty editor"
+            );
+            std::fs::write(file.path(), "a\r\next\r\n").expect("external write");
+            assert_eq!(editor.check_external(), Conflict::ChangedOnDisk);
+            assert_eq!(editor.buffer(), "a\nlocal\n", "the local edit is kept");
+            editor.keep();
+            editor.save().expect("save over the kept external change");
+            assert_eq!(
+                std::fs::read_to_string(file.path()).expect("read back"),
+                "a\r\nlocal\r\n"
+            );
+            assert!(!editor.is_dirty());
+        }
+
+        #[test]
+        fn an_external_crlf_edit_under_a_clean_editor_is_adopted() {
+            let file = TempFile::new("crlf-adopt", "a\r\nb\r\n");
+            let mut editor = Editor::open(file.path());
+            std::fs::write(file.path(), "x\r\ny\r\n").expect("external write");
+            assert_eq!(editor.check_external(), Conflict::None);
+            assert_eq!(editor.buffer(), "x\ny\n");
+            assert_eq!(editor.line_ending(), LineEnding::Crlf);
+            assert!(!editor.is_dirty());
+        }
+
+        #[test]
+        fn a_single_line_crlf_file_stays_clean_after_save_and_reread() {
+            let file = TempFile::new("crlf-single-line", "hello");
+            let mut editor = Editor::open(file.path());
+            editor.set_line_ending(LineEnding::Crlf);
+            assert!(editor.is_dirty());
+            editor.save().expect("save");
+            assert_eq!(
+                std::fs::read_to_string(file.path()).expect("read back"),
+                "hello"
+            );
+            assert!(!editor.is_dirty());
+            assert_eq!(editor.check_external(), Conflict::None);
+            assert_eq!(editor.line_ending(), LineEnding::Crlf);
             assert!(!editor.is_dirty());
         }
     }

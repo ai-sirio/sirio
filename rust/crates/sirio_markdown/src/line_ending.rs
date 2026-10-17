@@ -22,6 +22,11 @@ impl LineEnding {
     }
 
     /// `raw` with every `\r\n` replaced by `\n`. A lone `\r` is text and stays.
+    ///
+    /// Limit: a `\r` directly before a CRLF stays behind as a lone `\r`, so
+    /// `a\r\r\n` becomes `a\r\n`, a text that still holds a `\r\n` pair. Such a
+    /// file may not round-trip through an ending switch: the next load detects
+    /// CRLF and drops that `\r`. The algorithm is kept as it is.
     pub fn normalize(raw: &str) -> String {
         raw.replace("\r\n", "\n")
     }

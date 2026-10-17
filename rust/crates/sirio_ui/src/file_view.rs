@@ -1383,8 +1383,8 @@ impl FileView {
         let Some(editor) = self.editor_mut() else {
             return;
         };
-        if editor.replace(selection, text).is_ok() {
-            self.caret = selection.start + text.len();
+        if let Ok(caret) = editor.replace(selection, text) {
+            self.caret = caret;
             self.source_selection = None;
             self.selection_anchor = None;
         }
@@ -1429,8 +1429,8 @@ impl FileView {
         let Some(editor) = self.editor_mut() else {
             return;
         };
-        if editor.replace(selection, text).is_ok() {
-            self.caret = selection.start + text.len();
+        if let Ok(caret) = editor.replace(selection, text) {
+            self.caret = caret;
             self.source_selection = None;
             self.selection_anchor = None;
         }
