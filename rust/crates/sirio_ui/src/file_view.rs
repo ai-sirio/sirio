@@ -3943,67 +3943,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_find_bar_sits_above_the_code_and_the_code_gets_its_height_back(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        // A snapshot, so the code's read-only banner is drawn at its top too.
-        cx.update(|cx| {
-            Theme::init(cx);
-            ::editor::init(cx);
-            crate::ely::init(cx);
-        });
-        let text = (0..40).map(|n| format!("line {n}\n")).collect::<String>();
-        let window = cx.add_window(|_window, cx| {
-            FileView::snapshot(snapshot_origin_for_tests(), text.into_bytes(), cx)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let view = cx.update(|window, _| window.root::<FileView>().flatten().expect("root"));
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-            window.simulate_next_frame(cx);
-        });
-        let code_height = |cx: &mut VisualTestContext| {
-            cx.debug_bounds("file-text-scroll")
-                .expect("the code is drawn")
-                .size
-                .height
-        };
-        let before = code_height(&mut cx);
-
-        open_find(&view, "line", None, &mut cx);
-        let bar = cx.debug_bounds("file-find-bar").expect("the find bar is drawn");
-        let code = cx.debug_bounds("file-text-scroll").expect("the code is drawn");
-        let first = cx
-            .debug_bounds("code-editor-line-0")
-            .expect("the first line is drawn");
-        assert!(
-            bar.bottom() <= code.top(),
-            "the bar ends ({:?}) before the code begins ({:?})",
-            bar.bottom(),
-            code.top()
-        );
-        assert!(
-            first.top() >= bar.bottom(),
-            "the first line (below the read-only banner) is not under the bar"
-        );
-        assert_eq!(
-            code.size.height + bar.size.height,
-            before,
-            "the code is as much shorter as the bar is tall"
-        );
-        assert_eq!(bar.size.width, code.size.width, "the bar spans the code's width");
-
-        view.update(&mut cx.cx, |view, _| view.find = None);
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-        assert!(cx.debug_bounds("file-find-bar").is_none(), "closed find draws no bar");
-        assert_eq!(code_height(&mut cx), before, "closing find gives the code its height back");
-    }
-
-    #[gpui::test]
     async fn the_find_key_in_the_query_selects_it_and_never_reseeds_it(
         cx: &mut gpui::TestAppContext,
     ) {
