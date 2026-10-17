@@ -1,0 +1,457 @@
+//! Find and replace in the file's code, with Ely's `FindWidget`.
+//!
+//! The widget and `find_all` are Ely's; this module owns the state around
+//! them: which matches the query has in the code editor's text, which one is
+//! current, and the washes that show them.
+//!
+//! How it can fail. Each failure has a test in `file_view.rs`'s `tests`.
+//!
+//! - Replace-one leaves the matches where they stood before the edit, so a
+//!   later match is replaced at an offset the earlier replacement moved. The
+//!   test puts a multi-byte character before the matches and a replacement
+//!   longer than the match.
+//! - Replace-one with a replacement that holds the query finds that text
+//!   again and never moves on (`x` to `xx`).
+//! - Replace-all is one edit per match, so it takes one undo per match.
+//! - A text change in the code leaves the matches, and the washes, where the
+//!   old text had them.
+//! - Escape in the code with find open collapses the cursors instead of
+//!   closing find, or closes find and the hunk together, or swallows the
+//!   Escape that should collapse the cursors once nothing is open.
+//! - Escape in the query field closes find but leaves the keyboard in
+//!   nothing, so the next key goes nowhere.
+
+use std::ops::Range;
+
+use ely_gpui_component::editor::{CodeEditor, FindOptions, FindWidget, find_all};
+use ely_gpui_component::forms::{InputEvent, TextInput};
+use ely_gpui_component::theme::{ActiveTheme as _, TextSize};
+use gpui::{
+    AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, Pixels, SharedString,
+    Subscription, Window, div, font, prelude::*, px,
+};
+use sirio_theme::Theme;
+
+use super::FileView;
+
+/// An open find: its two fields, what they found, and which match is current.
+pub(super) struct FindState {
+    pub(super) query: Entity<TextInput>,
+    pub(super) replacement: Entity<TextInput>,
+    pub(super) options: FindOptions,
+    /// Byte ranges in the code editor's text, in order; empty when nothing matches.
+    pub(super) matches: Vec<Range<usize>>,
+    /// An index into `matches`: `None` only while there is no match.
+    pub(super) current: Option<usize>,
+    /// Why the query found nothing, when it is a pattern that does not compile.
+    pub(super) error: Option<SharedString>,
+    pub(super) replace_open: bool,
+    /// The washes last pushed to the code editor: every match, and the current one.
+    washes: (Hsla, Hsla),
+    _subscriptions: Vec<Subscription>,
+}
+
+/// The first match that starts at or after `at`, wrapping to the first one
+/// when none does; `None` without matches.
+fn current_after(matches: &[Range<usize>], at: usize) -> Option<usize> {
+    if matches.is_empty() {
+        return None;
+    }
+    Some(matches.iter().position(|hit| hit.start >= at).unwrap_or(0))
+}
+
+/// The wash of every match, and the stronger one of the current match.
+fn washes(cx: &App) -> (Hsla, Hsla) {
+    let theme = Theme::get(cx);
+    (theme.ely.warning.opacity(0.2), theme.ely.selection)
+}
+
+/// The last line of a pattern error: the regex crate's message draws the
+/// pattern above it, and only that last line fits the widget's count slot.
+fn last_line(message: &str) -> &str {
+    message.lines().last().unwrap_or(message).trim()
+}
+
+/// How far the code editor's minimap reaches in from the right edge, for the
+/// widget to stay clear of it. Ely sizes the minimap at 12 columns of its
+/// code font (`MINIMAP` in its `editor/view.rs`, which is private).
+fn minimap_inset(code: &Entity<CodeEditor>, window: &Window, cx: &App) -> Pixels {
+    if !code.read(cx).view_options().minimap {
+        return px(0.0);
+    }
+    let theme = cx.theme();
+    let size = theme.text_size(TextSize::Sm).to_pixels(window.rem_size());
+    let mono = window
+        .text_system()
+        .resolve_font(&font(theme.mono_family.clone()));
+    let advance = window
+        .text_system()
+        .advance(mono, size, 'm')
+        .map_or(size * 0.6, |advance| advance.width);
+    advance * 12.0
+}
+
+impl FileView {
+    /// Opens find on the code, or brings the open one back to the query.
+    ///
+    /// `query` replaces the query's text (`None` leaves it, empty for a find
+    /// that was not open). `replace` opens the replace row with that text
+    /// (`None` leaves the row as it is, closed for a find that was not open);
+    /// a read-only code (a snapshot, or a file not unlocked) never shows the
+    /// row. The query takes the keyboard, its text selected. Returns `false`,
+    /// opening nothing, when the code is not what the tab shows (no file yet,
+    /// or the Markdown preview).
+    pub fn open_find(
+        &mut self,
+        query: Option<String>,
+        options: FindOptions,
+        replace: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.code_shown() {
+            return false;
+        }
+        let mut find = match self.find.take() {
+            Some(find) => find,
+            None => self.new_find(window, cx),
+        };
+        find.options = options;
+        if let Some(query) = query {
+            find.query.update(cx, |field, cx| field.set_text(query, cx));
+        }
+        if let Some(replace) = replace {
+            find.replacement
+                .update(cx, |field, cx| field.set_text(replace, cx));
+            find.replace_open = true;
+        }
+        let query = find.query.clone();
+        self.find = Some(find);
+        self.find_recompute(None, true, cx);
+        let length = query.read(cx).text().len();
+        query.update(cx, |field, cx| field.select(0..length, cx));
+        query.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    /// Makes the two fields and listens to the query: a change recomputes the
+    /// matches, Enter steps to the next one.
+    fn new_find(&self, window: &mut Window, cx: &mut Context<Self>) -> FindState {
+        let query = cx.new(|cx| TextInput::new(window, cx).placeholder("Find"));
+        let replacement = cx.new(|cx| TextInput::new(window, cx).placeholder("Replace"));
+        let subscription = cx.subscribe_in(
+            &query,
+            window,
+            |view, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Changed => view.find_recompute(None, true, cx),
+                InputEvent::Submit => view.find_step(true, window, cx),
+                _ => {}
+            },
+        );
+        FindState {
+            query,
+            replacement,
+            options: FindOptions::default(),
+            matches: Vec::new(),
+            current: None,
+            error: None,
+            replace_open: false,
+            washes: washes(cx),
+            _subscriptions: vec![subscription],
+        }
+    }
+
+    /// Finds the query again in the code's text, and paints it.
+    ///
+    /// `current` becomes the first match that starts at or after `from`, or
+    /// after the primary selection's start when `from` is `None`: the start,
+    /// not the caret, because a step selects its match, which puts the caret
+    /// at the match's end. With `reveal` the code selects the current match
+    /// and scrolls to it; a recompute caused by typing in the code does not,
+    /// because that would take the caret from the text being typed.
+    ///
+    /// Called directly by everything here that changes the matches, so the
+    /// accessors are right as soon as it returns; the query's and the code's
+    /// change events call it again later and land on the same answer.
+    fn find_recompute(&mut self, from: Option<usize>, reveal: bool, cx: &mut Context<Self>) {
+        let Some(code) = self.code_editor.clone() else {
+            return;
+        };
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let (matches, error) = match find_all(
+            code.read(cx).text(),
+            find.query.read(cx).text(),
+            find.options,
+        ) {
+            Ok(matches) => (matches, None),
+            Err(message) => (Vec::new(), Some(message.into())),
+        };
+        let at = from.unwrap_or_else(|| code.read(cx).primary().range().start);
+        find.current = current_after(&matches, at);
+        find.matches = matches;
+        find.error = error;
+        let select = reveal.then(|| find.current.map(|ix| find.matches[ix].clone()));
+        self.paint_find(cx);
+        if let Some(Some(range)) = select {
+            code.update(cx, |code, cx| code.select([range], cx));
+        }
+        cx.notify();
+    }
+
+    /// The code's text changed (`code_changed`): the matches move with it.
+    pub(super) fn find_text_changed(&mut self, cx: &mut Context<Self>) {
+        self.find_recompute(None, false, cx);
+    }
+
+    /// Hands the code editor the washes: every match dim, the current one strong.
+    /// Find owns the code editor's backgrounds; nothing else in Sirio sets them.
+    fn paint_find(&mut self, cx: &mut Context<Self>) {
+        let Some(code) = self.code_editor.clone() else {
+            return;
+        };
+        let washes = washes(cx);
+        let backgrounds = match self.find.as_mut() {
+            Some(find) => {
+                find.washes = washes;
+                find.matches
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, range)| {
+                        let wash = if Some(ix) == find.current { washes.1 } else { washes.0 };
+                        (range.clone(), wash)
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+        code.update(cx, |code, cx| code.set_backgrounds(backgrounds, cx));
+    }
+
+    /// Repaints the washes when the theme moved them since they were pushed.
+    /// Called every frame, like `sync_code_prefs`.
+    pub(super) fn sync_find_washes(&mut self, cx: &mut Context<Self>) {
+        if self
+            .find
+            .as_ref()
+            .is_some_and(|find| find.washes != washes(cx))
+        {
+            self.paint_find(cx);
+        }
+    }
+
+    /// Moves to the next match (`forward`) or the previous one, wrapping, and
+    /// selects it in the code. Does nothing without a match.
+    pub fn find_step(&mut self, forward: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(code) = self.code_editor.clone() else {
+            return;
+        };
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let total = find.matches.len();
+        let Some(current) = find.current else {
+            return;
+        };
+        let next = if forward {
+            (current + 1) % total
+        } else {
+            (current + total - 1) % total
+        };
+        find.current = Some(next);
+        let range = find.matches[next].clone();
+        self.paint_find(cx);
+        code.update(cx, |code, cx| code.select([range], cx));
+        cx.notify();
+    }
+
+    /// Whether the code takes edits: not a snapshot, and not read-only.
+    fn find_can_replace(&self, cx: &App) -> bool {
+        self.snapshot.is_none()
+            && self
+                .code_editor
+                .as_ref()
+                .is_some_and(|code| !code.read(cx).is_read_only())
+    }
+
+    /// Replaces the current match with the replacement field's text, or every
+    /// match (`all`). The text goes in as typed: `$1` is not a capture group,
+    /// even under a regular expression. Replace-all is one `CodeEditor::edit`,
+    /// so one undo. After replacing one, the next match becomes current: the
+    /// first one that starts at or after the end of the text just written (so
+    /// a replacement that holds the query is not found again), wrapping to the
+    /// first. Does nothing without a match or when the code takes no edits.
+    pub fn replace_matches(&mut self, all: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.find_can_replace(cx) {
+            return;
+        }
+        let Some(code) = self.code_editor.clone() else {
+            return;
+        };
+        let Some(find) = self.find.as_ref() else {
+            return;
+        };
+        // `edit` takes text as it is, and the code never holds a carriage return.
+        let with = find
+            .replacement
+            .read(cx)
+            .text()
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        let chosen: Vec<Range<usize>> = if all {
+            find.matches.clone()
+        } else {
+            find.current
+                .and_then(|ix| find.matches.get(ix))
+                .cloned()
+                .into_iter()
+                .collect()
+        };
+        let Some(first) = chosen.first() else {
+            return;
+        };
+        let resume = (!all).then(|| first.start + with.len());
+        let edits: Vec<(Range<usize>, String)> = chosen
+            .into_iter()
+            .map(|range| (range, with.clone()))
+            .collect();
+        code.update(cx, |code, cx| code.edit(edits, cx));
+        self.find_recompute(resume, resume.is_some(), cx);
+    }
+
+    /// Closes find: its washes go, and the keyboard goes back to the code.
+    pub fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.take().is_none() {
+            return;
+        }
+        self.paint_find(cx);
+        self.focus_target(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// The tab's Find and Replace keys. The primary selection becomes the query
+    /// when it is not empty and holds no line break; otherwise the query stays.
+    /// Replace opens the row only where the code takes edits, and falls back to
+    /// Find where it does not.
+    pub(super) fn find_from_key(
+        &mut self,
+        replace: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(code) = self.code_editor.clone() else {
+            return;
+        };
+        let query = {
+            let code = code.read(cx);
+            let selected = &code.text()[code.primary().range()];
+            (!selected.is_empty() && !selected.contains('\n')).then(|| selected.to_owned())
+        };
+        let options = self.find.as_ref().map_or_else(FindOptions::default, |find| find.options);
+        let replace = (replace && self.find_can_replace(cx)).then(|| {
+            self.find
+                .as_ref()
+                .map_or_else(String::new, |find| find.replacement.read(cx).text().to_owned())
+        });
+        self.open_find(query, options, replace, window, cx);
+    }
+
+    /// How many matches find holds, `None` while find is closed.
+    pub fn find_matches(&self) -> Option<usize> {
+        self.find.as_ref().map(|find| find.matches.len())
+    }
+
+    /// The current match as an index into the matches, counting from 0: the
+    /// number Ely's widget shows, less one. `None` while find is closed or
+    /// has no match.
+    pub fn find_current(&self) -> Option<usize> {
+        self.find.as_ref().and_then(|find| find.current)
+    }
+
+    /// Why the query is not a pattern, the regex crate's whole message, while
+    /// it is not. `None` while find is closed or the query compiles.
+    pub fn find_error(&self) -> Option<&str> {
+        self.find.as_ref().and_then(|find| find.error.as_deref())
+    }
+
+    /// The find widget over the top-right of the code, when find is open and
+    /// the code is shown. It sits left of the minimap.
+    pub(super) fn render_find(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let find = self.find.as_ref()?;
+        if !self.code_shown() {
+            return None;
+        }
+        let code = self.code_editor.as_ref()?;
+        let entity = cx.entity();
+        let options = {
+            let entity = entity.clone();
+            move |options, _: &mut Window, cx: &mut App| {
+                entity.update(cx, |view, cx| {
+                    if let Some(find) = view.find.as_mut() {
+                        find.options = options;
+                    }
+                    view.find_recompute(None, true, cx);
+                });
+            }
+        };
+        let step = {
+            let entity = entity.clone();
+            move |forward, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |view, cx| view.find_step(forward, window, cx));
+            }
+        };
+        let close = {
+            let entity = entity.clone();
+            move |window: &mut Window, cx: &mut App| {
+                entity.update(cx, |view, cx| view.close_find(window, cx));
+            }
+        };
+        let mut widget = FindWidget::new("file-find", &find.query, find.current, find.matches.len())
+            .options(find.options)
+            .on_options(options)
+            .on_step(step)
+            .on_close(close);
+        if let Some(message) = &find.error {
+            widget = widget.error(last_line(message).to_owned());
+        }
+        if self.find_can_replace(cx) {
+            let fold = entity.clone();
+            let replace = entity.clone();
+            widget = widget
+                .on_toggle_replace(move |open, _, cx| {
+                    fold.update(cx, |view, cx| {
+                        if let Some(find) = view.find.as_mut() {
+                            find.replace_open = open;
+                        }
+                        cx.notify();
+                    });
+                })
+                .on_replace(move |all, window, cx| {
+                    replace.update(cx, |view, cx| view.replace_matches(all, window, cx));
+                });
+            if find.replace_open {
+                widget = widget.replace(&find.replacement);
+            }
+        }
+        // The press stops here: the tab's own press hands the keyboard to the
+        // code, which would take it back from the field the press was for.
+        Some(
+            div()
+                .id("file-find")
+                .debug_selector(|| "file-find".into())
+                .absolute()
+                .top(px(8.0))
+                .right(minimap_inset(code, window, cx) + px(12.0))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .child(widget)
+                .into_any_element(),
+        )
+    }
+}

@@ -387,6 +387,7 @@ impl FileView {
                 );
             }
         }
+        self.find_text_changed(cx);
         cx.notify();
     }
 

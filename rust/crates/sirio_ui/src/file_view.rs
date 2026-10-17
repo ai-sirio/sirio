@@ -26,9 +26,9 @@ use bezel::motion::Painter;
 use bezel::ui::scroll::{self, ScrollbarState};
 use bezel::ui::tooltip::Tooltip;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, HighlightStyle, MouseButton, MouseDownEvent,
-    Pixels, Point, Render, ScrollHandle, Subscription, Task, UnderlineStyle, Window, anchored,
-    canvas, deferred, div, point, prelude::*, px,
+    AnyElement, App, Context, Entity, FocusHandle, HighlightStyle, KeyBinding, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollHandle, Subscription, Task, UnderlineStyle,
+    Window, actions, anchored, canvas, deferred, div, point, prelude::*, px,
 };
 use sirio_diagram::{DiagramError, DiagramKind, Palette};
 use sirio_git::FileDiff;
@@ -56,6 +56,7 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
 mod code_surface;
+mod find;
 mod git_marks;
 mod sync;
 
@@ -244,6 +245,9 @@ pub struct FileView {
     git_diff_in_flight: bool,
     /// Whether the diff went stale while that fetch ran, so one more is due when it lands.
     git_diff_again: bool,
+    /// The open find: its fields, its matches and the one that is current.
+    /// `None` while find is closed.
+    find: Option<find::FindState>,
     /// The offset the pointer is resting on, the frame point it rests at,
     /// and the timer that will turn that rest into a question. Replacing
     /// the `Task` cancels it, which is the whole of dwell cancellation.
@@ -375,10 +379,27 @@ pub struct FileDiagnostic {
     pub message: String,
 }
 
-/// Installs bezel-editor's key bindings for the application. The app crate
-/// calls through this module so the dependency remains owned by `sirio_ui`.
+// `Find` opens find on the file's code, or brings the open one back; `Replace`
+// opens it with the replace row.
+actions!(file_view, [Find, Replace]);
+
+/// Installs bezel-editor's key bindings for the application, and the file
+/// tab's own: Find and Replace, in the tab's `FileEditor` context so they
+/// reach neither a terminal nor a chat. The app crate calls through this
+/// module so the dependency remains owned by `sirio_ui`.
 pub fn init(cx: &mut App) {
     ::editor::init(cx);
+    // `ctrl-h` on a platform with no `cmd-alt-f`: it is Backspace only inside
+    // bezel's macOS text fields, which are not in this context.
+    let replace = if cfg!(target_os = "macos") {
+        "cmd-alt-f"
+    } else {
+        "ctrl-h"
+    };
+    cx.bind_keys([
+        KeyBinding::new("secondary-f", Find, Some("FileEditor")),
+        KeyBinding::new(replace, Replace, Some("FileEditor")),
+    ]);
 }
 
 const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
@@ -451,6 +472,7 @@ impl FileView {
             open_hunk: None,
             git_diff_in_flight: false,
             git_diff_again: false,
+            find: None,
             hover_offset: None,
             hover_point: point(px(0.), px(0.)),
             hover_task: None,
@@ -1376,6 +1398,12 @@ impl FileView {
                         .key_context("FileEditor")
                         .track_focus(&editor_focus)
                         .focusable()
+                        .on_action(cx.listener(|view, _: &Find, window, cx| {
+                            view.find_from_key(false, window, cx);
+                        }))
+                        .on_action(cx.listener(|view, _: &Replace, window, cx| {
+                            view.find_from_key(true, window, cx);
+                        }))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             editor_entity.update(cx, |view, cx| {
                                 view.focus_target(cx).focus(window, cx);
@@ -1396,6 +1424,7 @@ impl FileView {
                             theme,
                             entity.clone(),
                             self.code_editor.as_ref(),
+                            self.render_find(window, cx),
                             &self.scroll,
                             preview,
                         ))
@@ -1445,6 +1474,7 @@ impl Render for FileView {
         self.span_cache.borrow_mut().rotate();
         self.ensure_code_editor(window, cx);
         self.sync_code_prefs(cx);
+        self.sync_find_washes(cx);
         self.hand_over_focus(window, cx);
         let context_menu = self.context_menu.map(|position| {
             let entity = cx.entity();
@@ -1567,11 +1597,16 @@ impl Render for FileView {
             .flex()
             .flex_col()
             .bg(theme.ely.bg)
-            // Escape closes a hunk drawn in place and goes no further, so the
-            // code keeps its cursors. With no hunk drawn it passes on, and Ely
-            // collapses the cursors as it always has.
-            .capture_action(cx.listener(|view, _: &SingleCursor, _window, cx| {
-                if view.open_hunk.is_some() {
+            // Escape closes what is open over the code and goes no further, so
+            // the code keeps its cursors: find first, then a hunk drawn in
+            // place, one per press, the way a floating box goes before what is
+            // only drawn. With neither open it passes on, and Ely collapses the
+            // cursors as it always has.
+            .capture_action(cx.listener(|view, _: &SingleCursor, window, cx| {
+                if view.find.is_some() {
+                    view.close_find(window, cx);
+                    cx.stop_propagation();
+                } else if view.open_hunk.is_some() {
                     view.close_hunk(cx);
                     cx.stop_propagation();
                 }
@@ -1931,6 +1966,7 @@ fn render_content(
     theme: Theme,
     entity: gpui::Entity<FileView>,
     code: Option<&gpui::Entity<CodeEditor>>,
+    find: Option<AnyElement>,
     scroll: &SurfaceScroll,
     preview: Option<PreviewFrame>,
 ) -> AnyElement {
@@ -2068,7 +2104,9 @@ fn render_content(
                     // listener has run.
                     this.on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                         .child(code)
-                }),
+                })
+                // Over the code's top-right, left of its minimap.
+                .when_some(find, |this, find| this.child(find)),
         )
         .into_any_element()
 }
@@ -3573,12 +3611,13 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn escape_closes_a_hunk_drawn_in_place_and_leaves_the_cursors_until_none_is_drawn(
+    async fn escape_closes_find_then_a_hunk_and_leaves_the_cursors_until_none_is_open(
         cx: &mut gpui::TestAppContext,
     ) {
-        // Escape is Ely's `SingleCursor`, which collapses the cursors. With a
-        // hunk drawn in place it closes that hunk and stops, so both cursors
-        // stay. With none drawn it reaches Ely, which collapses them.
+        // Escape is Ely's `SingleCursor`, which collapses the cursors. With find
+        // open it closes find and stops, then with a hunk drawn in place it closes
+        // that and stops, so both cursors stay. With neither open it reaches Ely,
+        // which collapses them.
         let file = TempFile::with_extension("rs", "let x = 1;\nlet y = 2;\n");
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
         view.update(&mut cx.cx, |view, cx| {
@@ -3589,6 +3628,12 @@ mod tests {
             view.read_with(&cx.cx, |view, _| view.open_hunk_line()),
             Some(1),
             "the press on the mark draws the hunk"
+        );
+        open_find(&view, "let", None, &mut cx);
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.find_matches()),
+            Some(2),
+            "find is open"
         );
         cx.update(|window, cx| {
             focus_code(&view, window, cx);
@@ -3607,9 +3652,23 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.find_matches()),
+            None,
+            "Escape closes find"
+        );
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.open_hunk_line()),
+            Some(1),
+            "that Escape leaves the hunk drawn"
+        );
+        assert_eq!(cursor_count(&view, &cx), 2, "and stops there, so the cursors stay");
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
             view.read_with(&cx.cx, |view, _| view.open_hunk_line()),
             None,
-            "Escape closes the hunk drawn in place"
+            "the next Escape closes the hunk drawn in place"
         );
         assert_eq!(
             cursor_count(&view, &cx),
@@ -3622,8 +3681,167 @@ mod tests {
         assert_eq!(
             cursor_count(&view, &cx),
             1,
-            "with no hunk drawn, Escape reaches Ely and collapses the cursors"
+            "with nothing open, Escape reaches Ely and collapses the cursors"
         );
+    }
+
+    /// Opens find on `query` with the replace row on `replace`, then draws a frame.
+    fn open_find(
+        view: &gpui::Entity<FileView>,
+        query: &str,
+        replace: Option<&str>,
+        cx: &mut VisualTestContext,
+    ) {
+        let opened = cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.open_find(
+                    Some(query.to_owned()),
+                    ely_gpui_component::editor::FindOptions::default(),
+                    replace.map(str::to_owned),
+                    window,
+                    cx,
+                )
+            })
+        });
+        assert!(opened, "find opens on a file shown as code");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+    }
+
+    fn replace_matches(view: &gpui::Entity<FileView>, all: bool, cx: &mut VisualTestContext) {
+        cx.update(|window, app| {
+            view.update(app, |view, cx| view.replace_matches(all, window, cx))
+        });
+        cx.run_until_parked();
+    }
+
+    /// How many matches find holds and which one is current (0-based).
+    fn found(
+        view: &gpui::Entity<FileView>,
+        cx: &VisualTestContext,
+    ) -> (Option<usize>, Option<usize>) {
+        view.read_with(&cx.cx, |view, _| (view.find_matches(), view.find_current()))
+    }
+
+    #[gpui::test]
+    async fn replacing_one_match_moves_on_to_the_next_and_keeps_the_later_ones_right(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The "é" is two bytes, so an offset counted in characters is wrong from
+        // the first match on. The replacement holds the query and is longer than
+        // it, so every later match moves and the text just written matches again.
+        let file = TempFile::with_extension("rs", "é x x x\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        open_find(&view, "x", Some("xx"), &mut cx);
+        assert_eq!(found(&view, &cx), (Some(3), Some(0)), "three matches, the first current");
+
+        replace_matches(&view, false, &mut cx);
+        assert_eq!(buffer_of(&view, &cx), "é xx x x\n");
+        assert_eq!(
+            found(&view, &cx),
+            (Some(4), Some(2)),
+            "the next match is current, not the text just written"
+        );
+
+        replace_matches(&view, false, &mut cx);
+        assert_eq!(
+            buffer_of(&view, &cx),
+            "é xx xx x\n",
+            "the later match moved with the first edit"
+        );
+        assert_eq!(found(&view, &cx), (Some(5), Some(4)));
+
+        replace_matches(&view, false, &mut cx);
+        assert_eq!(buffer_of(&view, &cx), "é xx xx xx\n");
+        assert_eq!(
+            found(&view, &cx),
+            (Some(6), Some(0)),
+            "past the last match it wraps to the first"
+        );
+    }
+
+    #[gpui::test]
+    async fn replacing_every_match_is_one_undo_step(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "x x x\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        open_find(&view, "x", Some("y"), &mut cx);
+
+        replace_matches(&view, true, &mut cx);
+        assert_eq!(buffer_of(&view, &cx), "y y y\n");
+        assert_eq!(found(&view, &cx), (Some(0), None), "nothing is left to find");
+
+        cx.update(|window, app| focus_code(&view, window, app));
+        cx.simulate_keystrokes(&clipboard_chord("z"));
+        cx.run_until_parked();
+        assert_eq!(buffer_of(&view, &cx), "x x x\n", "one undo restores every match");
+    }
+
+    #[gpui::test]
+    async fn an_edit_in_the_code_recomputes_the_matches(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "x x x\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        open_find(&view, "x", None, &mut cx);
+        assert_eq!(found(&view, &cx).0, Some(3));
+
+        cx.update(|_, app| {
+            let code = view.read(app).code_editor().cloned().expect("code editor");
+            code.update(app, |code, cx| code.edit([(0..0, "x ".to_owned())], cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx).0, Some(4), "the typed match counts");
+
+        cx.update(|_, app| {
+            let code = view.read(app).code_editor().cloned().expect("code editor");
+            code.update(app, |code, cx| code.edit([(0..4, String::new())], cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx).0, Some(2), "a deleted match no longer counts");
+    }
+
+    #[gpui::test]
+    async fn the_find_key_searches_for_a_one_line_selection_and_keeps_the_query_for_any_other(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "let x = 1;\nlet y = 2;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|window, app| {
+            init(app);
+            focus_code(&view, window, app);
+            select_code(&view, app, 4..5);
+        });
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx), (Some(1), Some(0)), "the selected `x` is the query");
+
+        // A selection that crosses a line break is no query: the old one stays.
+        cx.update(|_, app| select_code(&view, app, 0..15));
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx), (Some(1), Some(0)), "the query is still `x`");
+    }
+
+    #[gpui::test]
+    async fn escape_in_the_query_closes_find_and_hands_the_keyboard_to_the_code(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "x x x\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        open_find(&view, "x", None, &mut cx);
+        let code_focused = |cx: &mut VisualTestContext| {
+            cx.update(|window, app| {
+                let code = view.read(app).code_editor().cloned().expect("code editor");
+                code.read(app).focus_handle(app).is_focused(window)
+            })
+        };
+        assert!(!code_focused(&mut cx), "typing goes to the query while find is open");
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx).0, None, "Escape in the query closes find");
+        assert!(code_focused(&mut cx), "and the keyboard goes back to the code");
     }
 
     #[gpui::test]
