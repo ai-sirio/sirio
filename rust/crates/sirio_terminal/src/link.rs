@@ -1341,10 +1341,13 @@ mod tests {
         while std::time::Instant::now() < deadline
             && !String::from_utf8_lossy(&seen).contains(needle)
         {
-            if let Ok(LinkChunk::Output(bytes)) =
-                link.chunks().recv_timeout(Duration::from_millis(200))
-            {
-                seen.extend_from_slice(&bytes);
+            // `env` can finish before the link attaches, and then its output
+            // arrives only in the attach's snapshot.
+            match link.chunks().recv_timeout(Duration::from_millis(200)) {
+                Ok(LinkChunk::Output(bytes) | LinkChunk::Snapshot { bytes, .. }) => {
+                    seen.extend_from_slice(&bytes);
+                }
+                _ => {}
             }
         }
         link.end();
