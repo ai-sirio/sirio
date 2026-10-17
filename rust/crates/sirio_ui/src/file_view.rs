@@ -635,6 +635,7 @@ impl FileView {
 
     pub fn set_diagnostics(&mut self, diagnostics: Vec<FileDiagnostic>, cx: &mut Context<Self>) {
         self.diagnostics = diagnostics;
+        self.push_diagnostics(cx);
         cx.notify();
     }
 
@@ -643,7 +644,7 @@ impl FileView {
     }
 
     /// Called from every pointer move over the code, which is to say very
-    /// often. The code editor's pointer events do not reach it yet. **An
+    /// often, by the code editor's `Pointer` event (`code_surface`). **An
     /// unchanged offset returns immediately**, without
     /// notifying — this is a hot path and a `notify` here would redraw the
     /// file on every pixel of travel.
@@ -776,15 +777,18 @@ impl FileView {
         }
     }
 
+    /// Opens the menu at `at`, a window point. The code editor calls this for a
+    /// right press on the code (`SecondaryClick`); the view for one anywhere
+    /// else, in Preview, while loading and on the banners.
     fn open_context_menu(
         &mut self,
-        event: &MouseDownEvent,
+        at: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.dismiss_hover(cx);
         self.focus_target(cx).focus(window, cx);
-        self.context_menu = Some(event.position);
+        self.context_menu = Some(at);
         cx.notify();
     }
 
@@ -808,6 +812,10 @@ impl FileView {
         match action {
             FileContextAction::Copy => self.copy_selection(false, cx),
             FileContextAction::CopyAndTrim => self.copy_selection(true, cx),
+            // A snapshot is read-only, so Cut and Paste do nothing at all: not
+            // even the copy Cut would make before its delete is refused. The
+            // menu does not disable them (`file_context_menu::items`).
+            FileContextAction::Cut | FileContextAction::Paste if self.is_snapshot() => {}
             FileContextAction::Cut => {
                 self.copy_selection(false, cx);
                 self.replace_code_selection("", cx);
@@ -993,8 +1001,6 @@ impl FileView {
     /// open it — the same `FileViewEvent::OpenFile` -> `add_file_tab` path
     /// used by the Files panel's "Open" and the chat transcript's link
     /// clicks (`RightPanelEvent::OpenFile` / `ChatEvent::OpenFile`).
-    // The code editor's platform click calls this from Task 7 on; the tests call it now.
-    #[allow(dead_code)]
     fn open_markdown_link(&mut self, target: &str, cx: &mut Context<Self>) {
         let base = self.path.parent().unwrap_or_else(|| Path::new("/"));
         if let Some(resolved) = resolve_file_link(target, base) {
@@ -1462,7 +1468,12 @@ impl Render for FileView {
             .flex()
             .flex_col()
             .bg(theme.ely.bg)
-            .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    view.open_context_menu(event.position, window, cx);
+                }),
+            )
             .when_some(context_menu, |this, menu| this.child(menu))
             .when_some(hover_card, |this, card| this.child(card))
             .when_some(message, |this, card| this.child(card))
@@ -1941,7 +1952,15 @@ fn render_content(
                 .min_h(px(0.0))
                 .relative()
                 .debug_selector(|| "file-text-scroll".into())
-                .when_some(code.cloned(), |this, code| this.child(code)),
+                .when_some(code.cloned(), |this, code| {
+                    // A right press on the code is the code editor's own
+                    // `SecondaryClick`, which opens the menu. Stopping it here
+                    // keeps the view's listener above from opening it a second
+                    // time. The stop is in bubble order, after the editor's
+                    // listener has run.
+                    this.on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .child(code)
+                }),
         )
         .into_any_element()
 }
@@ -2216,110 +2235,10 @@ fn markdown_document(path: &Path, text: &str) -> Option<Document> {
     }
 }
 
-// Kept for the diagnostics Task 7 draws in the code editor; see `line_highlights`.
-#[allow(dead_code)]
-fn previous_char_boundary(buffer: &str, position: usize) -> usize {
-    buffer[..position.min(buffer.len())]
-        .char_indices()
-        .next_back()
-        .map_or(0, |(index, _)| index)
-}
-
-/// The squiggles one line earns, as byte ranges **local to that line**
-/// paired with the severity that gets to colour them.
-///
-/// Selection is by range overlap, not by `FileDiagnostic::line`: a finding
-/// carries the line it *starts* on but a buffer-absolute range, so asking
-/// `line == index` leaves every continuation line of a multi-line
-/// diagnostic unmarked — which is what the gutter dot this replaced did.
-///
-/// Overlaps are flattened here, worst severity winning, and the result is
-/// disjoint and sorted. That is not tidiness: `combine_highlights` merges
-/// the styles of overlapping ranges by folding over a `HashSet`, so two
-/// diagnostics both writing `underline` over the same bytes would pick a
-/// winner in whatever order that set iterated — a colour that could differ
-/// from frame to frame.
-// Kept for the diagnostics Task 7 draws in the code editor; see `line_highlights`.
-#[allow(dead_code)]
-fn diagnostic_underlines(
-    diagnostics: &[FileDiagnostic],
-    line: &str,
-    line_start: usize,
-) -> Vec<(Range<usize>, DiagnosticSeverity)> {
-    let line_end = line_start + line.len();
-    let mut spans: Vec<(Range<usize>, DiagnosticSeverity)> = Vec::new();
-    for found in diagnostics {
-        let span = if found.range.is_empty() {
-            // A caret-position finding — "expected `;`" and its kind. It
-            // covers no bytes, so it would paint nothing at all, which
-            // reads exactly like a clean line. Take the character after
-            // the caret, or the one before it at end of line; an empty
-            // line has neither and goes unmarked.
-            if found.range.start < line_start || found.range.start > line_end {
-                continue;
-            }
-            let at = found.range.start - line_start;
-            let after = next_char_boundary(line, at);
-            if after > at {
-                at..after
-            } else {
-                previous_char_boundary(line, at)..at
-            }
-        } else {
-            found.range.start.max(line_start) - line_start
-                ..found.range.end.min(line_end).max(line_start) - line_start
-        };
-        if !span.is_empty() {
-            spans.push((span, found.severity));
-        }
-    }
-    flatten_worst_first(spans)
-}
-
-/// Rewrites possibly-overlapping severity spans as disjoint ones in
-/// ascending order, each carrying the worst severity that covered it.
-///
-/// `DiagnosticSeverity` is ordered worst-first, so "worst wins" is `min`.
-/// A gap no span covers stays a gap: two findings that do not touch must
-/// come out as two squiggles, not one run bridging the clean text between.
-// Kept for the diagnostics Task 7 draws in the code editor; see `line_highlights`.
-#[allow(dead_code)]
-fn flatten_worst_first(
-    spans: Vec<(Range<usize>, DiagnosticSeverity)>,
-) -> Vec<(Range<usize>, DiagnosticSeverity)> {
-    let mut boundaries: Vec<usize> = spans
-        .iter()
-        .flat_map(|(range, _)| [range.start, range.end])
-        .collect();
-    boundaries.sort_unstable();
-    boundaries.dedup();
-
-    let mut flattened: Vec<(Range<usize>, DiagnosticSeverity)> = Vec::new();
-    for pair in boundaries.windows(2) {
-        let (start, end) = (pair[0], pair[1]);
-        let Some(severity) = spans
-            .iter()
-            .filter(|(range, _)| range.start <= start && end <= range.end)
-            .map(|(_, severity)| *severity)
-            .min()
-        else {
-            continue;
-        };
-        match flattened.last_mut() {
-            // Only contiguous runs of one severity merge — a gap between
-            // two findings of the same severity must stay a gap.
-            Some((previous, last)) if previous.end == start && *last == severity => {
-                previous.end = end;
-            }
-            _ => flattened.push((start..end, severity)),
-        }
-    }
-    flattened
-}
-
 /// Every styled run one source line hands to the code editor: the grammar's
-/// colours (`spans`, from [`code_spans`]), the Markdown link rules, and the
-/// diagnostic squiggles on top.
+/// colours (`spans`, from [`code_spans`]), the Markdown link rules, and any
+/// squiggles passed in `underlines`. The code editor draws the findings
+/// itself now (`code_surface::ely_diagnostics`), so the highlighter passes none.
 ///
 /// The three sets are merged with [`gpui::combine_highlights`] rather than
 /// sorted. `with_highlights` ends in `compute_runs`, which walks the ranges
@@ -2404,16 +2323,6 @@ fn underline_highlights(
             )
         })
         .collect()
-}
-
-// Kept for the diagnostics Task 7 draws in the code editor; see `line_highlights`.
-#[allow(dead_code)]
-fn next_char_boundary(buffer: &str, position: usize) -> usize {
-    let position = position.min(buffer.len());
-    buffer[position..]
-        .chars()
-        .next()
-        .map_or(position, |character| position + character.len_utf8())
 }
 
 #[cfg(test)]
@@ -3313,111 +3222,6 @@ mod tests {
             Some("boom"),
             "no round trip is involved: the message is already in the view"
         );
-    }
-
-    /// Tests for `diagnostic_underlines` — the span arithmetic that decides
-    /// what a line underlines, kept pure so it is testable without a window.
-    mod underline_spans {
-        use super::*;
-
-        fn warning(range: Range<usize>) -> FileDiagnostic {
-            FileDiagnostic { line: 0, range, severity: DiagnosticSeverity::Warning,
-                message: "unused".into() }
-        }
-
-        fn error(range: Range<usize>) -> FileDiagnostic {
-            FileDiagnostic { line: 0, range, severity: DiagnosticSeverity::Error,
-                message: "boom".into() }
-        }
-
-        #[test]
-        fn a_diagnostic_underlines_its_own_span_not_the_whole_line() {
-            let line = "let x = 1;";
-            let found = diagnostic_underlines(&[warning(4..5)], line, 0);
-            assert_eq!(found, vec![(4..5, DiagnosticSeverity::Warning)]);
-        }
-
-        #[test]
-        fn a_diagnostic_on_another_line_underlines_nothing_here() {
-            // Line two of "a\nb\n" is the single byte at offset 2.
-            let found = diagnostic_underlines(&[warning(0..1)], "b", 2);
-            assert!(found.is_empty(), "a span that ends before this line starts");
-        }
-
-        /// The span arithmetic is what makes this possible at all: a
-        /// diagnostic carries one `line` (its first) but a buffer-absolute
-        /// range, so selecting by `line` alone leaves every continuation
-        /// line unmarked — the bug the gutter dot had.
-        #[test]
-        fn a_diagnostic_spanning_two_lines_underlines_the_part_on_each() {
-            // "let a = 1;\nlet b = 2;\n" — a span from byte 4 to byte 15
-            // covers "x = 1;" on line one and "let" on line two.
-            let first = diagnostic_underlines(&[error(4..15)], "let a = 1;", 0);
-            let second = diagnostic_underlines(&[error(4..15)], "let b = 2;", 11);
-            assert_eq!(first, vec![(4..10, DiagnosticSeverity::Error)],
-                "clipped at the first line's end, not run past it");
-            assert_eq!(second, vec![(0..4, DiagnosticSeverity::Error)],
-                "the continuation line underlines its own leading bytes");
-        }
-
-        /// `combine_highlights` folds the styles of overlapping ranges by
-        /// iterating a `HashSet`, so two diagnostics writing `underline`
-        /// over the same text would pick a winner non-deterministically.
-        /// Flattening here is what makes the painted colour stable.
-        #[test]
-        fn the_worst_severity_wins_where_two_diagnostics_overlap() {
-            let line = "let x = 1;";
-            let found = diagnostic_underlines(&[warning(2..8), error(0..5)], line, 0);
-            assert_eq!(
-                found,
-                vec![(0..5, DiagnosticSeverity::Error), (5..8, DiagnosticSeverity::Warning)],
-                "disjoint spans, the error keeping every byte it covers"
-            );
-        }
-
-        #[test]
-        fn two_diagnostics_that_do_not_touch_stay_two_spans() {
-            let line = "let x = y;";
-            let found = diagnostic_underlines(&[warning(4..5), error(8..9)], line, 0);
-            assert_eq!(found, vec![
-                (4..5, DiagnosticSeverity::Warning),
-                (8..9, DiagnosticSeverity::Error),
-            ]);
-        }
-
-        /// "expected `;`" arrives as an empty range. An empty range paints
-        /// nothing at all, which is indistinguishable from a clean line.
-        #[test]
-        fn a_zero_width_diagnostic_widens_to_the_next_character() {
-            let found = diagnostic_underlines(&[error(4..4)], "let x = 1;", 0);
-            assert_eq!(found, vec![(4..5, DiagnosticSeverity::Error)]);
-        }
-
-        #[test]
-        fn a_zero_width_diagnostic_widens_by_a_whole_character_not_a_byte() {
-            // Widening by one *byte* would cut the crab in half and the
-            // text system would reject the run boundary.
-            let line = "let \u{1f980} = 2;";
-            let found = diagnostic_underlines(&[error(4..4)], line, 0);
-            assert_eq!(found, vec![(4..8, DiagnosticSeverity::Error)]);
-            assert_eq!(&line[4..8], "\u{1f980}");
-        }
-
-        #[test]
-        fn a_zero_width_diagnostic_at_the_end_of_a_line_widens_backwards() {
-            // There is no next character to take, so the mark goes on the
-            // last one rather than vanishing.
-            let found = diagnostic_underlines(&[error(10..10)], "let x = 1;", 0);
-            assert_eq!(found, vec![(9..10, DiagnosticSeverity::Error)]);
-        }
-
-        #[test]
-        fn a_zero_width_diagnostic_on_an_empty_line_underlines_nothing() {
-            // Nothing to widen onto in either direction; an empty line has
-            // no glyph to carry a squiggle.
-            let found = diagnostic_underlines(&[error(0..0)], "", 0);
-            assert!(found.is_empty());
-        }
     }
 
     /// Tests for `underline_highlights` — the severity-to-style mapping and

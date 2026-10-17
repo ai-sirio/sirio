@@ -13,11 +13,18 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-use ely_gpui_component::editor::{CodeEditor, EditorEvent};
-use gpui::{App, AppContext as _, Context, Entity, FocusHandle, Focusable, HighlightStyle, Window};
+use ely_gpui_component::editor::{CodeEditor, Diagnostic, EditorEvent};
+use ely_gpui_component::primitives::Severity;
+use gpui::{
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, HighlightStyle, Pixels, Point,
+    Window,
+};
 use sirio_theme::Theme;
 
-use super::{CodeSpan, FileView, MarkdownMode, code_spans, line_highlights};
+use super::{
+    CodeSpan, DiagnosticSeverity, FileDiagnostic, FileView, MarkdownMode, code_spans,
+    line_highlights,
+};
 use crate::editor::{Language, LoadStatus, Selection, markdown_links_in_line};
 use crate::editor_prefs::EditorPrefs;
 
@@ -58,21 +65,104 @@ impl FileView {
         });
         let focus = code.read(cx).focus_handle(cx);
         let subscriptions = [
-            cx.subscribe(&code, |view, code, event: &EditorEvent, cx| match event {
-                EditorEvent::Changed => view.code_changed(code, cx),
-                // The read-only banner's "Make editable" unlocks the code
-                // editor. A snapshot stays read-only, so the lock goes back on
-                // before any key can reach it.
-                EditorEvent::Unlock if view.is_snapshot() => {
-                    code.update(cx, |code, cx| code.set_read_only(true, cx));
+            cx.subscribe_in(&code, window, |view, code, event: &EditorEvent, window, cx| {
+                match event {
+                    EditorEvent::Changed => view.code_changed(code.clone(), cx),
+                    EditorEvent::Pointer {
+                        offset: Some(offset),
+                        position,
+                    } => view.hover_moved(*offset, *position, cx),
+                    EditorEvent::Pointer { offset: None, .. } => view.dismiss_hover(cx),
+                    EditorEvent::PlatformClick { offset } => {
+                        view.code_platform_click(*offset, code, cx);
+                    }
+                    EditorEvent::SecondaryClick { offset, position } => {
+                        view.code_secondary_click(*offset, *position, code, window, cx);
+                    }
+                    // The read-only banner's "Make editable" unlocks the code
+                    // editor. A snapshot stays read-only, so the lock goes back on
+                    // before any key can reach it.
+                    EditorEvent::Unlock if view.is_snapshot() => {
+                        code.update(cx, |code, cx| code.set_read_only(true, cx));
+                    }
+                    _ => {}
                 }
-                _ => {}
             }),
             cx.on_focus(&focus, window, |view, _window, cx| view.check_external(cx)),
         ];
         self.code_subscriptions.extend(subscriptions);
         self.code_editor = Some(code);
+        // Diagnostics may have arrived before the first draw.
+        self.push_diagnostics(cx);
         self.apply_pending_reveal(cx);
+    }
+
+    /// Hands the code editor the findings as Ely draws them, for the text it
+    /// holds now. Ely keeps the ones that fit that text. Called whenever the
+    /// findings change, and once the editor exists.
+    pub(super) fn push_diagnostics(&self, cx: &mut Context<Self>) {
+        let Some(code) = &self.code_editor else {
+            return;
+        };
+        let drawn = ely_diagnostics(&self.diagnostics, code.read(cx).text());
+        code.update(cx, |code, cx| code.set_diagnostics(drawn, cx));
+    }
+
+    /// A left press and release with the platform modifier at `offset`. A
+    /// Markdown link's label opens its target, and anything else asks for the
+    /// definition. Ely's `PlatformClick` carries no position, so the definition
+    /// card goes where the pointer last entered `offset`: `hover_point` moves
+    /// only when the offset changes, so it is within a glyph of the click.
+    fn code_platform_click(
+        &mut self,
+        offset: usize,
+        code: &Entity<CodeEditor>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_markdown() {
+            // A click on the label, the part the highlighter underlines as a
+            // link; the `(target)` beside it is not a link to press.
+            let target = {
+                let text = code.read(cx).text();
+                let line_start = text[..offset].rfind('\n').map_or(0, |newline| newline + 1);
+                let line_end = text[offset..]
+                    .find('\n')
+                    .map_or(text.len(), |newline| offset + newline);
+                markdown_links_in_line(&text[line_start..line_end])
+                    .into_iter()
+                    .find(|span| span.label_range.contains(&(offset - line_start)))
+                    .map(|span| span.target)
+            };
+            if let Some(target) = target {
+                self.open_markdown_link(&target, cx);
+                return;
+            }
+        }
+        self.request_definition(offset, Some(self.hover_point), cx);
+    }
+
+    /// A right press on the code. A press off the selection moves the caret to
+    /// it, without scrolling, so "Go to definition" from the menu asks about
+    /// the word under the pointer. A press inside the selection keeps it, and
+    /// a press on the gutter (`offset` is `None`) moves nothing. The menu opens
+    /// either way, at the pointer.
+    fn code_secondary_click(
+        &mut self,
+        offset: Option<usize>,
+        position: Point<Pixels>,
+        code: &Entity<CodeEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(offset) = offset {
+            // Both ends count as inside, so a press on the last character of a
+            // selection, which Ely reads as the boundary after it, keeps it.
+            let selected = code.read(cx).primary().range();
+            if !(selected.start..=selected.end).contains(&offset) {
+                code.update(cx, |code, cx| code.select_in_place([offset..offset], cx));
+            }
+        }
+        self.open_context_menu(position, window, cx);
     }
 
     /// Pushes the app's editor settings into the code editor when they differ
@@ -307,6 +397,251 @@ fn line_start_offset(text: &str, line: usize) -> usize {
     match text.match_indices('\n').nth(line - 1) {
         Some((newline, _)) => newline + 1,
         None => text.rfind('\n').map_or(0, |newline| newline + 1),
+    }
+}
+
+/// The squiggles Ely draws for `diagnostics` in `text`, worst drawn last.
+///
+/// Ely stacks overlapping styles in list order, the later one on top, so the
+/// sort puts the worst finding after the milder ones it overlaps. The sort is
+/// stable: findings of one severity keep the order they came in.
+fn ely_diagnostics(diagnostics: &[FileDiagnostic], text: &str) -> Vec<Diagnostic> {
+    let mut drawn: Vec<Diagnostic> = diagnostics
+        .iter()
+        .filter_map(|found| {
+            Some(Diagnostic {
+                range: marked_range(&found.range, text)?,
+                severity: ely_severity(found.severity),
+                message: found.message.clone().into(),
+            })
+        })
+        .collect();
+    drawn.sort_by_key(|diagnostic| severity_rank(diagnostic.severity));
+    drawn
+}
+
+/// The bytes a finding marks, or `None` when it marks nothing. A range that
+/// does not fit the text is dropped, as Ely drops it, rather than moved onto
+/// bytes it does not name. A zero-width finding (one at a caret, such as
+/// "expected `;`") takes the character after the caret, or the one before it
+/// at a line end, because a zero-width run paints nothing. An empty line has
+/// neither, and marks nothing.
+fn marked_range(range: &Range<usize>, text: &str) -> Option<Range<usize>> {
+    let fits = |at: usize| at <= text.len() && text.is_char_boundary(at);
+    if range.start > range.end || !fits(range.start) || !fits(range.end) {
+        return None;
+    }
+    if !range.is_empty() {
+        return Some(range.clone());
+    }
+    let at = range.start;
+    if let Some(next) = text[at..].chars().next().filter(|next| *next != '\n') {
+        return Some(at..at + next.len_utf8());
+    }
+    text[..at]
+        .chars()
+        .next_back()
+        .filter(|previous| *previous != '\n')
+        .map(|previous| at - previous.len_utf8()..at)
+}
+
+fn ely_severity(severity: DiagnosticSeverity) -> Severity {
+    match severity {
+        DiagnosticSeverity::Error => Severity::Danger,
+        DiagnosticSeverity::Warning => Severity::Warning,
+        DiagnosticSeverity::Information | DiagnosticSeverity::Hint => Severity::Info,
+    }
+}
+
+/// The order `ely_diagnostics` sorts by: Ely's `Severity` has none of its own.
+fn severity_rank(severity: Severity) -> u8 {
+    match severity {
+        Severity::Info | Severity::Success => 0,
+        Severity::Warning => 1,
+        Severity::Danger => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! How `ely_diagnostics` can fail. Each failure has a test below.
+    //!
+    //! - A zero-width finding paints nothing. Ely's layout paints between
+    //!   distinct edges, so an empty range is kept and is invisible.
+    //! - A zero-width finding widens by one byte, not one character, and cuts a
+    //!   multi-byte character in half.
+    //! - A zero-width finding at a line end widens forward onto the newline, so
+    //!   the squiggle sits on a line break.
+    //! - A zero-width finding on an empty line is drawn over the line break
+    //!   that ends it.
+    //! - A range that runs past the text is kept and marks bytes the finding
+    //!   never named.
+    //! - A range that splits a multi-byte character is kept, and Ely would draw
+    //!   it across a boundary the text system rejects.
+    //! - A range whose start is past its end is kept.
+    //! - A multi-line finding is clipped to its first line, so its later lines
+    //!   lose it.
+    //! - The worst finding is drawn first, under a milder one that overlaps it.
+    //! - Findings of one severity are reordered, so two that overlap swap
+    //!   places from one frame to the next.
+    //! - A severity maps to the wrong colour: Error to Danger, Warning to
+    //!   Warning, Information and Hint to Info.
+
+    use super::*;
+
+    fn finding(range: Range<usize>, severity: DiagnosticSeverity, message: &str) -> FileDiagnostic {
+        FileDiagnostic {
+            line: 0,
+            range,
+            severity,
+            message: message.to_owned(),
+        }
+    }
+
+    fn marks(found: &[Diagnostic]) -> Vec<(Range<usize>, Severity)> {
+        found
+            .iter()
+            .map(|diagnostic| (diagnostic.range.clone(), diagnostic.severity))
+            .collect()
+    }
+
+    fn messages(found: &[Diagnostic]) -> Vec<String> {
+        found
+            .iter()
+            .map(|diagnostic| diagnostic.message.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_finding_marks_its_own_span_not_the_whole_line() {
+        let found = ely_diagnostics(
+            &[finding(4..5, DiagnosticSeverity::Warning, "unused")],
+            "let x = 1;",
+        );
+        assert_eq!(marks(&found), vec![(4..5, Severity::Warning)]);
+    }
+
+    #[test]
+    fn a_multi_line_finding_keeps_its_whole_span() {
+        // The span runs from the first line into the second.
+        let found = ely_diagnostics(
+            &[finding(4..15, DiagnosticSeverity::Error, "boom")],
+            "let a = 1;\nlet b = 2;\n",
+        );
+        assert_eq!(marks(&found), vec![(4..15, Severity::Danger)]);
+    }
+
+    #[test]
+    fn the_worst_finding_is_drawn_last_so_it_shows_over_a_milder_one() {
+        let found = ely_diagnostics(
+            &[
+                finding(2..8, DiagnosticSeverity::Warning, "unused"),
+                finding(0..5, DiagnosticSeverity::Error, "boom"),
+            ],
+            "let x = 1;",
+        );
+        assert_eq!(
+            marks(&found),
+            vec![(2..8, Severity::Warning), (0..5, Severity::Danger)],
+        );
+    }
+
+    #[test]
+    fn findings_of_one_severity_keep_their_order() {
+        let found = ely_diagnostics(
+            &[
+                finding(0..3, DiagnosticSeverity::Warning, "first"),
+                finding(2..5, DiagnosticSeverity::Warning, "second"),
+            ],
+            "let x = 1;",
+        );
+        assert_eq!(messages(&found), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn a_zero_width_finding_widens_to_the_next_character() {
+        // "expected `;`" arrives as an empty range at the caret.
+        let found = ely_diagnostics(
+            &[finding(4..4, DiagnosticSeverity::Error, "expected `;`")],
+            "let x = 1;",
+        );
+        assert_eq!(marks(&found), vec![(4..5, Severity::Danger)]);
+    }
+
+    #[test]
+    fn a_zero_width_finding_widens_by_a_whole_character_not_a_byte() {
+        // Widening by one byte would cut the crab in half.
+        let found = ely_diagnostics(
+            &[finding(4..4, DiagnosticSeverity::Error, "boom")],
+            "let \u{1f980} = 2;",
+        );
+        assert_eq!(marks(&found), vec![(4..8, Severity::Danger)]);
+    }
+
+    #[test]
+    fn a_zero_width_finding_at_a_line_end_widens_backwards_not_onto_the_newline() {
+        // Offset 10 is the newline that ends "let x = 1;".
+        let found = ely_diagnostics(
+            &[finding(10..10, DiagnosticSeverity::Error, "boom")],
+            "let x = 1;\nlet",
+        );
+        assert_eq!(marks(&found), vec![(9..10, Severity::Danger)]);
+    }
+
+    #[test]
+    fn a_zero_width_finding_on_an_empty_line_marks_nothing() {
+        // "a\n\nb": the empty second line has only the newline that ends it,
+        // and the newline before it.
+        let found = ely_diagnostics(
+            &[finding(2..2, DiagnosticSeverity::Error, "boom")],
+            "a\n\nb",
+        );
+        assert!(found.is_empty(), "no character on that line to mark");
+    }
+
+    #[test]
+    fn a_range_past_the_end_of_the_text_is_dropped() {
+        let found = ely_diagnostics(
+            &[
+                finding(8..40, DiagnosticSeverity::Error, "stale"),
+                finding(40..41, DiagnosticSeverity::Error, "stale"),
+            ],
+            "let x = 1;",
+        );
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_range_that_splits_a_character_is_dropped() {
+        // The crab is four bytes, at 0..4; offset 1 is inside it.
+        let found = ely_diagnostics(
+            &[finding(1..2, DiagnosticSeverity::Error, "boom")],
+            "\u{1f980}",
+        );
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn an_inverted_range_is_dropped() {
+        let found = ely_diagnostics(
+            &[finding(6..2, DiagnosticSeverity::Error, "boom")],
+            "let x = 1;",
+        );
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn each_severity_maps_to_the_colour_its_weight_earns() {
+        let cases = [
+            (DiagnosticSeverity::Error, Severity::Danger),
+            (DiagnosticSeverity::Warning, Severity::Warning),
+            (DiagnosticSeverity::Information, Severity::Info),
+            (DiagnosticSeverity::Hint, Severity::Info),
+        ];
+        for (input, expected) in cases {
+            let found = ely_diagnostics(&[finding(0..1, input, "x")], "x");
+            assert_eq!(marks(&found), vec![(0..1, expected)], "{input:?}");
+        }
     }
 }
 

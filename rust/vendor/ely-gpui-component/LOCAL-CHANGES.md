@@ -502,3 +502,16 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
   upstream form never showed on screen.
   The colours are unchanged: the ruler and the plain guide use `border` at 60%
   opacity, the guide of the active block `border_strong`.
+
+### Selecting without a scroll (Task 7a)
+
+- `src/editor/edit.rs`: `CodeEditor::select` keeps its behaviour, but its filter
+  and its "changes nothing" check moved into a private `chosen`, which returns
+  `None` when the ranges name no whole character or leave the selection as it
+  is. `select` sets what `chosen` returns and centres the primary row, as before.
+  This is a change of shape in a file upstream also edits: a sync must keep
+  `chosen` and the scroll together.
+- `src/editor/edit.rs`: `CodeEditor::select_in_place(ranges, cx)` sets the same
+  selections through the same `chosen` and notifies, but does not scroll. Sirio's
+  file tab uses it when a right press places the caret under the pointer, so the
+  view stays where it was.

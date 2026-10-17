@@ -442,12 +442,36 @@ fn joined(mut edits: Vec<(Range<usize>, String)>) -> Vec<(Range<usize>, String)>
 }
 
 impl CodeEditor {
-    /// Selects these ranges, the last one primary.
+    /// Selects these ranges, the last one primary, and centres the view on it.
     pub fn select(
         &mut self,
         ranges: impl IntoIterator<Item = Range<usize>>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(chosen) = self.chosen(ranges) {
+            self.set_selections(chosen, cx);
+            self.scroll
+                .scroll_to_item(self.primary_row(), ScrollStrategy::Center);
+        }
+    }
+
+    /// Selects these ranges as `select` does, but leaves the view where it is.
+    /// A host that places a caret under the pointer (a right press) uses this,
+    /// so the text under the pointer does not move.
+    pub fn select_in_place(
+        &mut self,
+        ranges: impl IntoIterator<Item = Range<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(chosen) = self.chosen(ranges) {
+            self.set_selections(chosen, cx);
+            cx.notify();
+        }
+    }
+
+    /// The selections `ranges` make when they are whole characters of the text
+    /// and change the current selection; `None` otherwise.
+    fn chosen(&self, ranges: impl IntoIterator<Item = Range<usize>>) -> Option<Vec<Selection>> {
         let chosen: Vec<Selection> = ranges
             .into_iter()
             .filter(|range| {
@@ -466,15 +490,10 @@ impl CodeEditor {
                 goal: None,
             })
             .collect();
-        if chosen.is_empty() {
-            return;
+        if chosen.is_empty() || merged(chosen.clone()) == self.selections {
+            return None;
         }
-        if merged(chosen.clone()) == self.selections {
-            return;
-        }
-        self.set_selections(chosen, cx);
-        self.scroll
-            .scroll_to_item(self.primary_row(), ScrollStrategy::Center);
+        Some(chosen)
     }
 
     /// Replaces ranges of the text at once, as one undo step; read-only text refuses.
