@@ -25,8 +25,14 @@ pub(crate) fn code_colors(text: &str, cx: &App) -> Vec<(Range<usize>, HighlightS
         .collect()
 }
 
-use crate::theme::ActiveTheme;
-use gpui::{AnyElement, FontWeight, IntoElement, SharedString, StyledText};
+/// From upstream charts/paint.rs.
+/// The color series `ix` takes from the chart palette.
+pub(crate) fn tint(colors: &Palette, ix: usize) -> Hsla {
+    colors.chart[ix % colors.chart.len()]
+}
+
+use crate::theme::{ActiveTheme, Palette};
+use gpui::{AnyElement, FontWeight, Hsla, IntoElement, SharedString, StyledText};
 /// How well a query fits a text, and the byte ranges it covers.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Fit {

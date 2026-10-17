@@ -1,7 +1,13 @@
 # Ely chat integration
 
-Upstream: https://github.com/ZacharyZhang-NY/Ely-GPUI-Components
+Upstream: https://git.zacharyzhang.com/ZacharyZhang-NY/Ely-GPUI-Components
+(formerly https://github.com/ZacharyZhang-NY/Ely-GPUI-Components; the
+repository moved and its history was rewritten.)
 Revision: `e17e31a6890c09ebcfa8b61133d7bc7c625edf69`
+Upstream `main` no longer contains this revision: `e17e31a6` is not an
+ancestor of `origin/main` in the upstream clone's existing refs (checked
+2026-10-17 without fetching). Vendored sources therefore come from this
+revision, not from upstream `main`.
 Package: `ely-gpui-component` 0.1.0, Rust 1.95, MIT OR Apache-2.0.
 The upstream MIT and Apache license texts accompany these sources.
 
@@ -203,3 +209,64 @@ follows on the next draw, the usual ways out still close it, and every close
 and closed over the control socket too (debug builds), and the panel must
 follow the picker's own state rather than drift from it.
 `a_popover_follows_its_owner_open_and_closed` proves both directions.
+
+## Editor (project 1)
+
+Sirio's file editor on Ely's `CodeEditor`, vendored from the same revision,
+`e17e31a6`. Design: `docs/superpowers/specs/2026-10-17-ely-code-editor-design.md`.
+Every file below is verbatim unless its entry says otherwise.
+
+Vendored files:
+
+- `src/editor/{buffer,cursor,edit,keys,moves,line,row,view,layout,gutter,decor,syntax,ime,find,status,state}.rs`:
+  verbatim, except the two local changes listed below.
+- `src/editor/tests.rs`: verbatim, gated `cfg(all(test, feature = "test-support"))`
+  as upstream. Nothing was removed: none of its 15 tests names a module this
+  crate does not declare.
+- `src/editor/mod.rs`: local. It declares only the files above. Upstream's
+  `mod.rs` also declares `chat`, `console`, `extensions`, `filters`, `hints`,
+  `hover`, `keybindings`, `preview`, `problems`, `refactor`, `search`,
+  `settings`, `symbols`, `tasks` and `welcome`, all excluded, and their
+  re-exports with them. `anchors` and `measure` arrive from `main` in Task 1b.
+- `src/navigation/breadcrumb.rs`: verbatim. `src/navigation/mod.rs` declares
+  it and re-exports `Breadcrumb` and `Crumb`.
+- `src/shell/bars.rs`: only `StatusBarItem`, its `ClickHandler` alias and the
+  imports it needs. `Toolbar`, `ToolbarGroup`, `ToolbarSeparator` and
+  `StatusBar` are not vendored. `src/shell/mod.rs` is local: it declares `bars`
+  and re-exports `StatusBarItem`.
+- `src/compat.rs`: `tint`, copied verbatim from upstream `charts/paint.rs`,
+  with the `Hsla` and `Palette` imports it needs. `code_colors` and its users
+  are unchanged.
+- `src/lib.rs`: declares `pub mod editor;` and `pub mod shell;`.
+
+Local changes:
+
+- `src/editor/row.rs`: the inline chat widget (`chat::InlineChat`) is not
+  vendored, so `chat_row` draws only the gutter for `Row::Chat`. Its
+  `InlineChat` and `CHAT_ROWS` imports are gone. Kept: `Row::Chat` and its
+  layout rows, `marks.chat`, `chat_field`, `set_chat` and `chat_line`, the
+  `Asked` and `ChatClosed` events, and Escape closing the chat in `keys.rs`.
+  Consequences: `set_chat(Some(line))` still reserves three blank rows below
+  the line and moves focus into `chat_field`, which nothing draws.
+  `EditorEvent::Asked` is still emitted from `state.rs` when that field
+  submits, but no visible control reaches it. A host must not call
+  `set_chat(Some(..))` until a chat widget is vendored.
+- `src/editor/line.rs`: `charts::tint` becomes `compat::tint`. Nothing else in
+  this file changed.
+- Warnings, not suppressed, following the precedent of the unused re-exports
+  above: `keys::bind_keys` has no caller until `init_editor` (Task 1c) calls it,
+  and `layout::stack` and `syntax::colors` (re-exported as `code_colors`) have
+  no user inside this crate yet.
+
+gpui adaptations: none. The closure compiled against the pinned Bezel GPUI
+unchanged, so no hover, focus or scroll shim was needed.
+
+Evidence: `cargo nextest run -p ely-gpui-component --features test-support`
+ran 108 tests, all passed. Before this change the same command ran 78, all
+passed. The 30 new are the editor's: 15 window tests in `editor::tests` and 15
+inline tests in `buffer`, `cursor`, `layout`, `syntax` and `find`.
+
+Without `--features test-support` the test target does not compile, at HEAD
+as well: `overlays/mod.rs` gates its tests on `cfg(test)` alone, and they
+import `gpui::TestAppContext`. That gate is outside this change and was left
+as it is.
