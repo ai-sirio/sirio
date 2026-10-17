@@ -82,6 +82,11 @@ Scripts/Tests/test-forge-diff-e2e.sh   # -> prints "FORGE DIFF E2E OK"
 # plus --appearance light|dark.
 Scripts/Tests/test-changes-e2e.sh   # -> prints "CHANGES E2E OK"
 
+# A project whose disk is unplugged between launches: kept with its worktrees
+# and tabs while the disk is away, whole again once it is back; --out-dir DIR,
+# --display :N adds two PID-matched captures.
+Scripts/Tests/test-unplugged-volume-e2e.sh   # -> prints "UNPLUGGED VOLUME E2E OK"
+
 # Acting on a change request: every write of sirio_forge on the wire (the token
 # transport and the real gh/glab), then the tab's actions in a real, isolated
 # Sirio driven by the debug-only `surface change-request act` verb. --stage NAME
