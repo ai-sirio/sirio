@@ -7928,7 +7928,9 @@ impl SirioWorkspace {
     /// GPUI thread, and shows it in `view`: the gutter's git marks and the hunk a
     /// mark opens. A file outside a repository, or a clean one, has none.
     fn refresh_git_diff(&self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
-        let ticket = view.update(cx, |view, _| view.begin_git_diff());
+        if !view.update(cx, |view, _| view.begin_git_diff()) {
+            return;
+        }
         let repository = self
             .worktree_root_for(path)
             .filter(|root| is_git_repository(root))
@@ -7937,7 +7939,7 @@ impl SirioWorkspace {
                 Some((root, relative))
             });
         let Some((root, relative)) = repository else {
-            view.update(cx, |view, cx| view.land_git_diff(ticket, None, cx));
+            view.update(cx, |view, cx| view.land_git_diff(None, cx));
             return;
         };
         let path = path.to_path_buf();
@@ -7952,7 +7954,7 @@ impl SirioWorkspace {
                     eprintln!("[git] the diff of {} could not be read: {error}", path.display());
                     None
                 });
-                view.land_git_diff(ticket, diff, cx);
+                view.land_git_diff(diff, cx);
             });
         })
         .detach();

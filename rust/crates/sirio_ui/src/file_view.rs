@@ -239,9 +239,11 @@ pub struct FileView {
     /// drawn. It is their opening line (`git_marks::opening_line`), a line that
     /// carries one of their marks, so `diff_open` names a line the gutter does.
     open_hunk: Option<usize>,
-    /// The number of the latest diff fetch this file began (`begin_git_diff`).
-    /// A fetch that lands with an older number answers a diff already superseded.
-    git_diff_ticket: u64,
+    /// Whether a diff fetch is running (`begin_git_diff` until `land_git_diff`).
+    /// Only one runs at a time: each is a whole-worktree `git status` and `diff`.
+    git_diff_in_flight: bool,
+    /// Whether the diff went stale while that fetch ran, so one more is due when it lands.
+    git_diff_again: bool,
     /// The offset the pointer is resting on, the frame point it rests at,
     /// and the timer that will turn that rest into a question. Replacing
     /// the `Task` cancels it, which is the whole of dwell cancellation.
@@ -447,7 +449,8 @@ impl FileView {
             diagnostics: Vec::new(),
             git_diff: None,
             open_hunk: None,
-            git_diff_ticket: 0,
+            git_diff_in_flight: false,
+            git_diff_again: false,
             hover_offset: None,
             hover_point: point(px(0.), px(0.)),
             hover_task: None,
@@ -970,9 +973,11 @@ impl FileView {
     /// Re-reads the file and compares it against the last known disk state
     /// (F-EDIT-05/06). The shell calls this when a file tab is activated —
     /// "modify externally, return to Sirio" — and on window focus.
-    pub fn check_external(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// Returns whether it asked for a fresh diff (`GitDiffStale`).
+    pub fn check_external(&mut self, cx: &mut Context<Self>) -> bool {
         if self.snapshot.is_some() {
-            return;
+            return false;
         }
         let before = self.buffer_and_conflict();
         if let Some(editor) = self.editor_mut() {
@@ -990,7 +995,22 @@ impl FileView {
         let conflicted = after
             .as_ref()
             .is_some_and(|(_, conflict)| *conflict != Conflict::None);
-        if before != after || conflicted {
+        let stale = before != after || conflicted;
+        if stale {
+            cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
+        }
+        stale
+    }
+
+    /// The file or the code editor took focus: look for a change on disk, and
+    /// ask for a fresh diff either way. HEAD can move with the file untouched (an
+    /// agent's `git commit` in a terminal), which no disk check sees, and focus
+    /// is user-paced; a second focus while the fetch runs is coalesced.
+    fn gained_focus(&mut self, cx: &mut Context<Self>) {
+        if self.snapshot.is_some() {
+            return;
+        }
+        if !self.check_external(cx) {
             cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
         }
     }
@@ -1398,7 +1418,7 @@ impl Render for FileView {
             let editor_focus = self.editor_focus.clone();
             self.focus_subscription =
                 Some(cx.on_focus(&editor_focus, window, |view, _window, cx| {
-                    view.check_external(cx)
+                    view.gained_focus(cx)
                 }));
         }
         let theme = *Theme::get(cx);
@@ -3435,6 +3455,110 @@ mod tests {
     /// A diff that opens one hunk, on line 1, which adds a line after line 1.
     fn one_added_line() -> sirio_git::FileDiff {
         sirio_git::parse_diff("@@ -1,0 +2 @@\n+let z = 0;\n", Path::new("main.rs"))
+    }
+
+    // One diff fetch at a time (`begin_git_diff` / `land_git_diff`). The unit has
+    // these ways to fail, each pinned below:
+    //   - a `GitDiffStale` that arrives while a fetch runs starts another one, so an
+    //     agent rewriting the file piles up whole-worktree scans;
+    //   - the requests that arrived meanwhile are forgotten, so the marks stay on a
+    //     diff older than the file;
+    //   - they are remembered as one request each, so landing starts a run per
+    //     request instead of one;
+    //   - landing with nothing pending asks for another fetch, so a quiet file
+    //     refetches forever;
+    //   - landing no diff (a clean file, a git error) loses what arrived meanwhile.
+
+    /// Stands in for the app's one path, `refresh_git_diff`: each `GitDiffStale` asks
+    /// the view to begin a fetch, and a granted one is counted. The fetch runs until
+    /// the test lands it.
+    fn count_granted_git_diff_fetches(
+        view: &gpui::Entity<FileView>,
+        cx: &mut VisualTestContext,
+    ) -> std::rc::Rc<std::cell::Cell<usize>> {
+        let granted = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = granted.clone();
+        cx.update(|_, app| {
+            app.subscribe(view, move |view, event: &FileViewEvent, app| {
+                if matches!(event, FileViewEvent::GitDiffStale(_))
+                    && view.update(app, |view, _| view.begin_git_diff())
+                {
+                    counter.set(counter.get() + 1);
+                }
+            })
+            .detach();
+        });
+        granted
+    }
+
+    fn git_diff_goes_stale(view: &gpui::Entity<FileView>, cx: &mut VisualTestContext) {
+        view.update(&mut cx.cx, |view, cx| {
+            cx.emit(FileViewEvent::GitDiffStale(view.path().to_path_buf()));
+        });
+    }
+
+    fn land_git_diff(
+        view: &gpui::Entity<FileView>,
+        diff: Option<sirio_git::FileDiff>,
+        cx: &mut VisualTestContext,
+    ) {
+        view.update(&mut cx.cx, |view, cx| view.land_git_diff(diff, cx));
+    }
+
+    #[gpui::test]
+    async fn stale_requests_during_a_fetch_ask_for_exactly_one_more(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "let x = 1;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let granted = count_granted_git_diff_fetches(&view, &mut cx);
+
+        git_diff_goes_stale(&view, &mut cx);
+        assert_eq!(granted.get(), 1, "the first request starts a fetch");
+        for _ in 0..3 {
+            git_diff_goes_stale(&view, &mut cx);
+        }
+        assert_eq!(granted.get(), 1, "requests during the fetch start nothing");
+
+        land_git_diff(&view, None, &mut cx);
+        assert_eq!(granted.get(), 2, "landing asks once for what arrived meanwhile");
+
+        land_git_diff(&view, None, &mut cx);
+        assert_eq!(granted.get(), 2, "the re-run found nothing pending");
+    }
+
+    #[gpui::test]
+    async fn landing_with_nothing_pending_asks_for_nothing_and_frees_the_next_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "let x = 1;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let granted = count_granted_git_diff_fetches(&view, &mut cx);
+
+        git_diff_goes_stale(&view, &mut cx);
+        land_git_diff(&view, Some(one_added_line()), &mut cx);
+        assert_eq!(granted.get(), 1, "nothing was pending, so nothing is asked");
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.git_marks_text()),
+            "1:added",
+            "the landed diff is shown"
+        );
+
+        git_diff_goes_stale(&view, &mut cx);
+        assert_eq!(granted.get(), 2, "an idle view starts a fetch at once");
+    }
+
+    #[gpui::test]
+    async fn landing_no_diff_still_runs_what_arrived_meanwhile(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "let x = 1;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let granted = count_granted_git_diff_fetches(&view, &mut cx);
+
+        git_diff_goes_stale(&view, &mut cx);
+        git_diff_goes_stale(&view, &mut cx);
+        assert_eq!(granted.get(), 1, "the second request waits for the fetch");
+        land_git_diff(&view, None, &mut cx);
+        assert_eq!(granted.get(), 2, "a clean or failed answer still re-runs");
     }
 
     /// How many cursors the code editor holds.

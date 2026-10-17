@@ -23,8 +23,8 @@ use sirio_git::FileDiff;
 use sirio_theme::Theme;
 
 use super::{
-    CodeSpan, DiagnosticSeverity, FileDiagnostic, FileView, MarkdownMode, code_spans, git_marks,
-    line_highlights,
+    CodeSpan, DiagnosticSeverity, FileDiagnostic, FileView, FileViewEvent, MarkdownMode, code_spans,
+    git_marks, line_highlights,
 };
 use crate::editor::{Language, LoadStatus, Selection, markdown_links_in_line};
 use crate::editor_prefs::EditorPrefs;
@@ -91,7 +91,7 @@ impl FileView {
                     _ => {}
                 }
             }),
-            cx.on_focus(&focus, window, |view, _window, cx| view.check_external(cx)),
+            cx.on_focus(&focus, window, |view, _window, cx| view.gained_focus(cx)),
             // Any key on the code dismisses the hover card. An observer, not a
             // key-down listener: gpui runs a bound key's action (arrows, Enter,
             // Backspace) before key-down listeners and stops there, capture
@@ -141,17 +141,27 @@ impl FileView {
         cx.notify();
     }
 
-    /// Starts a fetch of this file's diff and returns its ticket. The answer
-    /// lands through `land_git_diff`, which drops it when a later fetch began.
-    pub fn begin_git_diff(&mut self) -> u64 {
-        self.git_diff_ticket += 1;
-        self.git_diff_ticket
+    /// Asks to start a fetch of this file's diff; `true` means the caller fetches
+    /// and answers through `land_git_diff`. While a fetch runs the answer is
+    /// `false` and the request is remembered: a run per request would pile up
+    /// whole-worktree scans while an agent keeps rewriting the file, and one
+    /// more run when the fetch lands covers all of them.
+    pub fn begin_git_diff(&mut self) -> bool {
+        if self.git_diff_in_flight {
+            self.git_diff_again = true;
+            return false;
+        }
+        self.git_diff_in_flight = true;
+        true
     }
 
-    /// Shows the diff a fetch found, unless a later fetch began since `ticket`.
-    pub fn land_git_diff(&mut self, ticket: u64, diff: Option<FileDiff>, cx: &mut Context<Self>) {
-        if ticket == self.git_diff_ticket {
-            self.set_git_diff(diff, cx);
+    /// Shows the diff a fetch found, and asks for one more fetch when the diff
+    /// went stale while it ran.
+    pub fn land_git_diff(&mut self, diff: Option<FileDiff>, cx: &mut Context<Self>) {
+        self.git_diff_in_flight = false;
+        self.set_git_diff(diff, cx);
+        if std::mem::take(&mut self.git_diff_again) {
+            cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
         }
     }
 

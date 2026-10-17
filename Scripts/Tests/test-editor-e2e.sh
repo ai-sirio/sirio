@@ -34,7 +34,8 @@ set -eEuo pipefail
 #   context           the menu's Copy, run by a right press, reaches the clipboard
 #   git_marks         a file's changes against HEAD mark its gutter: the disk's when the
 #                     file opens, an adopted change, a save; a mark opens its hunk in
-#                     place, Escape closes it; a file restored to HEAD, a file outside
+#                     place, Escape closes it; a file restored to HEAD, a commit made
+#                     elsewhere (cleared when the editor takes focus), a file outside
 #                     the repository and a clean file have no marks
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
@@ -1070,6 +1071,31 @@ GIT_MARKS_PY
   write_disk "$WT/marks.txt" "$RUN_DIR/marks-head.txt"
   expect_state git_marks ""
   echo "OK: a file restored to HEAD has no marks"
+
+  # HEAD moves while the file does not: another program's commit leaves every
+  # committed line marked, and no disk event announces it. The file is changed on
+  # disk again (adopted, marked as at the start), the window takes X focus (gpui
+  # sends no focus event without it, the Xvfb having no window manager), a terminal
+  # pane opens below and takes focus, and the commit is made in git, not through
+  # Sirio. The editor then takes focus the way the verbs that act as the user's keys
+  # give it, through the code editor's own focus handle, the call a click makes.
+  # That move from the terminal to the editor is what the marks must follow.
+  write_disk "$WT/marks.txt" "$RUN_DIR/marks-edit.txt"
+  expect_state git_marks "9:modified,18:deleted,20:modified,29:added,30:added"
+  focus_window
+  ctl pane split down >/dev/null
+  sleep 1
+  git -C "$WT" commit -q -m "marks committed elsewhere" -- marks.txt
+  ctl surface editor keys --keys=escape >/dev/null
+  expect_state git_marks ""
+  # The terminal pane goes again, so the later scenarios see one pane. The verbs
+  # leave the terminal as the focused pane, so the close takes it.
+  ctl pane close >/dev/null
+  sleep 1
+  "$CTL" surface editor state >/dev/null 2>&1 \
+    || fail "$SCENARIO: the pane close took the file's pane"
+  expect_state path "$WT/marks.txt"
+  echo "OK: a commit made elsewhere clears the marks when the file takes focus"
 
   # A file outside the repository, and a committed clean one, have none. The
   # empty answer is the default, so the wait lets a late answer arrive first.
