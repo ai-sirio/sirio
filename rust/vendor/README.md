@@ -12,16 +12,17 @@ small crate, so a host's theme crate can use Ely's palette without compiling
 Ely's components; `ely-gpui-component` re-exports those types at their original
 paths.
 
-This directory holds `[patch.crates-io]` overrides for three packages: `bezel-gpui-linux` and
-`bezel-gpui-windows` (both release `0.3.8`) and `libghostty-vt-sys` (release `0.2.1`), all wired
-in via `rust/Cargo.toml`'s `[patch.crates-io]` section. Everything else in the Bezel GPUI family
+This directory holds `[patch.crates-io]` overrides for five packages: `bezel-gpui-linux` and
+`bezel-gpui-windows` (both release `0.3.8`), `bezel-ui` and `bezel-markdown` (both release
+`0.1.4`) and `libghostty-vt-sys` (release `0.2.1`), all wired in via `rust/Cargo.toml`'s
+`[patch.crates-io]` section. Everything else in the Bezel GPUI family
 (`gpui`, `gpui_platform`, and the rest) and `libghostty-vt` itself still come straight from the
 published crates.io releases, unpatched.
 
-Each override changes one thing about its crate and nothing else; the three are unrelated fixes
+Each override changes one thing about its crate and nothing else; the five are unrelated fixes
 that happen to need the same mechanism. `gpui_linux` is described first and at length because it
-established the arrangement; `gpui_windows` and `libghostty-vt-sys` follow it, each with its own
-short section at the end.
+established the arrangement; `gpui_windows`, `bezel_ui`, `bezel_markdown` and `libghostty-vt-sys`
+follow it, each with its own short section at the end.
 
 ## Why this exists: F-CORE-FILE-03A
 
@@ -166,6 +167,30 @@ name kept as `bezel-ui`, `[lib] name` kept as `ui`); no standalone `Cargo.lock`.
 `cargo tree -i bezel-ui` (the path source, no `patch ... was not used` warning). Bumping the pinned
 bezel version means re-applying the one builder by hand, or dropping the override if upstream has
 gained a way to style a field's fill by then.
+
+## `bezel_markdown` — a selection that covers each wrapped row from its first glyph
+
+`vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with exactly one change:
+`range_rects` in `src/render.rs`, the function that turns a byte range into one rectangle per
+visual row for the selection, the inline-code wash and the chips. Upstream 0.1.4 walked a range
+row by row through `TextLayout::position_for_index`, finding each row's last index by bisection
+and starting the next row one index later. gpui places a soft-wrap boundary — the first glyph of
+the row below — at the *end of the row above*, so every wrapped row's rectangle began at its second
+glyph: a selected chat response or Markdown Preview showed its rows' first letters unwashed, while
+Copy read them. The function is upstream 0.2.16's, which walks each line's `wrap_boundaries`
+directly, with one difference: the origin comes from `position_for_index(0)` rather than
+`TextLayout::bounds`, which panics in gpui 0.3.8 on a layout with no bounds. 0.2.16 itself is out
+of reach as a bump — it builds on gpui 0.3.19 and moves the whole bezel family off `=0.1.4`.
+Every other file is byte-for-byte the released source, plus the MIT `LICENSE` from the repository's
+`v0.1.4` tag, which the published crate does not ship.
+
+Same manifest conventions as `bezel_ui`, no standalone `Cargo.lock`; `cargo tree -i bezel-markdown`
+shows the path source, used by `sirio_ui` and by `bezel-editor`. The check is
+`Scripts/Tests/test-markdown-selection-probe.sh --xvfb` (`MARKDOWN SELECTION PROBE OK`): it draws
+`sirio_ui`'s `markdown_selection_probe` example, a selected document whose rows soft-wrap, break
+inside one paragraph and wrap an inline code span, and fails when any row's wash leaves the text's
+left edge bare — as it does with this override commented out. Bumping bezel past 0.1.4 drops this
+override, since 0.2.x carries the same function.
 
 ## `libghostty-vt-sys` — a portable CPU floor for the Zig-built VT parser
 

@@ -82,6 +82,11 @@ Scripts/Tests/test-forge-diff-e2e.sh   # -> prints "FORGE DIFF E2E OK"
 # plus --appearance light|dark.
 Scripts/Tests/test-changes-e2e.sh   # -> prints "CHANGES E2E OK"
 
+# A project whose disk is unplugged between launches: kept with its worktrees
+# and tabs while the disk is away, whole again once it is back; --out-dir DIR,
+# --display :N adds two PID-matched captures.
+Scripts/Tests/test-unplugged-volume-e2e.sh   # -> prints "UNPLUGGED VOLUME E2E OK"
+
 # The Secondary pane on demand and the right panel's Open list in a real,
 # isolated Sirio: one centre pane at launch, the list and its Chat
 # expansion, a pane that comes and goes with its tabs, across a quit and
@@ -109,6 +114,12 @@ Scripts/Tests/test-change-request-handoff-e2e.sh   # -> prints "HANDOFF E2E OK"
 # Mesa's lavapipe: PID-matched captures, a click per tab, the badge tooltip,
 # dark and light (docs/testing/ely-forge-probe.md).
 Scripts/Tests/test-ely-forge-probe.sh --xvfb   # -> prints "ELY FORGE PROBE OK"
+
+# The selection bezel-markdown paints (a chat response, the Markdown Preview):
+# a selected document whose rows soft-wrap, break and wrap a code span, on a
+# private Xvfb; fails when any row's wash starts after its first glyph, the
+# defect the vendored bezel_markdown fixes (rust/vendor/README.md).
+Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SELECTION PROBE OK"
 
 # Iterate on one crate only
 cd rust && cargo test -p <crate>

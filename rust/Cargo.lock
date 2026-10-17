@@ -1021,8 +1021,6 @@ dependencies = [
 [[package]]
 name = "bezel-markdown"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "178aaa5da8b44e55507a2c36d4a6f55e6bcdfb62a63fb0d7bb1920da5faf79a0"
 dependencies = [
  "bezel-gpui",
  "bezel-theme",

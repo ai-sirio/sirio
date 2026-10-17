@@ -146,6 +146,11 @@ bezel-gpui-windows = { path = "vendor/gpui_windows" }
 # theme's `surface` rather than the app-wide input fill. One builder added to `TextField`; see
 # rust/vendor/README.md.
 bezel-ui = { path = "vendor/bezel_ui" }
+# Local override that washes the first glyph of every soft-wrapped row of a selection. Upstream
+# 0.1.4 walks a range's rows through `position_for_index`, which places a wrap boundary at the end
+# of the row above, so each wrapped row's highlight began one glyph late — in a chat response and
+# the Markdown Preview alike. One function, taken from upstream 0.2.16; see rust/vendor/README.md.
+bezel-markdown = { path = "vendor/bezel_markdown" }
 # Local override that makes the Zig-built VT parser portable. Upstream 0.2.1 passes `-Dtarget` to
 # Zig only when cross-compiling, and a Zig target with no explicit arch is resolved by *detecting
 # the host CPU* rather than falling back to the architecture's baseline. Every release job here
