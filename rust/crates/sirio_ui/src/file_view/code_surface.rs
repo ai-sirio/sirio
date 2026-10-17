@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-use ely_gpui_component::editor::{CodeEditor, Diagnostic, EditorEvent, GitMark};
+use ely_gpui_component::editor::{CodeEditor, Diagnostic, DiffHunk, EditorEvent, GitMark};
 use ely_gpui_component::primitives::Severity;
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, HighlightStyle, Pixels, Point,
@@ -133,10 +133,9 @@ impl FileView {
     pub fn set_git_diff(&mut self, diff: Option<FileDiff>, cx: &mut Context<Self>) {
         self.git_diff = if self.is_snapshot() { None } else { diff };
         self.open_hunk = self.open_hunk.filter(|open| {
-            self.git_diff
-                .as_ref()
-                .and_then(|diff| git_marks::hunk_at(diff, *open))
-                .is_some_and(|hunk| git_marks::opening_line(&hunk) == *open)
+            self.hunks_at(*open)
+                .first()
+                .is_some_and(|hunk| git_marks::opening_line(hunk) == *open)
         });
         self.push_git(cx);
         cx.notify();
@@ -155,18 +154,22 @@ impl FileView {
         self.open_hunk
     }
 
+    /// The hunks the diff opens on `line`, none without a diff.
+    fn hunks_at(&self, line: usize) -> Vec<DiffHunk> {
+        self.git_diff
+            .as_ref()
+            .map(|diff| git_marks::hunks_at(diff, line))
+            .unwrap_or_default()
+    }
+
     /// A press on the gutter at `line` (`EditorEvent::GitMarkPressed`). A line
     /// that opens a hunk draws it in place, or closes it when it is the hunk
-    /// already drawn. A line that opens no hunk changes nothing.
+    /// already drawn. Every hunk the line opens is drawn or closed together. A
+    /// line that opens no hunk changes nothing.
     pub fn toggle_hunk(&mut self, line: usize, cx: &mut Context<Self>) {
-        let Some(hunk) = self
-            .git_diff
-            .as_ref()
-            .and_then(|diff| git_marks::hunk_at(diff, line))
-        else {
+        let Some(opening) = self.hunks_at(line).first().map(git_marks::opening_line) else {
             return;
         };
-        let opening = git_marks::opening_line(&hunk);
         self.open_hunk = if self.open_hunk == Some(opening) {
             None
         } else {
@@ -183,26 +186,26 @@ impl FileView {
         cx.notify();
     }
 
-    /// Hands the code editor the gutter marks and the hunk drawn in place, for
+    /// Hands the code editor the gutter marks and the hunks drawn in place, for
     /// the text it holds now. Called when either changes, and once the editor
-    /// exists. A gap past the last line is drawn above that line (`fit`).
+    /// exists. A gap past the last line, left by an edit since the diff was
+    /// pushed, is drawn above that line (`fit`).
     pub(super) fn push_git(&self, cx: &mut Context<Self>) {
         let Some(code) = &self.code_editor else {
             return;
         };
         let lines = code.read(cx).text().matches('\n').count() + 1;
-        let hunk = self
+        let hunks: Vec<DiffHunk> = self
             .open_hunk
-            .and_then(|open| {
-                self.git_diff
-                    .as_ref()
-                    .and_then(|diff| git_marks::hunk_at(diff, open))
-            })
-            .map(|hunk| git_marks::fit(hunk, lines));
+            .map(|open| self.hunks_at(open))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|hunk| git_marks::fit(hunk, lines))
+            .collect();
         let marks = self.git_mark_lines();
         code.update(cx, |code, cx| {
             code.set_git_marks(marks, cx);
-            code.set_diff(hunk.into_iter().collect(), cx);
+            code.set_diff(hunks, cx);
         });
     }
 

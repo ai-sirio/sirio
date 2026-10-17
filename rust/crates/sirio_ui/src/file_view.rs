@@ -235,9 +235,9 @@ pub struct FileView {
     /// the gutter's marks and the hunk drawn in place. `None` for a file that is
     /// not in a repository, is clean, or is a snapshot.
     git_diff: Option<FileDiff>,
-    /// The gutter line that opens the hunk drawn in place, `None` when none is
-    /// drawn. It is the hunk's opening line (`git_marks::opening_line`), a line
-    /// that carries one of its marks, so `diff_open` names a line the gutter does.
+    /// The gutter line that opens the hunks drawn in place, `None` when none is
+    /// drawn. It is their opening line (`git_marks::opening_line`), a line that
+    /// carries one of their marks, so `diff_open` names a line the gutter does.
     open_hunk: Option<usize>,
     /// The offset the pointer is resting on, the frame point it rests at,
     /// and the timer that will turn that rest into a question. Replacing
