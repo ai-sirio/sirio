@@ -49,7 +49,12 @@ pub fn user_environment_from(
     login_path: Option<&OsStr>,
     cli_dir: &Path,
 ) -> BTreeMap<String, String> {
-    let launch_path = launch.get("PATH").map_or("", String::as_str);
+    // Windows reports the variable as `Path`, and a child sees one variable
+    // whatever the case, so every spelling is folded into `PATH` here.
+    let launch_path = launch
+        .iter()
+        .find(|(name, _)| is_path_name(name))
+        .map_or("", |(_, value)| value.as_str());
     let login_entries = login_path.into_iter().flat_map(std::env::split_paths);
     let mut entries: Vec<PathBuf> = Vec::new();
     for entry in std::iter::once(cli_dir.to_path_buf())
@@ -64,12 +69,18 @@ pub fn user_environment_from(
         .map(|joined| joined.to_string_lossy().into_owned())
         .unwrap_or_else(|_| launch_path.to_string());
     let mut environment = launch.clone();
+    environment.retain(|name, _| !is_path_name(name));
     environment.insert("PATH".to_string(), path);
     environment
 }
 
-/// Records the user environment for this process; the app calls it once, at the
-/// end of `main`. A second call is ignored.
+fn is_path_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("PATH")
+}
+
+/// Records the user environment for this process. The app calls it once in
+/// `main`, after the exports for its children and before `application()`; a
+/// second call is ignored.
 pub fn install(mut user: BTreeMap<String, String>) {
     // The app's own decision wins: a variable it exported is in the process,
     // and one it removed must not survive from the launch snapshot.
@@ -118,8 +129,18 @@ pub fn absent_from_user() -> Vec<String> {
     };
     std::env::vars()
         .map(|(name, _)| name)
-        .filter(|name| !user.contains_key(name))
+        .filter(|name| !user_has(user, name))
         .collect()
+}
+
+/// Whether the user environment holds `name`. Windows variable names are
+/// case-insensitive, so `Path` and `PATH` are one variable there.
+fn user_has(user: &BTreeMap<String, String>, name: &str) -> bool {
+    if cfg!(windows) {
+        user.keys().any(|key| key.eq_ignore_ascii_case(name))
+    } else {
+        user.contains_key(name)
+    }
 }
 
 /// Decodes the hex dump of `env -0`: NUL-terminated `NAME=value` entries. A
@@ -288,6 +309,21 @@ mod tests {
         assert_eq!(environment["PATH"], "/cli:/opt:/usr/bin:/bin");
     }
 
+    #[test]
+    fn path_key_is_found_whatever_its_case() {
+        // Windows reports the variable as `Path`; a child must get one PATH,
+        // starting with the sirioctl directory, and not a second spelling of it.
+        let launch = map(&[("Path", "/usr/bin")]);
+        let environment = user_environment_from(&launch, None, Path::new("/cli"));
+        let path_names: Vec<&str> = environment
+            .keys()
+            .map(String::as_str)
+            .filter(|name| name.eq_ignore_ascii_case("PATH"))
+            .collect();
+        assert_eq!(path_names, ["PATH"]);
+        assert_eq!(environment["PATH"], "/cli:/usr/bin");
+    }
+
     #[cfg(unix)]
     #[test]
     fn command_without_install_inherits_the_process() {
@@ -336,6 +372,23 @@ mod tests {
                 .and_then(|user| user.get("SIRIO_PANE_HOST_HOME"))
                 .map(String::as_str),
             Some("/h")
+        );
+    }
+
+    #[test]
+    fn for_children_variable_absent_from_the_process_is_removed() {
+        // A stale value from the launch snapshot must not outlive the app's own
+        // decision to remove the variable from its process.
+        // SAFETY: a test process of its own under nextest, as above.
+        unsafe { std::env::remove_var("SIRIO_PANE_HOST_HOME") };
+        install(map(&[
+            ("PATH", "/usr/bin"),
+            ("SIRIO_PANE_HOST_HOME", "/stale"),
+        ]));
+        assert!(
+            !installed()
+                .expect("installed")
+                .contains_key("SIRIO_PANE_HOST_HOME")
         );
     }
 }

@@ -25718,7 +25718,7 @@ fn main() {
     // environment rather than a login shell's. The login PATH is read here,
     // once, so the user environment below can merge it as well.
     #[cfg(not(windows))]
-    let login = login_path::login_shell_path();
+    let login = login_path::login_shell_path(&launch);
     #[cfg(not(windows))]
     login_path::adopt_login_shell_path(login.as_deref());
     #[cfg(windows)]

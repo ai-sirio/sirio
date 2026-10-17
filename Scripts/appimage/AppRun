@@ -8,11 +8,13 @@
 # Taken only when none is inherited. A restart from the app (Restart to update)
 # runs this script again inside the old app's environment, which already holds
 # the old mount's prefixes and the original snapshot; a fresh one would bring
-# the dead mount back, nested, until exec fails with E2BIG. A snapshot over
-# 100 KiB is not exported, and the app falls back to its own environment.
+# the dead mount back, nested, until exec fails with E2BIG. Linux refuses any
+# single environment string of 131072 bytes or more, so a snapshot over about
+# 64 KiB (131000 hex characters) is not exported: the launch must still exec,
+# and the app falls back to its own environment.
 if [ -z "${SIRIO_LAUNCH_ENV:-}" ]; then
   snapshot="$(env -0 | od -An -tx1 -v | tr -d ' \n')"
-  if [ "${#snapshot}" -le 204800 ]; then export SIRIO_LAUNCH_ENV="$snapshot"; fi
+  if [ "${#snapshot}" -le 131000 ]; then export SIRIO_LAUNCH_ENV="$snapshot"; fi
   unset snapshot
 fi
 
