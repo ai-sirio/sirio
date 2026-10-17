@@ -1,4 +1,5 @@
 mod stale;
+mod wide;
 
 use std::{cell::Cell, rc::Rc, time::Duration};
 

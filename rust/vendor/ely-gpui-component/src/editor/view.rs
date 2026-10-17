@@ -263,6 +263,7 @@ impl Render for CodeEditor {
         };
         self.metrics.advance = advance;
         self.metrics.line = line;
+        self.metrics.size = pixels;
         let sticky = if self.options.sticky {
             self.sticky(cx)
         } else {

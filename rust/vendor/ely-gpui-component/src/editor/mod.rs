@@ -9,6 +9,7 @@ mod ime;
 mod keys;
 mod layout;
 mod line;
+mod measure;
 mod moves;
 mod row;
 mod state;

@@ -93,6 +93,8 @@ pub(crate) struct Metrics {
     pub top: Pixels,
     pub advance: Pixels,
     pub line: Pixels,
+    /// The code font's size.
+    pub size: Pixels,
 }
 
 const BLINK: Duration = Duration::from_millis(530);

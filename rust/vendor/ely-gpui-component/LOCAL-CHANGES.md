@@ -304,3 +304,22 @@ applied as upstream wrote it or was rewritten against the vendored code.
   channel), `src/editor/filters.rs` (the glob size limit) and
   `tasks/panics.md`. Their panics are not ported: the output panel and globs
   are outside the closure.
+- `9fb607b` "Code editor: columns sit where gpui lays them out": `ime.rs`,
+  `measure.rs` (new) and `tests/wide.rs` (new) are verbatim. `state.rs`,
+  `line.rs`, `state.rs`, `view.rs`, `mod.rs` and `tests/mod.rs` did not apply:
+  their context named upstream code from commits between `b29d66c` and this
+  one that the vendored copy does not have (the typewriter, `Metrics::height`,
+  `line.rs`'s imports, and the `preview`, `chinese` and `history` modules,
+  which are not vendored). Their added lines were typed in by hand. Hand-applied
+  pieces: `Metrics::size` (after `line`); `self.metrics.size = pixels` after
+  `self.metrics.line = line`; in `line.rs` the `measure::Measured` import, the
+  `styles` visibility becoming `pub(super)` (`ime.rs` calls it), the new
+  `whitespace` (hidden marks, arrows and dots drawn as a `StyledText`), the
+  `line_row` closures `x` (laid out) and `grid` (rulers and guides), selection
+  width, caret width `wide`, the drag/press calls with `window`, and the
+  `drag` signature. `mod.rs` gains `mod measure;`; `tests/mod.rs` gains
+  `mod wide;`.
+  Skipped, not vendored: `src/documents/document/tests/point.rs` and
+  `src/documents/tree/tests.rs`.
+  `tests/wide.rs` passes unchanged. `offset_in` keeps its `None` for a lost
+  line and now takes `window` and `cx`.
