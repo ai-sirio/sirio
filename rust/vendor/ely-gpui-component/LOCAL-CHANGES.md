@@ -497,7 +497,8 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
 ### Rulers and indent guides drawn (Task 6d fix 1)
 
 - `src/editor/line.rs`: a ruler and an indent guide are a one-pixel fill
-  (`w(px(1.))` with `bg`), not a zero-width box with a left border. gpui paints
-  nothing for a box of no width, so the upstream form never showed on screen.
+  (`w(px(1.))` with `bg`), not a zero-width box with a left border. Sirio's
+  renderer (bezel-gpui-wgpu) paints nothing for a box of no width, so the
+  upstream form never showed on screen.
   The colours are unchanged: the ruler and the plain guide use `border` at 60%
   opacity, the guide of the active block `border_strong`.
