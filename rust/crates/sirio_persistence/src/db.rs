@@ -1230,28 +1230,31 @@ impl AppDatabase {
             defaults.forge_hosts = value;
         }
         if let Some(value) = self.setting_value(settings_keys::EDITOR_MINIMAP)? {
-            defaults.editor_minimap = parse_bool_setting(&value, true);
+            defaults.editor_minimap = parse_bool_setting(&value, defaults.editor_minimap);
         }
         if let Some(value) = self.setting_value(settings_keys::EDITOR_STICKY_SCROLL)? {
-            defaults.editor_sticky_scroll = parse_bool_setting(&value, true);
+            defaults.editor_sticky_scroll =
+                parse_bool_setting(&value, defaults.editor_sticky_scroll);
         }
         if let Some(value) = self.setting_value(settings_keys::EDITOR_INDENT_GUIDES)? {
-            defaults.editor_indent_guides = parse_bool_setting(&value, true);
+            defaults.editor_indent_guides =
+                parse_bool_setting(&value, defaults.editor_indent_guides);
         }
         if let Some(value) = self.setting_value(settings_keys::EDITOR_RAINBOW_BRACKETS)? {
-            defaults.editor_rainbow_brackets = parse_bool_setting(&value, true);
+            defaults.editor_rainbow_brackets =
+                parse_bool_setting(&value, defaults.editor_rainbow_brackets);
         }
         if let Some(value) = self.setting_value(settings_keys::EDITOR_CODE_LENS)? {
-            defaults.editor_code_lens = parse_bool_setting(&value, true);
+            defaults.editor_code_lens = parse_bool_setting(&value, defaults.editor_code_lens);
         }
         if let Some(value) = self.setting_value(settings_keys::EDITOR_INLAY_HINTS)? {
-            defaults.editor_inlay_hints = parse_bool_setting(&value, true);
+            defaults.editor_inlay_hints = parse_bool_setting(&value, defaults.editor_inlay_hints);
         }
         if let Some(value) = self.setting_value(settings_keys::EDITOR_WHITESPACE)? {
-            defaults.editor_whitespace = parse_bool_setting(&value, false);
+            defaults.editor_whitespace = parse_bool_setting(&value, defaults.editor_whitespace);
         }
         if let Some(value) = self.setting_value(settings_keys::EDITOR_RULER)? {
-            defaults.editor_ruler = parse_bool_setting(&value, false);
+            defaults.editor_ruler = parse_bool_setting(&value, defaults.editor_ruler);
         }
         if let Some(value) = self.setting_value(settings_keys::EDITOR_RULER_COLUMN)? {
             defaults.editor_ruler_column = clamp_setting(

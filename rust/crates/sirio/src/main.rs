@@ -37891,7 +37891,7 @@ done
     }
 
     #[test]
-    fn persisted_settings_round_trip_maps_all_twenty_fields_explicitly() {
+    fn persisted_settings_round_trip_maps_every_field_explicitly() {
         let persisted = AppSettings {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,

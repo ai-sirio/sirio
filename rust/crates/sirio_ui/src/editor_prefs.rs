@@ -68,9 +68,13 @@ impl EditorPrefs {
         cx.try_global::<Self>().cloned().unwrap_or_default()
     }
 
-    /// Publishes `prefs` app-wide. Windows are refreshed only when the value
-    /// changed, so republishing the same preferences repaints nothing.
+    /// Publishes `prefs` app-wide. A global is replaced only when its value
+    /// changed or none exists yet, because `set_global` notifies every global
+    /// observer; windows are refreshed only when the value changed.
     pub fn apply(prefs: Self, cx: &mut App) {
+        if cx.try_global::<Self>() == Some(&prefs) {
+            return;
+        }
         let changed = Self::current(cx) != prefs;
         cx.set_global(prefs);
         if changed {
