@@ -32,6 +32,10 @@ set -eEuo pipefail
 #                     line (the reveal)
 #   link              a platform click on a Markdown link's label opens its target
 #   context           the menu's Copy, run by a right press, reaches the clipboard
+#   git_marks         a file's changes against HEAD mark its gutter: the disk's when the
+#                     file opens, an adopted change, a save; a mark opens its hunk in
+#                     place, Escape closes it; a file restored to HEAD, a file outside
+#                     the repository and a clean file have no marks
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
 #                     stickyScroll, lineNumbers, cursorShape, and the ruler at
@@ -987,6 +991,101 @@ scenario_context() {
   # the report), and a chat is what the selection would go to.
 }
 
+scenario_git_marks() {
+  # The marks read each file against HEAD with no context lines. This repository
+  # asks git to merge hunks that lie within three unchanged lines of each other
+  # (the user's diff.interHunkContext), and the edits below depend on it: line 20
+  # is deleted and line 22 rewritten, one unchanged line apart. Without the
+  # zero-context flag git prints the line between them as context, and the marks
+  # would be wrong or the debug build would stop.
+  git -C "$WT" config diff.interHunkContext 3
+  python3 - "$RUN_DIR" "$WT/marks.txt" <<'GIT_MARKS_PY'
+import os, sys
+run, marks = sys.argv[1], sys.argv[2]
+head = [f"line {n}\n" for n in range(1, 41)]
+edit = list(head)
+edit[9] = "line ten\n"             # line 10 rewritten
+del edit[19]                       # line 20 deleted
+edit[20] = "line twenty-two\n"     # line 22, now index 20, rewritten
+at = edit.index("line 30\n") + 1
+edit[at:at] = ["added x\n", "added y\n"]   # two lines after line 30
+adopt = list(edit)
+adopt[4] = "line five\n"           # line 5 rewritten, adopted by the clean buffer
+
+def write(path, lines):
+    with open(path, "wb") as handle:
+        handle.write("".join(lines).encode("utf-8"))
+
+write(marks, head)
+write(os.path.join(run, "marks-head.txt"), head)
+write(os.path.join(run, "marks-edit.txt"), edit)
+write(os.path.join(run, "marks-adopt.txt"), adopt)
+write(os.path.join(run, "outside.txt"), ["outside the repository\n"])
+GIT_MARKS_PY
+  git -C "$WT" add marks.txt
+  git -C "$WT" commit -q -m marks
+
+  # Changed on disk before the file opens: the open reads the disk against HEAD.
+  write_disk "$WT/marks.txt" "$RUN_DIR/marks-edit.txt"
+  open_file "$WT/marks.txt"
+  expect_state state loaded
+  expect_state dirty false
+  expect_state git_marks "9:modified,18:deleted,20:modified,29:added,30:added"
+  expect_state diff_open none
+  echo "OK: the open file's marks are the disk's changes against HEAD"
+
+  # A modified line's mark opens its hunk in place, and the same press closes it.
+  ctl surface editor git-mark --line=9 >/dev/null
+  expect_state diff_open 9
+  capture git-marks-open
+  ctl surface editor git-mark --line=9 >/dev/null
+  expect_state diff_open none
+
+  # A deletion's mark is the line above the gap, and Escape closes the hunk it opens.
+  ctl surface editor git-mark --line=18 >/dev/null
+  expect_state diff_open 18
+  capture git-marks-deleted-open
+  ctl surface editor keys --keys=escape >/dev/null
+  expect_state diff_open none
+  echo "OK: a modified and a deleted hunk open in place; Escape closes the deleted one"
+
+  # Another program's change is adopted by the clean buffer, and the marks follow it.
+  write_disk "$WT/marks.txt" "$RUN_DIR/marks-adopt.txt"
+  expect_state dirty false
+  expect_state git_marks "4:modified,9:modified,18:deleted,20:modified,29:added,30:added"
+  echo "OK: an adopted change refreshes the marks"
+
+  # A save changes the diff: a line typed at the end adds its mark once saved.
+  local end
+  end="$(python3 "$TOOLS" length "$(sfield text)")"
+  ctl surface editor select --ranges="$end..$end" >/dev/null
+  ctl surface editor type --text=$'appended\n' >/dev/null
+  expect_state dirty true
+  ctl surface editor save >/dev/null
+  expect_state dirty false
+  expect_state git_marks "4:modified,9:modified,18:deleted,20:modified,29:added,30:added,41:added"
+  echo "OK: a save refreshes the marks"
+
+  # Restored to HEAD on disk, the clean buffer adopts it and the marks clear.
+  write_disk "$WT/marks.txt" "$RUN_DIR/marks-head.txt"
+  expect_state git_marks ""
+  echo "OK: a file restored to HEAD has no marks"
+
+  # A file outside the repository, and a committed clean one, have none. The
+  # empty answer is the default, so the wait lets a late answer arrive first.
+  open_file "$RUN_DIR/outside.txt"
+  expect_state path "$RUN_DIR/outside.txt"
+  sleep 1
+  expect_state git_marks ""
+  open_file "$WT/nonl.txt"
+  expect_state path "$WT/nonl.txt"
+  sleep 1
+  expect_state git_marks ""
+  echo "OK: a file outside the repository and a clean file have no marks"
+
+  git -C "$WT" config --unset diff.interHunkContext
+}
+
 prefs_line() {
   printf 'minimap=%s,stickyScroll=%s,indentGuides=%s,rainbowBrackets=%s,codeLens=%s,inlayHints=%s,whitespace=%s,ruler=%s,rulerColumn=%s,lineNumbers=%s,cursorShape=%s,tabSize=%s' \
     "${PREF[minimap]}" "${PREF[stickyScroll]}" "${PREF[indentGuides]}" "${PREF[rainbowBrackets]}" \
@@ -1125,6 +1224,7 @@ scenario hover scenario_hover
 scenario definition scenario_definition
 scenario link scenario_link
 scenario context scenario_context
+scenario git_marks scenario_git_marks
 scenario prefs scenario_prefs
 
 stop_hosts
