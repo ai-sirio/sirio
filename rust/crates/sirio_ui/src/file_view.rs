@@ -1742,6 +1742,7 @@ impl Render for FileView {
         // because a stale coordinate is worse than an honest default.
         // Either way it sits *over* the file — priority 2 so it stays above
         // the menu that may have raised it.
+        let status_row = self.render_status_row(theme, &entity, cx);
         let message = self.message.as_ref().map(|message| {
             let card = message_card(&message.text, &message.actions, theme, entity.clone());
             match message.at {
@@ -1753,9 +1754,18 @@ impl Render for FileView {
                 )
                 .priority(2)
                 .into_any_element(),
+                // Above the row when there is one; without it (a file still
+                // loading) the card sits at the corner itself.
                 None => div()
                     .absolute()
-                    .bottom(px(16.0) + status_row::STATUS_ROW_HEIGHT)
+                    .bottom(
+                        px(16.0)
+                            + if status_row.is_some() {
+                                status_row::STATUS_ROW_HEIGHT
+                            } else {
+                                px(0.0)
+                            },
+                    )
                     .right(px(16.0))
                     .child(card)
                     .into_any_element(),
@@ -1802,7 +1812,7 @@ impl Render for FileView {
                 window,
                 cx,
             )))
-            .when_some(self.render_status_row(theme, &entity, cx), |this, row| this.child(row))
+            .when_some(status_row, |this, row| this.child(row))
             // Last, so it paints over the content and the row: an absolute child
             // earlier in the order sits under the code's own background.
             .when_some(message, |this, card| this.child(card))
@@ -2482,6 +2492,9 @@ fn message_card(
     let mut card = div()
         .id("file-view-message")
         .debug_selector(|| "file-view-message".into())
+        // A press on the card is the card's: without this it falls through to
+        // the code under it and moves the caret as it dismisses.
+        .occlude()
         .max_w(px(420.0))
         .px(px(12.0))
         .py(px(8.0))
