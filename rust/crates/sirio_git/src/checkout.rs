@@ -271,9 +271,15 @@ pub fn exclude(repo: &Path, pattern: &str) -> Result<(), String> {
         .map_err(|error| format!("could not create {}: {error}", info.display()))?;
     // A temp file and a rename, so a reader (git, or another process doing
     // this) never sees the file truncated to nothing.
-    let temporary = info.join(format!("exclude.sirio-{}.tmp", std::process::id()));
+    // A symlinked exclude (dotfiles) is written through: the rename lands on
+    // its target, beside which the temp file goes, not over the link.
+    let target = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+    let temporary = target
+        .parent()
+        .unwrap_or(&info)
+        .join(format!("exclude.sirio-{}.tmp", std::process::id()));
     std::fs::write(&temporary, text)
-        .and_then(|()| std::fs::rename(&temporary, &file))
+        .and_then(|()| std::fs::rename(&temporary, &target))
         .map_err(|error| {
             let _ = std::fs::remove_file(&temporary);
             format!("could not write {}: {error}", file.display())
