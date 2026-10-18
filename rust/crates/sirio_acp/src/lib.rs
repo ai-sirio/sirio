@@ -16,16 +16,15 @@ use agent_client_protocol::schema::v1::{
     ToolCallContent, ToolCallLocation, ToolCallStatus,
 };
 use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, ErrorCode, Lines,
-    is_incoming_transport_closed,
+    Agent, Client, ConnectionTo, ErrorCode, Lines, is_incoming_transport_closed,
 };
 use anyhow::{Result, anyhow};
 use async_process::Child;
 use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -1247,6 +1246,74 @@ fn command_for_process(command: AgentCommand) -> AgentCommand {
     command
 }
 
+/// Where a chat agent starts: the directory its session is created for, when
+/// that is an absolute directory; otherwise the user's home, as the user
+/// environment resolves it. The process's own directory is never used: under the
+/// AppImage launcher the process has changed into the mount, and an agent started
+/// there reads the mount.
+fn agent_start_dir(session_cwd: &Path) -> Option<PathBuf> {
+    if session_cwd.is_absolute() && session_cwd.is_dir() {
+        return Some(session_cwd.to_path_buf());
+    }
+    sirio_env::for_child()
+        .get("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute() && home.is_dir())
+}
+
+/// Starts the agent as `AcpAgent::spawn_process` does (a process group of its
+/// own, the environment it is given, piped stdio), in `dir`, with `PWD` naming
+/// `dir`. The crate's spawn sets neither a working directory nor PWD, so the
+/// child used to inherit the process's directory, and under AppRun that is the
+/// mount.
+fn spawn_agent_process(
+    program: &Path,
+    args: &[String],
+    environment: &BTreeMap<String, String>,
+    dir: &Path,
+) -> std::io::Result<(
+    async_process::ChildStdin,
+    async_process::ChildStdout,
+    async_process::ChildStderr,
+    Child,
+)> {
+    let mut std_cmd = std::process::Command::new(program);
+    std_cmd
+        .args(args)
+        .envs(environment)
+        .env("PWD", dir)
+        .current_dir(dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        std_cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // CREATE_NO_WINDOW, as the crate's spawn sets it.
+        std_cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = async_process::Command::from(std_cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("Failed to open stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("Failed to open stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("Failed to open stderr"))?;
+    Ok((stdin, stdout, stderr, child))
+}
+
 /// The agent's program started through `/usr/bin/env`, which unsets each name
 /// the user environment lacks before it execs the program. `AcpAgentConfig`
 /// can add variables to the child but cannot remove the launcher's, and
@@ -1333,14 +1400,17 @@ fn run_connection(
     let command = command_for_process(command);
     #[cfg(unix)]
     let command = in_user_environment(command);
-    let agent = AcpAgent::new(
-        AcpAgentConfig::new(command.program)
-            .args(command.args)
-            .envs(sirio_env::for_child())
-            .env("TERM", "xterm-256color"),
-    );
-
-    let (stdin, stdout, stderr, child) = match agent.spawn_process() {
+    let mut environment = sirio_env::for_child();
+    environment.insert("TERM".to_string(), "xterm-256color".to_string());
+    // The directory the session is created for: the agent starts in it, as the
+    // session's own working directory, and never in the process's directory.
+    let spawned = match agent_start_dir(&cwd) {
+        Some(dir) => spawn_agent_process(&command.program, &command.args, &environment, &dir),
+        None => Err(std::io::Error::other(
+            "no absolute home directory to start the agent in",
+        )),
+    };
+    let (stdin, stdout, stderr, child) = match spawned {
         Ok(process) => process,
         Err(error) => {
             let _ = worker_tx.send(WorkerSignal::Startup(Err(AcpError::Transport(format!(
