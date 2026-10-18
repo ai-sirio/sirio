@@ -814,6 +814,31 @@ SCENARIOS = [
 ]
 
 
+def stop_hosts(run: Run) -> None:
+    """End the hosts the scenarios' instances started beside their databases.
+
+    A quit only detaches, so each host outlives its instance. Only a pid its own
+    state file names, and only while that pid is still a sirio-host, is signalled:
+    TERM, then KILL after 5 s.
+    """
+    for state in run.work.glob("*/host/host-v*.json"):
+        try:
+            pid = int(json.loads(state.read_text())["pid"])
+            comm = Path(f"/proc/{pid}/comm").read_text()
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if "sirio-host" not in comm:
+            continue
+        try:
+            os.kill(pid, 15)
+            for _ in range(50):
+                time.sleep(0.1)
+                os.kill(pid, 0)
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
 def build(run: Run) -> None:
     run.log("building sirio, ely_chat_seed and the probe")
     subprocess.run(
@@ -872,6 +897,7 @@ def main() -> int:
     finally:
         for instance in run.instances:
             instance.quit()
+        stop_hosts(run)
     (run.out / "summary.json").write_text(json.dumps({"results": run.results, "frames": run.frames}, indent=2))
     run.log("artifacts:")
     for name in ("transcript.log", "responses.jsonl", "summary.json", "scenarios"):
