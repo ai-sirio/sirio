@@ -146,7 +146,7 @@ impl DoubleClickAction {
     /// call otherwise fails; this is a graceful default; not an error.
     ///
     /// No `#[cfg]` seam needed here, unlike the rest of this wave's Linux-only
-    /// call sites: `Command::new("gsettings")` fails to spawn on any platform
+    /// call sites: `sirio_env::command("gsettings")` fails to spawn on any platform
     /// without that binary and is already caught by the `_ =>` arm below, so
     /// this compiles and degrades safely everywhere. That fallback happens to
     /// be exactly right on both other platforms, for different reasons: on
@@ -159,7 +159,7 @@ impl DoubleClickAction {
     /// reads), which a future macOS implementation should read instead of
     /// silently accepting the GNOME-shaped default.
     pub fn from_system() -> Self {
-        match std::process::Command::new("gsettings")
+        match sirio_env::command("gsettings")
             .args([
                 "get",
                 "org.gnome.desktop.wm.preferences",

@@ -499,6 +499,11 @@ pub fn find_executable_in_path_checked(
         }
     } else {
         for directory in std::env::split_paths(path) {
+            // A relative entry names a different directory from every working
+            // directory a launch can have, so it is never searched.
+            if !directory.is_absolute() {
+                continue;
+            }
             for variant in &variants {
                 if let Some(hit) = probe(directory.join(variant))? {
                     return Ok(Some(hit));

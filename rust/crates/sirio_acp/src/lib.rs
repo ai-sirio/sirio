@@ -1299,8 +1299,8 @@ fn agent_start_dir(session_cwd: &Path) -> Option<PathBuf> {
 }
 
 /// Starts the agent as `AcpAgent::spawn_process` does (a process group of its
-/// own, the environment it is given, piped stdio), in `dir`, with `PWD` naming
-/// `dir`. The crate's spawn sets neither a working directory nor PWD, so the
+/// own, exactly the environment it is given, piped stdio), in `dir`, with `PWD`
+/// naming `dir`. The crate's spawn sets neither a working directory nor PWD, so the
 /// child used to inherit the process's directory, and under AppRun that is the
 /// mount.
 fn spawn_agent_process(
@@ -1317,6 +1317,7 @@ fn spawn_agent_process(
     let mut std_cmd = std::process::Command::new(program);
     std_cmd
         .args(args)
+        .env_clear()
         .envs(environment)
         .env("PWD", dir)
         .current_dir(dir);
@@ -1349,41 +1350,6 @@ fn spawn_agent_process(
         .take()
         .ok_or_else(|| std::io::Error::other("Failed to open stderr"))?;
     Ok((stdin, stdout, stderr, child))
-}
-
-/// The agent's program started through `/usr/bin/env`, which unsets each name
-/// the user environment lacks before it execs the program. `AcpAgentConfig`
-/// can add variables to the child but cannot remove the launcher's, and
-/// `env -u` is the one way left to do it. Nothing is wrapped when the user
-/// environment holds every name the process has (or is not installed).
-#[cfg(unix)]
-fn in_user_environment(command: AgentCommand) -> AgentCommand {
-    // `AgentCommand` carries its arguments as text, so a program path that is
-    // not UTF-8 cannot be handed to `env`; it starts without the wrapper.
-    let Some(program) = command.program.to_str().map(str::to_owned) else {
-        return command;
-    };
-    // `run_connection` sets TERM on the agent after this wrapper, so unsetting
-    // it here would strip the value the agent is given.
-    let absent: Vec<String> = sirio_env::absent_from_user()
-        .into_iter()
-        .filter(|name| name != "TERM")
-        .collect();
-    if absent.is_empty() {
-        return command;
-    }
-    let mut args = Vec::with_capacity(2 * absent.len() + 2 + command.args.len());
-    for name in absent {
-        args.push("-u".to_string());
-        args.push(name);
-    }
-    args.push("--".to_string());
-    args.push(program);
-    args.extend(command.args);
-    AgentCommand {
-        program: PathBuf::from("/usr/bin/env"),
-        args,
-    }
 }
 
 // Pre-existing wiring, not a J4-ci change: bundling these into a params struct is a real
@@ -1435,8 +1401,6 @@ fn run_connection(
     let activity: ActivityClock = Arc::new(Mutex::new(std::time::Instant::now()));
     let attempted_program = command.program.clone();
     let command = command_for_process(command);
-    #[cfg(unix)]
-    let command = in_user_environment(command);
     let mut environment = sirio_env::for_child();
     environment.insert("TERM".to_string(), "xterm-256color".to_string());
     // The agent's PATH keeps only absolute entries, so its program is never found
@@ -3375,46 +3339,9 @@ mod tests {
         assert_eq!(
             agent.get("TERM"),
             Some(&"xterm-256color"),
-            "the variable the launch sets itself was unset by the wrapper"
+            "the variable the launch sets itself was cleared with the launcher's"
         );
         let _ = std::fs::remove_dir_all(&scratch);
-    }
-
-    /// A program that does not exist fails inside the `/usr/bin/env` wrapper,
-    /// which exits 127 and names the program on stderr. That is the diagnosis,
-    /// and it must reach the error the user reads, phrased as a launch failure
-    /// rather than as a dead transport: the chat classifies "transport closed"
-    /// as a disconnected agent, which offers Restart rather than Retry.
-    #[cfg(unix)]
-    #[test]
-    fn missing_agent_program_is_reported_as_a_launch_failure() {
-        // The map holds PATH only, so the wrapper is used for every other name.
-        // SAFETY: this is the only test in its process (nextest), so nothing else
-        // reads or writes the environment while it runs.
-        unsafe { std::env::set_var("SIRIO_ACP_LAUNCHER_ONLY", "from-launcher") };
-        let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
-        sirio_env::install(std::collections::BTreeMap::from([("PATH".to_string(), path)]));
-
-        let result = AcpClient::launch_with_timeout(
-            AgentCommand::new("/nonexistent-sirio-agent/agent"),
-            std::env::temp_dir(),
-            FIXTURE_STARTUP_TIMEOUT,
-        );
-        let error = match result {
-            Ok((mut client, _events)) => {
-                let _ = client.shutdown();
-                panic!("a program that does not exist unexpectedly started a session")
-            }
-            Err(error) => format!("{error:#}"),
-        };
-        assert!(
-            error.contains("nonexistent-sirio-agent"),
-            "the launch error must name the program, got {error}"
-        );
-        assert!(
-            !error.to_ascii_lowercase().contains("transport closed"),
-            "the launch error must not read as a dead transport, got {error}"
-        );
     }
 
     #[cfg(unix)]

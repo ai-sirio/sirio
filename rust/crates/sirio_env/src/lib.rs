@@ -25,7 +25,7 @@ pub const LAUNCHER_ONLY: [&str; 5] = ["APPIMAGE", "APPDIR", "ARGV0", "OWD", LAUN
 pub const FOR_CHILDREN: [&str; 1] = ["SIRIO_PANE_HOST_HOME"];
 
 /// Set per pane by whoever opens it, so never inherited.
-pub const PER_PANE: [&str; 1] = ["SIRIO_WORKTREE_ID"];
+pub const PER_PANE: [&str; 3] = ["SIRIO_WORKTREE_ID", "SIRIO_PANE_ID", "TILLER_PANE_ID"];
 
 static INSTALLED: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
@@ -457,6 +457,29 @@ mod tests {
                 .expect("installed")
                 .contains_key("SIRIO_WORKTREE_ID")
         );
+    }
+
+    /// A pane's id is its own: `Session::spawn` exports `SIRIO_PANE_ID` and
+    /// `TILLER_PANE_ID` for the pane it opens, after the environment is
+    /// applied. A sirioctl run in one pane, or an app launched from one, must
+    /// not pass that pane's id on to a child of another.
+    #[test]
+    fn a_pane_id_inherited_from_the_launching_pane_never_reaches_a_child() {
+        // SAFETY: a test process of its own under nextest, as above.
+        unsafe {
+            std::env::set_var("SIRIO_PANE_ID", "pane-inherited");
+            std::env::set_var("TILLER_PANE_ID", "pane-inherited");
+        }
+        assert!(!for_child().contains_key("SIRIO_PANE_ID"));
+        assert!(!for_child().contains_key("TILLER_PANE_ID"));
+        install(map(&[
+            ("PATH", "/usr/bin"),
+            ("SIRIO_PANE_ID", "pane-inherited"),
+            ("TILLER_PANE_ID", "pane-inherited"),
+        ]));
+        let user = installed().expect("installed");
+        assert!(!user.contains_key("SIRIO_PANE_ID"));
+        assert!(!user.contains_key("TILLER_PANE_ID"));
     }
 
     #[test]

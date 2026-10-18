@@ -1210,3 +1210,64 @@ fn opencode_global_plugin_honours_the_config_dir_overrides() {
     );
     assert!(home.tree().is_empty());
 }
+
+/// The directory `target`, written relative to the test's working directory,
+/// so a PATH entry spelled that way names the same place as `target` does.
+#[cfg(unix)]
+fn relative_to_working_directory(target: &Path) -> PathBuf {
+    let working = std::env::current_dir().expect("working directory");
+    let working: Vec<_> = working.components().collect();
+    let target_parts: Vec<_> = target.components().collect();
+    let common = working
+        .iter()
+        .zip(&target_parts)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = PathBuf::new();
+    for _ in common..working.len() {
+        relative.push("..");
+    }
+    for part in &target_parts[common..] {
+        relative.push(part);
+    }
+    relative
+}
+
+/// A relative PATH entry names a different directory from every launch's
+/// working directory, so it never finds a program, while the same directory
+/// spelled absolutely does. The entries are passed in, never set on the process.
+#[cfg(unix)]
+#[test]
+fn a_relative_path_entry_never_finds_a_program() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("sirio-agent-relative-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create fixture directory");
+    let program = root.join("x");
+    std::fs::write(&program, b"not launched").expect("write fixture");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("make fixture executable");
+
+    let absolute = std::env::join_paths([&root]).expect("join paths");
+    assert_eq!(
+        find_executable_in_path("x", &absolute),
+        Some(program.clone()),
+        "the control: the directory found by its absolute name"
+    );
+
+    let relative = relative_to_working_directory(&root);
+    assert!(relative.is_relative(), "{relative:?} must be relative for the test to mean anything");
+    let search = std::env::join_paths([PathBuf::from("."), relative]).expect("join paths");
+    assert_eq!(
+        find_executable_in_path("x", &search),
+        None,
+        "a relative PATH entry must never resolve a program, whatever the working directory"
+    );
+    assert!(
+        matches!(find_executable_in_path_checked("x", &search), Ok(None)),
+        "a skipped relative entry is a clean miss, not a probe error"
+    );
+
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
+}
