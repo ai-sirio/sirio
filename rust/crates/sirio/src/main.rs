@@ -1526,7 +1526,10 @@ enum WorkspaceAction {
         note: Option<&'static str>,
         asked: Entity<ChangeRequestTab>,
     },
-    InstallSkill(sirio_project::SkillInstallCommand),
+    /// Settings → Install Skill: writes Sirio's skill at the user level for
+    /// each agent (`sirio_agents::install_user_skills`) off the UI thread and
+    /// reports each location back to the Settings card.
+    InstallSkill,
     /// Settings → Install Hooks: the host writes every agent's user-global
     /// sirioctl hooks (`sirio_agents::install_global_hooks`) off the UI
     /// thread and reports each outcome back to the Settings card.
@@ -3774,32 +3777,6 @@ fn registry_cache_path(store: &sirio_registry::InstallStore) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("registry.json"))
 }
 
-/// The shell that runs the Settings → Install Skill command in a terminal
-/// tab, with the program resolved against the real PATH. The bare `npx` the
-/// provisioner names is an npm shim: on Windows it is `npx.cmd`, which the
-/// PTY's `CreateProcess` cannot infer from the name alone — the same PATHEXT
-/// resolution `agent_command_for` does for `opencode.cmd`.
-fn skill_install_shell(command: sirio_project::SkillInstallCommand) -> TerminalShell {
-    skill_install_shell_with(command, sirio_agents::find_executable_on_path)
-}
-
-/// [`skill_install_shell`] with the PATH lookup injected, so the resolution
-/// contract is testable without a real `npx` on this machine. An unresolved
-/// program keeps its bare name: the pane then reports the spawn failure
-/// itself, which is more honest than inventing a path.
-fn skill_install_shell_with(
-    command: sirio_project::SkillInstallCommand,
-    resolve: impl Fn(&str) -> Option<PathBuf>,
-) -> TerminalShell {
-    let program = resolve(&command.program)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or(command.program);
-    TerminalShell::WithArguments {
-        program,
-        args: command.args,
-    }
-}
-
 /// Builds the shell that runs an agent row's Install command (F-SET-18) —
 fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -> Option<&'a str> {
     (event.target.pane_id() == pane_id).then_some(event.url.as_str())
@@ -5594,8 +5571,8 @@ impl SirioWorkspace {
                                         path, agent, surface, prompt, relative, note, asked, window, cx,
                                     );
                                 }
-                                WorkspaceAction::InstallSkill(command) => {
-                                    workspace.open_skill_install_terminal(command, cx);
+                                WorkspaceAction::InstallSkill => {
+                                    workspace.begin_skill_install(cx);
                                 }
                                 WorkspaceAction::InstallHooks => {
                                     workspace.begin_global_hooks_install(cx);
@@ -17151,19 +17128,38 @@ impl SirioWorkspace {
     /// The full-window Settings route used by the status-bar affordance and
     /// by the control socket. Selecting a section is done on the Settings
     /// entity itself, so both doors render the same selected detail.
-    /// Settings → Install Skill: runs the installer in a new terminal tab
-    /// and closes the Settings surface, so the click lands the user on the
-    /// terminal where the install is running rather than on a screen that
-    /// only says so.
-    fn open_skill_install_terminal(
-        &mut self,
-        command: sirio_project::SkillInstallCommand,
-        cx: &mut Context<Self>,
-    ) {
-        self.add_terminal_tab_with_shell("Install Skill", skill_install_shell(command), None, cx);
-        if self.show_settings {
-            self.close_settings_surface(cx);
-        }
+    /// Settings → Install Skill: writes Sirio's skill for every agent on the
+    /// background executor (a few small files, no prompt) and hands each
+    /// location's outcome back to the Settings card. Nothing opens a terminal.
+    fn begin_skill_install(&mut self, cx: &mut Context<Self>) {
+        let report = |workspace: &mut Self, text: String, cx: &mut Context<Self>| {
+            workspace.settings.update(cx, |settings, cx| {
+                settings.set_skill_install_report(Some(text), cx);
+            });
+        };
+        let process: BTreeMap<String, String> = std::env::vars().collect();
+        let Some((home, environment)) = cli_install::skill_home_and_environment(&process) else {
+            report(
+                self,
+                "home directory not found: no HOME or USERPROFILE in the environment".into(),
+                cx,
+            );
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let summary = cx
+                .background_executor()
+                .spawn(async move {
+                    sirio_agents::install_user_skills(&home, &environment)
+                        .iter()
+                        .map(sirio_agents::UserSkillReport::summary_line)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| report(workspace, summary, cx));
+        })
+        .detach();
     }
 
     /// Settings → Install Hooks: writes every agent's user-global sirioctl
@@ -22910,6 +22906,16 @@ fn replay_pane_events<T>(
     tree
 }
 
+/// `prepare` writes the worktree's copy of Sirio's skill for Codex, Pi and the
+/// agents that share their folder. That file is Sirio's, not the user's, so it
+/// stays out of git the way the hand-off's context folder does. Only untracked
+/// files are affected, and a failure is logged rather than stopping the pane.
+fn keep_agent_skill_out_of_git(worktree: &Path) {
+    if let Err(error) = sirio_git::exclude(worktree, ".agents/skills/sirio/") {
+        eprintln!("[sirio] agent skill not kept out of git: {error}");
+    }
+}
+
 /// The shell a new agent starts under `pane_key`: `prepare` writes the
 /// worktree's hooks for that pane, then the adapter's command with its prompt.
 /// The warning names what could not be written, and the command still runs.
@@ -22932,6 +22938,7 @@ fn fresh_agent_shell(
     {
         warning = Some(format!("hooks not written: {error}"));
     }
+    keep_agent_skill_out_of_git(Path::new(worktree));
     let command = adapter.command_with_prompt(worktree, pane_key, &sirioctl, prompt);
     let (program, args) = command_shell_invocation(&command);
     (TerminalShell::WithArguments { program, args }, warning)
@@ -23066,6 +23073,7 @@ fn restored_agent_shell(
             adapter.display_name()
         );
     }
+    keep_agent_skill_out_of_git(Path::new(&worktree_path));
     let command = resumable
         .get(pane_key)
         .and_then(|session_ref| {
@@ -26074,9 +26082,9 @@ fn main() {
                         })
                         .on_install_skill({
                             let pending_actions = pending_for_settings.clone();
-                            move |command| {
+                            move || {
                                 if let Ok(mut actions) = pending_actions.lock() {
-                                    actions.push(WorkspaceAction::InstallSkill(command));
+                                    actions.push(WorkspaceAction::InstallSkill);
                                 }
                             }
                         })
@@ -28029,27 +28037,6 @@ done
                         .child("terminal chord fixture"),
                 )
         }
-    }
-
-    /// The skills CLI ships as an npm shim: on Windows `npx` is `npx.cmd`,
-    /// which `CreateProcess` cannot infer from the bare name — the PTY child
-    /// must be handed the PATH-resolved program, the same way
-    /// `agent_command_for` resolves `opencode.cmd`. Handing it the bare name
-    /// is the "Install Skill does nothing" defect: the pane shows a spawn
-    /// failure instead of the installer.
-    #[test]
-    fn skill_install_runs_the_path_resolved_program() {
-        let command = sirio_project::agent_skill_install_command();
-        let resolved = PathBuf::from(r"C:\Program Files\nodejs\npx.cmd");
-        let shell = skill_install_shell_with(command, |program| {
-            assert_eq!(program, "npx", "the bare name is what gets resolved");
-            Some(resolved.clone())
-        });
-        let TerminalShell::WithArguments { program, args } = shell else {
-            panic!("skill installation must run as a terminal command");
-        };
-        assert_eq!(program, resolved.to_string_lossy());
-        assert_eq!(args.first().map(String::as_str), Some("skills"));
     }
 
     /// F-TERM-UI-02: a real `TerminalLinkEvent`, fed through the real
@@ -32825,50 +32812,6 @@ done
             palette.left() < center.left(),
             "the command palette must extend beyond the overflow-hidden center panel"
         );
-    }
-
-    /// Install Skill hands the installer to a terminal tab — one the user
-    /// cannot see while the Settings surface still covers the workspace.
-    /// The hand-off must close Settings too, so the click lands the user on
-    /// the terminal where the install is running, not on a screen that
-    /// merely says so.
-    #[gpui::test]
-    async fn install_skill_opens_its_terminal_in_front_of_settings(cx: &mut TestAppContext) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("palette workspace root")
-        });
-
-        workspace.update(&mut cx, |workspace, cx| {
-            workspace.open_settings(None, cx);
-            assert!(workspace.show_settings, "Settings covers the workspace");
-            // A program that cannot exist: the pane reports the spawn failure
-            // and the tab still opens, so the test needs no npm on this box
-            // and never runs a real install.
-            workspace.open_skill_install_terminal(
-                sirio_project::SkillInstallCommand {
-                    program: "sirio-test-no-such-installer".into(),
-                    args: vec!["--version".into()],
-                },
-                cx,
-            );
-        });
-        cx.run_until_parked();
-
-        workspace.read_with(&cx, |workspace, _| {
-            assert!(
-                !workspace.show_settings,
-                "Settings closes so the terminal is what the user sees"
-            );
-            let active = &workspace.tabs[workspace.active_tab];
-            assert_eq!(active.title, "Install Skill");
-        });
     }
 
     /// The palette's filter row takes typed characters through

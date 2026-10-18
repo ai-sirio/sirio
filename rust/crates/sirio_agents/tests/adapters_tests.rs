@@ -909,6 +909,21 @@ fn claude_prepare_installs_the_bundled_skill_with_its_marker() {
 }
 
 #[test]
+fn codex_and_pi_prepare_write_the_skill() {
+    let bundled = include_str!("../../../../skills/sirio/SKILL.md");
+    for adapter in [&CodexAdapter as &dyn AgentAdapter, &PiAdapter] {
+        let worktree = TempDir::new();
+        adapter
+            .prepare(worktree.path().to_str().unwrap(), PANE_ID, SIRIOCTL)
+            .expect("prepare");
+
+        let skill = std::fs::read_to_string(worktree.path().join(".agents/skills/sirio/SKILL.md"))
+            .expect("prepare writes the skill inside the worktree");
+        assert_eq!(skill, bundled, "{} writes the bundled skill", adapter.id());
+    }
+}
+
+#[test]
 fn claude_prepare_refuses_to_run_over_an_unmanaged_skill_file() {
     let worktree = TempDir::new();
     let destination = worktree.path().join(".claude/skills/sirio/SKILL.md");

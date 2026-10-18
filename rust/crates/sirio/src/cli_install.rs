@@ -380,6 +380,7 @@ pub(crate) fn ensure_at_startup(
         .spawn(move || {
             let (outcome, link) = copy_and_link(&current_exe, &environment, false);
             store_outcomes(outcome, link);
+            refresh_user_skills_at_startup(&environment);
             // The receiver is gone only if the app is, and then nothing is left to tell.
             let _ = sender.send(());
         });
@@ -387,6 +388,41 @@ pub(crate) fn ensure_at_startup(
         eprintln!("[sirio] sirioctl copy not started: {error}");
     }
     started
+}
+
+/// Refreshes the user-level skill copies Sirio already wrote, so an update that
+/// changed the bundled skill reaches the user's agents too (spec §5.7). Only the
+/// copies that exist are touched: a user who never clicked Install Skill gets
+/// nothing created. A failure is logged here and never stops the launch.
+fn refresh_user_skills_at_startup(environment: &BTreeMap<String, String>) {
+    let Some((home, skill_environment)) = skill_home_and_environment(environment) else {
+        eprintln!("[skill] user-level skills not refreshed: no home directory");
+        return;
+    };
+    for report in sirio_agents::refresh_user_skills(&home, &skill_environment) {
+        if report.outcome.is_err() {
+            eprintln!("[skill] {}", report.summary_line());
+        }
+    }
+}
+
+/// The home directory and environment the user-level skills are written from,
+/// read the way the startup link reads HOME: the user environment once the launch
+/// recorded it, else the process's. Windows has no HOME, so USERPROFILE is read
+/// there. `None` when no absolute home directory is known.
+pub(crate) fn skill_home_and_environment(
+    process: &BTreeMap<String, String>,
+) -> Option<(PathBuf, BTreeMap<String, String>)> {
+    let user = sirio_env::installed();
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home = user
+        .and_then(|user| user.get(key))
+        .or_else(|| process.get(key))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())?;
+    let environment = user.cloned().unwrap_or_else(|| process.clone());
+    Some((home, environment))
 }
 
 /// Makes the stable copy, then the PATH link to it, and returns both. The copy's

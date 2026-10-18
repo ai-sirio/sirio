@@ -18,6 +18,7 @@ mod safe_write;
 mod session_validator;
 mod shell_quote;
 mod transcript;
+mod user_skill;
 
 pub use claude::ClaudeCodeAdapter;
 pub use codex::CodexAdapter;
@@ -29,6 +30,9 @@ pub use pi::PiAdapter;
 pub use session_validator::AgentSessionValidator;
 pub use shell_quote::{json_string_literal, shell_quote};
 pub use transcript::{ClaudeTranscriptSource, CodexTranscriptSource};
+pub use user_skill::{
+    UserSkillReport, install_user_skills, refresh_user_skills, user_skill_paths,
+};
 
 /// The result of resolving one provider's CLI on the current `PATH`.
 ///
