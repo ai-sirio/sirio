@@ -18519,6 +18519,7 @@ impl SirioWorkspace {
     }
 
     /// `surface.editor.find_step forward=`: the next match, or the previous one.
+    /// Refused while the code is not shown, as the step itself does nothing then.
     fn control_editor_find_step(
         &mut self,
         forward: bool,
@@ -18530,6 +18531,9 @@ impl SirioWorkspace {
             .ok_or_else(|| "no file tab is active".to_string())?;
         if view.read(cx).find_matches().is_none() {
             return Err("find is not open".to_string());
+        }
+        if !view.read(cx).code_shown() {
+            return Err("the code editor is not drawn: the file is loading or in Preview".to_string());
         }
         view.update(cx, |view, cx| view.find_step(forward, window, cx));
         Ok(Self::find_fields(view.read(cx)))

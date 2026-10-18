@@ -1215,7 +1215,7 @@ scenario_find() {
   expect_state find_error ""
 
   # The capture: the replace row open, the minimap on, the third match ("FN" on
-  # line 4) current, below the box that covers the first lines.
+  # line 4) current, the find bar docked above the code.
   ctl surface editor pref --key=minimap --value=true >/dev/null
   ctl surface editor select --ranges=0..0 >/dev/null
   ctl surface editor find --query=fn --replace=Y >/dev/null

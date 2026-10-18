@@ -3863,7 +3863,9 @@ mod tests {
     //   code onto the find bar.
     // - The bar floats over the code instead of sitting above it: it hides the
     //   first lines (and the read-only banner at the top of the code), and
-    //   closing it leaves the code at a different height than it had.
+    //   closing it leaves the code at a different height than it had. No unit
+    //   test guards it; the editor E2E's `find-open` capture and the flex column
+    //   in `render_content` show the bar docked above the code.
     // - Find pressed while typing in the query takes the code's selection as
     //   the query, which after any step is the current match, and so replaces
     //   a pattern such as `fo+` with the text it matched.

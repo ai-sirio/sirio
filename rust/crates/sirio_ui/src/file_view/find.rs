@@ -4,27 +4,41 @@
 //! them: which matches the query has in the code editor's text, which one is
 //! current, and the washes that show them.
 //!
-//! How it can fail. Each failure has a test in `file_view.rs`'s `tests`.
+//! How it can fail, and what guards each one: a unit test in `file_view.rs`'s
+//! `tests`, named under its failure, or nothing.
 //!
 //! - Replace-one leaves the matches where they stood before the edit, so a
 //!   later match is replaced at an offset the earlier replacement moved. The
 //!   test puts a multi-byte character before the matches and a replacement
-//!   longer than the match.
+//!   longer than the match. Test:
+//!   `replacing_one_match_moves_on_to_the_next_and_keeps_the_later_ones_right`.
 //! - Replace-one with a replacement that holds the query finds that text
-//!   again and never moves on (`x` to `xx`).
-//! - Replace-all is one edit per match, so it takes one undo per match.
-//! - A text change in the code leaves the matches, and the washes, where the
-//!   old text had them.
+//!   again and never moves on (`x` to `xx`). Same test.
+//! - Replace-all is one edit per match, so it takes one undo per match. Test:
+//!   `replacing_every_match_is_one_undo_step`.
+//! - A text change in the code leaves the matches where the old text had
+//!   them. Test: `an_edit_in_the_code_recomputes_the_matches`, which checks the
+//!   count only. No test or E2E assertion checks the washes.
 //! - Escape in the code with find open collapses the cursors instead of
 //!   closing find, or closes find and the hunk together, or swallows the
-//!   Escape that should collapse the cursors once nothing is open.
+//!   Escape that should collapse the cursors once nothing is open. Test:
+//!   `escape_closes_find_then_a_hunk_and_leaves_the_cursors_until_none_is_open`.
 //! - Escape in the query field closes find but leaves the keyboard in
-//!   nothing, so the next key goes nowhere.
-//! - The pointer on the box reaches the code under it: a diagnostic line pops
-//!   its card for hidden text, and a card already drawn stays.
+//!   nothing, so the next key goes nowhere. Test:
+//!   `escape_in_the_query_closes_find_and_hands_the_keyboard_to_the_code`.
+//! - A card already drawn for the code stays when the pointer slides from the
+//!   code onto the bar. Test:
+//!   `the_pointer_sliding_from_the_code_onto_the_find_bar_drops_the_card`.
 //! - Find pressed in the query field, or with the current match selected in
 //!   the code, replaces the pattern being typed with the text it matched.
+//!   Tests: `the_find_key_in_the_query_selects_it_and_never_reseeds_it` and
+//!   `a_selection_that_is_the_current_match_is_not_a_new_query`.
 //! - A selection seeds a regular expression verbatim, so `f(` is an error.
+//!   Test: `a_selection_seeds_a_regular_expression_query_literally`.
+//! - Find steps, or replaces, while the code is not shown (Preview, a file
+//!   still loading) act on code that is not drawn. `find_step` and
+//!   `replace_matches` refuse there. Nothing guards it: no test was asked for,
+//!   and the E2E never does find in Preview.
 
 use std::ops::Range;
 
@@ -228,8 +242,12 @@ impl FileView {
     }
 
     /// Moves to the next match (`forward`) or the previous one, wrapping, and
-    /// selects it in the code. Does nothing without a match.
+    /// selects it in the code. Does nothing without a match, or while the code
+    /// is not shown.
     pub fn find_step(&mut self, forward: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.code_shown() {
+            return;
+        }
         let Some(code) = self.code_editor.clone() else {
             return;
         };
@@ -268,26 +286,24 @@ impl FileView {
     /// first one that starts at or after the end of the text just written (so
     /// a replacement that holds the query is not found again), wrapping to the
     /// first. Answers how many matches were replaced: `Ok(0)` when there was
-    /// none to replace, `Err` when the call is refused: find is not open, or
-    /// the code takes no edits.
+    /// none to replace, `Err` when the call is refused: find is not open, the
+    /// code is not shown (the file is loading or in Preview), or the code takes
+    /// no edits.
     pub fn replace_matches(
         &mut self,
         all: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<usize, &'static str> {
-        if self.find.is_none() {
-            return Err("find is not open");
-        }
-        if !self.find_can_replace(cx) {
-            return Err("the file is read-only");
-        }
-        let Some(code) = self.code_editor.clone() else {
-            return Err("the code editor is not drawn");
-        };
         let Some(find) = self.find.as_ref() else {
             return Err("find is not open");
         };
+        let Some(code) = self.code_editor.clone().filter(|_| self.code_shown()) else {
+            return Err("the code is not shown");
+        };
+        if !self.find_can_replace(cx) {
+            return Err("the file is read-only");
+        }
         // `edit` takes text as it is, and the code never holds a carriage return.
         let with = find
             .replacement
@@ -479,9 +495,10 @@ impl FileView {
         // hover card, which the bar would otherwise leave drawn.
         // The bar spans the code's width with the widget right-aligned in it;
         // the widget shrinks in a pane narrower than its own fixed width
-        // rather than running off the left edge, and the bar's padding is
-        // small so the query field keeps what the widget's other controls
-        // leave of a narrow pane.
+        // rather than running off the left edge, and `overflow_hidden` clips
+        // what even the shrunken widget cannot fit, so nothing paints past the
+        // pane's edge. The bar's padding is small so the query field keeps what
+        // the widget's other controls leave of a narrow pane.
         let theme = Theme::get(cx);
         Some(
             div()
@@ -490,6 +507,7 @@ impl FileView {
                 .w_full()
                 .flex()
                 .justify_end()
+                .overflow_hidden()
                 .px(px(4.0))
                 .py(px(4.0))
                 .bg(theme.ely.surface)
