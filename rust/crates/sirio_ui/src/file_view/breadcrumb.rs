@@ -7,13 +7,18 @@
 //!
 //! The symbols come from the app (`FileView::set_symbols`), which asks the
 //! file's language server. With none, the row is the path alone. The row is
-//! drawn in Code and in Preview, since it names the file, and not at all for a
-//! snapshot: a revision has no worktree path or server, and its own bar names it.
+//! drawn in Code and in Preview, since it names the file, but only Code names
+//! symbols: Preview hides the code editor, so a caret there is not what the
+//! reader is looking at and a press on its symbol would move nothing visible.
+//! It is not drawn at all for a snapshot: a revision has no worktree path or
+//! server, and its own bar names it. In a narrow pane the directories give way
+//! first (the leading ones are cut with an ellipsis), then the file's name and
+//! the symbols are what stays.
 
 use gpui::{AnyElement, Context, Entity, prelude::*, px};
 use sirio_theme::Theme;
 
-use super::FileView;
+use super::{FileView, MarkdownMode};
 use crate::editor::LoadStatus;
 use crate::outline::OutlineSymbol;
 
@@ -22,10 +27,21 @@ use crate::outline::OutlineSymbol;
 /// last, so a symbol "encloses" the caret from its own line until a symbol at
 /// the same depth or a shallower one starts. A function that ended above the
 /// caret is still named while nothing else has begun.
+///
+/// A server need not sort its `DocumentSymbol`s or step one level at a time, so
+/// the walk is by line (stable: symbols on one line keep the order they came
+/// in) and a symbol closes whatever in the chain is as deep as itself or deeper.
 pub(super) fn chain(symbols: &[OutlineSymbol], caret_line: usize) -> Vec<&OutlineSymbol> {
+    let mut before: Vec<&OutlineSymbol> = symbols
+        .iter()
+        .filter(|symbol| symbol.line <= caret_line)
+        .collect();
+    before.sort_by_key(|symbol| symbol.line);
     let mut found: Vec<&OutlineSymbol> = Vec::new();
-    for symbol in symbols.iter().filter(|symbol| symbol.line <= caret_line) {
-        found.truncate(symbol.depth);
+    for symbol in before {
+        while found.last().is_some_and(|last| last.depth >= symbol.depth) {
+            found.pop();
+        }
         found.push(symbol);
     }
     found
@@ -41,15 +57,6 @@ pub(super) struct Crumb {
 
 /// The separator between parts, as the row draws it and the state reads it.
 const SEPARATOR: &str = " › ";
-
-/// The zero-based line `offset` is on.
-fn line_of(text: &str, offset: usize) -> usize {
-    let end = offset.min(text.len());
-    text.as_bytes()[..end]
-        .iter()
-        .filter(|byte| **byte == b'\n')
-        .count()
-}
 
 impl FileView {
     /// The symbols of this file, as the app's language server last gave them.
@@ -78,8 +85,8 @@ impl FileView {
         let Some(code) = &self.code_editor else {
             return false;
         };
-        let code = code.read(cx);
-        let line = line_of(code.text(), code.primary().head);
+        // `position` is a search over the buffer's line starts and counts from one.
+        let line = code.read(cx).position().0.saturating_sub(1);
         let moved = line != self.caret_line;
         self.caret_line = line;
         moved
@@ -87,7 +94,7 @@ impl FileView {
 
     /// The breadcrumb's parts in drawing order: the path's, then the symbols
     /// around the caret. Empty while there is nothing to name: no file loaded,
-    /// or a snapshot.
+    /// or a snapshot; in Markdown Preview the path alone.
     pub(super) fn breadcrumb_crumbs(&self) -> Vec<Crumb> {
         let loaded = self
             .editor()
@@ -111,10 +118,16 @@ impl FileView {
                 line: None,
             })
             .collect();
-        crumbs.extend(chain(&self.symbols, self.caret_line).into_iter().map(|symbol| Crumb {
-            label: symbol.name.clone(),
-            line: Some(symbol.line),
-        }));
+        if self.effective_mode() != MarkdownMode::Preview {
+            crumbs.extend(
+                chain(&self.symbols, self.caret_line)
+                    .into_iter()
+                    .map(|symbol| Crumb {
+                        label: symbol.name.clone(),
+                        line: Some(symbol.line),
+                    }),
+            );
+        }
         crumbs
     }
 
@@ -140,6 +153,11 @@ impl FileView {
             .line
             .ok_or_else(|| format!("\"{}\" is part of the path, not a symbol", crumb.label))?;
         self.reveal_at(line, cx);
+        // The code editor's own notification reaches the observer after this
+        // returns; the caller (the socket's reply) reads the breadcrumb now.
+        if self.refresh_caret_line(cx) {
+            cx.notify();
+        }
         Ok(())
     }
 
@@ -151,6 +169,8 @@ impl FileView {
     ) -> Option<AnyElement> {
         let crumbs = self.breadcrumb_crumbs();
         let last = crumbs.len().checked_sub(1)?;
+        let path_parts = crumbs.iter().filter(|crumb| crumb.line.is_none()).count();
+        let separator = || gpui::div().flex_none().px(px(2.0)).child("›");
         let mut row = gpui::div()
             .id("file-breadcrumb")
             .debug_selector(|| "file-breadcrumb".to_owned())
@@ -169,10 +189,38 @@ impl FileView {
             .bg(theme.ely.surface)
             .text_size(theme.typography.footnote)
             .text_color(theme.ely.fg_muted);
+        // The path is one child that shrinks: the directories are a single
+        // text cut with an ellipsis when the pane is narrow, the file's name
+        // after them is never cut. The symbols stay as wide as they are.
+        let mut path = gpui::div()
+            .min_w(px(0.0))
+            .flex_shrink(1.0)
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .overflow_hidden();
+        let directories: Vec<&str> = crumbs[..path_parts.saturating_sub(1)]
+            .iter()
+            .map(|crumb| crumb.label.as_str())
+            .collect();
+        if !directories.is_empty() {
+            path = path
+                .child(
+                    gpui::div()
+                        .id("file-crumb-directories")
+                        .debug_selector(|| "file-crumb-directories".to_owned())
+                        .min_w(px(0.0))
+                        .flex_shrink(1.0)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .px(px(4.0))
+                        .child(directories.join(SEPARATOR)),
+                )
+                .child(separator());
+        }
+        let mut symbols: Vec<AnyElement> = Vec::new();
         for (index, crumb) in crumbs.into_iter().enumerate() {
-            if index > 0 {
-                row = row.child(gpui::div().flex_none().px(px(2.0)).child("›"));
-            }
             let color = if index == last {
                 theme.ely.fg
             } else {
@@ -185,22 +233,30 @@ impl FileView {
                 .px(px(4.0))
                 .rounded(theme.radii.control)
                 .text_color(color);
-            row = row.child(match crumb.line {
+            match crumb.line {
                 Some(_) => {
                     let entity = entity.clone();
-                    part.cursor_pointer()
-                        .hover(|style| style.bg(theme.ely.hover))
-                        .on_click(move |_, _, cx| {
-                            entity.update(cx, |view, cx| {
-                                // A crumb that went with the last refresh refuses.
-                                let _ = view.press_crumb(index, cx);
-                            });
-                        })
-                        .child(crumb.label)
+                    symbols.push(separator().into_any_element());
+                    symbols.push(
+                        part.cursor_pointer()
+                            .hover(|style| style.bg(theme.ely.hover))
+                            .on_click(move |_, _, cx| {
+                                entity.update(cx, |view, cx| {
+                                    // A crumb that went with the last refresh refuses.
+                                    let _ = view.press_crumb(index, cx);
+                                });
+                            })
+                            .child(crumb.label)
+                            .into_any_element(),
+                    );
                 }
-                None => part.child(crumb.label),
-            });
+                // Only the file's own name is drawn here; the directories are
+                // already in the one text above.
+                None if index + 1 == path_parts => path = path.child(part.child(crumb.label)),
+                None => {}
+            }
         }
+        row = row.child(path).children(symbols);
         Some(row.into_any_element())
     }
 }
@@ -222,6 +278,12 @@ mod tests {
     //!    of one impl, as if the caret were in each.
     //! 6. A symbol at the caret's own line is left out, so a jump to a symbol
     //!    lands the caret on it and the breadcrumb does not name it.
+    //! 7. A server that does not sort its children (`[A, alpha at 3, zeta at
+    //!    1]`) is read in the order it sent them: the caret at line 3 is named
+    //!    `zeta`, the last one sent, though `alpha` is the later symbol.
+    //! 8. A depth that jumps by more than one (`[A at 0, C at 2, D at 2]`)
+    //!    keeps the sibling `C` beside `D`, because the chain is cut by index
+    //!    (`truncate(depth)`) and not by the depth of what is already in it.
 
     use super::chain;
     use crate::outline::{OutlineKind, OutlineSymbol};
@@ -274,6 +336,20 @@ mod tests {
         let symbols = outline();
         assert_eq!(names(&chain(&symbols, 13)), ["impl Foo", "second"]);
         assert_eq!(names(&chain(&symbols, 22)), ["tail"]);
+    }
+
+    #[test]
+    fn symbols_are_read_in_line_order_whatever_order_they_come_in() {
+        let symbols = vec![symbol("A", 0, 0), symbol("alpha", 3, 1), symbol("zeta", 1, 1)];
+        assert_eq!(names(&chain(&symbols, 3)), ["A", "alpha"]);
+        assert_eq!(names(&chain(&symbols, 2)), ["A", "zeta"]);
+    }
+
+    #[test]
+    fn a_depth_that_jumps_still_closes_its_sibling() {
+        let symbols = vec![symbol("A", 0, 0), symbol("C", 1, 2), symbol("D", 2, 2)];
+        assert_eq!(names(&chain(&symbols, 2)), ["A", "D"]);
+        assert_eq!(names(&chain(&symbols, 1)), ["A", "C"]);
     }
 
     #[test]
