@@ -373,6 +373,58 @@ fn crlf_files_diff_cleanly() {
     assert_eq!(diff.deletions, 1);
 }
 
+/// A real git, through `diff_entry`: a deleted `-- comment` line is a row of the
+/// diff (git prints it as `--- comment`).
+#[test]
+fn a_deleted_line_that_looks_like_a_file_header_keeps_its_row() {
+    let repo = make_repo();
+    write(repo.path(), "q.sql", b"select 1;\n-- comment\nselect 2;\n");
+    git(repo.path(), &["add", "q.sql"]);
+    git(repo.path(), &["commit", "-m", "sql"]);
+    write(repo.path(), "q.sql", b"select 1;\nselect 2;\n");
+
+    let snapshot = status(repo.path()).expect("status runs");
+    let entry = entry_for(&snapshot, "q.sql");
+    let diff = diff_entry(repo.path(), entry, sirio_git::DEFAULT_CONTEXT_LINES).expect("diff runs");
+
+    assert_eq!(diff.deletions, 1);
+    let deleted: Vec<_> = diff.hunks[0]
+        .lines
+        .iter()
+        .filter(|line| line.origin == DiffOrigin::Deletion)
+        .map(|line| line.content.as_str())
+        .collect();
+    assert_eq!(deleted, vec!["-- comment"]);
+}
+
+/// The pathspec is a path, not a pattern: a file named `a*.txt` must not drag its
+/// neighbour `ab.txt` into its diff.
+#[test]
+fn a_path_with_glob_characters_diffs_only_itself() {
+    let repo = make_repo();
+    write(repo.path(), "a*.txt", b"star\n");
+    write(repo.path(), "ab.txt", b"plain\n");
+    git(repo.path(), &["add", "-A"]);
+    git(repo.path(), &["commit", "-m", "two files"]);
+    write(repo.path(), "a*.txt", b"star changed\n");
+    write(repo.path(), "ab.txt", b"plain changed\n");
+
+    let snapshot = status(repo.path()).expect("status runs");
+    let entry = entry_for(&snapshot, "a*.txt");
+    let diff = diff_entry(repo.path(), entry, sirio_git::DEFAULT_CONTEXT_LINES).expect("diff runs");
+
+    let contents: Vec<_> = diff
+        .hunks
+        .iter()
+        .flat_map(|hunk| hunk.lines.iter().map(|line| line.content.as_str()))
+        .collect();
+    assert_eq!(
+        contents,
+        vec!["star", "star changed"],
+        "ab.txt leaked into a*.txt"
+    );
+}
+
 #[test]
 fn conflicted_file_is_reported_as_unmerged() {
     let repo = make_conflicted_repo();
