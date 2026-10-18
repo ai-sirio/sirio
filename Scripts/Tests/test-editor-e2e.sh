@@ -69,6 +69,16 @@ set -eEuo pipefail
 #                     server; the full set in a pane with room (sidebar and right panel
 #                     hidden) and the compact set in narrower ones, with a long branch
 #                     name shortened and the server whole; captured
+#   status_actions   the row's four interactions, through the verb the popovers share their
+#                     functions with (`surface editor status`) and, for the popovers
+#                     themselves, a real click and real keys: the line ending (CRLF is an
+#                     unsaved change, and a save writes it on every line; back to LF); the
+#                     indent (spaces or tabs, and a Tab, a Shift-Tab and a settings change
+#                     as that tab sees them); the language, colour only (the server and its
+#                     requests are untouched, two captures differ); go to line (a line, past
+#                     the end, a word and zero); a snapshot's refusals and a Markdown
+#                     Preview's; one popover at a time, Escape and Enter, focus back in the
+#                     code; each popover captured open
 #   find              Find over findme.txt: the match count against grep (case-insensitive,
 #                     then case-sensitive), two steps forward and one back, a pattern that
 #                     does not compile, close; captured with the replace row open and the
@@ -1859,6 +1869,264 @@ TOML
     || fail "$SCENARIO: secondaryVisible is $(layout_field secondaryVisible), expected $secondary_before"
 }
 
+# `status` is refused with a message naming WHY (or its first words): the verb
+# answers an error and the editor is left as it was.
+expect_status_refused() { # needle verb-args...
+  local needle="$1" out
+  shift
+  if out="$("$CTL" surface editor status "$@" 2>&1)"; then
+    fail "$SCENARIO: status $* was accepted, expected an error naming '$needle': $out"
+  fi
+  case "$out" in
+    *"$needle"*) echo "OK: status $* refused: $(printf '%s' "$out" | head -n 1 | cut -c1-200)" ;;
+    *) fail "$SCENARIO: status $* answered '$out', expected an error naming '$needle'" ;;
+  esac
+}
+
+# Where the status row's items sit in the window of CLICK_WINDOW when the
+# sidebar and the right panel are hidden and main.rs is open in Rust with LF
+# and Spaces: 4 (measured on the captures this scenario takes; a window of any
+# other size is refused by click_at).
+STATUS_CURSOR_ITEM=(1212 775)
+STATUS_INDENT_ITEM=(1274 775)
+STATUS_LINE_ENDING_ITEM=(1376 775)
+STATUS_LANGUAGE_ITEM=(1412 775)
+# The two rows of the line ending's panel.
+STATUS_LF_ROW=(1310 702)
+STATUS_CRLF_ROW=(1318 733)
+
+scenario_status_actions() {
+  local eol="$WT/status-eol.txt" ind="$WT/status-ind.txt" main="$WT/main.rs"
+  local tabs_before secondary_before count lines crlf offset mark last sha
+  tabs_before="$(tab_count)"
+  secondary_before="$(layout_field secondaryVisible)"
+
+  # ---- the line ending: an unsaved change, written on every line by a save
+  printf 'one\ntwo\nthree\n' >"$eol"
+  open_file "$eol"
+  expect_state state loaded
+  expect_status eol LF
+  expect_state dirty false
+  ctl surface editor status --item=line_ending --value=crlf >/dev/null
+  expect_status eol CRLF
+  expect_state line_ending crlf
+  expect_state dirty true
+  ctl surface editor save >/dev/null
+  expect_state dirty false
+  lines="$(wc -l <"$eol" | tr -d ' ')"
+  crlf="$(grep -c $'\r$' "$eol" || true)"
+  [ "$lines" = 3 ] && [ "$crlf" = 3 ] \
+    || fail "$SCENARIO: after CRLF and a save the file has $lines lines and $crlf end in CR, expected 3 and 3"
+  echo "OK: CRLF is an unsaved change, and the save wrote it on all $lines lines"
+  ctl surface editor status --item=line_ending --value=LF >/dev/null
+  expect_status eol LF
+  expect_state dirty true
+  ctl surface editor save >/dev/null
+  expect_state dirty false
+  crlf="$(grep -c $'\r$' "$eol" || true)"
+  [ "$crlf" = 0 ] || fail "$SCENARIO: back to LF and saved, $crlf lines still end in CR"
+  echo "OK: back to LF, saved: no line ends in CR"
+  expect_status_refused "not a line ending" --item=line_ending --value=cr
+  expect_status eol LF
+
+  # ---- the indent: what a Tab inserts, and what follows the settings
+  printf 'abc\n' >"$ind"
+  open_file "$ind"
+  expect_state state loaded
+  ctl surface editor select --ranges=0..0 >/dev/null
+  expect_status indent "Spaces: 4"
+  ctl surface editor pref --key=tabSize --value=8 >/dev/null
+  expect_status indent "Spaces: 8"
+  echo "OK: a tab with no indent of its own follows the Editor setting"
+  ctl surface editor status --item=indent --value=spaces:2 >/dev/null
+  expect_status indent "Spaces: 2"
+  ctl surface editor pref --key=tabSize --value=4 >/dev/null
+  sleep 1
+  expect_status indent "Spaces: 2"
+  echo "OK: a tab with an indent of its own keeps it when the setting changes"
+  ctl surface editor status --item=indent --value=tabs:4 >/dev/null
+  expect_status indent "Tab Size: 4"
+  ctl surface editor keys --keys=tab >/dev/null
+  expect_state text "$(printf '\tabc\\n')"
+  capture status-indent-tab
+  ctl surface editor keys --keys=shift-tab >/dev/null
+  expect_state text 'abc\n'
+  echo "OK: with tabs, Tab inserts a tab character and Shift-Tab takes it off"
+  ctl surface editor status --item=indent --value=spaces:2 >/dev/null
+  expect_status indent "Spaces: 2"
+  ctl surface editor keys --keys=tab >/dev/null
+  expect_state text '  abc\n'
+  echo "OK: with two spaces, Tab inserts two spaces"
+  ctl surface editor save >/dev/null
+  expect_state dirty false
+  expect_status_refused "not an indent" --item=indent --value=tabs:0
+  expect_status_refused "not an indent" --item=indent --value=spaces:99
+  expect_status_refused "not an indent" --item=indent --value=eight
+  expect_status indent "Spaces: 2"
+
+  # ---- the language: colour only
+  open_file "$main"
+  expect_state state loaded
+  ctl surface editor select --ranges=0..0 >/dev/null
+  expect_status language Rust
+  expect_status lsp fake-lsp:ready
+  capture status-language-rust
+  mark="$(lsp_mark)"
+  ctl surface editor status --item=language --value=plain >/dev/null
+  expect_status language "plain text"
+  expect_status lsp fake-lsp:ready
+  expect_state language Rust
+  capture status-language-plain
+  must_differ "the language's colour" status-language-rust status-language-plain
+  ctl surface editor status --item=language --value=C++ >/dev/null
+  expect_status language "C++"
+  ctl surface editor status --item=language --value=shell >/dev/null
+  expect_status language Shell
+  ctl surface editor status --item=language --value=rust >/dev/null
+  expect_status language Rust
+  expect_status lsp fake-lsp:ready
+  [ "$(lsp_count textDocument/didOpen "$mark")" = 0 ] && [ "$(lsp_count textDocument/didClose "$mark")" = 0 ] \
+    || fail "$SCENARIO: the language server was told something when only the colour changed"
+  echo "OK: five language choices, and the server was sent no didOpen or didClose"
+  expect_status_refused "not a language" --item=language --value=klingon
+
+  # ---- go to line
+  lines="$(wc -l <"$main" | tr -d ' ')"
+  [ "$lines" -ge 60 ] || fail "$SCENARIO: main.rs has $lines lines, expected at least 60"
+  ctl surface editor status --item=goto --value=40 >/dev/null
+  offset="$(head -n 39 "$main" | wc -c | tr -d ' ')"
+  expect_status cursor "Ln 40, Col 1"
+  expect_state selections "$offset..$offset"
+  echo "OK: line 40: the selection is at its start, byte $offset"
+  ctl surface editor status --item=goto --value=999 >/dev/null
+  last=$((lines + 1))
+  expect_status cursor "Ln $last, Col 1"
+  echo "OK: line 999 is the last line ($last, after the file's final newline)"
+  expect_status_refused "not a line number" --item=goto --value=abc
+  expect_status cursor "Ln $last, Col 1"
+  expect_status_refused "count from 1" --item=goto --value=0
+  expect_status cursor "Ln $last, Col 1"
+  echo "OK: a word and zero are refused and the caret stays"
+
+  # ---- what a refusal looks like
+  expect_status_refused "not a status item" --item=bogus --value=1
+  expect_status_refused "needs a value" --item=goto
+  open_file "$WT/notes.md"
+  expect_state state loaded
+  ctl surface editor mode --mode=preview >/dev/null
+  expect_state mode preview
+  expect_status_refused "Markdown Preview" --item=language --value=rust
+  expect_status_refused "Markdown Preview" --item=goto --value=2
+  expect_status_refused "Markdown Preview" --item=goto --open=true
+  ctl surface editor status --item=indent --value=spaces:4 >/dev/null
+  echo "OK: Preview refuses the language and go to line and still takes an indent"
+  ctl surface editor mode --mode=code >/dev/null
+  expect_state mode code
+  open_file "$WT/binary.bin"
+  expect_state state error
+  expect_status_refused "not loaded" --item=goto --value=1
+  sha="$(git -C "$WT" rev-parse HEAD)"
+  ctl surface editor open-snapshot --sha="$sha" --path=src/shapes.rs >/dev/null
+  settle
+  expect_state snapshot true
+  expect_status_refused "snapshot" --item=indent --value=tabs:4
+  expect_status_refused "snapshot" --item=line_ending --value=crlf
+  expect_status_refused "snapshot" --item=indent --open=true
+  expect_status indent "Spaces: 4"
+  expect_status eol LF
+  ctl surface editor status --item=language --value=plain >/dev/null
+  expect_status language "plain text"
+  expect_state dirty false
+  echo "OK: a snapshot refuses an indent and a line ending, and takes a language"
+
+  # ---- the popovers: a real click opens one, one at a time, Escape and Enter
+  open_file "$main"
+  expect_state state loaded
+  ctl surface editor select --ranges=0..0 >/dev/null
+  # Room for the whole row: the sidebar and the right panel hidden.
+  ctl surface editor keys --keys=ctrl-shift-s >/dev/null
+  ctl surface editor keys --keys=ctrl-shift-i >/dev/null
+  expect_state status_set full
+  focus_window
+  expect_state status_popover none
+  capture status-row-items
+  click_at "${STATUS_LANGUAGE_ITEM[@]}"
+  expect_state status_popover language
+  capture status-popover-language
+  click_at "${STATUS_LINE_ENDING_ITEM[@]}"
+  expect_state status_popover line_ending
+  capture status-popover-line-ending
+  click_at "${STATUS_INDENT_ITEM[@]}"
+  expect_state status_popover indent
+  capture status-popover-indent
+  click_at "${STATUS_CURSOR_ITEM[@]}"
+  expect_state status_popover goto
+  capture status-popover-goto
+  echo "OK: a click on each item opened its popover, the one before closed"
+  # A real key goes where the keyboard is: the field, which took it as the
+  # panel opened. Enter with a line number goes there and closes the panel.
+  x_key 4
+  x_key 0
+  x_key Return
+  expect_status cursor "Ln 40, Col 1"
+  expect_state status_popover none
+  x_key Down
+  expect_status cursor "Ln 41, Col 1"
+  echo "OK: Enter in the field went to line 40 and closed it; the next key moved the code's caret"
+  # Not a number: nothing happens, the field and the panel stay.
+  click_at "${STATUS_CURSOR_ITEM[@]}"
+  expect_state status_popover goto
+  x_key a
+  x_key Return
+  expect_state status_popover goto
+  expect_status cursor "Ln 41, Col 1"
+  x_key Escape
+  expect_state status_popover none
+  x_key Down
+  expect_status cursor "Ln 42, Col 1"
+  echo "OK: a word does nothing; Escape closed the panel and the keyboard is in the code"
+  # A choice in a list applies, closes the panel and gives the keyboard back:
+  # the CRLF row, then the LF row, in the panel the item opens above itself.
+  click_at "${STATUS_LINE_ENDING_ITEM[@]}"
+  expect_state status_popover line_ending
+  expect_state line_ending lf
+  click_at "${STATUS_CRLF_ROW[@]}"
+  expect_state line_ending crlf
+  expect_state dirty true
+  expect_state status_popover none
+  x_key Down
+  expect_status cursor "Ln 43, Col 1"
+  click_at "${STATUS_LINE_ENDING_ITEM[@]}"
+  expect_state status_popover line_ending
+  click_at "${STATUS_LF_ROW[@]}"
+  expect_state line_ending lf
+  expect_state dirty false
+  expect_state status_popover none
+  echo "OK: a click on CRLF and then on LF applied each, closed the panel and left the keyboard in the code"
+  # The verb closes a panel as well.
+  ctl surface editor status --item=line_ending --open=true >/dev/null
+  expect_state status_popover line_ending
+  ctl surface editor status --item=line_ending --open=false >/dev/null
+  expect_state status_popover none
+  ctl surface editor status --item=indent --open=true >/dev/null
+  expect_state status_popover indent
+  ctl surface editor status --item=language --open=true >/dev/null
+  expect_state status_popover language
+  ctl surface editor status --item=language --open=false >/dev/null
+  expect_state status_popover none
+  ctl surface editor keys --keys=ctrl-shift-s >/dev/null
+  ctl surface editor keys --keys=ctrl-shift-i >/dev/null
+  expect_state status_set compact
+
+  count="$(tab_count)"
+  while [ "$count" -gt "$tabs_before" ]; do
+    ctl surface tabs close "$count" >/dev/null
+    count=$((count - 1))
+  done
+  [ "$(layout_field secondaryVisible)" = "$secondary_before" ] \
+    || fail "$SCENARIO: secondaryVisible is $(layout_field secondaryVisible), expected $secondary_before"
+}
+
 scenario_find() {
   local fixture="$WT/findme.txt" all cased
   open_file "$fixture"
@@ -2154,6 +2422,7 @@ scenario breadcrumb scenario_breadcrumb
 scenario snapshot scenario_snapshot
 scenario git_marks scenario_git_marks
 scenario status scenario_status
+scenario status_actions scenario_status_actions
 scenario find scenario_find
 scenario replace scenario_replace
 scenario multibyte scenario_multibyte
