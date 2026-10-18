@@ -62,8 +62,13 @@ set -eEuo pipefail
 #                     (counted with git itself); the cursor in characters (an emoji and an
 #                     accent) with a two-range selection's total; the fake server named and
 #                     ready for a .rs file, failed for one that launches and ends at once,
-#                     and no server at all for a .txt and for a .zig with none installed; LF and CRLF; Markdown in Preview has no cursor;
-#                     a snapshot has neither branch nor server; captured
+#                     and no server at all for a .txt and for a .zig with none installed
+#                     (the app's PATH has no zls); two files opened while a slow server
+#                     starts share its one launch and each get a didOpen; LF and CRLF;
+#                     Markdown in Preview has no cursor; a snapshot has neither branch nor
+#                     server; the full set in a pane with room (sidebar and right panel
+#                     hidden) and the compact set in narrower ones, with a long branch
+#                     name shortened and the server whole; captured
 #   find              Find over findme.txt: the match count against grep (case-insensitive,
 #                     then case-sensitive), two steps forward and one back, a pattern that
 #                     does not compile, close; captured with the replace row open and the
@@ -489,19 +494,59 @@ cat >"$RUN_DIR/fake-lsp/answers.json" <<JSON
   ]
 }
 JSON
+# The server's program is a stub on the app's PATH, so the status row names it
+# the way it names a real one (`fake-lsp`, as it names `rust-analyzer`).
+# `slow-lsp` is the same server that takes two seconds to start: the status
+# scenario opens two files while its launch is still running.
+cat >"$RUN_DIR/stubs/fake-lsp" <<STUB
+#!/bin/sh
+exec python3 -I "$ROOT/Scripts/Tests/fake_lsp.py" "\$@"
+STUB
+cat >"$RUN_DIR/stubs/slow-lsp" <<STUB
+#!/bin/sh
+sleep 2
+exec python3 -I "$ROOT/Scripts/Tests/fake_lsp.py" "\$@"
+STUB
+chmod +x "$RUN_DIR/stubs/fake-lsp" "$RUN_DIR/stubs/slow-lsp"
 cat >"$XDG_CONFIG_HOME/sirio/languages.toml" <<TOML
 [[language]]
 name = "rust"
 extensions = ["rs"]
-command = "python3"
-args = ["-I", "$ROOT/Scripts/Tests/fake_lsp.py", "$RUN_DIR/fake-lsp/answers.json", "$RUN_DIR/fake-lsp/requests.log"]
+command = "fake-lsp"
+args = ["$RUN_DIR/fake-lsp/answers.json", "$RUN_DIR/fake-lsp/requests.log"]
 TOML
 
 # ---------------------------------------------------------------- the app
 
+# The app's PATH: this script's, without a `zls`. The status scenario needs a
+# .zig file whose server is not installed, and a machine with zls beside its
+# Zig would answer it. A directory holding a zls (a system bin directory, say)
+# cannot simply be dropped, so a directory of links to everything else in it
+# stands in its place.
+app_path_without_zls() {
+  local dir entry copy kept="" n=0 old_ifs="$IFS"
+  IFS=:
+  for dir in $PATH; do
+    if [ -n "$dir" ] && [ -f "$dir/zls" ] && [ -x "$dir/zls" ]; then
+      n=$((n + 1))
+      copy="$RUN_DIR/path-without-zls/$n"
+      mkdir -p "$copy"
+      for entry in "$dir"/*; do
+        [ "${entry##*/}" = zls ] || ln -s "$entry" "$copy/"
+      done
+      echo "NOTE: $dir/zls is on this machine's PATH; the app's PATH leaves it out ($copy stands in for $dir)" >&2
+      dir="$copy"
+    fi
+    kept="${kept:+$kept:}$dir"
+  done
+  IFS="$old_ifs"
+  printf '%s' "$kept"
+}
+APP_PATH="$(app_path_without_zls)"
+
 app_start() {
   rm -f "$SIRIO_SOCKET"
-  (cd "$WT" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 \
+  (cd "$WT" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 PATH="$APP_PATH" \
     ${VULKAN_ENV[@]+"${VULKAN_ENV[@]}"} "$BIN" >>"$RUN_DIR/app.log" 2>&1) &
   APP_PID=$!
   for _ in $(seq 1 300); do
@@ -1677,11 +1722,12 @@ scenario_status() {
   expect_status cursor "Ln 2, Col 4 (8 selected)"
   echo "OK: the cursor counts characters and the selections' total"
 
-  # The fake server, named by the program the entry runs, ready for a .rs file.
+  # The fake server, named by the program the entry runs (the stub on PATH,
+  # `fake-lsp`), ready for a .rs file.
   printf 'fn a() {}\n// héllo\n' >"$WT/status-c.rs"
   open_file "$WT/status-c.rs"
   expect_state state loaded
-  expect_status lsp python3:ready
+  expect_status lsp fake-lsp:ready
   expect_status language Rust
   expect_status branch main
   expect_status ahead 1
@@ -1693,6 +1739,35 @@ scenario_status() {
   capture status-row
   ctl surface editor select --ranges=3..12 >/dev/null
   expect_status cursor "Ln 2, Col 3 (9 selected)"
+
+  # One launch serves a second file of its language opened while it runs: the
+  # entry's program waits two seconds before it starts, two files are opened
+  # back to back, and the server sees one handshake and a didOpen for each.
+  local slow_log="$RUN_DIR/fake-lsp/slow-requests.log" opens="" tries
+  rm -f "$slow_log"
+  cat >>"$XDG_CONFIG_HOME/sirio/languages.toml" <<TOML
+
+[[language]]
+name = "slow"
+extensions = ["slw"]
+command = "slow-lsp"
+args = ["$RUN_DIR/fake-lsp/answers.json", "$slow_log"]
+TOML
+  printf 'one\n' >"$WT/status-s1.slw"
+  printf 'two\n' >"$WT/status-s2.slw"
+  ctl surface editor open --path="$WT/status-s1.slw" >/dev/null
+  ctl surface editor open --path="$WT/status-s2.slw" >/dev/null
+  expect_status lsp slow-lsp:starting
+  expect_status lsp slow-lsp:ready
+  for tries in $(seq 1 50); do
+    opens="$(grep -c ' textDocument/didOpen$' "$slow_log" 2>/dev/null || true)"
+    [ "$opens" = 2 ] && break
+    sleep 0.2
+  done
+  [ "$opens" = 2 ] || fail "$SCENARIO: the slow server was sent $opens didOpen, expected 2 (one per file)"
+  [ "$(grep -c ' initialize$' "$slow_log")" = 1 ] \
+    || fail "$SCENARIO: the slow server was started more than once: $(grep -c ' initialize$' "$slow_log") initialize"
+  echo "OK: two files opened during one launch: one initialize, two didOpen"
 
   # A language with a server entry that is not installed says nothing.
   printf 'const a = 1;\n' >"$WT/status-b.zig"
@@ -1733,6 +1808,35 @@ TOML
   expect_state mode code
   ctl surface editor select --ranges=0..0 >/dev/null
   expect_status cursor "Ln 1, Col 1"
+
+  # The row's two sets. The Secondary pane is about 430 px with the sidebar, the
+  # terminal and the right panel all showing, and the row draws its compact set
+  # there. A long branch name (checked out for these captures, with the same
+  # upstream) is drawn shortened in the middle, so the server stays whole.
+  local long="feature/a-very-long-branch-name-for-the-status-row"
+  git -C "$WT" checkout -q -b "$long"
+  git -C "$WT" branch -q --set-upstream-to=origin/main
+  printf 'fn d() {}\n// héllo wörld\n' >"$WT/status-d.rs"
+  open_file "$WT/status-d.rs"
+  expect_state state loaded
+  expect_status branch "$long"
+  expect_status ahead 1
+  expect_status lsp fake-lsp:ready
+  expect_state status_set compact
+  # With the sidebar and the right panel hidden, the pane has room for all of it.
+  ctl surface editor keys --keys=ctrl-shift-s >/dev/null
+  ctl surface editor keys --keys=ctrl-shift-i >/dev/null
+  expect_state status_set full
+  capture status-row-full
+  # The sidebar back: the pane is narrower, and a selection takes room too.
+  ctl surface editor keys --keys=ctrl-shift-s >/dev/null
+  ctl surface editor select --ranges=3..12 >/dev/null
+  expect_status cursor "Ln 2, Col 3 (9 selected)"
+  capture status-row-narrow
+  ctl surface editor keys --keys=ctrl-shift-i >/dev/null
+  expect_state status_set compact
+  git -C "$WT" checkout -q main
+  git -C "$WT" branch -q -D "$long"
 
   # A revision has no branch of its own and no server.
   sha="$(git -C "$WT" rev-parse HEAD)"
