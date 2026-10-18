@@ -548,6 +548,64 @@ impl BaseColor {
     }
 }
 
+/// How the code editor numbers its lines. The serde half of Ely's
+/// `LineNumbers`, kept here for the same reason as `BaseColor`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditorLineNumbers {
+    #[default]
+    Absolute,
+    /// Distances from the cursor's line, which shows its own number.
+    Relative,
+    Hidden,
+}
+
+impl EditorLineNumbers {
+    pub fn raw(self) -> &'static str {
+        match self {
+            EditorLineNumbers::Absolute => "absolute",
+            EditorLineNumbers::Relative => "relative",
+            EditorLineNumbers::Hidden => "hidden",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "absolute" => Some(EditorLineNumbers::Absolute),
+            "relative" => Some(EditorLineNumbers::Relative),
+            "hidden" => Some(EditorLineNumbers::Hidden),
+            _ => None,
+        }
+    }
+}
+
+/// The code editor's cursor. The serde half of Ely's `CursorShape`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditorCursorShape {
+    #[default]
+    Line,
+    Block,
+    Underline,
+}
+
+impl EditorCursorShape {
+    pub fn raw(self) -> &'static str {
+        match self {
+            EditorCursorShape::Line => "line",
+            EditorCursorShape::Block => "block",
+            EditorCursorShape::Underline => "underline",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "line" => Some(EditorCursorShape::Line),
+            "block" => Some(EditorCursorShape::Block),
+            "underline" => Some(EditorCursorShape::Underline),
+            _ => None,
+        }
+    }
+}
+
 /// The application settings the Swift app keeps in UserDefaults, persisted
 /// here as key-value rows under the *exact* Swift key names. Loading applies
 /// the Swift defaults for keys that were never written, and clamps font
@@ -637,6 +695,32 @@ pub struct AppSettings {
     /// view (spec §5.2, step 1). Owned by the host's `ForgeHub`, not by the
     /// Settings snapshot: a Settings save re-applies the stored value.
     pub forge_hosts: String,
+    /// "editor.minimap" — default: true.
+    pub editor_minimap: bool,
+    /// "editor.stickyScroll" — default: true.
+    pub editor_sticky_scroll: bool,
+    /// "editor.indentGuides" — default: true.
+    pub editor_indent_guides: bool,
+    /// "editor.rainbowBrackets" — default: true.
+    pub editor_rainbow_brackets: bool,
+    /// "editor.codeLens" — default: true.
+    pub editor_code_lens: bool,
+    /// "editor.inlayHints" — default: true.
+    pub editor_inlay_hints: bool,
+    /// "editor.whitespace" — default: false (whitespace is not drawn).
+    pub editor_whitespace: bool,
+    /// "editor.ruler" — default: false.
+    pub editor_ruler: bool,
+    /// "editor.rulerColumn" — default 100, clamped to 20...400.
+    pub editor_ruler_column: i64,
+    /// "editor.lineNumbers" — default: absolute. An unknown stored value
+    /// reads back as the default.
+    pub editor_line_numbers: EditorLineNumbers,
+    /// "editor.cursorShape" — default: line. An unknown stored value reads
+    /// back as the default.
+    pub editor_cursor_shape: EditorCursorShape,
+    /// "editor.tabSize" — default 4, clamped to 1...16.
+    pub editor_tab_size: i64,
 }
 
 impl Default for AppSettings {
@@ -668,6 +752,18 @@ impl Default for AppSettings {
             lsp_silenced_languages: "[]".to_string(),
             markdown_plantuml_server: String::new(),
             forge_hosts: "[]".to_string(),
+            editor_minimap: true,
+            editor_sticky_scroll: true,
+            editor_indent_guides: true,
+            editor_rainbow_brackets: true,
+            editor_code_lens: true,
+            editor_inlay_hints: true,
+            editor_whitespace: false,
+            editor_ruler: false,
+            editor_ruler_column: 100,
+            editor_line_numbers: EditorLineNumbers::Absolute,
+            editor_cursor_shape: EditorCursorShape::Line,
+            editor_tab_size: 4,
         }
     }
 }
@@ -710,6 +806,19 @@ pub mod settings_keys {
     pub const MARKDOWN_PLANTUML_SERVER: &str = "markdown.plantumlServer";
     /// Linux-rewrite-only: no Swift antecedent.
     pub const FORGE_HOSTS: &str = "forge.hosts";
+    /// Linux-rewrite-only: the code editor's preferences, no Swift antecedent.
+    pub const EDITOR_MINIMAP: &str = "editor.minimap";
+    pub const EDITOR_STICKY_SCROLL: &str = "editor.stickyScroll";
+    pub const EDITOR_INDENT_GUIDES: &str = "editor.indentGuides";
+    pub const EDITOR_RAINBOW_BRACKETS: &str = "editor.rainbowBrackets";
+    pub const EDITOR_CODE_LENS: &str = "editor.codeLens";
+    pub const EDITOR_INLAY_HINTS: &str = "editor.inlayHints";
+    pub const EDITOR_WHITESPACE: &str = "editor.whitespace";
+    pub const EDITOR_RULER: &str = "editor.ruler";
+    pub const EDITOR_RULER_COLUMN: &str = "editor.rulerColumn";
+    pub const EDITOR_LINE_NUMBERS: &str = "editor.lineNumbers";
+    pub const EDITOR_CURSOR_SHAPE: &str = "editor.cursorShape";
+    pub const EDITOR_TAB_SIZE: &str = "editor.tabSize";
 }
 
 /// The Swift ranges settings values are clamped into.
@@ -732,6 +841,11 @@ pub mod settings_ranges {
     /// Linux-rewrite-only; no Swift range to mirror.
     pub const RIGHT_PANEL_WIDTH: std::ops::RangeInclusive<i64> = 220..=640;
     pub const CENTER_SPLIT_RATIO: std::ops::RangeInclusive<i64> = 100..=900;
+    /// Linux-rewrite-only: the ruler's column. 20 is the narrowest a ruler
+    /// is still a guide rather than a stripe; 400 is past any screen.
+    pub const EDITOR_RULER_COLUMN: std::ops::RangeInclusive<i64> = 20..=400;
+    /// Linux-rewrite-only: the tab width in spaces.
+    pub const EDITOR_TAB_SIZE: std::ops::RangeInclusive<i64> = 1..=16;
 }
 
 /// One isolated agent-CLI account, as persisted (F-SET-15). Mirrors the

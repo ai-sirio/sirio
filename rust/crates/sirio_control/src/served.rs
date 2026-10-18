@@ -67,10 +67,30 @@ pub const BROWSER_NOT_SUPPORTED: &[&str] = &[
 
 /// Served by debug builds only. A release build leaves these out of
 /// `system.capabilities`, and answers them with "unknown method".
-const DEBUG_METHODS: [&str; 11] = [
+const DEBUG_METHODS: [&str; 31] = [
     "surface.change_request.act",
     "surface.open_list.open",
     "surface.changes.confirm",
+    "surface.editor.open",
+    "surface.editor.open_snapshot",
+    "surface.editor.state",
+    "surface.editor.type",
+    "surface.editor.keys",
+    "surface.editor.select",
+    "surface.editor.hover",
+    "surface.editor.click",
+    "surface.editor.context",
+    "surface.editor.git_mark",
+    "surface.editor.crumb",
+    "surface.editor.find",
+    "surface.editor.find_step",
+    "surface.editor.replace",
+    "surface.editor.find_close",
+    "surface.editor.save",
+    "surface.editor.conflict",
+    "surface.editor.mode",
+    "surface.editor.status",
+    "surface.editor.pref",
     "surface.host.end_all",
     "surface.settings.act",
     "surface.terminal.open",

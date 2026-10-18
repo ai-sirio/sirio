@@ -48,8 +48,31 @@ command -v python3 >/dev/null || fail "python3 is required"
 
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sirio-changes-e2e-XXXXXX")
 APP_PID=""
+# The isolated host the app started beside its database ($RUN_DIR/host). A quit only
+# detaches, so the host outlives the app. Only a pid its own state file names, and
+# only while that pid is still a sirio-host, is signalled: TERM, then KILL after 5 s.
+stop_hosts() {
+  local state pid tries
+  for state in "$RUN_DIR"/host/host-v*.json; do
+    [ -f "$state" ] || continue
+    pid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pid", ""))' "$state" 2>/dev/null) || continue
+    [ -n "$pid" ] || continue
+    case "$(cat "/proc/$pid/comm" 2>/dev/null || ps -o comm= -p "$pid" 2>/dev/null)" in
+      *sirio-host*) ;;
+      *) continue ;;
+    esac
+    kill "$pid" 2>/dev/null || true
+    tries=0
+    while kill -0 "$pid" 2>/dev/null && [ "$tries" -lt 50 ]; do
+      tries=$((tries + 1))
+      sleep 0.1
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+}
 cleanup() {
   [ -z "$APP_PID" ] || { kill "$APP_PID" 2>/dev/null || true; wait "$APP_PID" 2>/dev/null || true; }
+  stop_hosts
   [ ! -d "$RUN_DIR/repo/.git-away" ] || mv "$RUN_DIR/repo/.git-away" "$RUN_DIR/repo/.git"
   cp "$RUN_DIR"/*.log "$OUT_DIR/" 2>/dev/null || true
   rm -rf "$RUN_DIR"

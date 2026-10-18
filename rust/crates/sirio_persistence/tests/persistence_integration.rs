@@ -10,6 +10,7 @@ use sirio_persistence::{
     CLOSED_CHAT_MAX_AGE_MS, CURRENT_SCHEMA_VERSION, ChangeRequestLinkRecord, ChatEntry, HandoffChoiceRecord,
     ChatPermissionOption,
     ChatPermissionOutcome, ChatToolLocation, ChatTranscript, ChatTurn, ClosedChatSummary,
+    EditorCursorShape, EditorLineNumbers,
     MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, SidebarView, TabRecord,
     TabStateRecord, WorktreeRecord, migrate_up_to,
 };
@@ -2110,6 +2111,64 @@ fn forge_hosts_round_trip_and_default_to_an_empty_list() {
     })
     .expect("save settings");
     assert_eq!(db.settings().expect("read back").forge_hosts, hosts);
+}
+
+#[test]
+fn editor_settings_round_trip_and_default() {
+    let dir = TempDir::new();
+    let path = dir.db_path("editor-settings");
+    let db = AppDatabase::open(&path).expect("open fresh database");
+    let defaults = db.settings().expect("defaults");
+    assert!(defaults.editor_minimap);
+    assert!(defaults.editor_sticky_scroll);
+    assert!(defaults.editor_indent_guides);
+    assert!(defaults.editor_rainbow_brackets);
+    assert!(defaults.editor_code_lens);
+    assert!(defaults.editor_inlay_hints);
+    assert!(!defaults.editor_whitespace);
+    assert!(!defaults.editor_ruler);
+    assert_eq!(defaults.editor_ruler_column, 100);
+    assert_eq!(defaults.editor_line_numbers, EditorLineNumbers::Absolute);
+    assert_eq!(defaults.editor_cursor_shape, EditorCursorShape::Line);
+    assert_eq!(defaults.editor_tab_size, 4);
+
+    db.save_settings(&AppSettings {
+        editor_minimap: false,
+        editor_ruler: true,
+        editor_ruler_column: 120,
+        editor_line_numbers: EditorLineNumbers::Relative,
+        editor_cursor_shape: EditorCursorShape::Block,
+        editor_tab_size: 2,
+        ..AppSettings::default()
+    })
+    .expect("save settings");
+    let saved = db.settings().expect("read back");
+    assert!(!saved.editor_minimap);
+    assert!(saved.editor_ruler);
+    assert_eq!(saved.editor_ruler_column, 120);
+    assert_eq!(saved.editor_line_numbers, EditorLineNumbers::Relative);
+    assert_eq!(saved.editor_cursor_shape, EditorCursorShape::Block);
+    assert_eq!(saved.editor_tab_size, 2);
+    drop(db);
+
+    // Hand-written rows outside the range and the vocabulary read back as
+    // the clamp and the default they fall to.
+    let conn = rusqlite::Connection::open(&path).expect("raw open");
+    conn.execute(
+        "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
+        ["editor.rulerColumn", "5"],
+    )
+    .expect("raw ruler column");
+    conn.execute(
+        "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
+        ["editor.cursorShape", "bogus"],
+    )
+    .expect("raw cursor shape");
+    drop(conn);
+    let reopened = AppDatabase::open(&path).expect("reopen");
+    let raw = reopened.settings().expect("raw rows");
+    assert_eq!(raw.editor_ruler_column, 20);
+    assert_eq!(raw.editor_cursor_shape, EditorCursorShape::Line);
 }
 
 fn chat_with_turn(db: &AppDatabase, id: &str, title: &str) {

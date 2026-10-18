@@ -295,6 +295,60 @@ pub fn upstream_of(repo: &Path, branch: &str) -> Result<Option<UpstreamBranch>, 
     }))
 }
 
+/// How many commits the checked-out branch holds that its upstream lacks
+/// (ahead, to push) and how many the upstream holds that it lacks (behind, to
+/// pull), as `(ahead, behind)`.
+///
+/// `None` when there is nothing to compare with: a detached HEAD, a branch
+/// that tracks nothing, or a tracked branch whose remote branch is gone. Those
+/// are decided from plumbing output (`symbolic-ref`'s exit status and
+/// `for-each-ref`'s fields), never from git's localized messages, so a git
+/// failure is still an error. `rev-list --left-right --count
+/// <upstream>...<branch>` prints the upstream-only count first (behind) and the
+/// branch-only count second (ahead), hence the swap.
+pub fn ahead_behind(repo: &Path) -> Result<Option<(usize, usize)>, GitError> {
+    let head = git::run_accepting(&["symbolic-ref", "-q", "HEAD"], repo, &[0, 1])?;
+    if head.status != Some(0) {
+        return Ok(None);
+    }
+    let refname = head.stdout_string().trim().to_string();
+    let tracking = git::run_accepting(
+        &[
+            "for-each-ref",
+            "--format=%(upstream)\t%(upstream:track)",
+            &refname,
+        ],
+        repo,
+        &[0],
+    )?;
+    let text = tracking.stdout_string();
+    let Some((upstream, track)) = text.lines().next().and_then(|line| line.split_once('\t'))
+    else {
+        return Ok(None);
+    };
+    if upstream.trim().is_empty() || track.trim() == "[gone]" {
+        return Ok(None);
+    }
+    // The refnames just read, not `@{upstream}` and `HEAD`: a checkout that
+    // moves between the calls cannot pair one branch with another's upstream.
+    let counts = git::run_accepting(
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{}...{refname}", upstream.trim()),
+        ],
+        repo,
+        &[0],
+    )?;
+    let text = counts.stdout_string();
+    let mut fields = text.split_whitespace().map(str::parse::<usize>);
+    match (fields.next(), fields.next()) {
+        (Some(Ok(behind)), Some(Ok(ahead))) => Ok(Some((ahead, behind))),
+        _ => Ok(None),
+    }
+}
+
 /// Deletes `upstream`'s branch on its remote: `git push <remote> --delete
 /// <branch>`. Nothing local changes; git's refusal (offline, no permission,
 /// already gone) is surfaced as the error.
@@ -543,5 +597,103 @@ mod tests {
             resolve_parent_directory(root, None),
             PathBuf::from("/Users/me/projects")
         );
+    }
+
+    /// `ahead_behind` fails when:
+    /// - a branch that tracks nothing answers `Some((0, 0))` or an error
+    ///   instead of `None`, or a tracked branch whose remote branch is gone
+    ///   (`fetch --prune`) is read as in sync or as a git failure;
+    /// - the two counts are swapped: the fixture is two commits ahead and one
+    ///   behind, so a swap shows;
+    /// - a detached HEAD that sits on the upstream's own tip is read as in
+    ///   sync instead of `None`.
+    mod ahead_behind {
+        use super::*;
+
+        /// A second clone of `origin`, one commit further, pushed back.
+        fn push_from_another_clone(root: &Path, file: &str) {
+            let other = root.join("other");
+            if !other.exists() {
+                let origin = root.join("origin.git");
+                git_ok(
+                    root,
+                    &[
+                        "clone",
+                        "-q",
+                        "-b",
+                        "main",
+                        origin.to_str().expect("utf-8 path"),
+                        other.to_str().expect("utf-8 path"),
+                    ],
+                );
+                git_ok(&other, &["config", "user.email", "test@sirio.dev"]);
+                git_ok(&other, &["config", "user.name", "Sirio Test"]);
+            }
+            std::fs::write(other.join(file), "upstream\n").expect("write");
+            git_ok(&other, &["add", "-A"]);
+            git_ok(&other, &["commit", "-q", "-m", file]);
+            git_ok(&other, &["push", "-q", "origin", "main"]);
+        }
+
+        fn commit_here(repo: &Path, file: &str) {
+            std::fs::write(repo.join(file), "local\n").expect("write");
+            git_ok(repo, &["add", "-A"]);
+            git_ok(repo, &["commit", "-q", "-m", file]);
+        }
+
+        #[test]
+        fn no_upstream_is_none() {
+            let (root, repo) = repo_with_bare_origin("ahead-behind-none");
+            git_ok(&repo, &["switch", "-q", "-c", "loose"]);
+            assert_eq!(
+                ahead_behind(&repo).expect("git answers"),
+                None,
+                "a branch never pushed with -u tracks nothing"
+            );
+
+            git_ok(&repo, &["push", "-q", "-u", "origin", "loose"]);
+            assert_eq!(
+                ahead_behind(&repo).expect("git answers"),
+                Some((0, 0)),
+                "after push -u the branch is level with its upstream"
+            );
+            git_ok(&repo, &["switch", "-q", "main"]);
+            git_ok(&repo, &["push", "-q", "origin", "--delete", "loose"]);
+            git_ok(&repo, &["fetch", "-q", "--prune", "origin"]);
+            git_ok(&repo, &["switch", "-q", "loose"]);
+            assert_eq!(
+                ahead_behind(&repo).expect("a gone upstream is not a failure"),
+                None,
+                "the configured upstream no longer exists"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        #[test]
+        fn commits_on_both_sides_count_each() {
+            let (root, repo) = repo_with_bare_origin("ahead-behind-both");
+            commit_here(&repo, "local-1.txt");
+            commit_here(&repo, "local-2.txt");
+            push_from_another_clone(&root, "upstream-1.txt");
+            git_ok(&repo, &["fetch", "-q", "origin"]);
+            assert_eq!(
+                ahead_behind(&repo).expect("git answers"),
+                Some((2, 1)),
+                "(ahead, behind): two local commits, one upstream commit"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        #[test]
+        fn a_detached_head_is_none() {
+            let (root, repo) = repo_with_bare_origin("ahead-behind-detached");
+            git_ok(&repo, &["checkout", "-q", "--detach"]);
+            assert_eq!(
+                ahead_behind(&repo).expect("a detached head is not a failure"),
+                None,
+                "a detached head has no branch, so no upstream"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }

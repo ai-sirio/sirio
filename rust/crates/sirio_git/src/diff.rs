@@ -100,36 +100,38 @@ pub fn diff_entry(
     context_lines: usize,
 ) -> Result<FileDiff, GitError> {
     let unified = format!("--unified={context_lines}");
+    // A user's `diff.interHunkContext` makes git merge nearby hunks and print the
+    // lines between them as context, even at zero context. A zero-context reader
+    // (`sirio_ui`'s git marks) cannot tell those lines from changes, so it is pinned.
+    // It also numbers hunks in the raw buffer's lines, which a `textconv` driver would
+    // convert out from under it, so the driver is skipped.
+    let zero_context: &[&str] = if context_lines == 0 {
+        &["--inter-hunk-context=0", "--no-textconv"]
+    } else {
+        &[]
+    };
     let result = if entry.is_untracked() || !has_head(repo) {
         let absolute = git::path_arg(&repo.join(&entry.path));
-        git::run_accepting(
-            &[
-                "diff",
-                "--no-color",
-                "--no-ext-diff",
-                "--no-index",
-                &unified,
-                "--",
-                "/dev/null",
-                &absolute,
-            ],
-            repo,
-            &[0, 1],
-        )
+        let mut args: Vec<&str> =
+            vec!["diff", "--no-color", "--no-ext-diff", "--no-index", &unified];
+        args.extend(zero_context);
+        args.extend(["--", "/dev/null", absolute.as_str()]);
+        git::run_accepting(&args, repo, &[0, 1])
     } else {
         let mut pathspecs = Vec::new();
+        // Literal: a path is not a pattern (`a*.txt`, `file[1].txt`).
         if let Some(original) = &entry.original_path {
-            pathspecs.push(git::path_arg(original));
+            pathspecs.push(format!(":(literal){}", git::path_arg(original)));
         }
-        pathspecs.push(git::path_arg(&entry.path));
+        pathspecs.push(format!(":(literal){}", git::path_arg(&entry.path)));
         let mut args = vec![
             "diff".to_string(),
             "--no-color".to_string(),
             "--no-ext-diff".to_string(),
             unified,
-            "HEAD".to_string(),
-            "--".to_string(),
         ];
+        args.extend(zero_context.iter().map(|arg| arg.to_string()));
+        args.extend(["HEAD".to_string(), "--".to_string()]);
         args.extend(pathspecs);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         git::run_accepting(&args, repo, &[0])
@@ -212,9 +214,24 @@ pub fn parse_diff(output: &str, path: &Path) -> FileDiff {
     // Cursor state inside the current hunk.
     let mut old_line: Option<usize> = None;
     let mut new_line: Option<usize> = None;
+    // What the current hunk's header still owes: while either is non-zero the
+    // next lines are the hunk's own, whatever they begin with (a deleted
+    // `-- x` arrives as `--- x`, an added `++ y` as `+++ y`).
+    let mut old_remaining = 0usize;
+    let mut new_remaining = 0usize;
 
     for raw in output.lines() {
-        if raw.is_empty() {
+        let in_hunk = old_remaining > 0 || new_remaining > 0;
+        // A line that cannot be a hunk's own (`diff --git`, `index`, anything
+        // not starting with a marker) ends a hunk the header over-promised.
+        let marked = raw.is_empty() || raw.starts_with(['+', '-', ' ', '\\']);
+        if in_hunk && !marked {
+            old_remaining = 0;
+            new_remaining = 0;
+        }
+        let in_hunk = in_hunk && marked;
+
+        if raw.is_empty() && !in_hunk {
             continue;
         }
 
@@ -227,6 +244,8 @@ pub fn parse_diff(output: &str, path: &Path) -> FileDiff {
             if let Some(new) = header.new_start {
                 new_line = Some(new);
             }
+            old_remaining = header.old_lines.unwrap_or(0);
+            new_remaining = header.new_lines.unwrap_or(0);
             hunks.push(Hunk {
                 header: raw.to_string(),
                 old_start: header.old_start.unwrap_or(0),
@@ -238,19 +257,25 @@ pub fn parse_diff(output: &str, path: &Path) -> FileDiff {
             continue;
         }
 
-        if raw.starts_with("diff --git ")
-            || raw.starts_with("index ")
-            || raw.starts_with("--- ")
-            || raw.starts_with("+++ ")
-            || raw.starts_with("new file mode ")
-            || raw.starts_with("deleted file mode ")
-            || raw.starts_with("old mode ")
-            || raw.starts_with("new mode ")
-            || raw.starts_with("rename from ")
-            || raw.starts_with("rename to ")
-            || raw.starts_with("similarity index ")
-            || raw.starts_with("dissimilarity index ")
-            || raw == "\\ No newline at end of file"
+        if raw == "\\ No newline at end of file" {
+            continue;
+        }
+
+        // Preamble lines. Inside a hunk's counted lines none of these applies:
+        // `--- x` there is a deleted `-- x`.
+        if !in_hunk
+            && (raw.starts_with("diff --git ")
+                || raw.starts_with("index ")
+                || raw.starts_with("--- ")
+                || raw.starts_with("+++ ")
+                || raw.starts_with("new file mode ")
+                || raw.starts_with("deleted file mode ")
+                || raw.starts_with("old mode ")
+                || raw.starts_with("new mode ")
+                || raw.starts_with("rename from ")
+                || raw.starts_with("rename to ")
+                || raw.starts_with("similarity index ")
+                || raw.starts_with("dissimilarity index "))
         {
             continue;
         }
@@ -273,6 +298,8 @@ pub fn parse_diff(output: &str, path: &Path) -> FileDiff {
             raw.strip_prefix(' ')
                 .map(|rest| (DiffOrigin::Context, rest))
         });
+        // A context line whose lone space was trimmed away on its way here.
+        let content = content.or_else(|| raw.is_empty().then_some((DiffOrigin::Context, raw)));
 
         let Some((origin, rest)) = content else {
             // Unknown preamble line (e.g. a `Subproject commit` line outside a
@@ -313,11 +340,19 @@ pub fn parse_diff(output: &str, path: &Path) -> FileDiff {
         };
 
         match origin {
-            DiffOrigin::Addition => new_line = new_line.map(|n| n + 1),
-            DiffOrigin::Deletion => old_line = old_line.map(|n| n + 1),
+            DiffOrigin::Addition => {
+                new_line = new_line.map(|n| n + 1);
+                new_remaining = new_remaining.saturating_sub(1);
+            }
+            DiffOrigin::Deletion => {
+                old_line = old_line.map(|n| n + 1);
+                old_remaining = old_remaining.saturating_sub(1);
+            }
             DiffOrigin::Context => {
                 old_line = old_line.map(|n| n + 1);
                 new_line = new_line.map(|n| n + 1);
+                old_remaining = old_remaining.saturating_sub(1);
+                new_remaining = new_remaining.saturating_sub(1);
             }
         }
 
@@ -605,6 +640,118 @@ mod tests {
         assert_eq!(second.new_start, 11);
         assert_eq!(second.lines[0].old_line_number, Some(10));
         assert_eq!(second.lines[1].new_line_number, Some(11));
+    }
+
+    /// Reading a hunk's lines by the hunk's own counts. Every way it can fail,
+    /// written before the code:
+    ///
+    /// 1. a deleted line whose text is `-- x` arrives as `--- x` inside a hunk and
+    ///    is taken for the old-file header, so its row is lost (and the deletion
+    ///    count, and every old line number after it, are off by one);
+    /// 2. an added line whose text is `++ y` arrives as `+++ y` and is lost the
+    ///    same way;
+    /// 3. the cure must not swallow real headers: after the hunk's last counted
+    ///    line, `diff --git`, `index`, `--- a/…` and `+++ b/…` of a second file
+    ///    are still not rows;
+    /// 4. a hunk that holds both traps keeps its line numbers right across them.
+    mod hunk_lines_by_count {
+        use super::*;
+
+        #[test]
+        fn a_deleted_line_that_looks_like_the_old_file_header_is_a_row() {
+            let patch = concat!(
+                "diff --git a/q.sql b/q.sql\n",
+                "--- a/q.sql\n",
+                "+++ b/q.sql\n",
+                "@@ -1,3 +1,2 @@\n",
+                " select 1;\n",
+                "--- comment\n",
+                " select 2;\n",
+            );
+            let diff = parse_diff(patch, Path::new("q.sql"));
+            let hunk = &diff.hunks[0];
+            assert_eq!(hunk.lines.len(), 3, "{:?}", hunk.lines);
+            assert_eq!(hunk.lines[1].origin, DiffOrigin::Deletion);
+            assert_eq!(hunk.lines[1].content, "-- comment");
+            assert_eq!(hunk.lines[1].old_line_number, Some(2));
+            assert_eq!(hunk.lines[2].old_line_number, Some(3));
+            assert_eq!(hunk.lines[2].new_line_number, Some(2));
+            assert_eq!(diff.deletions, 1);
+        }
+
+        #[test]
+        fn an_added_line_that_looks_like_the_new_file_header_is_a_row() {
+            let patch = concat!(
+                "--- a/q.txt\n",
+                "+++ b/q.txt\n",
+                "@@ -1,2 +1,3 @@\n",
+                " a\n",
+                "+++ y\n",
+                " b\n",
+            );
+            let diff = parse_diff(patch, Path::new("q.txt"));
+            let hunk = &diff.hunks[0];
+            assert_eq!(hunk.lines.len(), 3, "{:?}", hunk.lines);
+            assert_eq!(hunk.lines[1].origin, DiffOrigin::Addition);
+            assert_eq!(hunk.lines[1].content, "++ y");
+            assert_eq!(hunk.lines[1].new_line_number, Some(2));
+            assert_eq!(diff.additions, 1);
+        }
+
+        #[test]
+        fn a_second_files_header_after_the_last_counted_line_is_not_a_row() {
+            let patch = concat!(
+                "diff --git a/f b/f\n",
+                "--- a/f\n",
+                "+++ b/f\n",
+                "@@ -1 +1 @@\n",
+                "-old\n",
+                "+new\n",
+                "diff --git a/g b/g\n",
+                "index 1111111..2222222 100644\n",
+                "--- a/g\n",
+                "+++ b/g\n",
+                "@@ -5 +5 @@\n",
+                "-five\n",
+                "+FIVE\n",
+            );
+            let diff = parse_diff(patch, Path::new("f"));
+            assert_eq!(diff.hunks.len(), 2);
+            assert_eq!(diff.hunks[0].lines.len(), 2, "{:?}", diff.hunks[0].lines);
+            assert_eq!(diff.hunks[1].lines.len(), 2, "{:?}", diff.hunks[1].lines);
+            assert_eq!(diff.hunks[1].lines[0].old_line_number, Some(5));
+            assert_eq!((diff.additions, diff.deletions), (2, 2));
+        }
+
+        #[test]
+        fn both_look_alikes_in_one_hunk_keep_the_line_numbers_right() {
+            let patch = concat!(
+                "@@ -1,3 +1,3 @@\n",
+                "--- one\n",
+                "+++ two\n",
+                " three\n",
+                "-- four\n",
+                "+++ five\n",
+            );
+            let diff = parse_diff(patch, Path::new("f"));
+            let lines = &diff.hunks[0].lines;
+            let shape: Vec<_> = lines
+                .iter()
+                .map(|line| (line.origin, line.old_line_number, line.new_line_number))
+                .collect();
+            assert_eq!(
+                shape,
+                vec![
+                    (DiffOrigin::Deletion, Some(1), None),
+                    (DiffOrigin::Addition, None, Some(1)),
+                    (DiffOrigin::Context, Some(2), Some(2)),
+                    (DiffOrigin::Deletion, Some(3), None),
+                    (DiffOrigin::Addition, None, Some(3)),
+                ],
+                "{lines:?}"
+            );
+            assert_eq!((diff.additions, diff.deletions), (2, 2));
+        }
     }
 
     #[test]

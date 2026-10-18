@@ -459,6 +459,7 @@ record_gap "Settings / AI Providers: no Settings-opening or section-selection me
 record_gap "Settings / Agents: no Settings-opening or section-selection method is present"
 record_gap "Settings / General: no Settings-opening or section-selection method is present"
 record_gap "Settings / Appearance: no Settings-opening or section-selection method is present"
+record_gap "Settings / Editor: no Settings-opening or section-selection method is present"
 record_gap "Settings / Permissions: not offered by the Linux build (macOS-only category)"
 
 if [[ "$STATE_ONLY" -eq 1 ]]; then

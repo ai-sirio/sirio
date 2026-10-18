@@ -2,10 +2,10 @@
 
 use gpui::{
     AnyElement, App, Bounds, ClickEvent, Context, DefiniteLength, DragMoveEvent, Entity,
-    FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding, KeyDownEvent, Modifiers,
-    MouseButton, PathPromptOptions, PromptLevel, Render, StatefulInteractiveElement,
-    StyleRefinement, Task, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, deferred,
-    div, point, prelude::*, px, size,
+    EntityInputHandler, FocusHandle, Focusable, FontWeight, InteractiveElement, KeyBinding,
+    KeyDownEvent, Keystroke, Modifiers, MouseButton, PathPromptOptions, PromptLevel, Render,
+    StatefulInteractiveElement, StyleRefinement, Task, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, actions, deferred, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
 use notify::{
@@ -46,8 +46,10 @@ use sirio_ui::{
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
+    editor::{Conflict, LineEnding},
+    editor_prefs::EditorPrefs,
     file_context_menu::{FileContextFacts, MissingServer},
-    file_view::{FileView, FileViewEvent, SnapshotOrigin},
+    file_view::{FileView, FileViewEvent, FindOptions, MarkdownMode, SnapshotOrigin},
     loading,
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     orbit::{EMPTY_SURFACE_MARK, orbit},
@@ -712,6 +714,12 @@ fn clamp_first_visible(
 
 const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long typing must pause before the breadcrumb's symbols are asked for again.
+const SYMBOLS_DEBOUNCE: Duration = Duration::from_secs(1);
+/// How long a server that said it is still indexing is given before the one
+/// more ask of its symbols.
+const SYMBOLS_RETRY: Duration = Duration::from_secs(1);
+
 // F-CTRL-BROWSER-04: a lightweight structural snapshot — role, accessible
 // name and bounding box for interactive/labelled elements — serialized as
 // JSON text, the same shape browser.console already returns for console
@@ -1223,6 +1231,103 @@ enum ControlAction {
         reply: ControlReply,
     },
     ReadFile {
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.editor.*` verbs. Most drive the active file tab's
+    /// code editor, as the user's own gestures would; `pref` writes the
+    /// Settings page's Editor values.
+    EditorOpen {
+        path: String,
+        reply: ControlReply,
+    },
+    /// A file at a commit, in the read-only tab a change request's file opens.
+    EditorOpenSnapshot {
+        sha: String,
+        path: String,
+        reply: ControlReply,
+    },
+    EditorState {
+        reply: ControlReply,
+    },
+    EditorType {
+        text: String,
+        reply: ControlReply,
+    },
+    EditorKeys {
+        keys: String,
+        reply: ControlReply,
+    },
+    EditorSelect {
+        ranges: String,
+        reply: ControlReply,
+    },
+    EditorSave {
+        reply: ControlReply,
+    },
+    EditorConflict {
+        action: String,
+        reply: ControlReply,
+    },
+    EditorMode {
+        mode: String,
+        reply: ControlReply,
+    },
+    EditorStatus {
+        item: String,
+        value: Option<String>,
+        open: Option<bool>,
+        reply: ControlReply,
+    },
+    EditorPref {
+        key: String,
+        value: String,
+        reply: ControlReply,
+    },
+    /// The pointer verbs: a hover at `offset`, a click there (a platform click
+    /// or a plain caret placement), and a right press there with a menu action.
+    EditorHover {
+        offset: usize,
+        reply: ControlReply,
+    },
+    EditorClick {
+        offset: usize,
+        platform: bool,
+        reply: ControlReply,
+    },
+    EditorContext {
+        offset: usize,
+        action: sirio_ui::file_context_menu::FileContextAction,
+        reply: ControlReply,
+    },
+    /// A press on the gutter's git mark at `line`: draws or closes its hunk.
+    EditorGitMark {
+        line: usize,
+        reply: ControlReply,
+    },
+    /// A press on the breadcrumb's part at `index`.
+    EditorCrumb {
+        index: usize,
+        reply: ControlReply,
+    },
+    /// Find and replace: open find (`replace` present opens the replace row with
+    /// that text), step between matches, replace one or all, close.
+    EditorFind {
+        query: Option<String>,
+        case: bool,
+        word: bool,
+        regex: bool,
+        replace: Option<String>,
+        reply: ControlReply,
+    },
+    EditorFindStep {
+        forward: bool,
+        reply: ControlReply,
+    },
+    EditorReplace {
+        all: bool,
+        reply: ControlReply,
+    },
+    EditorFindClose {
         reply: ControlReply,
     },
     AddAgentAccount {
@@ -2633,6 +2738,164 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.changes.confirm" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::ChangesConfirm { reply })
+            }
+            "surface.editor.open" if cfg!(debug_assertions) => {
+                let Some(path) = request.params.get("path").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.editor.open requires path");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorOpen { path, reply })
+            }
+            "surface.editor.open_snapshot" if cfg!(debug_assertions) => {
+                let (Some(sha), Some(path)) = (request.params.get("sha").cloned(), request.params.get("path").cloned()) else {
+                    return ControlResponse::failure(&request.id, "surface.editor.open_snapshot requires sha and path");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorOpenSnapshot { sha, path, reply })
+            }
+            "surface.editor.state" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::EditorState { reply })
+            }
+            "surface.editor.type" if cfg!(debug_assertions) => {
+                let Some(text) = request.params.get("text").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.editor.type requires text");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorType { text, reply })
+            }
+            "surface.editor.keys" if cfg!(debug_assertions) => {
+                let Some(keys) = request.params.get("keys").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.editor.keys requires keys");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorKeys { keys, reply })
+            }
+            "surface.editor.select" if cfg!(debug_assertions) => {
+                let Some(ranges) = request.params.get("ranges").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.editor.select requires ranges");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorSelect { ranges, reply })
+            }
+            "surface.editor.hover" if cfg!(debug_assertions) => {
+                let Some(offset) = request.params.get("offset").and_then(|offset| offset.parse::<usize>().ok()) else {
+                    return ControlResponse::failure(&request.id, "surface.editor.hover requires offset");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorHover { offset, reply })
+            }
+            "surface.editor.click" if cfg!(debug_assertions) => {
+                let offset = request.params.get("offset").and_then(|offset| offset.parse::<usize>().ok());
+                let platform = match request.params.get("platform").map(String::as_str) {
+                    Some("true") => Some(true),
+                    Some("false") => Some(false),
+                    _ => None,
+                };
+                let (Some(offset), Some(platform)) = (offset, platform) else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.click requires offset and platform=true or platform=false",
+                    );
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorClick { offset, platform, reply })
+            }
+            "surface.editor.context" if cfg!(debug_assertions) => {
+                let offset = request.params.get("offset").and_then(|offset| offset.parse::<usize>().ok());
+                let action = request
+                    .params
+                    .get("action")
+                    .and_then(|action| sirio_ui::file_context_menu::FileContextAction::from_kebab(action));
+                let (Some(offset), Some(action)) = (offset, action) else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.context requires offset and a menu action such as copy or go-to-definition",
+                    );
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorContext { offset, action, reply })
+            }
+            "surface.editor.git_mark" if cfg!(debug_assertions) => {
+                let Some(line) = request.params.get("line").and_then(|line| line.parse::<usize>().ok()) else {
+                    return ControlResponse::failure(&request.id, "surface.editor.git_mark requires line");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorGitMark { line, reply })
+            }
+            "surface.editor.crumb" if cfg!(debug_assertions) => {
+                let Some(index) = request.params.get("index").and_then(|index| index.parse::<usize>().ok()) else {
+                    return ControlResponse::failure(&request.id, "surface.editor.crumb requires index");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorCrumb { index, reply })
+            }
+            "surface.editor.find" if cfg!(debug_assertions) => {
+                let query = request.params.get("query").cloned();
+                let replace = request.params.get("replace").cloned();
+                let on = |key: &str| request.params.get(key).is_some_and(|value| value == "true");
+                let (case, word, regex) = (on("case"), on("word"), on("regex"));
+                self.queue_action(request, move |reply| ControlAction::EditorFind {
+                    query,
+                    case,
+                    word,
+                    regex,
+                    replace,
+                    reply,
+                })
+            }
+            "surface.editor.find_step" if cfg!(debug_assertions) => {
+                let forward = request.params.get("forward").is_none_or(|value| value != "false");
+                self.queue_action(request, move |reply| ControlAction::EditorFindStep { forward, reply })
+            }
+            "surface.editor.replace" if cfg!(debug_assertions) => {
+                let all = request.params.get("all").is_some_and(|value| value == "true");
+                self.queue_action(request, move |reply| ControlAction::EditorReplace { all, reply })
+            }
+            "surface.editor.find_close" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::EditorFindClose { reply })
+            }
+            "surface.editor.save" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::EditorSave { reply })
+            }
+            "surface.editor.conflict" if cfg!(debug_assertions) => {
+                let action = request.params.get("action").cloned().unwrap_or_default();
+                if action != "reload" && action != "keep" {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.conflict requires action: reload or keep",
+                    );
+                }
+                self.queue_action(request, move |reply| ControlAction::EditorConflict { action, reply })
+            }
+            "surface.editor.mode" if cfg!(debug_assertions) => {
+                let mode = request.params.get("mode").cloned().unwrap_or_default();
+                if mode != "code" && mode != "preview" {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.mode requires mode: code or preview",
+                    );
+                }
+                self.queue_action(request, move |reply| ControlAction::EditorMode { mode, reply })
+            }
+            "surface.editor.status" if cfg!(debug_assertions) => {
+                let Some(item) = request.params.get("item").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.editor.status requires item");
+                };
+                let value = request.params.get("value").cloned();
+                let open = match request.params.get("open").map(String::as_str) {
+                    None => None,
+                    Some("true" | "1" | "yes") => Some(true),
+                    Some("false" | "0" | "no") => Some(false),
+                    Some(other) => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            format!("open must be true or false, not '{other}'"),
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorStatus { item, value, open, reply })
+            }
+            "surface.editor.pref" if cfg!(debug_assertions) => {
+                let (Some(key), Some(value)) = (
+                    request.params.get("key").cloned(),
+                    request.params.get("value").cloned(),
+                ) else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.pref requires key and value",
+                    );
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorPref { key, value, reply })
             }
             "surface.update.read" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::UpdateCardRead { reply })
@@ -5232,6 +5495,16 @@ struct SirioWorkspace {
     /// Language servers, started lazily when a file that wants one is
     /// opened and stopped on app quit. See `crate::lsp`.
     lsp: crate::lsp::LspSupervisor,
+    /// The newest symbols fetch of each open document: an answer that arrives
+    /// under an older number is dropped, and a closed document has none.
+    symbol_generations: HashMap<PathBuf, u64>,
+    /// The pending fetch of symbols after an edit, per document. A new edit
+    /// replaces it, which cancels its timer, so a burst of typing asks once.
+    symbol_debounce: HashMap<PathBuf, gpui::Task<()>>,
+    /// The symbols failures already logged, per document and kind of failure,
+    /// so an edit that fails again does not log again. Cleared with the
+    /// document's last view.
+    symbol_failures_logged: HashSet<(PathBuf, String)>,
     /// Languages already offered this session, keyed by language name.
     /// Checked before raising the install card and never cleared: ten
     /// .java files are one card, not ten, which is what separates this
@@ -5532,7 +5805,7 @@ impl SirioWorkspace {
                                         workspace.sidebar.update(cx, |sidebar, cx| {
                                             sidebar.set_notice(
                                                 format!(
-                                                    "[history] could not restore the previous launch: {error}"
+                                                    "Could not restore the previous launch: {error}"
                                                 ),
                                                 cx,
                                             )
@@ -5745,6 +6018,75 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::ReadFile { reply } => {
                                     let _ = reply.send(workspace.control_read_file(cx));
+                                }
+                                ControlAction::EditorOpen { path, reply } => {
+                                    let _ = reply.send(workspace.control_editor_open(&path, cx));
+                                }
+                                ControlAction::EditorOpenSnapshot { sha, path, reply } => {
+                                    workspace.control_editor_open_snapshot(sha, path, reply, cx);
+                                }
+                                ControlAction::EditorState { reply } => {
+                                    let _ = reply.send(workspace.control_editor_state(cx));
+                                }
+                                ControlAction::EditorType { text, reply } => {
+                                    let _ = reply.send(workspace.control_editor_type(&text, window, cx));
+                                }
+                                ControlAction::EditorKeys { keys, reply } => {
+                                    workspace.control_editor_keys(&keys, reply, window, cx);
+                                }
+                                ControlAction::EditorSelect { ranges, reply } => {
+                                    let _ = reply.send(workspace.control_editor_select(&ranges, cx));
+                                }
+                                ControlAction::EditorSave { reply } => {
+                                    let _ = reply.send(workspace.control_editor_save(cx));
+                                }
+                                ControlAction::EditorConflict { action, reply } => {
+                                    let _ = reply.send(workspace.control_editor_conflict(&action, cx));
+                                }
+                                ControlAction::EditorMode { mode, reply } => {
+                                    let _ = reply.send(workspace.control_editor_mode(&mode, cx));
+                                }
+                                ControlAction::EditorStatus { item, value, open, reply } => {
+                                    let _ = reply.send(workspace.control_editor_status(
+                                        &item,
+                                        value.as_deref(),
+                                        open,
+                                        window,
+                                        cx,
+                                    ));
+                                }
+                                ControlAction::EditorPref { key, value, reply } => {
+                                    let _ = reply.send(workspace.control_editor_pref(&key, &value, cx));
+                                }
+                                ControlAction::EditorHover { offset, reply } => {
+                                    let _ = reply.send(workspace.control_editor_hover(offset, window, cx));
+                                }
+                                ControlAction::EditorClick { offset, platform, reply } => {
+                                    let _ = reply.send(workspace.control_editor_click(offset, platform, cx));
+                                }
+                                ControlAction::EditorContext { offset, action, reply } => {
+                                    let _ = reply.send(workspace.control_editor_context(offset, action, window, cx));
+                                }
+                                ControlAction::EditorGitMark { line, reply } => {
+                                    let _ = reply.send(workspace.control_editor_git_mark(line, cx));
+                                }
+                                ControlAction::EditorCrumb { index, reply } => {
+                                    let _ = reply.send(workspace.control_editor_crumb(index, cx));
+                                }
+                                ControlAction::EditorFind { query, case, word, regex, replace, reply } => {
+                                    let options = FindOptions { case, word, regex };
+                                    let _ = reply.send(workspace.control_editor_find(
+                                        query, options, replace, window, cx,
+                                    ));
+                                }
+                                ControlAction::EditorFindStep { forward, reply } => {
+                                    let _ = reply.send(workspace.control_editor_find_step(forward, window, cx));
+                                }
+                                ControlAction::EditorReplace { all, reply } => {
+                                    let _ = reply.send(workspace.control_editor_replace(all, window, cx));
+                                }
+                                ControlAction::EditorFindClose { reply } => {
+                                    let _ = reply.send(workspace.control_editor_find_close(window, cx));
                                 }
                                 ControlAction::AddAgentAccount {
                                     provider,
@@ -6023,6 +6365,10 @@ impl SirioWorkspace {
                 .status_bar
                 .update(cx, |bar, cx| bar.apply_preferences(prefs, cx));
             workspace.apply_terminal_font_size(snapshot.terminal_font_size, cx);
+            // The code editor's view options, live. `apply` refreshes the
+            // windows only when a value changed, so a notify that changes
+            // nothing repaints nothing.
+            EditorPrefs::apply(snapshot.editor, cx);
         })
         .detach();
         // Task 8: how every agent launches is resolved state, held here and
@@ -6191,6 +6537,9 @@ impl SirioWorkspace {
                     &user_home_dir().unwrap_or_default(),
                 ),
             )),
+            symbol_generations: HashMap::new(),
+            symbol_debounce: HashMap::new(),
+            symbol_failures_logged: HashSet::new(),
             offered: HashSet::new(),
             #[cfg(test)]
             offer_count: 0,
@@ -7577,7 +7926,19 @@ impl SirioWorkspace {
                     FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
                     // The one moment a freshly opened tab has text to describe.
                     FileViewEvent::Loaded(path) => {
-                        workspace.sync_document_with_server(path, &view, cx);
+                        // A document the server already holds (a second view of
+                        // it) is not sent again, and still wants its symbols.
+                        if !workspace.sync_document_with_server(path, &view, cx) {
+                            workspace.refresh_symbols_now(path, cx);
+                        }
+                        workspace.refresh_git_diff(path, &view, cx);
+                        workspace.push_language_server_status(path, &view, cx);
+                    }
+                    FileViewEvent::GitDiffStale(path) => {
+                        workspace.refresh_git_diff(path, &view, cx);
+                    }
+                    FileViewEvent::Saved(path) => {
+                        workspace.refresh_symbols_now(path, cx);
                     }
                     FileViewEvent::RevealInFileManager(path) => {
                         if let Some(mut command) = reveal_command(path) {
@@ -7649,6 +8010,163 @@ impl SirioWorkspace {
         .detach();
     }
 
+    /// Fetches the diff of `path` against HEAD, with no context lines, off the
+    /// GPUI thread, and shows it in `view`: the gutter's git marks and the hunk a
+    /// mark opens. A file outside a repository, or a clean one, has none.
+    ///
+    /// The same trip refreshes the status row's git facts (branch, whether the
+    /// worktree has changes, how far it is from its upstream): the whole-worktree
+    /// `status` the diff already reads says whether there are changes, so the row
+    /// costs no second `status`, and it follows the diff's timing (a load, a
+    /// save, a reload, a focus, an outside change).
+    fn refresh_git_diff(&self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        if !view.update(cx, |view, _| view.begin_git_diff()) {
+            return;
+        }
+        let repository = self
+            .worktree_root_for(path)
+            .filter(|root| is_git_repository(root))
+            .and_then(|root| {
+                let relative = path.strip_prefix(&root).ok()?.to_path_buf();
+                Some((root, relative))
+            });
+        let Some((root, relative)) = repository else {
+            view.update(cx, |view, cx| view.land_git_diff(None, cx));
+            return;
+        };
+        let path = path.to_path_buf();
+        let view = view.downgrade();
+        cx.spawn(async move |_, cx| {
+            let (result, branch, sync) = cx
+                .background_spawn(async move {
+                    let result = Self::head_diff(&root, &relative);
+                    let (branch, sync) = Self::branch_and_sync(&root);
+                    (result, branch, sync)
+                })
+                .await;
+            // A view closed while the fetch ran has no answer to take.
+            let _ = view.update(cx, |view, cx| {
+                let mut facts = view.status_facts().clone();
+                facts.branch = branch;
+                facts.sync = sync;
+                let diff = match result {
+                    Ok((diff, dirty)) => {
+                        facts.worktree_dirty = dirty;
+                        diff
+                    }
+                    Err(error) => {
+                        eprintln!("[git] the diff of {} could not be read: {error}", path.display());
+                        None
+                    }
+                };
+                view.set_status_facts(facts, cx);
+                view.land_git_diff(diff, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The diff of `relative` against HEAD with no context lines, or `None` when
+    /// git lists the file as clean, and whether git lists any change in the
+    /// worktree at all. `status` reads the whole worktree; the file's own entry
+    /// is the only one diffed.
+    fn head_diff(
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(Option<sirio_git::FileDiff>, bool), GitError> {
+        let snapshot = sirio_git::status(root)?;
+        let dirty = !snapshot.entries.is_empty();
+        let Some(entry) = snapshot.entries.iter().find(|entry| entry.path == relative) else {
+            return Ok((None, dirty));
+        };
+        sirio_git::diff_entry(root, entry, 0).map(|diff| (Some(diff), dirty))
+    }
+
+    /// What the status row says of the checkout at `root` that needs no
+    /// `status`: the branch its `HEAD` file names (a short commit id when
+    /// detached) and how far it is from its upstream, `None` for no upstream.
+    /// A git failure is logged and reads as no upstream.
+    fn branch_and_sync(root: &Path) -> (Option<String>, Option<(usize, usize)>) {
+        let sync = sirio_git::ahead_behind(root).unwrap_or_else(|error| {
+            eprintln!("[git] how far {} is from its upstream could not be read: {error}", root.display());
+            None
+        });
+        (read_head_label(root), sync)
+    }
+
+    /// Refreshes the status row's branch and upstream distance for `path`'s
+    /// view without a `status` (the worktree's own state is left as it was
+    /// last read). Run when a worktree is switched to: a push, a fetch or a
+    /// commit made in a terminal meanwhile moved them.
+    fn refresh_branch_and_sync(&self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        let Some(root) = self
+            .worktree_root_for(path)
+            .filter(|root| is_git_repository(root))
+        else {
+            return;
+        };
+        let view = view.downgrade();
+        cx.spawn(async move |_, cx| {
+            let (branch, sync) = cx
+                .background_spawn(async move { Self::branch_and_sync(&root) })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                let mut facts = view.status_facts().clone();
+                facts.branch = branch;
+                facts.sync = sync;
+                view.set_status_facts(facts, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// `refresh_branch_and_sync` for every file open in the strip that has
+    /// loaded; one still loading is refreshed by its own `Loaded`, so a
+    /// switch does not read git twice for it.
+    fn refresh_branch_and_sync_of_open_files(&self, cx: &mut Context<Self>) {
+        for (path, view) in Self::open_file_views(&self.tabs, cx) {
+            let view_state = view.read(cx);
+            if view_state.is_loaded() && !view_state.is_snapshot() {
+                self.refresh_branch_and_sync(&path, &view, cx);
+            }
+        }
+    }
+
+    /// The language server the status row names for `path`, and where it
+    /// stands. The name is the program the entry runs (`rust-analyzer`), without
+    /// its directory or an `.exe`. `None` for a file with no entry, or whose server is not
+    /// there to run: nothing is volunteered about a missing one.
+    fn language_server_status(&self, path: &Path) -> Option<(String, sirio_ui::file_view::LspState)> {
+        let entry = self.lsp.known_entry_for(path)?;
+        let root = self.worktree_root_for(path)?;
+        let state = self.lsp.state_of(&self.lsp.key_for(path, &root, &entry))?;
+        let name = Path::new(&entry.command)
+            .file_stem()
+            .map_or_else(|| entry.command.clone(), |name| name.to_string_lossy().into_owned());
+        Some((name, state))
+    }
+
+    /// Pushes the language server's state for `path` to its status row.
+    fn push_language_server_status(&self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        let lsp = self.language_server_status(path);
+        view.update(cx, |view, cx| {
+            let mut facts = view.status_facts().clone();
+            facts.lsp = lsp;
+            view.set_status_facts(facts, cx);
+        });
+    }
+
+    /// `push_language_server_status` for every file open in the strip: one
+    /// server serves every file of its language under one root, so a launch
+    /// that starts, ends or fails changes them all.
+    fn push_language_server_status_to_open_files(&self, cx: &mut Context<Self>) {
+        for (path, view) in Self::open_file_views(&self.tabs, cx) {
+            if !view.read(cx).is_snapshot() {
+                self.push_language_server_status(&path, &view, cx);
+            }
+        }
+    }
+
     /// The context-menu facts only this workspace can answer. `in_git_repo`
     /// is decided from the worktree rows already held, not from a
     /// subprocess; only the GitHub check shells out, and only once per
@@ -7677,8 +8195,8 @@ impl SirioWorkspace {
             // install for one Sirio can fetch, the thing that has to come
             // first for a `Manual` one, or — for an entry of the reader's
             // own, which carries no recipe — the name they wrote.
-            // `Dead::Failed` carries nothing, having already been reported
-            // at the moment it broke.
+            // `Dead::Failed` offers nothing here: it was already reported at
+            // the moment it broke.
             missing_language_server: worktree.as_deref().and_then(|root| {
                 let dead = self.lsp.dead_reason_for(path, root)?;
                 let command = self.lsp.known_entry_for(path)?.command.clone();
@@ -7716,12 +8234,13 @@ impl SirioWorkspace {
                             command: command.clone(),
                         })
                     }
-                    crate::lsp::Dead::Failed => None,
+                    crate::lsp::Dead::Failed { .. } => None,
                 }
             }),
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,
+            is_snapshot: false,
         }
     }
 
@@ -8405,7 +8924,11 @@ impl SirioWorkspace {
             return;
         }
         let facts = self.file_context_facts(path);
-        view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+        let location = self.repo_relative(path);
+        view.update(cx, |view, cx| {
+            view.set_shell_facts(facts, cx);
+            view.set_location(location, cx);
+        });
         self.start_language_server_for(path, view, cx);
     }
 
@@ -11121,6 +11644,7 @@ impl SirioWorkspace {
         }
         self.worktree_label = context.activity_label;
         self.rebind_changes_tabs(cx);
+        self.refresh_branch_and_sync_of_open_files(cx);
         // The old worktree's pane list is NOT wiped here. `sync_control_panes`
         // re-registers this window's own panes under the newly selected path
         // by pane id, and the registry is keyed by id, so those entries leave
@@ -12865,7 +13389,22 @@ impl SirioWorkspace {
             }
         });
         for path in closed_files {
-            self.close_document_on_server(&path, cx);
+            // The closing tab is still in `self.tabs`; any other view of the
+            // path is in another tab.
+            let shown_elsewhere = self.tabs.iter().enumerate().any(|(other, tab)| {
+                let mut found = false;
+                if other != index {
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::File { view } = content
+                            && paths_name_the_same_document(view.read(cx).path(), &path)
+                        {
+                            found = true;
+                        }
+                    });
+                }
+                found
+            });
+            self.close_document_on_server(&path, !shown_elsewhere, cx);
         }
         self.tabs.remove(index);
         self.tab_worktree_paths.remove(&tab_id);
@@ -13951,10 +14490,19 @@ impl SirioWorkspace {
             return;
         };
         let key = self.lsp.key_for(path, &worktree_root, &entry);
-        if self.lsp.is_running(&key) || self.lsp.is_dead(&key) {
+        // A launch already under way serves this file too: it is synced when
+        // that launch answers (below), and a second spawn would leave two
+        // servers under one key.
+        if self.lsp.is_running(&key) || self.lsp.is_dead(&key) || self.lsp.is_starting(&key) {
+            self.push_language_server_status(path, view, cx);
             self.sync_document_with_server(path, view, cx);
             return;
         }
+        // The launch is under way from here to its answer, which the status
+        // row shows as "starting" in every tab this server serves.
+        self.lsp.mark_starting(key.clone());
+        self.push_language_server_status(path, view, cx);
+        self.push_language_server_status_to_open_files(cx);
 
         let command = entry.command.clone();
         let args = entry.args.clone();
@@ -14013,6 +14561,7 @@ impl SirioWorkspace {
 
             let _ = this.update(cx, |workspace, cx| match launched {
                 Ok((server, read_loop)) => {
+                    workspace.lsp.finish_starting(&key);
                     let task = cx.background_executor().spawn(read_loop);
                     let router = Self::spawn_router(&server, cx);
                     workspace.lsp.insert(
@@ -14029,8 +14578,17 @@ impl SirioWorkspace {
                     let facts = workspace.file_context_facts(&path_for_facts);
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
                     workspace.sync_document_with_server(&path_for_facts, &view, cx);
+                    // Files of this key opened while the launch ran were not
+                    // spawned for; the server is theirs now.
+                    for (path, other) in Self::open_file_views(&workspace.tabs, cx) {
+                        if !other.read(cx).is_snapshot() {
+                            workspace.sync_document_with_server(&path, &other, cx);
+                        }
+                    }
+                    workspace.push_language_server_status_to_open_files(cx);
                 }
                 Err(sirio_lsp::LspError::NotInstalled { command }) => {
+                    workspace.lsp.finish_starting(&key);
                     // The shipped table offers a server for every language
                     // Sirio can open, so "not installed" is the answer for
                     // most of it on any given machine. Saying so on every
@@ -14065,6 +14623,8 @@ impl SirioWorkspace {
                         },
                     };
                     workspace.lsp.mark_dead(key, reason.clone());
+                    // Nothing to name: the row draws no server for a missing one.
+                    workspace.push_language_server_status_to_open_files(cx);
                     let facts = workspace.file_context_facts(&path_for_facts);
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
                     // The offer, once per language: a silenced language
@@ -14080,7 +14640,14 @@ impl SirioWorkspace {
                     );
                 }
                 Err(error) => {
-                    workspace.lsp.mark_dead(key, crate::lsp::Dead::Failed);
+                    workspace.lsp.finish_starting(&key);
+                    workspace.lsp.mark_dead(
+                        key,
+                        crate::lsp::Dead::Failed {
+                            message: error.to_string(),
+                        },
+                    );
+                    workspace.push_language_server_status_to_open_files(cx);
                     // Naming the command is the point: it came from the
                     // user's languages.toml, and naming it turns a mystery
                     // into a line they can edit.
@@ -14283,7 +14850,7 @@ impl SirioWorkspace {
             crate::lsp::Dead::Manual { needs, .. } => OfferKind::Manual {
                 text: format!("{command} needs {needs}."),
             },
-            crate::lsp::Dead::NotInstalled { .. } | crate::lsp::Dead::Failed => return,
+            crate::lsp::Dead::NotInstalled { .. } | crate::lsp::Dead::Failed { .. } => return,
         };
         self.offered.insert(language.to_owned());
         #[cfg(test)]
@@ -14414,53 +14981,192 @@ impl SirioWorkspace {
     ///
     /// Returning early is the whole fix: `FileViewEvent::Loaded` brings the
     /// text back here the moment there is any.
+    ///
+    /// Returns whether it sent the server anything (a `didOpen` or a
+    /// `didChange`).
     fn sync_document_with_server(
         &mut self,
         path: &Path,
         view: &Entity<FileView>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         // Ordered by cost, because the observer in `subscribe_file_view`
         // reaches this on every notify a file view makes — a caret blink
         // included. Nothing here reads the disk (`known_entry_for` uses the
         // table already loaded) and nothing copies the buffer until a send
         // is certain.
         let Some(entry) = self.lsp.known_entry_for(path) else {
-            return;
+            return false;
         };
         let Some(worktree_root) = self.worktree_root_for(path) else {
-            return;
+            return false;
         };
         let key = self.lsp.key_for(path, &worktree_root, &entry);
         let Some(server) = self.lsp.server_for(&key) else {
-            return;
+            return false;
         };
         let client = server.client().clone();
+        let offers_symbols = server.capabilities().document_symbols;
         let view_state = view.read(cx);
         let Some(buffer) = view_state.editor().map(|editor| editor.buffer()) else {
-            return;
+            return false;
         };
         if self.lsp.is_synced(path, buffer) {
-            return;
+            return false;
         }
         let text = buffer.to_owned();
         let Some(sync) = self.lsp.sync_text(path, &text) else {
-            return;
+            return false;
         };
-        let path = path.to_path_buf();
+        let opened = matches!(sync, crate::lsp::DocumentSync::Open { .. });
+        // A document just opened has its symbols asked for as soon as the
+        // server has the text, and the request waits for the `didOpen` it is
+        // about: two spawned futures start in no fixed order. After an edit the
+        // `didChange` is long sent when the debounce ends.
+        let (sent, after_send) = if opened && offers_symbols {
+            let (sent, after_send) = futures::channel::oneshot::channel();
+            (Some(sent), Some(after_send))
+        } else {
+            (None, None)
+        };
+        let owned_path = path.to_path_buf();
         let language = entry.name.clone();
         cx.background_executor()
             .spawn(async move {
                 let _ = match sync {
                     crate::lsp::DocumentSync::Open { version } => {
-                        sirio_lsp::did_open(&client, &path, &language, version, &text).await
+                        sirio_lsp::did_open(&client, &owned_path, &language, version, &text).await
                     }
                     crate::lsp::DocumentSync::Change { version } => {
-                        sirio_lsp::did_change(&client, &path, version, &text).await
+                        sirio_lsp::did_change(&client, &owned_path, version, &text).await
                     }
                 };
+                if let Some(sent) = sent {
+                    let _ = sent.send(());
+                }
             })
             .detach();
+        if offers_symbols {
+            if opened {
+                self.fetch_symbols(path, after_send, cx);
+            } else {
+                self.schedule_symbols(path, cx);
+            }
+        }
+        true
+    }
+
+    /// The client of the server holding `path`, when it offers document symbols.
+    fn symbols_client(&self, path: &Path) -> Option<sirio_lsp::Client> {
+        let entry = self.lsp.known_entry_for(path)?;
+        let worktree_root = self.worktree_root_for(path)?;
+        let key = self.lsp.key_for(path, &worktree_root, &entry);
+        let server = self.lsp.server_for(&key)?;
+        server
+            .capabilities()
+            .document_symbols
+            .then(|| server.client().clone())
+    }
+
+    /// Asks the server for `path`'s symbols, off the GPUI thread, and hands them
+    /// to every open view of the file for the breadcrumb. The newest ask wins:
+    /// an answer that comes back after a later ask began is dropped, and a file
+    /// with no view left has none to give it to. `after_send` is a text still on
+    /// its way to the server, waited for first. A server still indexing
+    /// (`NotReady`) is asked once more after a second. Any other failure keeps
+    /// the symbols the views have, is logged once per file and kind, and the
+    /// next edit asks again.
+    fn fetch_symbols(
+        &mut self,
+        path: &Path,
+        after_send: Option<futures::channel::oneshot::Receiver<()>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.symbols_client(path) else {
+            return;
+        };
+        let generation = self.symbol_generations.entry(path.to_path_buf()).or_insert(0);
+        *generation += 1;
+        let generation = *generation;
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let source = path.clone();
+            let executor = cx.background_executor().clone();
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    if let Some(after_send) = after_send {
+                        let _ = after_send.await;
+                    }
+                    let mut found = sirio_lsp::document_symbols(&client, &source).await;
+                    if matches!(found, Err(sirio_lsp::LspError::NotReady)) {
+                        executor.timer(SYMBOLS_RETRY).await;
+                        found = sirio_lsp::document_symbols(&client, &source).await;
+                    }
+                    found
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.symbol_generations.get(&path) != Some(&generation) {
+                    return;
+                }
+                match found {
+                    Ok(symbols) => {
+                        let symbols = crate::lsp::view_symbols(&symbols);
+                        for (open_path, view) in Self::open_file_views(&workspace.tabs, cx) {
+                            if paths_name_the_same_document(&open_path, &path)
+                                && !view.read(cx).is_snapshot()
+                            {
+                                view.update(cx, |view, cx| view.set_symbols(symbols.clone(), cx));
+                            }
+                        }
+                    }
+                    Err(error) => workspace.note_symbols_failure(&path, &error),
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Logs a failed symbols ask once per file and kind of failure: the file's
+    /// path and the kind (a server's error code too), never the server's own
+    /// message, which can quote the file.
+    fn note_symbols_failure(&mut self, path: &Path, error: &sirio_lsp::LspError) {
+        use sirio_lsp::LspError;
+        let kind = match error {
+            LspError::Launch(_) => "launch".to_owned(),
+            LspError::NotInstalled { .. } => "not installed".to_owned(),
+            LspError::Transport(_) => "transport".to_owned(),
+            LspError::Server { code, .. } => format!("server error {code}"),
+            LspError::NotReady => "still indexing".to_owned(),
+            LspError::Timeout { .. } => "timeout".to_owned(),
+        };
+        if self
+            .symbol_failures_logged
+            .insert((path.to_path_buf(), kind.clone()))
+        {
+            eprintln!("[lsp] document symbols for {}: {kind}", path.display());
+        }
+    }
+
+    /// Asks again for `path`'s symbols once the typing has paused for
+    /// `SYMBOLS_DEBOUNCE`. Each call replaces the one before it.
+    fn schedule_symbols(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let source = path.to_path_buf();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SYMBOLS_DEBOUNCE).await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.fetch_symbols(&source, None, cx);
+            });
+        });
+        self.symbol_debounce.insert(path.to_path_buf(), task);
+    }
+
+    /// Asks for `path`'s symbols now. A pending debounced ask stays: the edit
+    /// it waits for may not have reached the server before this ask does, and
+    /// its later answer wins by generation.
+    fn refresh_symbols_now(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.fetch_symbols(path, None, cx);
     }
 
     fn request_hover(
@@ -14733,8 +15439,16 @@ impl SirioWorkspace {
     }
 
     /// Tells the server a file is closed and forgets its version, so a
-    /// reopen starts over at 1.
-    fn close_document_on_server(&mut self, path: &Path, cx: &mut Context<Self>) {
+    /// reopen starts over at 1. `last_view` is whether no other tab shows the
+    /// file: the symbols bookkeeping (the newest ask, the pending debounce, the
+    /// failures logged) is dropped only then, before anything can return early,
+    /// so a view that stays keeps its pending ask.
+    fn close_document_on_server(&mut self, path: &Path, last_view: bool, cx: &mut Context<Self>) {
+        if last_view {
+            self.symbol_generations.remove(path);
+            self.symbol_debounce.remove(path);
+            self.symbol_failures_logged.retain(|(logged, _)| logged != path);
+        }
         let Some(entry) = self.lsp.entry_for(path) else {
             return;
         };
@@ -15020,8 +15734,12 @@ impl SirioWorkspace {
         );
         let facts = self.file_context_facts(&path);
         let view = cx.new(|cx| FileView::new(path.clone(), cx));
+        let location = self.repo_relative(&path);
         Self::subscribe_file_view(&view, cx);
-        view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+        view.update(cx, |view, cx| {
+            view.set_shell_facts(facts, cx);
+            view.set_location(location, cx);
+        });
         self.start_language_server_for(&path, &view, cx);
         let tab_id = self.next_tab_id;
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
@@ -17916,19 +18634,684 @@ impl SirioWorkspace {
         Ok(self.control_read_layout(cx))
     }
 
+    /// The active tab's focused file view, or its first one when the focused
+    /// pane is not a file: the one the `surface.editor.*` verbs act on, and the
+    /// one `surface.file.read` reads.
+    fn active_file_view(&self) -> Option<Entity<FileView>> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let mut focused = None;
+        let mut first = None;
+        tab.panes.for_each(&mut |id, content| {
+            if let TabContent::File { view } = content {
+                if id == tab.focused_pane {
+                    focused = Some(view.clone());
+                }
+                first.get_or_insert_with(|| view.clone());
+            }
+        });
+        focused.or(first)
+    }
+
+    /// The active file tab's editor. The text is escaped as `surface.file.read`
+    /// escapes it; the selections are `a..b` byte offsets, anchor first, joined
+    /// by `;`. `state` is `loaded` only once the code editor exists, so a
+    /// caller that waits for it never races the first frame.
+    fn control_editor_state(&self, cx: &App) -> Result<Vec<(String, String)>, String> {
+        let view_entity = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let view = view_entity.read(cx);
+        let editor = view.editor();
+        let code = view.code_editor().map(|code| code.read(cx));
+        // A file that failed to load, or a snapshot that did, is in error. A
+        // file still loading, and one whose code editor is not drawn yet, is not.
+        let error = view
+            .snapshot_error()
+            .map(str::to_owned)
+            .or_else(|| editor.and_then(|editor| editor.load_message()));
+        let state = match (&error, code) {
+            (Some(_), _) => "error",
+            (None, Some(_)) => "loaded",
+            (None, None) => "loading",
+        };
+        let text = editor
+            .map(|editor| Self::escaped_field(editor.buffer()))
+            .unwrap_or_default();
+        // The card and the message as the user reads them; the findings the code
+        // editor draws, which the card reads too.
+        let hover = Self::escaped_field(view.hover_card().unwrap_or_default());
+        let message = Self::escaped_field(&view.message_text().unwrap_or_default());
+        let (newest_note, oldest_note) = view.notification_ends(40);
+        let diagnostics = code.map_or(0, |code| code.diagnostics().len());
+        let selections = code.map(|code| {
+            Self::joined_selections(
+                code.selections()
+                    .iter()
+                    .map(|selection| (selection.anchor, selection.head)),
+            )
+        });
+        let line_ending = match editor.map(|editor| editor.line_ending()) {
+            Some(LineEnding::Crlf) => "crlf",
+            _ => "lf",
+        };
+        let conflict = match view.conflict() {
+            Conflict::None => "none",
+            Conflict::ChangedOnDisk => "changed",
+            Conflict::DeletedOnDisk => "deleted",
+        };
+        let mode = match view.effective_mode() {
+            MarkdownMode::Code => "code",
+            MarkdownMode::Preview => "preview",
+        };
+        let format_buttons = if view.formatting_controls_shown() {
+            "shown"
+        } else {
+            "hidden"
+        };
+        let mut fields = vec![
+            ("path".to_string(), display_absolute_path(view.path())),
+            ("state".to_string(), state.to_string()),
+            ("error".to_string(), error.unwrap_or_default()),
+            ("text".to_string(), text),
+            ("dirty".to_string(), view.is_dirty().to_string()),
+            (
+                "language".to_string(),
+                editor
+                    .map(|editor| editor.language().name().to_string())
+                    .unwrap_or_default(),
+            ),
+            ("line_ending".to_string(), line_ending.to_string()),
+            ("selections".to_string(), selections.unwrap_or_default()),
+            ("snapshot".to_string(), view.is_snapshot().to_string()),
+            (
+                "banner".to_string(),
+                Self::escaped_field(&view.snapshot_origin().map(SnapshotOrigin::banner_message).unwrap_or_default()),
+            ),
+            (
+                "banner_action".to_string(),
+                view.snapshot_origin().and_then(SnapshotOrigin::banner_action).unwrap_or_default().to_string(),
+            ),
+            (
+                "read_only".to_string(),
+                code.map_or(view.is_snapshot(), |code| code.is_read_only()).to_string(),
+            ),
+            (
+                "ely_banner".to_string(),
+                code.is_some_and(|code| code.draws_read_only_banner()).to_string(),
+            ),
+            ("format_buttons".to_string(), format_buttons.to_string()),
+            ("conflict".to_string(), conflict.to_string()),
+            ("mode".to_string(), mode.to_string()),
+            ("hover".to_string(), hover),
+            ("message".to_string(), message),
+            ("diagnostics".to_string(), diagnostics.to_string()),
+            ("git_marks".to_string(), view.git_marks_text()),
+            ("diff_open".to_string(), Self::open_hunk_text(view)),
+            // Asks for this file's diff so far, the coalesced asks too: a focus,
+            // a save, a reload and an outside change each count once.
+            ("git_diff_requests".to_string(), view.git_diff_requests().to_string()),
+            ("breadcrumb".to_string(), Self::escaped_field(&view.breadcrumb_text())),
+            // The row under the file, as drawn: empty until it is drawn.
+            ("status".to_string(), view.status_text(cx)),
+            ("status_set".to_string(), view.status_set(cx).to_string()),
+            ("worktree_dirty".to_string(), view.status_facts().worktree_dirty.to_string()),
+            (
+                "status_popover".to_string(),
+                view.status_popover().map_or("none", |item| item.word()).to_string(),
+            ),
+            // How many notifications the tab holds behind the bell; the
+            // bell's own count (those not yet seen) is `status=`'s `bell`.
+            ("notifications".to_string(), view.notification_count().to_string()),
+            // The first 40 characters of the newest and the oldest row, and
+            // how many times in a row the newest arrived (0: no rows).
+            ("notification_newest".to_string(), Self::escaped_field(&newest_note)),
+            ("notification_oldest".to_string(), Self::escaped_field(&oldest_note)),
+            ("notification_repeats".to_string(), view.notification_repeats().to_string()),
+            // What the code's highlighter last gave the first line: its language
+            // and how many coloured spans.
+            ("highlight".to_string(), view.highlight_text()),
+            ("prefs".to_string(), EditorPrefs::current(cx).describe()),
+        ];
+        fields.extend(Self::find_fields(view));
+        Ok(fields)
+    }
+
+    /// Opens `path` as a file tab, as the shell opens a file, and answers with
+    /// its state. The load may still be running; `state` says so. `path` is
+    /// absolute, as a shell's would be.
+    fn control_editor_open(
+        &mut self,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        self.add_file_tab(PathBuf::from(path), cx);
+        self.control_editor_state(cx)
+    }
+
+    /// `surface.editor.open_snapshot sha= path=`: `path` at the commit `sha`
+    /// (a full id) in the active worktree, in the read-only tab a change
+    /// request's file opens, through `add_snapshot_tab`. The change request is
+    /// a fixed stand-in (`#7`, on a host that does not exist): the tab only
+    /// needs one to name its origin. The blob is read off the GPUI thread, and
+    /// the reply, the new tab's editor state, is sent once the tab exists, so a
+    /// read that fails answers a state with its error.
+    fn control_editor_open_snapshot(
+        &mut self,
+        sha: String,
+        path: String,
+        reply: ControlReply,
+        cx: &mut Context<Self>,
+    ) {
+        let path = PathBuf::from(path);
+        if !sirio_git::is_commit_id(&sha) {
+            let _ = reply.send(Err("sha must be a full commit id".to_string()));
+            return;
+        }
+        if !snapshot_path_is_repository_relative(&path) {
+            let _ = reply.send(Err(INVALID_CHANGE_REQUEST_FILE_PATH.to_string()));
+            return;
+        }
+        let worktree = self.working_directory.clone();
+        cx.spawn(async move |this, cx| {
+            let (blob_worktree, blob_sha, blob_path) = (worktree.clone(), sha.clone(), path.clone());
+            let read = cx
+                .background_spawn(async move {
+                    sirio_git::show_blob(&blob_worktree, &blob_sha, &blob_path).map_err(snapshot_read_error)
+                })
+                .await;
+            let local = worktree.join(&path);
+            let origin = SnapshotOrigin {
+                reference: sirio_forge::ChangeRef {
+                    forge: sirio_forge::Forge::GitHub,
+                    host: "forge.invalid".to_string(),
+                    project: "sirio/e2e".to_string(),
+                    number: 7,
+                },
+                sha,
+                relative_path: path,
+                local_copy: local.is_file().then_some(local),
+                deleted: false,
+            };
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.still_in(&worktree) {
+                    workspace.add_snapshot_tab(origin, read, None, cx);
+                    let _ = reply.send(workspace.control_editor_state(cx));
+                } else {
+                    let _ = reply.send(Err("the worktree changed before the snapshot opened".to_string()));
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Types `text` through the code editor's input handler, so read-only,
+    /// multi-cursor and undo grouping behave as for typed text. Refused while
+    /// the code editor is not drawn (the file is loading, or in Preview).
+    fn control_editor_type(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let (code, focus) = {
+            let view = view.read(cx);
+            if !view.code_shown() {
+                return Err(
+                    "the code editor is not drawn: the file is loading or in Preview".to_string(),
+                );
+            }
+            let code = view
+                .code_editor()
+                .cloned()
+                .ok_or_else(|| "the file is still loading".to_string())?;
+            (code, view.focus_target(cx))
+        };
+        focus.focus(window, cx);
+        code.update(cx, |code, cx| code.replace_text_in_range(None, text, window, cx));
+        Ok(Vec::new())
+    }
+
+    /// Dispatches each keystroke to the window, as the user's keys reach it.
+    /// The keystrokes run after this action returns: one may be a workspace
+    /// action, and this action holds the workspace. Every keystroke is parsed
+    /// first, so one that does not parse dispatches none of them.
+    fn control_editor_keys(
+        &mut self,
+        keys: &str,
+        reply: ControlReply,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let parsed = keys
+            .split_whitespace()
+            .map(|key| {
+                Keystroke::parse(key)
+                    .map_err(|error| format!("'{key}' is not a keystroke: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let keystrokes = match parsed {
+            Ok(keystrokes) if !keystrokes.is_empty() => keystrokes,
+            Ok(_) => {
+                let _ = reply.send(Err("surface.editor.keys requires keys".to_string()));
+                return;
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        let Some(view) = self.active_file_view() else {
+            let _ = reply.send(Err("no file tab is active".to_string()));
+            return;
+        };
+        let focus = view.read(cx).focus_target(cx);
+        focus.focus(window, cx);
+        window.defer(cx, move |window, cx| {
+            for keystroke in keystrokes {
+                window.dispatch_keystroke(keystroke, cx);
+            }
+            let _ = reply.send(Ok(Vec::new()));
+        });
+    }
+
+    /// Selects the ranges `a..b;c..d`, the last one primary. A reversed range,
+    /// one past the text or one that splits a character is an error: the code
+    /// editor would drop it silently.
+    fn control_editor_select(
+        &mut self,
+        ranges: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let code = view
+            .read(cx)
+            .code_editor()
+            .cloned()
+            .ok_or_else(|| "the file is still loading".to_string())?;
+        let ranges = Self::editor_ranges(ranges)?;
+        {
+            let text = code.read(cx).text();
+            for range in &ranges {
+                let whole = range.start <= range.end
+                    && range.end <= text.len()
+                    && text.is_char_boundary(range.start)
+                    && text.is_char_boundary(range.end);
+                if !whole {
+                    return Err(format!(
+                        "{}..{} is not a range of whole characters in {} bytes",
+                        range.start,
+                        range.end,
+                        text.len()
+                    ));
+                }
+            }
+        }
+        code.update(cx, |code, cx| code.select(ranges, cx));
+        let selections = Self::joined_selections(
+            code.read(cx)
+                .selections()
+                .iter()
+                .map(|selection| (selection.anchor, selection.head)),
+        );
+        Ok(vec![("selections".to_string(), selections)])
+    }
+
+    /// The active file view for a pointer verb. Its code editor must be drawn,
+    /// and `offset` must name a character boundary of its text.
+    fn editor_pointer_target(&self, offset: usize, cx: &App) -> Result<Entity<FileView>, String> {
+        let view_entity = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let view = view_entity.read(cx);
+        if !view.code_shown() {
+            return Err("the code editor is not drawn: the file is loading or in Preview".to_string());
+        }
+        let text = view
+            .code_editor()
+            .ok_or_else(|| "the file is still loading".to_string())?
+            .read(cx)
+            .text();
+        if offset > text.len() || !text.is_char_boundary(offset) {
+            return Err(format!("{offset} is not a character boundary in {} bytes", text.len()));
+        }
+        Ok(view_entity)
+    }
+
+    /// The middle of the window. A debug verb's pointer rests there, where the
+    /// file view's text is in the usual layout.
+    fn window_centre(window: &Window) -> gpui::Point<gpui::Pixels> {
+        let size = window.viewport_size();
+        point(size.width / 2., size.height / 2.)
+    }
+
+    /// The active file's selections as `a..b` pairs, for a pointer verb's reply.
+    fn selections_reply(view: &Entity<FileView>, cx: &App) -> Result<Vec<(String, String)>, String> {
+        let selections = view.read(cx).code_editor().map(|code| {
+            Self::joined_selections(
+                code.read(cx)
+                    .selections()
+                    .iter()
+                    .map(|selection| (selection.anchor, selection.head)),
+            )
+        });
+        Ok(vec![("selections".to_string(), selections.unwrap_or_default())])
+    }
+
+    /// `surface.editor.hover offset=`: the pointer rests at `offset`, as the code
+    /// editor's `Pointer` event reports it. The card shows the diagnostics there
+    /// now and the server's answer after the hover delay.
+    fn control_editor_hover(
+        &mut self,
+        offset: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self.editor_pointer_target(offset, cx)?;
+        let at = Self::window_centre(window);
+        view.update(cx, |view, cx| view.hover_moved(offset, at, cx));
+        Ok(Vec::new())
+    }
+
+    /// `surface.editor.click offset= platform=`: a platform click at `offset`, as
+    /// Ely's `PlatformClick` makes it (a link, or go to definition), or a plain
+    /// caret placement. Answers the selections.
+    fn control_editor_click(
+        &mut self,
+        offset: usize,
+        platform: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self.editor_pointer_target(offset, cx)?;
+        view.update(cx, |view, cx| {
+            if platform {
+                view.platform_click_at(offset, cx);
+            } else {
+                view.place_caret_at(offset, cx);
+            }
+        });
+        Self::selections_reply(&view, cx)
+    }
+
+    /// `surface.editor.context offset= action=`: a right press at `offset`, then
+    /// the menu row's click for `action`, as the menu runs it. A row the click
+    /// refuses answers its reason as the error. Answers the selections.
+    fn control_editor_context(
+        &mut self,
+        offset: usize,
+        action: sirio_ui::file_context_menu::FileContextAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self.editor_pointer_target(offset, cx)?;
+        let at = Self::window_centre(window);
+        view.update(cx, |view, cx| {
+            view.context_action_at(offset, at, action, window, cx)
+        })?;
+        Self::selections_reply(&view, cx)
+    }
+
+    /// `surface.editor.git_mark line=`: a press on the gutter's git mark at
+    /// `line`, as the code editor's `GitMarkPressed` makes it. Answers the
+    /// `diff_open` the press leaves.
+    fn control_editor_git_mark(
+        &mut self,
+        line: usize,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        view.update(cx, |view, cx| view.toggle_hunk(line, cx));
+        let open = Self::open_hunk_text(view.read(cx));
+        Ok(vec![("diff_open".to_string(), open)])
+    }
+
+    /// The active file's find state as the find verbs and `state` answer it:
+    /// `find_matches` and `find_current` (0-based) are `none` while find is
+    /// closed, `find_current` also with no match; `find_error` is the pattern's
+    /// error, empty when there is none.
+    fn find_fields(view: &FileView) -> Vec<(String, String)> {
+        let number = |value: Option<usize>| value.map_or_else(|| "none".to_string(), |n| n.to_string());
+        vec![
+            ("find_matches".to_string(), number(view.find_matches())),
+            ("find_current".to_string(), number(view.find_current())),
+            (
+                "find_error".to_string(),
+                Self::escaped_field(view.find_error().unwrap_or_default()),
+            ),
+        ]
+    }
+
+    /// `surface.editor.find query= case= word= regex= replace=`: opens find as
+    /// the Find key does, or brings the open one back to its query. `replace`
+    /// opens the replace row with that text. Answers the find state.
+    fn control_editor_find(
+        &mut self,
+        query: Option<String>,
+        options: FindOptions,
+        replace: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let opened = view.update(cx, |view, cx| view.open_find(query, options, replace, window, cx));
+        if !opened {
+            return Err("the code editor is not drawn: the file is loading or in Preview".to_string());
+        }
+        Ok(Self::find_fields(view.read(cx)))
+    }
+
+    /// `surface.editor.find_step forward=`: the next match, or the previous one.
+    /// Refused while the code is not shown, as the step itself does nothing then.
+    fn control_editor_find_step(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        if view.read(cx).find_matches().is_none() {
+            return Err("find is not open".to_string());
+        }
+        if !view.read(cx).code_shown() {
+            return Err("the code editor is not drawn: the file is loading or in Preview".to_string());
+        }
+        view.update(cx, |view, cx| view.find_step(forward, window, cx));
+        Ok(Self::find_fields(view.read(cx)))
+    }
+
+    /// `surface.editor.replace all=`: replaces the current match or every one,
+    /// with the replace row's text. A refusal (find closed, a read-only file) is
+    /// the error; nothing to replace answers `replaced=0`.
+    fn control_editor_replace(
+        &mut self,
+        all: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let replaced = view.update(cx, |view, cx| view.replace_matches(all, window, cx))?;
+        let mut fields = vec![("replaced".to_string(), replaced.to_string())];
+        fields.extend(Self::find_fields(view.read(cx)));
+        Ok(fields)
+    }
+
+    /// `surface.editor.find_close`: closes find, as Escape does. Closing one
+    /// that is not open does nothing.
+    fn control_editor_find_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        view.update(cx, |view, cx| view.close_find(window, cx));
+        Ok(Self::find_fields(view.read(cx)))
+    }
+
+    /// `surface.editor.crumb index=`: a press on the breadcrumb's part at
+    /// `index` (its order, the path's parts first), through the call the row's
+    /// click makes. A part that is not a symbol is the error. Answers the
+    /// selections and the breadcrumb the press leaves.
+    fn control_editor_crumb(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        view.update(cx, |view, cx| view.press_crumb(index, cx))?;
+        let mut fields = Self::selections_reply(&view, cx)?;
+        fields.push((
+            "breadcrumb".to_string(),
+            Self::escaped_field(&view.read(cx).breadcrumb_text()),
+        ));
+        Ok(fields)
+    }
+
+    /// The line of the hunk drawn in place, or `none`.
+    fn open_hunk_text(view: &FileView) -> String {
+        view.open_hunk_line()
+            .map_or_else(|| "none".to_string(), |line| line.to_string())
+    }
+
+    /// Saves the active file tab through `FileView::save`, the call Save makes.
+    /// A failed save is the reply's error.
+    fn control_editor_save(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        view.update(cx, |view, cx| view.save(cx))?;
+        self.control_editor_state(cx)
+    }
+
+    /// Answers the disk conflict as the banner's Reload and Keep do.
+    fn control_editor_conflict(
+        &mut self,
+        action: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        match action {
+            "reload" => view.update(cx, |view, cx| view.reload(cx))?,
+            "keep" => view.update(cx, |view, cx| view.keep(cx)),
+            other => return Err(format!("unknown conflict action '{other}'")),
+        }
+        self.control_editor_state(cx)
+    }
+
+    /// Switches the Markdown mode, as the switcher does. A file that is not
+    /// Markdown keeps drawing its code, and `state` says what is drawn.
+    fn control_editor_mode(
+        &mut self,
+        mode: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let mode = match mode {
+            "code" => MarkdownMode::Code,
+            "preview" => MarkdownMode::Preview,
+            other => return Err(format!("unknown mode '{other}'")),
+        };
+        view.update(cx, |view, cx| view.set_markdown_mode(mode, cx));
+        self.control_editor_state(cx)
+    }
+
+    /// `surface.editor.status item= [value=] [open=]`: one of the status row's
+    /// items, acted on through the functions its popover calls. `open=true`
+    /// opens the item's popover and `open=false` closes it; otherwise `value`
+    /// is a choice in it (a language name or id, `lf|crlf`, `spaces:N|tabs:N`,
+    /// a line number, `clear` for the bell's list). Answers the file's state,
+    /// as `open` does, so what the choice did is in the same reply.
+    fn control_editor_status(
+        &mut self,
+        item: &str,
+        value: Option<&str>,
+        open: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        view.update(cx, |view, cx| view.control_status(item, value, open, window, cx))?;
+        self.control_editor_state(cx)
+    }
+
+    /// Sets one Editor setting through the Settings page's own path: the page's
+    /// `set_editor_prefs` saves the settings, and the workspace's observer
+    /// applies them. Like the page, it needs no file tab. Answers the
+    /// preferences it set; `state` reads what is in force.
+    fn control_editor_pref(
+        &mut self,
+        key: &str,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut prefs = self.settings.read(cx).snapshot().editor;
+        prefs.set_from_text(key, value)?;
+        let described = prefs.describe();
+        self.settings
+            .update(cx, |settings, cx| settings.set_editor_prefs(prefs, cx));
+        Ok(vec![("prefs".to_string(), described)])
+    }
+
+    /// `a..b;c..d` as byte ranges, in the order given.
+    fn editor_ranges(ranges: &str) -> Result<Vec<std::ops::Range<usize>>, String> {
+        ranges
+            .split(';')
+            .map(|range| {
+                let not_a_range = || format!("'{range}' is not a range a..b");
+                let (start, end) = range.split_once("..").ok_or_else(not_a_range)?;
+                let number = |text: &str| text.parse::<usize>().map_err(|_| not_a_range());
+                Ok(number(start)?..number(end)?)
+            })
+            .collect()
+    }
+
+    /// A value on one `key=value` line: a backslash and a newline are escaped,
+    /// as `surface.file.read` escapes its text.
+    fn escaped_field(text: &str) -> String {
+        text.replace('\\', "\\\\").replace('\n', "\\n")
+    }
+
+    /// The selections as `a..b` pairs of (anchor, head), joined by `;`.
+    fn joined_selections(pairs: impl Iterator<Item = (usize, usize)>) -> String {
+        pairs
+            .map(|(anchor, head)| format!("{anchor}..{head}"))
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
     /// The active tab's file: its path, whether it is a read-only snapshot,
     /// and its text with backslashes and newlines escaped.
     fn control_read_file(&self, cx: &Context<Self>) -> Result<Vec<(String, String)>, String> {
-        let tab = self.tabs.get(self.active_tab).ok_or_else(|| "no active tab".to_string())?;
-        let mut found = None;
-        tab.panes.for_each(&mut |_, content| {
-            if found.is_none()
-                && let TabContent::File { view } = content
-            {
-                found = Some(view.clone());
-            }
-        });
-        let view = found.ok_or_else(|| "the active tab is not a file".to_string())?;
+        if self.tabs.get(self.active_tab).is_none() {
+            return Err("no active tab".to_string());
+        }
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "the active tab is not a file".to_string())?;
         let view = view.read(cx);
         let text = view
             .editor()
@@ -21298,7 +22681,7 @@ impl SirioWorkspace {
         if let Err(error) = self.restore_launch_snapshot(window, cx) {
             self.sidebar.update(cx, |sidebar, cx| {
                 sidebar.set_notice(
-                    format!("[history] could not restore the previous launch: {error}"),
+                    format!("Could not restore the previous launch: {error}"),
                     cx,
                 )
             });
@@ -21324,7 +22707,7 @@ impl SirioWorkspace {
                 Ok(Err(error)) => {
                     workspace.sidebar.update(cx, |sidebar, cx| {
                         sidebar.set_notice(
-                            format!("[files] could not open the file picker: {error}"),
+                            format!("Could not open the file picker: {error}"),
                             cx,
                         )
                     });
@@ -21361,10 +22744,10 @@ impl SirioWorkspace {
             })
             .unwrap_or_default();
         for view in views {
+            // `FileView::save` raises its own failure (the card and the bell),
+            // so this only logs it.
             if let Err(error) = view.update(cx, |view, cx| view.save(cx)) {
-                view.update(cx, |view, cx| {
-                    view.set_message(format!("[files] save failed: {error}"), cx)
-                });
+                eprintln!("[files] save failed: {error}");
             }
         }
     }
@@ -24326,6 +25709,8 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
             }
         };
 
+    let editor = EditorPrefs::from_settings(&settings);
+
     SettingsSnapshot {
         theme: theme_mode(settings.appearance),
         interface_font_size: settings.ui_font_size.clamp(12, 18) as i32,
@@ -24356,6 +25741,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         lsp_silenced_languages: serde_json::from_str(&settings.lsp_silenced_languages)
             .unwrap_or_default(),
         plantuml_server: settings.markdown_plantuml_server,
+        editor,
     }
 }
 
@@ -24399,6 +25785,20 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         // Not in the Settings snapshot: `ForgeHub` owns it. Callers re-apply
         // the stored value — see `app_settings_for_settings_save`.
         forge_hosts: AppSettings::default().forge_hosts,
+        // The snapshot carries the editor preferences, so a save writes back
+        // the values the surface was built from.
+        editor_minimap: snapshot.editor.minimap,
+        editor_sticky_scroll: snapshot.editor.sticky_scroll,
+        editor_indent_guides: snapshot.editor.indent_guides,
+        editor_rainbow_brackets: snapshot.editor.rainbow_brackets,
+        editor_code_lens: snapshot.editor.code_lens,
+        editor_inlay_hints: snapshot.editor.inlay_hints,
+        editor_whitespace: snapshot.editor.whitespace,
+        editor_ruler: snapshot.editor.ruler,
+        editor_ruler_column: snapshot.editor.ruler_column as i64,
+        editor_line_numbers: snapshot.editor.line_numbers,
+        editor_cursor_shape: snapshot.editor.cursor_shape,
+        editor_tab_size: snapshot.editor.tab_size as i64,
     }
 }
 
@@ -25818,6 +27218,8 @@ fn main() {
             &saved_settings.markdown_plantuml_server,
             cx,
         );
+        // The code editor's view options, before the first editor opens.
+        EditorPrefs::apply(EditorPrefs::from_settings(&saved_settings), cx);
         // The window below is opened with the material resolved from the
         // persisted preference; the theme's surfaces must fade to match from
         // the first frame, not only once the toggle is next flipped, or a
@@ -26438,6 +27840,7 @@ mod tests {
     use super::*;
     // Only the tests address a parked tab by its row id; the app addresses
     // one by its pill, so this import lives here rather than at the top.
+    use sirio_persistence::{EditorCursorShape, EditorLineNumbers};
     use sirio_ui::sidebar::{SidebarView, parked_tab_row_id};
 
     /// `panel.state` tells a caller whether a pane's session outlives the
@@ -26589,6 +27992,8 @@ mod tests {
     #[cfg(unix)]
     #[gpui::test]
     async fn an_opened_document_reaches_the_server_with_its_text(cx: &mut TestAppContext) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-didopen-{}-{}",
             std::process::id(),
@@ -26705,6 +28110,8 @@ mod tests {
     #[cfg(unix)]
     #[gpui::test]
     async fn an_edit_after_the_open_reaches_the_server(cx: &mut TestAppContext) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-didchange-{}-{}",
             std::process::id(),
@@ -26755,14 +28162,19 @@ mod tests {
             wait_for_wire(&mut cx, &log, |wire| wire.contains("textDocument/didOpen")).await;
         assert!(opened, "the open must land before the edit is meaningful");
 
-        // Edit through the view the way the shell's own edit path does.
+        // Edit through the code editor, the way a keystroke reaches the view:
+        // its change lands in the buffer and the view notifies, and that
+        // notify is what sends it on.
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
         let view = workspace.update(&mut cx, |workspace, cx| first_open_file_view(workspace, cx));
-        view.update(&mut cx, |view, cx| {
-            view.editor_mut()
-                .expect("the editor is loaded by now")
-                .replace(sirio_ui::editor::Selection { start: 3, end: 9 }, "renamed")
-                .expect("the replacement applies");
-            cx.notify();
+        let code = view
+            .read_with(&cx.cx, |view, _| view.code_editor().cloned())
+            .expect("the file tab has drawn its code editor");
+        code.update(&mut cx, |code, cx| {
+            code.edit([(3..9, "renamed".to_owned())], cx);
         });
 
         let changed = wait_for_wire(&mut cx, &log, |wire| {
@@ -26841,6 +28253,8 @@ done
         PathBuf,
         Vec<PathBuf>,
     ) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-{}-{}-{}",
             tag,
@@ -26994,6 +28408,8 @@ done
     async fn a_language_server_that_is_not_installed_says_nothing_until_asked(
         cx: &mut TestAppContext,
     ) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let tag = "uninstalled";
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-{}-{}-{}",
@@ -27082,8 +28498,8 @@ done
         // missing, which is how this shipped.
         use sirio_ui::file_context_menu::{FileContextAction, ItemState};
         let view = workspace.read_with(&cx.cx, |workspace, cx| first_open_file_view(workspace, cx));
-        let states: Vec<ItemState> = view.read_with(&cx.cx, |view, _| {
-            view.context_menu_items()
+        let states: Vec<ItemState> = view.read_with(&cx.cx, |view, app| {
+            view.context_menu_items(app)
                 .into_iter()
                 .filter(|item| {
                     matches!(
@@ -27144,6 +28560,8 @@ done
         PathBuf,
         Vec<PathBuf>,
     ) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-{tag}-{}-{}",
             std::process::id(),
@@ -27332,6 +28750,8 @@ done
     #[cfg(unix)]
     #[gpui::test]
     async fn an_install_reaches_every_open_tab_of_that_language(cx: &mut TestAppContext) {
+        // The file tab draws its code with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let tag = "revive-language";
         let scratch = std::env::temp_dir().join(format!(
             "sirio-lsp-{tag}-{}-{}",
@@ -34890,6 +36310,8 @@ done
     #[gpui::test]
     async fn drawn_active_tab_underline_follows_pane_focus(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
+        // The file tab draws its status row with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -35041,6 +36463,8 @@ done
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
+        // The file tab draws its status row with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let working_directory =
             std::env::temp_dir().join(format!("sirio-wsp01-kinds-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create wsp01 test directory");
@@ -36088,6 +37512,8 @@ done
             std::env::temp_dir().join(format!("sirio-open-file-menu-{}.md", std::process::id()));
         std::fs::write(&path, "# opened from tab menu\n").expect("write picker fixture");
         cx.set_global(Theme::light());
+        // The file tab draws its status row with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -36286,6 +37712,7 @@ done
     #[gpui::test]
     async fn drawn_save_failure_is_visible_without_hiding_the_file(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
         let path = PathBuf::from("/proc/self/status");
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -36339,6 +37766,7 @@ done
         let path = std::env::temp_dir().join(format!("sirio-dirty-tab-{}.txt", std::process::id()));
         std::fs::write(&path, "clean\n").expect("write dirty-tab fixture");
         cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -37858,7 +39286,7 @@ done
     }
 
     #[test]
-    fn persisted_settings_round_trip_maps_all_twenty_fields_explicitly() {
+    fn persisted_settings_round_trip_maps_every_field_explicitly() {
         let persisted = AppSettings {
             appearance: AppearanceMode::Dark,
             ui_font_size: 17,
@@ -37886,10 +39314,26 @@ done
             lsp_silenced_languages: "[]".to_string(),
             markdown_plantuml_server: "http://plantuml.test".into(),
             forge_hosts: "[]".to_string(),
+            editor_minimap: false,
+            editor_sticky_scroll: false,
+            editor_indent_guides: false,
+            editor_rainbow_brackets: false,
+            editor_code_lens: false,
+            editor_inlay_hints: false,
+            editor_whitespace: true,
+            editor_ruler: true,
+            editor_ruler_column: 120,
+            editor_line_numbers: EditorLineNumbers::Relative,
+            editor_cursor_shape: EditorCursorShape::Block,
+            editor_tab_size: 2,
         };
 
         let snapshot = settings_snapshot_from_app_settings(persisted.clone());
         assert_eq!(snapshot.theme, sirio_theme::ThemeMode::Dark);
+        assert!(!snapshot.editor.minimap);
+        assert!(snapshot.editor.ruler);
+        assert_eq!(snapshot.editor.ruler_column, 120);
+        assert_eq!(snapshot.editor.line_numbers, EditorLineNumbers::Relative);
         assert_eq!(snapshot.interface_font_size, 17);
         assert_eq!(snapshot.terminal_font_size, 16);
         assert!(!snapshot.control_socket_enabled);
@@ -37950,6 +39394,18 @@ done
             persisted.opencode_workspace_id_override
         );
         assert_eq!(restored.translucency, persisted.translucency);
+        assert_eq!(restored.editor_minimap, persisted.editor_minimap);
+        assert_eq!(restored.editor_sticky_scroll, persisted.editor_sticky_scroll);
+        assert_eq!(restored.editor_indent_guides, persisted.editor_indent_guides);
+        assert_eq!(restored.editor_rainbow_brackets, persisted.editor_rainbow_brackets);
+        assert_eq!(restored.editor_code_lens, persisted.editor_code_lens);
+        assert_eq!(restored.editor_inlay_hints, persisted.editor_inlay_hints);
+        assert_eq!(restored.editor_whitespace, persisted.editor_whitespace);
+        assert_eq!(restored.editor_ruler, persisted.editor_ruler);
+        assert_eq!(restored.editor_ruler_column, persisted.editor_ruler_column);
+        assert_eq!(restored.editor_line_numbers, persisted.editor_line_numbers);
+        assert_eq!(restored.editor_cursor_shape, persisted.editor_cursor_shape);
+        assert_eq!(restored.editor_tab_size, persisted.editor_tab_size);
 
         let mut invalid_summarizer = persisted;
         invalid_summarizer.summarizer_agent = "not-a-supported-agent".into();
@@ -40931,6 +42387,26 @@ done
             | ControlAction::ReadLayout { reply }
             | ControlAction::OpenListOpen { reply, .. }
             | ControlAction::ReadFile { reply }
+            | ControlAction::EditorOpen { reply, .. }
+            | ControlAction::EditorOpenSnapshot { reply, .. }
+            | ControlAction::EditorState { reply }
+            | ControlAction::EditorType { reply, .. }
+            | ControlAction::EditorKeys { reply, .. }
+            | ControlAction::EditorSelect { reply, .. }
+            | ControlAction::EditorSave { reply }
+            | ControlAction::EditorConflict { reply, .. }
+            | ControlAction::EditorMode { reply, .. }
+            | ControlAction::EditorStatus { reply, .. }
+            | ControlAction::EditorPref { reply, .. }
+            | ControlAction::EditorHover { reply, .. }
+            | ControlAction::EditorClick { reply, .. }
+            | ControlAction::EditorContext { reply, .. }
+            | ControlAction::EditorGitMark { reply, .. }
+            | ControlAction::EditorCrumb { reply, .. }
+            | ControlAction::EditorFind { reply, .. }
+            | ControlAction::EditorFindStep { reply, .. }
+            | ControlAction::EditorReplace { reply, .. }
+            | ControlAction::EditorFindClose { reply }
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
@@ -41082,6 +42558,36 @@ done
             "surface.layout.read" => request::layout_read(),
             "surface.open_list.open" => request::open_list_open("show"),
             "surface.file.read" => request::file_read(),
+            "surface.editor.open" => request_with_params(method, &[("path", "x.rs")]),
+            "surface.editor.open_snapshot" => {
+                request_with_params(method, &[("sha", "0000000000000000000000000000000000000000"), ("path", "x.rs")])
+            }
+            "surface.editor.state" => request::editor_state(),
+            "surface.editor.type" => request_with_params(method, &[("text", "x")]),
+            "surface.editor.keys" => request_with_params(method, &[("keys", "ctrl-z")]),
+            "surface.editor.select" => request_with_params(method, &[("ranges", "0..0")]),
+            "surface.editor.save" => request::editor_save(),
+            "surface.editor.conflict" => request_with_params(method, &[("action", "keep")]),
+            "surface.editor.mode" => request_with_params(method, &[("mode", "code")]),
+            "surface.editor.status" => {
+                request_with_params(method, &[("item", "goto"), ("value", "1")])
+            }
+            "surface.editor.pref" => {
+                request_with_params(method, &[("key", "minimap"), ("value", "true")])
+            }
+            "surface.editor.hover" => request_with_params(method, &[("offset", "0")]),
+            "surface.editor.click" => {
+                request_with_params(method, &[("offset", "0"), ("platform", "true")])
+            }
+            "surface.editor.context" => {
+                request_with_params(method, &[("offset", "0"), ("action", "copy")])
+            }
+            "surface.editor.git_mark" => request_with_params(method, &[("line", "0")]),
+            "surface.editor.crumb" => request_with_params(method, &[("index", "0")]),
+            "surface.editor.find" => request_with_params(method, &[("query", "x")]),
+            "surface.editor.find_step" => request_with_params(method, &[("forward", "true")]),
+            "surface.editor.replace" => request_with_params(method, &[("all", "false")]),
+            "surface.editor.find_close" => request_with_params(method, &[]),
             "settings.account.add" => {
                 request_with_params(method, &[("provider", "claude"), ("label", "test")])
             }
@@ -43964,6 +45470,7 @@ browser  profile  "
     #[gpui::test]
     async fn layout_captures_the_open_editors_path(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
+        cx.update(sirio_ui::ely::init);
         let path = std::env::temp_dir().join(format!(
             "sirio-editor-capture-{}-{}.rs",
             std::process::id(),

@@ -176,6 +176,26 @@ fn usage() {
          \x20 surface host end-all             (debug builds) End All sessions without its dialog\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
+         \x20 surface editor open --path p      (debug builds) open a file as a tab; prints its editor state\n\
+         \x20 surface editor open-snapshot --sha=s --path=p  (debug builds) open p (repository-relative) at the full commit id s as a read-only snapshot tab; prints its editor state\n\
+         \x20 surface editor state [--json]     (debug builds) the active file tab's editor state, one key=value per line\n\
+         \x20 surface editor type --text=t      (debug builds) type t through the code editor's input handler\n\
+         \x20 surface editor keys --keys=K...   (debug builds) dispatch space-separated keystrokes (ctrl-z) to the window\n\
+         \x20 surface editor select --ranges=a..b;c..d  (debug builds) select byte ranges\n\
+         \x20 surface editor hover --offset=n   (debug builds) rest the pointer at byte n: the card shows its diagnostics, then the server's answer\n\
+         \x20 surface editor click --offset=n --platform=true|false  (debug builds) a platform click at n (a link, go to definition), or a plain caret placement\n\
+         \x20 surface editor context --offset=n --action=a  (debug builds) a right press at n, then the menu action a (copy, cut, paste, go-to-definition, ...)\n\
+         \x20 surface editor git-mark --line=n  (debug builds) press the git mark at line n: draw its hunk in place, or close it; answers diff_open\n\
+         \x20 surface editor find [--query=q] [--case=true] [--word=true] [--regex=true] [--replace=r]  (debug builds) open find; --replace opens the replace row; answers find_matches, find_current, find_error\n\
+         \x20 surface editor find-step [--forward=false]  (debug builds) the next find match, or the previous\n\
+         \x20 surface editor replace [--all=true]  (debug builds) replace the current match, or every one, with the replace row's text\n\
+         \x20 surface editor find-close         (debug builds) close find\n\
+         \x20 surface editor crumb --index=n   (debug builds) press the breadcrumb's part n (the path's parts first): a symbol reveals its line\n\
+         \x20 surface editor save               (debug builds) save the active file tab\n\
+         \x20 surface editor conflict --action=reload|keep  (debug builds) answer a disk conflict\n\
+         \x20 surface editor mode --mode=code|preview  (debug builds) switch the Markdown mode\n\
+         \x20 surface editor status --item=language|line_ending|indent|goto|bell [--value=v | --open=true|false]  (debug builds) a status row item: --value is a language (name or id), lf|crlf, spaces:N|tabs:N, a line number, or for the bell clear, copy:N (the Nth newest to the clipboard) or raise:TEXT; --open opens or closes its popover\n\
+         \x20 surface editor pref --key=k --value=v  (debug builds) set one Editor setting, as Settings does\n\
          \x20 browser open <url> [--id-format uuids|both] [--json]\n\
          \x20 browser navigate <surface> <back|forward|reload>\n\
          \x20 browser get <surface> <url|text|html> [--selector s] [--json]\n\
@@ -406,6 +426,19 @@ fn print_result(response: &ControlResponse, columns: &[&str], as_json: bool) {
         .filter_map(|column| result.get(*column).map(String::as_str))
         .collect();
     println!("{}", line.join("\t"));
+}
+
+/// A `surface editor` answer as `key=value` lines, sorted by key, or the whole
+/// answer as JSON with `--json`: a value may hold a tab, which a column cannot.
+fn print_editor_result(response: &ControlResponse, as_json: bool) {
+    let result = response.result.clone().unwrap_or_default();
+    if as_json {
+        println!("{}", rows::encode(&[result]));
+        return;
+    }
+    for (key, value) in &result {
+        println!("{key}={value}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -821,6 +854,25 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
     }
 }
 
+/// The byte offset `surface editor hover|click|context` take as `--offset`.
+fn editor_offset(parsed: &ParsedArgs) -> Result<usize, String> {
+    parsed
+        .require("offset")?
+        .parse::<usize>()
+        .map_err(|_| "--offset must be a byte offset".to_string())
+}
+
+/// A true/false option of an editor verb: `--k=true`, `--k=false`, or `--k`
+/// alone for true; false when it is not given.
+fn editor_bool(parsed: &ParsedArgs, key: &str) -> Result<bool, String> {
+    match parsed.value(key) {
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(_) => Err(format!("--{key} must be true or false")),
+        None => Ok(parsed.flag(key)),
+    }
+}
+
 fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
     let surface = parsed
         .positional
@@ -1090,8 +1142,135 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             require_ok(socket, &request)
         }
         ("file", "read") => require_ok(socket, &sirio_control::protocol::request::file_read()),
+        ("editor", "open") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_open(&parsed.require("path")?),
+        ),
+        ("editor", "open-snapshot") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_open_snapshot(
+                &parsed.require("sha")?,
+                &parsed.require("path")?,
+            ),
+        ),
+        ("editor", "state") => require_ok(socket, &sirio_control::protocol::request::editor_state()),
+        ("editor", "type") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_type(&parsed.require("text")?),
+        ),
+        ("editor", "keys") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_keys(&parsed.require("keys")?),
+        ),
+        ("editor", "select") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_select(&parsed.require("ranges")?),
+        ),
+        ("editor", "hover") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_hover(editor_offset(parsed)?),
+        ),
+        ("editor", "click") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_click(
+                editor_offset(parsed)?,
+                parsed
+                    .require("platform")?
+                    .parse::<bool>()
+                    .map_err(|_| "--platform must be true or false".to_string())?,
+            ),
+        ),
+        ("editor", "context") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_context(
+                editor_offset(parsed)?,
+                &parsed.require("action")?,
+            ),
+        ),
+        ("editor", "git-mark") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_git_mark(
+                parsed
+                    .require("line")?
+                    .parse::<usize>()
+                    .map_err(|_| "--line must be a line number".to_string())?,
+            ),
+        ),
+        ("editor", "find") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_find(
+                parsed.value("query"),
+                editor_bool(parsed, "case")?,
+                editor_bool(parsed, "word")?,
+                editor_bool(parsed, "regex")?,
+                parsed.value("replace"),
+            ),
+        ),
+        ("editor", "find-step") => {
+            let forward = if parsed.flag("forward") || parsed.value("forward").is_some() {
+                editor_bool(parsed, "forward")?
+            } else {
+                true
+            };
+            require_ok(
+                socket,
+                &sirio_control::protocol::request::editor_find_step(forward),
+            )
+        }
+        ("editor", "replace") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_replace(editor_bool(parsed, "all")?),
+        ),
+        ("editor", "find-close") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_find_close(),
+        ),
+        ("editor", "crumb") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_crumb(
+                parsed
+                    .require("index")?
+                    .parse::<usize>()
+                    .map_err(|_| "--index must be a number".to_string())?,
+            ),
+        ),
+        ("editor", "save") => require_ok(socket, &sirio_control::protocol::request::editor_save()),
+        ("editor", "conflict") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_conflict(&parsed.require("action")?),
+        ),
+        ("editor", "mode") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_mode(&parsed.require("mode")?),
+        ),
+        ("editor", "status") => {
+            let open = if parsed.flag("open") || parsed.value("open").is_some() {
+                Some(editor_bool(parsed, "open")?)
+            } else {
+                None
+            };
+            require_ok(
+                socket,
+                &sirio_control::protocol::request::editor_status(
+                    &parsed.require("item")?,
+                    parsed.value("value"),
+                    open,
+                ),
+            )
+        }
+        ("editor", "pref") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_pref(
+                &parsed.require("key")?,
+                &parsed.require("value")?,
+            ),
+        ),
         _ => return Err(format!("unknown surface action '{surface} {action}'")),
     };
+    if surface == "editor" {
+        print_editor_result(&response, parsed.flag("json"));
+        return Ok(());
+    }
     print_result(
         &response,
         &[

@@ -38,6 +38,9 @@
 //! - `save` writes the buffer unconditionally and can therefore *recreate*
 //!   a file deleted while open (F-EDIT-06); when the write fails it leaves
 //!   a visible `save_error` instead of swallowing the failure.
+//! - The buffer is LF-only whatever the file holds. The file's line ending
+//!   is kept beside it and applied on save, so a CRLF file stays CRLF, and
+//!   switching the ending is an unsaved edit.
 //!
 //! # What maps to which inventory entry
 //!
@@ -64,6 +67,7 @@
 //!   clipboard write itself needs a display and is not exercised).
 
 use sirio_markdown::{DocumentChange, DocumentError, MarkdownDocument};
+pub use sirio_markdown::LineEnding;
 use std::path::{Path, PathBuf};
 
 /// Largest file the editor will load at all. Refusing a bigger file keeps a
@@ -206,7 +210,7 @@ impl Language {
     /// The human-readable name shown in the editor's status line.
     pub fn name(&self) -> &'static str {
         match self {
-            Language::PlainText => "plain text",
+            Language::PlainText => "Plain text",
             Language::Markdown => "Markdown",
             Language::Rust => "Rust",
             Language::Python => "Python",
@@ -392,6 +396,12 @@ fn is_binary(bytes: &[u8]) -> bool {
     bytes.contains(&0) || String::from_utf8(bytes.to_vec()).is_err()
 }
 
+/// Whether raw disk bytes are the snapshot an editor synced from: the same
+/// LF text, written with the same line ending.
+fn is_snapshot(bytes: &[u8], snapshot: &str, line_ending: LineEnding) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|raw| LineEnding::matches(raw, snapshot, line_ending))
+}
+
 /// The headless document: buffer, the on-disk state we know about, and the
 /// derived dirty/conflict flags. See the module docs for the state machine.
 ///
@@ -405,9 +415,9 @@ pub struct Editor {
     /// missing/unreadable synthetic editor created with `from_buffer`.
     document: Option<MarkdownDocument>,
     buffer: String,
-    /// The last on-disk content we synced from: the file's content at open,
-    /// after a reload, or after a save. `None` when the file has never been
-    /// successfully read (missing or unreadable at open).
+    /// The last on-disk content we synced from, LF-normalized: the file's
+    /// content at open, after a reload, or after a save. `None` when the file
+    /// has never been successfully read (missing or unreadable at open).
     snapshot: Option<String>,
     status: LoadStatus,
     conflict: Conflict,
@@ -418,6 +428,11 @@ pub struct Editor {
     /// [`Editor::request_preview`] is called.
     preview_locked: bool,
     dirty: bool,
+    /// The ending the next save writes. Used only without a document; a
+    /// document keeps its own.
+    line_ending: LineEnding,
+    /// The ending of the snapshot, to tell an ending switch from an edit.
+    saved_line_ending: LineEnding,
 }
 
 impl Editor {
@@ -438,6 +453,8 @@ impl Editor {
             language,
             preview_locked: false,
             dirty: false,
+            line_ending: LineEnding::Lf,
+            saved_line_ending: LineEnding::Lf,
         };
         match read_disk(&editor.path) {
             Ok(bytes) => {
@@ -448,13 +465,11 @@ impl Editor {
                 } else if is_binary(&bytes) {
                     editor.status = LoadStatus::Binary;
                 } else {
-                    let text = String::from_utf8(bytes).expect("is_binary checked UTF-8");
-                    editor.buffer = text.clone();
-                    editor.snapshot = Some(text);
-                    editor.document = Some(
-                        MarkdownDocument::load(&editor.path)
-                            .expect("validated text file must load as a markdown document"),
-                    );
+                    let document = MarkdownDocument::load(&editor.path)
+                        .expect("validated text file must load as a markdown document");
+                    editor.buffer = document.text().to_owned();
+                    editor.snapshot = Some(document.text().to_owned());
+                    editor.document = Some(document);
                     editor.status = LoadStatus::Loaded;
                     editor.recompute_preview_lock();
                 }
@@ -470,7 +485,9 @@ impl Editor {
     /// formatting-operation tests and by flows that create a fresh file
     /// rather than reading one.
     pub fn from_buffer(path: PathBuf, buffer: impl Into<String>) -> Editor {
-        let buffer = buffer.into();
+        let raw: String = buffer.into();
+        let line_ending = LineEnding::detect(&raw);
+        let buffer = LineEnding::normalize(&raw);
         let language = Language::from_path(&path);
         let mut editor = Editor {
             path,
@@ -482,6 +499,8 @@ impl Editor {
             language,
             preview_locked: false,
             dirty: false,
+            line_ending,
+            saved_line_ending: line_ending,
             buffer,
         };
         editor.recompute_preview_lock();
@@ -517,6 +536,8 @@ impl Editor {
                 save_error: None,
                 preview_locked: false,
                 dirty: false,
+                line_ending: LineEnding::Lf,
+                saved_line_ending: LineEnding::Lf,
             },
         }
     }
@@ -532,7 +553,7 @@ impl Editor {
             return;
         }
         self.dirty = match &self.snapshot {
-            Some(disk) => self.buffer != *disk,
+            Some(disk) => self.buffer != *disk || self.line_ending != self.saved_line_ending,
             // No disk baseline: the buffer is dirty once it is non-empty.
             None => !self.buffer.is_empty(),
         };
@@ -572,6 +593,14 @@ impl Editor {
 
     pub fn language(&self) -> Language {
         self.language
+    }
+
+    /// The line ending the next save writes: the file's own, unless the user
+    /// switched it with [`Editor::set_line_ending`].
+    pub fn line_ending(&self) -> LineEnding {
+        self.document
+            .as_ref()
+            .map_or(self.line_ending, MarkdownDocument::line_ending)
     }
 
     pub fn status(&self) -> &LoadStatus {
@@ -637,24 +666,48 @@ impl Editor {
 
     /// Replaces `range` with `text` (an empty range inserts), then
     /// recomputes dirty state. Rejects selections that would split a
-    /// multibyte character. F-EDIT-04's edit half.
-    pub fn replace(&mut self, range: Selection, text: &str) -> Result<(), String> {
+    /// multibyte character. F-EDIT-04's edit half. CRLF in `text` (a paste)
+    /// becomes LF, so the buffer stays LF-only. Returns the byte offset just
+    /// past the text actually inserted, which is where the caret belongs: the
+    /// LF form is shorter than `text` when it had CRLF.
+    pub fn replace(&mut self, range: Selection, text: &str) -> Result<usize, String> {
         if !self.buffer.is_char_boundary(range.start) || !self.buffer.is_char_boundary(range.end) {
             return Err("selection splits a multibyte character".to_string());
         }
-        self.buffer.replace_range(range.start..range.end, text);
+        let inserted = LineEnding::normalize(text);
+        self.buffer.replace_range(range.start..range.end, &inserted);
         self.sync_document_from_buffer();
-        Ok(())
+        Ok(range.start + inserted.len())
+    }
+
+    /// Replaces the whole buffer with `text` (LF or CRLF; the buffer keeps
+    /// LF). The file's line ending is unchanged.
+    pub fn replace_all(&mut self, text: &str) {
+        self.buffer = LineEnding::normalize(text);
+        self.sync_document_from_buffer();
+    }
+
+    /// Chooses the ending the next save writes. Switching it away from the
+    /// one the file was read with is an unsaved edit.
+    pub fn set_line_ending(&mut self, line_ending: LineEnding) {
+        if let Some(document) = &mut self.document {
+            document.set_line_ending(line_ending);
+            self.dirty = document.is_dirty();
+        } else {
+            self.line_ending = line_ending;
+            self.recompute_dirty();
+        }
     }
 
     /// Inserts `text` at a caret offset. F-EDIT-04's edit half, for the
-    /// common "type at the caret" case.
-    pub fn insert(&mut self, at: usize, text: &str) -> Result<(), String> {
+    /// common "type at the caret" case. Returns the caret after the text, as
+    /// [`Editor::replace`] does.
+    pub fn insert(&mut self, at: usize, text: &str) -> Result<usize, String> {
         self.replace(Selection::point(at), text)
     }
 
     /// Inserts the four-space indent unit (F-EDIT-07) at a caret offset.
-    pub fn insert_indent(&mut self, at: usize) -> Result<(), String> {
+    pub fn insert_indent(&mut self, at: usize) -> Result<usize, String> {
         self.insert(at, INDENT_UNIT)
     }
 
@@ -693,7 +746,9 @@ impl Editor {
             return conflict;
         }
         self.conflict = match (&self.snapshot, read_disk(&self.path)) {
-            (Some(disk), Ok(current)) if current == disk.as_bytes() => Conflict::None,
+            (Some(disk), Ok(current)) if is_snapshot(&current, disk, self.saved_line_ending) => {
+                Conflict::None
+            }
             (Some(_), Ok(_)) => Conflict::ChangedOnDisk,
             // The file we had is gone: this is the recreate-on-save case,
             // not a generic conflict.
@@ -720,11 +775,10 @@ impl Editor {
         if is_binary(&bytes) {
             return Err("the file on disk is no longer text".to_string());
         }
-        let text = String::from_utf8(bytes).expect("is_binary checked UTF-8");
-        self.document =
-            Some(MarkdownDocument::load(&self.path).map_err(|error| error.to_string())?);
-        self.buffer = text.clone();
-        self.snapshot = Some(text);
+        let document = MarkdownDocument::load(&self.path).map_err(|error| error.to_string())?;
+        self.buffer = document.text().to_owned();
+        self.snapshot = Some(document.text().to_owned());
+        self.document = Some(document);
         self.status = LoadStatus::Loaded;
         self.conflict = Conflict::None;
         self.dirty = false;
@@ -745,9 +799,10 @@ impl Editor {
             return;
         }
         if let Ok(bytes) = read_disk(&self.path)
-            && let Ok(text) = String::from_utf8(bytes)
+            && let Ok(raw) = String::from_utf8(bytes)
         {
-            self.snapshot = Some(text);
+            self.snapshot = Some(LineEnding::normalize(&raw));
+            self.saved_line_ending = LineEnding::detect(&raw);
         }
         self.conflict = Conflict::None;
         self.recompute_dirty();
@@ -791,9 +846,10 @@ impl Editor {
                 }
             }
         }
-        match std::fs::write(&self.path, self.buffer.as_bytes()) {
+        match std::fs::write(&self.path, self.line_ending.apply(&self.buffer)) {
             Ok(()) => {
                 self.snapshot = Some(self.buffer.clone());
+                self.saved_line_ending = self.line_ending;
                 self.status = LoadStatus::Loaded;
                 self.conflict = Conflict::None;
                 self.save_error = None;
@@ -1309,6 +1365,164 @@ mod tests {
 
     fn sel(buffer: &str, start: usize, end: usize) -> Selection {
         Selection::new(buffer, start, end).expect("test selection is on char boundaries")
+    }
+
+    /// The file's line endings: the buffer is always LF, and the ending the
+    /// file was written with is kept beside it and applied on save.
+    ///
+    /// Failure list, written before the code:
+    /// - a CRLF file loads with a `\r` in the buffer, or reads as dirty while
+    ///   nothing was edited (the buffer is not the LF-normalized disk text);
+    /// - saving a CRLF file writes LF, so every line of the file changes;
+    /// - switching the ending does not mark the editor dirty, so a later
+    ///   close or save silently drops the choice;
+    /// - a mixed file reads as dirty, or saves with some lines CRLF and some LF;
+    /// - a lone carriage return is treated as a line break and disappears;
+    /// - a pasted CRLF leaves the caret short of the inserted text, inside the
+    ///   next multi-byte character, so the next Home or End panics;
+    /// - an untouched CRLF file reads as changed through `check_external`:
+    ///   adopted with its `\r`s under a clean editor, a conflict under a dirty
+    ///   one (the disk compared as raw bytes against the LF baseline);
+    /// - an external CRLF edit under a dirty editor is not a conflict, or
+    ///   `keep` then `save` does not write CRLF;
+    /// - an external CRLF edit under a clean editor is not adopted, or is
+    ///   adopted with `\r`s in the buffer or with the wrong ending;
+    /// - a single-line CRLF file saved with `Crlf` reads back as changed on the
+    ///   next `check_external`, and its ending reverts to LF.
+    mod crlf_line_endings {
+        use super::*;
+
+        #[test]
+        fn a_crlf_file_loads_lf_and_is_clean() {
+            let file = TempFile::new("crlf-load", "a\r\nb\r\n");
+            let editor = Editor::open(file.path());
+            assert_eq!(editor.buffer(), "a\nb\n");
+            assert_eq!(editor.line_ending(), LineEnding::Crlf);
+            assert!(!editor.is_dirty());
+        }
+
+        #[test]
+        fn a_crlf_file_saves_crlf() {
+            let file = TempFile::new("crlf-save", "a\r\nb\r\n");
+            let mut editor = Editor::open(file.path());
+            editor.replace_all("a\nc\n");
+            editor.save().expect("save");
+            assert_eq!(
+                std::fs::read_to_string(file.path()).expect("read back"),
+                "a\r\nc\r\n"
+            );
+        }
+
+        #[test]
+        fn switching_the_ending_dirties_and_saves_it() {
+            let file = TempFile::new("crlf-switch", "a\r\nb\r\n");
+            let mut editor = Editor::open(file.path());
+            editor.set_line_ending(LineEnding::Lf);
+            assert!(editor.is_dirty(), "a changed ending is an unsaved edit");
+            editor.save().expect("save");
+            assert_eq!(
+                std::fs::read_to_string(file.path()).expect("read back"),
+                "a\nb\n"
+            );
+            assert!(!editor.is_dirty());
+        }
+
+        #[test]
+        fn a_mixed_file_is_clean_until_edited_and_saves_uniform() {
+            let file = TempFile::new("mixed-endings", "a\r\nb\nc\r\n");
+            let mut editor = Editor::open(file.path());
+            assert!(!editor.is_dirty());
+            assert_eq!(editor.line_ending(), LineEnding::Crlf);
+            let edited = format!("{}d\n", editor.buffer());
+            editor.replace_all(&edited);
+            editor.save().expect("save");
+            assert_eq!(
+                std::fs::read_to_string(file.path()).expect("read back"),
+                "a\r\nb\r\nc\r\nd\r\n"
+            );
+        }
+
+        #[test]
+        fn a_lone_carriage_return_is_kept_as_text() {
+            let file = TempFile::new("lone-cr", "a\rb\n");
+            let editor = Editor::open(file.path());
+            assert_eq!(editor.buffer(), "a\rb\n");
+            assert_eq!(editor.line_ending(), LineEnding::Lf);
+            assert!(!editor.is_dirty());
+        }
+
+        #[test]
+        fn a_crlf_paste_leaves_the_caret_on_a_character_boundary() {
+            // "é" is two bytes: a caret left at byte 3 would sit inside it.
+            let file = TempFile::new("crlf-paste-caret", "é\r\n");
+            let mut editor = Editor::open(file.path());
+            let caret = editor
+                .replace(Selection::point(0), "x\r\n")
+                .expect("paste applies");
+            assert_eq!(caret, 2, "the caret goes just past the inserted \"x\\n\"");
+            assert!(editor.buffer().is_char_boundary(caret));
+            assert_eq!(&editor.buffer()[caret..], "é\n");
+        }
+
+        #[test]
+        fn an_untouched_crlf_file_is_clean_through_check_external() {
+            let file = TempFile::new("crlf-untouched", "a\r\nb\r\n");
+            let mut editor = Editor::open(file.path());
+            assert_eq!(editor.check_external(), Conflict::None);
+            assert_eq!(editor.buffer(), "a\nb\n");
+            assert_eq!(editor.line_ending(), LineEnding::Crlf);
+            assert!(!editor.is_dirty());
+        }
+
+        #[test]
+        fn an_external_crlf_edit_conflicts_with_a_dirty_editor_and_keep_saves_crlf() {
+            let file = TempFile::new("crlf-conflict", "a\r\nb\r\n");
+            let mut editor = Editor::open(file.path());
+            editor.replace_all("a\nlocal\n");
+            assert_eq!(
+                editor.check_external(),
+                Conflict::None,
+                "an untouched file is not a conflict, even under a dirty editor"
+            );
+            std::fs::write(file.path(), "a\r\next\r\n").expect("external write");
+            assert_eq!(editor.check_external(), Conflict::ChangedOnDisk);
+            assert_eq!(editor.buffer(), "a\nlocal\n", "the local edit is kept");
+            editor.keep();
+            editor.save().expect("save over the kept external change");
+            assert_eq!(
+                std::fs::read_to_string(file.path()).expect("read back"),
+                "a\r\nlocal\r\n"
+            );
+            assert!(!editor.is_dirty());
+        }
+
+        #[test]
+        fn an_external_crlf_edit_under_a_clean_editor_is_adopted() {
+            let file = TempFile::new("crlf-adopt", "a\r\nb\r\n");
+            let mut editor = Editor::open(file.path());
+            std::fs::write(file.path(), "x\r\ny\r\n").expect("external write");
+            assert_eq!(editor.check_external(), Conflict::None);
+            assert_eq!(editor.buffer(), "x\ny\n");
+            assert_eq!(editor.line_ending(), LineEnding::Crlf);
+            assert!(!editor.is_dirty());
+        }
+
+        #[test]
+        fn a_single_line_crlf_file_stays_clean_after_save_and_reread() {
+            let file = TempFile::new("crlf-single-line", "hello");
+            let mut editor = Editor::open(file.path());
+            editor.set_line_ending(LineEnding::Crlf);
+            assert!(editor.is_dirty());
+            editor.save().expect("save");
+            assert_eq!(
+                std::fs::read_to_string(file.path()).expect("read back"),
+                "hello"
+            );
+            assert!(!editor.is_dirty());
+            assert_eq!(editor.check_external(), Conflict::None);
+            assert_eq!(editor.line_ending(), LineEnding::Crlf);
+            assert!(!editor.is_dirty());
+        }
     }
 
     // ── F-EDIT-05: changed on disk; Reload and Keep both work ──────────

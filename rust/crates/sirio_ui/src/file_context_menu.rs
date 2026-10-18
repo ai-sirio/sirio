@@ -8,6 +8,7 @@
 //! walk of the open tabs.
 
 const NO_SELECTION: &str = "Select some text first";
+const READ_ONLY: &str = "A revision cannot be changed";
 const NO_AGENT_CHAT: &str = "No agent chat open in this worktree";
 const NO_GITHUB_REMOTE: &str = "This repository has no GitHub remote";
 const NOT_IN_GIT: &str = "This file is not in a git repository";
@@ -31,6 +32,39 @@ pub enum FileContextAction {
     /// Never drawn — absent from `ITEMS` — only dispatched to: a `Redirected`
     /// row's click lands here instead of on the action it is labelled with.
     InstallLanguageServer,
+}
+
+impl FileContextAction {
+    /// The action's name in kebab case (`copy-and-trim`, `go-to-definition`),
+    /// as a debug verb names it. No `_` arm: a new action has a name or the
+    /// build breaks, and `from_kebab` finds it through this name.
+    pub fn kebab(self) -> &'static str {
+        match self {
+            Self::SendToAgent => "send-to-agent",
+            Self::Cut => "cut",
+            Self::Copy => "copy",
+            Self::CopyAndTrim => "copy-and-trim",
+            Self::Paste => "paste",
+            Self::RevealInFileManager => "reveal-in-file-manager",
+            Self::OpenInTerminal => "open-in-terminal",
+            Self::OpenMarkdownPreview => "open-markdown-preview",
+            Self::CopyPermalink => "copy-permalink",
+            Self::ViewFileHistory => "view-file-history",
+            Self::GoToDefinition => "go-to-definition",
+            Self::FindReferences => "find-references",
+            Self::InstallLanguageServer => "install-language-server",
+        }
+    }
+
+    /// The action a debug verb names, by `kebab`. `None` for a name no action
+    /// has. The table's actions, then the one the table never draws.
+    pub fn from_kebab(name: &str) -> Option<Self> {
+        ITEMS
+            .iter()
+            .map(|item| item.action)
+            .chain([Self::InstallLanguageServer])
+            .find(|action| action.kebab() == name)
+    }
 }
 
 /// `View` is served by `FileView` itself; `App` leaves as a `FileViewEvent`
@@ -97,6 +131,8 @@ pub enum MissingServer {
 pub struct FileContextFacts {
     pub has_selection: bool,
     pub is_markdown: bool,
+    /// The text is a revision, not a file: nothing here can be cut or pasted.
+    pub is_snapshot: bool,
     pub in_git_repo: bool,
     pub has_github_remote: bool,
     pub has_agent_chat: bool,
@@ -223,6 +259,10 @@ fn state_for(action: FileContextAction, facts: &FileContextFacts) -> ItemState {
                 ItemState::Ready
             }
         }
+        // A snapshot's reason comes first: with text selected, the missing
+        // selection is not why Cut refuses.
+        FileContextAction::Cut if facts.is_snapshot => unavailable(READ_ONLY),
+        FileContextAction::Paste if facts.is_snapshot => unavailable(READ_ONLY),
         FileContextAction::Cut | FileContextAction::Copy | FileContextAction::CopyAndTrim => {
             if facts.has_selection {
                 ItemState::Ready
@@ -416,6 +456,7 @@ mod tests {
         FileContextFacts {
             has_selection: true,
             is_markdown: true,
+            is_snapshot: false,
             in_git_repo: true,
             has_github_remote: true,
             has_agent_chat: true,
@@ -475,6 +516,37 @@ mod tests {
         }
         let paste = items.iter().find(|item| item.action == FileContextAction::Paste).unwrap();
         assert_eq!(paste.state, ItemState::Ready, "Paste does not need a selection");
+    }
+
+    /// What a snapshot's menu must get wrong to fail: Cut still ready with a
+    /// selection (it only sat disabled by accident when nothing was selected),
+    /// Paste still ready, Copy or Copy and Trim lost along with them, or the
+    /// reason for Cut being "Select some text first" when text is selected.
+    #[test]
+    fn a_snapshot_cannot_be_cut_or_pasted_into_but_can_be_copied() {
+        let facts = FileContextFacts { is_snapshot: true, ..all_true() };
+        let items = items(&facts);
+        let state = |action| items.iter().find(|item| item.action == action).unwrap().state.clone();
+        for action in [FileContextAction::Cut, FileContextAction::Paste] {
+            assert_eq!(
+                state(action),
+                ItemState::Unavailable("A revision cannot be changed".to_owned()),
+                "{action:?} on a snapshot"
+            );
+        }
+        for action in [FileContextAction::Copy, FileContextAction::CopyAndTrim] {
+            assert_eq!(state(action), ItemState::Ready, "{action:?} on a snapshot");
+        }
+        let nothing_selected = FileContextFacts { has_selection: false, ..facts };
+        assert_eq!(
+            items_for(&nothing_selected, FileContextAction::Cut),
+            ItemState::Unavailable("A revision cannot be changed".to_owned()),
+            "a snapshot's reason outranks the missing selection"
+        );
+    }
+
+    fn items_for(facts: &FileContextFacts, action: FileContextAction) -> ItemState {
+        items(facts).into_iter().find(|item| item.action == action).unwrap().state
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use crate::caret;
 use crate::controls;
+use crate::editor_prefs::EditorPrefs;
 use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
@@ -36,9 +37,11 @@ const ACCOUNT_ERROR_DISMISS: Duration = Duration::from_secs(4);
 actions!(settings_summarizer, [CloseSummarizerPicker]);
 
 mod agents_page;
+mod editor_page;
 mod git_hosting_page;
 mod language_servers_page;
 
+use editor_page::EditorInputs;
 use language_servers_page::ServerStates;
 
 /// The settings content column — the frozen 720px content column of
@@ -121,6 +124,7 @@ pub enum SettingsCategory {
     General,
     Permissions,
     Appearance,
+    Editor,
 }
 
 impl SettingsCategory {
@@ -128,7 +132,7 @@ impl SettingsCategory {
     ///
     /// Permissions contains the platform-specific privacy controls and the
     /// in-app browser's durable origin grants.
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::AiProviders,
         Self::Agents,
         Self::LanguageServers,
@@ -136,6 +140,7 @@ impl SettingsCategory {
         Self::General,
         Self::Permissions,
         Self::Appearance,
+        Self::Editor,
     ];
 
     /// Returns the categories this platform can actually render.
@@ -152,6 +157,7 @@ impl SettingsCategory {
             Self::General => "General",
             Self::Permissions => "Permissions",
             Self::Appearance => "Appearance",
+            Self::Editor => "Editor",
         }
     }
 
@@ -175,6 +181,7 @@ impl SettingsCategory {
             "general" => Some(Self::General),
             "permissions" => Some(Self::Permissions),
             "appearance" => Some(Self::Appearance),
+            "editor" => Some(Self::Editor),
             _ => None,
         }
     }
@@ -188,6 +195,7 @@ impl SettingsCategory {
             Self::General => Icon::Settings,
             Self::Permissions => Icon::Shield,
             Self::Appearance => Icon::SunMoon,
+            Self::Editor => Icon::Code,
         }
     }
 }
@@ -378,6 +386,9 @@ pub struct SettingsSnapshot {
     /// The Markdown Preview's PlantUML server (design §6). Empty means none;
     /// the host trims it. Persisted as `markdown.plantumlServer`.
     pub plantuml_server: String,
+    /// The code editor's preferences (`editor.*`). No control on this surface
+    /// edits them yet; the value is carried through so a save keeps it.
+    pub editor: EditorPrefs,
 }
 
 impl Default for SettingsSnapshot {
@@ -405,6 +416,7 @@ impl Default for SettingsSnapshot {
             translucency: false,
             lsp_silenced_languages: Vec::new(),
             plantuml_server: String::new(),
+            editor: EditorPrefs::default(),
         }
     }
 }
@@ -978,6 +990,11 @@ pub struct Settings {
     plantuml_server: String,
     /// Focus handle for the server field.
     plantuml_server_focus: FocusHandle,
+    /// The code editor's preferences, as the Editor screen shows and edits them.
+    editor: EditorPrefs,
+    /// The Editor screen's two number fields. A text input needs a window, so
+    /// they are made on the first draw of that screen.
+    editor_inputs: Option<EditorInputs>,
     /// The local `plantuml`, looked up once when the surface opens.
     plantuml_path: Option<std::path::PathBuf>,
     /// Where the cookie is saved: the app's own on-disk store (macOS uses
@@ -1154,6 +1171,8 @@ impl Settings {
             opencode_override_focus: cx.focus_handle(),
             plantuml_server: initial.plantuml_server,
             plantuml_server_focus: cx.focus_handle(),
+            editor: initial.editor,
+            editor_inputs: None,
             plantuml_path: sirio_diagram::find_plantuml(),
             credential_store: CredentialStore::from_env().ok(),
             browser_origins: BTreeSet::new(),
@@ -1699,6 +1718,7 @@ impl Settings {
             translucency: self.translucency,
             lsp_silenced_languages: self.lsp_servers.silenced.iter().cloned().collect(),
             plantuml_server: self.plantuml_server.clone(),
+            editor: self.editor.clone(),
         }
     }
 
@@ -1812,6 +1832,33 @@ impl Settings {
 
     fn set_terminal_font_size(&mut self, value: i32, cx: &mut Context<Self>) {
         self.terminal_font_size = value.clamp(12, 18);
+        self.changed();
+        cx.notify();
+    }
+
+    /// Replaces the code editor's preferences. Every Editor control writes
+    /// through here, so the host's `on_change` callback saves and applies the
+    /// whole set the same way it does for every other setting.
+    pub fn set_editor_prefs(&mut self, prefs: EditorPrefs, cx: &mut Context<Self>) {
+        self.editor = prefs;
+        if let Some(inputs) = &self.editor_inputs {
+            // A field drawn before this call still shows its old number, and
+            // its next Blur would commit that number back over the change.
+            let ruler_on = self.editor.ruler;
+            let ruler_column = self.editor.ruler_column.to_string();
+            let tab_size = self.editor.tab_size.to_string();
+            inputs.ruler_column.update(cx, |input, cx| {
+                input.set_disabled(!ruler_on, cx);
+                if input.text() != ruler_column {
+                    input.set_text(ruler_column, cx);
+                }
+            });
+            inputs.tab_size.update(cx, |input, cx| {
+                if input.text() != tab_size {
+                    input.set_text(tab_size, cx);
+                }
+            });
+        }
         self.changed();
         cx.notify();
     }
@@ -4372,7 +4419,8 @@ impl Render for Settings {
             cx,
         );
         self.field_caret_visible = field_focused && self.field_blink.visible();
-        let category_sidebar = self.render_categories(theme, entity.clone());
+        // The detail is built before the sidebar, which borrows `self` for as
+        // long as it lives, so the Editor screen can make its fields here.
         let detail = match self.category {
             SettingsCategory::AiProviders => {
                 self.render_ai_providers(theme, entity.clone(), window)
@@ -4385,7 +4433,12 @@ impl Render for Settings {
             SettingsCategory::General => self.render_general(theme, entity.clone(), window),
             SettingsCategory::Permissions => self.render_permissions(theme, entity.clone()),
             SettingsCategory::Appearance => self.render_appearance(theme, mode, entity.clone()),
+            SettingsCategory::Editor => {
+                let fields = self.editor_fields(window, cx);
+                self.render_editor(theme, entity.clone(), fields)
+            }
         };
+        let category_sidebar = self.render_categories(theme, entity.clone());
 
         let mut surface = div()
             .id("settings-surface")
@@ -4478,6 +4531,7 @@ mod tests {
 
     use super::*;
     use gpui::{Modifiers, VisualTestContext};
+    use sirio_persistence::{EditorCursorShape, EditorLineNumbers};
     use std::cell::{Cell, RefCell};
 
     #[gpui::test]
@@ -4723,6 +4777,28 @@ mod tests {
         assert_eq!(
             SettingsCategory::from_title(SettingsCategory::LanguageServers.title()),
             Some(SettingsCategory::LanguageServers),
+            "the title has to parse back under the spelling the report writes"
+        );
+    }
+
+    /// The Editor screen is reached by the socket label `editor`, which is
+    /// what `settings_category_id` writes for its title. It fails if the
+    /// variant is missing from `ALL` (the sidebar and the socket both read
+    /// it), if `from_title` does not accept `editor`, or if the title does not
+    /// parse back to the same category.
+    #[test]
+    fn the_editor_category_round_trips_through_its_socket_label() {
+        assert!(
+            SettingsCategory::all().contains(&SettingsCategory::Editor),
+            "every platform offers the editor screen"
+        );
+        assert_eq!(
+            SettingsCategory::from_title("editor"),
+            Some(SettingsCategory::Editor)
+        );
+        assert_eq!(
+            SettingsCategory::from_title(SettingsCategory::Editor.title()),
+            Some(SettingsCategory::Editor),
             "the title has to parse back under the spelling the report writes"
         );
     }
@@ -7017,6 +7093,114 @@ mod tests {
             px(14.0),
             "the interface font size updates the shared typography"
         );
+    }
+
+    /// The Editor screen's controls drive every `EditorPrefs` field: eight
+    /// switches, the line-number and cursor-shape groups, and the ruler
+    /// column and tab size fields. A number field is clamped into its range
+    /// on Enter, and it takes no typing while the ruler is off.
+    #[gpui::test]
+    async fn the_editor_page_changes_every_preference_through_its_controls(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            Theme::init(cx);
+            crate::ely::init(cx);
+        });
+        let window =
+            cx.add_window(|_window, cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        // The page is taller than the default test window; a control outside
+        // the window's hit-test bounds takes no click, so the test grows it.
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+        click_editor_control(&mut cx, "settings-category-Editor");
+
+        let mut expected = editor_prefs(&settings, &mut cx);
+        click_editor_control(&mut cx, "settings-editor-ruler-column");
+        cx.simulate_keystrokes(SELECT_ALL);
+        cx.simulate_input("120");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            editor_prefs(&settings, &mut cx),
+            expected,
+            "the ruler column takes no typing while the ruler is off"
+        );
+
+        let switches: [(&str, EditorFlag); 8] = [
+            ("settings-editor-minimap", |prefs| &mut prefs.minimap),
+            ("settings-editor-sticky-scroll", |prefs| &mut prefs.sticky_scroll),
+            ("settings-editor-indent-guides", |prefs| &mut prefs.indent_guides),
+            ("settings-editor-rainbow-brackets", |prefs| &mut prefs.rainbow_brackets),
+            ("settings-editor-code-lens", |prefs| &mut prefs.code_lens),
+            ("settings-editor-inlay-hints", |prefs| &mut prefs.inlay_hints),
+            ("settings-editor-whitespace", |prefs| &mut prefs.whitespace),
+            ("settings-editor-ruler", |prefs| &mut prefs.ruler),
+        ];
+        for (selector, flag) in switches {
+            let turned = !*flag(&mut expected);
+            click_editor_control(&mut cx, selector);
+            *flag(&mut expected) = turned;
+            assert_eq!(
+                editor_prefs(&settings, &mut cx),
+                expected,
+                "{selector} flips its own preference and nothing else"
+            );
+        }
+
+        click_editor_control(&mut cx, "toggle relative");
+        expected.line_numbers = EditorLineNumbers::Relative;
+        click_editor_control(&mut cx, "toggle block");
+        expected.cursor_shape = EditorCursorShape::Block;
+        assert_eq!(editor_prefs(&settings, &mut cx), expected);
+
+        click_editor_control(&mut cx, "settings-editor-ruler-column");
+        cx.simulate_keystrokes(SELECT_ALL);
+        cx.simulate_input("120");
+        cx.simulate_keystrokes("enter");
+        expected.ruler_column = 120;
+        assert_eq!(editor_prefs(&settings, &mut cx), expected);
+
+        click_editor_control(&mut cx, "settings-editor-tab-size");
+        cx.simulate_keystrokes(SELECT_ALL);
+        cx.simulate_input("99");
+        cx.simulate_keystrokes("enter");
+        expected.tab_size = 16;
+        assert_eq!(
+            editor_prefs(&settings, &mut cx),
+            expected,
+            "a tab size above its range is clamped to the top of it"
+        );
+        cx.simulate_keystrokes(SELECT_ALL);
+        cx.simulate_input("2");
+        cx.simulate_keystrokes("enter");
+        expected.tab_size = 2;
+        assert_eq!(editor_prefs(&settings, &mut cx), expected);
+    }
+
+    /// The Editor page's switches, each with the flag it writes.
+    type EditorFlag = fn(&mut EditorPrefs) -> &mut bool;
+
+    /// Select-all as the platform spells it, to replace a number field's text.
+    const SELECT_ALL: &str = if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    };
+
+    fn click_editor_control(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("the editor page draws {selector}"));
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn editor_prefs(settings: &Entity<Settings>, cx: &mut VisualTestContext) -> EditorPrefs {
+        settings.read_with(&cx.cx, |settings, _| settings.snapshot().editor)
     }
 
     // The shell's Escape contract (F-SET-02), tested with a faithful host

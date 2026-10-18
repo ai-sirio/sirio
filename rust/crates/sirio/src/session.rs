@@ -2739,7 +2739,9 @@ fn flush_if_due(inner: &SessionInner) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sirio_persistence::{AppearanceMode, BaseColor, ProjectRecord};
+    use sirio_persistence::{
+        AppearanceMode, BaseColor, EditorCursorShape, EditorLineNumbers, ProjectRecord,
+    };
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     struct TempDir(PathBuf);
@@ -3410,6 +3412,20 @@ mod tests {
             lsp_silenced_languages: r#"["java"]"#.into(),
             markdown_plantuml_server: "http://plantuml.test".into(),
             forge_hosts: r#"[{"host":"git.corp","forge":"gitlab"}]"#.into(),
+            // Every editor preference off its default, so this round trip is
+            // what proves the SessionStore layer carries each one.
+            editor_minimap: false,
+            editor_sticky_scroll: false,
+            editor_indent_guides: false,
+            editor_rainbow_brackets: false,
+            editor_code_lens: false,
+            editor_inlay_hints: false,
+            editor_whitespace: true,
+            editor_ruler: true,
+            editor_ruler_column: 120,
+            editor_line_numbers: EditorLineNumbers::Hidden,
+            editor_cursor_shape: EditorCursorShape::Underline,
+            editor_tab_size: 2,
         };
 
         {
@@ -3440,6 +3456,18 @@ mod tests {
                 ("chat.limitHistory".into(), "false".into()),
                 ("chat.retentionCount".into(), "37".into()),
                 ("controlSocket.enabled".into(), "false".into()),
+                ("editor.codeLens".into(), "false".into()),
+                ("editor.cursorShape".into(), "underline".into()),
+                ("editor.indentGuides".into(), "false".into()),
+                ("editor.inlayHints".into(), "false".into()),
+                ("editor.lineNumbers".into(), "hidden".into()),
+                ("editor.minimap".into(), "false".into()),
+                ("editor.rainbowBrackets".into(), "false".into()),
+                ("editor.ruler".into(), "true".into()),
+                ("editor.rulerColumn".into(), "120".into()),
+                ("editor.stickyScroll".into(), "false".into()),
+                ("editor.tabSize".into(), "2".into()),
+                ("editor.whitespace".into(), "true".into()),
                 ("forge.hosts".into(), r#"[{"host":"git.corp","forge":"gitlab"}]"#.into()),
                 ("general.autoNaming".into(), "true".into()),
                 ("general.summarizerAgent".into(), "codex".into()),

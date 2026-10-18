@@ -1,0 +1,226 @@
+<style>
+.ed{--bg:#181818;--panel:#1f1f1f;--raised:#2a2a2a;--line:#2f2f2f;--fg:#dcdcdc;--muted:#9a9a9a;--subtle:#626262;--acc:#7aa2f7;--sel:rgba(122,162,247,.22);--hl:rgba(255,255,255,.07);--err:#f07178;--warn:#e5b567;--info:#7aa2f7;--add:#8ccf7e;--mod:#7aa2f7;--del:#f07178;
+  font-family:Inter,system-ui,sans-serif;font-size:12px;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:10px;overflow:hidden;position:relative;margin:8px 0 6px}
+.ed *{box-sizing:border-box}
+.ed .tabs{height:30px;border-bottom:1px solid var(--line);display:flex;align-items:flex-end;padding-left:8px;gap:2px;background:var(--panel)}
+.ed .tab{padding:6px 12px;color:var(--muted)} .ed .tab.on{color:var(--fg);border-bottom:2px solid var(--acc);background:var(--bg)}
+.ed .crumb{height:24px;display:flex;align-items:center;gap:6px;padding:0 12px;color:var(--muted);border-bottom:1px solid var(--line);font-size:11.5px}
+.ed .crumb b{color:var(--fg);font-weight:500} .ed .crumb i{font-style:normal;color:var(--subtle)}
+.ed .view{display:flex;position:relative;font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-size:11.5px}
+.ed .rows{flex:1;min-width:0;position:relative}
+.ed .row{display:flex;height:18px;line-height:18px;position:relative}
+.ed .row.cur{background:var(--hl)}
+.ed .g{width:62px;flex:none;display:flex;align-items:center;color:var(--subtle);position:relative}
+.ed .g .gm{width:3px;height:100%;margin-right:3px}
+.ed .g .gm.add{background:var(--add)} .ed .g .gm.mod{background:var(--mod)} .ed .g .gm.del{border-top:5px solid transparent;border-bottom:5px solid transparent;border-left:5px solid var(--del);height:0;width:0;margin-right:1px}
+.ed .g .dg{width:14px;font-size:10px;text-align:center} .ed .g .num{width:26px;text-align:right} .ed .g .fd{width:14px;text-align:center;color:var(--muted)}
+.ed .row.cur .num{color:var(--fg)}
+.ed .code{flex:1;white-space:pre;position:relative;padding-left:4px}
+.ed .ig{display:inline-block;width:4ch;height:18px;vertical-align:top;box-shadow:inset 1px 0 0 #2e2e2e}
+.ed .ig.on{box-shadow:inset 1px 0 0 #555}
+.k{color:#c792ea}.f{color:#82aaff}.t{color:#7fdbca}.s{color:#c3e88d}.n{color:#f78c6c}.c{color:#676e7a;font-style:italic}.p{color:#e6e6e6}.m{color:#89ddff}
+.b1{color:#e5c07b}.b2{color:#ff79c6}.b3{color:#61afef}
+.ed .bm{outline:1px solid #6b6b6b;border-radius:2px}
+.ed .sh{background:rgba(255,255,255,.10);border-radius:2px}
+.ed .selx{background:var(--sel)}
+.ed .caret{display:inline-block;width:2px;height:15px;background:var(--acc);vertical-align:-3px;margin:0 -1px}
+.ed .sq-e{text-decoration:underline wavy var(--err);text-underline-offset:3px}
+.ed .sq-w{text-decoration:underline wavy var(--warn);text-underline-offset:3px}
+.ed .sq-i{text-decoration:underline dotted var(--info);text-underline-offset:3px}
+.ed .inlay{font-size:10px;color:var(--muted);background:#262626;border-radius:3px;padding:0 3px;margin:0 2px;font-family:Inter,sans-serif}
+.ed .lens{height:16px;line-height:16px;font-family:Inter,sans-serif;font-size:10.5px;color:var(--subtle);padding-left:66px}
+.ed .lens span{margin-right:10px} .ed .lens span:hover{color:var(--acc)}
+.ed .eol{font-family:Inter,sans-serif;font-size:10.5px;margin-left:18px;opacity:.85}
+.ed .sticky{border-bottom:1px solid var(--line);background:var(--panel);box-shadow:0 3px 6px rgba(0,0,0,.35);position:relative;z-index:2}
+.ed .ruler{position:absolute;top:0;bottom:0;left:calc(66px + 100ch);border-left:1px dashed #333;pointer-events:none}
+.ed .mini{width:64px;flex:none;border-left:1px solid var(--line);position:relative;background:var(--bg)}
+.ed .mini .ln{height:2px;margin:1px 6px;background:#3a3a3a;border-radius:1px}
+.ed .mini .vp{position:absolute;left:0;right:0;background:rgba(255,255,255,.06);border-top:1px solid #333;border-bottom:1px solid #333}
+.ed .mini .mk{position:absolute;right:0;width:4px;height:3px}
+.ed .ws{color:#3d3d3d}
+.ed .est{height:24px;border-top:1px solid var(--line);display:flex;align-items:center;gap:14px;padding:0 12px;color:var(--muted);font-size:11px;background:var(--panel)}
+.ed .est .r{margin-left:auto;display:flex;gap:14px;align-items:center}
+.ed .est .it:hover{color:var(--fg)}
+.ed .bell{position:relative}.ed .bell sup{position:absolute;top:-6px;right:-7px;background:var(--acc);color:#111;border-radius:6px;font-size:8px;padding:0 3px}
+.ed .drawer{border-top:1px solid var(--line);background:var(--panel)}
+.ed .dh{height:28px;display:flex;align-items:center;gap:14px;padding:0 12px;color:var(--muted);font-size:11.5px}
+.ed .dh .on{color:var(--fg);border-bottom:2px solid var(--acc);padding:6px 0}
+.ed .dh .r{margin-left:auto;display:flex;gap:10px}
+.ed .cnt{display:inline-flex;gap:3px;align-items:center;margin-left:4px}
+.ed .e{color:var(--err)}.ed .w{color:var(--warn)}.ed .i{color:var(--info)}
+.ed .pop{position:absolute;z-index:5;background:var(--raised);border:1px solid #3a3a3a;border-radius:7px;box-shadow:0 10px 28px rgba(0,0,0,.5);font-family:Inter,sans-serif;font-size:11.5px}
+.ed .mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:11px}
+.ed .item{display:flex;gap:8px;align-items:center;padding:3px 8px;border-radius:4px}
+.ed .item.on{background:#353b4a}
+.ed .item .d{margin-left:auto;color:var(--muted);font-size:10.5px}
+.ed .ico{width:14px;text-align:center;font-size:10px}
+.ed .btn{background:#333;border-radius:4px;padding:2px 8px}
+.ed .inp{background:var(--bg);border:1px solid #3a3a3a;border-radius:4px;padding:3px 7px;display:inline-block}
+.ed .inp.f{border-color:var(--acc)}
+.ed .tg{color:var(--muted);padding:1px 4px;border-radius:3px} .ed .tg.on{background:#3a4560;color:var(--fg)}
+.ed .ghost{color:#5a5a5a;font-style:italic}
+.cap{font-size:13px;color:#999;margin:2px 0 26px;line-height:1.5}
+.cap b{color:#ddd}
+h3.st{margin:30px 0 0}
+.note{display:inline-block;font-size:10px;border:1px dashed #7aa2f7;color:#7aa2f7;border-radius:4px;padding:0 4px;font-family:Inter,sans-serif}
+</style>
+
+<h2>Prototipo: la scheda file con l'editor Ely</h2>
+<p class="subtitle">Layout A. Una sola scheda vista in cinque momenti. Tutto quello che vedi viene dai componenti Ely; i colori della sintassi restano quelli di tree-sitter.</p>
+
+<h3 class="st">1 · A riposo</h3>
+<div class="ed" id="m1"></div>
+<p class="cap">Dall'alto in basso:
+<b>breadcrumb</b> con i simboli dell'LSP ·
+<b>sticky scroll</b> con <code>impl Palette</code> fissato in cima ·
+<b>code lens</b> sopra la funzione ·
+<b>gutter</b> con segni git (aggiunte, modifiche, cancellazioni), icone diagnostiche, numeri e fold ·
+<b>indent guide</b> con quella attiva più chiara ·
+<b>rainbow brackets</b> con la coppia del cursore incorniciata ·
+<b>selection highlight</b> delle altre occorrenze di <code>lift</code> ·
+<b>inlay hint</b> <code>: Color</code> ·
+<b>squiggle</b> con il messaggio a fine riga ·
+<b>ruler</b> a 100 colonne ·
+<b>minimap</b> con l'area visibile e i segni di errore e git ·
+<b>riga di stato</b> · <b>cassetto chiuso</b> con i contatori.</p>
+
+<h3 class="st">2 · Mentre scrivi</h3>
+<div class="ed" id="m2"></div>
+<p class="cap"><b>CompletionMenu</b> sotto il cursore, con le lettere digitate in evidenza e la documentazione dell'elemento scelto a fianco. Sopra c'è <b>SignatureHelp</b> con il parametro corrente sottolineato; 1/2 indica che ci sono due overload. <b>Due cursori</b> (Ctrl+D ha aggiunto la seconda occorrenza) scrivono insieme.</p>
+
+<h3 class="st">3 · Capire e correggere il codice</h3>
+<div class="ed" id="m3"></div>
+<p class="cap">La <b>lampadina</b> nel gutter apre il <b>CodeActionMenu</b> con le correzioni del language server. Sotto la riga 30 si è aperta una <b>PeekView</b>: la definizione di <code>Color</code> in linea, con l'elenco a destra, senza cambiare scheda. A destra trovi <b>HoverInfo</b> (diagnostica, firma, documentazione, link) e <b>RenameInput</b> aperto sul simbolo.</p>
+
+<h3 class="st">4 · Cercare e il cassetto aperto</h3>
+<div class="ed" id="m4"></div>
+<p class="cap"><b>FindWidget + ReplaceWidget</b> in alto a destra: maiuscole, parola intera e regex, "3 of 11", frecce, Replace e Replace all. La corrispondenza corrente è più accesa delle altre, e le corrispondenze compaiono anche nella minimap. Il <b>cassetto</b> è aperto su Problems: filtri per gravità, raggruppamento per file, sorgente e posizione. Le altre schede del cassetto sono Output (il log del language server, a canali) e Search (la ricerca nel worktree, <span class="note">vedi la domanda in fondo</span>).</p>
+
+<h3 class="st">5 · Agenti e Vim</h3>
+<div class="ed" id="m5"></div>
+<p class="cap"><b>InlineChat</b> aperta sotto la riga 34 (Ctrl+I): il prompt parte verso un agente di Sirio e la risposta torna come <b>InlineDiff</b> da accettare o scartare. Alla riga 38 c'è <b>GhostText</b>, un suggerimento in grigio che Tab accetta. Nella riga di stato compare il <b>VimModeIndicator</b> (NORMAL, con i tasti in sospeso).</p>
+
+<h3 class="st">Dove va la ricerca nel worktree?</h3>
+<div class="options">
+ <div class="option" data-choice="search-drawer" onclick="toggleSelect(this)"><div class="letter">A</div><div class="content"><h3>Scheda del cassetto</h3><p>Accanto a Problems e Output. Sta vicino al codice, ma il cassetto appartiene a un file mentre i risultati riguardano tutto il worktree.</p></div></div>
+ <div class="option" data-choice="search-right" onclick="toggleSelect(this)"><div class="letter">B</div><div class="content"><h3>Vista del pannello destro</h3><p>Accanto a Files e References, che già lavorano su tutto il worktree. Si apre con Ctrl+Shift+F anche quando nessun file è aperto.</p></div></div>
+</div>
+
+<script>
+(function(){
+const IG=(n,act)=>Array.from({length:n},(_,i)=>`<span class="ig${act===i?' on':''}"></span>`).join('');
+function row(o){
+  const g=`<div class="g"><span class="gm ${o.git||''}"></span><span class="dg ${o.dg||''}">${o.dgi||''}</span><span class="num">${o.n}</span><span class="fd">${o.fold?'⌄':''}</span></div>`;
+  return `${o.lens?`<div class="lens">${o.lens}</div>`:''}<div class="row${o.cur?' cur':''}">${g}<div class="code">${o.h||''}</div></div>${o.after||''}`;
+}
+function mini(marks){
+  let s='<div class="mini">';for(let i=0;i<70;i++){const w=[30,60,80,45,20,70,90,55,35,65][i%10];s+=`<div class="ln" style="width:${w*0.5}px"></div>`}
+  s+='<div class="vp" style="top:96px;height:66px"></div>';
+  (marks||[]).forEach(m=>s+=`<div class="mk" style="top:${m[0]}px;background:${m[1]}"></div>`);
+  return s+'</div>';
+}
+const tabs=(extra)=>`<div class="tabs"><span class="tab">claude · feat/editor</span><span class="tab on">palette.rs ●</span><span class="tab">color.rs</span>${extra||''}</div>`;
+const crumb=`<div class="crumb">src <i>›</i> theme <i>›</i> palette.rs <i>›</i> impl Palette <i>›</i> <b>lookup</b></div>`;
+const sticky=`<div class="sticky">${row({n:16,fold:1,h:'<span class="k">impl</span> <span class="t">Palette</span> <span class="b1">{</span>'})}</div>`;
+const status=(vim)=>`<div class="est">${vim?'<span class="it" style="color:#111;background:#8ccf7e;border-radius:3px;padding:0 6px;font-weight:600">NORMAL</span><span class="it mono">"a d</span>':''}<span class="it">⎇ feat/editor* ↑2 ↓1</span><span class="it">◌ rust-analyzer · indexing 214 files</span><div class="r"><span class="it">Ln 31, Col 11 (4 selected)</span><span class="it">Spaces: 4</span><span class="it">UTF-8</span><span class="it">LF</span><span class="it">Rust</span><span class="it bell">🔔<sup>3</sup></span></div></div>`;
+const drawerClosed=`<div class="drawer"><div class="dh"><span>▸ Problems <span class="cnt"><span class="e">⊘ 1</span> <span class="w">⚠ 2</span> <span class="i">ⓘ 1</span></span></span><span>Output</span><span>Search</span><div class="r"><span>⌃J</span></div></div></div>`;
+
+const L={
+ 27:{n:27,h:''},
+ 28:{n:28,h:IG(1)+'<span class="c">/// The color for `name`, blended toward white by `lift`.</span>'},
+ 29:{n:29,fold:1,lens:'<span>3 references</span><span>1 implementation</span><span>▶ Run doc-test</span>',h:IG(1)+'<span class="k">pub fn</span> <span class="f">lookup</span><span class="b2">(</span>&amp;<span class="k">self</span>, <span class="p">name</span>: &amp;<span class="t">str</span>, <span class="p sh">lift</span>: <span class="t">f32</span><span class="b2">)</span> -&gt; <span class="t">Color</span> <span class="b2">{</span>'},
+ 30:{n:30,git:'mod',h:IG(2,1)+'<span class="k">let</span> base<span class="inlay">: Color</span> = <span class="k">self</span>.colors.<span class="f">get</span><span class="b3">(</span>name<span class="b3">)</span>.<span class="f">copied</span><span class="b3">()</span>.<span class="f">unwrap_or</span><span class="b3">(</span><span class="k">self</span>.fallback<span class="b3">)</span>;'},
+ 31:{n:31,fold:1,cur:1,h:IG(2,1)+'<span class="k">match</span> <span class="sh">lift</span><span class="caret"></span> <span class="b3 bm">{</span>'},
+ 32:{n:32,h:IG(3,1)+'l <span class="k">if</span> l &lt;= <span class="n">0.0</span> =&gt; base,'},
+ 33:{n:33,h:IG(3,1)+'l <span class="k">if</span> l &gt;= <span class="n">1.0</span> =&gt; <span class="t">Color</span>::<span class="m">WHITE</span>,'},
+ 34:{n:34,dg:'e',dgi:'⊘',h:IG(3,1)+'l =&gt; base.<span class="sq-e">blend</span><span class="b1">(</span><span class="t">Color</span>::<span class="m">WHITE</span>, l<span class="b1">)</span>,<span class="eol e">no method named `blend` found for `Color`</span>'},
+ 35:{n:35,h:IG(2,1)+'<span class="b3 bm">}</span>'},
+ 36:{n:36,h:IG(1)+'<span class="b2">}</span>'},
+ 37:{n:37,git:'del',h:''},
+ 38:{n:38,git:'add',fold:1,h:IG(1)+'<span class="k">pub fn</span> <span class="f">insert</span><span class="b2">(</span>&amp;<span class="k">mut self</span>, name: &amp;<span class="t">str</span>, color: <span class="t">Color</span><span class="b2">)</span> <span class="b2">{</span>'},
+ 39:{n:39,git:'add',dg:'w',dgi:'⚠',h:IG(2)+'<span class="k">let</span> <span class="sq-w">spare</span> = name.<span class="f">len</span><span class="b3">()</span>;'},
+ 40:{n:40,git:'add',h:IG(2)+'<span class="k">self</span>.colors.<span class="f">insert</span><span class="b3">(</span>name.<span class="f">to_string</span><span class="b1">()</span>, color<span class="b3">)</span>;'},
+ 41:{n:41,git:'add',h:IG(1)+'<span class="b2">}</span>'},
+};
+const rowsOf=(ids,patch)=>ids.map(i=>row(Object.assign({},L[i],(patch||{})[i]||{}))).join('');
+const view=(inner,minimarks,over)=>`<div class="view"><div class="rows">${inner}<div class="ruler"></div>${over||''}</div>${mini(minimarks)}</div>`;
+const MM=[[118,'#f07178'],[140,'#8ccf7e'],[146,'#e5b567'],[30,'#7aa2f7']];
+
+// 1
+document.getElementById('m1').innerHTML=tabs()+crumb+view(sticky+rowsOf([28,29,30,31,32,33,34,35,36,37,38,39,40,41]),MM)+drawerClosed+status();
+
+// 2 typing
+const p2={
+ 31:{cur:0},
+ 32:{h:IG(3,1)+'l <span class="k">if</span> l &lt;= <span class="n">0.0</span> =&gt; base.bl<span class="caret"></span>,'},
+ 34:{cur:1,dg:'',dgi:'',h:IG(3,1)+'l =&gt; base.bl<span class="caret"></span><span class="b1">(</span><span class="t">Color</span>::<span class="m">WHITE</span>, l<span class="b1">)</span>,'},
+};
+const comp=`<div class="pop" style="left:168px;top:182px;width:300px;padding:4px">
+ <div class="item on"><span class="ico f">ƒ</span><span class="mono"><b>bl</b>end</span><span class="d">fn(self, Color, f32) → Color</span></div>
+ <div class="item"><span class="ico t">◆</span><span class="mono"><b>bl</b>ue</span><span class="d">f32</span></div>
+ <div class="item"><span class="ico m">π</span><span class="mono"><b>BL</b>ACK</span><span class="d">const Color</span></div>
+ <div class="item"><span class="ico">⌁</span><span class="mono">dou<b>bl</b>e</span><span class="d">snippet</span></div>
+</div>
+<div class="pop" style="left:474px;top:182px;width:260px;padding:9px 11px"><div class="mono" style="margin-bottom:6px">fn blend(self, other: Color, amount: f32) → Color</div><div style="color:var(--muted)">Mixes two colors; <span class="mono">amount</span> 0 keeps <span class="mono">self</span>, 1 gives <span class="mono">other</span>.</div></div>
+<div class="pop" style="left:150px;top:116px;padding:6px 10px"><span style="color:var(--muted)">⌃ 1/2 ⌄</span> <span class="mono"><span class="k">fn</span> <span class="f">blend</span>(self, <u><b>other: Color</b></u>, amount: f32) → Color</span><div style="color:var(--muted);margin-top:3px">The color to mix toward.</div></div>`;
+document.getElementById('m2').innerHTML=tabs()+crumb+view(sticky+rowsOf([28,29,30,31,32,33,34,35,36,37,38,39,40,41],p2),MM,comp)+drawerClosed+status();
+
+// 3 code action + peek + hover + rename
+const peek=`<div style="margin:2px 0 2px 66px;border:1px solid #3a4560;border-radius:6px;background:#1c1f26;font-family:Inter,sans-serif">
+ <div style="display:flex;gap:8px;padding:4px 10px;border-bottom:1px solid #2f3442;color:var(--muted);font-size:11px"><b style="color:var(--fg)">color.rs</b> src/theme · 1 definition<span style="margin-left:auto">✕</span></div>
+ <div style="display:flex"><div class="mono" style="flex:1;padding:4px 10px;line-height:18px;white-space:pre"><span class="c">#[derive(Clone, Copy, Debug, PartialEq)]</span>
+<span class="k">pub struct</span> <span class="t" style="background:#3a4560">Color</span> <span class="b1">{</span>
+    <span class="k">pub</span> red: <span class="t">f32</span>, <span class="k">pub</span> green: <span class="t">f32</span>, <span class="k">pub</span> blue: <span class="t">f32</span>,
+<span class="b1">}</span></div>
+ <div style="width:170px;border-left:1px solid #2f3442;padding:4px 0;font-size:11px"><div class="item on">color.rs <span class="d">10:12</span></div><div class="item">palette.rs <span class="d">5:22</span></div><div class="item">palette.rs <span class="d">30:14</span></div></div></div></div>`;
+const p3={30:{after:peek},34:{dg:'',dgi:'💡',cur:1}};
+const ca=`<div class="pop" style="left:60px;top:262px;width:280px;padding:4px">
+ <div style="padding:3px 8px;color:var(--subtle);font-size:10.5px">Quick fix</div>
+ <div class="item on"><span class="ico">💡</span>Import trait <span class="mono">Blend</span></div>
+ <div class="item"><span class="ico">💡</span>Create method <span class="mono">blend</span> on <span class="mono">Color</span></div>
+ <div style="padding:3px 8px;color:var(--subtle);font-size:10.5px">Refactor</div>
+ <div class="item"><span class="ico">⇄</span>Extract into variable</div>
+</div>
+<div class="pop" style="left:560px;top:44px;width:300px;padding:10px 12px">
+ <div style="margin-bottom:6px"><span class="w">⚠</span> lift outside 0..=1 is clamped</div>
+ <div class="mono" style="margin-bottom:8px"><span class="k">pub fn</span> <span class="f">lookup</span>(&amp;self, name: &amp;str, lift: f32) → Color</div>
+ <div style="color:var(--muted);margin-bottom:8px">The color for <span class="mono">name</span>, blended toward white by <span class="mono">lift</span>.</div>
+ <div><span style="color:var(--acc)">Go to definition</span> &nbsp; <span style="color:var(--acc)">Find references</span> &nbsp; <span style="color:var(--acc)">Peek</span></div>
+</div>
+<div class="pop" style="left:560px;top:200px;padding:6px 8px;width:250px"><div style="color:var(--muted);font-size:10.5px;margin-bottom:4px">Rename symbol</div><span class="inp f mono" style="width:100%">lighten_by<span class="caret"></span></span><div style="color:var(--subtle);font-size:10.5px;margin-top:4px">↵ rename in 4 files · ⇧↵ preview</div></div>`;
+document.getElementById('m3').innerHTML=tabs()+crumb+view(sticky+rowsOf([28,29,30,31,32,33,34,35,36,37,38,39,40,41],p3),MM,ca)+drawerClosed+status();
+
+// 4 find + drawer open
+const F=(s,cur)=>`<span style="background:${cur?'rgba(229,181,103,.55)':'rgba(229,181,103,.22)'};border-radius:2px">${s}</span>`;
+const p4={
+ 28:{h:IG(1)+'<span class="c">/// The color for `name`, blended toward white by `'+F('lift')+'`.</span>'},
+ 29:{lens:'',h:IG(1)+'<span class="k">pub fn</span> <span class="f">lookup</span><span class="b2">(</span>&amp;<span class="k">self</span>, <span class="p">name</span>: &amp;<span class="t">str</span>, '+F('lift')+': <span class="t">f32</span><span class="b2">)</span> -&gt; <span class="t">Color</span> <span class="b2">{</span>'},
+ 31:{h:IG(2,1)+'<span class="k">match</span> '+F('lift',1)+' <span class="b3">{</span>'},
+};
+const find=`<div class="pop" style="right:74px;top:4px;padding:5px 7px;display:flex;flex-direction:column;gap:5px">
+ <div style="display:flex;gap:6px;align-items:center"><span>⌄</span><span class="inp f" style="width:170px">lift</span><span class="tg">Aa</span><span class="tg on">ab</span><span class="tg">.*</span><span style="color:var(--muted);width:52px;text-align:center">3 of 11</span><span>↑</span><span>↓</span><span style="color:var(--muted)">✕</span></div>
+ <div style="display:flex;gap:6px;align-items:center;padding-left:14px"><span class="inp" style="width:170px">amount</span><span class="btn">Replace</span><span class="btn">Replace all</span></div></div>`;
+const MM4=MM.concat([[100,'#e5b567'],[104,'#e5b567'],[110,'#e5b567'],[20,'#e5b567']]);
+const drawerOpen=`<div class="drawer"><div class="dh" style="border-bottom:1px solid var(--line)"><span class="on">▾ Problems <span class="cnt"><span class="e">⊘ 1</span> <span class="w">⚠ 2</span> <span class="i">ⓘ 1</span></span></span><span>Output</span><span>Search</span><div class="r"><span class="tg on"><span class="e">⊘</span> Errors</span><span class="tg on"><span class="w">⚠</span> Warnings</span><span class="tg on"><span class="i">ⓘ</span> Notes</span><span>⌃J</span></div></div>
+ <div style="padding:6px 12px 10px;display:flex;flex-direction:column;gap:5px">
+  <div>📄 palette.rs <span style="color:var(--subtle)">src/theme</span> <span class="tg on">3</span></div>
+  <div class="item on" style="padding-left:22px"><span class="e">⊘</span> no method named &#96;blend&#96; found for &#96;Color&#96; <span class="d mono">rustc 34:22</span></div>
+  <div class="item" style="padding-left:22px"><span class="w">⚠</span> unused variable: &#96;spare&#96; <span class="d mono">rustc 39:13</span></div>
+  <div class="item" style="padding-left:22px"><span class="i">ⓘ</span> a BTreeMap keeps a steady order <span class="d mono">clippy 1:24</span></div>
+ </div></div>`;
+document.getElementById('m4').innerHTML=tabs()+crumb+view(sticky+rowsOf([28,29,30,31,32,33,34,35,36],p4),MM4,find)+drawerOpen+status();
+
+// 5 inline chat + ghost + vim
+const chat=`<div style="margin:3px 0 3px 66px;border:1px solid #3a3a3a;border-radius:7px;background:var(--raised);font-family:Inter,sans-serif;padding:6px 8px;max-width:640px">
+ <div style="display:flex;gap:8px;align-items:center"><span style="color:#d97757">✳ Claude</span><span class="inp" style="flex:1">make blend clamp lift to 0..=1 instead of matching<span class="caret"></span></span><span class="btn">↵</span><span style="color:var(--muted)">✕</span></div></div>`;
+const diff=`<div class="row" style="background:rgba(240,113,120,.12)"><div class="g"><span class="gm"></span><span class="dg"></span><span class="num" style="color:var(--del)">−</span><span class="fd"></span></div><div class="code">${IG(2)}<span class="k">match</span> lift <span class="b3">{</span> … <span class="b3">}</span></div></div>
+<div class="row" style="background:rgba(140,207,126,.12)"><div class="g"><span class="gm"></span><span class="dg"></span><span class="num" style="color:var(--add)">+</span><span class="fd"></span></div><div class="code">${IG(2)}base.<span class="f">mix</span><span class="b3">(</span><span class="t">Color</span>::<span class="m">WHITE</span>, lift.<span class="f">clamp</span><span class="b1">(</span><span class="n">0.0</span>, <span class="n">1.0</span><span class="b1">)</span><span class="b3">)</span></div></div>
+<div style="margin:2px 0 6px 66px;font-family:Inter,sans-serif;display:flex;gap:6px"><span class="btn" style="background:#2f4a2c">Accept ⌘↵</span><span class="btn">Discard</span><span style="color:var(--muted)">1 change · from the chat in this worktree</span></div>`;
+const p5={
+ 30:{after:chat+diff},
+ 31:{cur:0},
+ 38:{git:'add',cur:1,h:IG(1)+'<span class="k">pub fn</span> <span class="f">insert</span><span class="caret"></span><span class="ghost">(&amp;mut self, name: &amp;str, color: Color) {</span><span class="eol" style="color:var(--subtle)">Tab to accept</span>'},
+};
+document.getElementById('m5').innerHTML=tabs()+crumb+view(sticky+rowsOf([28,29,30,36,37,38],p5),MM)+drawerClosed+status(true);
+})();
+</script>

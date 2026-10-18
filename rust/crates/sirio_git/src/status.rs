@@ -152,8 +152,16 @@ impl std::error::Error for StatusParseError {}
 /// need no quoting round-trip.
 pub fn status(repo: &std::path::Path) -> Result<StatusSnapshot, GitError> {
     let _perf = sirio_perf::span("git.status", 0);
+    // `--no-optional-locks` keeps this read from taking the index lock, which a
+    // `git add` or `git commit` running just as the caller refreshes would hit.
     let output = git::run_accepting(
-        &["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--untracked-files=all",
+        ],
         repo,
         &[0],
     )?;

@@ -3,8 +3,9 @@
 //! The editor's I/O substance — load, save, conflict detection, dirty state,
 //! and language detection — lives in [`crate::editor`] as pure synchronous
 //! code, tested without a display. This view owns the pixels and the
-//! shell-facing surface: Sirio's no-wrap source editor with bezel-syntax
-//! highlighting, plus the rendered Markdown preview.
+//! shell-facing surface: the source, drawn and edited by Ely's `CodeEditor`
+//! (hosted in `code_surface`, kept in step with the [`Editor`] model), plus
+//! the rendered Markdown preview.
 //!
 //! - it loads the path into an [`Editor`] on GPUI's background executor
 //!   (the same split the old read-only viewer used: no filesystem work
@@ -25,26 +26,30 @@ use bezel::motion::Painter;
 use bezel::ui::scroll::{self, ScrollbarState};
 use bezel::ui::tooltip::Tooltip;
 use gpui::{
-    AnyElement, App, BorderStyle, Bounds, Context, CursorStyle, DispatchPhase, Edges, Element,
-    ElementId, FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior,
-    InspectorElementId, KeyDownEvent, LayoutId, ListHorizontalSizingBehavior, MouseButton,
-    Hsla, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollHandle,
-    StyledText, Subscription, Task, UnderlineStyle, UniformListScrollHandle, Window, anchored,
-    canvas, deferred, div, point, prelude::*, px, quad, size, transparent_black, uniform_list,
+    AnyElement, App, Context, Entity, FocusHandle, HighlightStyle, KeyBinding, MouseButton,
+    MouseDownEvent, Pixels, Point, Render, ScrollHandle, SharedString, Subscription, Task,
+    UnderlineStyle, Window, actions, anchored, canvas, deferred, div, point, prelude::*, px,
 };
 use sirio_diagram::{DiagramError, DiagramKind, Palette};
+use sirio_git::FileDiff;
 use sirio_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use sirio_project::resolve_file_link;
 use sirio_theme::Theme;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::caret;
+use ely_gpui_component::editor::{CodeEditor, ReadOnlyBanner, SingleCursor};
+use ely_gpui_component::forms::TextInput;
+// `sirio` has no Ely dependency; `open_find` takes these, and the socket verbs build them.
+pub use ely_gpui_component::editor::{FindOptions, LspState};
+pub use status_actions::StatusItem;
+pub use status_row::StatusFacts;
 use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{
-    Conflict, Editor, Language, LoadStatus, Selection, markdown_links_in_line, word_range_at,
+    Conflict, Editor, Language, LoadStatus, Selection,
 };
 use crate::file_context_menu::{self, FileContextAction, FileContextFacts, ItemState};
 use crate::horizontal_scroll::{self, HorizontalBarState};
@@ -52,8 +57,19 @@ use crate::loading;
 use crate::markdown_preview::{
     self, DiagramRequest, DiagramSettings, DiagramState, Diagrams, PlantUmlQueue,
 };
+use crate::outline::OutlineSymbol;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
+
+mod breadcrumb;
+mod code_surface;
+mod find;
+mod git_marks;
+mod status_actions;
+mod status_row;
+mod sync;
+
+use sync::minimal_edit;
 
 /// The rendered-markdown column: the frozen 720px content column (waku
 /// `CONTENT_MAX_WIDTH`). Prose sits on the same measured column as the
@@ -142,6 +158,17 @@ impl SnapshotOrigin {
         format!("{} at {}", self.reference.label(), crate::forge_source::short_sha(&self.sha))
     }
 
+    /// What the banner over the snapshot says.
+    pub fn banner_message(&self) -> String {
+        format!("Read-only · {}", self.label())
+    }
+
+    /// The banner's one action, offered only when the worktree has a copy of
+    /// the file to open.
+    pub fn banner_action(&self) -> Option<&'static str> {
+        self.local_copy.is_some().then_some("Open local file")
+    }
+
     /// The view's `path()`. Never a real path — the workspace matches open
     /// documents by path, and a snapshot must not be mistaken for (or steal
     /// the tab of) the file it was taken from; the extension still picks the
@@ -181,6 +208,17 @@ pub struct FileView {
     /// would not start. It is *about* the file, never instead of it —
     /// see `TransientMessage` for why that distinction is load-bearing.
     message: Option<TransientMessage>,
+    /// What this tab has been told, oldest first, kept behind the status row's
+    /// bell: the text of every `set_message` and `offer`, the newest
+    /// `MAX_NOTIFICATIONS` rows of them. A message identical to the newest row
+    /// is not a new row: it counts into that row (`Notification::times`).
+    /// Dismissing the corner card leaves the list alone, and so does opening
+    /// it; only Clear empties it. Not kept across a relaunch, and a snapshot
+    /// tab has its own.
+    notifications: Vec<Notification>,
+    /// How many messages arrived since the list was last opened: the number on
+    /// the bell. A repeat counts here, though it adds no row.
+    notifications_unseen: usize,
     /// Where the gesture asking "where is this defined?" happened,
     /// window-absolute, so the answer can be put back where the question
     /// was asked. Recorded when the request is made because the two places
@@ -192,47 +230,28 @@ pub struct FileView {
     /// Markdown file (preview locked, F-EDIT-03) starts in Code with the
     /// manual-preview notice, and clicking Preview unlocks it.
     markdown_mode: MarkdownMode,
-    /// The source range selected in the custom code editor.
-    source_selection: Option<Selection>,
-    /// The insertion point used by the lightweight code surface. The model
-    /// owns text mutation; the view owns only this display/input state.
-    caret: usize,
-    /// The anchor for a shift-extended selection, if one is being built.
-    selection_anchor: Option<usize>,
-    /// The column a vertical move is trying to hold, paired with the caret
-    /// offset it was computed for. Walking down through a short line and
-    /// back up returns to the column the caret started from rather than to
-    /// where the short line clipped it.
-    ///
-    /// The pairing is what retires it, from both ends: `move_caret` clears
-    /// it for every keyboard move, and every other writer of `caret` -- a
-    /// click, a word select, an edit -- leaves the paired offset behind, so
-    /// a stale column cannot be read back even from a path that has never
-    /// heard of this field.
-    goal_column: Option<(usize, usize)>,
-    /// Focus target for the source surface. GPUI sends raw key events to the
-    /// focused element, so this is the missing input tier over `Editor`.
+    /// The file's code, drawn and edited by Ely's `CodeEditor`. Created in
+    /// `render` once the file is loaded, because building one needs a window;
+    /// snapshot reloads and disk adoptions reuse it through `reset_keeping_view`.
+    code_editor: Option<Entity<CodeEditor>>,
+    /// The code editor's text changes (kept in step with the `Editor`) and
+    /// its focus (which re-checks the disk, as `focus_subscription` does for
+    /// `editor_focus`).
+    code_subscriptions: Vec<Subscription>,
+    /// The colours of the code's lines, shared with the code editor's
+    /// highlighter. Rotated once per render of this view (see `render`).
+    span_cache: Rc<RefCell<code_surface::SpanCache>>,
+    /// The language and span count of the first line as the highlighter last
+    /// answered (`highlight_text`).
+    highlight_drawn: Rc<Cell<Option<(Language, usize)>>>,
+    /// Focus target for everything that is not the code: Loading, the
+    /// notices and the Markdown Preview. The code editor takes the keyboard
+    /// while it draws the file (see `focus_target`).
     editor_focus: FocusHandle,
     /// Re-check the disk snapshot whenever this tab's editor focus is
     /// regained after another surface owned it.
     focus_subscription: Option<Subscription>,
-    /// Whether a mouse-driven selection (F-EDIT-02) is currently being
-    /// dragged. Distinct from `selection_anchor.is_some()`, which also
-    /// covers a shift+arrow selection that should not keep extending on
-    /// an unrelated mouse move.
-    dragging: bool,
-    /// Blink state of the source surface's insertion caret, and the
-    /// (caret, selection) signature it was last rendered against — a
-    /// changed signature means the user moved/edited, so the bar wakes
-    /// instead of blinking off mid-interaction.
-    editor_blink: caret::Blink,
-    editor_caret_sig: (usize, Option<(usize, usize)>),
-    /// Whether the last drawn frame painted the insertion bar — the same
-    /// `field_caret_visible`/`modal_caret_visible` shape the other editable
-    /// surfaces keep, so the blink is observable without reading pixels.
-    editor_caret_visible: bool,
-    /// Scroll state of the two scrolling surfaces, so each can wear bezel's
-    /// bar.
+    /// Scroll state of the Markdown preview, so it can wear bezel's bars.
     scroll: SurfaceScroll,
     /// The window-absolute point of the right-click that opened the context
     /// menu, `None` when it is closed. Window-absolute because
@@ -247,6 +266,66 @@ pub struct FileView {
     /// terms. Replaced wholesale on every publish — an empty list is how a
     /// server says the errors are gone, so it must clear, not be ignored.
     diagnostics: Vec<FileDiagnostic>,
+    /// The file's symbols from its language server, as the app last pushed
+    /// them (`set_symbols`): what the breadcrumb names the caret's place by.
+    symbols: Vec<OutlineSymbol>,
+    /// The path the breadcrumb starts with, relative to the file's worktree
+    /// (`set_location`); `None` shows the file's own name.
+    location: Option<String>,
+    /// The line the caret was on when the code editor last changed, which the
+    /// breadcrumb names the symbols around. The code editor tells this view
+    /// nothing about a caret move, so an observer of it keeps this current.
+    caret_line: usize,
+    /// The file's diff against HEAD, as the app last pushed it (`set_git_diff`):
+    /// the gutter's marks and the hunk drawn in place. `None` for a file that is
+    /// not in a repository, is clean, or is a snapshot.
+    git_diff: Option<FileDiff>,
+    /// The gutter line that opens the hunks drawn in place, `None` when none is
+    /// drawn. It is their opening line (`git_marks::opening_line`), a line that
+    /// carries one of their marks, so `diff_open` names a line the gutter does.
+    open_hunk: Option<usize>,
+    /// Whether a diff fetch is running (`begin_git_diff` until `land_git_diff`).
+    /// Only one runs at a time: each is a whole-worktree `git status` and `diff`.
+    git_diff_in_flight: bool,
+    /// Whether the diff went stale while that fetch ran, so one more is due when it lands.
+    git_diff_again: bool,
+    /// How many times the app asked to fetch the diff (`begin_git_diff` calls, the
+    /// coalesced ones too): what the editor E2E counts per click and per focus.
+    git_diff_requests: u64,
+    /// What the row under the file shows that only the app knows
+    /// (`set_status_facts`): the branch, how far it is from its upstream, the
+    /// language server.
+    status_facts: StatusFacts,
+    /// What the row under the file has measured of itself, which decides
+    /// whether it draws every item or only the ones that matter at a glance.
+    status_layout: Rc<status_row::StatusLayout>,
+    /// The language this tab colours its code as, when the user chose one in
+    /// the status row (`set_language_override`); `None` is the path's. Colour
+    /// only, and not kept across a relaunch.
+    language_override: Option<Language>,
+    /// How this tab indents, `(spaces, width)`, when the user chose in the
+    /// status row (`set_indent`); `None` follows the Editor setting. Not kept
+    /// across a relaunch.
+    indent_override: Option<(bool, usize)>,
+    /// The status row's open popover; at most one.
+    status_popover: Option<StatusItem>,
+    /// The go-to-line field, made the first time its popover opens.
+    goto_input: Option<Entity<TextInput>>,
+    /// Whether the go-to-line field takes the keyboard when it is drawn.
+    goto_focus_pending: bool,
+    /// Whether the code takes the keyboard when the open popover closes: set by
+    /// Escape and by a finished choice, cleared by the close.
+    focus_code_on_close: bool,
+    /// Whether the open list takes the keyboard when it is drawn, so its own
+    /// keys (Up, Down, Enter, Escape) reach it without a Tab first.
+    list_focus_pending: bool,
+    /// A popover the verb asked for while another was open: the open one
+    /// closes in the next draw and this one opens after it, so the old one's
+    /// hand-back of the keyboard cannot close the new one.
+    pending_status_open: Option<StatusItem>,
+    /// The open find: its fields, its matches and the one that is current.
+    /// `None` while find is closed.
+    find: Option<find::FindState>,
     /// The offset the pointer is resting on, the frame point it rests at,
     /// and the timer that will turn that rest into a question. Replacing
     /// the `Task` cancels it, which is the whole of dwell cancellation.
@@ -273,15 +352,13 @@ pub struct FileView {
     diagram_generation: u64,
 }
 
-/// The scroll handles of the source list and the Markdown preview, plus the
-/// bar state each bezel scrollbar carries its drag in. Tracked because an
-/// untracked surface scrolls just as well but reports no viewport and no
-/// overflow — a bar with nothing to draw from. Held by the view, never
-/// rebuilt per frame: the handle *is* the scroll position across frames.
+/// The scroll handle of the Markdown preview, plus the bar state each bezel
+/// scrollbar carries its drag in. Tracked because an untracked surface
+/// scrolls just as well but reports no viewport and no overflow — a bar with
+/// nothing to draw from. Held by the view, never rebuilt per frame: the
+/// handle *is* the scroll position across frames. The code editor scrolls
+/// itself.
 struct SurfaceScroll {
-    source: UniformListScrollHandle,
-    source_bar: ScrollbarState,
-    source_horizontal_bar: HorizontalBarState,
     preview: ScrollHandle,
     preview_bar: ScrollbarState,
     preview_horizontal_bar: HorizontalBarState,
@@ -290,9 +367,6 @@ struct SurfaceScroll {
 impl SurfaceScroll {
     fn new(painter: Painter) -> Self {
         Self {
-            source: UniformListScrollHandle::new(),
-            source_bar: ScrollbarState::new(painter),
-            source_horizontal_bar: HorizontalBarState::default(),
             preview: ScrollHandle::new(),
             preview_bar: ScrollbarState::new(painter),
             preview_horizontal_bar: HorizontalBarState::default(),
@@ -322,6 +396,14 @@ pub enum FileViewEvent {
     /// `editor()` before this arrives sees `None`. Telling a language server
     /// about a file at that moment describes it as empty.
     Loaded(PathBuf),
+    /// The file on disk changed, or was saved or reloaded, so its diff against
+    /// HEAD (the git marks) is out of date. Emitted once per such change: after
+    /// a save or a reload that succeeded, and after a check that adopted a
+    /// change from disk or found one.
+    GitDiffStale(PathBuf),
+    /// A save succeeded: the file's symbols may have moved. Apart from
+    /// `GitDiffStale`, which also fires when the editor takes focus.
+    Saved(PathBuf),
     SendSelectionToAgent {
         path: PathBuf,
         lines: (usize, usize),
@@ -349,7 +431,7 @@ pub enum FileViewEvent {
     /// A snapshot's read failed and the Retry of its failure surface was
     /// clicked: read the revision again.
     RetrySnapshot,
-    /// The snapshot bar's "Open local copy": open the worktree's own,
+    /// The snapshot banner's "Open local file": open the worktree's own,
     /// editable file.
     OpenLocalCopy(PathBuf),
 }
@@ -378,10 +460,37 @@ pub struct FileDiagnostic {
     pub message: String,
 }
 
-/// Installs bezel-editor's key bindings for the application. The app crate
-/// calls through this module so the dependency remains owned by `sirio_ui`.
+// `Find` opens find on the file's code, or brings the open one back; `Replace`
+// opens it with the replace row.
+actions!(file_view, [Find, Replace]);
+
+/// Installs bezel-editor's key bindings for the application, and the file
+/// tab's own: Find and Replace, in the tab's `FileEditor` context so they
+/// reach neither a terminal nor a chat. The app crate calls through this
+/// module so the dependency remains owned by `sirio_ui`.
 pub fn init(cx: &mut App) {
     ::editor::init(cx);
+    // `ctrl-h` on a platform with no `cmd-alt-f`: it is Backspace only inside
+    // bezel's macOS text fields, which are not in this context.
+    let replace = if cfg!(target_os = "macos") {
+        "cmd-alt-f"
+    } else {
+        "ctrl-h"
+    };
+    cx.bind_keys([
+        KeyBinding::new("secondary-f", Find, Some("FileEditor")),
+        KeyBinding::new(replace, Replace, Some("FileEditor")),
+    ]);
+}
+
+/// How many notification rows a tab keeps; the oldest are dropped past it.
+const MAX_NOTIFICATIONS: usize = 50;
+
+/// One row of the bell's list: a message, and how many times it arrived in a
+/// row (a failing save pressed three times is one row marked "(×3)").
+struct Notification {
+    text: SharedString,
+    times: usize,
 }
 
 const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
@@ -439,22 +548,39 @@ impl FileView {
             snapshot: None,
             snapshot_error: None,
             message: None,
+            notifications: Vec::new(),
+            notifications_unseen: 0,
             markdown_mode: MarkdownMode::Preview,
-            source_selection: None,
-            caret: 0,
-            selection_anchor: None,
-            goal_column: None,
+            code_editor: None,
+            code_subscriptions: Vec::new(),
+            span_cache: Rc::default(),
+            highlight_drawn: Rc::default(),
             editor_focus: cx.focus_handle().tab_stop(true),
             focus_subscription: None,
-            dragging: false,
-            editor_blink: caret::Blink::new(),
-            editor_caret_sig: (0, None),
-            editor_caret_visible: false,
             scroll: SurfaceScroll::new(Painter::of(cx)),
             context_menu: None,
             definition_gesture: None,
             shell_facts: FileContextFacts::default(),
             diagnostics: Vec::new(),
+            symbols: Vec::new(),
+            location: None,
+            caret_line: 0,
+            git_diff: None,
+            open_hunk: None,
+            git_diff_in_flight: false,
+            git_diff_again: false,
+            git_diff_requests: 0,
+            status_facts: StatusFacts::default(),
+            status_layout: Rc::default(),
+            language_override: None,
+            indent_override: None,
+            status_popover: None,
+            goto_input: None,
+            goto_focus_pending: false,
+            focus_code_on_close: false,
+            list_focus_pending: false,
+            pending_status_open: None,
+            find: None,
             hover_offset: None,
             hover_point: point(px(0.), px(0.)),
             hover_task: None,
@@ -506,6 +632,8 @@ impl FileView {
                 self.state = ViewState::Ready(editor);
                 self.snapshot_error = None;
                 self.message = None;
+                // A retry shows new text in the same code editor.
+                self.sync_code_from_editor(cx);
                 // A line asked for while the read was pending (or failed
                 // and retried) has its lines now.
                 self.apply_pending_reveal(cx);
@@ -583,12 +711,42 @@ impl FileView {
     /// view's corner, over the content rather than in place of it, and
     /// carries no buttons: a message is news, and news is dismissed.
     pub fn set_message(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        let text = text.into();
+        self.note(&text);
         self.message = Some(TransientMessage {
-            text: text.into(),
+            text,
             at: None,
             actions: Vec::new(),
         });
         cx.notify();
+    }
+
+    /// Adds `text` to the tab's notifications (the status row's bell). Only
+    /// what nothing pointed at is news: `set_message` and `offer` call it, and
+    /// `answer_definition` does not, because it answers a gesture where it was
+    /// made and a list of past answers would only hold the user's own
+    /// questions. A message identical to the newest row adds no row: it is
+    /// counted into it, so a key held down on a failing save stays one line.
+    /// Past `MAX_NOTIFICATIONS` rows the oldest is dropped. A message that
+    /// arrives while the list is open is seen already; otherwise it counts on
+    /// the bell, repeat or not, up to what the list still holds.
+    fn note(&mut self, text: &str) {
+        match self.notifications.last_mut() {
+            Some(newest) if newest.text.as_ref() == text => newest.times += 1,
+            _ => {
+                self.notifications.push(Notification {
+                    text: SharedString::from(text.to_owned()),
+                    times: 1,
+                });
+                if self.notifications.len() > MAX_NOTIFICATIONS {
+                    self.notifications.remove(0);
+                }
+            }
+        }
+        if self.status_popover != Some(StatusItem::Bell) {
+            let held: usize = self.notifications.iter().map(|row| row.times).sum();
+            self.notifications_unseen = (self.notifications_unseen + 1).min(held);
+        }
     }
 
     /// Raises an offer about this file: a sentence and the buttons that end
@@ -602,8 +760,10 @@ impl FileView {
         actions: Vec<MessageAction>,
         cx: &mut Context<Self>,
     ) {
+        let text = text.into();
+        self.note(&text);
         self.message = Some(TransientMessage {
-            text: text.into(),
+            text,
             at: None,
             actions,
         });
@@ -661,6 +821,7 @@ impl FileView {
 
     pub fn set_diagnostics(&mut self, diagnostics: Vec<FileDiagnostic>, cx: &mut Context<Self>) {
         self.diagnostics = diagnostics;
+        self.push_diagnostics(cx);
         cx.notify();
     }
 
@@ -668,8 +829,9 @@ impl FileView {
         &self.diagnostics
     }
 
-    /// Called from every pointer move over the source surface, which is to
-    /// say very often. **An unchanged offset returns immediately**, without
+    /// Called from every pointer move over the code, which is to say very
+    /// often, by the code editor's `Pointer` event (`code_surface`). **An
+    /// unchanged offset returns immediately**, without
     /// notifying — this is a hot path and a `notify` here would redraw the
     /// file on every pixel of travel.
     pub fn hover_moved(&mut self, offset: usize, at: Point<Pixels>, cx: &mut Context<Self>) {
@@ -682,11 +844,7 @@ impl FileView {
         // The diagnostic half of the card is already here, so it shows
         // immediately — no round trip, and a server with no hoverProvider
         // still shows its errors. The reply joins it later in `set_hover`.
-        let local = self
-            .diagnostics_at(offset)
-            .iter()
-            .map(|found| found.message.clone())
-            .collect::<Vec<_>>();
+        let local = self.diagnostics_at(offset, cx);
         self.hover_card = (!local.is_empty()).then(|| local.join("\n"));
         if had_card || self.hover_card.is_some() {
             cx.notify();
@@ -709,12 +867,10 @@ impl FileView {
         if seq != self.hover_seq {
             return;
         }
-        let local = self.hover_offset.map(|offset| {
-            self.diagnostics_at(offset)
-                .iter()
-                .map(|found| found.message.clone())
-                .collect::<Vec<_>>()
-        }).unwrap_or_default();
+        let local = self
+            .hover_offset
+            .map(|offset| self.diagnostics_at(offset, cx))
+            .unwrap_or_default();
         let mut parts = local;
         parts.extend(text);
         self.hover_card = (!parts.is_empty()).then(|| parts.join("\n"));
@@ -734,19 +890,6 @@ impl FileView {
         self.apply_pending_reveal(cx);
     }
 
-    fn apply_pending_reveal(&mut self, cx: &mut Context<Self>) {
-        let Some(line) = self.pending_reveal else { return };
-        // No editor yet means no lines yet: keep holding.
-        if self.editor().is_none() {
-            return;
-        }
-        self.pending_reveal = None;
-        self.scroll
-            .source
-            .scroll_to_item(line, gpui::ScrollStrategy::Center);
-        cx.notify();
-    }
-
     /// Asks where the symbol at `offset` is defined. `at` is where the
     /// gesture happened, kept so the answer can be shown there; both real
     /// callers know it, and it is the last moment anyone does.
@@ -764,15 +907,34 @@ impl FileView {
         });
     }
 
-    /// Every message covering a byte offset, worst first.
-    fn diagnostics_at(&self, offset: usize) -> Vec<&FileDiagnostic> {
-        let mut found: Vec<_> = self
-            .diagnostics
+    /// Every message covering a byte offset, worst first. Once the code
+    /// editor exists it holds the findings: Ely moves them with each edit and
+    /// clears them on an undo or a reload, so the card agrees with the
+    /// squiggles. Before it exists, the view's own copy is all there is.
+    fn diagnostics_at(&self, offset: usize, cx: &App) -> Vec<String> {
+        // Both ends count. A zero-width finding at a line's end is drawn over
+        // the character before it (`marked_range` widens it to `x-1..x`), and
+        // Ely answers a pointer past that character with the boundary `x`, so
+        // the card must still show the finding at its end.
+        let covers = |range: &Range<usize>| range.start <= offset && offset <= range.end;
+        let Some(code) = &self.code_editor else {
+            let mut found: Vec<_> = self
+                .diagnostics
+                .iter()
+                .filter(|d| covers(&d.range))
+                .collect();
+            found.sort_by_key(|d| d.severity);
+            return found.iter().map(|d| d.message.clone()).collect();
+        };
+        let mut found: Vec<_> = code
+            .read(cx)
+            .diagnostics()
             .iter()
-            .filter(|d| d.range.contains(&offset) || d.range.start == offset)
+            .filter(|d| covers(&d.range))
             .collect();
-        found.sort_by_key(|d| d.severity);
-        found
+        // Worst first: the reverse of the order `ely_diagnostics` draws them in.
+        found.sort_by_key(|d| std::cmp::Reverse(code_surface::severity_rank(d.severity)));
+        found.iter().map(|d| d.message.to_string()).collect()
     }
 
     fn dismiss_hover(&mut self, cx: &mut Context<Self>) {
@@ -790,8 +952,8 @@ impl FileView {
     /// test that asks the workspace what it *would* say cannot tell a push
     /// that happened from one that did not — which is the failure this
     /// accessor exists to make visible.
-    pub fn context_menu_items(&self) -> Vec<file_context_menu::FileContextItem> {
-        file_context_menu::items(&self.menu_facts())
+    pub fn context_menu_items(&self, cx: &App) -> Vec<file_context_menu::FileContextItem> {
+        file_context_menu::items(&self.menu_facts(cx))
     }
 
     /// Whether this file is Markdown — the one question the Code/Preview
@@ -802,34 +964,78 @@ impl FileView {
             .is_some_and(|editor| editor.language() == Language::Markdown)
     }
 
-    /// The shell's facts plus the two this view answers itself.
-    fn menu_facts(&self) -> FileContextFacts {
+    /// Whether the file has been read: a view still loading, or one that
+    /// failed, is not.
+    pub fn is_loaded(&self) -> bool {
+        self.editor()
+            .is_some_and(|editor| editor.status() == &LoadStatus::Loaded)
+    }
+
+    /// Whether the Markdown row draws its formatting controls: a loaded
+    /// Markdown file in Code, and not a snapshot. The render and
+    /// `surface.editor.state` (`format_buttons`) both ask this, so the state
+    /// reports what is drawn.
+    pub fn formatting_controls_shown(&self) -> bool {
+        self.editor()
+            .is_some_and(|editor| editor.status() == &LoadStatus::Loaded)
+            && self.is_markdown()
+            && formatting_controls_drawn(self.effective_mode(), !self.is_snapshot())
+    }
+
+    /// The shell's facts plus the three this view answers itself.
+    fn menu_facts(&self, cx: &App) -> FileContextFacts {
         let has_selection = self
-            .editor()
-            .map(|editor| self.current_selection(editor))
-            .is_some_and(|selection| selection.start != selection.end);
+            .code_selection(cx)
+            .is_some_and(|selection| !selection.is_collapsed());
         FileContextFacts {
             has_selection,
             is_markdown: self.is_markdown(),
+            is_snapshot: self.is_snapshot(),
             ..self.shell_facts.clone()
         }
     }
 
+    /// Opens the menu at `at`, a window point. The code editor calls this for a
+    /// right press on the code (`SecondaryClick`); the view for one anywhere
+    /// else, in Preview, while loading and on the banners.
     fn open_context_menu(
         &mut self,
-        event: &MouseDownEvent,
+        at: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.dismiss_hover(cx);
-        self.editor_focus.focus(window, cx);
-        self.context_menu = Some(event.position);
+        self.focus_target(cx).focus(window, cx);
+        self.context_menu = Some(at);
         cx.notify();
     }
 
     fn dismiss_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu.take().is_some() {
             cx.notify();
+        }
+    }
+
+    /// What a click on the menu's row for `action` does now. Both the row's
+    /// click and the debug verb `surface.editor.context` take this path, so the
+    /// verb refuses exactly where a click does. A row that is not offered has
+    /// no click (`not offered`). An unavailable row refuses with its reason. A
+    /// redirected row does what it redirects to, not the action it is labelled
+    /// with: a missing language server is installed, not searched for.
+    fn context_effect(
+        &self,
+        action: FileContextAction,
+        cx: &App,
+    ) -> Result<FileContextAction, String> {
+        let items = self.context_menu_items(cx);
+        let item = items
+            .iter()
+            .find(|item| item.action == action)
+            .ok_or_else(|| "not offered".to_string())?;
+        match &item.state {
+            ItemState::Ready => Ok(item.action),
+            ItemState::Unavailable(reason) => Err(reason.clone()),
+            ItemState::Redirected { to, .. } => Ok(*to),
         }
     }
 
@@ -847,14 +1053,16 @@ impl FileView {
         match action {
             FileContextAction::Copy => self.copy_selection(false, cx),
             FileContextAction::CopyAndTrim => self.copy_selection(true, cx),
+            // A snapshot's menu disables Cut and Paste (`file_context_menu::items`),
+            // so neither reaches here for one: `context_effect` refuses them first.
             FileContextAction::Cut => {
                 self.copy_selection(false, cx);
-                self.replace_selection("");
+                self.replace_code_selection("", cx);
                 cx.notify();
             }
             FileContextAction::Paste => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.replace_selection(&text);
+                    self.replace_code_selection(&text, cx);
                     cx.notify();
                 }
             }
@@ -873,7 +1081,7 @@ impl FileView {
                 cx.emit(FileViewEvent::OpenInTerminal(self.path.clone()));
             }
             FileContextAction::CopyPermalink => {
-                if let Some(lines) = self.selection_lines() {
+                if let Some(lines) = self.selection_lines(cx) {
                     cx.emit(FileViewEvent::CopyPermalink {
                         path: self.path.clone(),
                         lines,
@@ -884,12 +1092,13 @@ impl FileView {
                 cx.emit(FileViewEvent::ViewFileHistory(self.path.clone()));
             }
             FileContextAction::GoToDefinition => {
-                self.request_definition(self.caret, gesture, cx);
+                let offset = self.code_caret(cx);
+                self.request_definition(offset, gesture, cx);
             }
             FileContextAction::FindReferences => {
                 cx.emit(FileViewEvent::FindReferences {
                     path: self.path.clone(),
-                    offset: self.caret,
+                    offset: self.code_caret(cx),
                 });
             }
             FileContextAction::InstallLanguageServer => {
@@ -901,15 +1110,14 @@ impl FileView {
     }
 
     /// The selected text, or `None` when the selection is collapsed.
-    fn selected_text(&self) -> Option<String> {
-        let editor = self.editor()?;
-        let selection = self.current_selection(editor);
-        (selection.start != selection.end)
-            .then(|| editor.buffer()[selection.start..selection.end].to_owned())
+    fn selected_text(&self, cx: &App) -> Option<String> {
+        let code = self.code_editor.as_ref()?.read(cx);
+        let range = code.primary().range();
+        (!range.is_empty()).then(|| code.text()[range].to_owned())
     }
 
     fn copy_selection(&mut self, trim: bool, cx: &mut Context<Self>) {
-        let Some(text) = self.selected_text() else {
+        let Some(text) = self.selected_text(cx) else {
             return;
         };
         let text = if trim {
@@ -921,21 +1129,21 @@ impl FileView {
     }
 
     /// The 1-based, inclusive line range the caret or selection covers.
-    fn selection_lines(&self) -> Option<(usize, usize)> {
-        let editor = self.editor()?;
+    fn selection_lines(&self, cx: &App) -> Option<(usize, usize)> {
+        let code = self.code_editor.as_ref()?.read(cx);
         Some(crate::editor::line_range_for(
-            editor.buffer(),
-            self.current_selection(editor),
+            code.text(),
+            self.code_selection(cx)?,
         ))
     }
 
     /// The payload "Add to Agent Thread" carries: where the code is, the code
     /// itself already trimmed flush left, and the fence tag to wrap it in.
-    fn selection_event(&self, _cx: &mut Context<Self>) -> Option<FileViewEvent> {
-        let text = file_context_menu::trim_common_indent(&self.selected_text()?);
+    fn selection_event(&self, cx: &mut Context<Self>) -> Option<FileViewEvent> {
+        let text = file_context_menu::trim_common_indent(&self.selected_text(cx)?);
         Some(FileViewEvent::SendSelectionToAgent {
             path: self.path.clone(),
-            lines: self.selection_lines()?,
+            lines: self.selection_lines(cx)?,
             text,
             language: self.editor()?.language().fence_tag(),
         })
@@ -944,14 +1152,52 @@ impl FileView {
     /// Re-reads the file and compares it against the last known disk state
     /// (F-EDIT-05/06). The shell calls this when a file tab is activated —
     /// "modify externally, return to Sirio" — and on window focus.
-    pub fn check_external(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// Returns whether it asked for a fresh diff (`GitDiffStale`).
+    pub fn check_external(&mut self, cx: &mut Context<Self>) -> bool {
         if self.snapshot.is_some() {
-            return;
+            return false;
         }
+        let before = self.buffer_and_conflict();
         if let Some(editor) = self.editor_mut() {
             editor.check_external();
             cx.notify();
         }
+        // A silent adoption of the disk's text lands in the code editor too.
+        self.sync_code_from_editor(cx);
+        // The git marks compare the file on disk with HEAD, so they go stale when
+        // the buffer adopted a change from disk, when a conflict began or ended,
+        // and while one stands, since the disk may have moved again under it. A
+        // check that finds nothing new is silent: the monitor also reports Sirio's
+        // own save, and that save has already asked for the diff.
+        let after = self.buffer_and_conflict();
+        let conflicted = after
+            .as_ref()
+            .is_some_and(|(_, conflict)| *conflict != Conflict::None);
+        let stale = before != after || conflicted;
+        if stale {
+            cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
+        }
+        stale
+    }
+
+    /// The file or the code editor took focus: look for a change on disk, and
+    /// ask for a fresh diff either way. HEAD can move with the file untouched (an
+    /// agent's `git commit` in a terminal), which no disk check sees, and focus
+    /// is user-paced; a second focus while the fetch runs is coalesced.
+    fn gained_focus(&mut self, cx: &mut Context<Self>) {
+        if self.snapshot.is_some() {
+            return;
+        }
+        if !self.check_external(cx) {
+            cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
+        }
+    }
+
+    /// The buffer's text and its conflict: what a disk check can change.
+    fn buffer_and_conflict(&self) -> Option<(String, Conflict)> {
+        self.editor()
+            .map(|editor| (editor.buffer().to_owned(), editor.conflict()))
     }
 
     /// Applies one inotify event from this file's monitor. The monitor is
@@ -982,8 +1228,10 @@ impl FileView {
         }
     }
 
-    /// Saves the buffer (F-EDIT-04/06), recreating a deleted file. Errors
-    /// are returned and kept visible on the editor.
+    /// Saves the buffer (F-EDIT-04/06), recreating a deleted file. A failure
+    /// is returned and raised here, once, as a message of this tab (the corner
+    /// card and the bell), so no caller raises it again: the Ctrl+S handler
+    /// only logs it.
     pub fn save(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         if self.snapshot.is_some() {
             let reason = "Read-only: open the local copy to edit".to_string();
@@ -994,6 +1242,13 @@ impl FileView {
             Some(editor) => editor.save(),
             None => Err("the file is still loading".to_string()),
         };
+        match &result {
+            Ok(()) => {
+                cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
+                cx.emit(FileViewEvent::Saved(self.path.clone()));
+            }
+            Err(error) => self.set_message(format!("Save failed: {error}"), cx),
+        }
         cx.notify();
         result
     }
@@ -1007,6 +1262,10 @@ impl FileView {
             Some(editor) => editor.reload(),
             None => Err("the file is still loading".to_string()),
         };
+        self.sync_code_from_editor(cx);
+        if result.is_ok() {
+            cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
+        }
         cx.notify();
         result
     }
@@ -1020,85 +1279,7 @@ impl FileView {
             editor.keep();
             cx.notify();
         }
-    }
-
-    /// F-EDIT-03: unlock the Markdown preview for a large file.
-    pub fn request_preview(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = self.editor_mut() {
-            editor.request_preview();
-            cx.notify();
-        }
-    }
-
-    // ── F-EDIT-02: real mouse-driven caret placement + drag-select ─────
-    //
-    // These are the mouse-side counterparts of `move_caret` above: a click
-    // starts a collapsed selection at the clicked buffer offset, a drag
-    // extends it exactly like Shift+Arrow does, and a double-click snaps to
-    // the touched word. Before this, the only way `source_selection` became
-    // non-`None` was the keyboard — a click landed formatting at whatever
-    // `source_selection` last held (or end-of-buffer), never at the click.
-
-    /// Starts a mouse selection at `position` (a buffer offset). Called on
-    /// mouse-down; a following drag calls `extend_mouse_selection`.
-    fn begin_mouse_selection(&mut self, position: usize, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor() else {
-            return;
-        };
-        let position = position.min(editor.buffer().len());
-        self.caret = position;
-        self.selection_anchor = Some(position);
-        self.source_selection = None;
-        self.dragging = true;
-        cx.notify();
-    }
-
-    /// Extends the in-progress mouse selection to `position`. A no-op once
-    /// `end_mouse_selection` has fired, so a stray mouse-move after the
-    /// button is released (or a drag that started elsewhere, e.g. on the
-    /// toolbar) cannot silently move the caret.
-    fn extend_mouse_selection(&mut self, position: usize, cx: &mut Context<Self>) {
-        if !self.dragging {
-            return;
-        }
-        let Some(editor) = self.editor() else {
-            return;
-        };
-        let buffer = editor.buffer().to_owned();
-        self.move_caret(position, true, &buffer);
-        cx.notify();
-    }
-
-    /// Ends the in-progress mouse selection (mouse-up).
-    fn end_mouse_selection(&mut self, cx: &mut Context<Self>) {
-        if self.dragging {
-            self.dragging = false;
-            cx.notify();
-        }
-    }
-
-    /// Double-click word selection: selects the word touching `position`,
-    /// or just places the caret there when it is not on a word.
-    fn select_word_at(&mut self, position: usize, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor() else {
-            return;
-        };
-        let buffer = editor.buffer().to_owned();
-        let position = position.min(buffer.len());
-        match word_range_at(&buffer, position) {
-            Some(range) => {
-                self.caret = range.end;
-                self.selection_anchor = Some(range.start);
-                self.source_selection = Selection::new(&buffer, range.start, range.end);
-            }
-            None => {
-                self.caret = position;
-                self.selection_anchor = None;
-                self.source_selection = None;
-            }
-        }
-        self.dragging = false;
-        cx.notify();
+        self.sync_code_from_editor(cx);
     }
 
     /// F-CORE-FILE-04: resolves a clicked link's raw target against the
@@ -1111,338 +1292,6 @@ impl FileView {
         let base = self.path.parent().unwrap_or_else(|| Path::new("/"));
         if let Some(resolved) = resolve_file_link(target, base) {
             cx.emit(FileViewEvent::OpenFile(resolved.path));
-        }
-    }
-
-    fn on_editor_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_hover(cx);
-        // Both spellings of the chord: Ctrl-A everywhere, ⌘A on macOS. The
-        // platform half was missing, which cost the select-all-then-copy
-        // flow its keyboard route on the reference release platform.
-        if (event.keystroke.modifiers.control || event.keystroke.modifiers.platform)
-            && event.keystroke.key == "a"
-        {
-            self.select_all();
-            cx.notify();
-            return;
-        }
-        // The clipboard chords. Copy, Cut and Paste reached the buffer only
-        // from the right-click menu: nothing binds the `FileEditor` key
-        // context, and the command-chord guard below returned before any of
-        // them could be read, so the keyboard route into the clipboard did
-        // not exist. They dispatch through `handle_context_action` so the
-        // two routes cannot answer the same key differently.
-        //
-        // Unlike the terminal's `ctrl-shift-c`/`v` (which leaves plain
-        // Ctrl-C to the PTY as the interrupt), a source surface is an
-        // ordinary text field and takes the unshifted chord.
-        if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
-            let action = match event.keystroke.key.as_str() {
-                "c" => Some(FileContextAction::Copy),
-                "x" => Some(FileContextAction::Cut),
-                "v" => Some(FileContextAction::Paste),
-                _ => None,
-            };
-            // Asked before acting rather than inside each arm: a paste while
-            // the Markdown preview is up would rewrite the buffer at a caret
-            // the reader cannot see, and a copy would take a source range
-            // nothing on screen shows as selected.
-            if let Some(action) = action.filter(|_| self.source_surface_ready()) {
-                self.handle_context_action(action, window, cx);
-                return;
-            }
-        }
-        if (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
-            && event.keystroke.key == "end"
-        {
-            let Some(editor) = self.editor() else {
-                return;
-            };
-            if editor.status() != &LoadStatus::Loaded || self.effective_mode() != MarkdownMode::Code
-            {
-                return;
-            }
-            let buffer = editor.buffer().to_owned();
-            self.move_caret(buffer.len(), event.keystroke.modifiers.shift, &buffer);
-            cx.notify();
-            return;
-        }
-        if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
-            // Command chords, including the shell-owned Ctrl-S save path,
-            // must continue to resolve outside this raw text-input tier.
-            return;
-        }
-
-        let Some(editor) = self.editor() else {
-            return;
-        };
-        if editor.status() != &LoadStatus::Loaded || self.effective_mode() != MarkdownMode::Code {
-            return;
-        }
-
-        let key = event.keystroke.key.as_str();
-        let extend = event.keystroke.modifiers.shift;
-        match key {
-            "home" => self.move_to_line_edge(true, extend),
-            "end" => self.move_to_line_edge(false, extend),
-            "up" => self.move_vertical(false, 1, extend),
-            "down" => self.move_vertical(true, 1, extend),
-            "pageup" => self.move_vertical(false, self.page_lines(), extend),
-            "pagedown" => self.move_vertical(true, self.page_lines(), extend),
-            "left" => self.move_horizontal(false, extend),
-            "right" => self.move_horizontal(true, extend),
-            "backspace" => self.delete_backward(),
-            "delete" => self.delete_forward(),
-            "enter" | "return" => self.replace_selection("\n"),
-            "tab" => self.replace_selection("    "),
-            _ => {
-                if let Some(character) = event.keystroke.key_char.as_deref()
-                    && character != "\n"
-                {
-                    self.replace_selection(character);
-                } else {
-                    return;
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    /// Whether the raw source surface is the thing on screen and holding a
-    /// buffer that can be read and written. The Markdown preview mounts
-    /// under the same focusable element, so a chord that acts on the source
-    /// has to ask, and a file still loading has no buffer to act on at all.
-    fn source_surface_ready(&self) -> bool {
-        self.editor()
-            .is_some_and(|editor| editor.status() == &LoadStatus::Loaded)
-            && self.effective_mode() == MarkdownMode::Code
-    }
-
-    fn current_selection(&self, editor: &Editor) -> Selection {
-        self.source_selection
-            .filter(|selection| {
-                selection.end <= editor.buffer().len()
-                    && editor.buffer().is_char_boundary(selection.start)
-                    && editor.buffer().is_char_boundary(selection.end)
-            })
-            .unwrap_or_else(|| {
-                let caret = self.caret.min(editor.buffer().len());
-                Selection::point(caret)
-            })
-    }
-
-    fn move_to_line_edge(&mut self, start: bool, extend: bool) {
-        let Some(editor) = self.editor() else {
-            return;
-        };
-        let selection = self.current_selection(editor);
-        let buffer = editor.buffer().to_owned();
-        let caret = selection.end.min(buffer.len());
-        let position = if start {
-            buffer[..caret].rfind('\n').map_or(0, |newline| newline + 1)
-        } else {
-            buffer[caret..]
-                .find('\n')
-                .map_or(buffer.len(), |newline| caret + newline)
-        };
-        self.move_caret(position, extend, &buffer);
-    }
-
-    fn move_horizontal(&mut self, right: bool, extend: bool) {
-        let Some(editor) = self.editor() else {
-            return;
-        };
-        let selection = self.current_selection(editor);
-        let buffer = editor.buffer().to_owned();
-        let position = if !extend && !selection.is_collapsed() {
-            if right {
-                selection.end
-            } else {
-                selection.start
-            }
-        } else if right {
-            next_char_boundary(&buffer, self.caret.max(selection.end))
-        } else {
-            previous_char_boundary(&buffer, self.caret.min(selection.start))
-        };
-        self.move_caret(position, extend, &buffer);
-    }
-
-    /// Vertical movement is the only caret move that has to invent a
-    /// column, because the line it lands on may be shorter than the one it
-    /// left. `goal_column` is what lets the caret walk down through a short
-    /// line and come back up to where it started.
-    ///
-    /// The document edge is not a dead end: a `down` already on the last
-    /// line lands at that line's end. Deliberately its end and not
-    /// `buffer.len()`, which a trailing newline puts one byte past the last
-    /// row the list draws -- `render_source_line` would find no row willing
-    /// to carry the caret, and it would simply stop being painted.
-    fn move_vertical(&mut self, down: bool, lines: usize, extend: bool) {
-        let Some(editor) = self.editor() else {
-            return;
-        };
-        let buffer = editor.buffer().to_owned();
-        let caret = self.caret.min(buffer.len());
-        let column = match self.goal_column {
-            Some((offset, column)) if offset == caret => column,
-            _ => column_at(&buffer, caret),
-        };
-
-        let mut line_start = line_start_at(&buffer, caret);
-        let mut moved = 0;
-        for _ in 0..lines {
-            let next = if down {
-                next_line_start(&buffer, line_start)
-            } else {
-                previous_line_start(&buffer, line_start)
-            };
-            let Some(next) = next else {
-                break;
-            };
-            line_start = next;
-            moved += 1;
-        }
-
-        let position = if moved == 0 {
-            // Already against the edge. The key still means something, and
-            // what it means there is the very start or the very end.
-            if down {
-                line_end_at(&buffer, line_start)
-            } else {
-                0
-            }
-        } else {
-            offset_at_column(&buffer, line_start, column)
-        };
-
-        self.move_caret(position, extend, &buffer);
-        // `move_caret` just cleared the column; a vertical move is the one
-        // caller that means to carry it forward.
-        self.goal_column = Some((self.caret, column));
-        // Non-strict, so a line already on screen scrolls nothing. Without
-        // this a `pagedown` would move the caret exactly one viewport away
-        // from the only place it is drawn.
-        self.scroll.source.scroll_to_item(
-            line_index_at(&buffer, line_start_at(&buffer, self.caret)),
-            gpui::ScrollStrategy::Nearest,
-        );
-    }
-
-    /// How many whole lines the source list is showing, which is what a
-    /// page means to `pageup` and `pagedown`.
-    ///
-    /// The answer comes from the list's own last layout, and `ItemSize` is
-    /// worth reading twice: despite the name, `item` is the list's padded
-    /// viewport, not a row. A row's height only appears in `contents`,
-    /// which gpui fills with `row_height * item_count` -- so the row is
-    /// recovered by dividing by the same line count the list was given.
-    /// Before the first paint there is nothing to read at all, and a page
-    /// is one line rather than a guess.
-    fn page_lines(&self) -> usize {
-        let Some(size) = self.scroll.source.0.borrow().last_item_size else {
-            return 1;
-        };
-        let Some(editor) = self.editor() else {
-            return 1;
-        };
-        let line_count = line_count_of(editor.buffer());
-        let row_height = size.contents.height / line_count as f32;
-        if row_height <= px(0.0) {
-            return 1;
-        }
-        ((size.item.height / row_height) as usize).max(1)
-    }
-
-    fn move_caret(&mut self, position: usize, extend: bool, buffer: &str) {
-        // Every keyboard move but the vertical one abandons the remembered
-        // column; `move_vertical` puts its own back afterwards.
-        self.goal_column = None;
-        let position = position.min(buffer.len());
-        if extend {
-            let anchor = self.selection_anchor.unwrap_or(self.caret);
-            self.selection_anchor = Some(anchor);
-            self.caret = position;
-            self.source_selection =
-                Selection::new(buffer, anchor.min(position), anchor.max(position))
-                    .filter(|selection| !selection.is_collapsed());
-        } else {
-            self.caret = position;
-            self.source_selection = None;
-            self.selection_anchor = None;
-        }
-    }
-
-    fn replace_selection(&mut self, text: &str) {
-        if self.snapshot.is_some() {
-            return;
-        }
-        let Some(selection) = self.editor().map(|editor| self.current_selection(editor)) else {
-            return;
-        };
-        let Some(editor) = self.editor_mut() else {
-            return;
-        };
-        if editor.replace(selection, text).is_ok() {
-            self.caret = selection.start + text.len();
-            self.source_selection = None;
-            self.selection_anchor = None;
-        }
-    }
-
-    fn delete_backward(&mut self) {
-        let Some(editor) = self.editor() else {
-            return;
-        };
-        let selection = self.current_selection(editor);
-        let range = if selection.is_collapsed() {
-            let start = previous_char_boundary(editor.buffer(), selection.start);
-            Selection::new(editor.buffer(), start, selection.start)
-        } else {
-            Some(selection)
-        };
-        if let Some(range) = range {
-            self.replace_selection_range(range, "");
-        }
-    }
-
-    fn delete_forward(&mut self) {
-        let Some(editor) = self.editor() else {
-            return;
-        };
-        let selection = self.current_selection(editor);
-        let range = if selection.is_collapsed() {
-            let end = next_char_boundary(editor.buffer(), selection.end);
-            Selection::new(editor.buffer(), selection.start, end)
-        } else {
-            Some(selection)
-        };
-        if let Some(range) = range {
-            self.replace_selection_range(range, "");
-        }
-    }
-
-    fn replace_selection_range(&mut self, selection: Selection, text: &str) {
-        if self.snapshot.is_some() {
-            return;
-        }
-        let Some(editor) = self.editor_mut() else {
-            return;
-        };
-        if editor.replace(selection, text).is_ok() {
-            self.caret = selection.start + text.len();
-            self.source_selection = None;
-            self.selection_anchor = None;
-        }
-    }
-
-    fn select_all(&mut self) {
-        if let Some(editor) = self.editor() {
-            let buffer = editor.buffer().to_owned();
-            self.caret = buffer.len();
-            self.source_selection = Selection::new(&buffer, 0, buffer.len())
-                .filter(|selection| !selection.is_collapsed());
-            self.selection_anchor = Some(0);
         }
     }
 
@@ -1464,12 +1313,16 @@ impl FileView {
         if self.snapshot.is_some() {
             return;
         }
-        let Some(selection) = self.editor().map(|editor| self.current_selection(editor)) else {
+        let Some(range) = self.code_selection(cx) else {
             return;
         };
         let Some(editor) = self.editor_mut() else {
             return;
         };
+        let Some(selection) = Selection::new(editor.buffer(), range.start, range.end) else {
+            return;
+        };
+        let before = editor.buffer().to_owned();
         let selection = match operation {
             MarkdownFormatOp::Bold => editor.format_bold(selection),
             MarkdownFormatOp::Italic => editor.format_italic(selection),
@@ -1477,8 +1330,17 @@ impl FileView {
             MarkdownFormatOp::List => editor.toggle_list(selection),
             MarkdownFormatOp::Link { url } => editor.make_link(selection, &url),
         };
-        self.caret = selection.end;
-        self.source_selection = Some(selection);
+        // The op ran on the model; the code editor takes the same change as
+        // one edit, so one undo step reverts it, and then shows the result.
+        let change = minimal_edit(&before, editor.buffer());
+        if let Some(code) = self.code_editor.clone() {
+            code.update(cx, |code, cx| {
+                if let Some((range, text)) = change {
+                    code.edit([(range, text)], cx);
+                }
+                code.select([selection.start..selection.end], cx);
+            });
+        }
         cx.notify();
     }
 
@@ -1492,7 +1354,7 @@ impl FileView {
     /// renders source even if Preview was requested, until the unlock
     /// happens — the switcher highlights this effective mode so the mark
     /// never lies about what is on screen.
-    fn effective_mode(&self) -> MarkdownMode {
+    pub fn effective_mode(&self) -> MarkdownMode {
         match self.editor() {
             Some(editor)
                 if editor.language() == Language::Markdown
@@ -1655,8 +1517,6 @@ impl FileView {
         &self,
         theme: Theme,
         entity: gpui::Entity<Self>,
-        caret_visible: bool,
-        caret_offset: usize,
         preview: Option<PreviewFrame>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1690,43 +1550,54 @@ impl FileView {
                 LoadStatus::Loaded => {
                     let conflict = editor.conflict();
                     let mode = self.effective_mode();
-                    let is_markdown = editor.language() == Language::Markdown;
+                    let is_markdown = self.is_markdown();
+                    let formatting_shown = self.formatting_controls_shown();
                     let editor_entity = entity.clone();
-                    let key_entity = entity.clone();
                     let editor_focus = self.editor_focus.clone();
+                    // The press bubbles up from the code editor after it has
+                    // taken focus itself, so this hands focus to the same
+                    // target the press was for, never back to `editor_focus`.
                     div()
                         .id("file-editor")
                         .key_context("FileEditor")
                         .track_focus(&editor_focus)
                         .focusable()
+                        .on_action(cx.listener(|view, _: &Find, window, cx| {
+                            view.find_from_key(false, window, cx);
+                        }))
+                        .on_action(cx.listener(|view, _: &Replace, window, cx| {
+                            view.find_from_key(true, window, cx);
+                        }))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             editor_entity.update(cx, |view, cx| {
-                                view.editor_focus.focus(window, cx);
-                            });
-                        })
-                        .on_key_down(move |event, window, cx| {
-                            key_entity.update(cx, |view, cx| {
-                                view.on_editor_key(event, window, cx);
+                                view.focus_target(cx).focus(window, cx);
                             });
                         })
                         .size_full()
                         .flex()
                         .flex_col()
+                        .when_some(
+                            self.render_breadcrumb(theme, entity.clone()),
+                            |this, row| this.child(row),
+                        )
                         .when(conflict != Conflict::None, |this| {
                             this.child(render_conflict_banner(conflict, theme, entity.clone()))
                         })
                         .when(is_markdown, |this| {
-                            this.child(render_markdown_bar(mode, theme, entity.clone()))
+                            this.child(render_markdown_bar(
+                                mode,
+                                formatting_shown,
+                                theme,
+                                entity.clone(),
+                            ))
                         })
                         .child(render_content(
                             editor,
                             mode,
                             theme,
                             entity.clone(),
-                            self.source_selection,
-                            caret_visible,
-                            caret_offset,
-                            theme.syntax_palette(),
+                            self.code_editor.as_ref(),
+                            self.render_find(cx),
                             &self.scroll,
                             preview,
                         ))
@@ -1741,30 +1612,26 @@ impl FileView {
             },
         }
     }
-
-    /// Blink timer tick for the source surface's insertion caret.
-    fn flip_editor_blink(&mut self, cx: &mut Context<Self>) {
-        self.editor_blink.flip();
-        cx.notify();
-    }
 }
 
 impl Render for FileView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = cx.entity_id().as_u64();
+        let _render = sirio_perf::span("FileView.render", id);
         if self.focus_subscription.is_none() {
             let editor_focus = self.editor_focus.clone();
             self.focus_subscription =
                 Some(cx.on_focus(&editor_focus, window, |view, _window, cx| {
-                    view.check_external(cx)
+                    view.gained_focus(cx)
                 }));
         }
         let theme = *Theme::get(cx);
         // Production installs bezel alongside Sirio's theme. Some isolated
         // shell fixtures set only the Sirio global, so establish the same
         // invariant before anything below reaches for a bezel component
-        // (mirrors the sidebar's popup guard). The source surface no longer
-        // depends on it — its palette is `Theme::syntax_palette` — but the
-        // bezel primitives this view renders still do.
+        // (mirrors the sidebar's popup guard). The code editor reads Ely's
+        // theme instead, but the bezel primitives this view renders still
+        // need this one.
         if cx.try_global::<bezel::theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
@@ -1773,36 +1640,30 @@ impl Render for FileView {
             doc,
             diagram_dir: DiagramSettings::get(cx).map(|settings| settings.cache_dir.clone()),
         });
-        // The source surface's insertion caret: wake on any caret/selection
-        // move since the last frame, then arm the single toggle timer while
-        // the editor owns focus.
-        let editor_focused = self.editor_focus.is_focused(window);
-        let caret_sig = (
-            self.caret,
-            self.source_selection
-                .map(|selection| (selection.start, selection.end)),
-        );
-        if caret_sig != self.editor_caret_sig {
-            self.editor_blink.wake();
-            self.editor_caret_sig = caret_sig;
-        }
-        let caret_active = editor_focused && self.effective_mode() != MarkdownMode::Preview;
-        caret::schedule(
-            &mut self.editor_blink,
-            caret_active,
-            Self::flip_editor_blink,
-            cx,
-        );
-        // The focus gate is what `caret::schedule` arms the timer on; the
-        // paint gate additionally folds in the blink phase. Passing the
-        // folded value to `schedule` instead would read a dark bar as
-        // "unfocused" and latch the caret permanently on.
-        self.editor_caret_visible = caret_active && self.editor_blink.visible();
-        let caret_visible = self.editor_caret_visible;
-        let caret_offset = self.caret.min(match &self.state {
-            ViewState::Ready(editor) => editor.buffer().len(),
-            _ => 0,
-        });
+        // The code editor is made the first frame the file is loaded, then
+        // kept to the app's editor settings and handed the keyboard whenever
+        // the mode or its existence changes under the focus.
+        // A new generation of line colours per render: the code editor's
+        // minimap asks for the same rows every frame (every row of a short
+        // file, one row per pixel of its height otherwise), so this frame's
+        // rows come back from the previous generation and nothing a frame
+        // still shows is dropped.
+        self.span_cache.borrow_mut().rotate();
+        let step = sirio_perf::span("FileView.ensure_code_editor", id);
+        self.ensure_code_editor(window, cx);
+        drop(step);
+        let step = sirio_perf::span("FileView.sync_code_prefs", id);
+        self.sync_code_prefs(cx);
+        drop(step);
+        let step = sirio_perf::span("FileView.settle_status_popover", id);
+        self.settle_status_popover(window, cx);
+        drop(step);
+        let step = sirio_perf::span("FileView.sync_find_washes", id);
+        self.sync_find_washes(cx);
+        drop(step);
+        let step = sirio_perf::span("FileView.hand_over_focus", id);
+        self.hand_over_focus(window, cx);
+        drop(step);
         let context_menu = self.context_menu.map(|position| {
             let entity = cx.entity();
             let dismiss_entity = entity.clone();
@@ -1817,7 +1678,7 @@ impl Render for FileView {
                 .bg(theme.menu_surface())
                 .shadow_lg();
 
-            let items = self.context_menu_items();
+            let items = self.context_menu_items(cx);
             let mut previous_group = None;
             for (index, item) in items.iter().enumerate() {
                 if previous_group.is_some_and(|group| group != item.group) {
@@ -1830,12 +1691,7 @@ impl Render for FileView {
                 let debug_selector = selector.clone();
                 let state = item.state.clone();
                 let is_disabled = matches!(state, ItemState::Unavailable(_));
-                // A redirected row acts on what is missing, not on what it
-                // is labelled with; an unavailable row acts on nothing.
-                let effect = match &state {
-                    ItemState::Ready | ItemState::Unavailable(_) => item.action,
-                    ItemState::Redirected { to, .. } => *to,
-                };
+                let action = item.action;
                 let note = match &state {
                     ItemState::Ready => None,
                     ItemState::Unavailable(reason) => Some(reason.clone()),
@@ -1862,7 +1718,9 @@ impl Render for FileView {
                                 .hover(|style| style.bg(theme.ely.hover))
                                 .on_click(move |_, window, cx| {
                                     item_entity.update(cx, |view, cx| {
-                                        view.handle_context_action(effect, window, cx);
+                                        if let Ok(effect) = view.context_effect(action, cx) {
+                                            view.handle_context_action(effect, window, cx);
+                                        }
                                     });
                                 })
                         })
@@ -1902,6 +1760,9 @@ impl Render for FileView {
         // because a stale coordinate is worse than an honest default.
         // Either way it sits *over* the file — priority 2 so it stays above
         // the menu that may have raised it.
+        let step = sirio_perf::span("FileView.status_row", id);
+        let status_row = self.render_status_row(theme, &entity, cx);
+        drop(step);
         let message = self.message.as_ref().map(|message| {
             let card = message_card(&message.text, &message.actions, theme, entity.clone());
             match message.at {
@@ -1913,9 +1774,18 @@ impl Render for FileView {
                 )
                 .priority(2)
                 .into_any_element(),
+                // Above the row when there is one; without it (a file still
+                // loading) the card sits at the corner itself.
                 None => div()
                     .absolute()
-                    .bottom(px(16.0))
+                    .bottom(
+                        px(16.0)
+                            + if status_row.is_some() {
+                                status_row::STATUS_ROW_HEIGHT
+                            } else {
+                                px(0.0)
+                            },
+                    )
                     .right(px(16.0))
                     .child(card)
                     .into_any_element(),
@@ -1927,64 +1797,67 @@ impl Render for FileView {
             .flex()
             .flex_col()
             .bg(theme.ely.bg)
-            .on_mouse_down(MouseButton::Right, cx.listener(Self::open_context_menu))
+            // Escape closes what is open over the code and goes no further, so
+            // the code keeps its cursors: find first, then a hunk drawn in
+            // place, one per press, the way a floating box goes before what is
+            // only drawn. With neither open it passes on, and Ely collapses the
+            // cursors as it always has.
+            .capture_action(cx.listener(|view, _: &SingleCursor, window, cx| {
+                if view.find.is_some() {
+                    view.close_find(window, cx);
+                    cx.stop_propagation();
+                } else if view.open_hunk.is_some() {
+                    view.close_hunk(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|view, event: &MouseDownEvent, window, cx| {
+                    view.open_context_menu(event.position, window, cx);
+                }),
+            )
             .when_some(context_menu, |this, menu| this.child(menu))
             .when_some(hover_card, |this, card| this.child(card))
-            .when_some(message, |this, card| this.child(card))
             .when_some(
                 self.snapshot
                     .as_ref()
-                    .map(|origin| render_snapshot_bar(origin, theme, cx.entity())),
+                    .map(|origin| render_snapshot_bar(origin, cx.entity())),
                 |this, bar| this.child(bar),
             )
-            .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
-                theme,
-                cx.entity(),
-                caret_visible,
-                caret_offset,
-                preview,
-                window,
-                cx,
-            )))
+            .child(div().flex_1().min_h(px(0.0)).child({
+                let _step = sirio_perf::span("FileView.render_state", id);
+                self.render_state(theme, cx.entity(), preview, window, cx)
+            }))
+            .when_some(status_row, |this, row| this.child(row))
+            // Last, so it paints over the content and the row: an absolute child
+            // earlier in the order sits under the code's own background.
+            .when_some(message, |this, card| this.child(card))
     }
 }
 
-/// The bar over a snapshot: what it is, and the way to the editable copy.
+/// The banner over a snapshot: what it is, and the way to the editable copy.
+/// Ely's own banner is switched off for a snapshot (its "Make editable" has
+/// nothing to unlock), so this is the only one. It sits above the find bar
+/// and the code, over the failure card too, and keeps `file-snapshot-bar` as
+/// its selector.
 fn render_snapshot_bar(
     origin: &SnapshotOrigin,
-    theme: Theme,
     entity: gpui::Entity<FileView>,
 ) -> impl IntoElement {
-    let local = origin.local_copy.clone();
+    let banner = ReadOnlyBanner::new("read-only", origin.banner_message());
+    let banner = match (origin.banner_action(), origin.local_copy.clone()) {
+        (Some(label), Some(path)) => banner.action(label, move |_, cx| {
+            let path = path.clone();
+            entity.update(cx, |_, cx| cx.emit(FileViewEvent::OpenLocalCopy(path)));
+        }),
+        _ => banner,
+    };
     div()
         .id("file-snapshot-bar")
         .debug_selector(|| "file-snapshot-bar".into())
         .w_full()
-        .px(px(20.0))
-        .py(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(12.0))
-        .bg(theme.ely.hover)
-        .border_b_1()
-        .border_color(theme.ely.border)
-        .text_size(theme.typography.footnote)
-        .text_color(theme.ely.fg)
-        .child(div().flex_1().child(format!("Read-only · {}", origin.label())))
-        .when_some(local, |this, path| {
-            this.child(
-                div()
-                    .id("file-snapshot-open-local")
-                    .debug_selector(|| "file-snapshot-open-local".into())
-                    .cursor_pointer()
-                    .text_color(theme.sirio.quantity)
-                    .child("Open local copy")
-                    .on_click(move |_, _, cx| {
-                        let path = path.clone();
-                        entity.update(cx, |_, cx| cx.emit(FileViewEvent::OpenLocalCopy(path)));
-                    }),
-            )
-        })
+        .child(banner)
 }
 
 /// A snapshot whose read failed: the reason, and the Retry that is the
@@ -2136,9 +2009,9 @@ fn render_conflict_banner(
         .flex()
         .items_center()
         .gap(px(12.0))
-        .bg(theme.sirio.danger_muted)
+        .bg(theme.ely.danger_subtle)
         .border_b_1()
-        .border_color(theme.ely.border)
+        .border_color(theme.ely.danger)
         .text_size(theme.typography.footnote)
         .text_color(theme.ely.fg)
         .child(div().flex_1().child(message))
@@ -2172,6 +2045,12 @@ fn render_conflict_banner(
         })
 }
 
+/// Whether the Markdown row draws the formatting controls for a file in `mode`:
+/// Code only, and only when the file is editable (a snapshot is not).
+fn formatting_controls_drawn(mode: MarkdownMode, editable: bool) -> bool {
+    mode == MarkdownMode::Code && editable
+}
+
 /// The Markdown row: the formatting controls (F-EDIT-02) on the left, the
 /// Code/Preview icons (F-EDIT-01) at its right end.
 ///
@@ -2182,10 +2061,14 @@ fn render_conflict_banner(
 /// Preview would be a dead end.
 ///
 /// The formatting controls themselves stay Code-only: Preview is a reading
-/// surface, and there is nothing rendered there to format. The link URL is a
-/// deterministic placeholder until the view has a text prompt seam of its own.
+/// surface, and there is nothing rendered there to format. A snapshot has none
+/// either, in either mode: it refuses every edit, so a button would only lie.
+/// `formatting_shown` is `FileView::formatting_controls_shown`, the same answer
+/// `surface.editor.state` reports. The link URL is a deterministic placeholder
+/// until the view has a text prompt seam of its own.
 fn render_markdown_bar(
     mode: MarkdownMode,
+    formatting_shown: bool,
     theme: Theme,
     file_view: gpui::Entity<FileView>,
 ) -> impl IntoElement {
@@ -2202,7 +2085,7 @@ fn render_markdown_bar(
         .border_b_1()
         .border_color(theme.ely.border)
         .bg(theme.ely.surface)
-        .when(mode == MarkdownMode::Code, move |this| {
+        .when(formatting_shown, move |this| {
             this.child(render_format_button(
                 "B",
                 "file-format-bold",
@@ -2278,10 +2161,8 @@ fn render_content(
     mode: MarkdownMode,
     theme: Theme,
     entity: gpui::Entity<FileView>,
-    selection: Option<Selection>,
-    caret_visible: bool,
-    caret_offset: usize,
-    syntax_palette: bezel::theme::SyntaxPalette,
+    code: Option<&gpui::Entity<CodeEditor>>,
+    find: Option<AnyElement>,
     scroll: &SurfaceScroll,
     preview: Option<PreviewFrame>,
 ) -> AnyElement {
@@ -2323,7 +2204,7 @@ fn render_content(
         // strip, the way Code mode never wraps a source line.
         //
         // The surface takes what the Markdown bar above it leaves, as the
-        // source surface's `flex_1().min_h(0)` does: at `size_full` it was
+        // code editor's `flex_1().min_h(0)` container does: at `size_full` it was
         // the whole pane tall, so the bar's height of document — and both
         // scrollbars' bottom edge — hung below the pane, out of reach.
         return div()
@@ -2365,77 +2246,6 @@ fn render_content(
             .into_any_element();
     }
 
-    // One row per line, materialized only for the visible range (the same
-    // `uniform_list` the history panel scrolls thousands of commits with).
-    // The old surface built an element for *every* line on *every* frame —
-    // each with its own tree-sitter pass and text shaping — and since gpui
-    // draws the window in one pass, one long file stalled the whole app.
-    // The buffer is segmented exactly as `split_inclusive('\n')` does: a
-    // trailing newline does not open an extra empty line, and an empty
-    // buffer still hosts one empty line so a freshly opened file shows an
-    // insertion point instead of nothing.
-    let buffer = editor.buffer();
-    let mut line_ranges: Vec<(usize, usize)> = Vec::new();
-    let mut offset = 0;
-    for raw in buffer.split_inclusive('\n') {
-        let line_len = raw.strip_suffix('\n').unwrap_or(raw).len();
-        line_ranges.push((offset, offset + line_len));
-        offset += raw.len();
-    }
-    if line_ranges.is_empty() {
-        line_ranges.push((0, 0));
-    }
-    // Every row is as wide as the list's measured item, so measure the
-    // longest line (F-EDIT-07: no wrapping, the horizontal scroller owns
-    // the overflow) — measuring row 0 would clip everything wider than it.
-    let longest_line = line_ranges
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, (start, end))| end - start)
-        .map(|(index, _)| index);
-    let line_count = line_ranges.len();
-    let line_ranges = Rc::new(line_ranges);
-    let language = editor.language();
-    let row_entity = entity.clone();
-    let lines = uniform_list("file-text-scroll", line_count, move |range, _window, cx| {
-        // Read the buffer back through the entity instead of cloning up
-        // to a mebibyte of text into the closure every frame. The
-        // ranges were cut from this same buffer this same frame; the
-        // checked slice only guards a mutation that cannot happen
-        // between render and prepaint.
-        let view = row_entity.read(cx);
-        let Some(editor) = view.editor() else {
-            return Vec::new();
-        };
-        let buffer = editor.buffer();
-        range
-            .filter_map(|index| line_ranges.get(index).map(|range| (index, *range)))
-            .map(|(index, (start, end))| {
-                let text = buffer.get(start..end).unwrap_or_default();
-                let underlines = diagnostic_underlines(view.diagnostics(), text, start);
-                render_source_line(
-                    index,
-                    text.to_owned(),
-                    start,
-                    end,
-                    language,
-                    theme,
-                    row_entity.clone(),
-                    selection,
-                    caret_visible,
-                    caret_offset,
-                    &syntax_palette,
-                    &underlines,
-                )
-            })
-            .collect()
-    })
-    .debug_selector(|| "file-text-scroll".into())
-    .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-    .with_width_from_item(longest_line)
-    .track_scroll(&scroll.source)
-    .size_full()
-    .p(px(16.0));
     let mut source = div().size_full().flex().flex_col();
     if is_markdown && mode == MarkdownMode::Code && editor.preview_locked() {
         let preview_entity = entity.clone();
@@ -2472,28 +2282,37 @@ fn render_content(
                 ),
         );
     }
-    // Both bars read the list handle's base `ScrollHandle`: the same offset
-    // and overflow the list itself scrolls by.
-    let source_handle = scroll.source.0.borrow().base_handle.clone();
-    let horizontal_bar = horizontal_scrollbar(
-        "file-horizontal-bar",
-        &source_handle,
-        &scroll.source_horizontal_bar,
-        entity,
-    );
+    // The code editor draws and scrolls the source itself; the selector is the
+    // one the drawn-frame tests use to ask whether the source is on screen.
+    // The find bar, when open, is the first row of this column and the code
+    // takes what it leaves, so nothing is drawn over the code.
     source
         .child(
             div()
                 .flex_1()
                 .min_h(px(0.0))
-                .relative()
-                .child(lines)
-                .child(scrollbar(
-                    "file-text-bar",
-                    &source_handle,
-                    &scroll.source_bar,
-                ))
-                .child(horizontal_bar),
+                .flex()
+                .flex_col()
+                .when_some(find, |this, find| this.child(find))
+                .child(
+                    div()
+                        .id("file-text-scroll")
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .relative()
+                        .debug_selector(|| "file-text-scroll".into())
+                        .when_some(code.cloned(), |this, code| {
+                            // A right press on the code is the code editor's own
+                            // `SecondaryClick`, which opens the menu. Stopping it
+                            // here keeps the view's listener above from opening it
+                            // a second time. The stop is in bubble order, after
+                            // the editor's listener has run.
+                            this.on_mouse_down(MouseButton::Right, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .child(code)
+                        }),
+                ),
         )
         .into_any_element()
 }
@@ -2596,67 +2415,6 @@ pub(crate) fn horizontal_scrollbar<V: 'static>(
     )
 }
 
-/// One row of the virtualized source surface: the gutter number plus the
-/// editable text run for the buffer bytes `start..end` (the line without
-/// its newline). The caret bar lives on exactly one row — the one whose
-/// range contains `caret_offset` — collapsed to that row's own bytes.
-#[allow(clippy::too_many_arguments)]
-fn render_source_line(
-    index: usize,
-    line: String,
-    start: usize,
-    end: usize,
-    language: Language,
-    theme: Theme,
-    entity: gpui::Entity<FileView>,
-    selection: Option<Selection>,
-    caret_visible: bool,
-    caret_offset: usize,
-    syntax_palette: &bezel::theme::SyntaxPalette,
-    underlines: &[(Range<usize>, DiagnosticSeverity)],
-) -> gpui::Stateful<gpui::Div> {
-    let caret = if caret_visible && caret_offset >= start && caret_offset <= end {
-        Some((caret_offset - start).min(line.len()))
-    } else {
-        None
-    };
-    div()
-        .id(("file-line", index))
-        .debug_selector({
-            let selector = format!("file-source-line-{index}");
-            move || selector.clone()
-        })
-        .w_full()
-        .min_h(px(18.0))
-        .flex()
-        .whitespace_nowrap()
-        .font_family(theme.typography.code_family)
-        .text_size(theme.typography.code_size)
-        .text_color(theme.ely.fg)
-        // The gutter is the line number alone. It used to carry a 10px
-        // severity dot as well; the squiggle on the code says the same
-        // thing where the problem actually is, so the column went with it.
-        .child(
-            div()
-                .w(px(42.0))
-                .flex_none()
-                .text_color(theme.ely.fg_subtle)
-                .child(format!("{:>5} ", index + 1)),
-        )
-        .child(EditableLine::new(
-            ("file-line-text", index),
-            line,
-            start,
-            language,
-            theme,
-            entity,
-            selection,
-            syntax_palette,
-            caret,
-            underlines,
-        ))
-}
-
 /// One classified span of a source line, in bezel-syntax's own vocabulary.
 ///
 /// The kind is `bezel::theme::HighlightKind` rather than a reduction of it:
@@ -2689,382 +2447,6 @@ pub(crate) fn code_spans(language: Language, line: &str) -> Vec<CodeSpan> {
         .into_iter()
         .map(|(range, kind)| CodeSpan { range, kind })
         .collect()
-}
-
-/// One rendered code-surface line: painted text plus the mouse machinery
-/// that makes it a real caret/selection surface (F-EDIT-02) instead of the
-/// old click-selects-the-whole-line stand-in, and makes a rendered Markdown
-/// link a real click target (F-CORE-FILE-04). Modeled on
-/// `Chat`'s `TranscriptSelectableText` — same `StyledText` + hitbox +
-/// `index_for_position`/`position_for_index` shape — but scoped to a single
-/// source line, since each line already carries its own buffer-offset
-/// range.
-struct EditableLine {
-    id: ElementId,
-    text: StyledText,
-    line_start: usize,
-    line_len: usize,
-    view: gpui::Entity<FileView>,
-    selection: Option<Selection>,
-    selection_fill: Hsla,
-    /// Byte ranges *local to this line* of clickable Markdown link labels,
-    /// paired with their raw (unresolved) target text.
-    links: Vec<(Range<usize>, String)>,
-    /// Local byte offset of the insertion caret when this line hosts it
-    /// (`None` on every other line, or whenever the bar is hidden). Painted
-    /// as a thin accent quad in `Element::paint`, after any selection.
-    caret_offset: Option<usize>,
-    /// Colour of the caret bar (the theme's accent).
-    caret_color: Hsla,
-    /// The line's own font and size, kept so an empty selected line can ask
-    /// the font for a character's advance — there is no glyph to measure.
-    font: gpui::Font,
-    font_size: Pixels,
-    /// Set on mouse-down, consumed on mouse-up: the down position and
-    /// whether the platform modifier was held, so a same-position mouse-up
-    /// on a link (not a drag) can open it (F-CORE-FILE-04) while a plain
-    /// click still only places the caret.
-    pressed: std::rc::Rc<std::cell::Cell<Option<(usize, bool)>>>,
-}
-
-/// What one line shows of a selection, as byte offsets local to it, or
-/// `None` when the selection does not reach it.
-///
-/// An empty line the selection passes through answers `Some(0..0)` — a
-/// real answer meaning "selected, but with no text to measure". It used
-/// to be indistinguishable from "not selected", so dragging across a
-/// paragraph break left the blank lines looking untouched; the painter
-/// gives that case a character's width instead of a rectangle of nothing.
-///
-/// A selection that stops exactly where an empty line begins has consumed
-/// the previous line's newline and none of this one, so it does not claim
-/// it.
-fn selected_run_on_line(
-    selection: Selection,
-    line_start: usize,
-    line_len: usize,
-) -> Option<Range<usize>> {
-    if selection.is_collapsed() {
-        return None;
-    }
-    if line_len == 0 {
-        return (selection.start <= line_start && line_start < selection.end).then_some(0..0);
-    }
-    let start = selection.start.max(line_start);
-    let end = selection.end.min(line_start + line_len);
-    (start < end).then(|| start - line_start..end - line_start)
-}
-
-impl EditableLine {
-    fn new(
-        id: impl Into<ElementId>,
-        line: String,
-        line_start: usize,
-        language: Language,
-        theme: Theme,
-        view: gpui::Entity<FileView>,
-        selection: Option<Selection>,
-        syntax_palette: &bezel::theme::SyntaxPalette,
-        caret_offset: Option<usize>,
-        underlines: &[(Range<usize>, DiagnosticSeverity)],
-    ) -> Self {
-        let line_len = line.len();
-        let links: Vec<(Range<usize>, String)> = if language == Language::Markdown {
-            markdown_links_in_line(&line)
-                .into_iter()
-                .map(|span| (span.label_range, span.target))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let highlights = line_highlights(
-            language,
-            &line,
-            &links,
-            underlines,
-            &theme,
-            syntax_palette,
-        );
-        let text = StyledText::new(line).with_highlights(highlights);
-        Self {
-            id: id.into(),
-            text,
-            line_start,
-            line_len,
-            view,
-            selection,
-            selection_fill: theme.ely.active,
-            caret_offset,
-            caret_color: theme.ely.fg,
-            font: gpui::font(theme.typography.code_family),
-            font_size: theme.typography.code_size,
-            links,
-            pressed: std::rc::Rc::new(std::cell::Cell::new(None)),
-        }
-    }
-
-    /// One character's advance in this line's font.
-    ///
-    /// `em_advance` rather than a shaped space: the code surface is
-    /// monospace, so every glyph shares the advance, and this asks the
-    /// font instead of laying out text that is not in the buffer.
-    fn character_width(&self, window: &Window) -> Pixels {
-        let font_id = window.text_system().resolve_font(&self.font);
-        window
-            .text_system()
-            .em_advance(font_id, self.font_size)
-            .unwrap_or(self.font_size / 2.0)
-    }
-
-    /// Paints the part of `self.selection` that falls on this line, clipped
-    /// to this line's own bounds. Each line computes its own overlap
-    /// independently, so a selection spanning several lines highlights the
-    /// exact selected run on the first/last line and the full width of any
-    /// line fully inside it — never a whole line that is only partly
-    /// selected, which is what the old line-level background did.
-    fn paint_selection(&self, bounds: Bounds<Pixels>, window: &mut Window) {
-        let Some(selection) = self.selection.filter(|selection| !selection.is_collapsed()) else {
-            return;
-        };
-        let Some(run) = selected_run_on_line(selection, self.line_start, self.line_len) else {
-            return;
-        };
-        let layout = self.text.layout();
-        let line_height = layout.line_height();
-        let start_position = layout.position_for_index(run.start).unwrap_or(bounds.origin);
-        let end_position = if run.is_empty() {
-            // An empty line has no glyph to measure, so a band drawn
-            // between its own two ends is a rectangle of nothing. Give it
-            // one character — the band a blank line inside a selection is
-            // expected to show — rather than the row's whole width, which
-            // would make the emptiest lines the loudest.
-            gpui::point(start_position.x + self.character_width(window), bounds.origin.y)
-        } else {
-            layout
-                .position_for_index(run.end)
-                .unwrap_or(gpui::point(bounds.right(), bounds.origin.y))
-        };
-        if end_position.x <= start_position.x {
-            return;
-        }
-        window.paint_quad(quad(
-            Bounds::from_corners(
-                point(start_position.x, bounds.origin.y),
-                point(end_position.x, bounds.origin.y + line_height),
-            ),
-            px(0.0),
-            self.selection_fill,
-            Edges::default(),
-            transparent_black(),
-            BorderStyle::default(),
-        ));
-    }
-}
-
-impl Element for EditableLine {
-    type RequestLayoutState = ();
-    type PrepaintState = Hitbox;
-
-    fn id(&self) -> Option<ElementId> {
-        Some(self.id.clone())
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    /// The text node, wrapped in one that grows to fill the row.
-    ///
-    /// `StyledText` measures a line exactly as wide as its glyphs, and
-    /// `prepaint` below hangs this line's hitbox on those bounds — so
-    /// without the wrapper an empty line gets an empty hitbox,
-    /// `is_hovered` is never true for it, and every mouse handler on the
-    /// line is gated behind a rectangle nothing can be inside. The same
-    /// arithmetic made the space to the right of any short line dead;
-    /// the empty line was only the case where that space was the whole
-    /// line.
-    ///
-    /// `flex_grow` claims the row's leftover width, never more: growth
-    /// consumes free space, and an intrinsic measure — which is what
-    /// `with_width_from_item` performs to size the list from its longest
-    /// line — offers none, so the measured width is still the text's.
-    fn request_layout(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let (text, ()) = self.text.request_layout(id, inspector_id, window, cx);
-        let style = gpui::Style {
-            flex_grow: 1.0,
-            ..Default::default()
-        };
-        (window.request_layout(style, [text], cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        state: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        self.text
-            .prepaint(id, inspector_id, bounds, state, window, cx);
-        window.insert_hitbox(bounds, HitboxBehavior::Normal)
-    }
-
-    fn paint(
-        &mut self,
-        id: Option<&GlobalElementId>,
-        inspector_id: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        state: &mut Self::RequestLayoutState,
-        hitbox: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.paint_selection(bounds, window);
-        // The insertion caret: a thin accent quad at the tracked offset,
-        // painted after the selection so a collapsed selection shows the
-        // bar rather than nothing.
-        if let Some(caret) = self.caret_offset {
-            let layout = self.text.layout();
-            let line_height = layout.line_height();
-            let position = layout
-                .position_for_index(caret)
-                .unwrap_or(point(bounds.right(), bounds.origin.y));
-            window.paint_quad(quad(
-                Bounds::new(
-                    point(position.x.min(bounds.right()), bounds.origin.y),
-                    size(crate::caret::BAR_WIDTH, line_height),
-                ),
-                px(0.0),
-                self.caret_color,
-                Edges::default(),
-                transparent_black(),
-                BorderStyle::default(),
-            ));
-        }
-        window.set_cursor_style(CursorStyle::IBeam, hitbox);
-
-        let layout = self.text.layout().clone();
-        let line_start = self.line_start;
-        let line_len = self.line_len;
-        let view = self.view.clone();
-        let pressed = self.pressed.clone();
-        let hitbox_for_down = hitbox.clone();
-        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble
-                && event.button == MouseButton::Left
-                && hitbox_for_down.is_hovered(window)
-            {
-                let local = match layout.index_for_position(event.position) {
-                    Ok(index) | Err(index) => index.min(line_len),
-                };
-                let global = line_start + local;
-                pressed.set(Some((global, event.modifiers.platform)));
-                if event.click_count >= 2 {
-                    view.update(cx, |view, cx| view.select_word_at(global, cx));
-                } else {
-                    view.update(cx, |view, cx| view.begin_mouse_selection(global, cx));
-                }
-                window.prevent_default();
-            }
-        });
-
-        let layout = self.text.layout().clone();
-        let line_start = self.line_start;
-        let line_len = self.line_len;
-        let view = self.view.clone();
-        let hitbox_for_move = hitbox.clone();
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble
-                && event.dragging()
-                && hitbox_for_move.is_hovered(window)
-            {
-                let local = match layout.index_for_position(event.position) {
-                    Ok(index) | Err(index) => index.min(line_len),
-                };
-                view.update(cx, |view, cx| {
-                    view.extend_mouse_selection(line_start + local, cx)
-                });
-            }
-        });
-
-        let layout = self.text.layout().clone();
-        let line_start = self.line_start;
-        let line_len = self.line_len;
-        let view = self.view.clone();
-        let hitbox_for_hover = hitbox.clone();
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble
-                && !event.dragging()
-                && hitbox_for_hover.is_hovered(window)
-            {
-                let local = match layout.index_for_position(event.position) {
-                    Ok(index) | Err(index) => index.min(line_len),
-                };
-                let at = event.position;
-                view.update(cx, |view, cx| view.hover_moved(line_start + local, at, cx));
-            }
-        });
-
-        let layout = self.text.layout().clone();
-        let line_start = self.line_start;
-        let line_len = self.line_len;
-        let view = self.view.clone();
-        let links = self.links.clone();
-        let pressed_for_up = self.pressed.clone();
-        let hitbox_for_up = hitbox.clone();
-        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble
-                && event.button == MouseButton::Left
-                && hitbox_for_up.is_hovered(window)
-            {
-                if let Some((down_global, down_platform)) = pressed_for_up.take() {
-                    let local = match layout.index_for_position(event.position) {
-                        Ok(index) | Err(index) => index.min(line_len),
-                    };
-                    let up_global = line_start + local;
-                    let clicked_in_place = down_global == up_global;
-                    let platform_held = down_platform || event.modifiers.platform;
-                    if clicked_in_place && platform_held {
-                        let local_click = up_global - line_start;
-                        if let Some((_, target)) =
-                            links.iter().find(|(range, _)| range.contains(&local_click))
-                        {
-                            let target = target.clone();
-                            view.update(cx, |view, cx| view.open_markdown_link(&target, cx));
-                        } else {
-                            // Not a link — in a code file the same gesture
-                            // means "where is this defined?".
-                            let at = Some(event.position);
-                            view.update(cx, |view, cx| {
-                                view.request_definition(up_global, at, cx)
-                            });
-                        }
-                    }
-                }
-                view.update(cx, |view, cx| view.end_mouse_selection(cx));
-                window.prevent_default();
-            }
-        });
-
-        self.text
-            .paint(id, inspector_id, bounds, state, &mut (), window, cx);
-    }
-}
-
-impl IntoElement for EditableLine {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 /// The Markdown formatting operations the toolbar offers (F-EDIT-02). Every
@@ -3127,6 +2509,9 @@ fn message_card(
     let mut card = div()
         .id("file-view-message")
         .debug_selector(|| "file-view-message".into())
+        // A press on the card is the card's: without this it falls through to
+        // the code under it and moves the caret as it dismisses.
+        .occlude()
         .max_w(px(420.0))
         .px(px(12.0))
         .py(px(8.0))
@@ -3205,188 +2590,26 @@ fn markdown_document(path: &Path, text: &str) -> Option<Document> {
     }
 }
 
-/// Where the line holding `offset` begins: just past the newline before
-/// it, or the start of the buffer.
-fn line_start_at(buffer: &str, offset: usize) -> usize {
-    buffer[..offset].rfind('\n').map_or(0, |newline| newline + 1)
-}
-
-/// Where the line holding `offset` ends. The newline that closes a line is
-/// not part of it, matching the ranges the rows are cut from.
-fn line_end_at(buffer: &str, offset: usize) -> usize {
-    buffer[offset..]
-        .find('\n')
-        .map_or(buffer.len(), |newline| offset + newline)
-}
-
-/// The start of the line below the one beginning at `line_start`, when
-/// there is one.
+/// Every styled run one source line hands to the code editor: the grammar's
+/// colours (`spans`, from [`code_spans`]) and the Markdown link rules. The
+/// code editor draws the findings itself (`code_surface::ely_diagnostics`), so
+/// the highlighter has no squiggles to add.
 ///
-/// A trailing newline does not open a line. The rows are cut with
-/// `split_inclusive('\n')`, which ends `"alpha\ngamma\n"` with `gamma\n` as
-/// a single chunk and draws two rows, not three -- so the byte past that
-/// final newline belongs to no row, and a caret sent there is painted by
-/// nobody.
-fn next_line_start(buffer: &str, line_start: usize) -> Option<usize> {
-    let line_end = line_end_at(buffer, line_start);
-    (line_end + 1 < buffer.len()).then_some(line_end + 1)
-}
-
-/// The start of the line above the one beginning at `line_start`, when
-/// there is one.
-fn previous_line_start(buffer: &str, line_start: usize) -> Option<usize> {
-    (line_start > 0).then(|| line_start_at(buffer, line_start - 1))
-}
-
-/// How many characters into its own line `offset` sits. Characters rather
-/// than bytes: the surface draws a monospace grid, so a line of accented
-/// text has to carry the caret exactly as far as a line of ASCII.
-fn column_at(buffer: &str, offset: usize) -> usize {
-    buffer[line_start_at(buffer, offset)..offset].chars().count()
-}
-
-/// The offset `column` characters into the line beginning at `line_start`,
-/// clamped to that line's end when the line is too short to reach it.
-fn offset_at_column(buffer: &str, line_start: usize, column: usize) -> usize {
-    let line_end = line_end_at(buffer, line_start);
-    buffer[line_start..line_end]
-        .char_indices()
-        .nth(column)
-        .map_or(line_end, |(offset, _)| line_start + offset)
-}
-
-/// Which row the line beginning at `line_start` is drawn as.
-fn line_index_at(buffer: &str, line_start: usize) -> usize {
-    buffer[..line_start].matches('\n').count()
-}
-
-/// How many rows the list draws for this buffer -- the same count
-/// `render_source` hands `uniform_list`, empty buffer and all.
-fn line_count_of(buffer: &str) -> usize {
-    buffer.split_inclusive('\n').count().max(1)
-}
-
-fn previous_char_boundary(buffer: &str, position: usize) -> usize {
-    buffer[..position.min(buffer.len())]
-        .char_indices()
-        .next_back()
-        .map_or(0, |(index, _)| index)
-}
-
-/// The squiggles one line earns, as byte ranges **local to that line**
-/// paired with the severity that gets to colour them.
-///
-/// Selection is by range overlap, not by `FileDiagnostic::line`: a finding
-/// carries the line it *starts* on but a buffer-absolute range, so asking
-/// `line == index` leaves every continuation line of a multi-line
-/// diagnostic unmarked — which is what the gutter dot this replaced did.
-///
-/// Overlaps are flattened here, worst severity winning, and the result is
-/// disjoint and sorted. That is not tidiness: `combine_highlights` merges
-/// the styles of overlapping ranges by folding over a `HashSet`, so two
-/// diagnostics both writing `underline` over the same bytes would pick a
-/// winner in whatever order that set iterated — a colour that could differ
-/// from frame to frame.
-fn diagnostic_underlines(
-    diagnostics: &[FileDiagnostic],
-    line: &str,
-    line_start: usize,
-) -> Vec<(Range<usize>, DiagnosticSeverity)> {
-    let line_end = line_start + line.len();
-    let mut spans: Vec<(Range<usize>, DiagnosticSeverity)> = Vec::new();
-    for found in diagnostics {
-        let span = if found.range.is_empty() {
-            // A caret-position finding — "expected `;`" and its kind. It
-            // covers no bytes, so it would paint nothing at all, which
-            // reads exactly like a clean line. Take the character after
-            // the caret, or the one before it at end of line; an empty
-            // line has neither and goes unmarked.
-            if found.range.start < line_start || found.range.start > line_end {
-                continue;
-            }
-            let at = found.range.start - line_start;
-            let after = next_char_boundary(line, at);
-            if after > at {
-                at..after
-            } else {
-                previous_char_boundary(line, at)..at
-            }
-        } else {
-            found.range.start.max(line_start) - line_start
-                ..found.range.end.min(line_end).max(line_start) - line_start
-        };
-        if !span.is_empty() {
-            spans.push((span, found.severity));
-        }
-    }
-    flatten_worst_first(spans)
-}
-
-/// Rewrites possibly-overlapping severity spans as disjoint ones in
-/// ascending order, each carrying the worst severity that covered it.
-///
-/// `DiagnosticSeverity` is ordered worst-first, so "worst wins" is `min`.
-/// A gap no span covers stays a gap: two findings that do not touch must
-/// come out as two squiggles, not one run bridging the clean text between.
-fn flatten_worst_first(
-    spans: Vec<(Range<usize>, DiagnosticSeverity)>,
-) -> Vec<(Range<usize>, DiagnosticSeverity)> {
-    let mut boundaries: Vec<usize> = spans
-        .iter()
-        .flat_map(|(range, _)| [range.start, range.end])
-        .collect();
-    boundaries.sort_unstable();
-    boundaries.dedup();
-
-    let mut flattened: Vec<(Range<usize>, DiagnosticSeverity)> = Vec::new();
-    for pair in boundaries.windows(2) {
-        let (start, end) = (pair[0], pair[1]);
-        let Some(severity) = spans
-            .iter()
-            .filter(|(range, _)| range.start <= start && end <= range.end)
-            .map(|(_, severity)| *severity)
-            .min()
-        else {
-            continue;
-        };
-        match flattened.last_mut() {
-            // Only contiguous runs of one severity merge — a gap between
-            // two findings of the same severity must stay a gap.
-            Some((previous, last)) if previous.end == start && *last == severity => {
-                previous.end = end;
-            }
-            _ => flattened.push((start..end, severity)),
-        }
-    }
-    flattened
-}
-
-/// Every styled run one source line hands to `StyledText`: the grammar's
-/// colours, the Markdown link rules, and the diagnostic squiggles on top.
-///
-/// The three sets are merged with [`gpui::combine_highlights`] rather than
-/// sorted. `with_highlights` ends in `compute_runs`, which walks the ranges
-/// assuming each begins at or after the previous one's end — true while
-/// only syntax and links were in play, since `code_spans` fires for
-/// non-Markdown and `links` for Markdown and the two never met. A
-/// diagnostic sits *on* a coloured token by definition, so a sort is no
-/// longer enough; `combine_highlights` splits the overlap into disjoint
-/// runs and folds the styles. Syntax writes `color` and a diagnostic writes
-/// `underline`, so the fold never has to choose between them.
+/// The runs are sorted by start, because `with_highlights` ends in
+/// `compute_runs`, which walks the ranges assuming each begins at or after the
+/// previous one's end.
 fn line_highlights(
-    language: Language,
-    line: &str,
+    spans: &[CodeSpan],
     links: &[(Range<usize>, String)],
-    underlines: &[(Range<usize>, DiagnosticSeverity)],
     theme: &Theme,
     syntax_palette: &bezel::theme::SyntaxPalette,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut painted: Vec<(Range<usize>, HighlightStyle)> = code_spans(language, line)
-        .into_iter()
+    let mut painted: Vec<(Range<usize>, HighlightStyle)> = spans
+        .iter()
         .map(|span| {
             let color = syntax_palette.color(span.kind);
             (
-                span.range,
+                span.range.clone(),
                 HighlightStyle {
                     color: Some(color),
                     ..Default::default()
@@ -3409,61 +2632,37 @@ fn line_highlights(
         )
     }));
     painted.sort_by_key(|(range, _)| range.start);
-    if underlines.is_empty() {
-        return painted;
-    }
-    gpui::combine_highlights(painted, underline_highlights(underlines, theme)).collect()
-}
-
-/// Dresses each span as the squiggle its severity earns.
-///
-/// Only `underline` is set. The glyphs keep whatever the grammar painted
-/// them: a diagnostic says "look here", not "this is a keyword now", and
-/// leaving `color` empty is also what lets `combine_highlights` merge this
-/// with the syntax runs in either order and land on the same result.
-fn underline_highlights(
-    spans: &[(Range<usize>, DiagnosticSeverity)],
-    theme: &Theme,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    spans
-        .iter()
-        .map(|(range, severity)| {
-            let color = match severity {
-                DiagnosticSeverity::Error => theme.ely.danger,
-                DiagnosticSeverity::Warning => theme.ely.warning,
-                DiagnosticSeverity::Information | DiagnosticSeverity::Hint => theme.ely.fg_subtle,
-            };
-            (
-                range.clone(),
-                HighlightStyle {
-                    underline: Some(UnderlineStyle {
-                        thickness: px(1.0),
-                        color: Some(color),
-                        // Wavy, not straight: a straight rule is already
-                        // the Markdown link style in this same surface.
-                        wavy: true,
-                    }),
-                    ..Default::default()
-                },
-            )
-        })
-        .collect()
-}
-
-fn next_char_boundary(buffer: &str, position: usize) -> usize {
-    let position = position.min(buffer.len());
-    buffer[position..]
-        .chars()
-        .next()
-        .map_or(position, |character| position + character.len_utf8())
+    painted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use gpui::{Modifiers, VisualTestContext};
+    use crate::editor::markdown_links_in_line;
+    use gpui::{Focusable, Modifiers, VisualTestContext};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Sets the code editor's selection to `range`, as a drag or a keystroke
+    /// would. `mounted_file_view` has drawn two frames, so the editor exists.
+    fn select_code(view: &gpui::Entity<FileView>, cx: &mut gpui::App, range: Range<usize>) {
+        let code = view
+            .read(cx)
+            .code_editor()
+            .cloned()
+            .expect("the code editor is drawn once the file has loaded");
+        code.update(cx, |code, cx| code.select([range], cx));
+    }
+
+    /// Gives the keyboard to the code editor, as a click on the code does.
+    fn focus_code(view: &gpui::Entity<FileView>, window: &mut Window, cx: &mut gpui::App) {
+        let code = view
+            .read(cx)
+            .code_editor()
+            .cloned()
+            .expect("the code editor is drawn once the file has loaded");
+        code.read(cx).focus_handle(cx).focus(window, cx);
+    }
 
     struct TempFile(PathBuf);
 
@@ -3590,7 +2789,7 @@ mod tests {
                 .iter()
                 .find(|kept| kept.range == (at..at + needle.len()))
                 .unwrap_or_else(|| panic!("{needle} must be classified: kept={kept:?}"));
-            // Exactly what `EditableLine::new` paints with.
+            // Exactly what the code editor's highlighter paints with.
             palette.color(span.kind)
         };
 
@@ -3610,6 +2809,7 @@ mod tests {
         cx.update(|cx| {
             Theme::init(cx);
             ::editor::init(cx);
+            crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| FileView::new(file.path().to_path_buf(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -3654,17 +2854,30 @@ mod tests {
         );
     }
 
+    /// The keyboard reaches the code editor through the view's focus, with no
+    /// click and no hand-focusing of the code editor. The view takes focus
+    /// before any frame is drawn; the frame that creates the code editor hands
+    /// the keyboard over to it (`hand_over_focus`), so a file that opens takes
+    /// typing at once.
     #[gpui::test]
     async fn keyboard_input_edits_the_buffer_through_the_focused_file_view(
         cx: &mut gpui::TestAppContext,
     ) {
         let file = TempFile::new("keyboard-input", "hello\n");
-        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
+        let (mut cx, view) =
+            mounted_file_view_with(cx, file.path().to_path_buf(), |view, window, cx| {
+                view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            });
+        let code = view
+            .read_with(&cx.cx, |view, _| view.code_editor().cloned())
+            .expect("the frame that loaded the file drew the code editor");
+        cx.update(|window, app| {
+            assert!(
+                code.read(app).focus_handle(app).is_focused(window),
+                "the keyboard went to the code editor without any click"
+            );
+        });
 
-        let line = cx
-            .debug_bounds("file-source-line-0")
-            .expect("the source line is drawn");
-        cx.simulate_click(line.center(), Modifiers::none());
         cx.simulate_keystrokes("home");
         cx.simulate_input("typed ");
         cx.simulate_keystrokes("end");
@@ -3687,6 +2900,11 @@ mod tests {
                 .to_owned()
         });
         assert_eq!(buffer, "replacement\nex\n");
+        assert_eq!(
+            code.read_with(&cx.cx, |code, _| code.text().to_owned()),
+            buffer,
+            "the code editor shows what the keys wrote"
+        );
         assert!(cx.update(|window, cx| {
             window
                 .root::<FileView>()
@@ -3706,6 +2924,7 @@ mod tests {
         cx.update(|cx| {
             Theme::init(cx);
             ::editor::init(cx);
+            crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| FileView::new(file.path().to_path_buf(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -3877,6 +3096,7 @@ mod tests {
         cx.update(|cx| {
             Theme::init(cx);
             ::editor::init(cx);
+            crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| FileView::new(file.path().to_path_buf(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -4046,6 +3266,7 @@ mod tests {
         cx.update(|cx| {
             Theme::init(cx);
             ::editor::init(cx);
+            crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| FileView::new(file.path().to_path_buf(), cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -4226,7 +3447,7 @@ mod tests {
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
 
         assert!(
-            cx.debug_bounds("file-source-line-350").is_none(),
+            cx.debug_bounds("code-editor-line-350").is_none(),
             "line 350 starts off screen, or the test proves nothing"
         );
         view.update(&mut cx.cx, |view, cx| view.reveal_at(350, cx));
@@ -4236,7 +3457,7 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("file-source-line-350").is_some(),
+            cx.debug_bounds("code-editor-line-350").is_some(),
             "reveal scrolls the line into view"
         );
     }
@@ -4254,6 +3475,7 @@ mod tests {
         cx.update(|cx| {
             Theme::init(cx);
             ::editor::init(cx);
+            crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| {
             let mut view = FileView::new(file.path().to_path_buf(), cx);
@@ -4283,184 +3505,8 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("file-source-line-350").is_some(),
+            cx.debug_bounds("code-editor-line-350").is_some(),
             "the reveal was held until the content existed, not dropped"
-        );
-    }
-
-    /// Typing is the other half of the same failure: with no hitbox there is
-    /// no click, with no click the caret never arrives, and the keystroke
-    /// lands wherever the caret was left.
-    #[gpui::test]
-    async fn an_empty_line_accepts_typed_text(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "alpha\n\nbeta\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let row = cx
-            .debug_bounds("file-source-line-1")
-            .expect("the empty line is drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.simulate_input("x");
-        cx.run_until_parked();
-
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| view
-                .editor()
-                .expect("loaded")
-                .buffer()
-                .to_owned()),
-            "alpha\nx\nbeta\n",
-            "the character belongs on the empty line, not wherever the caret was"
-        );
-    }
-
-    /// The empty line was only the extreme case. The dead space to the right
-    /// of every short line came from the same measurement, and an editor is
-    /// expected to take a click there as "the end of this line".
-    #[gpui::test]
-    async fn a_click_past_the_end_of_a_line_lands_at_its_end(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "alpha\n\nbeta\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
-        cx.simulate_click(
-            point(row.origin.x + row.size.width - px(8.), row.center().y),
-            Modifiers::none(),
-        );
-        cx.run_until_parked();
-
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| view.caret),
-            5,
-            "a click in the empty space right of `alpha` belongs at its end"
-        );
-    }
-
-    /// The column the caret came from has to survive a short line, which is
-    /// the whole difference between vertical movement here and in an editor
-    /// that recomputes the column every press.
-    /// "alphabet\nab\nalphabet\n": 0..8, 9..11, 12..20.
-    #[gpui::test]
-    async fn a_short_line_does_not_swallow_the_column(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "alphabet\nab\nalphabet\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.simulate_keystrokes("end down");
-        cx.run_until_parked();
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| view.caret),
-            11,
-            "`ab` is too short for column 8, so the caret stops at its end"
-        );
-
-        cx.simulate_keystrokes("down");
-        cx.run_until_parked();
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| view.caret),
-            20,
-            "the third line is long enough again, so column 8 comes back"
-        );
-    }
-
-    /// The remembered column belongs to vertical movement alone. Anything
-    /// else that moves the caret retires it, or the next `down` would aim at
-    /// a column the caret left two presses ago.
-    #[gpui::test]
-    async fn a_horizontal_move_retires_the_remembered_column(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "alphabet\nab\nalphabet\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.simulate_keystrokes("end down left down");
-        cx.run_until_parked();
-
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| view.caret),
-            13,
-            "column 1, where `left` left the caret -- not the remembered 8"
-        );
-    }
-
-    /// `down` on the last line is neither a no-op nor a leap to
-    /// `buffer.len()`. The trailing newline makes that byte belong to no
-    /// drawn row, and `render_source_line` paints a caret only on a row it
-    /// can place it on -- so the caret would silently stop being drawn.
-    #[gpui::test]
-    async fn down_on_the_last_line_stops_where_the_line_does(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "alpha\nbeta\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let row = cx.debug_bounds("file-source-line-1").expect("drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.simulate_keystrokes("home down");
-        cx.run_until_parked();
-
-        let (caret, len) = view.read_with(&cx.cx, |view, _| {
-            (view.caret, view.editor().expect("loaded").buffer().len())
-        });
-        assert_eq!(len, 11, "`alpha\nbeta\n` is eleven bytes");
-        assert_eq!(
-            caret, 10,
-            "the end of `beta`, not the byte after the newline that closes it"
-        );
-    }
-
-    /// Symmetrically, `up` against the top is how the caret reaches byte 0.
-    #[gpui::test]
-    async fn up_on_the_first_line_reaches_the_start_of_the_document(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let file = TempFile::with_extension("rs", "alpha\nbeta\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.simulate_keystrokes("end up");
-        cx.run_until_parked();
-
-        assert_eq!(view.read_with(&cx.cx, |view, _| view.caret), 0);
-    }
-
-    /// Shift makes the same movement extend rather than jump, which is the
-    /// only reason `move_vertical` routes through `move_caret` at all.
-    #[gpui::test]
-    async fn shift_down_extends_the_selection_a_line_at_a_time(cx: &mut gpui::TestAppContext) {
-        let file = TempFile::with_extension("rs", "alpha\nbeta\ngamma\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.simulate_keystrokes("home shift-down");
-        cx.run_until_parked();
-
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| view.selected_text()),
-            Some("alpha\n".to_owned()),
-            "shift-down takes the line and the newline that ends it"
-        );
-    }
-
-    /// A page is however many lines the list is showing, so this only means
-    /// anything on a file taller than the window.
-    #[gpui::test]
-    async fn pagedown_moves_further_than_a_single_line(cx: &mut gpui::TestAppContext) {
-        let body: String = (0..400).map(|n| format!("line {n}\n")).collect();
-        let file = TempFile::with_extension("rs", &body);
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let row = cx.debug_bounds("file-source-line-0").expect("drawn");
-        cx.simulate_click(row.center(), Modifiers::none());
-        cx.simulate_keystrokes("home pagedown");
-        cx.run_until_parked();
-
-        let caret = view.read_with(&cx.cx, |view, _| view.caret);
-        let landed = body[..caret].matches('\n').count();
-        assert!(
-            landed > 1,
-            "a page is more than one line; the caret landed on line {landed}"
         );
     }
 
@@ -4488,227 +3534,59 @@ mod tests {
         );
     }
 
-    /// Tests for `selected_run_on_line` — which part of a line a selection
-    /// covers, and the empty-line case that used to come out as "nothing".
-    /// Vertical movement has to agree with how the rows were cut, and the
-    /// rows are cut with `split_inclusive('\n')`. Disagreeing here walks the
-    /// caret to a byte no row is willing to draw.
-    mod line_walk {
-        use super::*;
-
-        #[test]
-        fn an_empty_line_is_walked_like_any_other() {
-            let buffer = "alpha\n\nbeta\n";
-            assert_eq!(next_line_start(buffer, 0), Some(6), "alpha -> the empty line");
-            assert_eq!(next_line_start(buffer, 6), Some(7), "the empty line -> beta");
-            assert_eq!(previous_line_start(buffer, 7), Some(6));
-            assert_eq!(previous_line_start(buffer, 0), None, "nothing above the first");
-        }
-
-        #[test]
-        fn a_line_index_counts_the_rows_above_it() {
-            let buffer = "alpha\nbeta\ngamma\n";
-            assert_eq!(line_index_at(buffer, 0), 0);
-            assert_eq!(line_index_at(buffer, 6), 1);
-            assert_eq!(line_index_at(buffer, 11), 2);
-        }
-    }
-
-    /// A column is a position on a monospace grid, so it is counted in
-    /// characters. Counting bytes would make an accented line move the
-    /// caret twice as far as an ASCII one.
-    mod columns {
-        use super::*;
-
-        // Five two-byte characters, so the first line is ten bytes wide but
-        // only five columns wide. `abcde` starts at 11.
-        const BUFFER: &str = "\u{e0}\u{e8}\u{ec}\u{f2}\u{f9}\nabcde\n";
-
-        #[test]
-        fn a_column_is_counted_in_characters_not_bytes() {
-            assert_eq!(column_at(BUFFER, 10), 5, "five characters in, not ten");
-        }
-
-        #[test]
-        fn the_same_column_lands_on_the_same_character_of_an_ascii_line() {
-            assert_eq!(offset_at_column(BUFFER, 11, 2), 13, "the third character");
-            assert_eq!(offset_at_column(BUFFER, 0, 2), 4, "and two characters in is four bytes in");
-        }
-    }
-
-    mod selection_spans {
-        use super::*;
-
-        // "alpha\n\nbeta\n": line 0 is 0..5, the empty line sits at 6, and
-        // line 2 is 7..11.
-        const BUFFER: &str = "alpha\n\nbeta\n";
-
-        fn span(from: usize, to: usize) -> Selection {
-            Selection::new(BUFFER, from, to).expect("valid range")
-        }
-
-        #[test]
-        fn an_empty_line_the_selection_passes_through_is_selected() {
-            assert_eq!(
-                selected_run_on_line(span(0, 11), 6, 0),
-                Some(0..0),
-                "a real answer: selected, with no text to measure"
+    #[gpui::test]
+    async fn a_key_on_the_code_dismisses_a_resting_hover_card_and_still_reaches_the_editor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A key is not a pointer move, so the card is dismissed by the key
+        // itself; the caret moving proves the key still reached Ely.
+        let file = TempFile::with_extension("rs", "let x = 1;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic {
+                    line: 0,
+                    range: 4..5,
+                    severity: DiagnosticSeverity::Error,
+                    message: "boom".into(),
+                }],
+                cx,
             );
-        }
+            view.hover_moved(4, point(px(10.), px(10.)), cx);
+        });
+        cx.update(|window, cx| {
+            focus_code(&view, window, cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.update(|_, app| select_code(&view, app, 0..0));
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned)).as_deref(),
+            Some("boom"),
+            "the card is showing before the key"
+        );
 
-        /// The selection stops exactly where the empty line begins, so it
-        /// has consumed the previous line's newline and nothing of this one.
-        #[test]
-        fn a_selection_ending_where_an_empty_line_begins_does_not_claim_it() {
-            assert_eq!(selected_run_on_line(span(0, 6), 6, 0), None);
-        }
+        cx.simulate_keystrokes("right");
+        cx.run_until_parked();
 
-        #[test]
-        fn an_empty_line_that_anchors_the_selection_is_selected() {
-            assert_eq!(selected_run_on_line(span(6, 11), 6, 0), Some(0..0));
-        }
-
-        #[test]
-        fn a_partly_selected_line_reports_only_the_selected_run() {
-            // Bytes 2..5 of "alpha" — "pha".
-            assert_eq!(selected_run_on_line(span(2, 5), 0, 5), Some(2..5));
-        }
-
-        #[test]
-        fn a_line_fully_inside_the_selection_reports_all_of_it() {
-            assert_eq!(selected_run_on_line(span(0, 11), 0, 5), Some(0..5));
-        }
-
-        #[test]
-        fn a_collapsed_selection_is_a_caret_and_selects_nothing() {
-            assert_eq!(selected_run_on_line(Selection::point(6), 6, 0), None);
-            assert_eq!(selected_run_on_line(Selection::point(2), 0, 5), None);
-        }
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned)),
+            None,
+            "a key on the code dismisses the card"
+        );
+        let caret = cx.update(|_, app| {
+            let code = view
+                .read(app)
+                .code_editor()
+                .cloned()
+                .expect("the code editor is drawn once the file has loaded");
+            code.read(app).primary().range()
+        });
+        assert_eq!(caret, 1..1, "the arrow key still moved the caret in the editor");
     }
 
-    /// Tests for `diagnostic_underlines` — the span arithmetic that decides
-    /// what a line underlines, kept pure so it is testable without a window.
-    mod underline_spans {
-        use super::*;
-
-        fn warning(range: Range<usize>) -> FileDiagnostic {
-            FileDiagnostic { line: 0, range, severity: DiagnosticSeverity::Warning,
-                message: "unused".into() }
-        }
-
-        fn error(range: Range<usize>) -> FileDiagnostic {
-            FileDiagnostic { line: 0, range, severity: DiagnosticSeverity::Error,
-                message: "boom".into() }
-        }
-
-        #[test]
-        fn a_diagnostic_underlines_its_own_span_not_the_whole_line() {
-            let line = "let x = 1;";
-            let found = diagnostic_underlines(&[warning(4..5)], line, 0);
-            assert_eq!(found, vec![(4..5, DiagnosticSeverity::Warning)]);
-        }
-
-        #[test]
-        fn a_diagnostic_on_another_line_underlines_nothing_here() {
-            // Line two of "a\nb\n" is the single byte at offset 2.
-            let found = diagnostic_underlines(&[warning(0..1)], "b", 2);
-            assert!(found.is_empty(), "a span that ends before this line starts");
-        }
-
-        /// The span arithmetic is what makes this possible at all: a
-        /// diagnostic carries one `line` (its first) but a buffer-absolute
-        /// range, so selecting by `line` alone leaves every continuation
-        /// line unmarked — the bug the gutter dot had.
-        #[test]
-        fn a_diagnostic_spanning_two_lines_underlines_the_part_on_each() {
-            // "let a = 1;\nlet b = 2;\n" — a span from byte 4 to byte 15
-            // covers "x = 1;" on line one and "let" on line two.
-            let first = diagnostic_underlines(&[error(4..15)], "let a = 1;", 0);
-            let second = diagnostic_underlines(&[error(4..15)], "let b = 2;", 11);
-            assert_eq!(first, vec![(4..10, DiagnosticSeverity::Error)],
-                "clipped at the first line's end, not run past it");
-            assert_eq!(second, vec![(0..4, DiagnosticSeverity::Error)],
-                "the continuation line underlines its own leading bytes");
-        }
-
-        /// `combine_highlights` folds the styles of overlapping ranges by
-        /// iterating a `HashSet`, so two diagnostics writing `underline`
-        /// over the same text would pick a winner non-deterministically.
-        /// Flattening here is what makes the painted colour stable.
-        #[test]
-        fn the_worst_severity_wins_where_two_diagnostics_overlap() {
-            let line = "let x = 1;";
-            let found = diagnostic_underlines(&[warning(2..8), error(0..5)], line, 0);
-            assert_eq!(
-                found,
-                vec![(0..5, DiagnosticSeverity::Error), (5..8, DiagnosticSeverity::Warning)],
-                "disjoint spans, the error keeping every byte it covers"
-            );
-        }
-
-        #[test]
-        fn two_diagnostics_that_do_not_touch_stay_two_spans() {
-            let line = "let x = y;";
-            let found = diagnostic_underlines(&[warning(4..5), error(8..9)], line, 0);
-            assert_eq!(found, vec![
-                (4..5, DiagnosticSeverity::Warning),
-                (8..9, DiagnosticSeverity::Error),
-            ]);
-        }
-
-        /// "expected `;`" arrives as an empty range. An empty range paints
-        /// nothing at all, which is indistinguishable from a clean line.
-        #[test]
-        fn a_zero_width_diagnostic_widens_to_the_next_character() {
-            let found = diagnostic_underlines(&[error(4..4)], "let x = 1;", 0);
-            assert_eq!(found, vec![(4..5, DiagnosticSeverity::Error)]);
-        }
-
-        #[test]
-        fn a_zero_width_diagnostic_widens_by_a_whole_character_not_a_byte() {
-            // Widening by one *byte* would cut the crab in half and the
-            // text system would reject the run boundary.
-            let line = "let \u{1f980} = 2;";
-            let found = diagnostic_underlines(&[error(4..4)], line, 0);
-            assert_eq!(found, vec![(4..8, DiagnosticSeverity::Error)]);
-            assert_eq!(&line[4..8], "\u{1f980}");
-        }
-
-        #[test]
-        fn a_zero_width_diagnostic_at_the_end_of_a_line_widens_backwards() {
-            // There is no next character to take, so the mark goes on the
-            // last one rather than vanishing.
-            let found = diagnostic_underlines(&[error(10..10)], "let x = 1;", 0);
-            assert_eq!(found, vec![(9..10, DiagnosticSeverity::Error)]);
-        }
-
-        #[test]
-        fn a_zero_width_diagnostic_on_an_empty_line_underlines_nothing() {
-            // Nothing to widen onto in either direction; an empty line has
-            // no glyph to carry a squiggle.
-            let found = diagnostic_underlines(&[error(0..0)], "", 0);
-            assert!(found.is_empty());
-        }
-    }
-
-    /// Tests for `underline_highlights` — the severity-to-style mapping and
-    /// its interaction with the syntax colours it is painted over.
-    mod underline_styles {
-        use super::*;
-
-        #[test]
-        fn an_underline_sets_no_colour_of_its_own() {
-            // The glyphs keep whatever the grammar painted them; only the
-            // rule underneath is the diagnostic's.
-            let styled = underline_highlights(&[(0..1, DiagnosticSeverity::Error)], &Theme::dark());
-            assert!(styled[0].1.color.is_none(),
-                "an error must not repaint the token it sits under");
-        }
-    }
-
-    /// Tests for `line_highlights` — the composition `EditableLine` hands
-    /// to `StyledText`, where the syntax colours and the diagnostic
-    /// squiggles finally meet.
+    /// Tests for `line_highlights` — the composition the code editor's highlighter hands
+    /// to `StyledText`, where the syntax colours and the Markdown link rules
+    /// meet.
     mod line_style {
         use super::*;
 
@@ -4724,64 +3602,6 @@ mod tests {
         }
 
         #[test]
-        fn a_diagnostic_squiggles_its_span_without_disturbing_the_keyword() {
-            let theme = Theme::dark();
-            let palette = theme.syntax_palette();
-            let line = "let x = 1;";
-            let highlights = line_highlights(
-                Language::Rust,
-                line,
-                &[],
-                &[(4..5, DiagnosticSeverity::Warning)],
-                &theme,
-                &palette,
-            );
-
-            let marked = style_at(&highlights, 4);
-            let underline = marked.underline.expect("the diagnostic span underlines");
-            assert!(underline.wavy);
-            assert_eq!(underline.color, Some(theme.ely.warning));
-
-            let keyword = style_at(&highlights, 0);
-            assert!(
-                keyword.underline.is_none(),
-                "`let` carries no diagnostic, so it carries no squiggle"
-            );
-            assert!(
-                keyword.color.is_some(),
-                "and it keeps the colour the grammar gave it"
-            );
-        }
-
-        /// `compute_runs` — what `with_highlights` ultimately feeds — walks
-        /// the ranges assuming each starts at or after the previous one's
-        /// end. A diagnostic sitting on a coloured token breaks that
-        /// assumption, which is why `combine_highlights` replaced the plain
-        /// sort this function used to do.
-        #[test]
-        fn the_runs_come_out_disjoint_and_ascending() {
-            let theme = Theme::dark();
-            let palette = theme.syntax_palette();
-            let highlights = line_highlights(
-                Language::Rust,
-                "let x = 1;",
-                &[],
-                &[(0..6, DiagnosticSeverity::Error)],
-                &theme,
-                &palette,
-            );
-            for pair in highlights.windows(2) {
-                assert!(
-                    pair[0].0.end <= pair[1].0.start,
-                    "overlapping runs reach compute_runs as garbage offsets: \
-                     {:?} then {:?}",
-                    pair[0].0,
-                    pair[1].0
-                );
-            }
-        }
-
-        #[test]
         fn a_markdown_link_still_underlines_straight_when_nothing_is_wrong() {
             let theme = Theme::dark();
             let palette = theme.syntax_palette();
@@ -4791,7 +3611,7 @@ mod tests {
                 .map(|span| (span.label_range, span.target))
                 .collect::<Vec<_>>();
             let highlights =
-                line_highlights(Language::Markdown, line, &links, &[], &theme, &palette);
+                line_highlights(&code_spans(Language::Markdown, line), &links, &theme, &palette);
             let label = style_at(&highlights, 1);
             let underline = label.underline.expect("a link underlines");
             assert!(!underline.wavy, "a link is a straight rule; only a diagnostic waves");
@@ -4806,12 +3626,28 @@ mod tests {
         cx: &mut gpui::TestAppContext,
         path: PathBuf,
     ) -> (VisualTestContext, gpui::Entity<FileView>) {
+        mounted_file_view_with(cx, path, |_, _, _| {})
+    }
+
+    /// `mounted_file_view`, with `before_frames` run as soon as the window
+    /// exists, before the load finishes and before any frame is drawn: the
+    /// frame that creates the code editor comes after it.
+    fn mounted_file_view_with(
+        cx: &mut gpui::TestAppContext,
+        path: PathBuf,
+        before_frames: impl FnOnce(&gpui::Entity<FileView>, &mut Window, &mut gpui::App),
+    ) -> (VisualTestContext, gpui::Entity<FileView>) {
         cx.update(|cx| {
             Theme::init(cx);
             ::editor::init(cx);
+            crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| FileView::new(path, cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, app| {
+            let view = window.root::<FileView>().flatten().expect("file view root");
+            before_frames(&view, window, app);
+        });
         cx.cx.executor().allow_parking();
         for _ in 0..600 {
             let loaded = cx.update(|window, app| {
@@ -4863,6 +3699,654 @@ mod tests {
         }
     }
 
+    /// A diff that opens one hunk, on line 1, which adds a line after line 1.
+    fn one_added_line() -> sirio_git::FileDiff {
+        sirio_git::parse_diff("@@ -1,0 +2 @@\n+let z = 0;\n", Path::new("main.rs"))
+    }
+
+    // One diff fetch at a time (`begin_git_diff` / `land_git_diff`). The unit has
+    // these ways to fail, each pinned below:
+    //   - a `GitDiffStale` that arrives while a fetch runs starts another one, so an
+    //     agent rewriting the file piles up whole-worktree scans;
+    //   - the requests that arrived meanwhile are forgotten, so the marks stay on a
+    //     diff older than the file;
+    //   - they are remembered as one request each, so landing starts a run per
+    //     request instead of one;
+    //   - landing with nothing pending asks for another fetch, so a quiet file
+    //     refetches forever;
+    //   - landing no diff (a clean file, a git error) loses what arrived meanwhile.
+
+    /// Stands in for the app's one path, `refresh_git_diff`: each `GitDiffStale` asks
+    /// the view to begin a fetch, and a granted one is counted. The fetch runs until
+    /// the test lands it.
+    fn count_granted_git_diff_fetches(
+        view: &gpui::Entity<FileView>,
+        cx: &mut VisualTestContext,
+    ) -> std::rc::Rc<std::cell::Cell<usize>> {
+        let granted = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = granted.clone();
+        cx.update(|_, app| {
+            app.subscribe(view, move |view, event: &FileViewEvent, app| {
+                if matches!(event, FileViewEvent::GitDiffStale(_))
+                    && view.update(app, |view, _| view.begin_git_diff())
+                {
+                    counter.set(counter.get() + 1);
+                }
+            })
+            .detach();
+        });
+        granted
+    }
+
+    fn git_diff_goes_stale(view: &gpui::Entity<FileView>, cx: &mut VisualTestContext) {
+        view.update(&mut cx.cx, |view, cx| {
+            cx.emit(FileViewEvent::GitDiffStale(view.path().to_path_buf()));
+        });
+    }
+
+    fn land_git_diff(
+        view: &gpui::Entity<FileView>,
+        diff: Option<sirio_git::FileDiff>,
+        cx: &mut VisualTestContext,
+    ) {
+        view.update(&mut cx.cx, |view, cx| view.land_git_diff(diff, cx));
+    }
+
+    #[gpui::test]
+    async fn stale_requests_during_a_fetch_ask_for_exactly_one_more(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "let x = 1;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let granted = count_granted_git_diff_fetches(&view, &mut cx);
+
+        git_diff_goes_stale(&view, &mut cx);
+        assert_eq!(granted.get(), 1, "the first request starts a fetch");
+        for _ in 0..3 {
+            git_diff_goes_stale(&view, &mut cx);
+        }
+        assert_eq!(granted.get(), 1, "requests during the fetch start nothing");
+
+        land_git_diff(&view, None, &mut cx);
+        assert_eq!(granted.get(), 2, "landing asks once for what arrived meanwhile");
+
+        land_git_diff(&view, None, &mut cx);
+        assert_eq!(granted.get(), 2, "the re-run found nothing pending");
+    }
+
+    #[gpui::test]
+    async fn landing_with_nothing_pending_asks_for_nothing_and_frees_the_next_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "let x = 1;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let granted = count_granted_git_diff_fetches(&view, &mut cx);
+
+        git_diff_goes_stale(&view, &mut cx);
+        land_git_diff(&view, Some(one_added_line()), &mut cx);
+        assert_eq!(granted.get(), 1, "nothing was pending, so nothing is asked");
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.git_marks_text()),
+            "1:added",
+            "the landed diff is shown"
+        );
+
+        git_diff_goes_stale(&view, &mut cx);
+        assert_eq!(granted.get(), 2, "an idle view starts a fetch at once");
+    }
+
+    #[gpui::test]
+    async fn landing_no_diff_still_runs_what_arrived_meanwhile(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "let x = 1;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let granted = count_granted_git_diff_fetches(&view, &mut cx);
+
+        git_diff_goes_stale(&view, &mut cx);
+        git_diff_goes_stale(&view, &mut cx);
+        assert_eq!(granted.get(), 1, "the second request waits for the fetch");
+        land_git_diff(&view, None, &mut cx);
+        assert_eq!(granted.get(), 2, "a clean or failed answer still re-runs");
+    }
+
+    /// How many cursors the code editor holds.
+    fn cursor_count(view: &gpui::Entity<FileView>, cx: &VisualTestContext) -> usize {
+        view.read_with(&cx.cx, |view, app| {
+            view.code_editor()
+                .expect("the code editor is drawn once the file has loaded")
+                .read(app)
+                .selections()
+                .len()
+        })
+    }
+
+    #[gpui::test]
+    async fn escape_closes_find_then_a_hunk_and_leaves_the_cursors_until_none_is_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Escape is Ely's `SingleCursor`, which collapses the cursors. With find
+        // open it closes find and stops, then with a hunk drawn in place it closes
+        // that and stops, so both cursors stay. With neither open it reaches Ely,
+        // which collapses them.
+        let file = TempFile::with_extension("rs", "let x = 1;\nlet y = 2;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_git_diff(Some(one_added_line()), cx);
+            view.toggle_hunk(1, cx);
+        });
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.open_hunk_line()),
+            Some(1),
+            "the press on the mark draws the hunk"
+        );
+        open_find(&view, "let", None, &mut cx);
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.find_matches()),
+            Some(2),
+            "find is open"
+        );
+        cx.update(|window, cx| {
+            focus_code(&view, window, cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.update(|_, app| {
+            let code = view
+                .read(app)
+                .code_editor()
+                .cloned()
+                .expect("the code editor is drawn once the file has loaded");
+            code.update(app, |code, cx| code.select([0..0, 11..11], cx));
+        });
+        assert_eq!(cursor_count(&view, &cx), 2, "two cursors before the key");
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.find_matches()),
+            None,
+            "Escape closes find"
+        );
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.open_hunk_line()),
+            Some(1),
+            "that Escape leaves the hunk drawn"
+        );
+        assert_eq!(cursor_count(&view, &cx), 2, "and stops there, so the cursors stay");
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            view.read_with(&cx.cx, |view, _| view.open_hunk_line()),
+            None,
+            "the next Escape closes the hunk drawn in place"
+        );
+        assert_eq!(
+            cursor_count(&view, &cx),
+            2,
+            "that Escape stops at the hunk, so the cursors stay"
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(
+            cursor_count(&view, &cx),
+            1,
+            "with nothing open, Escape reaches Ely and collapses the cursors"
+        );
+    }
+
+    /// Opens find on `query` with the replace row on `replace`, then draws a frame.
+    fn open_find(
+        view: &gpui::Entity<FileView>,
+        query: &str,
+        replace: Option<&str>,
+        cx: &mut VisualTestContext,
+    ) {
+        let opened = cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.open_find(
+                    Some(query.to_owned()),
+                    ely_gpui_component::editor::FindOptions::default(),
+                    replace.map(str::to_owned),
+                    window,
+                    cx,
+                )
+            })
+        });
+        assert!(opened, "find opens on a file shown as code");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+        });
+    }
+
+    fn replace_matches(view: &gpui::Entity<FileView>, all: bool, cx: &mut VisualTestContext) {
+        cx.update(|window, app| {
+            view.update(app, |view, cx| view.replace_matches(all, window, cx))
+                .expect("replacing is accepted")
+        });
+        cx.run_until_parked();
+    }
+
+    /// How many matches find holds and which one is current (0-based).
+    fn found(
+        view: &gpui::Entity<FileView>,
+        cx: &VisualTestContext,
+    ) -> (Option<usize>, Option<usize>) {
+        view.read_with(&cx.cx, |view, _| (view.find_matches(), view.find_current()))
+    }
+
+    #[gpui::test]
+    async fn replacing_one_match_moves_on_to_the_next_and_keeps_the_later_ones_right(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The "é" is two bytes, so an offset counted in characters is wrong from
+        // the first match on. The replacement holds the query and is longer than
+        // it, so every later match moves and the text just written matches again.
+        let file = TempFile::with_extension("rs", "é x x x\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        open_find(&view, "x", Some("xx"), &mut cx);
+        assert_eq!(found(&view, &cx), (Some(3), Some(0)), "three matches, the first current");
+
+        replace_matches(&view, false, &mut cx);
+        assert_eq!(buffer_of(&view, &cx), "é xx x x\n");
+        assert_eq!(
+            found(&view, &cx),
+            (Some(4), Some(2)),
+            "the next match is current, not the text just written"
+        );
+
+        replace_matches(&view, false, &mut cx);
+        assert_eq!(
+            buffer_of(&view, &cx),
+            "é xx xx x\n",
+            "the later match moved with the first edit"
+        );
+        assert_eq!(found(&view, &cx), (Some(5), Some(4)));
+
+        replace_matches(&view, false, &mut cx);
+        assert_eq!(buffer_of(&view, &cx), "é xx xx xx\n");
+        assert_eq!(
+            found(&view, &cx),
+            (Some(6), Some(0)),
+            "past the last match it wraps to the first"
+        );
+    }
+
+    #[gpui::test]
+    async fn replacing_every_match_is_one_undo_step(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "x x x\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        open_find(&view, "x", Some("y"), &mut cx);
+
+        replace_matches(&view, true, &mut cx);
+        assert_eq!(buffer_of(&view, &cx), "y y y\n");
+        assert_eq!(found(&view, &cx), (Some(0), None), "nothing is left to find");
+
+        cx.update(|window, app| focus_code(&view, window, app));
+        cx.simulate_keystrokes(&clipboard_chord("z"));
+        cx.run_until_parked();
+        assert_eq!(buffer_of(&view, &cx), "x x x\n", "one undo restores every match");
+    }
+
+    #[gpui::test]
+    async fn an_edit_in_the_code_recomputes_the_matches(cx: &mut gpui::TestAppContext) {
+        let file = TempFile::with_extension("rs", "x x x\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        open_find(&view, "x", None, &mut cx);
+        assert_eq!(found(&view, &cx).0, Some(3));
+
+        cx.update(|_, app| {
+            let code = view.read(app).code_editor().cloned().expect("code editor");
+            code.update(app, |code, cx| code.edit([(0..0, "x ".to_owned())], cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx).0, Some(4), "the typed match counts");
+
+        cx.update(|_, app| {
+            let code = view.read(app).code_editor().cloned().expect("code editor");
+            code.update(app, |code, cx| code.edit([(0..4, String::new())], cx));
+        });
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx).0, Some(2), "a deleted match no longer counts");
+    }
+
+    #[gpui::test]
+    async fn the_find_key_searches_for_a_one_line_selection_and_keeps_the_query_for_any_other(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "let x = 1;\nlet y = 2;\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|window, app| {
+            init(app);
+            focus_code(&view, window, app);
+            select_code(&view, app, 4..5);
+        });
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx), (Some(1), Some(0)), "the selected `x` is the query");
+
+        // A selection that crosses a line break is no query: the old one stays.
+        cx.update(|_, app| select_code(&view, app, 0..15));
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx), (Some(1), Some(0)), "the query is still `x`");
+    }
+
+    #[gpui::test]
+    async fn escape_in_the_query_closes_find_and_hands_the_keyboard_to_the_code(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "x x x\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        open_find(&view, "x", None, &mut cx);
+        let code_focused = |cx: &mut VisualTestContext| {
+            cx.update(|window, app| {
+                let code = view.read(app).code_editor().cloned().expect("code editor");
+                code.read(app).focus_handle(app).is_focused(window)
+            })
+        };
+        assert!(!code_focused(&mut cx), "typing goes to the query while find is open");
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx).0, None, "Escape in the query closes find");
+        assert!(code_focused(&mut cx), "and the keyboard goes back to the code");
+    }
+
+    // How Find can fail around the box and the query (task 9b, from 9a's review):
+    //
+    // - A card already drawn for the code stays when the pointer slides from the
+    //   code onto the find bar.
+    // - The bar floats over the code instead of sitting above it: it hides the
+    //   first lines (and the read-only banner at the top of the code), and
+    //   closing it leaves the code at a different height than it had. No unit
+    //   test guards it; the editor E2E's `find-open` capture and the flex column
+    //   in `render_content` show the bar docked above the code.
+    // - Find pressed while typing in the query takes the code's selection as
+    //   the query, which after any step is the current match, and so replaces
+    //   a pattern such as `fo+` with the text it matched.
+    // - A selection seeds the query of a regular expression verbatim, so `f(`
+    //   is an error and `a.b` finds more than was selected.
+
+    /// The text of find's query field, `None` while find is closed.
+    fn find_query(view: &gpui::Entity<FileView>, cx: &VisualTestContext) -> Option<String> {
+        view.read_with(&cx.cx, |view, app| {
+            view.find
+                .as_ref()
+                .map(|find| find.query.read(app).text().to_owned())
+        })
+    }
+
+    fn query_focused(view: &gpui::Entity<FileView>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, app| {
+            let query = view
+                .read(app)
+                .find
+                .as_ref()
+                .expect("find is open")
+                .query
+                .clone();
+            query.read(app).focus_handle(app).is_focused(window)
+        })
+    }
+
+    #[gpui::test]
+    async fn the_pointer_sliding_from_the_code_onto_the_find_bar_drops_the_card(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Long lines and one finding over all of them, so any point of the code
+        // the pointer can reach is a point the card would answer.
+        let line = "x".repeat(400);
+        let text = format!("{line}\n{line}\n{line}\n");
+        let file = TempFile::with_extension("rs", &text);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let whole = 0..text.len();
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic {
+                    line: 0,
+                    range: whole,
+                    severity: DiagnosticSeverity::Error,
+                    message: "boom".into(),
+                }],
+                cx,
+            );
+        });
+        open_find(&view, "x", None, &mut cx);
+        let card = |cx: &VisualTestContext| {
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned))
+        };
+
+        let line_bounds = cx
+            .debug_bounds("code-editor-line-0")
+            .expect("the first line is drawn");
+        // Past the gutter.
+        let on_code = point(line_bounds.origin.x + px(300.), line_bounds.center().y);
+        cx.simulate_mouse_move(on_code, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            card(&cx).as_deref(),
+            Some("boom"),
+            "resting on the code shows the diagnostic"
+        );
+
+        let find = cx.debug_bounds("file-find").expect("the find box is drawn");
+        cx.simulate_mouse_move(find.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            card(&cx),
+            None,
+            "the pointer on the find bar does not keep the card of the code it left"
+        );
+    }
+
+    // How a hover card can outlive the pointer's visit to the code (task 12a, from
+    // 9b's review): Ely emits no `Pointer { offset: None }` when the pointer
+    // leaves the code, so a card drawn for the code stays when the pointer slides
+    // onto another surface of the tab. The cure is at the source (vendored Ely says
+    // so when the pointer leaves the code); the find bar's test above is the third
+    // of these.
+    //
+    // - A card stays when the pointer slides onto the conflict banner.
+    // - A card stays when the pointer slides onto the Markdown row.
+
+    /// Rests the pointer on the first line's code until its diagnostic card is
+    /// drawn, slides it onto `surface`, and answers the card before and after.
+    fn card_before_and_after_sliding_onto(
+        extension: &str,
+        surface: &'static str,
+        prepare: impl FnOnce(&gpui::Entity<FileView>, &mut VisualTestContext),
+        cx: &mut gpui::TestAppContext,
+    ) -> (Option<String>, Option<String>) {
+        let line = "x".repeat(400);
+        let text = format!("{line}\n{line}\n{line}\n");
+        let file = TempFile::with_extension(extension, &text);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let whole = 0..text.len();
+        prepare(&view, &mut cx);
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic {
+                    line: 0,
+                    range: whole,
+                    severity: DiagnosticSeverity::Error,
+                    message: "boom".into(),
+                }],
+                cx,
+            );
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        let card = |cx: &VisualTestContext| {
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned))
+        };
+        let line_bounds = cx
+            .debug_bounds("code-editor-line-0")
+            .expect("the first line is drawn");
+        let on_code = point(line_bounds.origin.x + px(300.), line_bounds.center().y);
+        cx.simulate_mouse_move(on_code, None, Modifiers::none());
+        cx.run_until_parked();
+        let before = card(&cx);
+        let target = cx.debug_bounds(surface).expect("the surface is drawn");
+        cx.simulate_mouse_move(target.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        (before, card(&cx))
+    }
+
+    #[gpui::test]
+    async fn the_pointer_sliding_from_the_code_onto_the_conflict_banner_drops_the_card(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (before, after) = card_before_and_after_sliding_onto(
+            "rs",
+            "file-conflict-banner",
+            |view, cx| {
+                view.update(&mut cx.cx, |view, cx| {
+                    let editor = view.editor_mut().expect("editor loaded");
+                    editor.insert(0, "user edit\n").expect("local edit");
+                    cx.notify();
+                });
+                std::fs::write(view.read_with(&cx.cx, |view, _| view.path().to_path_buf()), "external\n")
+                    .expect("external write");
+                view.update(&mut cx.cx, |view, cx| view.check_external(cx));
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.simulate_next_frame(cx);
+                    window.simulate_next_frame(cx);
+                });
+            },
+            cx,
+        );
+        assert_eq!(before.as_deref(), Some("boom"), "resting on the code shows it");
+        assert_eq!(after, None, "the banner does not keep the code's card");
+    }
+
+    #[gpui::test]
+    async fn the_pointer_sliding_from_the_code_onto_the_markdown_row_drops_the_card(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (before, after) =
+            card_before_and_after_sliding_onto(
+                "md",
+                "file-markdown-row",
+                |view, cx| {
+                    view.update(&mut cx.cx, |view, cx| {
+                        view.set_markdown_mode(MarkdownMode::Code, cx)
+                    });
+                },
+                cx,
+            );
+        assert_eq!(before.as_deref(), Some("boom"), "resting on the code shows it");
+        assert_eq!(after, None, "the Markdown row does not keep the code's card");
+    }
+
+    #[gpui::test]
+    async fn the_find_key_in_the_query_selects_it_and_never_reseeds_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "foo fooo foo\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|_, app| init(app));
+        let options = ely_gpui_component::editor::FindOptions {
+            regex: true,
+            ..Default::default()
+        };
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.open_find(Some("fo+".into()), options, None, window, cx)
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx), (Some(3), Some(0)));
+        assert!(query_focused(&view, &mut cx), "open_find puts the keyboard in the query");
+
+        // `open_find` selected the first match in the code, `foo`: the text a
+        // seed would take.
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(
+            find_query(&view, &cx).as_deref(),
+            Some("fo+"),
+            "Find in the query field does not replace the pattern with the code's selection"
+        );
+        assert!(query_focused(&view, &mut cx), "and the keyboard stays in the query");
+        assert_eq!(found(&view, &cx), (Some(3), Some(0)));
+    }
+
+    #[gpui::test]
+    async fn a_selection_that_is_the_current_match_is_not_a_new_query(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "foo fooo foo\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|_, app| init(app));
+        let options = ely_gpui_component::editor::FindOptions {
+            regex: true,
+            ..Default::default()
+        };
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.open_find(Some("fo+".into()), options, None, window, cx);
+                view.find_step(true, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(found(&view, &cx), (Some(3), Some(1)), "`fooo` is current and selected");
+
+        cx.update(|window, app| focus_code(&view, window, app));
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(
+            find_query(&view, &cx).as_deref(),
+            Some("fo+"),
+            "the code's selection is the match the query found, not a new query"
+        );
+        assert_eq!(found(&view, &cx), (Some(3), Some(1)));
+    }
+
+    #[gpui::test]
+    async fn a_selection_seeds_a_regular_expression_query_literally(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let file = TempFile::with_extension("rs", "f(x) a.b axb\n");
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        cx.update(|_, app| init(app));
+        let options = ely_gpui_component::editor::FindOptions {
+            regex: true,
+            ..Default::default()
+        };
+        cx.update(|window, app| {
+            view.update(app, |view, cx| {
+                view.open_find(Some("zzz".into()), options, None, window, cx)
+            });
+            focus_code(&view, window, app);
+            select_code(&view, app, 0..2);
+        });
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(
+            find_query(&view, &cx).as_deref(),
+            Some(r"f\("),
+            "the selected `f(` is escaped for a pattern"
+        );
+        assert_eq!(found(&view, &cx), (Some(1), Some(0)));
+        assert_eq!(view.read_with(&cx.cx, |view, _| view.find_error().map(str::to_owned)), None);
+
+        // `a.b` selected: the escaped dot does not match `axb`.
+        cx.update(|window, app| {
+            focus_code(&view, window, app);
+            select_code(&view, app, 5..8);
+        });
+        cx.simulate_keystrokes(&clipboard_chord("f"));
+        cx.run_until_parked();
+        assert_eq!(find_query(&view, &cx).as_deref(), Some(r"a\.b"));
+        assert_eq!(found(&view, &cx), (Some(1), Some(0)), "`axb` is not a match of `a.b`");
+    }
+
     #[gpui::test]
     async fn the_context_menu_paints_at_the_click_point_behind_a_non_zero_origin(
         cx: &mut gpui::TestAppContext,
@@ -4905,6 +4389,7 @@ mod tests {
         cx.update(|cx| {
             Theme::init(cx);
             ::editor::init(cx);
+            crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| {
             let view = cx.new(|cx| FileView::new(path, cx));
@@ -4955,10 +4440,7 @@ mod tests {
         });
         let start = buffer.find("        let a").expect("first indented line");
         let end = buffer.find("\n}").expect("closing brace");
-        view.update(&mut cx.cx, |view, cx| {
-            view.source_selection = Some(Selection { start, end });
-            cx.notify();
-        });
+        cx.update(|_, app| select_code(&view, app, start..end));
 
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
@@ -4988,10 +4470,9 @@ mod tests {
         }
     }
 
-    /// The editor's clipboard chords. Copy, Cut and Paste existed only on
-    /// the right-click menu: `on_editor_key` returned on every command
-    /// chord, and no binding anywhere claimed the `FileEditor` context, so
-    /// the keyboard route into the clipboard did not exist at all.
+    /// The editor's clipboard chords reach the code editor's own keymap and
+    /// move the selection through the model: copy writes it, cut takes it out
+    /// and paste puts the clipboard back in its place.
     #[gpui::test]
     async fn the_clipboard_chords_copy_cut_and_paste_the_source_selection(
         cx: &mut gpui::TestAppContext,
@@ -4999,16 +4480,12 @@ mod tests {
         let file = TempFile::with_extension("rs", "alpha beta\n");
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
         cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            focus_code(&view, window, cx);
             window.simulate_next_frame(cx);
         });
 
         // Copy: the selection reaches the clipboard, the buffer is untouched.
-        view.update(&mut cx.cx, |view, cx| {
-            view.source_selection = Some(Selection { start: 0, end: 5 });
-            view.caret = 5;
-            cx.notify();
-        });
+        cx.update(|_, app| select_code(&view, app, 0..5));
         cx.simulate_keystrokes(&clipboard_chord("c"));
         cx.run_until_parked();
         assert_eq!(
@@ -5053,19 +4530,18 @@ mod tests {
         );
     }
 
-    /// Select-all answered `ctrl-a` alone, so on macOS — the reference
-    /// release platform — ⌘A did nothing, and the select-all-then-copy
-    /// flow had no keyboard route into the clipboard however well the
-    /// copy chord itself worked.
+    /// Select-all is the editor's secondary chord: ⌘A on macOS, Ctrl-A
+    /// elsewhere. The source surface answered Ctrl-A everywhere and ⌘A on
+    /// macOS, so a macOS user's Ctrl-A stopped selecting all with the code
+    /// editor, which takes Ely's keymap (spec §5.4). The Linux and Windows
+    /// platform chord no longer selects all either.
     #[gpui::test]
-    async fn select_all_answers_both_the_control_and_the_platform_chord(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn select_all_answers_the_secondary_chord(cx: &mut gpui::TestAppContext) {
         const SOURCE: &str = "alpha beta\n";
         let file = TempFile::with_extension("rs", SOURCE);
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
         cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            focus_code(&view, window, cx);
             window.simulate_next_frame(cx);
         });
         let whole = Some(Selection {
@@ -5073,26 +4549,12 @@ mod tests {
             end: SOURCE.len(),
         });
 
-        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_keystrokes(&clipboard_chord("a"));
         cx.run_until_parked();
         assert_eq!(
-            view.read_with(&cx.cx, |view, _| view.source_selection),
+            view.read_with(&cx.cx, |view, app| view.code_selection(app)),
             whole,
-            "the platform chord must select the whole buffer"
-        );
-
-        // And the chord that already worked still has to.
-        view.update(&mut cx.cx, |view, cx| {
-            view.source_selection = None;
-            view.caret = 0;
-            cx.notify();
-        });
-        cx.simulate_keystrokes("ctrl-a");
-        cx.run_until_parked();
-        assert_eq!(
-            view.read_with(&cx.cx, |view, _| view.source_selection),
-            whole,
-            "the control chord must keep selecting the whole buffer"
+            "the secondary chord must select the whole buffer"
         );
     }
 
@@ -5106,11 +4568,14 @@ mod tests {
     ) {
         let file = TempFile::with_extension("md", "# Title\n\nHello.\n");
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        // The keyboard starts in the code, then the reader switches to the
+        // preview. The code editor hands the keyboard back to the view, so the
+        // paste below reaches neither the code editor nor the buffer.
         cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.set_markdown_mode(MarkdownMode::Preview, cx);
-                view.editor_focus.focus(window, cx);
-            });
+            view.update(cx, |view, cx| view.set_markdown_mode(MarkdownMode::Code, cx));
+            window.simulate_next_frame(cx);
+            focus_code(&view, window, cx);
+            view.update(cx, |view, cx| view.set_markdown_mode(MarkdownMode::Preview, cx));
             window.simulate_next_frame(cx);
         });
         assert_eq!(
@@ -5118,6 +4583,12 @@ mod tests {
             MarkdownMode::Preview,
             "the fixture must actually be showing the preview"
         );
+        cx.update(|window, app| {
+            assert!(
+                view.read(app).editor_focus.is_focused(window),
+                "the preview has the keyboard, not the hidden code editor"
+            );
+        });
 
         cx.update(|_, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string("intruder".to_string()));
@@ -5166,10 +4637,7 @@ mod tests {
         });
         let start = buffer.find("fn b").expect("second line");
         let end = start + "fn b() {}".len();
-        view.update(&mut cx.cx, |view, cx| {
-            view.source_selection = Some(Selection { start, end });
-            cx.notify();
-        });
+        cx.update(|_, app| select_code(&view, app, start..end));
 
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
@@ -5215,7 +4683,7 @@ mod tests {
         );
 
         cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
+            focus_code(&view, window, cx);
             window.simulate_next_frame(cx);
         });
         cx.simulate_keystrokes("ctrl-end");
@@ -5230,46 +4698,6 @@ mod tests {
         assert_eq!(
             std::fs::read(file.path()).expect("saved file"),
             expected.as_bytes()
-        );
-    }
-
-    /// Drives one blink cycle of the source surface's insertion bar.
-    /// `caret::schedule` keeps the surface's `Blink` ticking, but the gate
-    /// that decides whether the bar is painted never read that state back,
-    /// so a focused editor drew a permanently-solid bar — the one thing a
-    /// caret must not be.
-    #[gpui::test]
-    async fn the_editor_caret_blinks_while_the_source_surface_holds_focus(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let file = TempFile::with_extension("txt", "hello\n");
-        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| view.editor_focus.focus(window, cx));
-        });
-        cx.cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-
-        assert!(
-            view.read_with(&cx.cx, |view, _| view.editor_caret_visible),
-            "a focused source surface paints its insertion bar"
-        );
-
-        cx.cx.executor().advance_clock(caret::BLINK_INTERVAL);
-        cx.cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-
-        assert!(
-            !view.read_with(&cx.cx, |view, _| view.editor_caret_visible),
-            "one blink interval later the bar must be dark — a bar that never \
-             goes dark is a decoration, not a caret"
         );
     }
 
@@ -5428,9 +4856,9 @@ mod tests {
         });
 
         cx.update(|window, app| {
-            view.update(app, |view, cx| view.editor_focus.focus(window, cx));
+            focus_code(&view, window, app);
+            window.simulate_next_frame(app);
         });
-        cx.update(|window, app| window.simulate_next_frame(app));
         #[cfg(target_os = "macos")]
         cx.simulate_keystrokes("cmd-a");
         #[cfg(not(target_os = "macos"))]
@@ -5450,6 +4878,9 @@ mod tests {
             );
         }
 
+        let code = view
+            .read_with(&cx.cx, |view, _| view.code_editor().cloned())
+            .expect("the code editor is drawn in Code mode");
         let mut previous = view.read_with(&cx.cx, |view, _| {
             view.editor().expect("editor loaded").buffer().to_owned()
         });
@@ -5477,6 +4908,11 @@ mod tests {
                     .to_owned()
             });
             assert_ne!(current, previous, "{selector} changes Markdown source");
+            assert_eq!(
+                code.read_with(&cx.cx, |code, _| code.text().to_owned()),
+                current,
+                "{selector} shows its change in the code editor"
+            );
             previous = current;
         }
     }
@@ -5616,6 +5052,7 @@ mod tests {
         std::fs::write(&note, "# Notes\n\nSelect this paragraph.\n").expect("write file");
 
         cx.update(::editor::init);
+        cx.update(crate::ely::init);
         let path = note.clone();
         let (view, _, cx) = testing::host(cx, move |_, cx| FileView::new(path, cx));
         cx.cx.executor().allow_parking();
@@ -5649,101 +5086,6 @@ mod tests {
             Some("Notes\n\nSelect this paragraph.")
         );
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A long file costs a frame only what fits the viewport: rows are
-    /// materialized from the visible range, so the first line is drawn and
-    /// a line thousands of rows below is never laid out. Before this, every
-    /// line became an element on every frame — each with its own
-    /// tree-sitter pass and text shaping — and since gpui draws the window
-    /// in one pass, one long file stalled the whole app, not just the tab.
-    #[gpui::test]
-    async fn a_long_file_draws_only_the_visible_lines(cx: &mut gpui::TestAppContext) {
-        let mut source = String::new();
-        for i in 0..4000 {
-            source.push_str(&format!(
-                "fn function_{i}(value: u32) -> u32 {{ let result = value * {i}; // comment\n    result + 1 }}\n"
-            ));
-        }
-        assert_eq!(source.lines().count(), 8000);
-        let file = TempFile::with_extension("rs", &source);
-        let (mut cx, _view) = mounted_file_view(cx, file.path().to_path_buf());
-
-        let start = std::time::Instant::now();
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-        eprintln!(
-            "[file_view] one frame over 8000 lines took {:?}",
-            start.elapsed()
-        );
-
-        assert!(
-            cx.debug_bounds("file-source-line-0").is_some(),
-            "the first line is drawn"
-        );
-        assert!(
-            cx.debug_bounds("file-source-line-7999").is_none(),
-            "a line far below the viewport is not laid out at all"
-        );
-    }
-
-    #[gpui::test]
-    async fn file_horizontal_bar_tracks_wide_source_without_changing_vertical_scroll(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let wide = TempFile::with_extension(
-            "rs",
-            &format!("{}\n{}", "w".repeat(400), "x\n".repeat(400)),
-        );
-        let (mut cx, view) = mounted_file_view(cx, wide.path().to_path_buf());
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-        assert!(cx.debug_bounds("file-horizontal-bar-track").is_some());
-        assert!(cx.debug_bounds("file-horizontal-bar-thumb").is_some());
-        assert!(cx.debug_bounds("file-text-bar").is_some());
-
-        let before_y = view.read_with(&cx.cx, |v, _| {
-            v.scroll.source.0.borrow().base_handle.offset().y
-        });
-        let track = cx.debug_bounds("file-horizontal-bar-track").unwrap();
-        let thumb = cx.debug_bounds("file-horizontal-bar-thumb").unwrap();
-        let end = gpui::point(track.right() - px(2.), thumb.center().y);
-        cx.simulate_mouse_move(thumb.center(), None, Modifiers::none());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.simulate_mouse_down(thumb.center(), MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_move(
-            gpui::point(thumb.center().x + px(8.), thumb.center().y),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
-        cx.run_until_parked();
-        view.read_with(&cx.cx, |v, _| {
-            let position = v.scroll.source.0.borrow().base_handle.offset();
-            assert!(position.x < px(0.));
-            assert_eq!(position.y, before_y);
-        });
-
-        let short = TempFile::with_extension("rs", "fn main() {}\n");
-        let (mut cx, _) = mounted_file_view(&mut cx.cx, short.path().to_path_buf());
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-        assert!(cx.debug_bounds("file-horizontal-bar-track").is_none());
-
-        let markdown = TempFile::with_extension("md", &format!("{}\n", "w".repeat(400)));
-        let (mut cx, _) = mounted_file_view(&mut cx.cx, markdown.path().to_path_buf());
-        cx.update(|window, cx| {
-            window.refresh();
-            window.simulate_next_frame(cx);
-        });
-        assert!(cx.debug_bounds("file-horizontal-bar-track").is_none());
     }
 
     /// The same contract for the rendered Markdown document in Preview.
@@ -6095,21 +5437,95 @@ mod tests {
         }
     }
 
+    /// A snapshot's revision is drawn read-only: its text is on screen, and
+    /// typing, a paste, the view's own edits (a replacement, a Markdown format,
+    /// a save) leave it as it was and clean. An `Unlock` the code editor
+    /// announces (the one word it has for "Make editable") is taken back before
+    /// the next key arrives, so a key after it changes nothing either.
     #[gpui::test]
-    async fn a_snapshot_shows_the_revisions_text_and_refuses_every_edit(cx: &mut gpui::TestAppContext) {
-        cx.update(Theme::init);
-        let view = cx.new(|cx| FileView::snapshot(snapshot_origin_for_tests(), b"hello\nworld\n".to_vec(), cx));
-        view.update(cx, |view, cx| {
+    async fn a_snapshot_shows_the_revisions_text_and_refuses_every_edit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use ely_gpui_component::editor::EditorEvent;
+
+        cx.update(|cx| {
+            Theme::init(cx);
+            ::editor::init(cx);
+            crate::ely::init(cx);
+        });
+        let window = cx.add_window(|_window, cx| {
+            FileView::snapshot(
+                snapshot_origin_for_tests(),
+                b"hello\nworld\n".to_vec(),
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let view = cx.update(|window, _| window.root::<FileView>().flatten().expect("root"));
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        let code = view
+            .read_with(&cx.cx, |view, _| view.code_editor().cloned())
+            .expect("the snapshot's code editor is drawn");
+        assert!(
+            cx.debug_bounds("code-editor-line-0").is_some(),
+            "the revision's text is on screen"
+        );
+        assert!(
+            code.read_with(&cx.cx, |code, _| code.is_read_only()),
+            "the code editor is drawn read-only"
+        );
+
+        cx.update(|window, cx| focus_code(&view, window, cx));
+        cx.update(|_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("intruder".to_string()));
+        });
+        cx.simulate_input("X");
+        cx.simulate_keystrokes(&clipboard_chord("v"));
+        cx.run_until_parked();
+        assert_eq!(
+            buffer_of(&view, &cx),
+            "hello\nworld\n",
+            "typing and pasting leave a snapshot alone"
+        );
+        assert_eq!(
+            code.read_with(&cx.cx, |code, _| code.text().to_owned()),
+            "hello\nworld\n",
+            "and the code editor still shows the revision"
+        );
+
+        // What Ely's "Make editable" did (it is not drawn now): unlock, then announce it.
+        code.update(&mut cx.cx, |code, cx| {
+            code.set_read_only(false, cx);
+            cx.emit(EditorEvent::Unlock);
+        });
+        cx.run_until_parked();
+        assert!(
+            code.read_with(&cx.cx, |code, _| code.is_read_only()),
+            "a snapshot takes its read-only lock back when it is unlocked"
+        );
+        cx.simulate_input("Y");
+        cx.simulate_keystrokes(&clipboard_chord("v"));
+        cx.run_until_parked();
+        assert_eq!(
+            buffer_of(&view, &cx),
+            "hello\nworld\n",
+            "an unlock does not let a snapshot be edited"
+        );
+
+        view.update(&mut cx.cx, |view, cx| {
             assert!(view.is_snapshot());
             assert_eq!(view.editor().expect("loaded").buffer(), "hello\nworld\n");
             assert_eq!(
                 view.snapshot_origin().expect("origin").label(),
                 "#578 at a1b2c3d"
             );
-            view.replace_selection("X");
+            view.replace_code_selection("X", cx);
             view.apply_markdown_format(MarkdownFormatOp::Bold, cx);
-            view.delete_backward();
-            view.delete_forward();
+            view.replace_code_selection("", cx);
             assert_eq!(view.editor().expect("loaded").buffer(), "hello\nworld\n", "nothing edits a snapshot");
             assert!(!view.is_dirty());
             let saved = view.save(cx);
@@ -6184,6 +5600,7 @@ mod tests {
         cx.update(|cx| {
             Theme::init(cx);
             ::editor::init(cx);
+            crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| {
             let mut view = FileView::snapshot_pending(snapshot_origin_for_tests(), cx);
@@ -6204,7 +5621,7 @@ mod tests {
             window.simulate_next_frame(cx);
         });
         assert!(
-            cx.debug_bounds("file-source-line-350").is_some(),
+            cx.debug_bounds("code-editor-line-350").is_some(),
             "the held reveal scrolls the line into view once the retry lands"
         );
     }
@@ -6260,6 +5677,7 @@ mod tests {
         cx.update(|cx| {
             Theme::init(cx);
             ::editor::init(cx);
+            crate::ely::init(cx);
         });
         let window =
             cx.add_window(|_window, cx| FileView::snapshot_pending(snapshot_origin_for_tests(), cx));

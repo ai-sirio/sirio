@@ -9,7 +9,7 @@
 //! Rust workspaces inside one worktree need two servers, and this repository
 //! is itself a case where the project root (`rust/`) is not the worktree root.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use sirio_lsp::{Capabilities, ConfigLoader, LanguageEntry, LanguageTable, Reload, Server};
@@ -159,6 +159,10 @@ pub struct LspSupervisor {
     /// `Editor`'s eleven buffer-write sites, and a `String` comparison
     /// checks length before it reads a byte.
     synced: HashMap<PathBuf, String>,
+    /// Keys a launch is under way for: set before the server is spawned,
+    /// cleared when the launch answers either way. What the status row's
+    /// "starting" is read from (`state_of`).
+    starting: HashSet<(PathBuf, String)>,
 }
 
 /// Why a key has no server and will not be tried again — and, for the arms
@@ -179,8 +183,8 @@ pub enum Dead {
     NotInstalled { command: String },
     /// It launched and then failed. Already shown on a card at the moment
     /// it happened; nothing further is owed, and reinstalling is not the
-    /// cure.
-    Failed,
+    /// cure. What it said is kept for the status row.
+    Failed { message: String },
 }
 
 /// What a document needs told to a server, if anything.
@@ -200,6 +204,42 @@ impl LspSupervisor {
             versions: sirio_lsp::DocumentVersions::default(),
             dead: HashMap::new(),
             synced: HashMap::new(),
+            starting: HashSet::new(),
+        }
+    }
+
+    /// A launch for `key` is about to be spawned.
+    pub fn mark_starting(&mut self, key: (PathBuf, String)) {
+        self.starting.insert(key);
+    }
+
+    /// Whether a launch for `key` is under way.
+    pub fn is_starting(&self, key: &(PathBuf, String)) -> bool {
+        self.starting.contains(key)
+    }
+
+    /// The launch for `key` answered, with a server or without one.
+    pub fn finish_starting(&mut self, key: &(PathBuf, String)) {
+        self.starting.remove(key);
+    }
+
+    /// Where the server for `key` stands, as the status row names it:
+    /// launching, running, or failed to launch. `None` when there is nothing
+    /// to name: no launch was tried, or the program is not there to run (the
+    /// row says nothing about a missing server, which nearly every file has).
+    /// A server that dies after it started is not noticed today, so `Failed`
+    /// covers launch failures only.
+    pub fn state_of(&self, key: &(PathBuf, String)) -> Option<sirio_ui::file_view::LspState> {
+        use sirio_ui::file_view::LspState;
+        if self.starting.contains(key) {
+            return Some(LspState::Starting);
+        }
+        if self.servers.contains_key(key) {
+            return Some(LspState::Ready);
+        }
+        match self.dead.get(key) {
+            Some(Dead::Failed { message }) => Some(LspState::Failed(message.clone().into())),
+            _ => None,
         }
     }
 
@@ -331,7 +371,7 @@ impl LspSupervisor {
     /// being restarted in a loop.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn revive(&mut self, key: &(PathBuf, String)) {
-        if matches!(self.dead.get(key), Some(Dead::Failed)) {
+        if matches!(self.dead.get(key), Some(Dead::Failed { .. })) {
             return;
         }
         self.dead.remove(key);
@@ -729,7 +769,12 @@ mod tests {
         let root = std::path::Path::new("/repo");
         let entry = supervisor.entry_for(file).expect("rust is in the defaults");
         let key = supervisor.key_for(file, root, &entry);
-        supervisor.mark_dead(key.clone(), Dead::Failed);
+        supervisor.mark_dead(
+            key.clone(),
+            Dead::Failed {
+                message: "crashed".to_owned(),
+            },
+        );
 
         supervisor.revive(&key);
 

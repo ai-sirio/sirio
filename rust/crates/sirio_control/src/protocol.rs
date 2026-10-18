@@ -833,6 +833,173 @@ pub mod request {
         request("surface.file.read", BTreeMap::new())
     }
 
+    /// The `surface.editor.*` verbs drive the active file tab's code editor.
+    /// Debug builds only: a release build answers "unknown method".
+    pub fn editor_open(path: &str) -> ControlRequest {
+        request(
+            "surface.editor.open",
+            BTreeMap::from([("path".to_string(), path.to_string())]),
+        )
+    }
+
+    pub fn editor_open_snapshot(sha: &str, path: &str) -> ControlRequest {
+        request(
+            "surface.editor.open_snapshot",
+            BTreeMap::from([
+                ("sha".to_string(), sha.to_string()),
+                ("path".to_string(), path.to_string()),
+            ]),
+        )
+    }
+
+    pub fn editor_state() -> ControlRequest {
+        request("surface.editor.state", BTreeMap::new())
+    }
+
+    pub fn editor_type(text: &str) -> ControlRequest {
+        request(
+            "surface.editor.type",
+            BTreeMap::from([("text".to_string(), text.to_string())]),
+        )
+    }
+
+    pub fn editor_keys(keys: &str) -> ControlRequest {
+        request(
+            "surface.editor.keys",
+            BTreeMap::from([("keys".to_string(), keys.to_string())]),
+        )
+    }
+
+    pub fn editor_select(ranges: &str) -> ControlRequest {
+        request(
+            "surface.editor.select",
+            BTreeMap::from([("ranges".to_string(), ranges.to_string())]),
+        )
+    }
+
+    pub fn editor_hover(offset: usize) -> ControlRequest {
+        request(
+            "surface.editor.hover",
+            BTreeMap::from([("offset".to_string(), offset.to_string())]),
+        )
+    }
+
+    pub fn editor_click(offset: usize, platform: bool) -> ControlRequest {
+        request(
+            "surface.editor.click",
+            BTreeMap::from([
+                ("offset".to_string(), offset.to_string()),
+                ("platform".to_string(), platform.to_string()),
+            ]),
+        )
+    }
+
+    pub fn editor_context(offset: usize, action: &str) -> ControlRequest {
+        request(
+            "surface.editor.context",
+            BTreeMap::from([
+                ("offset".to_string(), offset.to_string()),
+                ("action".to_string(), action.to_string()),
+            ]),
+        )
+    }
+
+    pub fn editor_git_mark(line: usize) -> ControlRequest {
+        request(
+            "surface.editor.git_mark",
+            BTreeMap::from([("line".to_string(), line.to_string())]),
+        )
+    }
+
+    /// Opens find. `query` and `replace` are left out of the request when `None`
+    /// (the open find keeps them); the three options are always sent.
+    pub fn editor_find(
+        query: Option<&str>,
+        case: bool,
+        word: bool,
+        regex: bool,
+        replace: Option<&str>,
+    ) -> ControlRequest {
+        let mut params = BTreeMap::from([
+            ("case".to_string(), case.to_string()),
+            ("word".to_string(), word.to_string()),
+            ("regex".to_string(), regex.to_string()),
+        ]);
+        if let Some(query) = query {
+            params.insert("query".to_string(), query.to_string());
+        }
+        if let Some(replace) = replace {
+            params.insert("replace".to_string(), replace.to_string());
+        }
+        request("surface.editor.find", params)
+    }
+
+    pub fn editor_find_step(forward: bool) -> ControlRequest {
+        request(
+            "surface.editor.find_step",
+            BTreeMap::from([("forward".to_string(), forward.to_string())]),
+        )
+    }
+
+    pub fn editor_replace(all: bool) -> ControlRequest {
+        request(
+            "surface.editor.replace",
+            BTreeMap::from([("all".to_string(), all.to_string())]),
+        )
+    }
+
+    pub fn editor_find_close() -> ControlRequest {
+        request("surface.editor.find_close", BTreeMap::new())
+    }
+
+    pub fn editor_crumb(index: usize) -> ControlRequest {
+        request(
+            "surface.editor.crumb",
+            BTreeMap::from([("index".to_string(), index.to_string())]),
+        )
+    }
+
+    pub fn editor_save() -> ControlRequest {
+        request("surface.editor.save", BTreeMap::new())
+    }
+
+    pub fn editor_conflict(action: &str) -> ControlRequest {
+        request(
+            "surface.editor.conflict",
+            BTreeMap::from([("action".to_string(), action.to_string())]),
+        )
+    }
+
+    pub fn editor_mode(mode: &str) -> ControlRequest {
+        request(
+            "surface.editor.mode",
+            BTreeMap::from([("mode".to_string(), mode.to_string())]),
+        )
+    }
+
+    /// `surface.editor.status`: `value` is the choice, `open` opens (`true`) or
+    /// closes (`false`) the item's popover instead.
+    pub fn editor_status(item: &str, value: Option<&str>, open: Option<bool>) -> ControlRequest {
+        let mut params = BTreeMap::from([("item".to_string(), item.to_string())]);
+        if let Some(value) = value {
+            params.insert("value".to_string(), value.to_string());
+        }
+        if let Some(open) = open {
+            params.insert("open".to_string(), open.to_string());
+        }
+        request("surface.editor.status", params)
+    }
+
+    pub fn editor_pref(key: &str, value: &str) -> ControlRequest {
+        request(
+            "surface.editor.pref",
+            BTreeMap::from([
+                ("key".to_string(), key.to_string()),
+                ("value".to_string(), value.to_string()),
+            ]),
+        )
+    }
+
     /// Opens the non-drawing chat surface for a worktree.
     pub fn chat_open(worktree: Option<&str>) -> ControlRequest {
         let mut params = BTreeMap::new();

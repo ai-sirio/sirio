@@ -1,3 +1,4 @@
+use crate::LineEnding;
 use std::path::{Path, PathBuf};
 
 /// The externally observable state of an open document.
@@ -10,11 +11,17 @@ pub enum DocumentChange {
 }
 
 /// A UTF-8 markdown document with conflict-aware external reload behavior.
+///
+/// The text is LF-only; the line ending the disk used is kept beside it and
+/// applied on save. The document is dirty when the text differs from the
+/// LF-normalized disk text, or when the ending differs from the disk's.
 #[derive(Debug)]
 pub struct MarkdownDocument {
     path: PathBuf,
     text: String,
     saved_text: String,
+    line_ending: LineEnding,
+    saved_line_ending: LineEnding,
     dirty: bool,
     conflict: bool,
     deleted: bool,
@@ -50,13 +57,17 @@ impl From<std::io::Error> for DocumentError {
 impl MarkdownDocument {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, DocumentError> {
         let path = path.into();
-        let text = std::fs::read(&path)
+        let raw = std::fs::read(&path)
             .map_err(DocumentError::Io)
             .and_then(|bytes| String::from_utf8(bytes).map_err(DocumentError::InvalidUtf8))?;
+        let line_ending = LineEnding::detect(&raw);
+        let text = LineEnding::normalize(&raw);
         Ok(Self {
             path,
             saved_text: text.clone(),
             text,
+            line_ending,
+            saved_line_ending: line_ending,
             dirty: false,
             conflict: false,
             deleted: false,
@@ -71,6 +82,11 @@ impl MarkdownDocument {
         &self.text
     }
 
+    /// The ending the next save writes.
+    pub fn line_ending(&self) -> LineEnding {
+        self.line_ending
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
@@ -83,9 +99,21 @@ impl MarkdownDocument {
         self.deleted
     }
 
+    /// Replaces the text. `text` must be LF-only; the caller normalizes it.
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
-        self.dirty = self.text != self.saved_text;
+        self.recompute_dirty();
+    }
+
+    /// Chooses the ending the next save writes. Changing it away from the
+    /// disk's ending is an unsaved edit.
+    pub fn set_line_ending(&mut self, line_ending: LineEnding) {
+        self.line_ending = line_ending;
+        self.recompute_dirty();
+    }
+
+    fn recompute_dirty(&mut self) {
+        self.dirty = self.text != self.saved_text || self.line_ending != self.saved_line_ending;
     }
 
     /// Detects an external change and reloads it only when local text is clean.
@@ -98,8 +126,8 @@ impl MarkdownDocument {
             }
             Err(error) => return Err(DocumentError::Io(error)),
         };
-        let external = String::from_utf8(bytes).map_err(DocumentError::InvalidUtf8)?;
-        if external == self.saved_text {
+        let raw = String::from_utf8(bytes).map_err(DocumentError::InvalidUtf8)?;
+        if LineEnding::matches(&raw, &self.saved_text, self.saved_line_ending) {
             self.conflict = false;
             self.deleted = false;
             return Ok(DocumentChange::Unchanged);
@@ -109,13 +137,18 @@ impl MarkdownDocument {
             self.deleted = false;
             return Ok(DocumentChange::Conflict);
         }
+        let external = LineEnding::normalize(&raw);
+        let external_line_ending = LineEnding::detect(&raw);
         self.text = external.clone();
         self.saved_text = external;
+        self.line_ending = external_line_ending;
+        self.saved_line_ending = external_line_ending;
         self.deleted = false;
         Ok(DocumentChange::Reloaded)
     }
 
-    /// Atomically writes the current text and clears dirty/conflict state.
+    /// Atomically writes the current text, with the line ending applied, and
+    /// clears dirty/conflict state.
     pub fn save(&mut self) -> Result<(), DocumentError> {
         if self.conflict {
             return Err(DocumentError::Conflict);
@@ -130,7 +163,7 @@ impl MarkdownDocument {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
         let temp = parent.join(format!(".{name}.sirio-{}-{nonce}-tmp", std::process::id()));
-        std::fs::write(&temp, self.text.as_bytes())?;
+        std::fs::write(&temp, self.line_ending.apply(&self.text))?;
         // The sync handle needs write access: Windows rejects flushing a
         // read-only handle with os error 5 (access denied — FlushFileBuffers
         // demands GENERIC_WRITE), while Unix fsync accepts any open mode,
@@ -145,6 +178,7 @@ impl MarkdownDocument {
         }
         std::fs::rename(&temp, &self.path)?;
         self.saved_text = self.text.clone();
+        self.saved_line_ending = self.line_ending;
         self.dirty = false;
         self.conflict = false;
         self.deleted = false;
@@ -157,13 +191,14 @@ impl MarkdownDocument {
     /// recreate it.
     pub fn keep_external(&mut self) {
         if let Ok(bytes) = std::fs::read(&self.path)
-            && let Ok(external) = String::from_utf8(bytes)
+            && let Ok(raw) = String::from_utf8(bytes)
         {
-            self.saved_text = external;
+            self.saved_text = LineEnding::normalize(&raw);
+            self.saved_line_ending = LineEnding::detect(&raw);
             self.deleted = false;
         }
         self.conflict = false;
-        self.dirty = self.text != self.saved_text;
+        self.recompute_dirty();
     }
 }
 
