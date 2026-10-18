@@ -113,6 +113,13 @@ set -eEuo pipefail
 #                     byte for byte
 #   escape            Escape closes find from the code, and from the query field with a
 #                     real X key, after which a typed key lands in the code
+#   send_to_agent     the context menu's Send to agent puts the file, the line range and
+#                     the selected lines in the chat's composer; a second send appends
+#   focus_refresh     one real press into the code asks for the file's diff once
+#                     (`git_diff_requests`), not once per handler that sees the focus
+#   hover_leave       with the card of an Error drawn for a real resting pointer, a pointer
+#                     that jumps onto the find bar, and onto the conflict banner, leaves no
+#                     card (`hover=` empty) -- Ely says when the pointer leaves the code
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
 #                     stickyScroll, lineNumbers, cursorShape, and the ruler at
