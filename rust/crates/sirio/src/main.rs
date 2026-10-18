@@ -18592,6 +18592,7 @@ impl SirioWorkspace {
         // editor draws, which the card reads too.
         let hover = Self::escaped_field(view.hover_card().unwrap_or_default());
         let message = Self::escaped_field(&view.message_text().unwrap_or_default());
+        let (newest_note, oldest_note) = view.notification_ends(40);
         let diagnostics = code.map_or(0, |code| code.diagnostics().len());
         let selections = code.map(|code| {
             Self::joined_selections(
@@ -18669,6 +18670,11 @@ impl SirioWorkspace {
             // How many notifications the tab holds behind the bell; the
             // bell's own count (those not yet seen) is `status=`'s `bell`.
             ("notifications".to_string(), view.notification_count().to_string()),
+            // The first 40 characters of the newest and the oldest row, and
+            // how many times in a row the newest arrived (0: no rows).
+            ("notification_newest".to_string(), Self::escaped_field(&newest_note)),
+            ("notification_oldest".to_string(), Self::escaped_field(&oldest_note)),
+            ("notification_repeats".to_string(), view.notification_repeats().to_string()),
             // What the code's highlighter last gave the first line: its language
             // and how many coloured spans.
             ("highlight".to_string(), view.highlight_text()),

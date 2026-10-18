@@ -210,12 +210,14 @@ pub struct FileView {
     message: Option<TransientMessage>,
     /// What this tab has been told, oldest first, kept behind the status row's
     /// bell: the text of every `set_message` and `offer`, the newest
-    /// `MAX_NOTIFICATIONS` of them. Dismissing the corner card leaves it
-    /// alone, and so does opening the list; only Clear empties it. Not kept
-    /// across a relaunch, and a snapshot tab has its own.
-    notifications: Vec<SharedString>,
-    /// How many of `notifications` were added since the list was last opened:
-    /// the number on the bell.
+    /// `MAX_NOTIFICATIONS` rows of them. A message identical to the newest row
+    /// is not a new row: it counts into that row (`Notification::times`).
+    /// Dismissing the corner card leaves the list alone, and so does opening
+    /// it; only Clear empties it. Not kept across a relaunch, and a snapshot
+    /// tab has its own.
+    notifications: Vec<Notification>,
+    /// How many messages arrived since the list was last opened: the number on
+    /// the bell. A repeat counts here, though it adds no row.
     notifications_unseen: usize,
     /// Where the gesture asking "where is this defined?" happened,
     /// window-absolute, so the answer can be put back where the question
@@ -478,8 +480,15 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
-/// How many notifications a tab keeps; the oldest are dropped past it.
+/// How many notification rows a tab keeps; the oldest are dropped past it.
 const MAX_NOTIFICATIONS: usize = 50;
+
+/// One row of the bell's list: a message, and how many times it arrived in a
+/// row (a failing save pressed three times is one row marked "(×3)").
+struct Notification {
+    text: SharedString,
+    times: usize,
+}
 
 const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
@@ -712,16 +721,27 @@ impl FileView {
     /// what nothing pointed at is news: `set_message` and `offer` call it, and
     /// `answer_definition` does not, because it answers a gesture where it was
     /// made and a list of past answers would only hold the user's own
-    /// questions. Past `MAX_NOTIFICATIONS` the oldest is dropped. A
-    /// notification that arrives while the list is open is seen already.
+    /// questions. A message identical to the newest row adds no row: it is
+    /// counted into it, so a key held down on a failing save stays one line.
+    /// Past `MAX_NOTIFICATIONS` rows the oldest is dropped. A message that
+    /// arrives while the list is open is seen already; otherwise it counts on
+    /// the bell, repeat or not, up to what the list still holds.
     fn note(&mut self, text: &str) {
-        self.notifications.push(SharedString::from(text.to_owned()));
-        if self.notifications.len() > MAX_NOTIFICATIONS {
-            self.notifications.remove(0);
+        match self.notifications.last_mut() {
+            Some(newest) if newest.text.as_ref() == text => newest.times += 1,
+            _ => {
+                self.notifications.push(Notification {
+                    text: SharedString::from(text.to_owned()),
+                    times: 1,
+                });
+                if self.notifications.len() > MAX_NOTIFICATIONS {
+                    self.notifications.remove(0);
+                }
+            }
         }
         if self.status_popover != Some(StatusItem::Bell) {
-            self.notifications_unseen =
-                (self.notifications_unseen + 1).min(self.notifications.len());
+            let held: usize = self.notifications.iter().map(|row| row.times).sum();
+            self.notifications_unseen = (self.notifications_unseen + 1).min(held);
         }
     }
 

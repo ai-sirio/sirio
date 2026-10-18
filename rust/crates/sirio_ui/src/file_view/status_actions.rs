@@ -2,8 +2,11 @@
 //! the line ending each open a short list; the caret's place opens a field that
 //! goes to a line.
 //!
-//! The bell opens the tab's notifications, newest first, with a Clear that
-//! empties them; opening the list is what clears the count on the bell.
+//! The bell opens the tab's notifications, newest first, each with a Copy and
+//! a "(×n)" mark when it arrived n times in a row, and a Clear that empties
+//! them; opening the list is what clears the count on the bell. The panel's
+//! first tab stop is the newest row's Copy, so a stray Enter copies a line and
+//! wipes nothing; Clear is the second.
 //!
 //! The popovers and the control socket's `surface.editor.status` verb act
 //! through the same functions (`apply_status_value`, `open_status_popover`), so
@@ -27,14 +30,14 @@
 
 use std::rc::Rc;
 
-use ely_gpui_component::buttons::{Button, ButtonVariant};
+use ely_gpui_component::buttons::{Button, ButtonVariant, IconButton};
 use ely_gpui_component::forms::{Choice, Input, InputEvent, ListBox};
 use ely_gpui_component::overlays::Popover;
-use ely_gpui_component::primitives::FocusNext;
+use ely_gpui_component::primitives::{FocusNext, IconName};
 use ely_gpui_component::theme::ControlSize;
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, KeyDownEvent, MouseButton, SharedString,
-    Window, div, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Entity, Focusable as _, KeyDownEvent, MouseButton,
+    SharedString, Window, div, prelude::*, px,
 };
 use sirio_markdown::LineEnding;
 use sirio_theme::Theme;
@@ -180,6 +183,34 @@ impl FileView {
         self.notifications_unseen
     }
 
+    /// The first `chars` characters of the newest notification's text, and of
+    /// the oldest's; what the state reads to say which rows the list holds.
+    pub fn notification_ends(&self, chars: usize) -> (String, String) {
+        let head = |row: Option<&super::Notification>| {
+            row.map_or(String::new(), |row| row.text.chars().take(chars).collect())
+        };
+        (head(self.notifications.last()), head(self.notifications.first()))
+    }
+
+    /// How many times in a row the newest notification arrived (1 when it did
+    /// not repeat); 0 with an empty list.
+    pub fn notification_repeats(&self) -> usize {
+        self.notifications.last().map_or(0, |row| row.times)
+    }
+
+    /// Writes the text of the `index`th notification, counted from the newest,
+    /// to the clipboard: what a row's Copy does, and what the verb's
+    /// `copy:<n>` does. The text alone, without the repeat mark.
+    pub(super) fn copy_notification(&mut self, index: usize, cx: &mut Context<Self>) -> Result<(), String> {
+        let held = self.notifications.len();
+        let row = held
+            .checked_sub(index + 1)
+            .and_then(|at| self.notifications.get(at))
+            .ok_or_else(|| format!("there is no notification {index} (the list holds {held})"))?;
+        cx.write_to_clipboard(ClipboardItem::new_string(row.text.to_string()));
+        Ok(())
+    }
+
     /// Empties the tab's notifications and the bell's count.
     pub fn clear_notifications(&mut self, cx: &mut Context<Self>) {
         self.notifications.clear();
@@ -310,13 +341,27 @@ impl FileView {
                 let line_ending = parse_line_ending(value)?;
                 self.set_line_ending_choice(line_ending, cx)
             }
-            StatusItem::Bell => match value.trim().to_ascii_lowercase().as_str() {
-                "clear" => {
+            StatusItem::Bell => {
+                let value = value.trim();
+                if value.eq_ignore_ascii_case("clear") {
                     self.clear_notifications(cx);
                     Ok(())
+                } else if let Some(index) = value.strip_prefix("copy:") {
+                    let index: usize = index
+                        .parse()
+                        .map_err(|_| format!("'{index}' is not a notification number"))?;
+                    self.copy_notification(index, cx)
+                } else if let Some(text) = value.strip_prefix("raise:") {
+                    // For a test to raise a message of its own, as `set_message`
+                    // does (the card and the list); the verb is debug-only.
+                    self.set_message(text, cx);
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "'{value}' is not a bell value: use clear, copy:<n> or raise:<text>"
+                    ))
                 }
-                _ => Err(format!("'{value}' is not a bell value: use clear")),
-            },
+            }
             StatusItem::Goto => {
                 let line: usize = value
                     .trim()
@@ -648,8 +693,9 @@ impl FileView {
     /// The rows are plain text, not `selectable_text`: a selection moves the
     /// keyboard into the workspace's sink, which the popover reads as focus
     /// leaving it, so a double click or a drag on a row closed the panel (seen
-    /// in the E2E's captures). The corner card, which holds the newest one
-    /// until it is dismissed, can be selected.
+    /// in the E2E's captures). What a row gives instead is its own Copy, a
+    /// separate control that writes the row's text to the clipboard. The
+    /// corner card is not selectable either: it dismisses on a mouse-down.
     fn bell_body(
         &mut self,
         theme: Theme,
@@ -658,17 +704,40 @@ impl FileView {
         window: &mut Window,
     ) -> AnyElement {
         if std::mem::take(&mut self.list_focus_pending) {
-            // The panel holds the keyboard on its own handle, above Clear: one
-            // Tab step, once it is drawn, puts it on Clear, where Escape and
-            // Enter reach the panel's keys.
+            // The panel holds the keyboard on its own handle, above the first
+            // tab stop: one Tab step, once it is drawn, puts it on the newest
+            // row's Copy (Clear when the list is empty), where Escape reaches
+            // the panel's keys and an Enter harms nothing.
             window.on_next_frame(|window, cx| window.dispatch_action(Box::new(FocusNext), cx));
         }
         let escaping = entity.clone();
-        let rows = self.notifications.iter().rev().enumerate().map(|(index, text)| {
+        let rows = self.notifications.iter().rev().enumerate().map(|(index, row)| {
+            let copier = entity.clone();
+            let text = if row.times > 1 {
+                format!("{} (×{})", row.text, row.times)
+            } else {
+                row.text.to_string()
+            };
             div()
                 .py(px(4.0))
+                .flex()
+                .items_start()
+                .gap(px(6.0))
                 .when(index > 0, |row| row.border_t_1().border_color(theme.ely.border))
-                .child(text.clone())
+                .child(div().flex_1().min_w(px(0.0)).child(text))
+                .child(
+                    IconButton::new(("status-bell-copy", index), IconName::Copy)
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .tooltip("Copy")
+                        .on_click(move |_, _, cx| {
+                            let copied =
+                                copier.update(cx, |view, cx| view.copy_notification(index, cx));
+                            if let Err(why) = copied {
+                                eprintln!("[files] status bell: {why}");
+                            }
+                        }),
+                )
         });
         let list = if self.notifications.is_empty() {
             div()

@@ -181,7 +181,7 @@ fn usage() {
          \x20 surface editor save               (debug builds) save the active file tab\n\
          \x20 surface editor conflict --action=reload|keep  (debug builds) answer a disk conflict\n\
          \x20 surface editor mode --mode=code|preview  (debug builds) switch the Markdown mode\n\
-         \x20 surface editor status --item=language|line_ending|indent|goto|bell [--value=v | --open=true|false]  (debug builds) a status row item: --value is a language (name or id), lf|crlf, spaces:N|tabs:N, a line number or clear (the bell's list); --open opens or closes its popover\n\
+         \x20 surface editor status --item=language|line_ending|indent|goto|bell [--value=v | --open=true|false]  (debug builds) a status row item: --value is a language (name or id), lf|crlf, spaces:N|tabs:N, a line number, or for the bell clear, copy:N (the Nth newest to the clipboard) or raise:TEXT; --open opens or closes its popover\n\
          \x20 surface editor pref --key=k --value=v  (debug builds) set one Editor setting, as Settings does\n\
          \x20 browser open <url> [--id-format uuids|both] [--json]\n\
          \x20 browser navigate <surface> <back|forward|reload>\n\
