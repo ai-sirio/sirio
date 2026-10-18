@@ -656,9 +656,12 @@ before, 0.04 ms after, on a 1 MiB file of 39,247 lines).
   span times it): 3.4 ms a frame on a 24k-line Rust file, 0.3 ms in a layer. The
   quads are the same, so the picture is the same. (The first version of the
   pixel-row sampling had drawn a row at every pixel and cost 1.1 ms more than
-  the stride sampling it replaced, which had been dropping about a third of its
-  rows by accident: a 0.7 px quad whose top falls between .5 and .8 of a device
-  pixel snaps to a box of no height and is not painted.)
+  the stride sampling it replaced, which had been leaving about a quarter of its
+  rows unpainted by accident: GPUI snaps a quad's corners to device pixels, so a
+  0.7 px quad whose top falls between .5 and .8 of a pixel becomes a box of no
+  height; a dark capture of a 24k-line file has 10,673 painted pixels with the
+  stride sampling and 14,916 with the pixel rows. Measured in
+  `docs/perf/2026-10-ely-code-editor.md`.)
 - `src/editor/anchors.rs`, `state.rs`, `line.rs`, `gutter.rs`: a row's washes
   (`Marks.backgrounds`) and diagnostics are found by range, not by testing every
   one for every drawn row (a find on `e` washes ~117k places). `Reach` keeps,
