@@ -115,7 +115,7 @@ fn plantuml_command(
     options: &Options,
     search_path: &OsStr,
 ) -> Command {
-    let mut command = Command::new(program);
+    let mut command = sirio_env::command(program);
     command
         .args(args)
         .current_dir(&options.working_dir)

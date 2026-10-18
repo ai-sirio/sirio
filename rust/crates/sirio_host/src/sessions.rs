@@ -151,8 +151,7 @@ impl SessionTable {
             TermCommand::Shell => None,
             TermCommand::Program { program, args } => Some((program, args)),
         };
-        let mut env = env_fallback.clone();
-        env.extend(params.env);
+        let env = spawn_env(params.env, env_fallback, params.env_exact);
         let (events_tx, events_rx) = mpsc::channel();
         let session = Session::spawn(
             SpawnSpec {
@@ -308,6 +307,23 @@ fn pump_events(
     });
 }
 
+/// The environment a session starts with. `env_exact` means the client built
+/// it from its own environment, so none of the host's variables may reach the
+/// session. Otherwise the host's environment is the base that the client's map
+/// extends, as sessions always were: `host_probe` depends on it.
+fn spawn_env(
+    client: BTreeMap<String, String>,
+    env_fallback: &BTreeMap<String, String>,
+    env_exact: bool,
+) -> BTreeMap<String, String> {
+    if env_exact {
+        return client;
+    }
+    let mut env = env_fallback.clone();
+    env.extend(client);
+    env
+}
+
 pub(crate) fn exit_status(exit: Exit) -> ExitStatus {
     match exit {
         Exit::Success => ExitStatus::Success,
@@ -335,4 +351,106 @@ pub(crate) fn random_token() -> String {
     let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
     hasher.write_u64(first);
     format!("{first:016x}{:016x}", hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sirio_host_protocol::messages::HostMode;
+    use sirio_term_session::{Format, session_login_shell};
+    use std::time::{Duration, Instant};
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn exact_env_excludes_the_hosts_own_variables() {
+        let host = map(&[("LEAK", "1"), ("PATH", "/host/bin")]);
+        let client = map(&[("PATH", "/client/bin"), ("HOME", "/home/user")]);
+        let env = spawn_env(client.clone(), &host, true);
+        assert_eq!(env, client);
+    }
+
+    #[test]
+    fn without_exact_env_the_fallback_is_extended_as_before() {
+        let host = map(&[("LEAK", "1"), ("PATH", "/host/bin")]);
+        let client = map(&[("PATH", "/client/bin"), ("HOME", "/home/user")]);
+        let env = spawn_env(client, &host, false);
+        assert_eq!(env.get("LEAK").map(String::as_str), Some("1"));
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/client/bin"));
+        assert_eq!(env.get("HOME").map(String::as_str), Some("/home/user"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn exact_env_shell_comes_from_the_clients_map() {
+        let host = map(&[("SHELL", "/bin/bash")]);
+        let env = spawn_env(map(&[("SHELL", "/bin/zsh")]), &host, true);
+        assert_eq!(session_login_shell(&env).0, "/bin/zsh");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn exact_env_without_a_shell_does_not_take_the_hosts() {
+        let host = map(&[("SHELL", "/host/only/shell")]);
+        let env = spawn_env(map(&[("PATH", "/client/bin")]), &host, true);
+        assert_ne!(session_login_shell(&env).0, "/host/only/shell");
+    }
+
+    /// The production path, not `spawn_env`: `create` must hand the session
+    /// its client's environment alone. The fallback carries `LEAK`, which the
+    /// program prints back when it is present.
+    #[cfg(unix)]
+    #[test]
+    fn an_exact_session_is_spawned_without_the_hosts_variables() {
+        let root = std::env::temp_dir().join(format!("sirio-host-exact-{}", random_token()));
+        let log = Arc::new(Log::new(root.join("host.log")));
+        let core = HostCore::new(
+            "test".into(),
+            1,
+            HostMode::OnDemand,
+            "generation".into(),
+            "host".into(),
+            log,
+        );
+        let fallback = map(&[("LEAK", "present"), ("PATH", "/usr/bin:/bin")]);
+        let params = CreateParams {
+            session_id: Some("pane-1".into()),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            command: TermCommand::Program {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), r#"printf '%s' "${LEAK-absent}""#.into()],
+            },
+            env: map(&[("PATH", "/usr/bin:/bin")]),
+            size: TermSize { cols: 80, rows: 24 },
+            origin: Origin::Control,
+            parent: None,
+            prelude: None,
+            env_exact: true,
+        };
+        core.sessions
+            .create(params, &fallback)
+            .expect("the session is created");
+        let entry = core.sessions.get("pane-1").expect("the session is listed");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let screen = loop {
+            let screen =
+                String::from_utf8_lossy(&entry.session.read(Format::Text, None)).into_owned();
+            if screen.contains("absent") || screen.contains("present") || Instant::now() >= deadline
+            {
+                break screen;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        core.sessions.close("pane-1");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            screen.contains("absent") && !screen.contains("present"),
+            "the session saw the host's variable: {screen:?}"
+        );
+    }
 }

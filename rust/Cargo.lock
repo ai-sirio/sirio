@@ -7310,6 +7310,7 @@ dependencies = [
  "anyhow",
  "bezel",
  "bezel-gpui",
+ "bezel-gpui-linux",
  "bezel-gpui-platform",
  "bezel-zed-scheduler",
  "chrono",
@@ -7319,6 +7320,7 @@ dependencies = [
  "gtk",
  "image",
  "ksni",
+ "libc",
  "notify",
  "objc2 0.5.2",
  "objc2-app-kit 0.2.2",
@@ -7332,6 +7334,7 @@ dependencies = [
  "sirio_apply",
  "sirio_claude",
  "sirio_control",
+ "sirio_env",
  "sirio_forge",
  "sirio_git",
  "sirio_host_client",
@@ -7364,6 +7367,7 @@ dependencies = [
  "libc",
  "serde_json",
  "sirio_claude",
+ "sirio_env",
  "sirio_persistence",
 ]
 
@@ -7410,6 +7414,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sirio_acp",
+ "sirio_env",
  "sirio_host_client",
  "sirio_host_protocol",
  "sirio_ipc",
@@ -7424,8 +7429,13 @@ dependencies = [
  "libc",
  "mermaid-rs-renderer",
  "sha2 0.10.9",
+ "sirio_env",
  "ureq",
 ]
+
+[[package]]
+name = "sirio_env"
+version = "0.1.0"
 
 [[package]]
 name = "sirio_forge"
@@ -7435,6 +7445,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1_smol",
+ "sirio_env",
  "sirio_perf",
  "thiserror 2.0.20",
  "ureq",
@@ -7445,6 +7456,7 @@ name = "sirio_git"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "sirio_env",
  "sirio_perf",
 ]
 
@@ -7507,6 +7519,7 @@ dependencies = [
  "lsp-types",
  "serde",
  "serde_json",
+ "sirio_env",
  "sirio_perf",
  "toml 0.8.23",
 ]
@@ -7552,6 +7565,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sirio_env",
 ]
 
 [[package]]
@@ -7563,6 +7577,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sirio_env",
  "tar",
  "thiserror 2.0.20",
  "ureq",
@@ -7632,6 +7647,7 @@ dependencies = [
  "libghostty-vt",
  "parking_lot",
  "portable-pty",
+ "sirio_env",
  "sirio_host_client",
  "sirio_host_protocol",
  "sirio_perf",
@@ -7680,6 +7696,7 @@ dependencies = [
  "sirio_acp",
  "sirio_agents",
  "sirio_diagram",
+ "sirio_env",
  "sirio_forge",
  "sirio_git",
  "sirio_icons",
@@ -7727,6 +7744,7 @@ dependencies = [
  "portable-pty",
  "serde_json",
  "sirio_claude",
+ "sirio_env",
 ]
 
 [[package]]

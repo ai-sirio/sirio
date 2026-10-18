@@ -4,6 +4,7 @@
 //! resolve binaries through the process environment, so under that PATH every
 //! CLI reads "Not found on PATH" and every ACP server dies at `initialize`.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -11,24 +12,38 @@ use std::process::{Command, Stdio};
 const BEGIN: &str = "SIRIO_PATH_BEGIN";
 const END: &str = "SIRIO_PATH_END";
 
-/// Merge the login shell's PATH into this process's environment.
+/// The login shell's PATH, or `None` when the shell cannot run or prints none.
 ///
-/// Must run before any thread exists: `set_var` is only sound single-threaded.
-pub(crate) fn adopt_login_shell_path() {
+/// The shell runs in the launch environment, not the launcher's: a profile that
+/// prepends to `$PATH` must not bring the AppImage's mount back into it.
+pub(crate) fn login_shell_path(launch: &BTreeMap<String, String>) -> Option<OsString> {
     let (program, args) = sirio_terminal::command_shell_invocation(&format!(
         "printf '%s' {BEGIN}; printenv PATH; printf '%s' {END}"
     ));
-    let Some(login) = login_shell_path(&program, &args) else {
+    run_login_shell(&program, &args, launch)
+}
+
+/// Merge the login shell's PATH into this process's environment.
+///
+/// Must run before any thread exists: `set_var` is only sound single-threaded.
+pub(crate) fn adopt_login_shell_path(login: Option<&OsStr>) {
+    let Some(login) = login else {
         return;
     };
     let current = std::env::var_os("PATH").unwrap_or_default();
     // SAFETY: called from the top of `main`, before any thread exists.
-    unsafe { std::env::set_var("PATH", merge_paths(&login, &current)) };
+    unsafe { std::env::set_var("PATH", merge_paths(login, &current)) };
 }
 
-fn login_shell_path(program: &str, args: &[String]) -> Option<OsString> {
+fn run_login_shell(
+    program: &str,
+    args: &[String],
+    launch: &BTreeMap<String, String>,
+) -> Option<OsString> {
     // ponytail: no timeout; stdin is closed so the shell cannot block on a read.
     let output = Command::new(program)
+        .env_clear()
+        .envs(launch)
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -90,24 +105,31 @@ mod tests {
         assert_eq!(merged, "/a:/b");
     }
 
-    #[test]
-    fn login_shell_path_runs_the_shell_and_reads_the_marked_value() {
+    /// An executable `sh` script with `body`, written under `scratch`.
+    fn fake_shell(scratch: &std::path::Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
-        let scratch = std::env::temp_dir().join(format!("sirio-login-path-{}", std::process::id()));
-        std::fs::create_dir_all(&scratch).expect("create scratch dir");
-        let fake_shell = scratch.join("fake-shell");
-        std::fs::write(
-            &fake_shell,
-            "#!/bin/sh\nprintf 'noise\\n'\nprintf 'SIRIO_PATH_BEGIN/fake/bin:/usr/bin\\nSIRIO_PATH_END'\n",
-        )
-        .expect("write fake shell");
-        std::fs::set_permissions(&fake_shell, std::fs::Permissions::from_mode(0o755))
+        std::fs::create_dir_all(scratch).expect("create scratch dir");
+        let shell = scratch.join("fake-shell");
+        std::fs::write(&shell, format!("#!/bin/sh\n{body}")).expect("write fake shell");
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755))
             .expect("make fake shell executable");
+        shell
+    }
 
-        let path = login_shell_path(
-            &fake_shell.to_string_lossy(),
+    #[test]
+    fn login_shell_path_runs_the_shell_and_reads_the_marked_value() {
+        let scratch = std::env::temp_dir().join(format!("sirio-login-path-{}", std::process::id()));
+        let shell = fake_shell(
+            &scratch,
+            "printf 'noise\\n'\nprintf 'SIRIO_PATH_BEGIN/fake/bin:/usr/bin\\nSIRIO_PATH_END'\n",
+        );
+        let launch = BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]);
+
+        let path = run_login_shell(
+            &shell.to_string_lossy(),
             &["-lc".to_string(), "ignored".to_string()],
+            &launch,
         );
 
         let _ = std::fs::remove_dir_all(&scratch);
@@ -115,7 +137,29 @@ mod tests {
     }
 
     #[test]
+    fn login_shell_runs_with_the_launch_environment_not_the_launchers() {
+        // The shell answers with the PATH it was started with. This test
+        // process has some other PATH, so `/clean` can only come from the
+        // launch map: a profile that prepends to $PATH must not see the mount.
+        let scratch = std::env::temp_dir().join(format!("sirio-login-env-{}", std::process::id()));
+        let shell = fake_shell(
+            &scratch,
+            "printf 'SIRIO_PATH_BEGIN%sSIRIO_PATH_END' \"$PATH\"\n",
+        );
+        let launch = BTreeMap::from([("PATH".to_string(), "/clean".to_string())]);
+
+        let path = run_login_shell(&shell.to_string_lossy(), &[], &launch);
+
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert_eq!(path.as_deref(), Some(OsStr::new("/clean")));
+    }
+
+    #[test]
     fn login_shell_path_is_none_when_the_shell_cannot_run() {
-        assert_eq!(login_shell_path("/definitely/missing/shell", &[]), None);
+        let launch = BTreeMap::new();
+        assert_eq!(
+            run_login_shell("/definitely/missing/shell", &[], &launch),
+            None
+        );
     }
 }

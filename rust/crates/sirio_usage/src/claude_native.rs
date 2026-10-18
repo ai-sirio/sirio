@@ -10,7 +10,7 @@
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
@@ -97,7 +97,7 @@ impl NativeUsageFetcher {
         // pipe this loop already reads.
         line.args.push("--permission-prompt-tool".to_string());
         line.args.push("stdio".to_string());
-        let mut child = match Command::new(program)
+        let mut child = match sirio_env::command(program)
             .args(&line.args)
             .envs(line.env)
             .envs(PROBE_ENV.iter().copied())
@@ -241,7 +241,7 @@ fn candidates() -> [&'static str; 1] {
 /// Runs `program --version`, bounded. `None` when it cannot be spawned,
 /// hangs, or prints nothing a version can be read from.
 fn probe_version(program: &Path, timeout: Duration) -> Option<ClaudeVersion> {
-    let mut child = Command::new(program)
+    let mut child = sirio_env::command(program)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -102,7 +102,7 @@ pub fn run(config: HostConfig) -> i32 {
     );
     ignore_sighup();
 
-    let router = Arc::new(Router::new(Arc::clone(&core)));
+    let router = Arc::new(Router::new(Arc::clone(&core), config.env_exact));
     let accept_core = Arc::clone(&core);
     let accept_log = Arc::clone(&log);
     let accept = std::thread::spawn(move || {

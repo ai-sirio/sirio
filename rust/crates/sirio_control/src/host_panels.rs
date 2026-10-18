@@ -49,11 +49,64 @@ impl From<String> for Failure {
 
 pub struct HostPanels {
     client: TermClient,
+    /// The variables a pane gets over the user environment, from the directory
+    /// it starts in (`SIRIO_WORKTREE_ID`, from the app's worktree that holds
+    /// it). `None`, as sirioctl's fallback has it, gives every pane none.
+    worktree_environment: Option<
+        std::sync::Arc<dyn Fn(&std::path::Path) -> BTreeMap<String, String> + Send + Sync>,
+    >,
 }
 
 impl HostPanels {
     pub fn new(client: TermClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            worktree_environment: None,
+        }
+    }
+
+    /// The panes this translation creates get the variables `resolve` names
+    /// for the directory each one starts in, whichever side answered. `resolve`
+    /// runs once per pane, at the moment it is created.
+    pub fn with_worktree_environment(
+        mut self,
+        resolve: std::sync::Arc<dyn Fn(&std::path::Path) -> BTreeMap<String, String> + Send + Sync>,
+    ) -> Self {
+        self.worktree_environment = Some(resolve);
+        self
+    }
+
+    /// The `term.create` of a pane, in the user's environment. `env_exact` is
+    /// what the host can honour: `TermClient::create` clears it for a host
+    /// without the capability, and the blanks then stand in for it. A split
+    /// passes its parent's `cwd`, so a split resolves from the same directory.
+    fn create_params(
+        &self,
+        cwd: String,
+        command: Option<&String>,
+        parent: Option<String>,
+    ) -> CreateParams {
+        let exact = self.client.env_exact();
+        let extra = self
+            .worktree_environment
+            .as_ref()
+            .map_or_else(BTreeMap::new, |resolve| resolve(std::path::Path::new(&cwd)));
+        CreateParams {
+            session_id: None,
+            cwd,
+            command: pane_command(command.map(String::as_str)),
+            env: sirio_env::host_create_env(
+                exact,
+                &sirio_env::for_child(),
+                &extra,
+                &sirio_env::absent_from_user(),
+            ),
+            size: CONTROL_SIZE,
+            origin: Origin::Control,
+            parent,
+            prelude: None,
+            env_exact: exact,
+        }
     }
 
     /// Answers one `panel.*` request. Pane errors keep the app's wording, so
@@ -100,7 +153,7 @@ impl HostPanels {
                 };
                 let created = self
                     .client
-                    .create(&create_params(cwd, params.get("cmd"), None))
+                    .create(&self.create_params(cwd, params.get("cmd"), None))
                     .map_err(|error| host_error("", error))?;
                 Ok(one("id", created.session_id))
             }
@@ -113,7 +166,7 @@ impl HostPanels {
                 let parent = self.session(&source)?;
                 let created = self
                     .client
-                    .create(&create_params(
+                    .create(&self.create_params(
                         parent.cwd,
                         params.get("cmd"),
                         Some(source.clone()),
@@ -285,19 +338,6 @@ impl HostPanels {
                 None => {}
             }
         }
-    }
-}
-
-fn create_params(cwd: String, command: Option<&String>, parent: Option<String>) -> CreateParams {
-    CreateParams {
-        session_id: None,
-        cwd,
-        command: pane_command(command.map(String::as_str)),
-        env: std::env::vars().collect(),
-        size: CONTROL_SIZE,
-        origin: Origin::Control,
-        parent,
-        prelude: None,
     }
 }
 

@@ -22,6 +22,7 @@ use sirio_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
     PaneInfo, PaneRegistry, PaneStateSnapshot, ScrollbackSource, base64_encode,
 };
+use sirio_control::served::{BROWSER_CAPABILITIES, BROWSER_METHODS, served_methods};
 use sirio_git::{
     GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
 };
@@ -79,6 +80,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -260,6 +262,8 @@ where
 
 mod account_login;
 mod claude_transport;
+mod cli_install;
+mod cli_path;
 mod command_palette;
 /// The X11-vs-Wayland decision, and the only place that touches the display
 /// environment. Linux-only by construction: the variables it reads and writes
@@ -707,44 +711,6 @@ fn clamp_first_visible(
 }
 
 const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
-const BROWSER_METHODS: [&str; 11] = [
-    "browser.open",
-    "browser.navigate",
-    "browser.get",
-    "browser.screenshot",
-    "browser.snapshot",
-    "browser.act",
-    "browser.wait",
-    "browser.eval",
-    "browser.console",
-    "browser.errors",
-    "browser.permission",
-];
-// F-CTRL-BROWSER-03/04/05/06/F-PER-08: browser.get, browser.wait,
-// browser.eval, browser.console, browser.snapshot and browser.permission
-// are real, implemented methods (see handle_browser_action) — they must not
-// be turned away here as "not implemented" before ever reaching that
-// dispatch.
-//
-// browser.screenshot stays out of this list on purpose: wry 0.56's public
-// WebView API (crates/sirio_ui/src/browser.rs's `build_webview`/
-// `build_production_webview`) has no pixel-capture entry point on the
-// webkitgtk backend, and there is no other dependency in this workspace
-// that reaches WebKitGTK's own `webkit_web_view_get_snapshot`. A true
-// screenshot needs a new `webkit2gtk` FFI dependency plus a GAsyncResult
-// callback bridged back into GPUI — out of this row's file list. See
-// F-CTRL-BROWSER-04's row in the wave report for the sketch.
-const BROWSER_CAPABILITIES: [&str; 9] = [
-    "browser.open",
-    "browser.navigate",
-    "browser.act",
-    "browser.get",
-    "browser.wait",
-    "browser.eval",
-    "browser.console",
-    "browser.snapshot",
-    "browser.permission",
-];
 
 // F-CTRL-BROWSER-04: a lightweight structural snapshot — role, accessible
 // name and bounding box for interactive/labelled elements — serialized as
@@ -1334,9 +1300,15 @@ enum ControlAction {
         reply: ControlReply,
     },
     /// Debug-only `surface.terminal.state {pane}`: whether the tab shows
-    /// *Session lost*.
+    /// *Session lost*, and the agent status its pane reports.
     TerminalState {
         pane: String,
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.settings.act {action}`: runs the install its Settings
+    /// button runs, and answers with the report its card receives once it ends.
+    SettingsAct {
+        action: String,
         reply: ControlReply,
     },
 }
@@ -1492,6 +1464,14 @@ struct RetainedChat {
     agent_id: Option<String>,
 }
 
+/// The Settings install whose outcome a report answers: Install Skill or
+/// Install Hooks, each with its own card.
+#[derive(Clone, Copy)]
+enum SettingsInstall {
+    Skill,
+    Hooks,
+}
+
 enum WorkspaceAction {
     NewTab(NewTabAction),
     /// F-SID-14: the sidebar worktree context menu's New Terminal/agent-panel/
@@ -1523,11 +1503,18 @@ enum WorkspaceAction {
         note: Option<&'static str>,
         asked: Entity<ChangeRequestTab>,
     },
-    InstallSkill(sirio_project::SkillInstallCommand),
+    /// Settings → Install Skill: writes Sirio's skill at the user level for
+    /// each agent (`sirio_agents::install_user_skills`) off the UI thread and
+    /// reports each location back to the Settings card.
+    InstallSkill,
     /// Settings → Install Hooks: the host writes every agent's user-global
     /// sirioctl hooks (`sirio_agents::install_global_hooks`) off the UI
     /// thread and reports each outcome back to the Settings card.
     InstallHooks,
+    /// Settings → Install in PATH: makes sirioctl's stable copy if it is
+    /// missing, then puts it on the user's PATH (the macOS administrator
+    /// prompt included), off the UI thread, and reports the result to the card.
+    InstallCli,
     OpenSettings,
     /// Brings the update card back from the status-bar indicator (spec §2.3);
     /// it never starts an update operation itself.
@@ -2091,6 +2078,9 @@ impl AppControlHandler {
                         working_directory.to_string_lossy().into_owned(),
                     );
                 }
+                // The pane carries the id of the worktree its directory is in,
+                // as a terminal of that worktree does (spec §5.3); `host_call`
+                // reads it per pane, from the directory each one starts in.
                 let response = self.host_request(&request);
                 self.refresh_control();
                 response
@@ -2169,7 +2159,8 @@ impl AppControlHandler {
 
     /// Runs one call against the host, off the GPUI thread. A lost connection
     /// is `Unreached`; a read (`read_only`) is run once more over a connection
-    /// rebuilt by the factory's reconnect, a write never is.
+    /// rebuilt by the factory's reconnect, a write never is. Each pane the call
+    /// creates gets the variables of the worktree its directory is in.
     fn host_call<T>(
         &self,
         read_only: bool,
@@ -2179,13 +2170,31 @@ impl AppControlHandler {
         let Some(client) = self.host_terminal.client() else {
             return Err(Failure::Unreached("the host is not running".to_string()));
         };
-        match call(&HostPanels::new(client)) {
+        let panels = |client| {
+            HostPanels::new(client).with_worktree_environment(self.worktree_environment_resolver())
+        };
+        match call(&panels(client)) {
             Err(Failure::Unreached(message)) if read_only => match self.host_terminal.reconnect() {
-                Some(fresh) => call(&HostPanels::new(fresh)),
+                Some(fresh) => call(&panels(fresh)),
                 None => Err(Failure::Unreached(message)),
             },
             other => other,
         }
+    }
+
+    /// The variables of the worktree that holds a directory, read from the
+    /// control state each time a pane is created. The guard lives only inside
+    /// the closure, so no host call runs while the state is locked.
+    fn worktree_environment_resolver(
+        &self,
+    ) -> Arc<dyn Fn(&Path) -> BTreeMap<String, String> + Send + Sync> {
+        let state = Arc::clone(&self.state);
+        Arc::new(move |directory: &Path| {
+            let control = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            worktree_environment_in(&control, directory)
+        })
     }
 
     /// Forwards one `panel.*` request to the host; a lost connection is
@@ -2472,101 +2481,7 @@ impl ControlHandler for AppControlHandler {
             }
             "system.ping" => Self::success(&request.id, [("pong".to_string(), "true".to_string())]),
             "system.capabilities" => {
-                let mut methods = vec![
-                    "system.ping",
-                    "system.capabilities",
-                    "system.identify",
-                    "system.quit",
-                    "project.list",
-                    "project.add",
-                    "workspace.list",
-                    "workspace.create",
-                    "workspace.select",
-                    "tray.jump",
-                    "workspace.current",
-                    "workspace.close",
-                    "worktree.set",
-                    "notify",
-                    "panel.create",
-                    "panel.split",
-                    "panel.list",
-                    "panel.write",
-                    "panel.key",
-                    "panel.read",
-                    "panel.state",
-                    "panel.scrollback",
-                    "panel.wait",
-                    "panel.focus",
-                    "panel.show",
-                    "panel.close",
-                    "pane.split",
-                    "pane.focus",
-                    "pane.close",
-                    "tab.cycle",
-                    "tab.select",
-                    "notification.create",
-                    "notification.list",
-                    "notification.clear",
-                    "session.ref",
-                    "session.restore",
-                    "session.transcript",
-                    "surface.changes.open",
-                    "surface.changes.read",
-                    "surface.changes.stage",
-                    "surface.changes.unstage",
-                    "surface.changes.discard",
-                    "surface.changes.stage_all",
-                    "surface.changes.discard_all",
-                    "surface.changes.view",
-                    "surface.changes.dialog",
-                    "git.branches",
-                    "surface.settings.open",
-                    "surface.settings.select",
-                    "surface.settings.read",
-                    "surface.change_requests.show",
-                    "surface.change_requests.read",
-                    "surface.change_requests.filter",
-                    "surface.change_requests.search",
-                    "surface.change_requests.token",
-                    "surface.change_request.open",
-                    "surface.change_request.tab",
-                    "surface.change_request.read",
-                    "surface.change_request.checkout",
-                    "surface.change_request.handoff",
-                    "surface.ci_log.open",
-                    "surface.ci_log.read",
-                    "surface.ci_log.view",
-                    "surface.change_request.reveal",
-                    "surface.change_request.thread",
-                    "surface.change_request.open_file",
-                    "surface.change_request.open_commit",
-                    "surface.tabs.read",
-                    "surface.tabs.select",
-                    "surface.tabs.close",
-                    "surface.layout.read",
-                    "surface.file.read",
-                    "settings.account.add",
-                    "settings.account.select",
-                    "surface.chat.open",
-                    "surface.chat.send",
-                    "surface.chat.compose",
-                    "surface.chat.permission",
-                    "surface.chat.stop",
-                    "surface.chat.read",
-                ];
-                methods.extend(BROWSER_CAPABILITIES);
-                if cfg!(debug_assertions) {
-                    methods.push("surface.change_request.act");
-                    methods.push("surface.open_list.open");
-                    methods.push("surface.changes.confirm");
-                    methods.push("surface.host.end_all");
-                    methods.push("surface.terminal.open");
-                    methods.push("surface.terminal.restart");
-                    methods.push("surface.terminal.state");
-                    methods.push("surface.update.read");
-                    methods.push("surface.update.act");
-                    methods.push("surface.update.inject");
-                }
+                let methods = served_methods(cfg!(debug_assertions));
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
                     .map(|method| BTreeMap::from([("method".to_string(), (*method).to_string())]))
@@ -2969,6 +2884,25 @@ impl ControlHandler for AppControlHandler {
             "surface.terminal.state" if cfg!(debug_assertions) => {
                 let pane = request.params.get("pane").cloned().unwrap_or_default();
                 self.queue_action(request, move |reply| ControlAction::TerminalState { pane, reply })
+            }
+            "surface.settings.act" if cfg!(debug_assertions) => {
+                let action = request.params.get("action").cloned().unwrap_or_default();
+                if !matches!(action.as_str(), "install-hooks" | "install-skill" | "install-cli") {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.settings.act requires action install-hooks, install-skill or install-cli",
+                    );
+                }
+                // The install waits on a copy, a link or an administrator's
+                // prompt, and the reply waits for it. `queue_action` bounds the
+                // wait by the request's own `timeoutMs`, so one is supplied when
+                // the caller left it out.
+                let mut waiting = request.clone();
+                waiting
+                    .params
+                    .entry("timeoutMs".to_string())
+                    .or_insert_with(|| "120000".to_string());
+                self.queue_action(&waiting, move |reply| ControlAction::SettingsAct { action, reply })
             }
             "surface.tabs.read" => self.queue_action(request, |reply| ControlAction::ReadTabs { reply }),
             "surface.layout.read" => self.queue_action(request, |reply| ControlAction::ReadLayout { reply }),
@@ -3745,32 +3679,6 @@ fn registry_cache_path(store: &sirio_registry::InstallStore) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("registry.json"))
 }
 
-/// The shell that runs the Settings → Install Skill command in a terminal
-/// tab, with the program resolved against the real PATH. The bare `npx` the
-/// provisioner names is an npm shim: on Windows it is `npx.cmd`, which the
-/// PTY's `CreateProcess` cannot infer from the name alone — the same PATHEXT
-/// resolution `agent_command_for` does for `opencode.cmd`.
-fn skill_install_shell(command: sirio_project::SkillInstallCommand) -> TerminalShell {
-    skill_install_shell_with(command, sirio_agents::find_executable_on_path)
-}
-
-/// [`skill_install_shell`] with the PATH lookup injected, so the resolution
-/// contract is testable without a real `npx` on this machine. An unresolved
-/// program keeps its bare name: the pane then reports the spawn failure
-/// itself, which is more honest than inventing a path.
-fn skill_install_shell_with(
-    command: sirio_project::SkillInstallCommand,
-    resolve: impl Fn(&str) -> Option<PathBuf>,
-) -> TerminalShell {
-    let program = resolve(&command.program)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or(command.program);
-    TerminalShell::WithArguments {
-        program,
-        args: command.args,
-    }
-}
-
 /// Builds the shell that runs an agent row's Install command (F-SET-18) —
 fn terminal_link_url_for_pane<'a>(event: &'a TerminalLinkEvent, pane_id: &str) -> Option<&'a str> {
     (event.target.pane_id() == pane_id).then_some(event.url.as_str())
@@ -3796,11 +3704,11 @@ fn post_desktop_notification(payload: &NotificationPayload) {
             apple_script_string_literal(&payload.body),
             apple_script_string_literal(&payload.title),
         );
-        Command::new("osascript").args(["-e", &script]).spawn()
+        sirio_env::command("osascript").args(["-e", &script]).spawn()
     };
 
     #[cfg(target_os = "linux")]
-    let result = Command::new("notify-send")
+    let result = sirio_env::command("notify-send")
         .arg("--app-name=Sirio")
         .arg(&payload.title)
         .arg(&payload.body)
@@ -3834,7 +3742,7 @@ fn post_desktop_notification(payload: &NotificationPayload) {
             powershell_single_quote_literal(&payload.title),
             powershell_single_quote_literal(&payload.body),
         );
-        Command::new("powershell")
+        sirio_env::command("powershell")
             .args(["-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command"])
             .arg(&script)
             .spawn()
@@ -3931,7 +3839,7 @@ fn summarizer_candidate_commands(
 /// Blocking: callers run this on a background executor, never the UI thread.
 fn run_summarizer_command(command: &str, worktree_path: &str, timeout: Duration) -> Option<String> {
     let (shell_program, shell_args) = command_shell_invocation(command);
-    let mut spawn = std::process::Command::new(&shell_program);
+    let mut spawn = sirio_env::command(&shell_program);
     // command_shell_invocation's output has TWO consumers with DIFFERENT
     // transports, and only one tolerates std's quoting. The terminal-pane
     // path feeds alacritty's Windows PTY, which concatenates the pieces RAW
@@ -4467,6 +4375,23 @@ fn paths_name_the_same_document(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The variables a terminal of the worktree that holds `directory` starts
+/// with: `SIRIO_WORKTREE_ID`, the id `worktree-set --worktree` accepts (spec
+/// §5.3), which is the id the control state names the worktree by. The deepest
+/// worktree holding `directory` wins; empty when no known worktree holds it.
+fn worktree_environment_in(control: &ControlState, directory: &Path) -> BTreeMap<String, String> {
+    control
+        .workspaces
+        .iter()
+        .filter(|workspace| {
+            let worktree = Path::new(&workspace.path);
+            directory.starts_with(worktree) || paths_name_the_same_document(worktree, directory)
+        })
+        .max_by_key(|workspace| workspace.path.len())
+        .map(|workspace| BTreeMap::from([("SIRIO_WORKTREE_ID".to_string(), workspace.id.clone())]))
+        .unwrap_or_default()
+}
+
 /// `open_paths` only ever contains this workspace's own already-open tabs
 /// (`add_file_tab` builds it from `self.tabs`, one `SirioWorkspace` per
 /// worktree), so this dedup is worktree-scoped by construction -- the same
@@ -4507,6 +4432,18 @@ fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Ico
         TabKind::Diff => Icon::File,
         TabKind::ProjectSettings => Icon::Settings,
         TabKind::ChangeRequest => Icon::PullRequest,
+    }
+}
+
+/// The `agentStatus` words `surface.terminal.state` answers with, which the
+/// stub agents and the E2E read. They are not `human_label`'s words.
+fn agent_status_word(status: Option<AgentStatus>) -> &'static str {
+    match status {
+        Some(AgentStatus::Running) => "running",
+        Some(AgentStatus::NeedsInput) => "needs-input",
+        Some(AgentStatus::Done) => "done",
+        Some(AgentStatus::Error) => "error",
+        None => "none",
     }
 }
 
@@ -5548,11 +5485,14 @@ impl SirioWorkspace {
                                         path, agent, surface, prompt, relative, note, asked, window, cx,
                                     );
                                 }
-                                WorkspaceAction::InstallSkill(command) => {
-                                    workspace.open_skill_install_terminal(command, cx);
+                                WorkspaceAction::InstallSkill => {
+                                    workspace.begin_skill_install(None, cx);
                                 }
                                 WorkspaceAction::InstallHooks => {
-                                    workspace.begin_global_hooks_install(cx);
+                                    workspace.begin_global_hooks_install(None, cx);
+                                }
+                                WorkspaceAction::InstallCli => {
+                                    workspace.begin_cli_install(None, cx);
                                 }
                                 WorkspaceAction::OpenSettings => {
                                     workspace.open_settings(None, cx);
@@ -5785,6 +5725,9 @@ impl SirioWorkspace {
                                 ControlAction::TerminalState { pane, reply } => {
                                     let _ = reply.send(workspace.control_terminal_state(&pane, cx));
                                 }
+                                ControlAction::SettingsAct { action, reply } => {
+                                    workspace.control_settings_act(&action, reply, cx);
+                                }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
                                 }
@@ -6009,7 +5952,13 @@ impl SirioWorkspace {
                 .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
                 .collect::<Vec<PathBuf>>(),
         );
-        Self::bind_terminal_tabs(&tabs, &known_worktrees, cx);
+        let worktree_environment = worktree_environment_in(
+            &control_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &working_directory,
+        );
+        Self::bind_terminal_tabs(&tabs, &known_worktrees, &worktree_environment, cx);
         Self::apply_terminal_font_size_to_tabs(&tabs, terminal_font_size, cx);
         // `bind_file_tabs` needs `&mut self`, which does not exist yet, so
         // collect the restored file views here and adopt them just below,
@@ -8473,18 +8422,48 @@ impl SirioWorkspace {
         }
     }
 
+    /// The environment a terminal of the worktree holding `directory` starts
+    /// with (see [`worktree_environment_in`]).
+    fn worktree_environment(&self, directory: &Path) -> BTreeMap<String, String> {
+        let control = self
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        worktree_environment_in(&control, directory)
+    }
+
+    /// Gives a new terminal the environment of the worktree holding
+    /// `directory`, before its first open.
+    fn adopt_worktree_environment(
+        &self,
+        terminal: &Entity<TerminalView>,
+        directory: &Path,
+        cx: &mut Context<Self>,
+    ) {
+        let environment = self.worktree_environment(directory);
+        terminal.update(cx, |terminal, _| terminal.set_extra_env(environment));
+    }
+
     fn bind_terminal_tabs(
         tabs: &[OpenTab],
         known_worktrees: &std::sync::Arc<[PathBuf]>,
+        worktree_environment: &BTreeMap<String, String>,
         cx: &mut Context<Self>,
     ) {
-        Self::bind_terminal_tabs_with_reused(tabs, None, known_worktrees, cx);
+        Self::bind_terminal_tabs_with_reused(
+            tabs,
+            None,
+            known_worktrees,
+            worktree_environment,
+            cx,
+        );
     }
 
     fn bind_terminal_tabs_with_reused(
         tabs: &[OpenTab],
         reused_terminal_panes: Option<&HashSet<usize>>,
         known_worktrees: &std::sync::Arc<[PathBuf]>,
+        worktree_environment: &BTreeMap<String, String>,
         cx: &mut Context<Self>,
     ) {
         for tab in tabs {
@@ -8500,6 +8479,7 @@ impl SirioWorkspace {
                     view.update(cx, |terminal, _| {
                         terminal.set_restored();
                         terminal.set_known_worktrees(known_worktrees.clone());
+                        terminal.set_extra_env(worktree_environment.clone());
                     });
                     Self::bind_terminal(view, tab_id, pane_id, cx);
                 }
@@ -11071,6 +11051,7 @@ impl SirioWorkspace {
                 &new_tabs,
                 Some(&reused_terminal_panes),
                 &known_worktrees,
+                &self.worktree_environment(&selected_path),
                 cx,
             );
             Self::apply_terminal_font_size_to_tabs(&new_tabs, self.terminal_font_size, cx);
@@ -11515,7 +11496,8 @@ impl SirioWorkspace {
             );
             Self::apply_terminal_font_size_to_tabs(&tabs, self.terminal_font_size, cx);
             let known_worktrees = std::sync::Arc::from(self.known_worktree_paths());
-            Self::bind_terminal_tabs(&tabs, &known_worktrees, cx);
+            let worktree_environment = self.worktree_environment(&self.working_directory);
+            Self::bind_terminal_tabs(&tabs, &known_worktrees, &worktree_environment, cx);
             let worktree = self.working_directory.clone();
             self.bind_file_tabs(&tabs, &worktree, cx);
             Self::bind_change_request_tabs(&tabs, cx);
@@ -13544,6 +13526,7 @@ impl SirioWorkspace {
                 terminal.set_attached();
             }
         });
+        self.adopt_worktree_environment(&terminal, &self.working_directory, cx);
         Self::bind_terminal(&terminal, tab_id, leaf, cx);
         self.tabs.push(OpenTab {
             id: tab_id,
@@ -13897,6 +13880,7 @@ impl SirioWorkspace {
         terminal.update(cx, |terminal, cx| {
             terminal.set_font_size(self.terminal_font_size, cx)
         });
+        self.adopt_worktree_environment(&terminal, &self.working_directory, cx);
         Self::bind_terminal(&terminal, tab_id, pane_id, cx);
         self.tabs.push(OpenTab {
             id: tab_id,
@@ -16564,7 +16548,7 @@ impl SirioWorkspace {
             // F-CTRL-BROWSER-04: a structural (accessibility-tree-shaped)
             // snapshot of the page, distinct from a pixel screenshot (which
             // this build has no capture path for — see the comment on
-            // BROWSER_CAPABILITIES above). Reuses the same
+            // BROWSER_CAPABILITIES in `sirio_control::served`). Reuses the same
             // evaluate_script/GTK-pump plumbing browser.eval and
             // browser.console already rely on, so it inherits their real
             // "Browser child is unavailable" failure mode rather than a
@@ -17061,60 +17045,154 @@ impl SirioWorkspace {
     /// The full-window Settings route used by the status-bar affordance and
     /// by the control socket. Selecting a section is done on the Settings
     /// entity itself, so both doors render the same selected detail.
-    /// Settings → Install Skill: runs the installer in a new terminal tab
-    /// and closes the Settings surface, so the click lands the user on the
-    /// terminal where the install is running rather than on a screen that
-    /// only says so.
-    fn open_skill_install_terminal(
+    /// Settings → Install Skill: writes Sirio's skill for every agent on the
+    /// background executor (a few small files, no prompt) and hands each
+    /// location's outcome back to the Settings card. Nothing opens a terminal.
+    fn begin_skill_install(&mut self, reply: Option<ControlReply>, cx: &mut Context<Self>) {
+        let process: BTreeMap<String, String> = std::env::vars().collect();
+        let Some((home, environment)) = cli_install::skill_home_and_environment(&process) else {
+            self.report_settings_install(
+                SettingsInstall::Skill,
+                "home directory not found: no HOME or USERPROFILE in the environment".into(),
+                reply,
+                cx,
+            );
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let summary = cx
+                .background_executor()
+                .spawn(async move {
+                    sirio_agents::install_user_skills(&home, &environment)
+                        .iter()
+                        .map(sirio_agents::UserSkillReport::summary_line)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.report_settings_install(SettingsInstall::Skill, summary, reply, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Hands an install's outcome to the Settings card that started it. Install
+    /// Skill and Install Hooks both answer through this, each through its own card.
+    /// A control request that started the install gets the same text back.
+    fn report_settings_install(
         &mut self,
-        command: sirio_project::SkillInstallCommand,
+        install: SettingsInstall,
+        text: String,
+        reply: Option<ControlReply>,
         cx: &mut Context<Self>,
     ) {
-        self.add_terminal_tab_with_shell("Install Skill", skill_install_shell(command), None, cx);
-        if self.show_settings {
-            self.close_settings_surface(cx);
+        if let Some(reply) = reply {
+            let _ = reply.send(Ok(vec![("report".to_string(), text.clone())]));
         }
+        self.settings.update(cx, |settings, cx| match install {
+            SettingsInstall::Skill => settings.set_skill_install_report(Some(text), cx),
+            SettingsInstall::Hooks => settings.set_hooks_install_report(Some(text), cx),
+        });
     }
 
     /// Settings → Install Hooks: writes every agent's user-global sirioctl
     /// hooks on the background executor and hands the per-agent outcome
     /// back to the Settings card. The only place Sirio ever writes under
     /// the home directory — `prepare()` on a launch never does.
-    fn begin_global_hooks_install(&mut self, cx: &mut Context<Self>) {
-        let report = |workspace: &mut Self, text: String, cx: &mut Context<Self>| {
-            workspace.settings.update(cx, |settings, cx| {
-                settings.set_hooks_install_report(Some(text), cx);
-            });
+    fn begin_global_hooks_install(&mut self, reply: Option<ControlReply>, cx: &mut Context<Self>) {
+        // User-global hooks always name the release copy, from any build. A
+        // release build makes that copy first, on the background executor.
+        let environment: BTreeMap<String, String> = std::env::vars().collect();
+        let Some(sirioctl_path) = cli_install::release_sirioctl_path(&environment) else {
+            let missing = if cfg!(windows) {
+                "sirioctl not found: no absolute data directory (LOCALAPPDATA)"
+            } else {
+                "sirioctl not found: no absolute data directory (XDG_DATA_HOME or HOME)"
+            };
+            self.report_settings_install(SettingsInstall::Hooks, missing.into(), reply, cx);
+            return;
         };
-        let sirioctl_path = match resolve_sirioctl_for_process() {
-            Ok(path) => path.to_string_lossy().into_owned(),
-            Err(error) => {
-                report(self, format!("sirioctl not found: {error}"), cx);
-                return;
-            }
-        };
+        let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();
         let Some(home) = user_home_dir() else {
-            report(
-                self,
+            self.report_settings_install(
+                SettingsInstall::Hooks,
                 "home directory not found: no HOME or USERPROFILE in the environment".into(),
+                reply,
                 cx,
             );
             return;
         };
-        let environment: BTreeMap<String, String> = std::env::vars().collect();
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        let make_release_copy = !cli_install::stable_is_debug();
         cx.spawn(async move |this, cx| {
-            let reports = cx
+            let outcome = cx
                 .background_executor()
                 .spawn(async move {
-                    sirio_agents::install_global_hooks(&home, &environment, &sirioctl_path)
+                    if make_release_copy
+                        && let Err(error) =
+                            cli_install::ensure_stable_copy(&current_exe, &environment, false)
+                    {
+                        return Err(error);
+                    }
+                    Ok(sirio_agents::install_global_hooks(
+                        &home,
+                        &environment,
+                        &sirioctl_path,
+                    ))
                 })
                 .await;
-            let summary = reports
-                .iter()
-                .map(sirio_agents::GlobalHookReport::summary_line)
-                .collect::<Vec<_>>()
-                .join("\n");
-            let _ = this.update(cx, |workspace, cx| report(workspace, summary, cx));
+            let summary = match outcome {
+                Ok(reports) => reports
+                    .iter()
+                    .map(sirio_agents::GlobalHookReport::summary_line)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Err(error) => format!("sirioctl not found: {error}"),
+            };
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.report_settings_install(SettingsInstall::Hooks, summary, reply, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Settings → Install in PATH: the copy and the link are made on a thread of
+    /// their own, because the macOS administrator prompt blocks and must not hold
+    /// a background-executor worker. The card is told what they came to after.
+    fn begin_cli_install(&mut self, reply: Option<ControlReply>, cx: &mut Context<Self>) {
+        let environment: BTreeMap<String, String> = std::env::vars().collect();
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        let (sender, finished) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("sirio-cli-install".into())
+            .spawn(move || {
+                cli_install::install_from_settings(&current_exe, &environment);
+                let _ = sender.send(());
+            });
+        if let Err(error) = spawned {
+            eprintln!("[sirio] sirioctl install not started: {error}");
+        }
+        cx.spawn(async move |this, cx| {
+            // A thread that never started drops the sender, and the card still
+            // reads what is stored, which also ends the button's disabled state.
+            let _ = finished.await;
+            let _ = this.update(cx, |workspace, cx| {
+                let status = cli_install::card_status();
+                if let Some(reply) = reply {
+                    let answer = match &status {
+                        Some(status) => Ok(vec![(
+                            "report".to_string(),
+                            cli_install::card_words(status),
+                        )]),
+                        None => Err("sirioctl install reported no status".to_string()),
+                    };
+                    let _ = reply.send(answer);
+                }
+                workspace.settings.update(cx, |settings, cx| {
+                    settings.set_cli_status(status, cx);
+                });
+            });
         })
         .detach();
     }
@@ -17423,7 +17501,17 @@ impl SirioWorkspace {
         if !self.show_settings {
             return Err("Settings surface is not open".to_string());
         }
-        settings_report_pairs(&self.settings.read(cx).report())
+        let mut pairs = settings_report_pairs(&self.settings.read(cx).report())?;
+        // The sirioctl card, as the startup job stored it: the same words the
+        // card draws. Absent until that job has finished.
+        if let Some(status) = cli_install::card_status() {
+            pairs.extend([
+                ("cliPath".to_string(), status.stable_path),
+                ("cliVersion".to_string(), status.version_line),
+                ("cliLink".to_string(), status.path_line),
+            ]);
+        }
+        Ok(pairs)
     }
 
     fn control_show_change_requests(&mut self, cx: &mut Context<Self>) -> Result<Vec<(String, String)>, String> {
@@ -17634,7 +17722,28 @@ impl SirioWorkspace {
     ) -> Result<Vec<(String, String)>, String> {
         let view = self.control_terminal_view(pane)?;
         let lost = view.read(cx).session_lost();
-        Ok(vec![("sessionLost".to_string(), lost.to_string())])
+        // Keyed by the id the pane exports as `SIRIO_PANE_ID`, which is the id a
+        // hook's `notify --session` sends back: the activity model's key for it.
+        let exported = view.read(cx).identity().pane_id().to_owned();
+        let status = self.activity.status(&exported);
+        Ok(vec![
+            ("sessionLost".to_string(), lost.to_string()),
+            ("agentStatus".to_string(), agent_status_word(status).to_string()),
+        ])
+    }
+
+    /// Debug-only `surface.settings.act`: runs the install its Settings button
+    /// runs. The socket side has already named the action; the reply waits
+    /// until the install ends and carries the text its card receives.
+    fn control_settings_act(&mut self, action: &str, reply: ControlReply, cx: &mut Context<Self>) {
+        match action {
+            "install-skill" => self.begin_skill_install(Some(reply), cx),
+            "install-hooks" => self.begin_global_hooks_install(Some(reply), cx),
+            "install-cli" => self.begin_cli_install(Some(reply), cx),
+            other => {
+                let _ = reply.send(Err(format!("surface.settings.act has no action {other}")));
+            }
+        }
     }
 
     /// Every tab as `<kind>|<snapshot yes|no>|<title>`, and which is active.
@@ -18248,6 +18357,7 @@ impl SirioWorkspace {
             split
         };
         if split {
+            self.adopt_worktree_environment(&terminal, &self.working_directory, cx);
             Self::bind_terminal(&terminal, tab_id, pane_id, cx);
             if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                 tab.session_state.pane_events.push(PaneEvent::Split {
@@ -22717,16 +22827,40 @@ fn seed_sidebar_identity_and_worktree_defaults(
 }
 
 /// Starts in the nearest repository when launched from one of its subdirectories.
-fn initial_working_directory() -> PathBuf {
-    let current = std::env::current_dir().unwrap_or_else(|error| {
-        eprintln!("[sirio] cannot read the current directory: {error}");
-        user_home_dir().unwrap_or_else(|| PathBuf::from("."))
-    });
-    current
+///
+/// Under an AppImage the process runs inside its mount (`APPDIR`), which is
+/// no place to start a workspace: the walk starts at `OWD`, the directory the
+/// AppImage was launched from, when that is an absolute existing directory
+/// outside the mount, and at `home` otherwise. Without an `APPDIR` the walk
+/// starts at `current`, as it always did.
+fn initial_working_directory(
+    current: &Path,
+    process: &BTreeMap<String, String>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    let mount = process
+        .get("APPDIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|mount| mount.is_absolute());
+    let start = match mount {
+        Some(mount) if current.starts_with(&mount) => {
+            let launched = process
+                .get("OWD")
+                .map(PathBuf::from)
+                .filter(|owd| {
+                    owd.is_absolute() && owd.is_dir() && !owd.starts_with(&mount)
+                });
+            // With neither, `/`: never the mount, which vanishes on quit.
+            launched.or(home).unwrap_or_else(|| PathBuf::from("/"))
+        }
+        _ => current.to_path_buf(),
+    };
+    start
         .ancestors()
         .find(|path| is_git_repository(path))
         .map(PathBuf::from)
-        .unwrap_or(current)
+        .unwrap_or(start)
 }
 
 /// Replays a persisted pane event history through `PaneNode`'s public
@@ -22770,6 +22904,32 @@ fn replay_pane_events<T>(
     tree
 }
 
+/// The adapters whose `prepare` writes `.agents/skills/sirio/` through
+/// `install_skill`, which they share. Claude writes its own folder instead.
+const SHARED_SKILL_ADAPTERS: [&str; 4] = ["codex", "pi", "opencode", "omp"];
+
+/// Keeps the worktree's copy of Sirio's skill out of git, the way the hand-off's
+/// context folder is, for the adapters in `SHARED_SKILL_ADAPTERS`. That file is
+/// Sirio's, not the user's. Only untracked files are affected. The exclude runs
+/// `git`, so it is made on a thread of its own rather than on the UI thread that
+/// starts or restores the pane; its outcome is only logged.
+fn keep_agent_skill_out_of_git(adapter_id: &str, worktree: &Path) {
+    if !SHARED_SKILL_ADAPTERS.contains(&adapter_id) {
+        return;
+    }
+    let worktree = worktree.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("sirio-skill-exclude".into())
+        .spawn(move || {
+            if let Err(error) = sirio_git::exclude(&worktree, ".agents/skills/sirio/") {
+                eprintln!("[sirio] agent skill not kept out of git: {error}");
+            }
+        });
+    if let Err(error) = spawned {
+        eprintln!("[sirio] agent skill not kept out of git: {error}");
+    }
+}
+
 /// The shell a new agent starts under `pane_key`: `prepare` writes the
 /// worktree's hooks for that pane, then the adapter's command with its prompt.
 /// The warning names what could not be written, and the command still runs.
@@ -22792,6 +22952,7 @@ fn fresh_agent_shell(
     {
         warning = Some(format!("hooks not written: {error}"));
     }
+    keep_agent_skill_out_of_git(adapter.id(), Path::new(worktree));
     let command = adapter.command_with_prompt(worktree, pane_key, &sirioctl, prompt);
     let (program, args) = command_shell_invocation(&command);
     (TerminalShell::WithArguments { program, args }, warning)
@@ -22926,6 +23087,7 @@ fn restored_agent_shell(
             adapter.display_name()
         );
     }
+    keep_agent_skill_out_of_git(adapter.id(), Path::new(&worktree_path));
     let command = resumable
         .get(pane_key)
         .and_then(|session_ref| {
@@ -24084,91 +24246,12 @@ fn new_worktree_path(project: &str, branch: &str) -> PathBuf {
         .join(format!("{project}-{branch}-{}", std::process::id()))
 }
 
-/// The control CLI's file name: `sirioctl.exe` on Windows, bare on unix.
-///
-/// The extension is part of the name here because this resolver does not
-/// *search* for the binary the way a shell does — it stats a path it built
-/// itself (a sibling of the app executable, or the install destination), and
-/// a stat needs the exact spelling the toolchain emitted. That is a property
-/// of direct path probing, not of the platform: cmd.exe would happily
-/// resolve a bare `sirioctl` by appending `.EXE` from PATHEXT, and so does
-/// the PATH search in `sirio_agents::find_executable_in_path`. Neither of
-/// those runs here.
-///
-/// One definition feeds both the sibling-dir candidate and the install
-/// subpath so the two cannot disagree on which name to look for.
-fn sirioctl_binary_name() -> &'static str {
-    #[cfg(windows)]
-    {
-        "sirioctl.exe"
-    }
-    #[cfg(not(windows))]
-    {
-        "sirioctl"
-    }
-}
-
-/// Install subpath of the control CLI under `XDG_DATA_HOME` (or its
-/// per-platform fallbacks).
-fn sirioctl_install_subpath() -> PathBuf {
-    Path::new("Sirio").join("bin").join(sirioctl_binary_name())
-}
-
-/// Resolve the control CLI used by worktree-local agent hooks.
-///
-/// The installed path is deliberately app-owned and XDG-correct rather than
-/// relying on the login shell's PATH. A development build supplies the
-/// sibling binary from `target/debug`; an installed build may supply an
-/// already-installed copy or a PATH entry. In all cases hooks receive the
-/// absolute app-owned path, so the shell that an agent starts cannot lose the
-/// control CLI merely because it has a different PATH.
-fn resolve_sirioctl_path(
-    current_exe: &Path,
-    environment: &BTreeMap<String, String>,
-) -> Result<PathBuf, String> {
-    let destination = xdg_data_home_for(environment).join(sirioctl_install_subpath());
-    #[cfg(unix)]
-    if is_executable_file(&destination) {
-        return Ok(destination);
-    }
-
-    let mut candidates = Vec::new();
-    if let Some(parent) = current_exe.parent() {
-        candidates.push(parent.join(sirioctl_binary_name()));
-    }
-    if let Some(path) = environment.get("PATH")
-        && let Some(path) =
-            sirio_agents::find_executable_in_path("sirioctl", std::ffi::OsStr::new(path))
-    {
-        candidates.push(path);
-    }
-
-    let source = match candidates
-        .iter()
-        .find(|candidate| is_executable_file(candidate))
-        .map(|candidate| {
-            std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf())
-        }) {
-        Some(source) => source,
-        None if is_executable_file(&destination) => return Ok(destination),
-        None => {
-            return Err(format!(
-                "sirioctl is unavailable: checked {} and PATH; build or install the control CLI before launching an agent",
-                current_exe
-                    .parent()
-                    .map(|path| path.join(sirioctl_binary_name()).display().to_string())
-                    .unwrap_or_else(|| "the app executable directory".to_string())
-            ));
-        }
-    };
-
-    install_sirioctl(&source, &destination, environment).map(|()| destination)
-}
-
+/// The stable copy of `sirioctl`, made current first (`cli_install`). Hooks,
+/// PATH links and panes name the path this returns.
 fn resolve_sirioctl_for_process() -> Result<PathBuf, String> {
     let current_exe = std::env::current_exe().unwrap_or_default();
     let environment: BTreeMap<String, String> = std::env::vars().collect();
-    resolve_sirioctl_path(&current_exe, &environment)
+    cli_install::resolve_for_pane(&current_exe, &environment, cli_install::stable_is_debug())
 }
 
 /// The user's home directory, or `None` when the environment offers no
@@ -24228,170 +24311,6 @@ fn xdg_data_home_for(environment: &BTreeMap<String, String>) -> PathBuf {
             }
         })
         .unwrap_or_else(|| std::env::temp_dir().join(".local/share"))
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn installed_copy_is_stale(source: &Path, destination: &Path) -> bool {
-    let Ok(source_metadata) = std::fs::metadata(source) else {
-        return false;
-    };
-    let Ok(destination_metadata) = std::fs::metadata(destination) else {
-        return true;
-    };
-
-    source_metadata.len() != destination_metadata.len()
-        || matches!(
-            (source_metadata.modified(), destination_metadata.modified()),
-            (Ok(source_modified), Ok(destination_modified))
-                if source_modified > destination_modified
-        )
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SirioctlInstallKind {
-    Symlink,
-    Copy,
-}
-
-fn sirioctl_install_kind(environment: &BTreeMap<String, String>) -> SirioctlInstallKind {
-    match environment.get("APPIMAGE") {
-        Some(path) if !path.is_empty() => SirioctlInstallKind::Copy,
-        _ => SirioctlInstallKind::Symlink,
-    }
-}
-
-fn install_sirioctl(
-    source: &Path,
-    destination: &Path,
-    _environment: &BTreeMap<String, String>,
-) -> Result<(), String> {
-    let parent = destination.parent().ok_or_else(|| {
-        format!(
-            "sirioctl install path has no parent: {}",
-            destination.display()
-        )
-    })?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
-
-    let destination_is_executable = is_executable_file(destination);
-    #[cfg(unix)]
-    let install_kind = sirioctl_install_kind(_environment);
-    #[cfg(unix)]
-    if destination_is_executable
-        && (matches!(install_kind, SirioctlInstallKind::Symlink)
-            || !std::fs::symlink_metadata(destination)
-                .map(|metadata| metadata.file_type().is_symlink())
-                .unwrap_or(false))
-    {
-        return Ok(());
-    }
-    #[cfg(not(unix))]
-    if destination_is_executable && !installed_copy_is_stale(source, destination) {
-        return Ok(());
-    }
-
-    // `symlink_metadata` describes the link itself and `is_executable_file`
-    // follows it, so the two disagree on exactly one thing: a link whose
-    // target is gone. That is our own install after a rebuild moved or
-    // cleaned `target/`, and replacing it is the whole point of an installer.
-    // A real file is somebody else's and still refuses to be clobbered.
-    match std::fs::symlink_metadata(destination) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            std::fs::remove_file(destination).map_err(|error| {
-                format!(
-                    "could not replace the stale sirioctl install at {}: {error}",
-                    destination.display()
-                )
-            })?;
-        }
-        Ok(_) if !destination_is_executable => {
-            return Err(format!(
-                "cannot install sirioctl at {}: a non-executable file already exists",
-                destination.display()
-            ));
-        }
-        Ok(_) | Err(_) => {}
-    }
-
-    #[cfg(unix)]
-    match install_kind {
-        SirioctlInstallKind::Symlink => {
-            std::os::unix::fs::symlink(source, destination).map_err(|error| {
-                format!(
-                    "could not install sirioctl at {}: {error}",
-                    destination.display()
-                )
-            })
-        }
-        SirioctlInstallKind::Copy => {
-            std::fs::copy(source, destination).map_err(|error| {
-                format!(
-                    "could not install sirioctl at {}: {error}",
-                    destination.display()
-                )
-            })?;
-
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(destination)
-                .map_err(|error| {
-                    format!(
-                        "could not read installed sirioctl at {}: {error}",
-                        destination.display()
-                    )
-                })?
-                .permissions();
-            permissions.set_mode(permissions.mode() | 0o111);
-            std::fs::set_permissions(destination, permissions).map_err(|error| {
-                format!(
-                    "could not make installed sirioctl at {} executable: {error}",
-                    destination.display()
-                )
-            })
-        }
-    }?;
-
-    #[cfg(not(unix))]
-    if let Err(error) = std::fs::copy(source, destination) {
-        // A running-exe lock can make Windows refuse to refresh the copy. Keep
-        // the usable old binary and retry on the next launch; only fail when
-        // there is no executable at the destination at all.
-        if is_executable_file(destination) {
-            return Ok(());
-        }
-        return Err(format!(
-            "could not install sirioctl at {}: {error}",
-            destination.display()
-        ));
-    }
-
-    if is_executable_file(destination) {
-        Ok(())
-    } else {
-        Err(format!(
-            "installed sirioctl at {} is not executable",
-            destination.display()
-        ))
-    }
 }
 
 fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapshot {
@@ -25449,6 +25368,9 @@ fn host_ensure_options(
         client_version: sirio_control::VERSION.to_string(),
         current_exe,
         environment,
+        // The host and its sessions run in the user's environment, not the
+        // launcher's (`sirio_env::install` ran before the first ensure).
+        host_environment: sirio_env::for_child(),
         major,
     })
 }
@@ -25483,6 +25405,24 @@ fn route_connect(route: Arc<HostRoute>) -> HostConnect {
             .connect()
             .map(|connected| (connected.client, connected.reconnect))
     })
+}
+
+/// Gives the sirioctl card its first state once the startup job has stored its outcomes.
+fn show_cli_status_when_started(
+    settings: Entity<Settings>,
+    started: futures::channel::oneshot::Receiver<()>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        if started.await.is_ok() {
+            let _ = cx.update(|cx| {
+                settings.update(cx, |settings, cx| {
+                    settings.set_cli_status(cli_install::card_status(), cx);
+                });
+            });
+        }
+    })
+    .detach();
 }
 
 /// Finds, starts or adopts the session host on a thread of its own —
@@ -25578,6 +25518,16 @@ fn ensure_host_in_background(
             let control = handle.term();
             (client, reconnect, sessions, control)
         });
+        // The suffix follows the host's terminal capability, not the sessions it
+        // holds: a host with terminals but no `term.env_exact` extends its own
+        // environment, so the terminals it opened before a restart keep the
+        // launcher's. A host with no terminal capability has none to name.
+        let line = match &term_data {
+            Some((client, ..)) if !client.env_exact() => format!(
+                "{line} — terminals opened before it restarts keep Sirio's launcher environment"
+            ),
+            _ => line,
+        };
         Ok((handle, line, term_data))
     };
     let spawned = std::thread::Builder::new()
@@ -25665,11 +25615,18 @@ fn ensure_host_in_background(
 }
 
 fn main() {
-    // First statement in the process, and it has to stay first. `gpui`
-    // decides X11 vs Wayland by reading the environment
-    // (`guess_compositor`), so the environment has to be right before
-    // `application()` constructs anything — and `set_var` is only sound while
-    // this is still a single-threaded process. See `display_backend`.
+    // Read before anything below changes the environment: children get the
+    // user's environment (`sirio_env`), and `display_backend` and the Windows
+    // `set_var` both rewrite values here (`GDK_BACKEND`, `WAYLAND_DISPLAY`)
+    // that the children must keep as the user set them.
+    let process_environment: BTreeMap<String, String> = std::env::vars().collect();
+    let launch = sirio_env::launch_environment(&process_environment);
+
+    // The first statement that changes the environment, and it has to stay
+    // first among those. `gpui` decides X11 vs Wayland by reading the
+    // environment (`guess_compositor`), so the environment has to be right
+    // before `application()` constructs anything — and `set_var` is only sound
+    // while this is still a single-threaded process. See `display_backend`.
     #[cfg(target_os = "linux")]
     display_backend::prepare_environment();
 
@@ -25708,9 +25665,14 @@ fn main() {
     // Same single-threaded window, same reason: a Finder/Dock launch carries
     // launchd's minimal PATH, and everything that resolves a binary — agent
     // discovery, ACP server spawns, the npm installer — reads this process's
-    // environment rather than a login shell's.
+    // environment rather than a login shell's. The login PATH is read here,
+    // once, so the user environment below can merge it as well.
     #[cfg(not(windows))]
-    login_path::adopt_login_shell_path();
+    let login = login_path::login_shell_path(&launch);
+    #[cfg(not(windows))]
+    login_path::adopt_login_shell_path(login.as_deref());
+    #[cfg(windows)]
+    let login: Option<std::ffi::OsString> = None;
 
     // #364: after the env setup above (which must stay single-threaded and
     // before `application()`), before any logging or window exists.
@@ -25722,12 +25684,42 @@ fn main() {
     // else asks for it; a pane receives it as SIRIO_PANE_HOST_HOME.
     session::export_pane_host_root();
 
+    // After the app's variables for its children are in the process, so
+    // `sirio_env` can copy them into the user environment. The sirioctl
+    // directory leads PATH, but only when a child can safely be given it: an
+    // absolute data home, owned by this user and not writable by others. It is
+    // created here, so the first launch already has it.
+    let install_dir =
+        cli_install::sirioctl_install_dir(&process_environment, cli_install::stable_is_debug());
+    if let Some(dir) = &install_dir
+        && let Err(error) = cli_install::create_install_dir(dir)
+    {
+        eprintln!("[sirio] could not create {}: {error}", dir.display());
+    }
+    // The stable path the hook repair names: the same on every launch of this build.
+    let stable_sirioctl = install_dir
+        .as_ref()
+        .map(|dir| dir.join(cli_install::sirioctl_binary_name()));
+    let cli_prefix = install_dir.filter(|dir| cli_install::safe_path_prefix(dir));
+    sirio_env::install(sirio_env::user_environment_from(
+        &launch,
+        login.as_deref(),
+        cli_prefix.as_deref(),
+    ));
+    // gpui starts `xdg-open` for every link: it gets the user's environment
+    // like the other children, not the AppImage mount's variables.
+    #[cfg(target_os = "linux")]
+    gpui_linux::set_child_environment(sirio_env::for_child().into_iter().collect());
+    // The login PATH the PATH link checks, recorded once so nothing runs the
+    // login shell a second time (cli_path.rs).
+    cli_path::set_login_path(login);
+
     sirio_perf::init();
     // bezel's icons are `svg().path("icons/…")`; without an asset source
     // gpui finds nothing and paints nothing. Sirio's own icons embed their
     // bytes and never needed this.
     let app = application().with_assets(sirio_ui::ely::AppAssets);
-    app.run(|cx: &mut App| {
+    app.run(move |cx: &mut App| {
         #[cfg(feature = "perf-native")]
         native_perf::init(cx);
         // Must land before `Theme::init`: Theme caches resolved font names.
@@ -25755,7 +25747,15 @@ fn main() {
         // The working directory can vanish between launches (a terminal
         // whose cwd was deleted): fall back rather than abort before the
         // window exists.
-        let fallback_directory = initial_working_directory();
+        let current_directory = std::env::current_dir().unwrap_or_else(|error| {
+            eprintln!("[sirio] cannot read the current directory: {error}");
+            user_home_dir().unwrap_or_else(|| PathBuf::from("."))
+        });
+        let fallback_directory = initial_working_directory(
+            &current_directory,
+            &process_environment,
+            user_home_dir(),
+        );
         let restored = session::restore(&database_path, &fallback_directory);
         for diagnostic in &restored.diagnostics {
             eprintln!("[session] {diagnostic}");
@@ -25774,7 +25774,10 @@ fn main() {
         // come. `migrate_file` touches only the path, never pane ids,
         // arguments, unrelated hooks, or other JSON keys; an unchanged or
         // unparseable file is a no-op.
-        if let Ok(sirioctl_path) = resolve_sirioctl_for_process() {
+        // The repair runs here, synchronously, and names the stable path, which
+        // does not depend on the copy having been made yet. Only the copy itself
+        // is made on a background thread, below.
+        if let Some(sirioctl_path) = stable_sirioctl {
             let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();
             for project in project_catalog.projects() {
                 for worktree in &project.worktrees {
@@ -25788,6 +25791,13 @@ fn main() {
                 }
             }
         }
+        // The copy is made off this thread, and nothing waits for it. A pane that
+        // starts before it finishes uses the copy that is there, and makes one
+        // only when there is none (`resolve_sirioctl_for_process`).
+        let cli_started = cli_install::ensure_at_startup(
+            std::env::current_exe().unwrap_or_default(),
+            std::env::vars().collect(),
+        );
         let session_store = SessionStore::open(&database_path);
         // Restore is tolerant of old path-based project ids; rewrite the
         // canonical catalog immediately so every later layout save sees one
@@ -26098,9 +26108,9 @@ fn main() {
                         })
                         .on_install_skill({
                             let pending_actions = pending_for_settings.clone();
-                            move |command| {
+                            move || {
                                 if let Ok(mut actions) = pending_actions.lock() {
-                                    actions.push(WorkspaceAction::InstallSkill(command));
+                                    actions.push(WorkspaceAction::InstallSkill);
                                 }
                             }
                         })
@@ -26109,6 +26119,14 @@ fn main() {
                             move || {
                                 if let Ok(mut actions) = pending_actions.lock() {
                                     actions.push(WorkspaceAction::InstallHooks);
+                                }
+                            }
+                        })
+                        .on_install_cli({
+                            let pending_actions = pending_for_settings.clone();
+                            move || {
+                                if let Ok(mut actions) = pending_actions.lock() {
+                                    actions.push(WorkspaceAction::InstallCli);
                                 }
                             }
                         })
@@ -26150,6 +26168,7 @@ fn main() {
                     panes_for_host_link.clone(),
                     cx,
                 );
+                show_cli_status_when_started(settings.clone(), cli_started, cx);
                 let workspace = cx.new(|cx| {
                     let sidebar = cx.new(|cx| {
                         let mut sidebar = Sidebar::from_projects(catalog_for_sidebar, cx);
@@ -28046,27 +28065,6 @@ done
         }
     }
 
-    /// The skills CLI ships as an npm shim: on Windows `npx` is `npx.cmd`,
-    /// which `CreateProcess` cannot infer from the bare name — the PTY child
-    /// must be handed the PATH-resolved program, the same way
-    /// `agent_command_for` resolves `opencode.cmd`. Handing it the bare name
-    /// is the "Install Skill does nothing" defect: the pane shows a spawn
-    /// failure instead of the installer.
-    #[test]
-    fn skill_install_runs_the_path_resolved_program() {
-        let command = sirio_project::agent_skill_install_command();
-        let resolved = PathBuf::from(r"C:\Program Files\nodejs\npx.cmd");
-        let shell = skill_install_shell_with(command, |program| {
-            assert_eq!(program, "npx", "the bare name is what gets resolved");
-            Some(resolved.clone())
-        });
-        let TerminalShell::WithArguments { program, args } = shell else {
-            panic!("skill installation must run as a terminal command");
-        };
-        assert_eq!(program, resolved.to_string_lossy());
-        assert_eq!(args.first().map(String::as_str), Some("skills"));
-    }
-
     /// F-TERM-UI-02: a real `TerminalLinkEvent`, fed through the real
     /// `subscribe_terminal_link` wiring (not a reimplementation of its
     /// logic), must queue `WorkspaceAction::OpenBrowserLink` -- the same
@@ -28108,6 +28106,44 @@ done
             Some("https://example.test/from-terminal"),
             "a terminal link click must queue OpenBrowserLink (the same in-app \
              Browser tab route bind_chat's ChatEvent::OpenLink uses)"
+        );
+    }
+
+    /// `surface.terminal.state` reports the agent status the activity model
+    /// holds under the pane's own id, the id it exports as `SIRIO_PANE_ID` and
+    /// that a hook's `notify --session` sends back.
+    #[gpui::test]
+    fn terminal_state_reports_the_agent_status_of_its_own_pane(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let workspace = palette_test_workspace(cx);
+            let terminal = match &workspace.tabs[0].panes {
+                PaneNode::Leaf {
+                    content: Some(TabContent::Terminal { view }),
+                    ..
+                } => view.clone(),
+                _ => panic!("test tab 0 must be a terminal pane"),
+            };
+            terminal.update(cx, |terminal, _| {
+                terminal.set_identity(TerminalIdentity::new("pane-0", "terminal-0"));
+            });
+            workspace
+        });
+        workspace.update(cx, |workspace, _| {
+            workspace
+                .activity
+                .notify("pane-0", AgentStatus::NeedsInput, Instant::now());
+        });
+        let pairs = workspace.read_with(cx, |workspace, app| {
+            workspace.control_terminal_state("pane-0", app)
+        });
+        let pairs = pairs.expect("tab 0 is a terminal pane");
+        assert!(
+            pairs.contains(&("agentStatus".to_string(), "needs-input".to_string())),
+            "a pane whose hook reported needs-input must say so: {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("sessionLost".to_string(), "false".to_string())),
+            "the session-lost answer must stay: {pairs:?}"
         );
     }
 
@@ -32840,50 +32876,6 @@ done
             palette.left() < center.left(),
             "the command palette must extend beyond the overflow-hidden center panel"
         );
-    }
-
-    /// Install Skill hands the installer to a terminal tab — one the user
-    /// cannot see while the Settings surface still covers the workspace.
-    /// The hand-off must close Settings too, so the click lands the user on
-    /// the terminal where the install is running, not on a screen that
-    /// merely says so.
-    #[gpui::test]
-    async fn install_skill_opens_its_terminal_in_front_of_settings(cx: &mut TestAppContext) {
-        cx.set_global(Theme::light());
-        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        let workspace = cx.update(|window, _| {
-            window
-                .root::<SirioWorkspace>()
-                .flatten()
-                .expect("palette workspace root")
-        });
-
-        workspace.update(&mut cx, |workspace, cx| {
-            workspace.open_settings(None, cx);
-            assert!(workspace.show_settings, "Settings covers the workspace");
-            // A program that cannot exist: the pane reports the spawn failure
-            // and the tab still opens, so the test needs no npm on this box
-            // and never runs a real install.
-            workspace.open_skill_install_terminal(
-                sirio_project::SkillInstallCommand {
-                    program: "sirio-test-no-such-installer".into(),
-                    args: vec!["--version".into()],
-                },
-                cx,
-            );
-        });
-        cx.run_until_parked();
-
-        workspace.read_with(&cx, |workspace, _| {
-            assert!(
-                !workspace.show_settings,
-                "Settings closes so the terminal is what the user sees"
-            );
-            let active = &workspace.tabs[workspace.active_tab];
-            assert_eq!(active.title, "Install Skill");
-        });
     }
 
     /// The palette's filter row takes typed characters through
@@ -38050,331 +38042,6 @@ done
         );
     }
 
-    fn stale_copy_test_files(name: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "sirio-sirioctl-stale-copy-{}-{}-{}",
-            name,
-            std::process::id(),
-            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("create stale-copy fixture");
-        let source = root.join("source");
-        let destination = root.join("destination");
-        (root, source, destination)
-    }
-
-    fn set_modified(path: &Path, seconds: u64) {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .expect("open fixture for timestamp update")
-            .set_times(
-                std::fs::FileTimes::new()
-                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(seconds)),
-            )
-            .expect("set fixture timestamp");
-    }
-
-    #[test]
-    fn installed_copy_different_size_is_stale() {
-        let (root, source, destination) = stale_copy_test_files("different-size");
-        std::fs::write(&source, b"new source").expect("write source fixture");
-        std::fs::write(&destination, b"old").expect("write destination fixture");
-
-        assert!(installed_copy_is_stale(&source, &destination));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn installed_copy_same_size_with_newer_source_is_stale() {
-        let (root, source, destination) = stale_copy_test_files("same-size-newer-source");
-        std::fs::write(&source, b"source").expect("write source fixture");
-        std::fs::write(&destination, b"copy!!").expect("write destination fixture");
-        set_modified(&destination, 1);
-        set_modified(&source, 2);
-
-        assert!(installed_copy_is_stale(&source, &destination));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn non_empty_appimage_selects_a_sirioctl_copy() {
-        let environment = BTreeMap::from([(
-            String::from("APPIMAGE"),
-            String::from("/tmp/Sirio.AppImage"),
-        )]);
-
-        assert_eq!(
-            sirioctl_install_kind(&environment),
-            SirioctlInstallKind::Copy
-        );
-    }
-
-    #[test]
-    fn empty_appimage_selects_a_sirioctl_symlink() {
-        let environment = BTreeMap::from([(String::from("APPIMAGE"), String::new())]);
-
-        assert_eq!(
-            sirioctl_install_kind(&environment),
-            SirioctlInstallKind::Symlink
-        );
-    }
-
-    #[test]
-    fn sirioctl_resolver_installs_the_sibling_binary_in_xdg_data_bin() {
-        // The fixture names the binary exactly the way the platform ships
-        // it (`sirioctl.exe` on Windows, bare `sirioctl` on unix); the
-        // resolver has to look for that name, not the other one.
-        let root = std::env::temp_dir().join(format!(
-            "sirio-sirioctl-resolution-{}-{}",
-            std::process::id(),
-            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let executable_dir = root.join("target/debug");
-        let data_home = root.join("data");
-        std::fs::create_dir_all(&executable_dir).expect("create executable fixture");
-        let current_exe = executable_dir.join("sirio");
-        let sirioctl = executable_dir.join(sirioctl_binary_name());
-        std::fs::write(&current_exe, b"sirio").expect("write app fixture");
-        std::fs::write(&sirioctl, b"sirioctl").expect("write sirioctl fixture");
-        make_executable(&current_exe);
-        make_executable(&sirioctl);
-
-        let environment = BTreeMap::from([
-            (
-                "XDG_DATA_HOME".to_string(),
-                data_home.to_string_lossy().into_owned(),
-            ),
-            (
-                "HOME".to_string(),
-                root.join("home").to_string_lossy().into_owned(),
-            ),
-            (
-                "PATH".to_string(),
-                root.join("empty-path").to_string_lossy().into_owned(),
-            ),
-        ]);
-
-        let resolved = resolve_sirioctl_path(&current_exe, &environment)
-            .expect("sibling sirioctl should be installed");
-        assert_eq!(resolved, data_home.join(sirioctl_install_subpath()));
-        assert!(resolved.is_absolute());
-        assert_installed_from(&resolved, &sirioctl);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// Windows regression: the build emits `sirioctl.exe`, and the
-    /// resolver must look for exactly that name. An extensionless `sirioctl`
-    /// next to the app is not a real Windows artifact (and does not exist on
-    /// a normal build), so it may not satisfy the resolution — otherwise
-    /// every agent tab would fail to open on Windows, which is the bug this
-    /// test pins.
-    #[cfg(windows)]
-    #[test]
-    fn sirioctl_resolver_requires_the_exe_sibling_on_windows() {
-        let root = std::env::temp_dir().join(format!(
-            "sirio-sirioctl-exe-resolution-{}-{}",
-            std::process::id(),
-            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let executable_dir = root.join("target/debug");
-        let data_home = root.join("data");
-        std::fs::create_dir_all(&executable_dir).expect("create executable fixture");
-        let current_exe = executable_dir.join("sirio.exe");
-        std::fs::write(&current_exe, b"sirio").expect("write app fixture");
-        // An extensionless twin is the Windows mistake in fixture form:
-        // present, but not the artifact the resolver must find.
-        std::fs::write(executable_dir.join("sirioctl"), b"wrong artifact")
-            .expect("write extensionless decoy");
-        std::fs::create_dir_all(root.join("empty-path")).expect("create empty PATH dir");
-
-        let environment = BTreeMap::from([
-            (
-                "XDG_DATA_HOME".to_string(),
-                data_home.to_string_lossy().into_owned(),
-            ),
-            (
-                "PATH".to_string(),
-                root.join("empty-path").to_string_lossy().into_owned(),
-            ),
-        ]);
-
-        let error = resolve_sirioctl_path(&current_exe, &environment)
-            .expect_err("an extensionless sirioctl must not satisfy the resolver");
-        assert!(error.contains("sirioctl is unavailable"), "got {error}");
-
-        let sirioctl = executable_dir.join("sirioctl.exe");
-        std::fs::write(&sirioctl, b"sirioctl").expect("write the real artifact");
-        let resolved = resolve_sirioctl_path(&current_exe, &environment)
-            .expect("the .exe sibling must resolve");
-        assert_eq!(
-            resolved,
-            data_home.join("Sirio").join("bin").join("sirioctl.exe")
-        );
-        assert_installed_from(&resolved, &sirioctl);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn sirioctl_resolver_falls_back_to_path_and_reports_missing_binary() {
-        let root = std::env::temp_dir().join(format!(
-            "sirio-sirioctl-path-resolution-{}-{}",
-            std::process::id(),
-            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let executable_dir = root.join("app");
-        let path_dir = root.join("path");
-        let data_home = root.join("data");
-        std::fs::create_dir_all(&executable_dir).expect("create app fixture");
-        std::fs::create_dir_all(&path_dir).expect("create PATH fixture");
-        let current_exe = executable_dir.join("sirio");
-        // The PATH entry is named the way the platform ships it, exactly as
-        // in the sibling-directory fixture above: the Windows build emits
-        // `sirioctl.exe` and `find_executable_in_path` deliberately probes
-        // the PATHEXT spellings only, never the bare name (see
-        // `sirioctl_binary_name`).
-        let path_sirioctl = path_dir.join(sirioctl_binary_name());
-        std::fs::write(&current_exe, b"sirio").expect("write app fixture");
-        std::fs::write(&path_sirioctl, b"sirioctl").expect("write PATH fixture");
-        make_executable(&current_exe);
-        make_executable(&path_sirioctl);
-
-        let mut environment = BTreeMap::from([
-            (
-                "XDG_DATA_HOME".to_string(),
-                data_home.to_string_lossy().into_owned(),
-            ),
-            ("PATH".to_string(), path_dir.to_string_lossy().into_owned()),
-        ]);
-        let resolved = resolve_sirioctl_path(&current_exe, &environment)
-            .expect("PATH sirioctl should be installed");
-        assert_eq!(resolved, data_home.join(sirioctl_install_subpath()));
-        assert_installed_from(&resolved, &path_sirioctl);
-
-        environment.insert(
-            "XDG_DATA_HOME".into(),
-            root.join("missing-data").display().to_string(),
-        );
-        environment.insert(
-            "PATH".into(),
-            root.join("missing-path").display().to_string(),
-        );
-        let error = resolve_sirioctl_path(&root.join("missing/sirio"), &environment)
-            .expect_err("missing sirioctl must be surfaced");
-        assert!(error.contains("sirioctl is unavailable"));
-        assert!(!error.contains("using bare sirioctl"));
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// A stale install is the ordinary end state of a rebuild: the symlink in
-    /// `XDG_DATA_HOME` outlives the `target/` directory it points into. The
-    /// resolver has to heal that itself. `symlink_metadata` succeeds for a
-    /// broken link, so the guard that keeps a real file from being clobbered
-    /// used to reject it as "a non-executable file already exists" -- and
-    /// because every agent launch funnels through `resolve_sirioctl_for_process`,
-    /// the app then refused to start any agent at all until a human deleted
-    /// the link by hand.
-    #[cfg(unix)]
-    #[test]
-    fn sirioctl_resolver_replaces_a_stale_install_symlink() {
-        let root = std::env::temp_dir().join(format!(
-            "sirio-sirioctl-stale-link-{}-{}",
-            std::process::id(),
-            TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let path_dir = root.join("path");
-        let data_home = root.join("data");
-        std::fs::create_dir_all(&path_dir).expect("create PATH fixture");
-        let destination = data_home.join(sirioctl_install_subpath());
-        std::fs::create_dir_all(destination.parent().expect("install parent"))
-            .expect("create install dir");
-        let path_sirioctl = path_dir.join("sirioctl");
-        std::fs::write(&path_sirioctl, b"sirioctl").expect("write PATH fixture");
-        make_executable(&path_sirioctl);
-
-        // The previous build's binary, now deleted: a link pointing at nothing.
-        std::os::unix::fs::symlink(root.join("deleted-target/debug/sirioctl"), &destination)
-            .expect("create the stale install symlink");
-        assert!(
-            std::fs::symlink_metadata(&destination).is_ok(),
-            "the fixture must be a dangling link, not an absent path"
-        );
-        assert!(
-            std::fs::metadata(&destination).is_err(),
-            "the fixture's link must resolve to nothing"
-        );
-
-        let environment = BTreeMap::from([
-            (
-                "XDG_DATA_HOME".to_string(),
-                data_home.to_string_lossy().into_owned(),
-            ),
-            ("PATH".to_string(), path_dir.to_string_lossy().into_owned()),
-        ]);
-
-        let resolved = resolve_sirioctl_path(&root.join("app/sirio"), &environment)
-            .expect("a stale link must be replaced, not treated as a fatal conflict");
-        assert_eq!(resolved, destination);
-        assert_eq!(
-            std::fs::canonicalize(&resolved).expect("healed installation exists"),
-            std::fs::canonicalize(&path_sirioctl).expect("PATH source exists")
-        );
-
-        // Negative control: a real file at the destination is somebody else's,
-        // and must still refuse to be clobbered.
-        std::fs::remove_file(&destination).expect("clear the healed link");
-        std::fs::write(&destination, b"not ours").expect("write conflicting file");
-        let error = resolve_sirioctl_path(&root.join("app/sirio"), &environment)
-            .expect_err("a real non-executable file must not be replaced");
-        assert!(error.contains("already exists"), "got {error}");
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    fn make_executable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = std::fs::metadata(path)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).expect("make fixture executable");
-    }
-
-    #[cfg(not(unix))]
-    fn make_executable(_path: &Path) {}
-
-    /// The installed control CLI must be the very artifact the resolver
-    /// picked, and `install_sirioctl` reaches that end state by two
-    /// different transports: a symlink on unix, a byte copy on Windows
-    /// (`std::fs::copy`, because a link is not a primitive a plain user may
-    /// create there). Carrying the source's bytes is the claim both
-    /// transports make and is therefore asserted on every platform; the
-    /// symlink's stronger claim — one file, reachable under two names — is
-    /// asserted where the installer actually makes it.
-    fn assert_installed_from(installed: &Path, source: &Path) {
-        #[cfg(unix)]
-        assert_eq!(
-            std::fs::canonicalize(installed).expect("installed sirioctl exists"),
-            std::fs::canonicalize(source).expect("source sirioctl exists"),
-            "a unix install must be a symlink back to the source"
-        );
-        assert_eq!(
-            std::fs::read(installed).expect("read the installed sirioctl"),
-            std::fs::read(source).expect("read the source sirioctl"),
-            "the installed sirioctl must carry the source artifact's bytes"
-        );
-    }
-
     #[test]
     fn restoring_launch_snapshot_adds_missing_tabs_without_replacing_current_tabs() {
         let snapshot = vec![
@@ -41127,6 +40794,66 @@ done
         assert!(response.ok, "queued compose response: {response:?}");
     }
 
+    /// `surface.settings.act` runs one of the three Settings installs and
+    /// nothing else: any other action is refused before anything is queued,
+    /// and the three are queued with the action the socket named.
+    #[test]
+    fn settings_act_queues_only_the_three_installs() {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let handler = Arc::new(AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                project_settings: BTreeMap::new(),
+                workspaces: Vec::new(),
+                current: None,
+            })),
+            actions.clone(),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/sirio-settings-act-test.sock")),
+        ));
+        let act = |action: &str| ControlRequest {
+            id: format!("settings-act-{action}"),
+            method: "surface.settings.act".into(),
+            params: BTreeMap::from([("action".into(), action.into())]),
+        };
+
+        let refused = handler.handle(&act("reinstall-everything"));
+        assert!(!refused.ok, "an unknown action must fail: {refused:?}");
+        let message = refused.error.clone().unwrap_or_default();
+        for install in ["install-hooks", "install-skill", "install-cli"] {
+            assert!(message.contains(install), "the refusal must name {install}: {message}");
+        }
+        assert!(
+            actions.lock().expect("action queue").is_empty(),
+            "a refused action must queue nothing"
+        );
+
+        let worker = std::thread::spawn({
+            let handler = handler.clone();
+            move || handler.handle(&act("install-hooks"))
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let action = loop {
+            if let Some(action) = actions.lock().expect("action queue").pop() {
+                break action;
+            }
+            assert!(Instant::now() < deadline, "install-hooks was never queued");
+            std::thread::yield_now();
+        };
+        let ControlAction::SettingsAct { action, reply } = action else {
+            panic!("settings.act must cross the existing GPUI control-action queue");
+        };
+        assert_eq!(action, "install-hooks");
+        reply
+            .send(Ok(vec![("report".into(), "done".into())]))
+            .expect("reply to socket worker");
+        let response = worker.join().expect("socket worker did not panic");
+        assert!(response.ok, "queued settings.act response: {response:?}");
+    }
+
     #[cfg(windows)]
     const VERBATIM_PATH: &str = r"\\?\D:\x\y";
     #[cfg(windows)]
@@ -41216,6 +40943,7 @@ done
             | ControlAction::OpenTerminal { reply, .. }
             | ControlAction::TerminalRestart { reply, .. }
             | ControlAction::TerminalState { reply, .. }
+            | ControlAction::SettingsAct { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -41344,6 +41072,7 @@ done
             "surface.change_request.act" => request::change_request_act("close", &BTreeMap::new()),
             "surface.host.end_all" => request_with_params(method, &[]),
             "surface.terminal.open" => request_with_params(method, &[]),
+            "surface.settings.act" => request_with_params(method, &[("action", "install-hooks")]),
             "surface.terminal.restart" | "surface.terminal.state" => {
                 request_with_params(method, &[("pane", "pane-1")])
             }
@@ -41829,6 +41558,33 @@ done
             std::process::id()
         ));
         let _ = std::fs::create_dir_all(&worktree);
+        // The shell needs a stable sirioctl, and a debug build keeps its own
+        // copy under XDG_DATA_HOME. A fixture copy keeps this test off the
+        // machine's install, which a debug build never uses. Nextest runs each
+        // test in its own process, so the variable is this test's alone.
+        let data_home = std::env::temp_dir().join(format!(
+            "sirio-f-set-04-data-{}",
+            std::process::id()
+        ));
+        let copy = data_home
+            .join("Sirio")
+            .join("bin-debug")
+            .join(cli_install::sirioctl_binary_name());
+        std::fs::create_dir_all(copy.parent().expect("copy dir")).expect("create the copy dir");
+        std::fs::write(&copy, b"sirioctl").expect("write the copy");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755))
+                .expect("make the copy executable");
+        }
+        // The data root the copy is resolved under: `LOCALAPPDATA` on Windows.
+        let data_base = if cfg!(windows) {
+            "LOCALAPPDATA"
+        } else {
+            "XDG_DATA_HOME"
+        };
+        unsafe { std::env::set_var(data_base, &data_home) };
 
         // Gate ON shape: `resumable` carries this pane's saved session ref
         // (mirrors `saved_session_refs_for_restore` / `load_session_refs()`
@@ -41862,6 +41618,7 @@ done
         );
 
         let _ = std::fs::remove_dir_all(&worktree);
+        let _ = std::fs::remove_dir_all(&data_home);
     }
 
     #[gpui::test]
@@ -45039,6 +44796,7 @@ browser  profile  "
                 attach_only: false,
                 restore: false,
                 known_worktrees: std::sync::Arc::from(Vec::new()),
+                extra_env: BTreeMap::new(),
             }
         }
 
@@ -45147,6 +44905,7 @@ browser  profile  "
             attach_only: false,
             restore: false,
             known_worktrees: std::sync::Arc::from(Vec::new()),
+            extra_env: BTreeMap::new(),
         };
         let started = Instant::now();
         assert!(matches!(factory.open(probe), OpenOutcome::Pending));
@@ -46890,6 +46649,149 @@ browser  profile  "
             );
         });
         shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A scratch tree for `initial_working_directory`, under the temp dir
+    /// (`TMPDIR` in the gate's environment) and unique to this test.
+    fn initial_directory_scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "sirio-initial-dir-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create the scratch tree");
+        root
+    }
+
+    fn initial_directory_environment(entries: &[(&str, &Path)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.display().to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn initial_directory_without_an_appimage_is_the_process_directory() {
+        let root = initial_directory_scratch("no-appimage");
+        let plain = root.join("plain");
+        let repo = root.join("repo");
+        let home = root.join("home");
+        for dir in [&plain, &repo.join(".git"), &repo.join("sub"), &home] {
+            std::fs::create_dir_all(dir).expect("create a directory");
+        }
+        let nothing = BTreeMap::new();
+        assert_eq!(
+            initial_working_directory(&plain, &nothing, Some(home.clone())),
+            plain,
+            "a directory outside any repository starts where it is"
+        );
+        assert_eq!(
+            initial_working_directory(&repo.join("sub"), &nothing, Some(home.clone())),
+            repo,
+            "a subdirectory of a repository starts at its root"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn inside_the_appimage_mount_the_walk_starts_where_it_was_launched() {
+        let root = initial_directory_scratch("launch-dir");
+        let mount = root.join("mount");
+        let mount_bin = mount.join("usr").join("bin");
+        let launched = root.join("launched");
+        let home = root.join("home");
+        for dir in [&mount_bin, &launched, &home] {
+            std::fs::create_dir_all(dir).expect("create a directory");
+        }
+        let process = initial_directory_environment(&[
+            ("APPDIR", mount.as_path()),
+            ("OWD", launched.as_path()),
+        ]);
+        assert_eq!(
+            initial_working_directory(&mount_bin, &process, Some(home)),
+            launched,
+            "a launch directory outside the mount is the starting point"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_launch_directory_inside_a_repository_starts_at_its_root() {
+        let root = initial_directory_scratch("launch-repo");
+        let mount = root.join("mount");
+        let mount_bin = mount.join("usr").join("bin");
+        let repo = root.join("repo");
+        let launched = repo.join("sub");
+        let home = root.join("home");
+        for dir in [&mount_bin, &repo.join(".git"), &launched, &home] {
+            std::fs::create_dir_all(dir).expect("create a directory");
+        }
+        let process = initial_directory_environment(&[
+            ("APPDIR", mount.as_path()),
+            ("OWD", launched.as_path()),
+        ]);
+        assert_eq!(
+            initial_working_directory(&mount_bin, &process, Some(home)),
+            repo,
+            "the git-ancestor walk runs from the launch directory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unusable_launch_directory_starts_at_home() {
+        let root = initial_directory_scratch("unusable-owd");
+        let mount = root.join("mount");
+        let mount_bin = mount.join("usr").join("bin");
+        let inside_mount = mount.join("inside");
+        let home = root.join("home");
+        for dir in [&mount_bin, &inside_mount, &home] {
+            std::fs::create_dir_all(dir).expect("create a directory");
+        }
+        let missing = root.join("missing");
+        let relative = PathBuf::from("relative/launch");
+        for (case, owd) in [
+            ("missing", missing),
+            ("relative", relative),
+            ("empty", PathBuf::new()),
+            ("under the mount", inside_mount),
+        ] {
+            let process = initial_directory_environment(&[
+                ("APPDIR", mount.as_path()),
+                ("OWD", owd.as_path()),
+            ]);
+            assert_eq!(
+                initial_working_directory(&mount_bin, &process, Some(home.clone())),
+                home,
+                "an OWD that is {case} never becomes the starting point"
+            );
+        }
+        // With no home either, the mount is still never the answer.
+        let process = initial_directory_environment(&[("APPDIR", mount.as_path())]);
+        assert_eq!(initial_working_directory(&mount_bin, &process, None), PathBuf::from("/"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_directory_outside_the_appimage_mount_ignores_the_launch_directory() {
+        let root = initial_directory_scratch("outside-mount");
+        let mount = root.join("mount");
+        let elsewhere = root.join("elsewhere");
+        let launched = root.join("launched");
+        let home = root.join("home");
+        for dir in [&mount, &elsewhere, &launched, &home] {
+            std::fs::create_dir_all(dir).expect("create a directory");
+        }
+        let process = initial_directory_environment(&[
+            ("APPDIR", mount.as_path()),
+            ("OWD", launched.as_path()),
+        ]);
+        assert_eq!(
+            initial_working_directory(&elsewhere, &process, Some(home)),
+            elsewhere,
+            "a directory outside the mount starts where it is"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

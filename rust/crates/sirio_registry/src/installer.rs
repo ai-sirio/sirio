@@ -245,7 +245,7 @@ impl Installer {
             !self.npm_argv.is_empty(),
             "the npm argv must name a program"
         );
-        let mut child = std::process::Command::new(&self.npm_argv[0])
+        let mut child = sirio_env::command(&self.npm_argv[0])
             .args(&self.npm_argv[1..])
             .args(npm_install_argv(&staging.to_string_lossy(), package, false))
             .current_dir(&staging)

@@ -59,6 +59,14 @@ Scripts/Tests/test-term-e2e.sh      # -> prints "TERM E2E OK (<n> cases, <s>s)"
 # no captures (macOS runs that way); --xvfb or --display :N picks the display (Linux);
 # --only N[,N...] runs some cases and prints "HOST SESSIONS E2E PARTIAL" instead.
 Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> cases, <s>s)"
+# The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
+# socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
+# mount kept out of a pane, quit and relaunch, every stub agent's hooks, the skill,
+# SIRIO_WORKTREE_ID and the flags sirioctl offers. Linux runs it with --xvfb or
+# --display :N; --state-only skips cases 4, 4c, 5, 6 and 10 and is what macOS runs.
+# --out-dir DIR keeps the transcript, logs and env dumps; --only N[,N...] prints
+# "SIRIOCTL E2E PARTIAL"; --mutate claude-prompt-hook is case 6's mutation check.
+Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 
 # Live end-to-end test of the forge layer (sirio_forge): the token transport
 # and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
@@ -130,6 +138,9 @@ cd rust && cargo test -p <crate> <test_name>
 # Build the sirioctl CLI standalone (control-socket client used by agent hooks)
 cd rust && cargo build -p sirio_control --bin sirioctl
 
+# The opt-in live hook test: each CLI spends one real turn, so it runs by hand only.
+cd rust && cargo nextest run -p sirio_agents --test hooks_live --run-ignored only
+
 # Dev build+launch loop: cargo build -> kill any running instance -> relaunch.
 Scripts/build-dev.sh
 
@@ -138,7 +149,7 @@ Scripts/build-dev.sh
 # Developer ID Application identity.
 Scripts/check-release-version.sh v0.6.0          # tag vs rust/Cargo.toml
 Scripts/set-workspace-version.sh <version>       # what the nightly job compiles in
-Scripts/build-app-bundle.sh <binary> <version> build/Sirio.app <sirio-host-binary>
+Scripts/build-app-bundle.sh <binary> <version> build/Sirio.app <sirio-host-binary> <sirioctl-binary>
 Scripts/build-dmg.sh build/Sirio.app Sirio build/Sirio-<version>.dmg
 ```
 
@@ -166,13 +177,31 @@ sirio_perf       (below everything — no deps at all, not even gpui, so any
                     layer may instrument without inverting the graph. Imported
                     by sirio_git, sirio_persistence, sirio_terminal,
                     sirio_activity, sirio_ui and sirio)
+sirio_env        (below everything, beside sirio_perf — no dependencies. It is
+                    the user environment every child process starts in: the
+                    launch snapshot minus the launcher's own variables (APPIMAGE,
+                    APPDIR, ARGV0, OWD, SIRIO_LAUNCH_ENV), the stable `sirioctl`
+                    directory first on `PATH`, the per-pane names stripped
+                    (`SIRIO_WORKTREE_ID`, `SIRIO_PANE_ID`, `TILLER_PANE_ID`), and
+                    `for_child()` for a site that cannot spawn through `command`.
+                    Its dependents are sirio_acp, sirio_control, sirio_diagram,
+                    sirio_forge, sirio_git, sirio_lsp, sirio_project,
+                    sirio_registry, sirio_terminal, sirio_ui, sirio_usage and sirio.
+                    With the host's `term.env_exact` (`sirio_host_protocol::term`)
+                    a session's environment is exactly the client's map; a host
+                    without it gets that map plus an empty value for each app
+                    variable the user environment lacks, except `SHELL`
+                    (`sirio_env::host_create_env`).
+                    The panel resolver (`worktree_environment_resolver` in
+                    `sirio/src/main.rs`) sets `SIRIO_WORKTREE_ID` from the deepest
+                    worktree holding the pane's starting directory)
     ^
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_activity, sirio_markdown, sirio_registry, sirio_release,
 sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram,
 sirio_forge, sirio_privacy, sirio_ipc, sirio_host_protocol,
 sirio_term_session
-                                (leaves — no local deps beyond sirio_perf;
+                                (leaves — no local deps beyond sirio_perf and sirio_env;
                                  sirio_theme takes `bezel-theme` (pinned
                                  `=0.1.4`) and the vendored `ely-palette`;
                                  sirio_ui takes the external `bezel` crate;
@@ -588,7 +617,7 @@ workspace root's `root_focus`) so a terminal or composer is never handed a copy.
 
 ### Agent adapters (`sirio_agents`)
 
-Every supported CLI implements the `AgentAdapter` trait (`id`, `display_name`, `has_native_hooks`, `prepare`, `command`, `resume_command`). `sirio_agents::ALL` is the fixed list of 5 adapters, in display order. An adapter's ACP claim (`builtin_acp`) covers only its own binary's subcommand — verified, defaulting to `None`; everything reachable through a separate package resolves through `sirio_registry`. `prepare` writes only worktree-local hook config — **never** touches user-global config (`~/.claude/settings.json`, `~/.codex/config.toml`, etc.). The one writer of user-global config is the explicit Settings → General → **Install Hooks** action (`install_global_hooks`, a trait method defaulting to `NotSupported`): Claude merges the five hook arrays into `$CLAUDE_CONFIG_DIR`/`~/.claude/settings.json`, Codex sets `notify` in `$CODEX_HOME`/`~/.codex/config.toml` via `toml_edit` (format-preserving), OpenCode writes `~/.config/opencode/plugins/sirio-session.js`; Pi and omp honestly report no user-global mechanism. Those hooks carry **no** `--session`: `sirioctl notify`/`session-ref` fall back to the `SIRIO_PANE_ID` every Sirio pane exports and exit 0 silently outside one (no pane, or no socket), so a global hook never surfaces an error inside an agent Sirio did not launch. Adapters that generate command-line overrides embedding JSON (Codex's `-c notify=[...]`, omp's hook file) share `json_string_literal` in `sirio_agents/src/shell_quote.rs` — it must build a JSON string literal without escaping slashes, because Codex's `-c key=value` override is parsed as **TOML**, and `\/` (JSON's optional slash-escaping) is not a valid TOML escape. Getting this wrong makes Codex fail silently at config load, before it ever reaches its TUI.
+Every supported CLI implements the `AgentAdapter` trait (`id`, `display_name`, `has_native_hooks`, `prepare`, `command`, `resume_command`). `sirio_agents::ALL` is the fixed list of 5 adapters, in display order. An adapter's ACP claim (`builtin_acp`) covers only its own binary's subcommand — verified, defaulting to `None`; everything reachable through a separate package resolves through `sirio_registry`. `prepare` writes only worktree-local files, its hook config and the skill, and **never** touches user-global config (`~/.claude/settings.json`, `~/.codex/config.toml`, etc.). The writers outside Sirio's own data are explicit buttons and two startup steps, never a pane. Settings → General → **Install Hooks** (`install_global_hooks`, a trait method defaulting to `NotSupported`) writes the hooks: Claude merges the five hook arrays into `$CLAUDE_CONFIG_DIR`/`~/.claude/settings.json`, Codex sets `notify` in `$CODEX_HOME`/`~/.codex/config.toml` via `toml_edit` (format-preserving), OpenCode writes `~/.config/opencode/plugins/sirio-session.js`; Pi and omp honestly report no user-global mechanism. Those hooks carry **no** `--session`: `sirioctl notify`/`session-ref` fall back to the `SIRIO_PANE_ID` every Sirio pane exports and exit 0 silently outside one (no pane, or no socket), so a global hook never surfaces an error inside an agent Sirio did not launch. Adapters that generate command-line overrides embedding JSON (Codex's `-c notify=[...]`, omp's hook file) share `json_string_literal` in `sirio_agents/src/shell_quote.rs` — it must build a JSON string literal without escaping slashes, because Codex's `-c key=value` override is parsed as **TOML**, and `\/` (JSON's optional slash-escaping) is not a valid TOML escape. Getting this wrong makes Codex fail silently at config load, before it ever reaches its TUI. Codex, pi, opencode and omp `prepare` write `.agents/skills/sirio/SKILL.md` in the worktree, from the copy the binary ships, and the app keeps that file out of git through the common dir's `info/exclude` (`keep_agent_skill_out_of_git` in `sirio/src/main.rs`, for `SHARED_SKILL_ADAPTERS`); Claude writes `.claude/skills/sirio/SKILL.md`, and that folder is not excluded. The skill is no longer installed with `npx`. **Install Skill** writes the user-level copy for each CLI, at the paths `sirio_agents::user_skill_paths` names: `<CLAUDE_CONFIG_DIR or ~/.claude>/skills/sirio/SKILL.md`, `~/.agents/skills/sirio/SKILL.md` (Codex, Pi and Oh-My-Pi read it together) and `<XDG_CONFIG_HOME or ~/.config>/opencode/skills/sirio/SKILL.md`; a file without the managed marker is never replaced. The startup refresh rewrites only a copy Sirio already wrote, and only when it differs from the bundled skill; a debug build runs it only with `SIRIO_CLI_AS_RELEASE=1` (`cli_install::stable_is_debug`).
 
 ### A Claude chat talks to Claude Code, not to a wrapper
 
@@ -628,7 +657,7 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
 
 ### Control socket (`sirio_control`)
 
-`ControlServer` listens on a unix socket (`$SIRIO_SOCKET` if set, otherwise `$XDG_RUNTIME_DIR/Sirio/control.sock`, falling back to the XDG state directory when no runtime directory exists) and dispatches line-delimited JSON `ControlRequest`s to a `ControlHandler` the app (`sirio`) implements. This is both the `sirioctl` CLI's transport and how agent lifecycle hooks talk back to Sirio (Layer A above). `PaneRegistry` (in `sirio_control`, not the terminal crate) is the shared source of truth for live panes that both the control handler and the foreground-process walk (Layer D) read from. Its method groups — panel.*, workspace.* (worktrees), project.*, pane.* and tab.*, surface.*, browser.*, notification.*, system.* (ping/capabilities/identify), session.* and a few singletons — are all dispatched from `rust/crates/sirio/src/main.rs`, and `sirioctl capabilities` lists the full set a running instance serves; the flat kebab sirioctl commands (`list-workspaces`, `new-workspace`, `select-workspace`, …) mirror cmux's CLI names. `panel.*` is also answered by the host (SP2): the app forwards every `panel.*` to the host, `sirio_control::host_panels` is the translation both sides share, and the app adds only the layout fields it alone knows. `sirioctl` asks the app first and goes to the host only when the app's socket is missing or refuses (`sirio_control::route`); a socket that accepts and stays silent is waited for, never bypassed to the host, because loss of contact is not evidence of death. With no app and no host it prints "Sirio is not running and no host is up" and never starts one; `--worktree` needs the app. Debug builds also serve `surface.host.end_all`, `surface.terminal.open` and `surface.open_list.open`, which release `capabilities` omits; `surface.layout.read` (whether the Secondary pane is drawn, each half's tabs, the right panel's view) serves every build. The socket can be disabled in Settings (`controlSocket.enabled` / `SIRIO_SOCKET_ENABLE`), which also disables Layer-A hooks.
+`ControlServer` listens on a unix socket (`$SIRIO_SOCKET` if set, otherwise `$XDG_RUNTIME_DIR/Sirio/control.sock`, falling back to the XDG state directory when no runtime directory exists) and dispatches line-delimited JSON `ControlRequest`s to a `ControlHandler` the app (`sirio`) implements. This is both the `sirioctl` CLI's transport and how agent lifecycle hooks talk back to Sirio (Layer A above). `PaneRegistry` (in `sirio_control`, not the terminal crate) is the shared source of truth for live panes that both the control handler and the foreground-process walk (Layer D) read from. Its method groups — panel.*, workspace.* (worktrees), project.*, pane.* and tab.*, surface.*, browser.*, notification.*, system.* (ping/capabilities/identify), session.* and a few singletons — are all dispatched from `rust/crates/sirio/src/main.rs`, and `sirioctl capabilities` lists the full set a running instance serves; the flat kebab sirioctl commands (`list-workspaces`, `new-workspace`, `select-workspace`, …) mirror cmux's CLI names. `panel.*` is also answered by the host (SP2): the app forwards every `panel.*` to the host, `sirio_control::host_panels` is the translation both sides share, and the app adds only the layout fields it alone knows. `sirioctl` asks the app first and goes to the host only when the app's socket is missing or refuses (`sirio_control::route`); a socket that accepts and stays silent is waited for, never bypassed to the host, because loss of contact is not evidence of death. With no app and no host it prints "Sirio is not running and no host is up" and never starts one; `--worktree` needs the app. Debug builds also serve `surface.host.end_all`, `surface.terminal.open`, `surface.open_list.open`, `surface.settings.act` and `surface.terminal.state` (whose `agentStatus` names the pane's status word), which release `capabilities` omits; `surface.layout.read` (whether the Secondary pane is drawn, each half's tabs, the right panel's view) serves every build. `sirio_control::served::served_methods(debug)` is the one list a build serves, and `system.capabilities` passes it `cfg!(debug_assertions)`. `sirioctl --dry-run` prints the one JSON request it would send and contacts nothing; `panel wait` exits with the waited child's code. The stable copy is `<data>/Sirio/bin/sirioctl` (`bin-debug` for a debug build; `cli_install`), a copy and never a symlink, kept current by content. The PATH link (`cli_path`) is `~/.local/bin/sirioctl` on Linux; on macOS it is `/usr/local/bin/sirioctl` when the user can write there, else `~/.local/bin` when the login PATH searches it, and the administrator's password is asked only by the Settings button, never at startup; on Windows the stable directory joins the user's HKCU `Path`, which the Inno uninstaller removes. A file Sirio did not make at a link's place is never replaced, and the card names it. The socket can be disabled in Settings (`controlSocket.enabled` / `SIRIO_SOCKET_ENABLE`), which also disables Layer-A hooks.
 
 ### Pane hierarchy
 

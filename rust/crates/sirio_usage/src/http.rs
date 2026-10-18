@@ -4,8 +4,6 @@
 //! must run off the render thread (the status bar runs it on GPUI's
 //! background executor).
 
-use std::process::Command;
-
 /// A completed HTTP response.
 pub struct HttpResponse {
     /// The response body.
@@ -52,7 +50,7 @@ fn request(
     body: Option<&str>,
     timeout_secs: u64,
 ) -> Result<HttpResponse, HttpError> {
-    let mut command = Command::new("curl");
+    let mut command = sirio_env::command("curl");
     command
         .current_dir(crate::probe_working_directory())
         .arg("--silent")

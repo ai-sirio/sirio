@@ -47,6 +47,7 @@ fn parent(dir: PathBuf) {
         cwd: dir.clone(),
         label: "sirio-host-probe".into(),
         launchd_dir: dir.join("launchd"),
+        env: None,
     })
     .expect("spawn_detached");
     println!("child-method={method:?}");

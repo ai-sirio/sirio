@@ -4,11 +4,12 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
-# Deliberately a leaf: no `sirio_*` dependency may appear here. The
-# launch-resolution design puts the join with `sirio_agents` in the
-# caller (see `resolve`), precisely so neither crate learns about the
-# other.
+# Deliberately a leaf: no `sirio_*` dependency may appear here but
+# `sirio_env`, which depends on nothing. The launch-resolution design puts
+# the join with `sirio_agents` in the caller (see `resolve`), precisely so
+# neither crate learns about the other.
 [dependencies]
+sirio_env = { path = "../sirio_env" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

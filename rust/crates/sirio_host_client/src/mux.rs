@@ -86,6 +86,7 @@ struct MuxInner {
 struct Shared {
     generation: String,
     terminal: bool,
+    env_exact: bool,
     closed: AtomicBool,
     next_id: Arc<AtomicU64>,
     discarded_data_frames: AtomicU64,
@@ -146,6 +147,7 @@ impl Mux {
         let shared = Arc::new(Shared {
             generation: welcome.generation.clone(),
             terminal: has_terminal_capability(&welcome.capabilities),
+            env_exact: has_env_exact_capability(&welcome.capabilities),
             closed: AtomicBool::new(false),
             next_id: Arc::clone(&next_id),
             discarded_data_frames: AtomicU64::new(0),
@@ -274,6 +276,10 @@ impl Mux {
 
     pub(crate) fn has_terminal(&self) -> bool {
         self.inner.shared.terminal
+    }
+
+    pub(crate) fn has_env_exact(&self) -> bool {
+        self.inner.shared.env_exact
     }
 
     pub fn discarded_data_frames(&self) -> u64 {
@@ -555,6 +561,12 @@ fn has_terminal_capability(capabilities: &[String]) -> bool {
         .any(|name| name == capability::TERMINAL)
 }
 
+fn has_env_exact_capability(capabilities: &[String]) -> bool {
+    capabilities
+        .iter()
+        .any(|name| name == capability::TERM_ENV_EXACT)
+}
+
 fn response_value(response: Response) -> Result<Value, CallError> {
     match (response.result, response.error) {
         (_, Some(error)) => Err(CallError::Remote(error)),
@@ -800,6 +812,7 @@ mod tests {
             Arc::new(Shared {
                 generation: "generation".to_string(),
                 terminal: true,
+                env_exact: false,
                 closed: AtomicBool::new(false),
                 next_id: Arc::new(AtomicU64::new(2)),
                 discarded_data_frames: AtomicU64::new(0),
@@ -820,6 +833,7 @@ mod tests {
         Shared {
             generation: "generation".to_string(),
             terminal: false,
+            env_exact: false,
             closed: AtomicBool::new(false),
             next_id: Arc::new(AtomicU64::new(2)),
             discarded_data_frames: AtomicU64::new(0),
@@ -952,6 +966,7 @@ mod tests {
         let shared = Shared {
             generation: "generation".to_string(),
             terminal: true,
+            env_exact: false,
             closed: AtomicBool::new(false),
             next_id: Arc::new(AtomicU64::new(2)),
             pending: Mutex::new(HashMap::new()),

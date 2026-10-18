@@ -26,6 +26,9 @@ const READ_TEXT_MAX_BYTES: usize = 768 << 10;
 
 pub struct Router {
     core: Arc<HostCore>,
+    /// Whether `term.env_exact` is advertised. A release host always does; a
+    /// debug host can leave it out, to stand in for an older host.
+    env_exact: bool,
 }
 
 pub struct ConnState {
@@ -46,8 +49,8 @@ struct StreamState {
 }
 
 impl Router {
-    pub fn new(core: Arc<HostCore>) -> Self {
-        Self { core }
+    pub fn new(core: Arc<HostCore>, env_exact: bool) -> Self {
+        Self { core, env_exact }
     }
 
     pub fn handle(&self, _principal: &Principal, request: &Request) -> Response {
@@ -127,7 +130,11 @@ impl Router {
     }
 
     pub fn capabilities(&self) -> Vec<String> {
-        vec![capability::HOST_V1.into(), capability::TERMINAL.into()]
+        let mut names = vec![capability::HOST_V1.into(), capability::TERMINAL.into()];
+        if self.env_exact {
+            names.push(capability::TERM_ENV_EXACT.into());
+        }
+        names
     }
 
     pub fn subscribe(

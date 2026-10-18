@@ -1,0 +1,18 @@
+{
+  "name": "create-with-an-exact-environment",
+  "major": 1,
+  "steps": [
+    {
+      "send": { "id": 1, "method": "host.hello", "params": { "client_version": "conformance", "majors": [1], "minor": 2 } },
+      "expect": { "id": 1, "result": { "type": "welcome", "capabilities": ["host.v1", "terminal", "term.env_exact"] } }
+    },
+    {
+      "send": { "id": 2, "method": "term.create", "params": { "session_id": "pane-15", "cwd": "/", "command": { "type": "shell" }, "env": { "PATH": "/usr/bin:/bin" }, "env_exact": true, "size": { "cols": 80, "rows": 24 }, "origin": "control" }, "generation": "$generation" },
+      "expect": { "id": 2, "result": { "session_id": "pane-15" } }
+    },
+    {
+      "send": { "id": 3, "method": "term.close", "params": { "session_id": "pane-15" }, "generation": "$generation" },
+      "expect": { "id": 3, "result": {} }
+    }
+  ]
+}

@@ -8,6 +8,9 @@ publish.workspace = true
 # docs/superpowers/specs/2026-09-23-markdown-rich-preview-design.md).
 # A leaf: no gpui, no bezel, no local crates.
 [dependencies]
+# The user's environment for the PlantUML launcher (`plantuml_command`), so a
+# child never inherits the launcher's variables. The one local crate a leaf may take.
+sirio_env = { path = "../sirio_env" }
 # The PlantUML server protocol: raw DEFLATE + PlantUML's base64 alphabet in
 # the URL, fetched over HTTP. Both are already in the lockfile.
 flate2 = "1"

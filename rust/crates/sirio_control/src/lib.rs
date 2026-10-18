@@ -125,6 +125,7 @@ pub mod host_panels;
 pub mod panel;
 pub mod protocol;
 pub mod route;
+pub mod served;
 pub mod server;
 
 pub use client::{ClientError, round_trip};

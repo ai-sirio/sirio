@@ -317,3 +317,60 @@ fn an_exclude_file_without_a_trailing_newline_gets_its_own_line() {
     let lines = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
     assert_eq!(lines, "*.log\n.sirio/handoff/\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn exclude_keeps_the_mode_of_the_file_it_appends_to() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_scratch, repo, _bare, _feat) = fixture("exclude-mode");
+    let file = repo.join(".git/info/exclude");
+    std::fs::write(&file, "*.log\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    exclude(&repo, ".sirio/handoff/").expect("exclude");
+    let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "appending must not replace the file's mode");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "*.log\n.sirio/handoff/\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn exclude_refuses_a_target_that_is_not_a_regular_file() {
+    let (_scratch, repo, _bare, _feat) = fixture("exclude-dir");
+    let file = repo.join(".git/info/exclude");
+    let elsewhere = repo.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let _ = std::fs::remove_file(&file);
+    std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+    let error = exclude(&repo, ".sirio/handoff/").expect_err("a directory is refused");
+    assert!(error.contains(&file.display().to_string()), "{error}");
+    assert!(error.contains("not a regular file"), "{error}");
+    assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none(), "nothing was written into it");
+}
+
+// A dangling link would otherwise have its target created wherever it points.
+#[cfg(unix)]
+#[test]
+fn exclude_refuses_a_link_that_points_nowhere() {
+    let (_scratch, repo, _bare, _feat) = fixture("exclude-dangling");
+    let file = repo.join(".git/info/exclude");
+    let nowhere = repo.parent().unwrap().join("nowhere");
+    let _ = std::fs::remove_file(&file);
+    std::os::unix::fs::symlink(&nowhere, &file).unwrap();
+    let error = exclude(&repo, ".sirio/handoff/").expect_err("a dangling link is refused");
+    assert!(error.contains(&file.display().to_string()), "{error}");
+    assert!(!nowhere.exists(), "the link's target was not created");
+}
+
+#[cfg(unix)]
+#[test]
+fn exclude_writes_through_a_symlink_to_a_regular_file() {
+    let (_scratch, repo, _bare, _feat) = fixture("exclude-link");
+    let file = repo.join(".git/info/exclude");
+    let dotfile = repo.parent().unwrap().join("dotfiles-exclude");
+    std::fs::write(&dotfile, "*.log\n").unwrap();
+    let _ = std::fs::remove_file(&file);
+    std::os::unix::fs::symlink(&dotfile, &file).unwrap();
+    exclude(&repo, ".sirio/handoff/").expect("exclude");
+    assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink(), "the link stays a link");
+    assert_eq!(std::fs::read_to_string(&dotfile).unwrap(), "*.log\n.sirio/handoff/\n");
+}

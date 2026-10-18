@@ -2131,3 +2131,46 @@ fn chat_door_streams_stops_and_restores_transcript_over_a_real_socket() {
 
     server.stop();
 }
+
+/// Answers `system.ping` (the route probe) and `panel.wait` with the given exit
+/// code, the way the app answers a waited child that has exited.
+#[cfg(unix)]
+struct ExitCodeHandler {
+    exit_code: &'static str,
+}
+
+#[cfg(unix)]
+impl ControlHandler for ExitCodeHandler {
+    fn handle(&self, request: &ControlRequest) -> ControlResponse {
+        match request.method.as_str() {
+            "system.ping" => ControlResponse::success(&request.id, BTreeMap::new()),
+            "panel.wait" => ControlResponse::success(
+                &request.id,
+                BTreeMap::from([("exitCode".to_string(), self.exit_code.to_string())]),
+            ),
+            other => ControlResponse::failure(&request.id, format!("unknown method: {other}")),
+        }
+    }
+}
+
+/// `panel wait` ends with the waited child's exit code, so a child that failed
+/// fails the wait. A code that is not a number is a failure too (1).
+#[cfg(unix)]
+#[test]
+fn panel_wait_exits_with_the_child_code() {
+    for (exit_code, expected) in [("3", 3), ("0", 0), ("x", 1)] {
+        let dir = TempDir::new("wait");
+        let socket_path = dir.path().join("control.sock");
+        let server =
+            ControlServer::new(socket_path.clone(), Arc::new(ExitCodeHandler { exit_code }));
+        server.start().expect("server starts");
+        let output = sirioctl(&socket_path, &["panel", "wait", "--id", "x"]);
+        server.stop();
+        assert_eq!(
+            output.status.code(),
+            Some(expected),
+            "a child that exited {exit_code:?} must make panel wait exit {expected}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

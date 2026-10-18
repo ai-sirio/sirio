@@ -154,6 +154,17 @@ BUNDLE_LINE=$(line_of 'Scripts/build-app-bundle.sh' "$BUILD")
 [ -n "$ASSERT_LINE" ] || fail "the macos job must assert the channel on the aarch64-apple-darwin sirioctl"
 [ "$ASSERT_LINE" -lt "$BUNDLE_LINE" ] || fail "the channel must be asserted before the binary is bundled and signed"
 
+# The bundle carries sirioctl beside the app's executable (spec §5.4), so the
+# bundle call must name the sirioctl this job built. The call is read whole:
+# its arguments sit on backslash-continued lines, and the last of them is the
+# one that names sirioctl.
+[ -n "$BUNDLE_LINE" ] || fail "the macos job must bundle the app with build-app-bundle.sh"
+BUNDLE_CALL=$(awk -v s="$BUNDLE_LINE" 'NR >= s { print; if ($0 !~ /\\$/) exit }' "$BUILD")
+case "$BUNDLE_CALL" in
+  *"rust/target/aarch64-apple-darwin/release/sirioctl"*) ;;
+  *) fail "the bundle step must pass the built sirioctl to build-app-bundle.sh" ;;
+esac
+
 # The linux job builds the AppImage and nothing else: webkit2gtk-4.1 must be
 # installed on the runner so build-appimage.sh can bundle its closure, and no
 # step may still produce the old tarball.

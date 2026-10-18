@@ -225,27 +225,8 @@ done < <(find "$APPDIR/usr/lib" -type f ! -name '*.bak' \( -name 'libwebkit2gtk-
 # That chdir is load-bearing: the webkit path rewrite above is relative, and
 # resolves against this directory. Keeps the gtk plugin's apprun-hooks, which
 # carry the GTK_THEME / GSETTINGS_SCHEMA_DIR / GIO_EXTRA_MODULES exports.
-cat >"$APPDIR/AppRun" <<'EOF'
-#!/bin/sh
-# Sirio AppImage launcher (#309). The chdir below is load-bearing: the webkit
-# libraries carry ././-relative paths (rewritten at build time), which resolve
-# against the AppDir; without it the web process never spawns.
-HERE="$(dirname -- "$(readlink -f -- "$0")")"
-cd "$HERE" || exit 1
-
-export PATH="$HERE/usr/bin:$HERE/usr/sbin:$HERE/usr/games:$HERE/bin:$HERE/sbin:$PATH"
-export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/i386-linux-gnu:$HERE/usr/lib/x86_64-linux-gnu:$HERE/usr/lib32:$HERE/usr/lib64:$HERE/lib:$HERE/lib/i386-linux-gnu:$HERE/lib/x86_64-linux-gnu:$HERE/lib32:$HERE/lib64:${LD_LIBRARY_PATH:-}"
-export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-
-# linuxdeploy-plugin-gtk's exports (GTK_THEME, GSETTINGS_SCHEMA_DIR,
-# GIO_EXTRA_MODULES, GDK_PIXBUF_MODULE_FILE, ...); $0 is this AppRun, so its
-# $(realpath "$0") resolves to the same directory as $HERE.
-for hook in "$HERE"/apprun-hooks/*.sh; do
-  [ -f "$hook" ] && . "$hook"
-done
-
-exec "$HERE/usr/bin/sirio" "$@"
-EOF
+# Its body is Scripts/appimage/AppRun, a file so it can be read and tested as one.
+cp "$SCRIPT_DIR/appimage/AppRun" "$APPDIR/AppRun"
 chmod +x "$APPDIR/AppRun"
 
 # -- Package -----------------------------------------------------------------

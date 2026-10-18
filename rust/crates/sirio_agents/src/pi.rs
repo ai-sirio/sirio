@@ -3,8 +3,8 @@
 use crate::error::PrepareError;
 use crate::shell_quote::{prompt_argument, shell_quote};
 
-/// Pi has no lifecycle hook mechanism — `prepare` is a no-op and Sirio
-/// watches the pane's exit code.
+/// Pi has no lifecycle hook mechanism — `prepare` writes only the worktree's
+/// Sirio skill, and Sirio watches the pane's exit code.
 pub struct PiAdapter;
 
 impl super::AgentAdapter for PiAdapter {
@@ -20,13 +20,21 @@ impl super::AgentAdapter for PiAdapter {
         false
     }
 
+    fn skill_markdown(&self) -> Option<&'static str> {
+        // F-AGENT-SAFE-01: see `ClaudeCodeAdapter::skill_markdown`.
+        Some(include_str!("../../../../skills/sirio/SKILL.md"))
+    }
+
     fn prepare(
         &self,
-        _worktree_path: &str,
+        worktree_path: &str,
         _pane_id: &str,
         _sirioctl_path: &str,
     ) -> Result<(), PrepareError> {
-        // No hook mechanism; nothing to write.
+        // No hook mechanism; the worktree's skill is the one file written.
+        if let Some(markdown) = self.skill_markdown() {
+            crate::install_skill(markdown, self.id(), worktree_path)?;
+        }
         Ok(())
     }
 

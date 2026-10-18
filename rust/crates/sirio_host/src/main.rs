@@ -57,5 +57,6 @@ fn main() {
         idle_grace,
         start_delay,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        env_exact: debug("SIRIO_HOST_NO_ENV_EXACT") != Some("1"),
     }));
 }

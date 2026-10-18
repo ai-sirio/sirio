@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Stand-in for the `omp` CLI in the hook E2E. Oh-My-Pi loads the hook file its
+# adapter wrote (`--hook <file>`, which is `.sirio/omp-hook.ts` in the worktree)
+# and calls the hook's default export with `pi`, then sends it lifecycle events.
+# This stub does the same with bun: for each event, a driver imports the hook,
+# hands it a `pi` whose `exec` runs real processes, and fires that one event.
+#
+# Handshake, through $HOOK_STUB_OUT:
+#   omp.pane  the pane id, written first and atomically;
+#   omp.go    one file per step: a step waits for it, takes it, then fires;
+#   omp.log   one line per fired event: `omp <event> exit=<status>`, or a SKIP.
+# After the last event the pane stays up until one more omp.go. Without bun the
+# stub records a SKIP and holds the pane the same way.
+set -euo pipefail
+
+out=${HOOK_STUB_OUT:?HOOK_STUB_OUT must name the handshake directory}
+: "${SIRIO_PANE_ID:?omp must run inside a Sirio pane}"
+go="$out/omp.go"
+log="$out/omp.log"
+
+printf '%s\n' "$SIRIO_PANE_ID" > "$out/omp.pane.tmp"
+mv -f "$out/omp.pane.tmp" "$out/omp.pane"
+
+# Waits for the E2E's go before the named hook, then takes it. A step the E2E never
+# releases logs why and fails the stub rather than holding the pane forever.
+await_go() {
+  local hook=$1
+  local deadline=$((SECONDS + 30))
+  until [ -e "$go" ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "timeout waiting for omp.go before $hook" >> "$log"
+      echo "omp: timed out waiting for $go" >&2
+      exit 1
+    fi
+    sleep 0.2
+  done
+  rm -f "$go"
+}
+
+hold() {
+  until [ -e "$go" ]; do sleep 0.2; done
+  rm -f "$go"
+}
+
+hook=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--hook" ]; then
+    hook=$argument
+  fi
+  previous=$argument
+done
+if [ -z "$hook" ]; then
+  echo "omp: no --hook <file> on the command line" >&2
+  exit 1
+fi
+
+if ! command -v bun >/dev/null 2>&1; then
+  echo "SKIP: bun is not on PATH" >> "$log"
+  hold
+  exit 0
+fi
+
+# The pi object the hook sees: `on` records a handler per event name, and `exec`
+# starts a process and resolves to its exit code, which the driver waits for.
+driver="$out/omp-driver.mjs"
+cat > "$driver" <<'JS'
+import { spawn } from 'node:child_process';
+
+const [hook, eventName] = process.argv.slice(2);
+const handlers = new Map();
+const pending = [];
+const pi = {
+  on(name, handler) {
+    handlers.set(name, handler);
+  },
+  exec(command, args) {
+    const child = spawn(command, args, { stdio: 'ignore' });
+    const exited = new Promise((resolve) => {
+      child.on('exit', (code) => resolve(code ?? 1));
+      child.on('error', () => resolve(127));
+    });
+    pending.push(exited);
+    return exited;
+  },
+};
+
+const hookModule = await import(hook);
+hookModule.default(pi);
+const handler = handlers.get(eventName);
+if (!handler) {
+  console.error(`no handler for ${eventName}`);
+  process.exitCode = 3;
+} else {
+  const payload = eventName === 'session_start' ? { session: { id: 'stub-omp' } } : {};
+  await handler(payload);
+  const codes = await Promise.all(pending);
+  process.exitCode = codes.find((code) => code !== 0) ?? 0;
+}
+JS
+
+# The lifecycle omp fires for one session, in order.
+for event in session_start turn_start turn_end session_shutdown; do
+  await_go "$event"
+  status=0
+  bun "$driver" "$hook" "$event" || status=$?
+  echo "omp $event exit=$status" >> "$log"
+done
+
+hold
