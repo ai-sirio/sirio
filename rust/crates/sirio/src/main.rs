@@ -5885,7 +5885,7 @@ impl SirioWorkspace {
                                         workspace.sidebar.update(cx, |sidebar, cx| {
                                             sidebar.set_notice(
                                                 format!(
-                                                    "[history] could not restore the previous launch: {error}"
+                                                    "Could not restore the previous launch: {error}"
                                                 ),
                                                 cx,
                                             )
@@ -22588,7 +22588,7 @@ impl SirioWorkspace {
         if let Err(error) = self.restore_launch_snapshot(window, cx) {
             self.sidebar.update(cx, |sidebar, cx| {
                 sidebar.set_notice(
-                    format!("[history] could not restore the previous launch: {error}"),
+                    format!("Could not restore the previous launch: {error}"),
                     cx,
                 )
             });
@@ -22614,7 +22614,7 @@ impl SirioWorkspace {
                 Ok(Err(error)) => {
                     workspace.sidebar.update(cx, |sidebar, cx| {
                         sidebar.set_notice(
-                            format!("[files] could not open the file picker: {error}"),
+                            format!("Could not open the file picker: {error}"),
                             cx,
                         )
                     });
