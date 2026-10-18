@@ -153,7 +153,8 @@ what each check does and does not prove.
   with more than one version. This crate depends on `bezel-gpui =0.3.8` and
   `bezel-gpui-platform =0.3.8`, the packages Sirio pins.
 - **This crate:** `cargo nextest run -p ely-gpui-component --features test-support`,
-  120 passed with the editor (78 before it). The test target compiles only with
+  137 passed with the editor (78 before it; the editor sections below quote the
+  count of their own task). The test target compiles only with
   `--features test-support`; see the Editor section. Its warnings, in the parts
   of Ely this chat does not use, are upstream's subset, not suppressed.
 - **The chat on top of it:** 205 chat tests, the real-app runner (11 scenarios,
@@ -671,3 +672,24 @@ before, 0.04 ms after, on a 1 MiB file of 39,247 lines).
   an earlier one) for the caller's own test to narrow; they are looked up again
   by `Marks::reindex` after either list is set, carried through an edit
   (`anchors::shift`) or cleared. The lists themselves are not reordered.
+
+### Final pass (Task 12c)
+
+Every change the editor plan made to this crate has an entry above: the editor
+closure and its ports from upstream `main` (Task 1), the highlighter, view
+options, hit events and `reset` (Task 2), `row.rs`'s line selector and
+`reveal_primary` (6b1), the carriage-return and silent-reset changes (Task 6),
+the drawn rulers and guides (6d), `select_in_place` (7a), the `diagnostics`
+getter (7b), the read-only banner hook (10b), hard tabs (11b), the pointer
+leaving the code (12a, under "Hosting hooks") and the performance work (12b).
+Tasks 8, 9 and 11a to 11c added no other vendored change: git marks, find, the
+status row and the bell are Sirio's own (`sirio_ui::file_view` and its
+modules) over Ely's marks, `FindWidget` and `StatusBarItem`.
+
+Evidence: `cargo nextest run -p ely-gpui-component --features test-support`
+runs 137 tests, all passed. The native proofs are
+`Scripts/Tests/test-ely-editor-probe.sh --xvfb` (the hosting hooks, on a frame)
+and `Scripts/Tests/test-editor-e2e.sh --xvfb` (the whole file tab, 27
+scenarios, with the fake language server `Scripts/Tests/fake_lsp.py`); the
+performance record is `docs/perf/2026-10-ely-code-editor.md`. Linux X11 only:
+macOS and Windows keys and a real input method are not covered.

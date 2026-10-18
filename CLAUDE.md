@@ -121,6 +121,25 @@ Scripts/Tests/test-ely-forge-probe.sh --xvfb   # -> prints "ELY FORGE PROBE OK"
 # defect the vendored bezel_markdown fixes (rust/vendor/README.md).
 Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SELECTION PROBE OK"
 
+# The file tab's editor (Ely's CodeEditor under sirio_ui::file_view) in a real,
+# isolated debug Sirio on a private Xvfb, driven through the debug-only
+# `sirioctl surface editor` verbs, real X keys and clicks, the Settings page and
+# the files on disk, with a fake language server (Scripts/Tests/fake_lsp.py):
+# editing, CRLF, disk conflicts, find and replace, hover and definition, the
+# breadcrumb, snapshots, git marks, the status row and its bell, every Editor
+# preference. --xvfb or --display :N picks the display (never your own $DISPLAY);
+# --state-only takes no captures; --appearance light|dark; --out-dir DIR keeps the
+# transcript and the PID-matched captures; --only NAME[,NAME...] runs some
+# scenarios and prints "EDITOR E2E PARTIAL" instead.
+Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
+
+# The editor's hosting hooks on a real frame, on a private Xvfb with Mesa's
+# lavapipe: the host's per-line colour (and Ely's own lexer kept out), a git mark,
+# a diagnostic, the gutter, and the events a host hears, each from a real xdotool
+# gesture. --xvfb or --display :N, --out-dir DIR, --no-build,
+# --no-software-vulkan.
+Scripts/Tests/test-ely-editor-probe.sh --xvfb   # -> prints "ELY EDITOR PROBE OK"
+
 # Iterate on one crate only
 cd rust && cargo test -p <crate>
 
@@ -165,7 +184,9 @@ On Windows, the MSVC toolchain is required; see `docs/prototypes/ghostty-pane-wi
 sirio_perf       (below everything — no deps at all, not even gpui, so any
                     layer may instrument without inverting the graph. Imported
                     by sirio_git, sirio_persistence, sirio_terminal,
-                    sirio_activity, sirio_ui and sirio)
+                    sirio_activity, sirio_forge, sirio_lsp, sirio_term_session,
+                    sirio_ui, sirio, and the vendored gpui_windows and
+                    ely-gpui-component)
     ^
 sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_activity, sirio_markdown, sirio_registry, sirio_release,
@@ -247,7 +268,9 @@ many in a once-a-second `health` row named `trace.dropped` (the count rides in
 the `entity` column), so **a trace is allowed to lose events and says when it
 did** — read those rows before trusting a count. Instrumentation is
 deliberately shallow: a `span` at the top of a `Render::render`, an `event`
-where something decides to `notify`.
+where something decides to `notify`. The vendored `ely-gpui-component` takes
+`sirio_perf` for the code editor's `CodeEditor.*` spans (the render and its
+steps, each with the editor's entity id in the `entity` column).
 
 **Every `name` is a content-free `&'static str`** — that is the crate's one
 hard rule, pinned by a test that asserts a fixture's text never reaches the
@@ -585,6 +608,10 @@ workspace root's `root_focus`) so a terminal or composer is never handed a copy.
   `text_selected_in_the_main_shell_…` in `sirio` fail if any of them is missing.
 - Tests: host the view under `text_selection::testing::host`, then `copy_line` /
   `copy_span` — a real drag and a real Ctrl+C against the real clipboard.
+
+### File editor on Ely (`sirio_ui::file_view`, vendored `ely-gpui-component`)
+
+The file tab draws and edits its code with Ely's `CodeEditor`, and the two halves keep a strict division: `CodeEditor` owns the text on screen and what the keyboard does, `Editor` (`sirio_ui::editor`) owns the disk (load, save, external change, conflict, snapshot) and the Markdown operations. Text flows `CodeEditor` → `Editor` on every `Changed`, and back through `reset_keeping_view` (a reload, a disk adoption; the caret and scroll stay) or `edit` (a Markdown op, one undo step) — `file_view/code_surface.rs` holds both directions, and `file_view/sync.rs` the minimal edit that carries a change across. The buffer is LF only: `sirio_markdown::Document` reads the file's line ending (`LineEnding`, re-exported from `sirio_ui::editor`), keeps it, and writes it back on save, and the code editor normalises a paste or an IME commit to LF so it never holds a `\r`. Colour is Ely's per-line highlighter hook fed by `sirio_syntax` (bezel's spans, `code_spans`) through a bounded per-line-text `SpanCache` that rotates once per render, so Ely's own lexer never colours a file; the git marks in the gutter are `sirio_git::diff_entry(.., 0)` (no context lines, `--inter-hunk-context=0`), fetched off the thread with one request in flight and one trailing re-run, and a mark opens its hunk in place. A breadcrumb row (the path, then the language server's symbols around the caret) and the find bar are docked above the code, in that order, not floating over it, and the status row below carries the branch, the server, the caret, indent, line ending, language and the notification bell; a snapshot (a change request's file at a revision) is read-only with one banner of Sirio's own (`without_read_only_banner`). Everything that is Sirio's own on top of Ely is a local change recorded in `rust/vendor/ely-gpui-component/LOCAL-CHANGES.md`, which also names the pinned revision (`e17e31a6`, not on upstream `main`), the ports from `main` and what is not vendored — read it before a sync, and keep each hook it lists (`select_in_place`, `reset_keeping_view`, `diagnostics`, the read-only banner, hard tabs, the pointer leaving the code). The editor's keys are Ely's, bound only in the `ElyEditor` context by `init_editor`; `ctrl-alt-up/down` stay Sirio's pane focus (add-cursor is `shift-alt-up/down`), an empty-selection Copy hands the chord on, and Escape is `SingleCursor`, which `FileView` captures to close find or an open hunk first. The performance record is `docs/perf/2026-10-ely-code-editor.md`: the cost that grew with the file's length is gone, and a constant 1.4–2.5 ms per typed or scrolled frame (median) over main remains, accepted; the one visible difference is that the minimap of a file taller than itself shows one sampled line per pixel row instead of blending every line. `Scripts/Tests/test-editor-e2e.sh` and `Scripts/Tests/test-ely-editor-probe.sh` prove it, and macOS and Windows keys and a real input method are not covered by either.
 
 ### Agent adapters (`sirio_agents`)
 
