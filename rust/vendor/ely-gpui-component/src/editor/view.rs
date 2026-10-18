@@ -71,7 +71,7 @@ impl CodeEditor {
     fn sticky(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let colors = cx.theme().colors.clone();
         let top = self.top_line()?;
-        let mut headers = syntax::enclosing(&self.buffer, top);
+        let mut headers = self.enclosing(top);
         headers.truncate(STICKY);
         if headers.is_empty() {
             return None;
@@ -276,12 +276,18 @@ impl Render for CodeEditor {
             }
         };
         let line = (pixels * LEADING).round();
-        let scan = sirio_perf::span("CodeEditor.folds", id);
-        // The blocks are asked about where the frame looks, not read over the whole file.
-        let caret_line = self.buffer.line_of(self.primary().head);
-        let active = syntax::enclosing(&self.buffer, caret_line)
-            .last()
-            .map(|header| self.buffer.indent(*header));
+        let scan = sirio_perf::span("CodeEditor.active_block", id);
+        // The strong guide is the innermost block around the caret's: asked for only while guides are drawn.
+        let active = self
+            .options
+            .guides
+            .then(|| {
+                let caret_line = self.buffer.line_of(self.primary().head);
+                self.enclosing(caret_line)
+                    .last()
+                    .map(|header| self.buffer.indent(*header))
+            })
+            .flatten();
         drop(scan);
         let scan = sirio_perf::span("CodeEditor.brackets", id);
         let found_brackets = self.brackets();

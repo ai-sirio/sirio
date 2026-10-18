@@ -681,6 +681,11 @@ impl CodeEditor {
         self.structure.borrow_mut().brackets(&self.buffer)
     }
 
+    /// The headers of the blocks that hold `line`, outermost first, from an index built once per revision of the text.
+    pub(crate) fn enclosing(&self, line: usize) -> Vec<usize> {
+        self.structure.borrow_mut().enclosing(&self.buffer, line)
+    }
+
     pub(crate) fn editable(&self) -> bool {
         !self.options.read_only
     }

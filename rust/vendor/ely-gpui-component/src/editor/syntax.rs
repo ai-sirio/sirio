@@ -115,8 +115,9 @@ pub(crate) fn opens(buffer: &Buffer, line: usize) -> bool {
         .is_some_and(|next| buffer.indent(next) > indent)
 }
 
-/// The headers of the blocks that hold `line`, outermost first: what `folds` gives for the blocks with `header < line <= end`, found by climbing from the line instead of reading every fold. The climb stops at a line of no indent, which no block can hold above it.
-pub(crate) fn enclosing(buffer: &Buffer, line: usize) -> Vec<usize> {
+/// The headers of the blocks that hold `line`, outermost first, found by climbing over every line above it. The read the nesting index replaces; kept to check it against.
+#[cfg(test)]
+fn enclosing_by_climbing(buffer: &Buffer, line: usize) -> Vec<usize> {
     let blank = |line: usize| buffer.line(line).trim().is_empty();
     // A block holds `line` only if it holds the first line from there on that is not blank.
     let Some(anchor) = (line..buffer.lines()).find(|at| !blank(*at)) else {
@@ -282,12 +283,66 @@ impl BracketIndex {
     }
 }
 
+/// Marks a line no block holds.
+const NO_HEADER: u32 = u32::MAX;
+
+/// What a line contributes to the nesting: zero when it is blank, else its indent plus one. Two texts whose lines all have the same shapes have the same nesting.
+fn shape(text: &str) -> u32 {
+    let indent = text
+        .bytes()
+        .take_while(|byte| *byte == b' ' || *byte == b'\t')
+        .count();
+    // A printable ASCII character after the indent settles it; anything else asks `trim`, as `blank` does elsewhere.
+    let blank = match text.as_bytes().get(indent) {
+        None => true,
+        Some(0x21..=0x7e) => false,
+        Some(_) => text[indent..].trim().is_empty(),
+    };
+    if blank { 0 } else { indent as u32 + 1 }
+}
+
+/// Each line's shape, and for each line the header of the innermost block that holds it, found in one pass over the lines: a header is the nearest line above with less indent than the first line from there on that is not blank. A line's answer is the first link of its chain of headers, and a header's own is the next, so a chain is read in as many steps as it is deep, whatever the file's length or the line's number.
+fn nesting(buffer: &Buffer) -> (Vec<u32>, Vec<u32>) {
+    let lines = buffer.lines();
+    let mut shapes = Vec::with_capacity(lines);
+    let mut inner = vec![NO_HEADER; lines];
+    // Headers whose block is still running, with their shape, shallowest first.
+    let mut open: Vec<(usize, u32)> = Vec::new();
+    // The first of the blank lines waiting for the line after them.
+    let mut blanks = 0;
+    for line in 0..lines {
+        let shape = shape(buffer.line(line));
+        shapes.push(shape);
+        if shape == 0 {
+            continue;
+        }
+        while let Some(&(_, shallow)) = open.last() {
+            if shape > shallow {
+                break;
+            }
+            open.pop();
+        }
+        let header = open.last().map_or(NO_HEADER, |(header, _)| *header as u32);
+        // The blank lines before this one hold what it holds; the ones after the last line hold nothing.
+        inner[blanks..=line].fill(header);
+        blanks = line + 1;
+        open.push((line, shape));
+    }
+    (shapes, inner)
+}
+
 /// What the whole text of a buffer gives, kept for the revision it was read from.
 #[derive(Default)]
 pub(crate) struct Structure {
     folds_stamp: u64,
     folds: Rc<Vec<(usize, usize)>>,
     brackets: BracketIndex,
+    nesting_stamp: u64,
+    /// Each line's `shape`, and the header of each line's innermost block, as of `nesting_stamp`.
+    shapes: Vec<u32>,
+    nesting: Vec<u32>,
+    /// Lines the last `enclosing` indexed anew; none when the index stood or only a line's text had changed.
+    pub(crate) nesting_read: usize,
 }
 
 impl Structure {
@@ -302,6 +357,43 @@ impl Structure {
     pub(crate) fn brackets(&mut self, buffer: &Buffer) -> Rc<Vec<Bracket>> {
         self.brackets.update(buffer);
         self.brackets.shared()
+    }
+
+    /// Brings the nesting index up to the text. An edit between the lines `kept_since` leaves alone that changed no line's shape (typing into a line) leaves the index as it was; any other edit reads the file again.
+    fn refresh_nesting(&mut self, buffer: &Buffer) {
+        self.nesting_read = 0;
+        if self.nesting_stamp == buffer.stamp() {
+            return;
+        }
+        if self.nesting_stamp != 0
+            && self.shapes.len() == buffer.lines()
+            && let Some(kept) = buffer.kept_since(self.nesting_stamp)
+        {
+            let len = buffer.len();
+            let prefix = kept.prefix.min(len);
+            let suffix = kept.suffix.min(len - prefix);
+            let (front, back) = (buffer.line_of(prefix), buffer.line_of(len - suffix) + 1);
+            if (front..back).all(|line| shape(buffer.line(line)) == self.shapes[line]) {
+                self.nesting_stamp = buffer.stamp();
+                return;
+            }
+        }
+        (self.shapes, self.nesting) = nesting(buffer);
+        self.nesting_stamp = buffer.stamp();
+        self.nesting_read = buffer.lines();
+    }
+
+    /// The headers of the blocks that hold `line`, outermost first: what `folds` gives for the blocks with `header < line <= end`. Read from an index of the text, by following each header's own header outward.
+    pub(crate) fn enclosing(&mut self, buffer: &Buffer, line: usize) -> Vec<usize> {
+        self.refresh_nesting(buffer);
+        let mut headers = Vec::new();
+        let mut at = self.nesting.get(line).copied().unwrap_or(NO_HEADER);
+        while at != NO_HEADER {
+            headers.push(at as usize);
+            at = self.nesting[at as usize];
+        }
+        headers.reverse();
+        headers
     }
 }
 
@@ -608,9 +700,210 @@ mod tests {
                     .filter(|(header, end)| *header < line && line <= *end)
                     .map(|(header, _)| *header)
                     .collect();
-                assert_eq!(enclosing(&buffer, line), held, "enclosing, line {line} of {text:?}");
+                assert_eq!(
+                    enclosing_by_climbing(&buffer, line),
+                    held,
+                    "climbing, line {line} of {text:?}"
+                );
+                assert_eq!(
+                    Structure::default().enclosing(&buffer, line),
+                    held,
+                    "index, line {line} of {text:?}"
+                );
             }
         }
+    }
+
+    // Task 12b fix 2: `Structure::enclosing` answers from an index of each
+    // line's innermost header, built once per text revision, in place of a
+    // climb over every line above (a file indented under one header, such as a
+    // class or a JSON document, climbed to its first line on every frame). The
+    // ways it can fail, written before the code:
+    //   1. a blank line inside a block not holding what the next line holds, or
+    //      a blank line after a block's last line holding the block;
+    //   2. trailing blank lines at the end of the file, or a file of blank
+    //      lines, giving a header;
+    //   3. a header whose block is only blank lines holding a line;
+    //   4. a dedent of several levels at once leaving an outer block out, or
+    //      the headers coming innermost first;
+    //   5. tabs, spaces and whitespace-only lines counted differently from
+    //      `indent` and `trim`;
+    //   6. an index of an older text answering for the new one: after an edit
+    //      that adds or removes lines, changes an indent, or replaces all;
+    //   7. a deep nest cut short, or a flat file giving a header;
+    //   8. the same revision answering differently when asked twice.
+
+    #[test]
+    fn the_nesting_index_agrees_with_climbing_on_every_line() {
+        let mut texts: Vec<String> = [
+            "",
+            "\n\n",
+            "a",
+            "a\n  b\n    c\n      d\n  e\nf",
+            "a\n\n  b\n\n\n  c\nd",
+            "a\n  b\n\n",
+            "a\n    \n  b",
+            "a\n\tb\n\t\tc\nd",
+            "  a\nb\n  c",
+            "a\n  b\n    c\n\n\nd\n  e",
+            "a\n  b\n\n    c\n",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        texts.extend((0..300).map(|seed| scattered(seed, 1 + (seed as usize % 60))));
+        let deep: String = (0..200).map(|level| format!("{}x\n", " ".repeat(level))).collect();
+        texts.push(deep);
+        texts.push((0..500).map(|n| format!("  line {n}\n")).collect::<String>());
+        for text in texts {
+            let buffer = Buffer::new(text.clone());
+            let mut structure = Structure::default();
+            for line in 0..buffer.lines() {
+                let held = enclosing_by_climbing(&buffer, line);
+                assert_eq!(
+                    structure.enclosing(&buffer, line),
+                    held,
+                    "line {line} of {text:?}"
+                );
+                assert_eq!(
+                    structure.enclosing(&buffer, line),
+                    held,
+                    "asked twice, line {line} of {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_nesting_index_follows_every_kind_of_edit() {
+        let mut buffer = Buffer::new(scattered(7, 80));
+        let mut structure = Structure::default();
+        let edits: Vec<Box<dyn Fn(&Buffer) -> (std::ops::Range<usize>, String)>> = vec![
+            Box::new(|_| (0..0, "root\n".into())),
+            Box::new(|b| (b.line_range(0).start..b.line_range(1).start, String::new())),
+            Box::new(|b| {
+                let at = b.line_range(30).start;
+                (at..at, "  ".into())
+            }),
+            Box::new(|b| {
+                let range = b.line_range(40);
+                (range.start..range.start + b.indent(40), String::new())
+            }),
+            Box::new(|b| {
+                let at = b.line_range(20).start;
+                (at..at, "\n\n    deep\n".into())
+            }),
+            Box::new(|b| (b.line_range(10).start..b.line_range(60).start, String::new())),
+            Box::new(|b| (b.len()..b.len(), "\n  tail\n\n".into())),
+            Box::new(|b| {
+                let same = b.text()[2..30].to_string();
+                (2..30, same)
+            }),
+            Box::new(|b| (0..b.len(), "a\n  b\n    c\n".into())),
+            Box::new(|b| (0..b.len(), String::new())),
+        ];
+        for (n, edit) in edits.iter().enumerate() {
+            let (range, text) = edit(&buffer);
+            buffer.replace(range, &text);
+            for line in 0..buffer.lines() {
+                assert_eq!(
+                    structure.enclosing(&buffer, line),
+                    enclosing_by_climbing(&buffer, line),
+                    "line {line} after edit {n}"
+                );
+            }
+        }
+    }
+
+    // Task 12b fix 2, second part: the index is rebuilt in one pass over the
+    // lines, and an edit that leaves every line's indent and blankness as it
+    // was (typing into a line) leaves the index as it was, so a keystroke does
+    // not pay for the file's length. The ways it can fail, written before the
+    // code:
+    //   1. the index read again for an edit inside a line;
+    //   2. the index kept for an edit that changed a line's indent, made a line
+    //      blank or not blank, or added or removed a line;
+    //   3. an edit in one place and another far away, with the lines between
+    //      untouched, keeping an index that one of them made stale;
+    //   4. an edit that cancels another in line count (one line added, one
+    //      removed) keeping the index;
+    //   5. a text asked about twice reading twice.
+
+    #[test]
+    fn an_edit_inside_a_line_does_not_read_the_file_again() {
+        let text: String = (0..3000)
+            .map(|n| format!("{}line {n}\n", " ".repeat(n % 5 * 2)))
+            .collect();
+        let mut buffer = Buffer::new(text);
+        let mut structure = Structure::default();
+        // The lines the first question after an edit read, once every sampled line agrees with the climb.
+        let same = |structure: &mut Structure, buffer: &Buffer| -> usize {
+            let mut read = None;
+            for line in (0..buffer.lines()).step_by(7) {
+                assert_eq!(
+                    structure.enclosing(buffer, line),
+                    enclosing_by_climbing(buffer, line),
+                    "line {line}"
+                );
+                read.get_or_insert(structure.nesting_read);
+            }
+            read.unwrap()
+        };
+        structure.enclosing(&buffer, 0);
+        assert_eq!(structure.nesting_read, buffer.lines(), "the first read takes every line");
+        structure.enclosing(&buffer, 5);
+        assert_eq!(structure.nesting_read, 0, "the same text is not read twice");
+
+        // Typing into a line, and deleting from it: nothing about its shape moved.
+        let at = buffer.line_range(1500).end;
+        buffer.replace(at..at, "x");
+        let read = same(&mut structure, &buffer);
+        assert_eq!(read, 0, "a character at the end of a line");
+        let at = buffer.line_range(1500).start + buffer.indent(1500) + 2;
+        buffer.replace(at..at + 1, "");
+        let read = same(&mut structure, &buffer);
+        assert_eq!(read, 0, "a character from the middle of a line");
+        let at = buffer.line_range(10).start + buffer.indent(10) + 1;
+        buffer.replace(at..at + 2, "abc");
+        let read = same(&mut structure, &buffer);
+        assert_eq!(read, 0, "a word replaced by a longer one");
+
+        // Each of these moves a line's shape, so the index is read again.
+        let start = buffer.line_range(2000).start;
+        buffer.replace(start..start, "  ");
+        let read = same(&mut structure, &buffer);
+        assert_eq!(read, buffer.lines(), "a deeper indent");
+        let line = buffer.line_range(2001);
+        buffer.replace(line.start + buffer.indent(2001)..line.end, "");
+        let read = same(&mut structure, &buffer);
+        assert_eq!(read, buffer.lines(), "a line made blank");
+        let end = buffer.line_range(2001).end;
+        buffer.replace(end..end, "back");
+        let read = same(&mut structure, &buffer);
+        assert_eq!(read, buffer.lines(), "a blank line written on");
+        let at = buffer.line_range(100).end;
+        buffer.replace(at..at, "\n");
+        let read = same(&mut structure, &buffer);
+        assert_eq!(read, buffer.lines(), "a line added");
+        let range = buffer.line_range(200).start..buffer.line_range(201).start;
+        buffer.replace(range, "");
+        let read = same(&mut structure, &buffer);
+        assert_eq!(read, buffer.lines(), "a line removed");
+
+        // Two edits between reads, far apart: one of them moves a shape.
+        let at = buffer.line_range(300).end;
+        buffer.replace(at..at, "y");
+        let start = buffer.line_range(2500).start;
+        buffer.replace(start..start, "    ");
+        let read = same(&mut structure, &buffer);
+        assert_eq!(read, buffer.lines(), "one of two edits moved a shape");
+        // One line added at the top and one removed at the bottom: the count holds.
+        buffer.replace(0..0, "top\n");
+        let last = buffer.lines() - 2;
+        let range = buffer.line_range(last).start..buffer.line_range(last + 1).start;
+        buffer.replace(range, "");
+        let read = same(&mut structure, &buffer);
+        assert_eq!(read, buffer.lines(), "lines added and removed in equal number");
     }
 
     #[test]
