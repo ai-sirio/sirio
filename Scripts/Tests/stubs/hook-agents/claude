@@ -66,8 +66,11 @@ if ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
   exit 0
 fi
 
-# Claude fires UserPromptSubmit when the user submits, and Stop when a turn ends.
-for event in UserPromptSubmit Stop; do
+# Claude fires SessionStart when a session starts, UserPromptSubmit when the user
+# submits, and Stop when a turn ends. The E2E releases them in that order, so a
+# change into running is UserPromptSubmit's, made from the needs-input SessionStart
+# left behind.
+for event in SessionStart UserPromptSubmit Stop; do
   count=0
   while IFS= read -r command; do
     [ -n "$command" ] || continue

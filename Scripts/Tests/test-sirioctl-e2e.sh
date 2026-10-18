@@ -1,6 +1,8 @@
 #!/bin/bash
 set -eEuo pipefail
 umask 022
+# Every git this script runs reads no user or system configuration.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 
 # The end-to-end proof of "sirioctl always there" (project 1 of the ADE
 # programme, plan Task 11): a real debug `sirio` on an isolated display (or none,
@@ -58,18 +60,22 @@ umask 022
 # a pane's own shell to run a command, which a state-only run does not render for
 # the case's purpose. 9, 12 and 13 run there: a session starts without a window.
 # --xvfb starts a private Xvfb on a free display; --display :N uses one that is
-# already there. --only N[,N...] runs some cases and prints
+# already there. --mutate claude-prompt-hook is the mutation check of case 6: it drops the
+# UserPromptSubmit hook from the Claude worktree before that hook can fire, and
+# case 6 must then fail. --only N[,N...] runs some cases and prints
 # `SIRIOCTL E2E PARTIAL` instead of OK. A case that needs an earlier one's
 # world (5 after 4, 4c after 5, 2 after nothing, 10 after nothing) says so when
 # it cannot find it.
 #
 # Usage: Scripts/Tests/test-sirioctl-e2e.sh [--out-dir DIR] [--no-build]
 #          [--state-only] [--xvfb | --display :N] [--only N[,N...]]
+#          [--mutate claude-prompt-hook]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUT_DIR=""
 ONLY=""
+MUTATE=""
 NO_BUILD=0
 STATE_ONLY=0
 START_XVFB=0
@@ -82,10 +88,15 @@ while [ $# -gt 0 ]; do
     --xvfb) START_XVFB=1; shift ;;
     --display) DISPLAY_TARGET="${2:?--display needs :N}"; shift 2 ;;
     --only) ONLY=",${2:?--only needs case numbers}," ; shift 2 ;;
+    --mutate) MUTATE="${2:?--mutate needs a name}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
+case "$MUTATE" in
+  ""|claude-prompt-hook) ;;
+  *) echo "unknown --mutate $MUTATE (the only one is claude-prompt-hook)" >&2; exit 2 ;;
+esac
 case "$(uname -s)" in
   Darwin) OS=macos ;;
   Linux) OS=linux ;;
@@ -107,6 +118,11 @@ STUBS="$REPO_ROOT/Scripts/Tests/stubs/hook-agents"
 SKILL="$REPO_ROOT/skills/sirio/SKILL.md"
 
 if [ -z "$OUT_DIR" ]; then OUT_DIR="$REPO_ROOT/artifacts/sirioctl-e2e-$(date +%Y%m%d-%H%M%S)-$$"; fi
+mkdir -p "$OUT_DIR"
+# Nothing from an earlier run may stand in for this run's evidence.
+rm -rf "$OUT_DIR/env" "$OUT_DIR/hooks" "$OUT_DIR/copies.sha256" "$OUT_DIR/ping.out"
+rm -rf "$OUT_DIR"/host-*-log
+rm -f "$OUT_DIR"/app-*.log "$OUT_DIR/xvfb.log"
 mkdir -p "$OUT_DIR/env" "$OUT_DIR/hooks"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 exec > >(tee "$OUT_DIR/transcript.log") 2>&1
@@ -130,6 +146,9 @@ CASE_NAME=""
 CASE_SKIPPED_NOW=0
 CASES_RUN=0
 CASES_SKIPPED=0
+INNER_SKIPS=0
+LAUNCH_N=0
+CHAT_DUMP=""
 APP_PID=""
 WT_ID=""
 NODE_BIN=""
@@ -305,6 +324,7 @@ cat > "$RUN/bin/opencode" <<SH
 # prints a version.
 if [ "\$1" = acp ]; then
   $PY3 -I $RUN/tools/dumpenv.py > "\$ACP_ENV_DUMP"
+  pwd -P > "\${ACP_ENV_DUMP%.env}.cwd"
   exec /usr/bin/cat > /dev/null
 fi
 echo "opencode 1.18.33 (stub)"
@@ -496,7 +516,7 @@ world_env() {
     "XDG_CONFIG_HOME=$W/xdg/config" "XDG_DATA_HOME=$W/xdg/data" "XDG_STATE_HOME=$W/xdg/state"
     "XDG_CACHE_HOME=$W/xdg/cache" "XDG_RUNTIME_DIR=$W/xdg/runtime"
     "SIRIO_DB=$W/s.sqlite" "SIRIO_SOCKET=$W_SOCK" "SIRIO_CREDENTIALS=$W/cred.json"
-    "SIRIO_WORKTREE_ID=leak" "HOOK_STUB_OUT=$W/hook-out" "ACP_ENV_DUMP=$OUT_DIR/env/chat.env"
+    "SIRIO_WORKTREE_ID=leak" "HOOK_STUB_OUT=$W/hook-out" "ACP_ENV_DUMP=$CHAT_DUMP"
   )
   if [ "$W_KNOB" -eq 1 ]; then WENV+=("SIRIO_CLI_AS_RELEASE=1"); fi
   if [ "$STATE_ONLY" -eq 0 ]; then
@@ -509,6 +529,8 @@ world_env() {
 app_start() { # exe [NAME=VALUE...]
   local exe=$1
   shift
+  LAUNCH_N=$((LAUNCH_N + 1))
+  CHAT_DUMP="$OUT_DIR/env/chat-$(basename "$W")-$LAUNCH_N.env"
   world_env
   rm -f "$W_SOCK"
   (cd "$W_REPO" && exec env -i "${WENV[@]}" "$@" "$exe" >>"$W/app.log" 2>&1) &
@@ -564,6 +586,8 @@ assert_no_launcher_names() { # dump mount...
   name="$(basename "$dump")"
   env_under "$dump" PATH "$@" || fail "$name: PATH holds a mount entry"
   env_under "$dump" LD_LIBRARY_PATH "$@" || fail "$name: LD_LIBRARY_PATH holds a mount entry"
+  env_under "$dump" XDG_DATA_DIRS "$@" || fail "$name: XDG_DATA_DIRS holds a mount entry"
+  env_under "$dump" PWD "$@" || fail "$name: PWD names a mount entry"
   [ "$(env_get "$dump" GTK_THEME)" = __ABSENT__ ] || fail "$name carries GTK_THEME"
   [ "$(env_get "$dump" APPIMAGE)" = __ABSENT__ ] || fail "$name carries APPIMAGE"
   [ "$(env_get "$dump" SIRIO_LAUNCH_ENV)" = __ABSENT__ ] || fail "$name carries SIRIO_LAUNCH_ENV"
@@ -581,16 +605,45 @@ hook_pane() { # agent: prints the pane the stub wrote; fails quietly when it wro
   cat "$W/hook-out/$1.pane"
 }
 # Claude's turn: UserPromptSubmit reads running, then Stop reads needs-input.
+# The stub has logged the step's outcome: its exit, or that the worktree holds no such hook.
+hook_settled() { # agent prefix
+  grep -Fq "$2 exit=" "$W/hook-out/$1.log" 2>/dev/null || grep -Fq "$2 no hook" "$W/hook-out/$1.log" 2>/dev/null
+}
+# The mutation check (--mutate claude-prompt-hook): drops UserPromptSubmit from the
+# Claude worktree's settings before the stub reads them, so no such hook can fire.
+mutate_prompt_hook() {
+  python3 -I -c 'import json, sys
+path = sys.argv[1]
+settings = json.load(open(path))
+settings.get("hooks", {}).pop("UserPromptSubmit", None)
+json.dump(settings, open(path, "w"), indent=2)' "$W_REPO/.claude/settings.local.json"
+  echo "MUTATION: UserPromptSubmit removed from $W_REPO/.claude/settings.local.json"
+}
+# Claude's hooks, each one seen in Sirio's status. A pane starts running (its spawn
+# state), so the first observed change is SessionStart's needs-input; then
+# UserPromptSubmit's running is a change from needs-input, and Stop's needs-input a
+# change from running. Each step waits for the stub's log before it reads the status.
 claude_turn() { # pane
-  local pane=$1 stub_pane
+  local pane=$1 stub_pane spawn
   stub_pane="$(hook_pane claude)" || fail "the claude stub never wrote its pane"
   [ "$stub_pane" = "$pane" ] || fail "the claude stub's pane $stub_pane is not the tab's $pane"
+  spawn="$(agent_status "$pane")"
+  [ "$spawn" != needs-input ] || fail "the claude pane already reads needs-input before any hook: a SessionStart needs-input could not be told from the spawn"
   hook_go claude
-  wait_until 30 hook_log_has claude "claude UserPromptSubmit exit=0" || fail "the UserPromptSubmit hook never ran"
-  wait_status "$pane" running 20
-  hook_go claude
-  wait_until 30 hook_log_has claude "claude Stop exit=0" || fail "the Stop hook never ran"
+  wait_until 30 hook_settled claude "claude SessionStart" || fail "the SessionStart step never ran"
+  hook_log_has claude "claude SessionStart exit=0" || fail "the worktree's settings hold no SessionStart hook"
   wait_status "$pane" needs-input 20
+  echo "OK: the SessionStart hook moved the pane from '$spawn' (before any hook) to needs-input"
+  hook_go claude
+  wait_until 30 hook_settled claude "claude UserPromptSubmit" || fail "the UserPromptSubmit step never ran"
+  hook_log_has claude "claude UserPromptSubmit exit=0" || fail "the worktree's settings hold no UserPromptSubmit hook, so none fired"
+  wait_status "$pane" running 20
+  echo "OK: the UserPromptSubmit hook moved the pane from needs-input to running"
+  hook_go claude
+  wait_until 30 hook_settled claude "claude Stop" || fail "the Stop step never ran"
+  hook_log_has claude "claude Stop exit=0" || fail "the worktree's settings hold no Stop hook"
+  wait_status "$pane" needs-input 20
+  echo "OK: the Stop hook moved the pane from running to needs-input"
 }
 
 append_sha() { # label file
@@ -603,6 +656,20 @@ stable_of() { echo "$W/xdg/data/Sirio/bin/sirioctl"; }
 path_with_stubs() { echo "$RUN/hookall:${NODE_DIR}$RUN/bin:/usr/bin:/bin"; }
 
 # ---------------------------------------------------------------- the cases
+
+# A step that cannot run here: printed as SKIP and counted in the summary.
+inner_skip() { echo "SKIP: $1"; INNER_SKIPS=$((INNER_SKIPS + 1)); }
+realpath_of() { python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+# Every pane's agent status, one `id status` line per pane the app lists: the
+# tabs and the host's sessions alike. A session that reports no status reads empty.
+pane_statuses() {
+  local id
+  ctl_json panel list | python3 -I -c 'import json, sys
+for row in json.load(sys.stdin):
+    print(row["id"])' | while IFS= read -r id; do
+    printf '%s %s\n' "$id" "$(agent_status "$id")"
+  done
+}
 
 want() {
   case "$ONLY" in
@@ -637,31 +704,39 @@ needs_window() {
 case_1() {
   world_open w1
   W_PATH="$RUN/hookclaude:$RUN/bin:/usr/bin:/bin"
-  echo "step 1: the first launch installs the stable copy, links ~/.local/bin to it, and the card says the login shell does not search it"
+  echo "step 1: the first launch installs the stable copy; a bare sirioctl and the card agree with the built one"
   app_start "$RUN/app-a/sirio"
-  local stable link version_out
+  local stable link cli_dir resolved version_out
   stable="$(stable_of)"
   wait_until 20 test -f "$stable" || fail "the stable copy was never written"
   cmp -s "$stable" "$CTL" || fail "the stable copy is not the built sirioctl"
   append_sha stable-copy-first-launch "$stable"
-  if [ "$OS" != linux ]; then
-    echo "SKIP: platform: the link checks run on Linux; macOS places its PATH link where its login PATH searches"
-    app_quit
-    return 0
+  echo "OK: the stable copy is the built sirioctl"
+  if [ "$OS" = linux ]; then
+    link="$W_HOME/.local/bin/sirioctl"
+    [ -L "$link" ] || fail "~/.local/bin/sirioctl is not a link"
+    [ "$(realpath_of "$link")" = "$(realpath_of "$stable")" ] || fail "the link does not point at the stable copy"
+    echo "OK: ~/.local/bin/sirioctl is a link to the stable copy"
+    cli_dir="$W_HOME/.local/bin"
+  else
+    inner_skip "platform: the link checks run on Linux; macOS places its PATH link where its login PATH searches"
+    cli_dir="$(dirname "$stable")"
   fi
-  link="$W_HOME/.local/bin/sirioctl"
-  [ -L "$link" ] || fail "~/.local/bin/sirioctl is not a link"
-  [ "$(python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$link")" = "$(python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$stable")" ] \
-    || fail "the link does not point at the stable copy"
-  echo "OK: the stable copy is the built sirioctl, and ~/.local/bin/sirioctl links it"
-  version_out="$(env -i HOME="$W_HOME" PATH="$W_HOME/.local/bin:/usr/bin:/bin" "$link" --socket "$W_SOCK" version)"
+  resolved="$(env -i HOME="$W_HOME" PATH="$cli_dir:/usr/bin:/bin" sh -c 'command -v sirioctl')"
+  [ "$resolved" = "$cli_dir/sirioctl" ] || fail "a bare sirioctl resolves to $resolved, not $cli_dir/sirioctl"
+  version_out="$(env -i HOME="$W_HOME" PATH="$cli_dir:/usr/bin:/bin" SIRIO_SOCKET="$W_SOCK" sirioctl version)" || fail "a bare sirioctl version failed"
   [ "$(printf '%s\n' "$version_out" | sed -n 1p)" = "sirioctl $VERSION" ] || fail "sirioctl names another build: $version_out"
   [ "$(printf '%s\n' "$version_out" | sed -n 2p)" = "running Sirio $VERSION" ] || fail "the running app is not $VERSION: $version_out"
-  echo "OK: env -i sirioctl version names $VERSION for both sirioctl and the running app"
+  echo "OK: a bare sirioctl resolves through PATH to $cli_dir/sirioctl and names $VERSION for it and for the running app"
   open_settings
-  wait_until 20 card_has cliLink "does not search" || fail "the card does not say the login shell does not search the link: $(card_field cliLink)"
-  card_has cliLink "$W_HOME/.local/bin" || fail "the card does not name the link's directory"
-  echo "OK: the card says the login shell does not search $W_HOME/.local/bin"
+  wait_until 20 card_has cliPath "$stable" || fail "the card does not name the stable copy: $(card_field cliPath)"
+  card_has cliVersion "Same build as Sirio" || fail "the card does not say the copy is the same build: $(card_field cliVersion)"
+  echo "OK: the card names the stable copy and says it is the same build as Sirio"
+  if [ "$OS" = linux ]; then
+    card_has cliLink "does not search" || fail "the card does not say the login shell does not search the link: $(card_field cliLink)"
+    card_has cliLink "$W_HOME/.local/bin" || fail "the card does not name the link's directory"
+    echo "OK: the card says the login shell does not search $W_HOME/.local/bin"
+  fi
   app_quit
 }
 
@@ -682,26 +757,26 @@ case_2() {
   printf 'x' >> "$RUN/app-b/sirioctl"
   chmod +x "$RUN/app-b/sirioctl"
   old_size="$(size_of "$stable")"
-  sleep 30 < "$stable" &
+  # The holder outlives the launch: it reads the old copy until cleanup ends it.
+  sleep 300 < "$stable" &
   held=$!
   HOLDS+=("$held")
   app_start "$RUN/app-b/sirio"
   select_repo "$W_REPO"
   wait_until 20 cmp -s "$stable" "$RUN/app-b/sirioctl" || fail "the stable copy still holds the old bytes after launch"
-  echo "OK: after the launch the stable copy holds the replacement's bytes"
   append_sha replaced-copy "$stable"
-  if [ -e "/proc/$held/fd/0" ]; then
+  echo "OK: after the launch the stable copy holds the replacement's bytes"
+  if [ "$OS" = linux ]; then
+    alive "$held" || fail "the process holding the old copy exited before the check"
     [ "$(size_of "/proc/$held/fd/0")" = "$old_size" ] || fail "the held copy changed size"
     echo "OK: the process holding the old copy still reads its $old_size bytes"
   else
-    echo "SKIP: platform: no /proc, so the held descriptor is not read on $OS"
+    inner_skip "platform: no /proc, so the held descriptor is not read on $OS"
   fi
   local pane
   pane="$(ctl_json surface terminal open --agent claude | pane_of)"
   claude_turn "$pane"
-  echo "OK: after the replacement the Claude worktree hook reports running, then needs-input"
   app_quit
-  kill "$held" 2>/dev/null || true
 }
 
 # ---- case 3: a foreign file
@@ -750,11 +825,12 @@ PATH=/usr/bin:/bin
 export PATH
 PROFILE
   make_mount "$RUN/mnt"
+  local stable_dir
+  stable_dir="$(dirname "$(stable_of)")"
   echo "step 4: through the mount's AppRun, a terminal, a panel session, an ACP chat and a login shell hold no mount entry"
   app_start "$RUN/mnt/AppRun" "APPIMAGE=$RUN/fake.AppImage" "APPDIR=$RUN/mnt" "ARGV0=sirio" "OWD=$RUN" "WAYLAND_DISPLAY=wayland-test"
   select_repo "$W_REPO"
-  local stable_dir
-  stable_dir="$(dirname "$(stable_of)")"
+  rm -f "$OUT_DIR/env/terminal.env" "$OUT_DIR/env/panel.env"
   local terminal panel
   terminal="$(ctl_json surface terminal open --cmd "$DUMP > $OUT_DIR/env/terminal.env; sleep 300" | pane_of)"
   panel="$(ctl_json panel create --worktree "$WT_ID" --cmd "$DUMP > $OUT_DIR/env/panel.env; sleep 300" | field id)"
@@ -762,18 +838,31 @@ PROFILE
   ctl surface open-list open --entry show >/dev/null
   ctl surface open-list open --entry chat >/dev/null
   wait_until 30 open_list_has opencode || fail "the Open list never offered the opencode stub"
+  rm -f "$CHAT_DUMP" "${CHAT_DUMP%.env}.cwd"
   ctl surface open-list open --entry agent:opencode >/dev/null
   assert_pane_env "$OUT_DIR/env/terminal.env" "$stable_dir" "$RUN/mnt" "$RUN/mnt2"
   assert_pane_env "$OUT_DIR/env/panel.env" "$stable_dir" "$RUN/mnt" "$RUN/mnt2"
-  assert_pane_env "$OUT_DIR/env/chat.env" "$stable_dir" "$RUN/mnt" "$RUN/mnt2"
+  assert_pane_env "$CHAT_DUMP" "$stable_dir" "$RUN/mnt" "$RUN/mnt2"
   echo "OK: the terminal, the panel session and the ACP chat hold no mount entry, and their PATH starts with the stable directory"
-
+  wait_until 30 test -s "${CHAT_DUMP%.env}.cwd" || fail "the chat agent wrote no working directory"
+  local chat_cwd chat_pwd under
+  chat_cwd="$(cat "${CHAT_DUMP%.env}.cwd")"
+  [ "$(realpath_of "$chat_cwd")" = "$(realpath_of "$W_REPO")" ] || fail "the chat agent's process directory is $chat_cwd, not its worktree"
+  for under in "$RUN/mnt" "$RUN/mnt2"; do
+    case "$chat_cwd" in "$under"|"$under"/*) fail "the chat agent's process directory is inside $under" ;; esac
+  done
+  chat_pwd="$(env_get "$CHAT_DUMP" PWD)"
+  if [ "$chat_pwd" != __ABSENT__ ]; then
+    [ "$(realpath_of "$chat_pwd")" = "$(realpath_of "$W_REPO")" ] || fail "the chat agent's PWD is $chat_pwd, not its worktree"
+  fi
+  echo "OK: the chat agent's process directory and its PWD are its worktree, and neither is inside a mount"
   local login
   # A host session with no command runs the user's login shell, as a tab does.
   # A tab's own pane is refused by `panel write`; a host session takes the input.
   login="$(ctl_json panel create --worktree "$WT_ID" | field id)"
   [ -n "$login" ] || fail "panel create named no login shell"
   printf '%s\n' "$login" > "$W/login-pane"
+  rm -f "$OUT_DIR/env/login-shell.env" "$OUT_DIR/env/login-shell.which"
   sleep 2
   pane_input "$login" "$DUMP > $OUT_DIR/env/login-shell.env; command -v sirioctl > $OUT_DIR/env/login-shell.which"
   wait_until 30 test -s "$OUT_DIR/env/login-shell.which" || fail "the login shell never wrote its sirioctl"
@@ -782,14 +871,13 @@ PROFILE
   which_path="$(cat "$OUT_DIR/env/login-shell.which")"
   link="$W_HOME/.local/bin/sirioctl"
   if [ "$which_path" = "$link" ]; then
-    echo "OK: in the login shell sirioctl resolves to the link $link: the profile dropped the stable directory from PATH, and the link is what keeps sirioctl in panes"
+    echo "OK: in the login shell 'command -v sirioctl' prints the link path $link (the profile dropped the stable directory from PATH, and the link is what keeps sirioctl in panes)"
   elif [ "$which_path" = "$(stable_of)" ]; then
-    echo "OK: in the login shell sirioctl resolves to the stable directory: the profile kept the prefix"
+    echo "OK: in the login shell 'command -v sirioctl' prints the stable copy's path (the profile kept the prefix)"
   else
     fail "in the login shell sirioctl is neither the link nor the stable copy"
   fi
-  echo "OK: the login shell's environment holds no mount entry in PATH or LD_LIBRARY_PATH, and no launcher name"
-
+  echo "OK: the login shell's environment holds no mount entry in PATH, XDG_DATA_DIRS, PWD or LD_LIBRARY_PATH, and no launcher name"
   local gtk
   gtk="$(tr '\0' '\n' < "/proc/$APP_PID/environ" 2>/dev/null | grep -x 'GTK_THEME=leak' || true)"
   [ -n "$gtk" ] || fail "the app's own environment lost GTK_THEME=leak"
@@ -801,6 +889,9 @@ PROFILE
   before_len="$(launch_snapshot_length "$APP_PID")"
   local -a relaunch_env=()
   while IFS= read -r -d '' entry; do relaunch_env+=("$entry"); done < "/proc/$APP_PID/environ"
+  LAUNCH_N=$((LAUNCH_N + 1))
+  CHAT_DUMP="$OUT_DIR/env/chat-$(basename "$W")-$LAUNCH_N.env"
+  relaunch_env+=("ACP_ENV_DUMP=$CHAT_DUMP")
   app_quit
   rm -f "$W_SOCK"
   (cd "$W_REPO" && exec env -i "${relaunch_env[@]}" "$RUN/mnt2/AppRun" >>"$W/app.log" 2>&1) &
@@ -810,7 +901,8 @@ PROFILE
   wait_until 60 ctl_ready || fail "the relaunched app never became ready"
   after_len="$(launch_snapshot_length "$APP_PID")"
   [ "$before_len" = "$after_len" ] || fail "SIRIO_LAUNCH_ENV changed length from $before_len to $after_len: the mount nested"
-  select_repo "$W_REPO" no-add
+  select_repo "$W_REPO"
+  rm -f "$OUT_DIR/env/restart-terminal.env"
   local restarted
   restarted="$(ctl_json surface terminal open --cmd "$DUMP > $OUT_DIR/env/restart-terminal.env; sleep 300" | pane_of)"
   [ -n "$restarted" ] || fail "the relaunched app opened no terminal"
@@ -866,6 +958,7 @@ case_4c() {
   app_start "$RUN/mnt3/AppRun" "APPIMAGE=$RUN/fake.AppImage" "APPDIR=$RUN/mnt3" "ARGV0=sirio" "OWD=$RUN" "WAYLAND_DISPLAY=wayland-test" "SIRIO_HOST_NO_ENV_EXACT=1"
   select_repo "$W_REPO" no-add
   local fresh
+  rm -f "$OUT_DIR/env/noexact-terminal.env"
   fresh="$(ctl_json surface terminal open --cmd "$DUMP > $OUT_DIR/env/noexact-terminal.env; sleep 300" | pane_of)"
   [ -n "$fresh" ] || fail "no terminal under the fresh host"
   wait_until 30 test -s "$OUT_DIR/env/noexact-terminal.env" || fail "the terminal under the fresh host never wrote its dump"
@@ -885,34 +978,36 @@ case_6() {
   world_open w3
   W_SHELL=/bin/bash
   W_PATH="$(path_with_stubs)"
-  echo "step 6: each agent's stub reports the status its adapter maps, and the global Claude Stop command works inside a pane"
+  echo "step 6: each agent's stub reports the status its adapter maps; the global Claude Stop command changes a pane's status from inside that pane and not from outside it"
   app_start "$RUN/app-a/sirio"
   select_repo "$W_REPO"
   local agent pane
   for agent in claude codex opencode omp pi; do
     pane="$(ctl_json surface terminal open --agent "$agent" | pane_of)"
     echo "$pane" > "$W/$agent.pane-id"
+    if [ "$agent" = claude ] && [ "$MUTATE" = claude-prompt-hook ]; then
+      mutate_prompt_hook
+    fi
     [ "$(hook_pane "$agent" || true)" = "$pane" ] || fail "the $agent stub's pane is not the tab's $pane"
   done
   echo "OK: every agent tab's stub wrote the pane id the tab reports"
 
   claude_turn "$(cat "$W/claude.pane-id")"
-  echo "claude: running on UserPromptSubmit, needs-input on Stop" > "$OUT_DIR/hooks/claude.status"
-  echo "OK: Claude reports running on UserPromptSubmit, then needs-input on Stop"
 
-  local codex_pane
+  local codex_pane spawn
   codex_pane="$(cat "$W/codex.pane-id")"
+  spawn="$(agent_status "$codex_pane")"
+  [ "$spawn" != needs-input ] || fail "the codex pane already reads needs-input before its hook"
   hook_go codex
   wait_until 30 hook_log_has codex "codex notify exit=0" || fail "the Codex notify hook never ran"
   wait_status "$codex_pane" needs-input 20
-  echo "codex: needs-input on its notify hook" > "$OUT_DIR/hooks/codex.status"
-  echo "OK: Codex reports needs-input on its notify hook"
+  echo "OK: Codex's notify hook moved its pane from '$spawn' (before the hook) to needs-input"
 
   local opencode_pane ref
   opencode_pane="$(cat "$W/opencode.pane-id")"
   if hook_log_has opencode "SKIP: node is not on PATH"; then
     echo "opencode: SKIP: node is not on PATH" > "$OUT_DIR/hooks/opencode.status"
-    echo "SKIP: node is not on PATH (the OpenCode plugin was not run)"
+    inner_skip "node is not on PATH (the OpenCode plugin was not run)"
   else
     hook_go opencode
     wait_until 30 hook_log_has opencode "opencode session.updated exit=0" || fail "the OpenCode plugin never ran"
@@ -930,8 +1025,10 @@ print(row[0] if row else "")' "$W/s.sqlite" "$opencode_pane")"
   wait_until 15 test -s "$W/hook-out/omp.log" || true
   if hook_log_has omp "SKIP: bun is not on PATH"; then
     echo "omp: SKIP: bun is not on PATH" > "$OUT_DIR/hooks/omp.status"
-    echo "SKIP: bun is not on PATH (the omp hook was not run)"
+    inner_skip "bun is not on PATH (the omp hook was not run)"
   else
+    spawn="$(agent_status "$omp_pane")"
+    [ "$spawn" != done ] || fail "the omp pane already reads done before its hooks"
     local step
     for step in 1 2 3 4; do
       hook_go omp
@@ -939,20 +1036,21 @@ print(row[0] if row else "")' "$W/s.sqlite" "$opencode_pane")"
     done
     wait_status "$omp_pane" done 20
     echo "omp: done after its session shutdown" > "$OUT_DIR/hooks/omp.status"
-    echo "OK: omp reports done after its session shutdown"
+    echo "OK: omp's session shutdown moved its pane from '$spawn' (before the hooks) to done"
   fi
 
   local pi_pane
   pi_pane="$(cat "$W/pi.pane-id")"
-  # Pi sends no hook: its status is what its title says. An idle Pi title is
-  # "π - <cwd>", which sirio_activity reads as needs-input (detect_pi_family), not
-  # as "none" as the plan assumed; the E2E asserts what the title layer reports.
+  # Pi sends no hook: its status is what its title says. The stub prints its idle
+  # "π - <cwd>" title right after it writes its pane file, so the spawn status
+  # cannot be read before the title is set; the E2E asserts only what the title
+  # layer reports, which sirio_activity reads as needs-input (detect_pi_family).
   wait_status "$pi_pane" needs-input 20
   echo "pi: needs-input from its idle title (no hook; sirio_activity reads the π title as idle)" > "$OUT_DIR/hooks/pi.status"
-  echo "OK: Pi reports needs-input from its idle π title, the title layer's reading"
+  echo "OK: Pi's idle π title reads needs-input (the title layer; Pi sends no hook)"
 
-  echo "step 6b: the global Claude Stop command, from ~/.claude/settings.json, changes a pane's status only from inside a pane"
-  local settings="$W_HOME/.claude/settings.json" running_cmd stop_cmd gate gate_pane
+  echo "step 6b: the global Claude Stop command, from ~/.claude/settings.json, changes a pane's status from inside that pane, and nothing outside it"
+  local settings="$W_HOME/.claude/settings.json" running_cmd stop_cmd gate_pane before after panes
   ctl surface settings act --action install-hooks >/dev/null || fail "install-hooks did not run"
   [ -f "$settings" ] || fail "install-hooks wrote no settings file"
   running_cmd="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"])' "$settings")"
@@ -961,26 +1059,36 @@ print(row[0] if row else "")' "$W/s.sqlite" "$opencode_pane")"
   case "$stop_cmd" in *"--session"*) fail "the global Stop command names a session" ;; esac
   printf '#!/bin/sh\n%s <<'"'"'JSON'"'"'\n{"session_id":"global-hook"}\nJSON\n' "$running_cmd" > "$W/global-running.sh"
   printf '#!/bin/sh\n%s <<'"'"'JSON'"'"'\n{"session_id":"global-hook"}\nJSON\n' "$stop_cmd" > "$W/global-stop.sh"
-  # The hooks run inside a terminal tab, whose status `surface terminal state`
-  # reads. The tab's command runs the UserPromptSubmit command, then waits at a
-  # gate this step opens, then runs the Stop command: one pane, both hooks.
-  gate="$W/global-gate"
-  rm -f "$gate" "$OUT_DIR/hooks/global-running.rc" "$OUT_DIR/hooks/global-stop.rc"
-  gate_pane="$(ctl_json surface terminal open --cmd "sh $W/global-running.sh; echo \$? > $OUT_DIR/hooks/global-running.rc; while [ ! -f $gate ]; do sleep 0.2; done; sh $W/global-stop.sh; echo \$? > $OUT_DIR/hooks/global-stop.rc; sleep 300" | pane_of)"
-  wait_until 30 test -s "$OUT_DIR/hooks/global-running.rc" || fail "the global running command never finished in the pane"
-  [ "$(cat "$OUT_DIR/hooks/global-running.rc")" = 0 ] || fail "the global running command failed in the pane"
-  wait_status "$gate_pane" running 20
-  echo "OK: the global UserPromptSubmit command, run inside the pane, sets running"
-  env -i HOME="$W_HOME" PATH="$(dirname "$(stable_of)"):/usr/bin:/bin" sh "$W/global-stop.sh" </dev/null >/dev/null 2>&1 \
-    || fail "the global Stop command failed outside a pane"
-  sleep 2
-  [ "$(agent_status "$gate_pane")" = running ] || fail "the global Stop command outside a pane changed the status"
-  echo "OK: outside any pane the global Stop command exits 0 and changes nothing"
-  : > "$gate"
-  wait_until 30 test -s "$OUT_DIR/hooks/global-stop.rc" || fail "the global Stop command never finished in the pane"
-  [ "$(cat "$OUT_DIR/hooks/global-stop.rc")" = 0 ] || fail "the global Stop command failed in the pane"
+  # The commands run inside a terminal tab, whose status `surface terminal state`
+  # reads. The tab waits at each gate this step opens, then runs one hook.
+  rm -f "$W"/global-gate-* "$OUT_DIR"/hooks/global-*.rc
+  gate_pane="$(ctl_json surface terminal open --cmd "while [ ! -f $W/global-gate-1 ]; do sleep 0.2; done; sh $W/global-stop.sh; echo \$? > $OUT_DIR/hooks/global-stop-1.rc; while [ ! -f $W/global-gate-2 ]; do sleep 0.2; done; sh $W/global-running.sh; echo \$? > $OUT_DIR/hooks/global-running.rc; while [ ! -f $W/global-gate-3 ]; do sleep 0.2; done; sh $W/global-stop.sh; echo \$? > $OUT_DIR/hooks/global-stop-2.rc; sleep 300" | pane_of)"
+  spawn="$(agent_status "$gate_pane")"
+  [ "$spawn" != needs-input ] || fail "the global-hook pane already reads needs-input before its Stop command"
+  : > "$W/global-gate-1"
+  wait_until 30 test -s "$OUT_DIR/hooks/global-stop-1.rc" || fail "the global Stop command never finished in the pane"
+  [ "$(cat "$OUT_DIR/hooks/global-stop-1.rc")" = 0 ] || fail "the global Stop command failed in the pane"
   wait_status "$gate_pane" needs-input 20
-  echo "OK: the global Stop command, run inside the pane, sets needs-input"
+  echo "OK: the global Stop command, run inside the pane, moved it from '$spawn' (before the command) to needs-input"
+  : > "$W/global-gate-2"
+  wait_until 30 test -s "$OUT_DIR/hooks/global-running.rc" || fail "the global UserPromptSubmit command never finished in the pane"
+  [ "$(cat "$OUT_DIR/hooks/global-running.rc")" = 0 ] || fail "the global UserPromptSubmit command failed in the pane"
+  wait_status "$gate_pane" running 20
+  echo "OK: the global UserPromptSubmit command, run inside the pane, moved it from needs-input to running"
+  before="$(pane_statuses)"
+  printf '%s\n' "$before" | grep -qxF "$gate_pane running" || fail "the pane is not listed with status running before the outside run: $(echo "$before" | tr '\n' ';')"
+  panes="$(printf '%s\n' "$before" | grep -c .)"
+  env -i HOME="$W_HOME" PATH="$(dirname "$(stable_of)"):/usr/bin:/bin" SIRIO_SOCKET="$W_SOCK" SIRIO_DB="$W/s.sqlite" \
+    sh "$W/global-stop.sh" </dev/null >/dev/null 2>&1 || fail "the global Stop command exited non-zero outside a pane"
+  sleep 2
+  after="$(pane_statuses)"
+  [ "$before" = "$after" ] || fail "the global Stop command outside a pane changed a pane's status: before [$(echo "$before" | tr '\n' ';')] after [$(echo "$after" | tr '\n' ';')]"
+  echo "OK: outside any pane, with this world's socket and database, the global Stop command exits 0 and no pane's status changed ($panes panes read before and after)"
+  : > "$W/global-gate-3"
+  wait_until 30 test -s "$OUT_DIR/hooks/global-stop-2.rc" || fail "the global Stop command never finished in the pane"
+  [ "$(cat "$OUT_DIR/hooks/global-stop-2.rc")" = 0 ] || fail "the global Stop command failed in the pane"
+  wait_status "$gate_pane" needs-input 20
+  echo "OK: the global Stop command, run inside the pane again, moved it from running to needs-input"
   app_quit
 }
 
@@ -1028,6 +1136,7 @@ case_8() {
   echo "step 8: a debug build without the knob keeps no release copy and no link; its hooks name the release path"
   app_start "$RUN/app-a/sirio"
   wait_until 30 test -d "$W/xdg/data/Sirio/bin-debug" || fail "the debug copy directory never appeared (the startup job did not run)"
+  sleep 3
   [ ! -e "$W/xdg/data/Sirio/bin" ] || fail "a debug build without the knob created the release directory"
   [ ! -e "$W_HOME/.local/bin/sirioctl" ] || fail "a debug build without the knob linked ~/.local/bin/sirioctl"
   echo "OK: no release directory and no ~/.local/bin link exist"
@@ -1062,6 +1171,7 @@ case_9() {
   nested_id="$(worktree_id_of "$W_REPO/nested-wt")"
   [ -n "$main_id" ] && [ -n "$nested_id" ] && [ "$main_id" != "$nested_id" ] || fail "the project does not list both worktrees"
   local terminal panel split nested outside name
+  rm -f "$OUT_DIR"/env/9-*.env
   terminal="$(ctl_json surface terminal open --cmd "$DUMP > $OUT_DIR/env/9-terminal.env; sleep 300" | pane_of)"
   panel="$(ctl_json panel create --cwd "$W_REPO" --cmd "$DUMP > $OUT_DIR/env/9-panel.env; sleep 300" | field id)"
   split="$(ctl_json panel split --from "$panel" --direction right --cmd "$DUMP > $OUT_DIR/env/9-split.env; sleep 300" | field id)"
@@ -1240,7 +1350,7 @@ if [ -n "$leftover" ]; then
 fi
 echo "OK: no process of this run is left"
 
-echo "cases: $CASES_RUN passed, $CASES_SKIPPED skipped, $(( $(date +%s) - START_ALL ))s"
+echo "cases: $CASES_RUN passed, $CASES_SKIPPED skipped; $INNER_SKIPS inner skip(s) printed inside the cases; $(( $(date +%s) - START_ALL ))s"
 if [ -n "$ONLY" ]; then
   echo "SIRIOCTL E2E PARTIAL"
 else

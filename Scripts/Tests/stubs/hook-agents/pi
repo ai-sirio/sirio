@@ -2,8 +2,8 @@
 # Stand-in for the `pi` CLI in the hook E2E. Pi has no hooks, so Sirio can only
 # identify it from its terminal title, and no lifecycle event ever reaches
 # `sirioctl`. This stub writes its pane id, sets the title Pi sets (`π - <cwd>`)
-# with an OSC 0 sequence, and holds the pane: its status is what the title alone
-# says, which is no agent status.
+# with an OSC 0 sequence, and holds the pane: its status is what the title says,
+# and an idle π title reads as needs-input.
 #
 # Handshake, through $HOOK_STUB_OUT:
 #   pi.pane  the pane id, written first and atomically;
