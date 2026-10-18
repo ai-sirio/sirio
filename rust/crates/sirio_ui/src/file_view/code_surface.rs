@@ -60,7 +60,9 @@ impl FileView {
                 .highlighter(code_highlighter(language, spans))
                 .without_breakpoints();
             if read_only {
-                code = code.read_only();
+                // The view draws the snapshot's banner itself, above the find
+                // bar, so Ely's, with its "Make editable", is not drawn.
+                code = code.read_only().without_read_only_banner();
             }
             code.set_view_options(prefs, cx);
             code
@@ -82,9 +84,10 @@ impl FileView {
                         view.code_secondary_click(*offset, *position, code, window, cx);
                     }
                     EditorEvent::GitMarkPressed { line } => view.toggle_hunk(*line, cx),
-                    // The read-only banner's "Make editable" unlocks the code
-                    // editor. A snapshot stays read-only, so the lock goes back on
-                    // before any key can reach it.
+                    // Nothing in a snapshot's view unlocks it today (Ely's banner
+                    // is off), but `Unlock` is the code editor's public word for
+                    // it. A snapshot stays read-only whoever says it, so the lock
+                    // goes back on before any key can reach it.
                     EditorEvent::Unlock if view.is_snapshot() => {
                         code.update(cx, |code, cx| code.set_read_only(true, cx));
                     }

@@ -833,6 +833,16 @@ pub mod request {
         )
     }
 
+    pub fn editor_open_snapshot(sha: &str, path: &str) -> ControlRequest {
+        request(
+            "surface.editor.open_snapshot",
+            BTreeMap::from([
+                ("sha".to_string(), sha.to_string()),
+                ("path".to_string(), path.to_string()),
+            ]),
+        )
+    }
+
     pub fn editor_state() -> ControlRequest {
         request("surface.editor.state", BTreeMap::new())
     }

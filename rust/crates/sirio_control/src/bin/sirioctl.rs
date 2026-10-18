@@ -164,6 +164,7 @@ fn usage() {
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
          \x20 surface editor open --path p      (debug builds) open a file as a tab; prints its editor state\n\
+         \x20 surface editor open-snapshot --sha=s --path=p  (debug builds) open p (repository-relative) at the full commit id s as a read-only snapshot tab; prints its editor state\n\
          \x20 surface editor state [--json]     (debug builds) the active file tab's editor state, one key=value per line\n\
          \x20 surface editor type --text=t      (debug builds) type t through the code editor's input handler\n\
          \x20 surface editor keys --keys=K...   (debug builds) dispatch space-separated keystrokes (ctrl-z) to the window\n\
@@ -1099,6 +1100,13 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ("editor", "open") => require_ok(
             socket,
             &sirio_control::protocol::request::editor_open(&parsed.require("path")?),
+        ),
+        ("editor", "open-snapshot") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_open_snapshot(
+                &parsed.require("sha")?,
+                &parsed.require("path")?,
+            ),
         ),
         ("editor", "state") => require_ok(socket, &sirio_control::protocol::request::editor_state()),
         ("editor", "type") => require_ok(

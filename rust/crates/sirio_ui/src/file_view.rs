@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use ely_gpui_component::editor::{CodeEditor, SingleCursor};
+use ely_gpui_component::editor::{CodeEditor, ReadOnlyBanner, SingleCursor};
 // `sirio` has no Ely dependency; `open_find` takes these, and the socket verbs build them.
 pub use ely_gpui_component::editor::FindOptions;
 use crate::chat::{Chat, LinkClickOverride};
@@ -151,6 +151,17 @@ impl SnapshotOrigin {
             return self.reference.label();
         }
         format!("{} at {}", self.reference.label(), crate::forge_source::short_sha(&self.sha))
+    }
+
+    /// What the banner over the snapshot says.
+    pub fn banner_message(&self) -> String {
+        format!("Read-only · {}", self.label())
+    }
+
+    /// The banner's one action, offered only when the worktree has a copy of
+    /// the file to open.
+    pub fn banner_action(&self) -> Option<&'static str> {
+        self.local_copy.is_some().then_some("Open local file")
     }
 
     /// The view's `path()`. Never a real path — the workspace matches open
@@ -844,7 +855,7 @@ impl FileView {
             .is_some_and(|editor| editor.language() == Language::Markdown)
     }
 
-    /// The shell's facts plus the two this view answers itself.
+    /// The shell's facts plus the three this view answers itself.
     fn menu_facts(&self, cx: &App) -> FileContextFacts {
         let has_selection = self
             .code_selection(cx)
@@ -852,6 +863,7 @@ impl FileView {
         FileContextFacts {
             has_selection,
             is_markdown: self.is_markdown(),
+            is_snapshot: self.is_snapshot(),
             ..self.shell_facts.clone()
         }
     }
@@ -914,10 +926,8 @@ impl FileView {
         match action {
             FileContextAction::Copy => self.copy_selection(false, cx),
             FileContextAction::CopyAndTrim => self.copy_selection(true, cx),
-            // A snapshot is read-only, so Cut and Paste do nothing at all: not
-            // even the copy Cut would make before its delete is refused. The
-            // menu does not disable them (`file_context_menu::items`).
-            FileContextAction::Cut | FileContextAction::Paste if self.is_snapshot() => {}
+            // A snapshot's menu disables Cut and Paste (`file_context_menu::items`),
+            // so neither reaches here for one: `context_effect` refuses them first.
             FileContextAction::Cut => {
                 self.copy_selection(false, cx);
                 self.replace_code_selection("", cx);
@@ -1441,7 +1451,12 @@ impl FileView {
                             this.child(render_conflict_banner(conflict, theme, entity.clone()))
                         })
                         .when(is_markdown, |this| {
-                            this.child(render_markdown_bar(mode, theme, entity.clone()))
+                            this.child(render_markdown_bar(
+                                mode,
+                                !self.is_snapshot(),
+                                theme,
+                                entity.clone(),
+                            ))
                         })
                         .child(render_content(
                             editor,
@@ -1648,7 +1663,7 @@ impl Render for FileView {
             .when_some(
                 self.snapshot
                     .as_ref()
-                    .map(|origin| render_snapshot_bar(origin, theme, cx.entity())),
+                    .map(|origin| render_snapshot_bar(origin, cx.entity())),
                 |this, bar| this.child(bar),
             )
             .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
@@ -1661,42 +1676,28 @@ impl Render for FileView {
     }
 }
 
-/// The bar over a snapshot: what it is, and the way to the editable copy.
+/// The banner over a snapshot: what it is, and the way to the editable copy.
+/// Ely's own banner is switched off for a snapshot (its "Make editable" has
+/// nothing to unlock), so this is the only one. It sits above the find bar
+/// and the code, over the failure card too, and keeps `file-snapshot-bar` as
+/// its selector.
 fn render_snapshot_bar(
     origin: &SnapshotOrigin,
-    theme: Theme,
     entity: gpui::Entity<FileView>,
 ) -> impl IntoElement {
-    let local = origin.local_copy.clone();
+    let banner = ReadOnlyBanner::new("read-only", origin.banner_message());
+    let banner = match (origin.banner_action(), origin.local_copy.clone()) {
+        (Some(label), Some(path)) => banner.action(label, move |_, cx| {
+            let path = path.clone();
+            entity.update(cx, |_, cx| cx.emit(FileViewEvent::OpenLocalCopy(path)));
+        }),
+        _ => banner,
+    };
     div()
         .id("file-snapshot-bar")
         .debug_selector(|| "file-snapshot-bar".into())
         .w_full()
-        .px(px(20.0))
-        .py(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(12.0))
-        .bg(theme.ely.hover)
-        .border_b_1()
-        .border_color(theme.ely.border)
-        .text_size(theme.typography.footnote)
-        .text_color(theme.ely.fg)
-        .child(div().flex_1().child(format!("Read-only · {}", origin.label())))
-        .when_some(local, |this, path| {
-            this.child(
-                div()
-                    .id("file-snapshot-open-local")
-                    .debug_selector(|| "file-snapshot-open-local".into())
-                    .cursor_pointer()
-                    .text_color(theme.sirio.quantity)
-                    .child("Open local copy")
-                    .on_click(move |_, _, cx| {
-                        let path = path.clone();
-                        entity.update(cx, |_, cx| cx.emit(FileViewEvent::OpenLocalCopy(path)));
-                    }),
-            )
-        })
+        .child(banner)
 }
 
 /// A snapshot whose read failed: the reason, and the Retry that is the
@@ -1894,10 +1895,12 @@ fn render_conflict_banner(
 /// Preview would be a dead end.
 ///
 /// The formatting controls themselves stay Code-only: Preview is a reading
-/// surface, and there is nothing rendered there to format. The link URL is a
+/// surface, and there is nothing rendered there to format. A snapshot has none
+/// either, in either mode: it refuses every edit, so a button would only lie. The link URL is a
 /// deterministic placeholder until the view has a text prompt seam of its own.
 fn render_markdown_bar(
     mode: MarkdownMode,
+    editable: bool,
     theme: Theme,
     file_view: gpui::Entity<FileView>,
 ) -> impl IntoElement {
@@ -1914,7 +1917,7 @@ fn render_markdown_bar(
         .border_b_1()
         .border_color(theme.ely.border)
         .bg(theme.ely.surface)
-        .when(mode == MarkdownMode::Code, move |this| {
+        .when(mode == MarkdownMode::Code && editable, move |this| {
             this.child(render_format_button(
                 "B",
                 "file-format-bold",
@@ -5160,8 +5163,10 @@ mod tests {
     }
 
     /// The snapshot is drawn read-only, so the keyboard can type and paste into
-    /// it and nothing changes. The banner's "Make editable" unlocks the code
-    /// editor for a moment; the view takes the lock back before a key arrives.
+    /// it and nothing changes. It carries the view's own banner and Ely's is not
+    /// drawn, so no "Make editable" is on screen; an `Unlock` the code editor
+    /// announces anyway (the one word it has for it) is taken back before a key
+    /// arrives.
     #[gpui::test]
     async fn a_snapshot_shows_the_revisions_text_and_refuses_every_edit(
         cx: &mut gpui::TestAppContext,
@@ -5198,6 +5203,17 @@ mod tests {
             code.read_with(&cx.cx, |code, _| code.is_read_only()),
             "the code editor is drawn read-only"
         );
+        let bar = cx
+            .debug_bounds("file-snapshot-bar")
+            .expect("the view draws the snapshot's banner");
+        assert!(
+            cx.debug_bounds("code-editor-read-only-banner").is_none(),
+            "Ely's own banner, with its Make editable, is not drawn for a snapshot"
+        );
+        assert!(
+            bar.bottom() <= cx.debug_bounds("code-editor-line-0").expect("line 0").top(),
+            "the banner sits above the code"
+        );
 
         cx.update(|window, cx| focus_code(&view, window, cx));
         cx.update(|_, cx| {
@@ -5217,7 +5233,7 @@ mod tests {
             "and the code editor still shows the revision"
         );
 
-        // What the banner's "Make editable" does: unlock, then announce it.
+        // What Ely's "Make editable" did (it is not drawn now): unlock, then announce it.
         code.update(&mut cx.cx, |code, cx| {
             code.set_read_only(false, cx);
             cx.emit(EditorEvent::Unlock);
@@ -5252,6 +5268,61 @@ mod tests {
             assert!(saved.is_err(), "a snapshot has no file to save to");
             assert!(view.message_text().is_some_and(|text| text.contains("Read-only")));
         });
+    }
+
+    /// What a Markdown snapshot's row must get wrong to fail: a formatting
+    /// button drawn in Code (each one would only refuse), the Code/Preview
+    /// switch lost with them, or a file that is not a snapshot losing its
+    /// buttons (the check is that the same row, for a real file, draws them:
+    /// `markdown_toolbar_controls_change_the_selected_source`).
+    #[gpui::test]
+    async fn a_markdown_snapshot_has_no_format_buttons_but_keeps_its_modes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            Theme::init(cx);
+            ::editor::init(cx);
+            crate::ely::init(cx);
+        });
+        let mut origin = snapshot_origin_for_tests();
+        origin.relative_path = PathBuf::from("docs/notes.md");
+        let window = cx.add_window(|_window, cx| {
+            FileView::snapshot(origin.clone(), b"# Notes\n\nword\n".to_vec(), cx)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let settle = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.simulate_next_frame(cx);
+                window.simulate_next_frame(cx);
+            });
+        };
+        settle(&mut cx);
+        let formats = [
+            "file-format-bold",
+            "file-format-italic",
+            "file-format-heading",
+            "file-format-list",
+            "file-format-link",
+        ];
+        for mode in ["file-mode-preview", "file-mode-code"] {
+            let option = cx
+                .debug_bounds(mode)
+                .unwrap_or_else(|| panic!("a Markdown snapshot keeps {mode}"));
+            cx.simulate_click(option.center(), Modifiers::none());
+            settle(&mut cx);
+            for selector in formats {
+                assert!(
+                    cx.debug_bounds(selector).is_none(),
+                    "a snapshot draws no {selector} after {mode}"
+                );
+            }
+        }
+        assert!(
+            cx.debug_bounds("code-editor-line-0").is_some(),
+            "the revision's source is on screen in Code"
+        );
     }
 
     #[gpui::test]

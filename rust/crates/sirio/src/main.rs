@@ -1274,6 +1274,12 @@ enum ControlAction {
         path: String,
         reply: ControlReply,
     },
+    /// A file at a commit, in the read-only tab a change request's file opens.
+    EditorOpenSnapshot {
+        sha: String,
+        path: String,
+        reply: ControlReply,
+    },
     EditorState {
         reply: ControlReply,
     },
@@ -2653,6 +2659,7 @@ impl ControlHandler for AppControlHandler {
                     methods.push("surface.open_list.open");
                     methods.push("surface.changes.confirm");
                     methods.push("surface.editor.open");
+                    methods.push("surface.editor.open_snapshot");
                     methods.push("surface.editor.state");
                     methods.push("surface.editor.type");
                     methods.push("surface.editor.keys");
@@ -2835,6 +2842,12 @@ impl ControlHandler for AppControlHandler {
                     return ControlResponse::failure(&request.id, "surface.editor.open requires path");
                 };
                 self.queue_action(request, move |reply| ControlAction::EditorOpen { path, reply })
+            }
+            "surface.editor.open_snapshot" if cfg!(debug_assertions) => {
+                let (Some(sha), Some(path)) = (request.params.get("sha").cloned(), request.params.get("path").cloned()) else {
+                    return ControlResponse::failure(&request.id, "surface.editor.open_snapshot requires sha and path");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorOpenSnapshot { sha, path, reply })
             }
             "surface.editor.state" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::EditorState { reply })
@@ -6061,6 +6074,9 @@ impl SirioWorkspace {
                                 ControlAction::EditorOpen { path, reply } => {
                                     let _ = reply.send(workspace.control_editor_open(&path, cx));
                                 }
+                                ControlAction::EditorOpenSnapshot { sha, path, reply } => {
+                                    workspace.control_editor_open_snapshot(sha, path, reply, cx);
+                                }
                                 ControlAction::EditorState { reply } => {
                                     let _ = reply.send(workspace.control_editor_state(cx));
                                 }
@@ -8150,6 +8166,7 @@ impl SirioWorkspace {
             // Answered by the view itself; see `FileView::menu_facts`.
             has_selection: false,
             is_markdown: false,
+            is_snapshot: false,
         }
     }
 
@@ -18436,6 +18453,15 @@ impl SirioWorkspace {
             ),
             ("line_ending".to_string(), line_ending.to_string()),
             ("selections".to_string(), selections.unwrap_or_default()),
+            ("snapshot".to_string(), view.is_snapshot().to_string()),
+            (
+                "banner".to_string(),
+                Self::escaped_field(&view.snapshot_origin().map(SnapshotOrigin::banner_message).unwrap_or_default()),
+            ),
+            (
+                "banner_action".to_string(),
+                view.snapshot_origin().and_then(SnapshotOrigin::banner_action).unwrap_or_default().to_string(),
+            ),
             (
                 "read_only".to_string(),
                 code.map_or(view.is_snapshot(), |code| code.is_read_only()).to_string(),
@@ -18464,6 +18490,62 @@ impl SirioWorkspace {
     ) -> Result<Vec<(String, String)>, String> {
         self.add_file_tab(PathBuf::from(path), cx);
         self.control_editor_state(cx)
+    }
+
+    /// `surface.editor.open_snapshot sha= path=`: `path` at the commit `sha`
+    /// (a full id) in the active worktree, in the read-only tab a change
+    /// request's file opens, through `add_snapshot_tab`. The change request is
+    /// a fixed stand-in (`#7`, on a host that does not exist): the tab only
+    /// needs one to name its origin. The blob is read off the GPUI thread, and
+    /// the reply, the new tab's editor state, is sent once the tab exists, so a
+    /// read that fails answers a state with its error.
+    fn control_editor_open_snapshot(
+        &mut self,
+        sha: String,
+        path: String,
+        reply: ControlReply,
+        cx: &mut Context<Self>,
+    ) {
+        let path = PathBuf::from(path);
+        if !sirio_git::is_commit_id(&sha) {
+            let _ = reply.send(Err("sha must be a full commit id".to_string()));
+            return;
+        }
+        if !snapshot_path_is_repository_relative(&path) {
+            let _ = reply.send(Err(INVALID_CHANGE_REQUEST_FILE_PATH.to_string()));
+            return;
+        }
+        let worktree = self.working_directory.clone();
+        cx.spawn(async move |this, cx| {
+            let (blob_worktree, blob_sha, blob_path) = (worktree.clone(), sha.clone(), path.clone());
+            let read = cx
+                .background_spawn(async move {
+                    sirio_git::show_blob(&blob_worktree, &blob_sha, &blob_path).map_err(snapshot_read_error)
+                })
+                .await;
+            let local = worktree.join(&path);
+            let origin = SnapshotOrigin {
+                reference: sirio_forge::ChangeRef {
+                    forge: sirio_forge::Forge::GitHub,
+                    host: "forge.invalid".to_string(),
+                    project: "sirio/e2e".to_string(),
+                    number: 7,
+                },
+                sha,
+                relative_path: path,
+                local_copy: local.is_file().then_some(local),
+                deleted: false,
+            };
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.still_in(&worktree) {
+                    workspace.add_snapshot_tab(origin, read, None, cx);
+                    let _ = reply.send(workspace.control_editor_state(cx));
+                } else {
+                    let _ = reply.send(Err("the worktree changed before the snapshot opened".to_string()));
+                }
+            });
+        })
+        .detach();
     }
 
     /// Types `text` through the code editor's input handler, so read-only,
@@ -42365,6 +42447,7 @@ done
             | ControlAction::OpenListOpen { reply, .. }
             | ControlAction::ReadFile { reply }
             | ControlAction::EditorOpen { reply, .. }
+            | ControlAction::EditorOpenSnapshot { reply, .. }
             | ControlAction::EditorState { reply }
             | ControlAction::EditorType { reply, .. }
             | ControlAction::EditorKeys { reply, .. }
@@ -42532,6 +42615,9 @@ done
             "surface.open_list.open" => request::open_list_open("show"),
             "surface.file.read" => request::file_read(),
             "surface.editor.open" => request_with_params(method, &[("path", "x.rs")]),
+            "surface.editor.open_snapshot" => {
+                request_with_params(method, &[("sha", "0000000000000000000000000000000000000000"), ("path", "x.rs")])
+            }
             "surface.editor.state" => request::editor_state(),
             "surface.editor.type" => request_with_params(method, &[("text", "x")]),
             "surface.editor.keys" => request_with_params(method, &[("keys", "ctrl-z")]),

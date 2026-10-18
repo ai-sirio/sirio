@@ -524,3 +524,16 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
   clear them. Sirio's hover card reads them from here, so the card and the
   squiggles agree after an edit, an undo or a reload. Until the next publish
   after a clear, the card shows no diagnostic either.
+
+### A read-only editor without its banner (Task 10b)
+
+- `src/editor/state.rs`: `CodeEditor::without_read_only_banner()` sets the new
+  `Options::read_only_banner` (default `true`) to false. A read-only editor
+  built with it draws no banner and so offers no "Make editable"; its owner says
+  why the text is read-only, in a banner of its own (`ReadOnlyBanner` is public).
+  Sirio's file tab uses it for a snapshot: a revision has nothing to unlock.
+- `src/editor/view.rs`: the banner is drawn when `read_only` and
+  `read_only_banner` are both set, inside a `div` with the debug selector
+  `code-editor-read-only-banner`, which is how a test tells that Ely's banner
+  is or is not on screen. The text, the button and the `Unlock` event are
+  unchanged. A sync must keep the extra condition and the wrapper.

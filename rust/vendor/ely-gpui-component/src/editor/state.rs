@@ -106,6 +106,8 @@ pub(crate) struct Options {
     pub minimap: bool,
     pub sticky: bool,
     pub read_only: bool,
+    /// Whether a read-only editor draws its own banner and its "Make editable".
+    pub read_only_banner: bool,
     pub tab: usize,
     pub highlighter: Option<LineHighlighter>,
     /// Whether the gutter's breakpoint slot takes presses and draws breakpoints.
@@ -253,6 +255,7 @@ impl CodeEditor {
                 minimap: false,
                 sticky: false,
                 read_only: false,
+                read_only_banner: true,
                 tab: 4,
                 highlighter: None,
                 breakpoints: true,
@@ -324,6 +327,12 @@ impl CodeEditor {
 
     pub fn read_only(mut self) -> Self {
         self.options.read_only = true;
+        self
+    }
+
+    /// A read-only editor draws no banner of its own and offers no way to unlock it; its owner says why it is read-only.
+    pub fn without_read_only_banner(mut self) -> Self {
+        self.options.read_only_banner = false;
         self
     }
 
