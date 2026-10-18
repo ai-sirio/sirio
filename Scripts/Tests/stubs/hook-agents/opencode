@@ -22,10 +22,14 @@ log="$out/opencode.log"
 printf '%s\n' "$SIRIO_PANE_ID" > "$out/opencode.pane.tmp"
 mv -f "$out/opencode.pane.tmp" "$out/opencode.pane"
 
+# Waits for the E2E's go before the named hook, then takes it. A step the E2E never
+# releases logs why and fails the stub rather than holding the pane forever.
 await_go() {
+  local hook=$1
   local deadline=$((SECONDS + 30))
   until [ -e "$go" ]; do
     if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "timeout waiting for opencode.go before $hook" >> "$log"
       echo "opencode: timed out waiting for $go" >&2
       exit 1
     fi
@@ -92,9 +96,24 @@ await hooks.event({
 process.exitCode = status;
 JS
 
-await_go
+# The plugin is copied under an .mjs name, which gives Node the module type
+# without its syntax detection. The copy is byte-identical to the worktree's
+# plugin, which stays the source.
+plugin_source="$PWD/.opencode/plugin/sirio-session.js"
+if [ ! -f "$plugin_source" ]; then
+  echo "no $plugin_source to run" >> "$log"
+  exit 1
+fi
+plugin="$(cd "$out" && pwd)/opencode-plugin.mjs"
+cp "$plugin_source" "$plugin"
+if ! cmp -s "$plugin_source" "$plugin"; then
+  echo "the copy of $plugin_source differs from it" >> "$log"
+  exit 1
+fi
+
+await_go "session.updated"
 status=0
-node "$driver" "$PWD/.opencode/plugin/sirio-session.js" session.updated || status=$?
+node "$driver" "$plugin" session.updated || status=$?
 echo "opencode session.updated exit=$status" >> "$log"
 
 hold

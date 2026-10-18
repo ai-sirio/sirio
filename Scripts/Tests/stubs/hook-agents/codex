@@ -21,10 +21,14 @@ log="$out/codex.log"
 printf '%s\n' "$SIRIO_PANE_ID" > "$out/codex.pane.tmp"
 mv -f "$out/codex.pane.tmp" "$out/codex.pane"
 
+# Waits for the E2E's go before the named hook, then takes it. A step the E2E never
+# releases logs why and fails the stub rather than holding the pane forever.
 await_go() {
+  local hook=$1
   local deadline=$((SECONDS + 30))
   until [ -e "$go" ]; do
     if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "timeout waiting for codex.go before $hook" >> "$log"
       echo "codex: timed out waiting for $go" >&2
       exit 1
     fi
@@ -74,7 +78,7 @@ fi
 
 payload='{"type":"agent-turn-complete","thread-id":"stub-codex","turn-id":"stub-codex-turn","input-messages":[],"last-assistant-message":"ok"}'
 
-await_go
+await_go notify
 status=0
 "${argv[@]}" "$payload" || status=$?
 echo "codex notify exit=$status" >> "$log"

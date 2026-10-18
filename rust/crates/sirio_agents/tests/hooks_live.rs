@@ -7,15 +7,23 @@
 //!
 //! Each test prints `SKIP:` and returns when its CLI is not on PATH, when
 //! `sirioctl` is not built beside this test binary (`cargo build -p sirio_control
-//! --bin sirioctl`), or when the CLI exits for want of a login or of credit. A
-//! live turn costs money and needs credentials, so every test here is on the
-//! `ci` and `pr` profiles' skip list in `rust/.config/nextest.toml`.
+//! --bin sirioctl`), when the installed `claude` lacks the flags that keep the
+//! user's config out, or when the CLI exits for want of a login or of credit.
+//!
+//! Each live test spends a real turn, so each is `#[ignore]`d and runs only on
+//! request:
+//!
+//!     cargo nextest run -p sirio_agents --test hooks_live --run-ignored only
+//!
+//! The scratch root is under `std::env::temp_dir()`. The tests expect `TMPDIR`
+//! to be set, because without it that root is `/tmp`.
 
 #![cfg(unix)]
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +36,13 @@ use sirio_agents::{ALL, AgentAdapter, find_executable_on_path, shell_quote};
 /// A turn that outlives this is killed, and its test fails.
 const TURN_TIMEOUT: Duration = Duration::from_secs(120);
 
+// libc's `kill`, declared here so this test takes no dependency for one call.
+// `SIGKILL` is 9 on every unix Sirio runs on.
+unsafe extern "C" {
+    safe fn kill(pid: i32, signal: i32) -> i32;
+}
+const SIGKILL: i32 = 9;
+
 const SIRIOCTL_NOT_BUILT: &str =
     "sirioctl is not built beside this test binary; run cargo build -p sirio_control --bin sirioctl";
 
@@ -35,22 +50,36 @@ const SIRIOCTL_NOT_BUILT: &str =
 const TAIL_LINES: usize = 20;
 const TAIL_WIDTH: usize = 200;
 
-/// Words a CLI prints when it cannot run a turn for want of a login or of
-/// credit. Checked only after a failed exit, and only the fact is printed, never
-/// the output.
-const NO_ACCESS_WORDS: &[&str] = &[
+/// Phrases a CLI prints when it cannot run a turn for want of a login or of
+/// credit, matched as whole phrases and checked only after a failed exit. Only
+/// the fact is printed, never the output. Rate limits, overloads and network
+/// errors are not here: they fail the test. Where each phrase comes from:
+/// - `not logged in`, `please run /login`: claude, printed with no login (run
+///   here with an empty HOME, which needs no credential).
+/// - `missing bearer or basic authentication`: codex, its 401 for a request with
+///   no credential (run here the same way).
+/// - `out of usage credits`: claude's organisation message (a string in the
+///   installed binary; not triggered, since a live attempt spends).
+/// - `requires more credits`: OpenRouter's HTTP 402 text, as opencode printed it
+///   in the live run of 2026-10-18.
+const NO_ACCESS_PHRASES: &[&str] = &[
     "not logged in",
-    "log in",
-    "login",
-    "api key",
-    "unauthorized",
-    "authentication",
-    "oauth",
-    "credits",
-    "quota",
+    "please run /login",
+    "missing bearer or basic authentication",
+    "out of usage credits",
+    "requires more credits",
 ];
 
+/// The flags that keep the user's global Claude config out of a turn.
+/// `--setting-sources project,local` drops the user's settings, while `local`
+/// still loads the `.claude/settings.local.json` that `prepare` wrote, so the
+/// hooks under test still fire. `--strict-mcp-config` with no `--mcp-config`
+/// starts no MCP server. Credentials are not a settings source, so the turn
+/// authenticates as the user does.
+const CLAUDE_ISOLATION_FLAGS: &[&str] = &["--setting-sources", "--strict-mcp-config"];
+
 #[test]
+#[ignore = "live: spends a real turn per CLI; run with --run-ignored only"]
 fn claude_fires_its_hooks_for_one_turn() {
     let Some(claude) = find_executable_on_path("claude") else {
         println!("SKIP: claude is not on PATH");
@@ -60,29 +89,66 @@ fn claude_fires_its_hooks_for_one_turn() {
         println!("SKIP: {SIRIOCTL_NOT_BUILT}");
         return;
     };
+    let help = claude_help(&claude);
+    if let Some(flag) = CLAUDE_ISOLATION_FLAGS.iter().find(|flag| !help.contains(*flag)) {
+        println!("SKIP: claude --help has no {flag}, so a turn would load the user's global config");
+        return;
+    }
     let pane = "pane-hooks-live-claude";
     let scratch = Scratch::new("claude");
     prepare("claude", &scratch, pane, &sirioctl);
 
     let recorder = Recorder::start(&scratch.socket());
     let mut command = Command::new(claude);
-    command.args(["-p", "say ok", "--max-turns", "1"]);
+    command.args([
+        "-p",
+        "say ok",
+        "--max-turns",
+        "1",
+        "--setting-sources",
+        "project,local",
+        "--strict-mcp-config",
+    ]);
     let turn = run_turn(command, &scratch);
     let requests = recorder.finish();
     if !turn_completed("claude", &turn) {
         return;
     }
 
+    // SessionStart reports needs-input too, but before the turn's running. Only a
+    // needs-input after the last running can be the Stop hook.
     let statuses = notify_statuses(&requests, pane);
+    let stop_fired = statuses
+        .iter()
+        .rposition(|status| status == "running")
+        .is_some_and(|last_running| {
+            statuses[last_running + 1..].iter().any(|status| status == "needs-input")
+        });
     assert!(
-        statuses.contains(&"running".to_string()) && statuses.contains(&"needs-input".to_string()),
-        "claude's turn must report running then needs-input for {pane}; the socket got \
-         {statuses:?} from {} request(s)",
+        stop_fired,
+        "claude's Stop hook must report needs-input after the last running for {pane}; the \
+         socket got {statuses:?} in arrival order from {} request(s)",
         requests.len()
     );
 }
 
+/// The text `claude --help` prints, which names the flags the installed version takes.
+fn claude_help(claude: &Path) -> String {
+    Command::new(claude)
+        .arg("--help")
+        .output()
+        .map(|output| {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+        .unwrap_or_default()
+}
+
 #[test]
+#[ignore = "live: spends a real turn per CLI; run with --run-ignored only"]
 fn codex_fires_its_notify_hook_for_one_turn() {
     if find_executable_on_path("codex").is_none() {
         println!("SKIP: codex is not on PATH");
@@ -129,6 +195,7 @@ fn codex_fires_its_notify_hook_for_one_turn() {
 }
 
 #[test]
+#[ignore = "live: spends a real turn per CLI; run with --run-ignored only"]
 fn opencode_reports_its_session_for_one_turn() {
     let Some(opencode) = find_executable_on_path("opencode") else {
         println!("SKIP: opencode is not on PATH");
@@ -204,8 +271,9 @@ fn notify_statuses(requests: &[serde_json::Value], pane: &str) -> Vec<String> {
         .collect()
 }
 
-/// A scratch directory for one test: its worktree and its recording socket.
-/// Under `TMPDIR` (`std::env::temp_dir`), and removed when the test ends.
+/// A scratch directory for one test: its worktree and its recording socket. It
+/// sits under `std::env::temp_dir()`, which is `TMPDIR` when that is set, and the
+/// test expects `TMPDIR` to be set; it is removed when the test ends.
 struct Scratch {
     root: PathBuf,
 }
@@ -313,6 +381,7 @@ struct Turn {
 fn run_turn(mut command: Command, scratch: &Scratch) -> Turn {
     let transcript_path = scratch.root.join("turn.txt");
     let transcript = File::create(&transcript_path).expect("create the turn's transcript");
+    // Its own process group, so a timeout takes the CLI's children down with it.
     let mut child = command
         .current_dir(scratch.worktree())
         .env("SIRIO_SOCKET", scratch.socket())
@@ -322,6 +391,7 @@ fn run_turn(mut command: Command, scratch: &Scratch) -> Turn {
         .stdin(Stdio::null())
         .stdout(transcript.try_clone().expect("clone the transcript"))
         .stderr(transcript)
+        .process_group(0)
         .spawn()
         .expect("start the CLI");
     let started = Instant::now();
@@ -330,7 +400,7 @@ fn run_turn(mut command: Command, scratch: &Scratch) -> Turn {
             break Some(status);
         }
         if started.elapsed() > TURN_TIMEOUT {
-            let _ = child.kill();
+            let _ = kill(-(child.id() as i32), SIGKILL);
             let _ = child.wait();
             break None;
         }
@@ -360,9 +430,27 @@ fn turn_completed(name: &str, turn: &Turn) -> bool {
     }
 }
 
+/// Whether the transcript says, as whole phrases, that the CLI cannot run a turn
+/// for want of a login or credit.
 fn has_no_access(transcript: &str) -> bool {
-    let lower = transcript.to_lowercase();
-    NO_ACCESS_WORDS.iter().any(|word| lower.contains(word))
+    NO_ACCESS_PHRASES
+        .iter()
+        .any(|phrase| has_phrase(transcript, phrase))
+}
+
+/// Whether `phrase` (lower case) occurs in `text`, compared lower-cased, with no
+/// letter, digit or `_` on either side: `not logged in` is not in `not logged indoors`.
+fn has_phrase(text: &str, phrase: &str) -> bool {
+    let text = text.to_lowercase();
+    text.match_indices(phrase).any(|(start, matched)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + matched.len()..].chars().next();
+        !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char)
+    })
+}
+
+fn is_word_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 fn tail(transcript: &str) -> String {
@@ -373,4 +461,22 @@ fn tail(transcript: &str) -> String {
         .map(|line| line.chars().take(TAIL_WIDTH).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Only a login or credit phrase makes a failed turn a SKIP. A rate limit, an
+/// overload or a network error is a failure, and a phrase inside a longer word
+/// is not the phrase.
+#[test]
+fn a_login_or_credit_phrase_is_a_skip_and_nothing_else_is() {
+    // Printed by claude with no login, and by codex when a request carries no credential.
+    assert!(has_no_access("Not logged in · Please run /login"));
+    assert!(has_no_access(
+        "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header"
+    ));
+    // Failures, not SKIPs.
+    assert!(!has_no_access("API Error: 429 rate limited, retry in 20 seconds"));
+    assert!(!has_no_access("API Error: 529 overloaded"));
+    assert!(!has_no_access("error: connection refused by api.anthropic.com (network error)"));
+    // A phrase inside a longer word is not the phrase.
+    assert!(!has_no_access("they are not logged indoors"));
 }

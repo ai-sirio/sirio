@@ -20,12 +20,14 @@ log="$out/claude.log"
 printf '%s\n' "$SIRIO_PANE_ID" > "$out/claude.pane.tmp"
 mv -f "$out/claude.pane.tmp" "$out/claude.pane"
 
-# Waits for the E2E's go for the next step, then takes it. A step the E2E never
-# releases fails the stub rather than holding the pane forever.
+# Waits for the E2E's go before the named hook, then takes it. A step the E2E never
+# releases logs why and fails the stub rather than holding the pane forever.
 await_go() {
+  local hook=$1
   local deadline=$((SECONDS + 30))
   until [ -e "$go" ]; do
     if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "timeout waiting for claude.go before $hook" >> "$log"
       echo "claude: timed out waiting for $go" >&2
       exit 1
     fi
@@ -70,7 +72,7 @@ for event in UserPromptSubmit Stop; do
   while IFS= read -r command; do
     [ -n "$command" ] || continue
     count=$((count + 1))
-    await_go
+    await_go "$event"
     status=0
     sh -c "$command" <<< '{"session_id":"stub-claude"}' || status=$?
     echo "claude $event exit=$status" >> "$log"
