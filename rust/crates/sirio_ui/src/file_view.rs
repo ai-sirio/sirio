@@ -1644,8 +1644,10 @@ impl Render for FileView {
         // kept to the app's editor settings and handed the keyboard whenever
         // the mode or its existence changes under the focus.
         // A new generation of line colours per render: the code editor's
-        // minimap asks for every row, so this frame's rows come back from the
-        // previous generation and nothing a frame still shows is dropped.
+        // minimap asks for the same rows every frame (every row of a short
+        // file, one row per pixel of its height otherwise), so this frame's
+        // rows come back from the previous generation and nothing a frame
+        // still shows is dropped.
         self.span_cache.borrow_mut().rotate();
         let step = sirio_perf::span("FileView.ensure_code_editor", id);
         self.ensure_code_editor(window, cx);

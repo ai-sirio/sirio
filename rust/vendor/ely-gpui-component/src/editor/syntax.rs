@@ -161,7 +161,7 @@ fn line_brackets(text: &str) -> Vec<(usize, char)> {
         .collect()
 }
 
-/// Every bracket outside strings and comments, kept from one frame to the next: a closer takes its opener's depth. A text that changed is read again only between the first and the last line the edits since the last read touched (`Buffer::kept_since`), so an edit costs its own lines and not the file; pairing the brackets is a pass over the brackets alone.
+/// Every bracket outside strings and comments, kept from one frame to the next: a closer takes its opener's depth. A text that changed is lexed again only between the first and the last line the edits since the last read touched (`Buffer::kept_since`); the kept brackets are spliced around them and the whole list is paired again, a pass over the brackets alone, so an edit costs its own lines to lex plus the file's brackets to splice and pair.
 #[derive(Default)]
 pub(crate) struct BracketIndex {
     /// Each bracket of the text as of `stamp`, as (offset, character), in order.

@@ -569,31 +569,36 @@ The editor's frame cost grew with the file: on a 1 MiB, 39,247-line file a typed
 character drew in 29 ms and a scrolled frame in 37 ms (main: 4 ms), because
 `CodeEditor::render` read the whole text on every frame. Each change below makes
 a frame's work follow what is drawn, or what an edit touched, and none changes
-what is drawn. Measured in `docs/perf/` terms by the render spans in the
-Task 12b report (`CodeEditor.render` median 25.5 ms before, 0.04 ms after, on
-that file).
+what is drawn except the minimap's sampling of a file taller than it (the
+last bullet says how). Measured, against main, in
+`docs/perf/2026-10-ely-code-editor.md` (`CodeEditor.render` median 25.5 ms
+before, 0.04 ms after, on a 1 MiB file of 39,247 lines).
 
 - `Cargo.toml`: depends on `sirio_perf` (path `../../crates/sirio_perf`, which
   has no dependencies of its own, so no cycle). `CodeEditor::render` and its
-  steps (`CodeEditor.folds`, `.brackets`, `.rows`, `.sticky`, `.minimap`), the
-  list's row builder (`CodeEditor.visible_rows`, with the row count in the
-  entity column) and the minimap's colour read (`CodeEditor.minimap_rows`) carry
-  content-free `sirio_perf` spans, the way every Sirio `Render::render` does.
+  steps (`CodeEditor.active_block`, `.brackets`, `.rows`, `.sticky`,
+  `.minimap`), the list's row builder (`CodeEditor.visible_rows`) and the
+  minimap's colour read (`CodeEditor.minimap_rows`) carry content-free
+  `sirio_perf` spans, the way every Sirio `Render::render` does; every one puts
+  the editor's entity id in the entity column.
 - `src/editor/buffer.rs`: `Buffer` keeps a log of its last 32 edits and
   `Buffer::kept_since(stamp) -> Option<Kept>` says how many bytes at the start
   and at the end no edit since that stamp touched (`None` for another text's
   stamp or an edit that has left the log). It is the one reader of the log.
 - `src/editor/syntax.rs`: `brackets(&Buffer)` is now a test-only reference;
-  `BracketIndex` keeps every bracket between frames and, after an edit, reads
+  `BracketIndex` keeps every bracket between frames and, after an edit, lexes
   again only the lines between the first and last ones the edits touched
   (`kept_since`), shifting the brackets after them; pairing and depth are a pass
-  over the brackets alone. A text it has not seen is read whole. `folds` is one
+  over the brackets alone, and the list is spliced and re-paired in time
+  proportional to all the brackets, not to the edit. A text it has not seen is
+  read whole. `folds` is one
   pass over the lines (a stack of open headers) instead of a scan to the end of
   each block, giving the same list. `opens(buffer, line)` and
-  `enclosing(buffer, line)` answer for one line what `folds` answers for all:
-  whether a block opens there, and the headers of the blocks that hold it. A
-  `Structure` on the editor keeps the fold list and the bracket index per text
-  revision (`CodeEditor::folds`, `CodeEditor::brackets`).
+  `Structure::enclosing(buffer, line)` answer for one line what `folds` answers
+  for all: whether a block opens there, and the headers of the blocks that hold
+  it. A `Structure` on the editor keeps the fold list and the bracket index per
+  text revision (`CodeEditor::folds`, `CodeEditor::brackets`), and the nesting
+  index (see "Fix round 2" below).
 - `src/editor/view.rs`: the frame no longer holds the folds or the places the
   selected word appears. The sticky header and the strong guide ask `enclosing`
   about one line; the gutter's chevron asks `opens`; `Frame` holds the needle
@@ -613,8 +618,43 @@ that file).
 - The minimap (`view.rs`, `layout::minimap_plan`) reads its colours in the
   canvas's prepaint, where its height is known, and for the rows it will draw:
   every row while a row is a pixel tall or more (all that a file of up to its
-  height in rows has, drawn exactly as before), else one row per pixel, drawn a
-  pixel tall. A taller file used to paint every line's colours as sub-pixel
-  quads on top of one another each frame; it now shows one line's colours per
-  pixel of its height. `tall` (the row height used to jump from a click) is
-  unchanged.
+  height in rows has, drawn exactly as before), else one row per pixel, drawn
+  as most of that pixel. A taller file used to paint every line's colours as
+  sub-pixel quads on top of one another each frame; it now shows one line's
+  colours per pixel of its height. `tall` (the row height used to jump from a
+  click) is unchanged. **This is the one change to what is drawn:** a file
+  taller than the minimap's height in rows is shown by sampled lines, not by
+  all of them (see fix round 2 for which lines).
+
+#### Fix round 2
+
+- `src/editor/syntax.rs`: `Structure::enclosing(buffer, line)` replaces the
+  climb over every line above the line (`syntax::enclosing`, now a test-only
+  reference, `enclosing_by_climbing`), which cost the line's number on a file
+  indented under one header (a class, a JSON document, `impl` / `mod tests`). An
+  index of each line's innermost header, built in one pass over the lines
+  (`nesting`), is read by following a header's own header outward, in as many
+  steps as the nesting is deep. It is kept per text revision with each line's
+  `shape` (blank, or its indent): an edit that leaves every shape between the
+  lines `kept_since` names as it was (typing into a line) keeps the index; any
+  other edit builds it again in one pass, which costs the number of lines.
+  `CodeEditor::enclosing` is what the sticky header and the strong guide ask;
+  the strong guide's block is asked for only while guides are drawn.
+- `src/editor/layout.rs`, `view.rs`: the minimap samples a taller file by
+  pixel row: pixel `y` shows the row at `floor(y / tall)`, at `y`. It used to
+  step through the rows `stride` apart (`ceil(1 / tall)`), which re-picked every
+  sampled row each time the stride changed and picked different lines after any
+  edit; the new sampling moves no pixel's row by more than one when a line is
+  added. A line shifted down by an Enter is still a different sample for most
+  pixels (sampling cannot avoid that), so the picture changes at the sampled
+  rows below the edit, by neighbouring lines. Files up to the minimap's height
+  in rows are drawn as before.
+- `src/editor/anchors.rs`, `state.rs`, `line.rs`, `gutter.rs`: a row's washes
+  (`Marks.backgrounds`) and diagnostics are found by range, not by testing every
+  one for every drawn row (a find on `e` washes ~117k places). `Reach` keeps,
+  for a list of ranges, their places sorted by start with the furthest end up to
+  each, so `Marks::diagnostics_touching` and `backgrounds_touching` give a line's
+  candidates in the owner's order (the order they draw in: a later wash lies over
+  an earlier one) for the caller's own test to narrow; they are looked up again
+  by `Marks::reindex` after either list is set, carried through an edit
+  (`anchors::shift`) or cleared. The lists themselves are not reordered.

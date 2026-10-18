@@ -333,7 +333,7 @@ impl Render for CodeEditor {
             "editor-rows",
             count,
             cx.processor(|editor, range: Range<usize>, window, cx| {
-                let _rows = sirio_perf::span("CodeEditor.visible_rows", range.len() as u64);
+                let _rows = sirio_perf::span("CodeEditor.visible_rows", cx.entity_id().as_u64());
                 range.map(|ix| editor.row(ix, window, cx)).collect()
             }),
         )
