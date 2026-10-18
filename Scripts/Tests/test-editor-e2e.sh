@@ -40,6 +40,12 @@ set -eEuo pipefail
 #                     the symbols once, after the pause (a slow burst is undone and run
 #                     again, and says so), and a save asks at once; a deep path in the
 #                     pane keeps its symbols in the capture; captured
+#   snapshot          src/shapes.rs and notes.md at HEAD, opened as a change request's file
+#                     is (the debug verb open-snapshot): read-only, one banner (the view's,
+#                     with its local-file action), typing, a paste, the menu's Cut and Paste
+#                     and replace-all each leave the text byte-identical with a clipboard
+#                     and a selection to prove it, Copy and find still work; captured with
+#                     find open (the banner above the find bar) and as Markdown in Code
 #   git_marks         a file's changes against HEAD mark its gutter: the disk's when the
 #                     file opens, an adopted change, a save; a mark opens its hunk in
 #                     place, Escape closes it; a file restored to HEAD, a commit made
@@ -1249,6 +1255,123 @@ PY
   echo "OK: a deep path keeps the whole breadcrumb in the state; the capture shows it in the pane"
 }
 
+scenario_snapshot() {
+  # A file at a commit opens as a change request's file does (the debug verb
+  # open-snapshot: git's blob, the read-only tab). It carries one banner, the
+  # view's own, and refuses every edit: typing, a paste, the menu's Cut and
+  # Paste and replace-all each leave the text byte-identical, with something on
+  # the clipboard to paste and a selection to cut, so a refusal is the cause.
+  local sha label snap_text refused out
+  sha="$(git -C "$WT" rev-parse HEAD)"
+  label="Read-only · #7 at ${sha:0:7}"
+
+  # Something on the clipboard: copied out of findme.txt, shown by a paste into
+  # the empty scratch file, then undone.
+  open_file "$WT/findme.txt"
+  expect_state state loaded
+  ctl surface editor select --ranges=0..5 >/dev/null
+  ctl surface editor keys --keys=ctrl-c >/dev/null
+  open_file "$WT/empty.txt"
+  expect_state state loaded
+  ctl surface editor keys --keys=ctrl-v >/dev/null
+  expect_state text "fn fi"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text ""
+  expect_state dirty false
+  echo "OK: the clipboard holds 'fn fi'"
+
+  git -C "$WT" show "$sha:src/shapes.rs" >"$RUN_DIR/snap-0.txt"
+  snap_text="$(escaped "$RUN_DIR/snap-0.txt")"
+  ctl surface editor open-snapshot --sha="$sha" --path=src/shapes.rs >/dev/null
+  settle
+  expect_state state loaded
+  expect_state snapshot true
+  expect_state read_only true
+  expect_state banner "$label"
+  expect_state banner_action "Open local file"
+  expect_state text "$snap_text"
+  expect_state dirty false
+  expect_state language Rust
+  echo "OK: src/shapes.rs at HEAD opens read-only, with the one banner and its local-file action"
+
+  # Typing and the keyboard's paste.
+  ctl surface editor select --ranges=0..6 >/dev/null
+  ctl surface editor type --text=Q >/dev/null
+  ctl surface editor keys --keys=ctrl-v >/dev/null
+  sleep 1
+  expect_state text "$snap_text"
+  expect_state dirty false
+  echo "OK: typing and a paste leave the snapshot as it was"
+
+  # The menu: Cut and Paste refuse with the snapshot's reason (the selection is
+  # there, so it is not the missing selection that refuses them), Copy is
+  # accepted.
+  ctl surface editor select --ranges=0..6 >/dev/null
+  for action in cut paste; do
+    if out="$(ctl surface editor context --offset=2 --action=$action 2>&1)"; then
+      fail "$SCENARIO: $action on a snapshot was accepted; the verb answered: $out"
+    fi
+    case "$out" in
+      *"sirioctl: A revision cannot be changed"*) ;;
+      *) fail "$SCENARIO: $action on a snapshot answered '$out', expected 'A revision cannot be changed'" ;;
+    esac
+  done
+  ctl surface editor context --offset=2 --action=copy >/dev/null
+  sleep 1
+  expect_state text "$snap_text"
+  expect_state dirty false
+  echo "OK: the menu refuses Cut and Paste on a snapshot with its reason, and accepts Copy"
+
+  # Find works on a snapshot; replace is refused.
+  local found
+  found="$(grep -io fn "$RUN_DIR/snap-0.txt" | wc -l | tr -d ' ')"
+  [ "$found" -gt 0 ] || fail "$SCENARIO: the fixture holds no fn"
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor find --query=fn --replace=Y >/dev/null
+  expect_state find_matches "$found"
+  if out="$(ctl surface editor replace --all=true 2>&1)"; then
+    fail "$SCENARIO: replace-all on a snapshot was accepted; the verb answered: $out"
+  fi
+  case "$out" in
+    *"read-only"*) ;;
+    *) fail "$SCENARIO: replace-all on a snapshot answered '$out', expected a read-only refusal" ;;
+  esac
+  sleep 1
+  expect_state text "$snap_text"
+  expect_state dirty false
+  expect_state find_matches "$found"
+  echo "OK: find counts $found matches in the snapshot; replace-all is refused and the text is unchanged"
+  capture snapshot
+  ctl surface editor find-close >/dev/null
+
+  # A Markdown snapshot, in Code: the buttons that format are not drawn (a unit
+  # test proves their absence in the drawn frame; the capture shows the row).
+  git -C "$WT" show "$sha:notes.md" >"$RUN_DIR/snap-md.txt"
+  ctl surface editor open-snapshot --sha="$sha" --path=notes.md >/dev/null
+  settle
+  expect_state snapshot true
+  expect_state banner "$label"
+  expect_state banner_action "Open local file"
+  expect_state text "$(escaped "$RUN_DIR/snap-md.txt")"
+  ctl surface editor mode --mode=code >/dev/null
+  expect_state mode code
+  ctl surface editor type --text=Q >/dev/null
+  sleep 1
+  expect_state text "$(escaped "$RUN_DIR/snap-md.txt")"
+  expect_state dirty false
+  capture snapshot-md
+  echo "OK: a Markdown snapshot in Code refuses typing and is captured with its row"
+
+  # A path outside the repository tree and a short sha are refused before git.
+  if out="$(ctl surface editor open-snapshot --sha="${sha:0:7}" --path=notes.md 2>&1)"; then
+    fail "$SCENARIO: a short sha was accepted: $out"
+  fi
+  if out="$(ctl surface editor open-snapshot --sha="$sha" --path=../escape.txt 2>&1)"; then
+    fail "$SCENARIO: a path that climbs was accepted: $out"
+  fi
+  echo "OK: a short sha and a climbing path are refused"
+}
+
 scenario_git_marks() {
   # The marks read each file against HEAD with no context lines. This repository
   # asks git to merge hunks that lie within three unchanged lines of each other
@@ -1697,6 +1820,7 @@ scenario definition scenario_definition
 scenario link scenario_link
 scenario context scenario_context
 scenario breadcrumb scenario_breadcrumb
+scenario snapshot scenario_snapshot
 scenario git_marks scenario_git_marks
 scenario find scenario_find
 scenario replace scenario_replace
