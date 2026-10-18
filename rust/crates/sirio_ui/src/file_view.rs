@@ -289,6 +289,9 @@ pub struct FileView {
     git_diff_in_flight: bool,
     /// Whether the diff went stale while that fetch ran, so one more is due when it lands.
     git_diff_again: bool,
+    /// How many times the app asked to fetch the diff (`begin_git_diff` calls, the
+    /// coalesced ones too): what the editor E2E counts per click and per focus.
+    git_diff_requests: u64,
     /// What the row under the file shows that only the app knows
     /// (`set_status_facts`): the branch, how far it is from its upstream, the
     /// language server.
@@ -566,6 +569,7 @@ impl FileView {
             open_hunk: None,
             git_diff_in_flight: false,
             git_diff_again: false,
+            git_diff_requests: 0,
             status_facts: StatusFacts::default(),
             status_layout: Rc::default(),
             language_override: None,
@@ -4124,10 +4128,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    async fn the_find_key_in_the_query_selects_it_and_never_reseeds_it(
-        cx: &mut gpui::TestAppContext,
-    ) {
     // How a hover card can outlive the pointer's visit to the code (task 12a, from
     // 9b's review): Ely emits no `Pointer { offset: None }` when the pointer
     // leaves the code, so a card drawn for the code stays when the pointer slides
@@ -4231,6 +4231,10 @@ mod tests {
         assert_eq!(after, None, "the Markdown row does not keep the code's card");
     }
 
+    #[gpui::test]
+    async fn the_find_key_in_the_query_selects_it_and_never_reseeds_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let file = TempFile::with_extension("rs", "foo fooo foo\n");
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
         cx.update(|_, app| init(app));

@@ -18658,6 +18658,9 @@ impl SirioWorkspace {
             ("diagnostics".to_string(), diagnostics.to_string()),
             ("git_marks".to_string(), view.git_marks_text()),
             ("diff_open".to_string(), Self::open_hunk_text(view)),
+            // Asks for this file's diff so far, the coalesced asks too: a focus,
+            // a save, a reload and an outside change each count once.
+            ("git_diff_requests".to_string(), view.git_diff_requests().to_string()),
             ("breadcrumb".to_string(), Self::escaped_field(&view.breadcrumb_text())),
             // The row under the file, as drawn: empty until it is drawn.
             ("status".to_string(), view.status_text(cx)),

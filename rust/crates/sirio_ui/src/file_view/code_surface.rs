@@ -162,12 +162,18 @@ impl FileView {
     /// whole-worktree scans while an agent keeps rewriting the file, and one
     /// more run when the fetch lands covers all of them.
     pub fn begin_git_diff(&mut self) -> bool {
+        self.git_diff_requests += 1;
         if self.git_diff_in_flight {
             self.git_diff_again = true;
             return false;
         }
         self.git_diff_in_flight = true;
         true
+    }
+
+    /// How many fetches of this file's diff were asked for so far.
+    pub fn git_diff_requests(&self) -> u64 {
+        self.git_diff_requests
     }
 
     /// Shows the diff a fetch found, and asks for one more fetch when the diff
