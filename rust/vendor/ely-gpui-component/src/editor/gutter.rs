@@ -50,11 +50,8 @@ impl CodeEditor {
     fn worst(&self, line: usize) -> Option<Severity> {
         let range = self.buffer.line_range(line);
         self.marks
-            .diagnostics
-            .iter()
-            .filter(|diagnostic| {
-                diagnostic.range.start <= range.end && range.start <= diagnostic.range.end
-            })
+            .diagnostics_touching(range.start, range.end)
+            .into_iter()
             .map(|diagnostic| diagnostic.severity)
             .max_by_key(|severity| match severity {
                 Severity::Danger => 3,

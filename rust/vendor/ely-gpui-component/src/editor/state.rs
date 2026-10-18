@@ -121,6 +121,9 @@ pub(crate) struct Options {
 pub(crate) struct Marks {
     pub diagnostics: Vec<Diagnostic>,
     pub backgrounds: Vec<(Range<usize>, gpui::Hsla)>,
+    /// Where `diagnostics` and `backgrounds` lie, to find a line's by search; `reindex` brings them up to date after either list changes.
+    pub(crate) diagnostic_reach: super::anchors::Reach,
+    pub(crate) background_reach: super::anchors::Reach,
     pub hints: Vec<InlayHint>,
     pub lenses: Vec<CodeLens>,
     pub ghost: Option<GhostText>,
@@ -537,6 +540,7 @@ impl CodeEditor {
             return;
         }
         self.marks.diagnostics = diagnostics;
+        self.marks.reindex();
         cx.notify();
     }
 
@@ -551,6 +555,7 @@ impl CodeEditor {
             return;
         }
         self.marks.backgrounds = ranges;
+        self.marks.reindex();
         cx.notify();
     }
 

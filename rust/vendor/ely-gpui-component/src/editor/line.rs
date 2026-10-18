@@ -77,10 +77,12 @@ impl CodeEditor {
                 },
             ));
         }
+        // The washes and the problems of the line are found by range, in the order the owner gave them: a later one lies over an earlier.
+        let hi = range.end.max(range.start + 1);
         for (span, color) in self
             .marks
-            .backgrounds
-            .iter()
+            .backgrounds_touching(range.start, hi)
+            .into_iter()
             .filter(|(span, _)| touches(span))
         {
             spans.push((
@@ -93,8 +95,8 @@ impl CodeEditor {
         }
         for diagnostic in self
             .marks
-            .diagnostics
-            .iter()
+            .diagnostics_touching(range.start, hi)
+            .into_iter()
             .filter(|diagnostic| touches(&diagnostic.range))
         {
             spans.push((
