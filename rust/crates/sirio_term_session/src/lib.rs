@@ -149,7 +149,10 @@ impl Session {
         #[cfg(unix)]
         terminate::drop_acquired_controlling_terminal();
 
-        let (program, args) = spec.program.clone().unwrap_or_else(login_shell);
+        let (program, args) = spec
+            .program
+            .clone()
+            .unwrap_or_else(|| session_login_shell(&spec.env));
         let mut command = CommandBuilder::new(program);
         for argument in &args {
             command.arg(argument);
@@ -435,8 +438,9 @@ fn validate_cwd(cwd: &Path) -> Result<(), SpawnError> {
     Ok(())
 }
 
-/// Program and arguments for the user's login shell, used when a session does
-/// not request an explicit program.
+/// Program and arguments for this process's login shell. A session the host
+/// owns takes its shell from its own environment instead: see
+/// [`session_login_shell`].
 #[cfg(not(windows))]
 pub fn login_shell() -> (String, Vec<String>) {
     match std::env::var("SHELL") {
@@ -449,6 +453,24 @@ pub fn login_shell() -> (String, Vec<String>) {
 /// may contain an MSYS path that CreateProcess cannot resolve.
 #[cfg(windows)]
 pub fn login_shell() -> (String, Vec<String>) {
+    default_login_shell()
+}
+
+/// The login shell a session runs when it names no program: the `SHELL` in
+/// the session's own environment. A session built from a client's environment
+/// (`env_exact`, docs/superpowers/specs/2026-10-17-ade-programme-design.md
+/// §5.3) runs that client's shell, never the host's.
+#[cfg(not(windows))]
+pub fn session_login_shell(env: &BTreeMap<String, String>) -> (String, Vec<String>) {
+    match env.get("SHELL") {
+        Some(value) if !value.is_empty() => (value.clone(), vec!["-il".into()]),
+        _ => default_login_shell(),
+    }
+}
+
+/// Windows ignores `SHELL` for the same reason [`login_shell`] does.
+#[cfg(windows)]
+pub fn session_login_shell(_env: &BTreeMap<String, String>) -> (String, Vec<String>) {
     default_login_shell()
 }
 

@@ -19,6 +19,8 @@ sirio_ipc = { path = "../sirio_ipc" }
 # running (spec SP2 §5). Never sirio_host: the boundary is client-only.
 sirio_host_client = { path = "../sirio_host_client" }
 sirio_host_protocol = { path = "../sirio_host_protocol" }
+# The user environment a control-owned pane and its host session start in.
+sirio_env = { path = "../sirio_env" }
 
 [target.'cfg(windows)'.dependencies]
 # #246: ConPTY for control-owned panes. Same version sirio_terminal pins for

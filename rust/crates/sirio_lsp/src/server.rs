@@ -38,7 +38,13 @@ impl Server {
         args: &[String],
         root: &Path,
     ) -> Result<(Self, impl std::future::Future<Output = ()> + use<>), LspError> {
-        let mut child = Command::new(command)
+        // `async_process` is not `std`, so `sirio_env::command` cannot build it:
+        // the clear happens here, before the site's own settings touch it.
+        let mut launch = Command::new(command);
+        if let Some(user) = sirio_env::installed() {
+            launch.env_clear().envs(user);
+        }
+        let mut child = launch
             .args(args)
             .current_dir(root)
             .stdin(Stdio::piped())

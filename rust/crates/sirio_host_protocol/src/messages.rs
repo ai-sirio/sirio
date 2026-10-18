@@ -221,6 +221,8 @@ pub mod topic {
 pub mod capability {
     pub const HOST_V1: &str = "host.v1";
     pub const TERMINAL: &str = "terminal";
+    /// `term.create` honours `env_exact` (minor 2).
+    pub const TERM_ENV_EXACT: &str = "term.env_exact";
 }
 
 #[cfg(test)]

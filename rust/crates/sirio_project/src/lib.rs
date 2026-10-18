@@ -87,7 +87,6 @@ mod id;
 mod layout;
 mod project;
 mod settings;
-mod skill;
 mod tab;
 mod workspace;
 mod worktree;
@@ -119,7 +118,6 @@ pub use layout::{
 };
 pub use project::Project;
 pub use settings::SettingsPolicy;
-pub use skill::{SkillInstallCommand, agent_skill_install_command};
 pub use tab::{PaneRole, Tab, TabKind};
 pub use workspace::{FilteredProject, FilteredTab, FilteredTree, FilteredWorktree, Workspace};
 pub use worktree::Worktree;

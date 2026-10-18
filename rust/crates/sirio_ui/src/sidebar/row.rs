@@ -138,11 +138,14 @@ impl Sidebar {
     /// (`RowStatusGlyph`), and writing the word next to it said the same
     /// thing twice in the row's narrowest space. What is left is the quiet
     /// half: a worktree sitting idle, and how many agents are parked in one.
+    ///
+    /// Only a pill with a brand mark is an agent: a plain shell or a chat
+    /// with no agent picked is a tab, and counting it said "2 agents" over a
+    /// worktree that had none.
     pub(crate) fn status_text(row: &SidebarRow) -> Option<String> {
+        let agents = row.pills.iter().filter(|pill| pill.brand.is_some()).count();
         match row.agent_status {
-            Some(ActivityStatus::Idle) | None if row.pills.len() > 1 => {
-                Some(format!("{} agents", row.pills.len()))
-            }
+            Some(ActivityStatus::Idle) | None if agents > 1 => Some(format!("{agents} agents")),
             Some(ActivityStatus::Idle) => Some("idle".to_owned()),
             _ => None,
         }
@@ -873,7 +876,7 @@ mod tests {
             parked_tab: None,
             title: "Claude".to_owned(),
             icon: Icon::MessageSquare,
-            brand: None,
+            brand: Some(AgentBrandColor::for_agent_id("claude")),
             status: Some(ActivityStatus::Idle),
             selected: false,
             kind: TabKind::AgentChat,
@@ -906,6 +909,19 @@ mod tests {
         assert_eq!(Sidebar::status_text(&row).as_deref(), Some("2 agents"));
         row.pills = vec![pill(1)];
         assert_eq!(Sidebar::status_text(&row).as_deref(), Some("idle"));
+
+        // A plain shell and a chat with no agent picked are tabs, not agents:
+        // only a pill with a brand mark is counted.
+        let mut shell = pill(2);
+        shell.kind = TabKind::Terminal;
+        shell.brand = None;
+        let mut empty_chat = pill(3);
+        empty_chat.brand = None;
+        row.pills = vec![pill(1), shell.clone(), empty_chat.clone()];
+        assert_eq!(Sidebar::status_text(&row).as_deref(), Some("idle"));
+        row.agent_status = None;
+        row.pills = vec![shell, empty_chat];
+        assert_eq!(Sidebar::status_text(&row), None);
     }
 
     /// The second line names the worktree's most recent task, not its

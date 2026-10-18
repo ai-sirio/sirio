@@ -2,6 +2,7 @@
 //! requests C1). Remote steps are non-interactive and use git's own
 //! credentials; nothing here rewrites an existing branch or remote.
 
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -242,12 +243,29 @@ pub fn fast_forward(worktree: &Path, target: &str) -> Result<FastForward, GitErr
 /// worktrees, never committed). A pattern already on its own line is left
 /// alone, so calling this again changes nothing.
 pub fn exclude(repo: &Path, pattern: &str) -> Result<(), String> {
+    // Callers run on their own threads (one per agent pane), and this is a
+    // read-modify-write: without the lock two appends can each read the file
+    // before the other writes, and one pattern is lost.
+    static EXCLUDE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = EXCLUDE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let output = git::run_accepting(&["rev-parse", "--git-common-dir"], repo, &[0])
         .map_err(|error| error.to_string())?;
     // Relative to `repo` in the main worktree, absolute in a linked one.
     let common = repo.join(output.stdout_string().trim());
     let info = common.join("info");
     let file = info.join("exclude");
+    // Followed through links: a symlink to a regular file is written through,
+    // and anything else (a directory, a FIFO) is refused by name before it is
+    // read or opened. A link that points nowhere is refused too: appending
+    // would create its target wherever it points.
+    if std::fs::metadata(&file).is_ok_and(|metadata| !metadata.is_file()) {
+        return Err(format!("could not write {}: it is not a regular file", file.display()));
+    }
+    if std::fs::metadata(&file).is_err()
+        && std::fs::symlink_metadata(&file).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(format!("could not write {}: it is a link that points nowhere", file.display()));
+    }
     let existing = match std::fs::read_to_string(&file) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -256,14 +274,22 @@ pub fn exclude(repo: &Path, pattern: &str) -> Result<(), String> {
     if existing.lines().any(|line| line == pattern) {
         return Ok(());
     }
-    let mut text = existing;
-    if !text.is_empty() && !text.ends_with('\n') {
+    let mut text = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') {
         text.push('\n');
     }
     text.push_str(pattern);
     text.push('\n');
     std::fs::create_dir_all(&info)
         .map_err(|error| format!("could not create {}: {error}", info.display()))?;
-    std::fs::write(&file, text)
+    // Appended in place, so the file keeps its mode, its inode and its hard
+    // links; a temp file renamed over it would have replaced all three.
+    let mut handle = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&file)
+        .map_err(|error| format!("could not write {}: {error}", file.display()))?;
+    handle
+        .write_all(text.as_bytes())
         .map_err(|error| format!("could not write {}: {error}", file.display()))
 }

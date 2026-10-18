@@ -162,6 +162,41 @@ fi
 grep -q 'cd "\$HERE"' "$APPDIR/AppRun" || fail "AppRun must chdir into the AppDir (webkit ././ paths resolve from there)"
 grep -q 'exec "\$HERE/usr/bin/sirio"' "$APPDIR/AppRun" || fail "AppRun must exec the bundled sirio"
 grep -q 'apprun-hooks' "$APPDIR/AppRun" || fail "AppRun must source the gtk plugin's hook"
+# The launch environment is snapshotted before the launcher's first PATH
+# export, so sirio_env can give every child the user's own PATH.
+snapshot_line=$(grep -n -m1 'export SIRIO_LAUNCH_ENV=' "$APPDIR/AppRun" | cut -d: -f1 || true)
+path_line=$(grep -n -m1 '^export PATH=' "$APPDIR/AppRun" | cut -d: -f1 || true)
+[ -n "$snapshot_line" ] || fail "AppRun must export SIRIO_LAUNCH_ENV (the launch snapshot)"
+if [ -z "$path_line" ] || [ "$snapshot_line" -ge "$path_line" ]; then
+  fail "AppRun must snapshot SIRIO_LAUNCH_ENV before its first export PATH="
+fi
+
+# -- The snapshot's size cap --------------------------------------------------
+# Linux refuses a single environment string of 131072 bytes or more with E2BIG
+# at exec, and the hex snapshot is twice the size of the environment it holds.
+# Run the built launcher from a copy with a stub sirio that reports whether the
+# snapshot arrived: a small environment must be snapshotted, and one over the
+# cap must not be, and the launch must still exec in both cases.
+CAP_RUN="$FIXTURE/cap-run"
+mkdir -p "$CAP_RUN/usr/bin"
+cp "$APPDIR/AppRun" "$CAP_RUN/AppRun"
+cat >"$CAP_RUN/usr/bin/sirio" <<'EOF'
+#!/bin/sh
+if [ -n "${SIRIO_LAUNCH_ENV:-}" ]; then echo set; else echo unset; fi
+exit 0
+EOF
+chmod +x "$CAP_RUN/usr/bin/sirio" "$CAP_RUN/AppRun"
+
+if ! small=$(env -i PATH=/usr/bin:/bin HOME=/h "$CAP_RUN/AppRun"); then
+  fail "a small launch environment must exec the stub sirio"
+fi
+[ "$small" = set ] || fail "a small launch environment must be snapshotted (stub reported: $small)"
+
+big_value=$(head -c 70000 /dev/zero | tr '\0' x)
+if ! big=$(env -i PATH=/usr/bin:/bin BIG="$big_value" "$CAP_RUN/AppRun"); then
+  fail "a launch environment over the snapshot cap must still exec (E2BIG from an oversized SIRIO_LAUNCH_ENV)"
+fi
+[ "$big" = unset ] || fail "a snapshot over the cap must not be exported (stub reported: $big)"
 
 # -- Failure modes ------------------------------------------------------------
 if SIRIO_TOOLS_DIR="$FAKE_TOOLS" SIRIO_WEBKIT_ROOT="$WEBKIT_ROOT" \

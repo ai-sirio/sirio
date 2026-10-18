@@ -192,3 +192,18 @@ jobs:
           name: host-sessions-e2e-linux
           path: host-sessions-e2e
           if-no-files-found: warn
+
+      # The sirioctl E2E (ADE project 1, Task 11): the stable copy and its PATH
+      # link, the pane environment under the AppImage launcher, the skill, the
+      # hooks and sirioctl's flags, on the same private Xvfb as the host sessions.
+      - name: sirioctl E2E
+        if: success() || failure()
+        run: Scripts/Tests/test-sirioctl-e2e.sh --xvfb --out-dir sirioctl-e2e
+
+      - name: Upload sirioctl E2E evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sirioctl-e2e-linux
+          path: sirioctl-e2e
+          if-no-files-found: warn

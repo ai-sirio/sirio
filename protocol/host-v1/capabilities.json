@@ -26,6 +26,12 @@
         "term.list"
       ],
       "topics": ["term.sessions"]
+    },
+    {
+      "name": "term.env_exact",
+      "since_minor": 2,
+      "methods": ["term.create"],
+      "topics": []
     }
   ]
 }

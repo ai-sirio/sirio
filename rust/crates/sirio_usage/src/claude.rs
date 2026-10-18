@@ -1067,7 +1067,7 @@ pub(crate) const PROBE_ENV: &[(&str, &str)] =
 
 #[cfg(unix)]
 fn probe_command(program: &str, args: &[&str], envs: &[(&str, &str)]) -> Command {
-    let mut command = Command::new(program);
+    let mut command = sirio_env::command(program);
     command
         .args(args)
         .current_dir(crate::probe_working_directory())

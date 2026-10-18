@@ -82,6 +82,10 @@
           "default": {},
           "type": "object"
         },
+        "env_exact": {
+          "description": "With `true`, `env` is the session's whole environment and the host's own\nvariables are not added to it. A host without `term.env_exact` ignores\nthis field and extends its own environment with `env`, so a client sends\n`true` only after the capability is in the host's `Welcome`.",
+          "type": "boolean"
+        },
         "origin": {
           "$ref": "#/$defs/Origin"
         },
@@ -1070,6 +1074,6 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "major": 1,
-  "minor": 1,
+  "minor": 2,
   "protocol": "sirio-host"
 }

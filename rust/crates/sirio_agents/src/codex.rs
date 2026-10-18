@@ -11,10 +11,10 @@ use crate::{GlobalHookInstall, write_atomic};
 
 /// Adapter for OpenAI's Codex CLI.
 ///
-/// `prepare` is a no-op because Codex configuration is global — and this
-/// crate never touches it on a launch. Hook behaviour is delivered via the
-/// `-c` CLI override in the command string instead. Only the explicit
-/// Settings → Install Hooks action (`install_global_hooks`) writes the
+/// `prepare` writes only the worktree's Sirio skill: Codex configuration is
+/// global — and this crate never touches it on a launch. Hook behaviour is
+/// delivered via the `-c` CLI override in the command string instead. Only the
+/// explicit Settings → Install Hooks action (`install_global_hooks`) writes the
 /// same `notify` argv into the user's `config.toml`.
 pub struct CodexAdapter;
 
@@ -34,14 +34,22 @@ impl super::AgentAdapter for CodexAdapter {
         true
     }
 
+    fn skill_markdown(&self) -> Option<&'static str> {
+        // F-AGENT-SAFE-01: see `ClaudeCodeAdapter::skill_markdown`.
+        Some(include_str!("../../../../skills/sirio/SKILL.md"))
+    }
+
     fn prepare(
         &self,
-        _worktree_path: &str,
+        worktree_path: &str,
         _pane_id: &str,
         _sirioctl_path: &str,
     ) -> Result<(), PrepareError> {
-        // Codex config is global; prepare must not touch it, so there is
-        // nothing to write.
+        // Codex config is global; prepare must not touch it. The worktree's
+        // skill is the one file written here.
+        if let Some(markdown) = self.skill_markdown() {
+            crate::install_skill(markdown, self.id(), worktree_path)?;
+        }
         Ok(())
     }
 

@@ -15,6 +15,7 @@ perf-native = ["gpui/profiler", "dep:perf_scheduler"]
 [dependencies]
 perf_scheduler = { package = "bezel-zed-scheduler", version = "=0.3.8", optional = true }
 sirio_perf = { path = "../sirio_perf" }
+sirio_env = { path = "../sirio_env" }
 sirio_lsp = { path = "../sirio_lsp" }
 notify.workspace = true
 # Sirio uses bezel's UI components; its Geist faces ship from `rust/assets/fonts`.
@@ -60,6 +61,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # `_NET_WM_ICON`. `png` is the only format the asset set needs.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 
+# The owner check on the directory that leads a child's PATH (`cli_install`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "windows")'.build-dependencies]
 # Compiles `build.rs`'s generated `1 ICON "app-icon.ico"` resource with the
 # MSVC `rc.exe`. The gpui Windows backend loads resource ID 1 once via
@@ -73,11 +78,13 @@ embed-resource = "3"
 # present in the workspace lockfile, so this adds no external dependency.
 # Win32_Graphics_Gdi is required because windows-sys gates WNDCLASSW behind
 # the HBRUSH field in that feature, although the tray does not draw with GDI.
+# Win32_System_Registry is the user's `Path` that `cli_path` adds sirioctl to.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
@@ -109,6 +116,10 @@ objc2-foundation = { version = "0.2.2", features = ["NSString"] }
 # wait here can make WebKit's async load actually progress instead of
 # spinning uselessly until timeout.
 gtk = "0.18.2"
+# gpui starts `xdg-open` for every link it opens; `set_child_environment` gives
+# those children the user's environment (`main.rs`). The same crate gpui_platform
+# builds on, so the one instance serves both; its own features come from there.
+gpui_linux = { package = "bezel-gpui-linux", version = "0.3.8", default-features = false }
 # F-USE-04/F-USE-05/F-WIN-08: the StatusNotifierItem tray (`src/tray.rs`).
 # "blocking" runs the D-Bus service on its own OS thread with a synchronous
 # `spawn()`/`Handle::update()`, so it needs no tokio runtime wired through

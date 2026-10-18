@@ -29,6 +29,10 @@ pub struct EnsureOptions {
     pub client_version: String,
     pub current_exe: PathBuf,
     pub environment: BTreeMap<String, String>,
+    /// The environment a host this call starts runs in. The app passes the
+    /// user environment (`sirio_env::for_child`); a caller that is not the app
+    /// passes the process's own.
+    pub host_environment: BTreeMap<String, String>,
     pub major: u32,
 }
 
@@ -330,6 +334,7 @@ fn start(options: &EnsureOptions, major: u32) -> Result<DetachMethod, EnsureErro
         cwd: options.paths.root.clone(),
         label: format!("sirio-host-v{major}"),
         launchd_dir: options.paths.launchd_dir(),
+        env: Some(options.host_environment.clone()),
     })
     .map_err(EnsureError::Spawn)
 }
@@ -525,6 +530,7 @@ mod tests {
             client_version: "0.0.0".into(),
             current_exe: "/nonexistent-sirio-ensure-test/sirio".into(),
             environment: BTreeMap::new(),
+            host_environment: BTreeMap::new(),
             major: 1,
         };
         match ensure_host(&options) {

@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 ely-gpui-component.workspace = true
 sirio_perf = { path = "../sirio_perf" }
+sirio_env = { path = "../sirio_env" }
 gpui.workspace = true
 gpui_platform.workspace = true
 bezel = { workspace = true }

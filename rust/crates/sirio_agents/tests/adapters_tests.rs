@@ -897,6 +897,28 @@ fn install_skill_overwrites_its_own_previously_installed_file() {
 }
 
 #[test]
+fn install_skill_refuses_a_file_that_only_mentions_the_marker_in_prose() {
+    let worktree = TempDir::new();
+    let destination = worktree.path().join(".claude/skills/sirio/SKILL.md");
+    std::fs::create_dir_all(destination.parent().unwrap()).expect("dir");
+    let notes = concat!(
+        "Sirio writes files that begin with <!-- Machine-managed by Sirio --> , ",
+        "not this.\n"
+    );
+    std::fs::write(&destination, notes).expect("seed the user's file");
+
+    let markdown = format!("{SKILL_MANAGED_MARKER}\n# Sirio\n");
+    let error = install_skill(&markdown, "claude", worktree.path().to_str().unwrap())
+        .expect_err("a file that only mentions the marker mid-line is not Sirio's");
+    assert!(matches!(error, PrepareError::UnmanagedSkillFile(path) if path == destination));
+    assert_eq!(
+        std::fs::read_to_string(&destination).expect("still there"),
+        notes,
+        "the user's note survives a refused install byte for byte"
+    );
+}
+
+#[test]
 fn claude_prepare_installs_the_bundled_skill_with_its_marker() {
     let worktree = TempDir::new();
     ClaudeCodeAdapter
@@ -906,6 +928,21 @@ fn claude_prepare_installs_the_bundled_skill_with_its_marker() {
     let skill = std::fs::read_to_string(worktree.path().join(".claude/skills/sirio/SKILL.md"))
         .expect("prepare installs the skill alongside the hook settings");
     assert!(skill.contains(SKILL_MANAGED_MARKER));
+}
+
+#[test]
+fn codex_and_pi_prepare_write_the_skill() {
+    let bundled = include_str!("../../../../skills/sirio/SKILL.md");
+    for adapter in [&CodexAdapter as &dyn AgentAdapter, &PiAdapter] {
+        let worktree = TempDir::new();
+        adapter
+            .prepare(worktree.path().to_str().unwrap(), PANE_ID, SIRIOCTL)
+            .expect("prepare");
+
+        let skill = std::fs::read_to_string(worktree.path().join(".agents/skills/sirio/SKILL.md"))
+            .expect("prepare writes the skill inside the worktree");
+        assert_eq!(skill, bundled, "{} writes the bundled skill", adapter.id());
+    }
 }
 
 #[test]
@@ -1172,4 +1209,65 @@ fn opencode_global_plugin_honours_the_config_dir_overrides() {
         GlobalHookInstall::Written(explicit.path().join("plugins/sirio-session.js"))
     );
     assert!(home.tree().is_empty());
+}
+
+/// The directory `target`, written relative to the test's working directory,
+/// so a PATH entry spelled that way names the same place as `target` does.
+#[cfg(unix)]
+fn relative_to_working_directory(target: &Path) -> PathBuf {
+    let working = std::env::current_dir().expect("working directory");
+    let working: Vec<_> = working.components().collect();
+    let target_parts: Vec<_> = target.components().collect();
+    let common = working
+        .iter()
+        .zip(&target_parts)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = PathBuf::new();
+    for _ in common..working.len() {
+        relative.push("..");
+    }
+    for part in &target_parts[common..] {
+        relative.push(part);
+    }
+    relative
+}
+
+/// A relative PATH entry names a different directory from every launch's
+/// working directory, so it never finds a program, while the same directory
+/// spelled absolutely does. The entries are passed in, never set on the process.
+#[cfg(unix)]
+#[test]
+fn a_relative_path_entry_never_finds_a_program() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("sirio-agent-relative-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create fixture directory");
+    let program = root.join("x");
+    std::fs::write(&program, b"not launched").expect("write fixture");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("make fixture executable");
+
+    let absolute = std::env::join_paths([&root]).expect("join paths");
+    assert_eq!(
+        find_executable_in_path("x", &absolute),
+        Some(program.clone()),
+        "the control: the directory found by its absolute name"
+    );
+
+    let relative = relative_to_working_directory(&root);
+    assert!(relative.is_relative(), "{relative:?} must be relative for the test to mean anything");
+    let search = std::env::join_paths([PathBuf::from("."), relative]).expect("join paths");
+    assert_eq!(
+        find_executable_in_path("x", &search),
+        None,
+        "a relative PATH entry must never resolve a program, whatever the working directory"
+    );
+    assert!(
+        matches!(find_executable_in_path_checked("x", &search), Ok(None)),
+        "a skipped relative entry is a clean miss, not a probe error"
+    );
+
+    std::fs::remove_dir_all(root).expect("remove fixture directory");
 }

@@ -13,8 +13,6 @@
 //! be parsed → error; a fetch that outlives its budget → `TimedOut`
 //! (visibly stale, never a fabricated number).
 
-#[cfg(target_os = "macos")]
-use std::process::Command;
 use std::time::Duration;
 
 use crate::http::{HttpError, get};
@@ -168,7 +166,7 @@ fn integer_after(text: &str, key: &str) -> Option<u64> {
 /// Reads a keychain generic password via the `security` CLI, read-only.
 #[cfg(target_os = "macos")]
 pub(crate) fn keychain_cookie(service: &str, account: &str) -> Option<String> {
-    let output = Command::new("security")
+    let output = sirio_env::command("security")
         .args(["find-generic-password", "-s", service, "-a", account, "-w"])
         .current_dir(crate::probe_working_directory())
         .output()

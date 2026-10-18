@@ -60,7 +60,7 @@
 //!   blocked by pipe EOF no matter what the processes do.
 
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -163,7 +163,7 @@ pub(crate) fn run_with_timeout(
     cwd: &Path,
     timeout: Duration,
 ) -> Result<GitOutput, GitError> {
-    let mut command = Command::new(GIT_BINARY);
+    let mut command = sirio_env::command(GIT_BINARY);
     command
         .args(args)
         .current_dir(cwd)
@@ -309,6 +309,8 @@ pub(crate) fn run_success(args: &[&str], cwd: &Path) -> Result<String, GitError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::process::Command;
     #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
 

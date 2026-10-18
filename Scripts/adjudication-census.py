@@ -33,8 +33,10 @@ its control printed ok. This script searches in-process (word-boundary regex ove
 crate tree read once), and refuses to print unless:
   - a symbol known present (`AgentAdapter`) is found, and a fabricated one is not;
   - a symbol known production-live (`bind_keys`) shows prod refs > 0;
-  - a symbol known test-only (`agent_skill_install_command`, DEAD-MODULES ground truth)
-    shows prod refs == 0 outside its defining file.
+  - a symbol known test-only (`palette_test_workspace`, a fixture of sirio's test
+    module) shows prod refs == 0 and test refs > 0. A symbol that is absent cannot
+    serve here: absence passes a prod == 0 check without proving the counter sees
+    tests at all.
 A zero from a probe that cannot find known positives is not evidence.
 
 WHAT A COUNT MEANS HERE (same discipline as dead-models.py)
@@ -181,17 +183,19 @@ def main() -> int:
     if live["prod"] == 0:
         print("CONTROL FAILED: `bind_keys` (known production-live) shows prod=0.", file=sys.stderr)
         return 3
-    deadctl = count(files, "agent_skill_install_command")
-    if deadctl["prod"] != 0:
-        print("CONTROL FAILED: `agent_skill_install_command` (known test-only, "
-              "DEAD-MODULES) shows prod>0 — the counter no longer separates prod from test.", file=sys.stderr)
+    fixture = count(files, "palette_test_workspace")
+    if fixture["prod"] != 0 or fixture["test"] == 0:
+        print("CONTROL FAILED: `palette_test_workspace` (known test-only fixture) shows "
+              f"prod={fixture['prod']} test={fixture['test']} — the counter no longer "
+              "separates prod from test.", file=sys.stderr)
         return 3
     never_recount = Counter(j for _, _, _, j in rows)
     if sum(never_recount.values()) != len(rows):
         print("CONTROL FAILED: population recount disagrees with itself.", file=sys.stderr)
         return 3
     print(f"controls ok: backend live (`AgentAdapter` defined in {probe['defs'][0]}); "
-          f"`bind_keys` prod={live['prod']}; `agent_skill_install_command` prod=0 test={deadctl['test']}; "
+          f"`bind_keys` prod={live['prod']}; "
+          f"`palette_test_workspace` prod={fixture['prod']} test={fixture['test']}; "
           f"population {len(rows)} never-judged rows "
           f"({', '.join(f'{k}={v}' for k, v in sorted(never_recount.items()))})\n")
 

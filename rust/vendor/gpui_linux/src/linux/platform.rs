@@ -22,7 +22,7 @@ use gpui_util::{ResultExt as _, new_std_command};
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
-use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
+use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver, with_child_environment};
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
     ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
@@ -538,7 +538,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                     clippy::disallowed_methods,
                     reason = "running on a background thread, so blocking is fine"
                 )]
-                new_std_command("xdg-open")
+                with_child_environment(new_std_command("xdg-open"))
                     .arg(path)
                     .status()
                     .context("invoking xdg-open")
@@ -761,7 +761,10 @@ pub(super) fn open_uri_internal(
         executor
             .spawn(async move {
                 let mut xdg_open_failed = false;
-                for mut command in open::commands(uri.to_string()) {
+                let commands = open::commands(uri.to_string())
+                    .into_iter()
+                    .map(with_child_environment);
+                for mut command in commands {
                     if let Some(token) = activation_token.as_ref() {
                         command.env("XDG_ACTIVATION_TOKEN", token);
                     }
@@ -821,10 +824,22 @@ pub(super) fn reveal_path_internal(
                     Ok(_) => return,
                     Err(e) => log::error!("Failed to open with dbus: {}", e),
                 }
-                if path.is_dir() {
-                    open::that_detached(path).log_err();
+                let target = if path.is_dir() {
+                    path.as_path()
                 } else {
-                    open::that_detached(path.parent().unwrap_or(Path::new(""))).log_err();
+                    path.parent().unwrap_or(Path::new(""))
+                };
+                // `open::that_detached`, with the opener in the child environment:
+                // the first command that starts wins, and nothing waits for it.
+                for command in open::commands(target).into_iter().map(with_child_environment) {
+                    let mut command = command;
+                    command
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
+                    if command.spawn().log_err().is_some() {
+                        break;
+                    }
                 }
             }
         })

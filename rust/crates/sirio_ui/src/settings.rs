@@ -17,7 +17,6 @@ use gpui::{
 };
 use sirio_agents::{AgentAvailability, DiscoveryError, try_discover_availability};
 use sirio_privacy::{PermissionAction, PermissionKind, PermissionStatus};
-use sirio_project::SkillInstallCommand;
 use sirio_theme::{Theme, ThemeMode};
 use sirio_usage::{
     AgentAccountIdentity, CredentialStore, CredentialStoreError, LocalAccountState,
@@ -27,7 +26,7 @@ use sirio_usage::{
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
-use std::{collections::BTreeSet, path::PathBuf, process::Command};
+use std::{collections::BTreeSet, path::PathBuf};
 
 /// How long an account action error stays visible before it self-dismisses.
 const ACCOUNT_ERROR_DISMISS: Duration = Duration::from_secs(4);
@@ -77,6 +76,25 @@ fn base_color_segment(base: sirio_theme::BaseColor) -> usize {
         .iter()
         .position(|candidate| *candidate == base)
         .unwrap_or(0)
+}
+
+/// A host's per-line report under an install button (Install Skill, Install
+/// Hooks): one selectable line per location, in the card's footnote style.
+fn install_report_lines(id: &'static str, report: &str, theme: Theme) -> impl IntoElement {
+    let mut lines = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .px(px(BezelTheme::SPACE_MD))
+        .py(px(BezelTheme::SPACE_XS))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .text_size(theme.typography.footnote)
+        .text_color(theme.ely.fg_muted);
+    for line in report.lines() {
+        lines = lines.child(selectable_text(line.to_string()));
+    }
+    lines
 }
 
 fn settings_section(title: &'static str, card: gpui::Div, theme: Theme) -> impl IntoElement {
@@ -538,7 +556,7 @@ fn discover_provider_account(provider: UsageProvider) -> ProviderAccountStatus {
 }
 
 fn discover_claude_identity() -> Option<String> {
-    let output = Command::new("claude")
+    let output = sirio_env::command("claude")
         .args(["auth", "status"])
         .output()
         .ok()?;
@@ -556,7 +574,7 @@ fn discover_codex_identity() -> Option<String> {
     if !codex_auth_file_path().is_file() {
         return None;
     }
-    let output = Command::new("codex")
+    let output = sirio_env::command("codex")
         .args(["login", "status"])
         .output()
         .ok()?;
@@ -757,6 +775,20 @@ pub enum InstallState {
     Failed(String),
 }
 
+/// Where sirioctl's stable copy is, and whether the login PATH reaches it, as
+/// the sirioctl card says it. The host decides every word; this crate only lays
+/// them out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CliStatus {
+    /// The copy's path, or why there is none.
+    pub stable_path: String,
+    /// The copy's build in words, or empty when there is no copy to compare.
+    /// An empty line is not drawn.
+    pub version_line: String,
+    /// The PATH link's verdict in words.
+    pub path_line: String,
+}
+
 pub struct Settings {
     category: SettingsCategory,
     detail_scroll: ScrollHandle,
@@ -835,23 +867,23 @@ pub struct Settings {
     /// credential files at construction — never a mock default.
     provider_accounts: ProviderAccountStates,
     /// Host callback for the Agent Skill card's Install button (F-SET-09).
-    /// The provisioner (`sirio_project::agent_skill_install_command`) is
-    /// tested and reachable from here; running the resulting command (in a
-    /// terminal or in the background) is the host's call, not this crate's
-    /// — `chat.rs`/`sirio_terminal` own process spawning, and neither is
-    /// mine to touch. Unset, the button renders muted and does not respond
-    /// to clicks, the same dead-control avoidance P76's `on_back` seam
-    /// uses: a click that reaches nothing is exactly the defect this brief
-    /// exists to close, so an unwired button must not look wired.
-    on_install_skill: Option<Rc<dyn Fn(SkillInstallCommand)>>,
+    /// The host writes Sirio's skill at the user level for each agent
+    /// (`sirio_agents::install_user_skills`), off its own executor, and
+    /// answers through [`Settings::set_skill_install_report`]. Unset, the
+    /// button renders muted and does not respond to clicks, the same
+    /// dead-control avoidance P76's `on_back` seam uses: a click that reaches
+    /// nothing is exactly the defect this brief exists to close, so an unwired
+    /// button must not look wired.
+    on_install_skill: Option<Rc<dyn Fn()>>,
     /// Set the instant Install Skill is clicked and reaches a wired
-    /// `on_install_skill` (F-SET-09). The button hands the actual install
-    /// off to the host (a spawned terminal), which this crate cannot watch
-    /// finish — but the click itself must leave a visible trace on this
-    /// screen rather than looking identical to a no-op, so this renders a
-    /// confirmation line under the button naming where the install is
-    /// running. Cleared the next time the button is clicked again.
+    /// `on_install_skill`, and cleared by the host's report. The button stays
+    /// disabled while it is set, so a second click starts no second job; it
+    /// also renders the in-flight line until the report replaces it.
     skill_install_launched: bool,
+    /// The host's per-agent outcome for Install Skill, one line per location,
+    /// rendered under the button in place of the in-flight line. `None` until
+    /// the host answers; cleared by the next click.
+    skill_install_report: Option<String>,
     /// Host callback for the Agent Hooks card's Install button — Install
     /// Skill's sibling for the sirioctl lifecycle hooks. The host owns the
     /// home directory (this crate never touches it): it writes each agent's
@@ -871,6 +903,17 @@ pub struct Settings {
     /// [`Settings::set_host_status`]. `None` until `ensure_host` answers,
     /// which renders as "Starting…".
     host_status: Option<String>,
+    /// sirioctl's copy and PATH link, from the host's startup job and the
+    /// last Install in PATH. `None` until the startup job has reported; the
+    /// card shows no CLI rows until then.
+    cli_status: Option<CliStatus>,
+    /// Host callback for the sirioctl card's Install in PATH button. Unset,
+    /// the button renders muted and inert, like the other host callbacks.
+    on_install_cli: Option<Rc<dyn Fn()>>,
+    /// Set by a click that reaches `on_install_cli`. The button stays
+    /// disabled until the host's next [`Settings::set_cli_status`], which is
+    /// the job's report.
+    cli_install_running: bool,
     /// The resolved launch source per adapter id (Task 9). The Agents
     /// screen's pill, version and Install/Update buttons render from this —
     /// a resolved fact — instead of the compiled claim they replaced.
@@ -1093,10 +1136,14 @@ impl Settings {
             refresh_interval: initial.refresh_interval.clamp(1, 60),
             on_install_skill: None,
             skill_install_launched: false,
+            skill_install_report: None,
             on_install_hooks: None,
             hooks_install_launched: false,
             hooks_install_report: None,
             host_status: None,
+            cli_status: None,
+            on_install_cli: None,
+            cli_install_running: false,
             launch_sources: Vec::new(),
             registry_versions: BTreeMap::new(),
             transport_notes: BTreeMap::new(),
@@ -1415,12 +1462,21 @@ impl Settings {
         self
     }
 
-    /// Installs the host callback that actually runs the Agent Skill
-    /// install command (F-SET-09). Unset, the Install Skill button renders
-    /// muted and inert — see the field doc on [`Settings::on_install_skill`].
-    pub fn on_install_skill(mut self, callback: impl Fn(SkillInstallCommand) + 'static) -> Self {
+    /// Installs the host callback that writes Sirio's skill at the user level
+    /// (F-SET-09). Unset, the Install Skill button renders muted and inert —
+    /// see the field doc on [`Settings::on_install_skill`].
+    pub fn on_install_skill(mut self, callback: impl Fn() + 'static) -> Self {
         self.on_install_skill = Some(Rc::new(callback));
         self
+    }
+
+    /// The host's answer to an Install Skill click: one line per location,
+    /// where the copy went or why it did not. Replaces the in-flight line;
+    /// `None` clears the card back to its idle state.
+    pub fn set_skill_install_report(&mut self, report: Option<String>, cx: &mut Context<Self>) {
+        self.skill_install_report = report;
+        self.skill_install_launched = false;
+        cx.notify();
     }
 
     /// Installs the host callback that writes the user-global sirioctl
@@ -1445,6 +1501,24 @@ impl Settings {
     /// fills it once `ensure_host` answers.
     pub fn set_host_status(&mut self, status: Option<String>, cx: &mut Context<Self>) {
         self.host_status = status;
+        cx.notify();
+    }
+
+    /// Installs the host callback that makes sirioctl's stable copy and puts
+    /// it on the user's PATH (the sirioctl card's Install in PATH button).
+    /// Unset, the button renders muted and inert — see
+    /// [`Settings::on_install_cli`].
+    pub fn on_install_cli(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_install_cli = Some(Rc::new(callback));
+        self
+    }
+
+    /// The host's report on sirioctl's copy and PATH link. `None` clears the
+    /// card back to having no CLI rows. Every push ends an Install in PATH in
+    /// progress, so the button is enabled again.
+    pub fn set_cli_status(&mut self, status: Option<CliStatus>, cx: &mut Context<Self>) {
+        self.cli_status = status;
+        self.cli_install_running = false;
         cx.notify();
     }
 
@@ -1890,16 +1964,19 @@ impl Settings {
     /// state, so a refresh is a fresh read — a user who just ran
     /// `claude login` in a terminal gets the card to match without a
     /// relaunch (F-SET-10).
-    /// Handles the Agent Skill card's Install button (F-SET-09): reaches
-    /// the wired host callback with the provisioner's command, and — click
-    /// or no host wired to actually run it — flips `skill_install_launched`
-    /// so the screen shows a real, notified state change rather than
-    /// nothing happening.
+    /// Handles the Agent Skill card's Install button (F-SET-09): hands the
+    /// install to the host and shows the in-flight line (a previous report is
+    /// cleared so the screen never shows a stale outcome next to a new
+    /// attempt). A click while the install runs is refused, so it starts once.
     fn install_skill_clicked(&mut self, cx: &mut Context<Self>) {
+        if self.skill_install_launched {
+            return;
+        }
         self.skill_install_launched = true;
+        self.skill_install_report = None;
         cx.notify();
         if let Some(handler) = self.on_install_skill.clone() {
-            handler(sirio_project::agent_skill_install_command());
+            handler();
         }
     }
 
@@ -1913,6 +1990,95 @@ impl Settings {
         if let Some(handler) = self.on_install_hooks.clone() {
             handler();
         }
+    }
+
+    /// Handles the sirioctl card's Install in PATH button: hands the job to
+    /// the host and disables the button until the host reports back. A click
+    /// while the job runs is refused, so the job starts once.
+    fn install_cli_clicked(&mut self, cx: &mut Context<Self>) {
+        if self.cli_install_running {
+            return;
+        }
+        self.cli_install_running = true;
+        cx.notify();
+        if let Some(handler) = self.on_install_cli.clone() {
+            handler();
+        }
+    }
+
+    /// The sirioctl card's rows once the host has reported: where the copy is
+    /// and which build it is, then the login PATH's verdict with Install in
+    /// PATH beside it. The read-only words are selectable and sit outside the
+    /// button, which is clickable.
+    fn cli_card_rows(&self, status: &CliStatus, entity: Entity<Self>, theme: Theme) -> gpui::Div {
+        let place_label = div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .flex_1()
+            .text_size(theme.typography.headline)
+            .text_color(theme.ely.fg)
+            .child(selectable_text("sirioctl").id("settings-cli-title"))
+            .child(
+                div()
+                    .debug_selector(|| "settings-cli-path".into())
+                    .mt(px(2.0))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.ely.fg_muted)
+                    .child(selectable_text(status.stable_path.clone()).id("settings-cli-path-text"))
+                    .when(!status.version_line.is_empty(), |caption| {
+                        caption.child(
+                            selectable_text(status.version_line.clone()).id("settings-cli-version"),
+                        )
+                    }),
+            );
+        let install_entity = entity.clone();
+        let install_handler =
+            (self.on_install_cli.is_some() && !self.cli_install_running).then(|| {
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                    install_entity.update(cx, |settings, cx| settings.install_cli_clicked(cx));
+                }
+            });
+        let link_label = div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .flex_1()
+            .text_size(theme.typography.headline)
+            .text_color(theme.ely.fg)
+            .child(selectable_text("PATH").id("settings-cli-link-title"))
+            .child(
+                div()
+                    .debug_selector(|| "settings-cli-link".into())
+                    .mt(px(2.0))
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.ely.fg_muted)
+                    .child(selectable_text(status.path_line.clone()).id("settings-cli-link-text")),
+            );
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(
+                controls::row_view(place_label, div(), theme)
+                    .id("settings-cli-path-row")
+                    .debug_selector(|| "settings-cli-path-row".into()),
+            )
+            .child(controls::separator(theme))
+            .child(
+                controls::row_view(
+                    link_label,
+                    controls::button_maybe(
+                        "general-install-cli",
+                        "Install in PATH",
+                        theme,
+                        install_handler,
+                    ),
+                    theme,
+                )
+                .id("settings-cli-link-row")
+                .debug_selector(|| "settings-cli-link-row".into()),
+            )
     }
 
     fn refresh_provider_accounts(&mut self, cx: &mut Context<Self>) {
@@ -3690,11 +3856,16 @@ impl Settings {
                         .id("settings-host-status-text"),
                     ),
             );
-        // The sirioctl card shows the bundled binary's name. "Copy install
-        // command" is not offered: no install mechanism exists on this
-        // platform (F-CTRL-CLI-02 is its own absent row), so there is no
-        // real command to copy — a button that copied a made-up one would
-        // lie (P58, F-SET-08).
+        // The sirioctl card is the CLI's status: where the copy is and whether
+        // the PATH reaches it are the host's report, shown only once it has
+        // made one. "Copy install command" is not offered: no install mechanism
+        // exists on this platform (F-CTRL-CLI-02 is its own absent row), so
+        // there is no real command to copy — a button that copied a made-up one
+        // would lie (P58, F-SET-08).
+        let cli_rows = self
+            .cli_status
+            .as_ref()
+            .map(|status| self.cli_card_rows(status, entity.clone(), theme));
         let control = controls::card(theme)
             .child(
                 controls::row_view(socket_label, socket, theme)
@@ -3702,16 +3873,9 @@ impl Settings {
                     .debug_selector(|| "settings-control-socket-row".into()),
             )
             .child(controls::separator(theme))
-            .child(controls::row(
-                "Bundled binary",
-                None,
-                div()
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.ely.fg_muted)
-                    .child(selectable_text("sirioctl")),
-                theme,
-            ))
-            .child(controls::separator(theme))
+            .when_some(cli_rows, |card, rows| {
+                card.child(rows).child(controls::separator(theme))
+            })
             .child(controls::row_view(
                 host_label,
                 {
@@ -3735,17 +3899,18 @@ impl Settings {
                 },
                 theme,
             ));
-        // F-SET-09: the provisioner (`agent_skill_install_command`) is
-        // built and tested; this button's job is only to reach it and hand
-        // the resulting command to whoever the host wires as
-        // `on_install_skill` — running it (terminal or background) is the
-        // host's call, not this crate's.
+        // F-SET-09: this button's job is only to hand the click to whoever the
+        // host wires as `on_install_skill`, which writes the user-level copies.
+        // Disabled while that job runs, like Install in PATH.
         let install_skill_entity = entity.clone();
-        let install_skill_handler = self.on_install_skill.clone().map(|_| {
-            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
-                install_skill_entity.update(cx, |settings, cx| settings.install_skill_clicked(cx));
-            }
-        });
+        let install_skill_handler = (self.on_install_skill.is_some()
+            && !self.skill_install_launched)
+            .then(|| {
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                    install_skill_entity
+                        .update(cx, |settings, cx| settings.install_skill_clicked(cx));
+                }
+            });
         let mut skill = controls::card(theme).child(controls::action_row(
             controls::button_maybe(
                 "general-install-skill",
@@ -3755,10 +3920,15 @@ impl Settings {
             ),
             theme,
         ));
-        // F-SET-09: a visible confirmation that the click reached the host
-        // and an install command was actually handed off — not just that
-        // the button is wired, but that this click did something.
-        if self.skill_install_launched {
+        // F-SET-09: a visible trace that the click reached the host, then the
+        // host's per-location outcome in place of it.
+        if let Some(report) = &self.skill_install_report {
+            skill = skill.child(install_report_lines(
+                "general-install-skill-report",
+                report,
+                theme,
+            ));
+        } else if self.skill_install_launched {
             skill = skill.child(
                 div()
                     .id("general-install-skill-status")
@@ -3767,7 +3937,9 @@ impl Settings {
                     .py(px(BezelTheme::SPACE_XS))
                     .text_size(theme.typography.footnote)
                     .text_color(theme.ely.fg_muted)
-                    .child(selectable_text("Installing… running in a new terminal tab.")),
+                    .child(selectable_text(
+                        "Installing… writing Sirio's skill for each agent.",
+                    )),
             );
         }
 
@@ -3805,20 +3977,11 @@ impl Settings {
                     )),
             );
         if let Some(report) = &self.hooks_install_report {
-            let mut lines = div()
-                .id("general-install-hooks-report")
-                .debug_selector(|| "general-install-hooks-report".into())
-                .px(px(BezelTheme::SPACE_MD))
-                .py(px(BezelTheme::SPACE_XS))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .text_size(theme.typography.footnote)
-                .text_color(theme.ely.fg_muted);
-            for line in report.lines() {
-                lines = lines.child(selectable_text(line.to_string()));
-            }
-            hooks = hooks.child(lines);
+            hooks = hooks.child(install_report_lines(
+                "general-install-hooks-report",
+                report,
+                theme,
+            ));
         } else if self.hooks_install_launched {
             hooks = hooks.child(
                 div()
@@ -6187,17 +6350,16 @@ mod tests {
     }
 
     /// F-SET-09: clicking Install Skill reaches the wired host callback
-    /// with the exact command `sirio_project::agent_skill_install_command`
-    /// builds — this crate's job is only to reach that provisioner and hand
-    /// its result off; running it is the host's call.
+    /// once. The host writes Sirio's skill at the user level for each agent;
+    /// this crate's job is only to hand the click off.
     #[gpui::test]
     async fn install_skill_click_reaches_the_wired_host_callback(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
-        let calls = Rc::new(RefCell::new(Vec::<SkillInstallCommand>::new()));
+        let calls = Rc::new(Cell::new(0usize));
         let recorder = calls.clone();
         let window = cx.add_window(|_window, cx| {
             Settings::with_snapshot(cx, SettingsSnapshot::default())
-                .on_install_skill(move |command| recorder.borrow_mut().push(command))
+                .on_install_skill(move || recorder.set(recorder.get() + 1))
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         // The new Updates section sits above Agent Skill; reach the lower
@@ -6217,12 +6379,7 @@ mod tests {
         cx.simulate_click(install.center(), Modifiers::none());
         cx.run_until_parked();
 
-        let recorded = calls.borrow();
-        assert_eq!(
-            recorded.as_slice(),
-            [sirio_project::agent_skill_install_command()],
-            "the click hands the host the exact provisioned command"
-        );
+        assert_eq!(calls.get(), 1, "the click reaches the host once");
 
         // F-SET-09: the click must also leave a visible trace on this
         // screen — a confirmation line, not just a callback nobody watching
@@ -6230,6 +6387,90 @@ mod tests {
         assert!(
             cx.debug_bounds("general-install-skill-status").is_some(),
             "a confirmation line appears once the install is handed off"
+        );
+    }
+
+    /// Install Skill starts one job per click that the host hears, and a click
+    /// while that job runs starts none: the button is disabled then, and the
+    /// handler refuses too, so a click that races the redraw cannot start a
+    /// second job.
+    #[gpui::test]
+    async fn install_skill_click_while_running_starts_one_job(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let starts = Rc::new(Cell::new(0usize));
+        let recorder = starts.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_install_skill(move || recorder.set(recorder.get() + 1))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+
+        settings.update(&mut cx, |settings, cx| settings.install_skill_clicked(cx));
+        settings.update(&mut cx, |settings, cx| settings.install_skill_clicked(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            starts.get(),
+            1,
+            "a second click while the job runs is ignored"
+        );
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_skill_install_report(None, cx);
+            settings.install_skill_clicked(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            starts.get(),
+            2,
+            "once the host has reported, a click starts a job"
+        );
+    }
+
+    /// The host's per-agent outcome replaces Install Skill's in-flight line,
+    /// the way Install Hooks' report does: the user reads where each copy
+    /// went, not a permanent "installing…".
+    #[gpui::test]
+    async fn install_skill_report_replaces_the_in_flight_line(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).on_install_skill(|| {})
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+        let install = cx
+            .debug_bounds("general-install-skill")
+            .expect("Install Skill renders");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_skill_install_report(
+                Some("Claude Code: /home/me/.claude/skills/sirio/SKILL.md".into()),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("general-install-skill-report").is_some(),
+            "the host's report renders under the button"
+        );
+        assert!(
+            cx.debug_bounds("general-install-skill-status").is_none(),
+            "the in-flight line is gone once the host has answered"
         );
     }
 
@@ -6342,6 +6583,95 @@ mod tests {
         assert!(
             cx.debug_bounds("general-install-hooks-status").is_none(),
             "the in-flight line is gone once the host has answered"
+        );
+    }
+
+    /// The sirioctl card, once the host has reported: the copy's place, the
+    /// login PATH's verdict as words, and Install in PATH, which hands the
+    /// job to the host once. The verdict is read back through the clipboard,
+    /// the way every selectable row is proven.
+    #[gpui::test]
+    async fn cli_card_reports_a_link_off_the_login_path(cx: &mut gpui::TestAppContext) {
+        let installs = Rc::new(Cell::new(0usize));
+        let recorder = installs.clone();
+        let (settings, _, cx) = crate::text_selection::testing::host(cx, move |_, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_install_cli(move || recorder.set(recorder.get() + 1))
+        });
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+
+        let path_line = "Linked at /home/me/.local/bin/sirioctl, but your login shell does not \
+                         search /home/me/.local/bin";
+        settings.update(cx, |settings, cx| {
+            settings.set_cli_status(
+                Some(CliStatus {
+                    stable_path: "/home/me/.local/share/Sirio/bin/sirioctl".into(),
+                    version_line: "Same build as Sirio".into(),
+                    path_line: path_line.into(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        let general = cx
+            .debug_bounds("settings-category-General")
+            .expect("General category is offered");
+        cx.simulate_click(general.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            crate::text_selection::testing::copy_span(cx, "settings-cli-link", px(1.0)).as_deref(),
+            Some(path_line),
+            "the link row says where the link is and why the login shell will not find it"
+        );
+
+        let install = cx
+            .debug_bounds("general-install-cli")
+            .expect("Install in PATH renders");
+        cx.simulate_click(install.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(installs.get(), 1, "the click reaches the host once");
+    }
+
+    /// Install in PATH starts one job per click that the host hears, and a
+    /// click while that job runs starts none: the button is disabled then, and
+    /// the handler refuses too, so a click that races the redraw cannot start
+    /// a second job.
+    #[gpui::test]
+    async fn cli_install_click_while_running_starts_one_job(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let starts = Rc::new(Cell::new(0usize));
+        let recorder = starts.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_install_cli(move || recorder.set(recorder.get() + 1))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+
+        settings.update(&mut cx, |settings, cx| settings.install_cli_clicked(cx));
+        settings.update(&mut cx, |settings, cx| settings.install_cli_clicked(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            starts.get(),
+            1,
+            "a second click while the job runs is ignored"
+        );
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_cli_status(None, cx);
+            settings.install_cli_clicked(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            starts.get(),
+            2,
+            "once the host has reported, a click starts a job"
         );
     }
 

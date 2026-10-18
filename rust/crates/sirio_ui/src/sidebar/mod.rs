@@ -1815,7 +1815,7 @@ impl Sidebar {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    std::process::Command::new("git")
+                    sirio_env::command("git")
                         .arg("init")
                         .arg("--quiet")
                         .current_dir(&init_path)

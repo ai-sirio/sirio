@@ -1210,14 +1210,14 @@ pub mod fs_actions {
     pub fn open_command(target: &OsStr) -> Command {
         #[cfg(target_os = "macos")]
         {
-            let mut command = Command::new("open");
+            let mut command = sirio_env::command("open");
             command.args(["--"]).arg(target);
             command
         }
 
         #[cfg(target_os = "linux")]
         {
-            let mut command = Command::new("xdg-open");
+            let mut command = sirio_env::command("xdg-open");
             command.arg(target);
             command
         }
@@ -1234,7 +1234,7 @@ pub mod fs_actions {
             // exactly why `cmd /c start` is avoided: its first-quoted-arg
             // quirks are a quoting minefield for paths with spaces). The
             // spawn returns immediately, like xdg-open/open.
-            let mut command = Command::new("rundll32");
+            let mut command = sirio_env::command("rundll32");
             command.arg("url.dll,FileProtocolHandler").arg(target);
             command
         }
@@ -1277,7 +1277,7 @@ pub mod fs_actions {
 
         #[cfg(target_os = "macos")]
         {
-            let mut command = Command::new("open");
+            let mut command = sirio_env::command("open");
             command.args(["-R", "--"]).arg(absolute);
             Some(command)
         }
@@ -1285,7 +1285,7 @@ pub mod fs_actions {
         #[cfg(target_os = "linux")]
         {
             let directory = absolute.parent()?;
-            let mut command = Command::new("xdg-open");
+            let mut command = sirio_env::command("xdg-open");
             command.arg(directory);
             Some(command)
         }
@@ -1299,7 +1299,7 @@ pub mod fs_actions {
             // shell involved), and Explorer returns immediately. A
             // relative input is absolutized above so the selector names a
             // real location.
-            let mut command = Command::new("explorer");
+            let mut command = sirio_env::command("explorer");
             command.arg(format!("/select,{}", absolute.display()));
             Some(command)
         }
