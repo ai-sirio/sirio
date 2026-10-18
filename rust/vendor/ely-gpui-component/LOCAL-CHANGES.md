@@ -554,3 +554,6 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
   deeper. `indent_step()` is the one place that says what a level is made of.
   The tab size still drives the indent guides and the non-tab path.
   Sirio's status row switches it per file (Indent: Spaces or Tabs).
+  In Tabs mode N drives only the indent guides and the status label: the text
+  system draws a tab character at its own advance, so a file indented with tabs
+  looks the same at Tab Size 2 and 8 (measured in a capture of both).

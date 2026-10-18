@@ -210,7 +210,7 @@ impl Language {
     /// The human-readable name shown in the editor's status line.
     pub fn name(&self) -> &'static str {
         match self {
-            Language::PlainText => "plain text",
+            Language::PlainText => "Plain text",
             Language::Markdown => "Markdown",
             Language::Rust => "Rust",
             Language::Python => "Python",

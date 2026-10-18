@@ -18666,6 +18666,9 @@ impl SirioWorkspace {
                 "status_popover".to_string(),
                 view.status_popover().map_or("none", |item| item.word()).to_string(),
             ),
+            // What the code's highlighter last gave the first line: its language
+            // and how many coloured spans.
+            ("highlight".to_string(), view.highlight_text()),
             ("prefs".to_string(), EditorPrefs::current(cx).describe()),
         ];
         fields.extend(Self::find_fields(view));

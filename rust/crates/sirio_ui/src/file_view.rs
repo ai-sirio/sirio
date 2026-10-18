@@ -35,7 +35,7 @@ use sirio_git::FileDiff;
 use sirio_markdown::{Document, FileSystemEvent, FileSystemEventMonitor, parse};
 use sirio_project::resolve_file_link;
 use sirio_theme::Theme;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -230,6 +230,9 @@ pub struct FileView {
     /// The colours of the code's lines, shared with the code editor's
     /// highlighter. Rotated once per render of this view (see `render`).
     span_cache: Rc<RefCell<code_surface::SpanCache>>,
+    /// The language and span count of the first line as the highlighter last
+    /// answered (`highlight_text`).
+    highlight_drawn: Rc<Cell<Option<(Language, usize)>>>,
     /// Focus target for everything that is not the code: Loading, the
     /// notices and the Markdown Preview. The code editor takes the keyboard
     /// while it draws the file (see `focus_target`).
@@ -299,6 +302,13 @@ pub struct FileView {
     /// Whether the code takes the keyboard when the open popover closes: set by
     /// Escape and by a finished choice, cleared by the close.
     focus_code_on_close: bool,
+    /// Whether the open list takes the keyboard when it is drawn, so its own
+    /// keys (Up, Down, Enter, Escape) reach it without a Tab first.
+    list_focus_pending: bool,
+    /// A popover the verb asked for while another was open: the open one
+    /// closes in the next draw and this one opens after it, so the old one's
+    /// hand-back of the keyboard cannot close the new one.
+    pending_status_open: Option<StatusItem>,
     /// The open find: its fields, its matches and the one that is current.
     /// `None` while find is closed.
     find: Option<find::FindState>,
@@ -518,6 +528,7 @@ impl FileView {
             code_editor: None,
             code_subscriptions: Vec::new(),
             span_cache: Rc::default(),
+            highlight_drawn: Rc::default(),
             editor_focus: cx.focus_handle().tab_stop(true),
             focus_subscription: None,
             scroll: SurfaceScroll::new(Painter::of(cx)),
@@ -540,6 +551,8 @@ impl FileView {
             goto_input: None,
             goto_focus_pending: false,
             focus_code_on_close: false,
+            list_focus_pending: false,
+            pending_status_open: None,
             find: None,
             hover_offset: None,
             hover_point: point(px(0.), px(0.)),
@@ -1570,6 +1583,7 @@ impl Render for FileView {
         self.span_cache.borrow_mut().rotate();
         self.ensure_code_editor(window, cx);
         self.sync_code_prefs(cx);
+        self.settle_status_popover(window, cx);
         self.sync_find_washes(cx);
         self.hand_over_focus(window, cx);
         let context_menu = self.context_menu.map(|position| {

@@ -26,6 +26,7 @@ use std::rc::Rc;
 
 use ely_gpui_component::forms::{Choice, Input, InputEvent, ListBox};
 use ely_gpui_component::overlays::Popover;
+use ely_gpui_component::primitives::FocusNext;
 use gpui::{
     AnyElement, App, Context, Entity, Focusable as _, KeyDownEvent, MouseButton, SharedString,
     Window, div, prelude::*, px,
@@ -96,7 +97,7 @@ pub fn language_id(language: Language) -> &'static str {
     }
 }
 
-/// A language named by its display name (`Rust`, `C++`, `plain text`), its id
+/// A language named by its display name (`Rust`, `C++`, `Plain text`), its id
 /// (`rust`, `cpp`, `plain`) or its fence tag (`bash`), in any case.
 pub fn parse_language(value: &str) -> Option<Language> {
     let value = value.trim().to_ascii_lowercase();
@@ -212,7 +213,7 @@ impl FileView {
             return Err(format!("an indent is from 1 to {MAX_INDENT} wide"));
         }
         self.indent_override = Some((spaces, size));
-        // The code editor follows on the next frame (`sync_code_prefs`).
+        self.sync_code_prefs(cx);
         cx.notify();
         Ok(())
     }
@@ -319,6 +320,10 @@ impl FileView {
     }
 
     /// Opens `item`'s popover, and closes whichever was open: one at a time.
+    /// When another is open, it closes in the next draw and `item` opens after
+    /// that one (`settle_status_popover`): the old panel hands the keyboard back
+    /// as it closes, and a panel opened in the same draw would read that as the
+    /// focus leaving it.
     pub(super) fn open_status_popover(
         &mut self,
         item: StatusItem,
@@ -328,14 +333,63 @@ impl FileView {
         if let Some(why) = self.item_refusal(item) {
             return Err(why.to_owned());
         }
+        if self.status_hidden(item, cx) {
+            return Err(format!(
+                "the row is compact, and does not draw {} (widen the window or hide a panel)",
+                item.word()
+            ));
+        }
+        if self.status_popover.is_some_and(|open| open != item) {
+            self.status_popover = None;
+            self.focus_code_on_close = true;
+            self.pending_status_open = Some(item);
+            cx.notify();
+            return Ok(());
+        }
         if item == StatusItem::Goto {
             let input = self.goto_field(window, cx);
             input.update(cx, |input, cx| input.set_text("", cx));
             self.goto_focus_pending = true;
+        } else {
+            self.list_focus_pending = true;
         }
         self.status_popover = Some(item);
         cx.notify();
         Ok(())
+    }
+
+    /// Whether the row, as it is drawn now, has no `item`: the compact set
+    /// leaves out the indent and the line ending.
+    fn status_hidden(&self, item: StatusItem, cx: &App) -> bool {
+        matches!(item, StatusItem::Indent | StatusItem::LineEnding)
+            && self.status_set(cx) == "compact"
+    }
+
+    /// Keeps `status_popover` in step with what the row draws, once a frame
+    /// before the row is built. A panel whose item is refused (Markdown Preview
+    /// takes the language and go-to-line from it) or not drawn (the compact set)
+    /// is dropped by the row without a close, so the field would keep it, the
+    /// keyboard would stay on a handle that is gone, and the panel would open by
+    /// itself when the item came back. Also opens the panel the verb asked for
+    /// after the one it closed.
+    pub(super) fn settle_status_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(item) = self.status_popover
+            && (self.item_refusal(item).is_some() || self.status_hidden(item, cx))
+        {
+            self.status_popover = None;
+            self.focus_target(cx).focus(window, cx);
+        }
+        // This frame draws the old panel closed; the next one opens the new.
+        if let Some(item) = self.pending_status_open.take() {
+            let view = cx.entity();
+            window.on_next_frame(move |window, cx| {
+                view.update(cx, |view, cx| {
+                    if let Err(why) = view.open_status_popover(item, window, cx) {
+                        eprintln!("[files] status {}: {why}", item.word());
+                    }
+                });
+            });
+        }
     }
 
     /// A press on an item: opens its popover, or closes it when it is open.
@@ -438,6 +492,12 @@ impl FileView {
                 // the keyboard (the file view takes it on a press, and the panel
                 // would read that as focus leaving and close before the click
                 // that closes it, which would then open it again).
+                //
+                // Ely draws the item's own tooltip ("Select the language mode")
+                // for as long as the pointer rests on it, and gives a caller no
+                // way to turn it off; a pointer that stays over a pressed item
+                // therefore leaves it showing under the open panel. Moving the
+                // pointer away dismisses it.
                 div()
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .child(trigger(Some(press)))
@@ -506,6 +566,12 @@ impl FileView {
             StatusItem::Indent => "status-indent-list",
             _ => "status-line-ending-list",
         };
+        if std::mem::take(&mut self.list_focus_pending) {
+            // The panel holds the keyboard on its own handle, above the list:
+            // one Tab step, once the panel is drawn, puts it on the list, where
+            // Up, Down, Enter and Escape reach it.
+            window.on_next_frame(|window, cx| window.dispatch_action(Box::new(FocusNext), cx));
+        }
         let escaping = entity.clone();
         div()
             .debug_selector(move || id.to_owned())

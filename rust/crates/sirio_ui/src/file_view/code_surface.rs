@@ -8,7 +8,7 @@
 //! snapshot retry), or through `edit` for a Markdown op, as one undo step.
 //! The two are kept equal after every such event.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -56,10 +56,11 @@ impl FileView {
         let mut prefs = EditorPrefs::current(cx).view_options();
         prefs.tab_size = size;
         let spans = self.span_cache.clone();
+        let drawn = self.highlight_drawn.clone();
         let code = cx.new(|cx| {
             let mut code = CodeEditor::new(text, window, cx)
                 .language(language.name())
-                .highlighter(code_highlighter(language, spans))
+                .highlighter(code_highlighter(language, spans, drawn))
                 .without_breakpoints();
             if read_only {
                 // The view draws the snapshot's banner itself, above the find
@@ -412,8 +413,25 @@ impl FileView {
         let Some(code) = &self.code_editor else {
             return;
         };
-        let highlighter = code_highlighter(self.effective_language(), self.span_cache.clone());
+        let highlighter = code_highlighter(
+            self.effective_language(),
+            self.span_cache.clone(),
+            self.highlight_drawn.clone(),
+        );
         code.update(cx, |code, cx| code.set_highlighter(highlighter, cx));
+    }
+
+    /// What the code editor's highlighter last gave the first line, for the
+    /// control socket's `state`: `<language id>;spans=<coloured spans>`, empty
+    /// before the first draw. A cache that kept another language's colours
+    /// shows as spans on a language that has none.
+    pub fn highlight_text(&self) -> String {
+        match self.highlight_drawn.get() {
+            Some((language, spans)) => {
+                format!("{};spans={spans}", super::status_actions::language_id(language))
+            }
+            None => String::new(),
+        }
     }
 
     /// The code editor's text changed. The `Editor` takes it unless it already
@@ -611,10 +629,14 @@ impl SpanCache {
 
 /// The code editor's colours for each line: the grammar's spans (from `cache`)
 /// and the Markdown link rules, read from the theme at each call so a theme
-/// switch recolours.
+/// switch recolours. The first line's answer is noted in `drawn` (the language
+/// this highlighter was built with, and how many coloured spans it gave that
+/// line), which is what `FileView::highlight_text` reports to the control
+/// socket.
 fn code_highlighter(
     language: Language,
     cache: Rc<RefCell<SpanCache>>,
+    drawn: Rc<Cell<Option<(Language, usize)>>>,
 ) -> impl Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)> + 'static {
     move |index, line, cx| {
         let mut cache = cache.borrow_mut();
@@ -629,7 +651,11 @@ fn code_highlighter(
         };
         let theme = Theme::get(cx);
         let palette = theme.syntax_palette();
-        line_highlights(spans, &links, theme, &palette)
+        let highlights = line_highlights(spans, &links, theme, &palette);
+        if index == 0 {
+            drawn.set(Some((language, highlights.len())));
+        }
+        highlights
     }
 }
 
