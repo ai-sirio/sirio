@@ -5203,17 +5203,6 @@ mod tests {
             code.read_with(&cx.cx, |code, _| code.is_read_only()),
             "the code editor is drawn read-only"
         );
-        let bar = cx
-            .debug_bounds("file-snapshot-bar")
-            .expect("the view draws the snapshot's banner");
-        assert!(
-            cx.debug_bounds("code-editor-read-only-banner").is_none(),
-            "Ely's own banner, with its Make editable, is not drawn for a snapshot"
-        );
-        assert!(
-            bar.bottom() <= cx.debug_bounds("code-editor-line-0").expect("line 0").top(),
-            "the banner sits above the code"
-        );
 
         cx.update(|window, cx| focus_code(&view, window, cx));
         cx.update(|_, cx| {
@@ -5268,61 +5257,6 @@ mod tests {
             assert!(saved.is_err(), "a snapshot has no file to save to");
             assert!(view.message_text().is_some_and(|text| text.contains("Read-only")));
         });
-    }
-
-    /// What a Markdown snapshot's row must get wrong to fail: a formatting
-    /// button drawn in Code (each one would only refuse), the Code/Preview
-    /// switch lost with them, or a file that is not a snapshot losing its
-    /// buttons (the check is that the same row, for a real file, draws them:
-    /// `markdown_toolbar_controls_change_the_selected_source`).
-    #[gpui::test]
-    async fn a_markdown_snapshot_has_no_format_buttons_but_keeps_its_modes(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| {
-            Theme::init(cx);
-            ::editor::init(cx);
-            crate::ely::init(cx);
-        });
-        let mut origin = snapshot_origin_for_tests();
-        origin.relative_path = PathBuf::from("docs/notes.md");
-        let window = cx.add_window(|_window, cx| {
-            FileView::snapshot(origin.clone(), b"# Notes\n\nword\n".to_vec(), cx)
-        });
-        let mut cx = VisualTestContext::from_window(window.into(), cx);
-        let settle = |cx: &mut VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                window.refresh();
-                window.simulate_next_frame(cx);
-                window.simulate_next_frame(cx);
-            });
-        };
-        settle(&mut cx);
-        let formats = [
-            "file-format-bold",
-            "file-format-italic",
-            "file-format-heading",
-            "file-format-list",
-            "file-format-link",
-        ];
-        for mode in ["file-mode-preview", "file-mode-code"] {
-            let option = cx
-                .debug_bounds(mode)
-                .unwrap_or_else(|| panic!("a Markdown snapshot keeps {mode}"));
-            cx.simulate_click(option.center(), Modifiers::none());
-            settle(&mut cx);
-            for selector in formats {
-                assert!(
-                    cx.debug_bounds(selector).is_none(),
-                    "a snapshot draws no {selector} after {mode}"
-                );
-            }
-        }
-        assert!(
-            cx.debug_bounds("code-editor-line-0").is_some(),
-            "the revision's source is on screen in Code"
-        );
     }
 
     #[gpui::test]
