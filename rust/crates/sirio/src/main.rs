@@ -8171,14 +8171,14 @@ impl SirioWorkspace {
 
     /// The language server the status row names for `path`, and where it
     /// stands. The name is the program the entry runs (`rust-analyzer`), without
-    /// its directory. `None` for a file with no entry, or whose server is not
+    /// its directory or an `.exe`. `None` for a file with no entry, or whose server is not
     /// there to run: nothing is volunteered about a missing one.
     fn language_server_status(&self, path: &Path) -> Option<(String, sirio_ui::file_view::LspState)> {
         let entry = self.lsp.known_entry_for(path)?;
         let root = self.worktree_root_for(path)?;
         let state = self.lsp.state_of(&self.lsp.key_for(path, &root, &entry))?;
         let name = Path::new(&entry.command)
-            .file_name()
+            .file_stem()
             .map_or_else(|| entry.command.clone(), |name| name.to_string_lossy().into_owned());
         Some((name, state))
     }
@@ -14492,7 +14492,10 @@ impl SirioWorkspace {
             return;
         };
         let key = self.lsp.key_for(path, &worktree_root, &entry);
-        if self.lsp.is_running(&key) || self.lsp.is_dead(&key) {
+        // A launch already under way serves this file too: it is synced when
+        // that launch answers (below), and a second spawn would leave two
+        // servers under one key.
+        if self.lsp.is_running(&key) || self.lsp.is_dead(&key) || self.lsp.is_starting(&key) {
             self.push_language_server_status(path, view, cx);
             self.sync_document_with_server(path, view, cx);
             return;
@@ -14577,6 +14580,13 @@ impl SirioWorkspace {
                     let facts = workspace.file_context_facts(&path_for_facts);
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
                     workspace.sync_document_with_server(&path_for_facts, &view, cx);
+                    // Files of this key opened while the launch ran were not
+                    // spawned for; the server is theirs now.
+                    for (path, other) in Self::open_file_views(&workspace.tabs, cx) {
+                        if !other.read(cx).is_snapshot() {
+                            workspace.sync_document_with_server(&path, &other, cx);
+                        }
+                    }
                     workspace.push_language_server_status_to_open_files(cx);
                 }
                 Err(sirio_lsp::LspError::NotInstalled { command }) => {

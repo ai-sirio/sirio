@@ -213,6 +213,11 @@ impl LspSupervisor {
         self.starting.insert(key);
     }
 
+    /// Whether a launch for `key` is under way.
+    pub fn is_starting(&self, key: &(PathBuf, String)) -> bool {
+        self.starting.contains(key)
+    }
+
     /// The launch for `key` answered, with a server or without one.
     pub fn finish_starting(&mut self, key: &(PathBuf, String)) {
         self.starting.remove(key);
