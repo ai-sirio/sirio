@@ -746,14 +746,15 @@ pub enum InstallState {
 }
 
 /// Where sirioctl's stable copy is, and whether the login PATH reaches it, as
-/// the sirioctl card says it. The host decides the words from its own outcomes;
-/// this crate only lays them out.
+/// the sirioctl card says it. The host decides every word; this crate only lays
+/// them out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CliStatus {
     /// The copy's path, or why there is none.
     pub stable_path: String,
-    /// Whether the copy is the build this Sirio carries.
-    pub version_matches: bool,
+    /// The copy's build in words, or empty when there is no copy to compare.
+    /// An empty line is not drawn.
+    pub version_line: String,
     /// The PATH link's verdict in words.
     pub path_line: String,
 }
@@ -1914,8 +1915,12 @@ impl Settings {
     }
 
     /// Handles the sirioctl card's Install in PATH button: hands the job to
-    /// the host and disables the button until the host reports back.
+    /// the host and disables the button until the host reports back. A click
+    /// while the job runs is refused, so the job starts once.
     fn install_cli_clicked(&mut self, cx: &mut Context<Self>) {
+        if self.cli_install_running {
+            return;
+        }
         self.cli_install_running = true;
         cx.notify();
         if let Some(handler) = self.on_install_cli.clone() {
@@ -1928,11 +1933,6 @@ impl Settings {
     /// PATH beside it. The read-only words are selectable and sit outside the
     /// button, which is clickable.
     fn cli_card_rows(&self, status: &CliStatus, entity: Entity<Self>, theme: Theme) -> gpui::Div {
-        let version = if status.version_matches {
-            "Same build as Sirio"
-        } else {
-            "Older than this Sirio — it could not be replaced"
-        };
         let place_label = div()
             .flex()
             .flex_col()
@@ -1948,7 +1948,11 @@ impl Settings {
                     .text_size(theme.typography.footnote)
                     .text_color(theme.ely.fg_muted)
                     .child(selectable_text(status.stable_path.clone()).id("settings-cli-path-text"))
-                    .child(selectable_text(version).id("settings-cli-version")),
+                    .when(!status.version_line.is_empty(), |caption| {
+                        caption.child(
+                            selectable_text(status.version_line.clone()).id("settings-cli-version"),
+                        )
+                    }),
             );
         let install_entity = entity.clone();
         let install_handler =
@@ -3774,12 +3778,12 @@ impl Settings {
                         .id("settings-host-status-text"),
                     ),
             );
-        // The sirioctl card shows the bundled binary's name. "Copy install
-        // command" is not offered: no install mechanism exists on this
-        // platform (F-CTRL-CLI-02 is its own absent row), so there is no
-        // real command to copy — a button that copied a made-up one would
-        // lie (P58, F-SET-08). Where the copy is and whether the PATH reaches
-        // it are the host's report, and show only once it has made one.
+        // The sirioctl card is the CLI's status: where the copy is and whether
+        // the PATH reaches it are the host's report, shown only once it has
+        // made one. "Copy install command" is not offered: no install mechanism
+        // exists on this platform (F-CTRL-CLI-02 is its own absent row), so
+        // there is no real command to copy — a button that copied a made-up one
+        // would lie (P58, F-SET-08).
         let cli_rows = self
             .cli_status
             .as_ref()
@@ -3790,16 +3794,6 @@ impl Settings {
                     .id("settings-control-socket-row")
                     .debug_selector(|| "settings-control-socket-row".into()),
             )
-            .child(controls::separator(theme))
-            .child(controls::row(
-                "Bundled binary",
-                None,
-                div()
-                    .text_size(theme.typography.footnote)
-                    .text_color(theme.ely.fg_muted)
-                    .child(selectable_text("sirioctl")),
-                theme,
-            ))
             .child(controls::separator(theme))
             .when_some(cli_rows, |card, rows| {
                 card.child(rows).child(controls::separator(theme))
@@ -6429,7 +6423,7 @@ mod tests {
             settings.set_cli_status(
                 Some(CliStatus {
                     stable_path: "/home/me/.local/share/Sirio/bin/sirioctl".into(),
-                    version_matches: true,
+                    version_line: "Same build as Sirio".into(),
                     path_line: path_line.into(),
                 }),
                 cx,
@@ -6455,6 +6449,46 @@ mod tests {
         cx.simulate_click(install.center(), Modifiers::none());
         cx.run_until_parked();
         assert_eq!(installs.get(), 1, "the click reaches the host once");
+    }
+
+    /// Install in PATH starts one job per click that the host hears, and a
+    /// click while that job runs starts none: the button is disabled then, and
+    /// the handler refuses too, so a click that races the redraw cannot start
+    /// a second job.
+    #[gpui::test]
+    async fn cli_install_click_while_running_starts_one_job(cx: &mut gpui::TestAppContext) {
+        cx.update(Theme::init);
+        let starts = Rc::new(Cell::new(0usize));
+        let recorder = starts.clone();
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default())
+                .on_install_cli(move || recorder.set(recorder.get() + 1))
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1100.0), px(3200.0)));
+        cx.run_until_parked();
+        let settings =
+            cx.update(|window, _| window.root::<Settings>().flatten().expect("settings root"));
+
+        settings.update(&mut cx, |settings, cx| settings.install_cli_clicked(cx));
+        settings.update(&mut cx, |settings, cx| settings.install_cli_clicked(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            starts.get(),
+            1,
+            "a second click while the job runs is ignored"
+        );
+
+        settings.update(&mut cx, |settings, cx| {
+            settings.set_cli_status(None, cx);
+            settings.install_cli_clicked(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            starts.get(),
+            2,
+            "once the host has reported, a click starts a job"
+        );
     }
 
     /// F-SET-14: clicking a provider card's Add Account button hands the

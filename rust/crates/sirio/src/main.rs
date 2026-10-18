@@ -17229,18 +17229,26 @@ impl SirioWorkspace {
         .detach();
     }
 
-    /// Settings → Install in PATH: the copy and the link are made on the
-    /// background executor (the link may wait for the administrator's
-    /// password), then the card is told what they came to.
+    /// Settings → Install in PATH: the copy and the link are made on a thread of
+    /// their own, because the macOS administrator prompt blocks and must not hold
+    /// a background-executor worker. The card is told what they came to after.
     fn begin_cli_install(&mut self, cx: &mut Context<Self>) {
         let environment: BTreeMap<String, String> = std::env::vars().collect();
         let current_exe = std::env::current_exe().unwrap_or_default();
+        let (sender, finished) = futures::channel::oneshot::channel();
+        let spawned = std::thread::Builder::new()
+            .name("sirio-cli-install".into())
+            .spawn(move || {
+                cli_install::install_from_settings(&current_exe, &environment);
+                let _ = sender.send(());
+            });
+        if let Err(error) = spawned {
+            eprintln!("[sirio] sirioctl install not started: {error}");
+        }
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .spawn(async move {
-                    cli_install::install_from_settings(&current_exe, &environment);
-                })
-                .await;
+            // A thread that never started drops the sender, and the card still
+            // reads what is stored, which also ends the button's disabled state.
+            let _ = finished.await;
             let _ = this.update(cx, |workspace, cx| {
                 workspace.settings.update(cx, |settings, cx| {
                     settings.set_cli_status(cli_install::card_status(), cx);
@@ -25377,20 +25385,7 @@ fn route_connect(route: Arc<HostRoute>) -> HostConnect {
     })
 }
 
-/// Finds, starts or adopts the session host on a thread of its own —
-/// `ensure_host` blocks, up to ~15 s on a host that will not answer, and a
-/// background-executor worker held that long starves every other task queued
-/// behind it — and hands its diagnostic line to Settings. When there is no
-/// host the app runs exactly as it did without one: the row says why, and
-/// nothing else changes.
-///
-/// Terminals wait in `Connecting` while the host is found (`PendingFactory`
-/// installed below before the ensure thread spawns); once the ensure ends,
-/// the factory flips to the route's `HostSessions`, which wakes every
-/// `Connecting` view (Task 9). A later open re-ensures through the route when
-/// its client has closed (finding 6).
-/// Gives the sirioctl card its first state. The startup job reports once it has
-/// stored its copy and link, and until then the card shows no CLI rows.
+/// Gives the sirioctl card its first state once the startup job has stored its outcomes.
 fn show_cli_status_when_started(
     settings: Entity<Settings>,
     started: futures::channel::oneshot::Receiver<()>,
@@ -25408,6 +25403,18 @@ fn show_cli_status_when_started(
     .detach();
 }
 
+/// Finds, starts or adopts the session host on a thread of its own —
+/// `ensure_host` blocks, up to ~15 s on a host that will not answer, and a
+/// background-executor worker held that long starves every other task queued
+/// behind it — and hands its diagnostic line to Settings. When there is no
+/// host the app runs exactly as it did without one: the row says why, and
+/// nothing else changes.
+///
+/// Terminals wait in `Connecting` while the host is found (`PendingFactory`
+/// installed below before the ensure thread spawns); once the ensure ends,
+/// the factory flips to the route's `HostSessions`, which wakes every
+/// `Connecting` view (Task 9). A later open re-ensures through the route when
+/// its client has closed (finding 6).
 fn ensure_host_in_background(
     settings: Entity<Settings>,
     workspace_slot: Arc<Mutex<Option<Entity<SirioWorkspace>>>>,
@@ -25489,9 +25496,10 @@ fn ensure_host_in_background(
             let control = handle.term();
             (client, reconnect, sessions, control)
         });
-        // A host without `term.env_exact` extends its own environment, so the
-        // terminals it opened before a restart keep the launcher's. A host with
-        // no terminals has none of those to name.
+        // The suffix follows the host's terminal capability, not the sessions it
+        // holds: a host with terminals but no `term.env_exact` extends its own
+        // environment, so the terminals it opened before a restart keep the
+        // launcher's. A host with no terminal capability has none to name.
         let line = match &term_data {
             Some((client, ..)) if !client.env_exact() => format!(
                 "{line} — terminals opened before it restarts keep Sirio's launcher environment"

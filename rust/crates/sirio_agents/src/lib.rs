@@ -65,9 +65,8 @@ impl AgentAvailability {
     /// when no such command is known here (F-SET-18). Deliberately absent
     /// rather than guessed for an adapter this table has no entry for —
     /// the same "never fabricate a command" rule `agent_skill_install_command`
-    /// and the sirioctl card's "Bundled binary" row already follow: a
-    /// button that ran a made-up install line would be worse than no
-    /// button at all.
+    /// and the sirioctl card already follow: a button that ran a made-up
+    /// install line would be worse than no button at all.
     pub fn install_command(&self) -> Option<&'static str> {
         match self.id {
             "claude" => Some("npm install -g @anthropic-ai/claude-code"),

@@ -378,21 +378,7 @@ pub(crate) fn ensure_at_startup(
     let spawned = std::thread::Builder::new()
         .name("sirio-cli-copy".into())
         .spawn(move || {
-            let outcome = ensure_stable_copy(&current_exe, &environment, stable_is_debug());
-            if let Err(error) = &outcome {
-                eprintln!("[sirio] sirioctl: {error}");
-            }
-            let link = link_copy(&outcome, &environment, false);
-            // `NeedsAdmin` is the usual state of a macOS user with no writable
-            // directory on the login PATH: not a failure, so not logged each launch.
-            if matches!(
-                link,
-                LinkOutcome::Failed(_)
-                    | LinkOutcome::Foreign { .. }
-                    | LinkOutcome::NotOnLoginPath(_)
-            ) {
-                eprintln!("[sirio] sirioctl on PATH: {link:?}");
-            }
+            let (outcome, link) = copy_and_link(&current_exe, &environment, false);
             store_outcomes(outcome, link);
             // The receiver is gone only if the app is, and then nothing is left to tell.
             let _ = sender.send(());
@@ -403,9 +389,33 @@ pub(crate) fn ensure_at_startup(
     started
 }
 
-/// The link to the copy just made, from the startup job or Install in PATH. A
-/// debug build keeps its own copy and leaves the user's PATH alone. `admin` lets
-/// macOS ask for the administrator's password, which only Install in PATH allows.
+/// Makes the stable copy, then the PATH link to it, and returns both. The copy's
+/// failure and the link's unusual outcomes are logged here, once, for both jobs.
+/// `admin` lets macOS ask for the administrator's password, which only Install in
+/// PATH allows.
+fn copy_and_link(
+    current_exe: &Path,
+    environment: &BTreeMap<String, String>,
+    admin: bool,
+) -> (CopyResult, LinkOutcome) {
+    let copy = ensure_stable_copy(current_exe, environment, stable_is_debug());
+    if let Err(error) = &copy {
+        eprintln!("[sirio] sirioctl: {error}");
+    }
+    let link = link_copy(&copy, environment, admin);
+    // `NeedsAdmin` is the usual state of a macOS user with no writable
+    // directory on the login PATH: not a failure, so not logged each launch.
+    if matches!(
+        link,
+        LinkOutcome::Failed(_) | LinkOutcome::Foreign { .. } | LinkOutcome::NotOnLoginPath(_)
+    ) {
+        eprintln!("[sirio] sirioctl on PATH: {link:?}");
+    }
+    (copy, link)
+}
+
+/// The link to the copy just made. A debug build keeps its own copy and leaves
+/// the user's PATH alone.
 fn link_copy(
     copy: &CopyResult,
     environment: &BTreeMap<String, String>,
@@ -442,15 +452,10 @@ fn link_copy(
 }
 
 /// Settings → Install in PATH: makes the stable copy if it is missing, then the
-/// PATH link, and keeps both outcomes for `card_status`. On macOS the link may
-/// wait for the administrator's password, so the caller runs this off the UI
-/// thread.
+/// PATH link with the administrator's prompt where macOS wants it, and keeps both
+/// outcomes for `card_status`. Blocks, so the caller runs it on its own thread.
 pub(crate) fn install_from_settings(current_exe: &Path, environment: &BTreeMap<String, String>) {
-    let copy = ensure_stable_copy(current_exe, environment, stable_is_debug());
-    if let Err(error) = &copy {
-        eprintln!("[sirio] sirioctl: {error}");
-    }
-    let link = link_copy(&copy, environment, true);
+    let (copy, link) = copy_and_link(current_exe, environment, true);
     store_outcomes(copy, link);
 }
 
@@ -463,21 +468,27 @@ pub(crate) fn card_status() -> Option<CliStatus> {
 }
 
 fn status_for(copy: &CopyResult, link: &LinkOutcome) -> CliStatus {
-    let (stable_path, version_matches) = match copy {
-        Ok((path, outcome)) => (
-            path.display().to_string(),
-            matches!(
-                outcome,
-                CopyOutcome::Installed | CopyOutcome::Replaced | CopyOutcome::Current
-            ),
-        ),
-        Err(error) => (format!("Not installed: {error}"), false),
+    let (stable_path, version_line) = match copy {
+        Ok((path, outcome)) => (path.display().to_string(), version_words(*outcome)),
+        Err(error) => (format!("Not installed: {error}"), String::new()),
     };
     CliStatus {
         stable_path,
-        version_matches,
+        version_line,
         path_line: path_line(link),
     }
+}
+
+/// The copy's build in words. A copy kept beside no bundled binary was never
+/// compared, so it does not claim a build.
+fn version_words(outcome: CopyOutcome) -> String {
+    String::from(match outcome {
+        CopyOutcome::Installed | CopyOutcome::Replaced | CopyOutcome::Current => {
+            "Same build as Sirio"
+        }
+        CopyOutcome::Stale => "Older than this Sirio — it could not be replaced",
+        CopyOutcome::SourceMissing => "Not checked: Sirio has no sirioctl beside it",
+    })
 }
 
 /// The card's line for the PATH link. Not every case is reachable on every
@@ -499,7 +510,7 @@ fn path_line(link: &LinkOutcome) -> String {
             place,
             points_to: Some(target),
         } => format!(
-            "{} is not Sirio's ({})— left as it is",
+            "{} is not Sirio's ({}) — left as it is",
             place.display(),
             target.display()
         ),
@@ -1253,5 +1264,48 @@ mod tests {
             b"first build"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The card's words follow each outcome exactly. A copy that is kept but
+    /// was never compared says so, and a copy that failed has no version line
+    /// at all. The foreign file's line puts a space before the dash.
+    #[test]
+    fn cli_status_words_follow_each_outcome() {
+        let copy = |outcome| Ok((PathBuf::from("/data/Sirio/bin/sirioctl"), outcome));
+        let linked = LinkOutcome::AlreadyLinked(PathBuf::from("/home/me/.local/bin/sirioctl"));
+        for outcome in [
+            CopyOutcome::Current,
+            CopyOutcome::Installed,
+            CopyOutcome::Replaced,
+        ] {
+            assert_eq!(
+                status_for(&copy(outcome), &linked).version_line,
+                "Same build as Sirio",
+                "{outcome:?}"
+            );
+        }
+        assert_eq!(
+            status_for(&copy(CopyOutcome::Stale), &linked).version_line,
+            "Older than this Sirio — it could not be replaced"
+        );
+        assert_eq!(
+            status_for(&copy(CopyOutcome::SourceMissing), &linked).version_line,
+            "Not checked: Sirio has no sirioctl beside it"
+        );
+        let failed: CopyResult = Err("no room in the data directory".into());
+        assert_eq!(status_for(&failed, &linked).version_line, "");
+
+        let foreign = |points_to| LinkOutcome::Foreign {
+            place: PathBuf::from("/usr/local/bin/sirioctl"),
+            points_to,
+        };
+        assert_eq!(
+            path_line(&foreign(Some(PathBuf::from("/opt/other/sirioctl")))),
+            "/usr/local/bin/sirioctl is not Sirio's (/opt/other/sirioctl) — left as it is"
+        );
+        assert_eq!(
+            path_line(&foreign(None)),
+            "/usr/local/bin/sirioctl is not Sirio's — left as it is"
+        );
     }
 }
