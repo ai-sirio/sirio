@@ -299,20 +299,16 @@ impl Render for CodeEditor {
         let (top, focus, input) = (cx.entity(), self.focus.clone(), cx.entity());
         let unlock = cx.entity();
         let banner = self.draws_read_only_banner().then(|| {
-            div()
-                .debug_selector(|| "code-editor-read-only-banner".to_owned())
-                .child(
-                    ReadOnlyBanner::new(
-                        ("read-only", cx.entity_id().as_u64()),
-                        "This file is read-only.",
-                    )
-                    .action("Make editable", move |_, cx| {
-                        unlock.update(cx, |editor, cx| {
-                            editor.set_read_only(false, cx);
-                            cx.emit(EditorEvent::Unlock);
-                        })
-                    }),
-                )
+            ReadOnlyBanner::new(
+                ("read-only", cx.entity_id().as_u64()),
+                "This file is read-only.",
+            )
+            .action("Make editable", move |_, cx| {
+                unlock.update(cx, |editor, cx| {
+                    editor.set_read_only(false, cx);
+                    cx.emit(EditorEvent::Unlock);
+                })
+            })
         });
         let body = div()
             .relative()

@@ -378,7 +378,7 @@ pub enum FileViewEvent {
     /// A snapshot's read failed and the Retry of its failure surface was
     /// clicked: read the revision again.
     RetrySnapshot,
-    /// The snapshot bar's "Open local copy": open the worktree's own,
+    /// The snapshot banner's "Open local file": open the worktree's own,
     /// editable file.
     OpenLocalCopy(PathBuf),
 }
@@ -1430,6 +1430,7 @@ impl FileView {
                     let conflict = editor.conflict();
                     let mode = self.effective_mode();
                     let is_markdown = self.is_markdown();
+                    let formatting_shown = self.formatting_controls_shown();
                     let editor_entity = entity.clone();
                     let editor_focus = self.editor_focus.clone();
                     // The press bubbles up from the code editor after it has
@@ -1464,7 +1465,7 @@ impl FileView {
                         .when(is_markdown, |this| {
                             this.child(render_markdown_bar(
                                 mode,
-                                !self.is_snapshot(),
+                                formatting_shown,
                                 theme,
                                 entity.clone(),
                             ))
@@ -1913,11 +1914,13 @@ fn formatting_controls_drawn(mode: MarkdownMode, editable: bool) -> bool {
 ///
 /// The formatting controls themselves stay Code-only: Preview is a reading
 /// surface, and there is nothing rendered there to format. A snapshot has none
-/// either, in either mode: it refuses every edit, so a button would only lie. The link URL is a
-/// deterministic placeholder until the view has a text prompt seam of its own.
+/// either, in either mode: it refuses every edit, so a button would only lie.
+/// `formatting_shown` is `FileView::formatting_controls_shown`, the same answer
+/// `surface.editor.state` reports. The link URL is a deterministic placeholder
+/// until the view has a text prompt seam of its own.
 fn render_markdown_bar(
     mode: MarkdownMode,
-    editable: bool,
+    formatting_shown: bool,
     theme: Theme,
     file_view: gpui::Entity<FileView>,
 ) -> impl IntoElement {
@@ -1934,7 +1937,7 @@ fn render_markdown_bar(
         .border_b_1()
         .border_color(theme.ely.border)
         .bg(theme.ely.surface)
-        .when(formatting_controls_drawn(mode, editable), move |this| {
+        .when(formatting_shown, move |this| {
             this.child(render_format_button(
                 "B",
                 "file-format-bold",
@@ -5179,11 +5182,11 @@ mod tests {
         }
     }
 
-    /// The snapshot is drawn read-only, so the keyboard can type and paste into
-    /// it and nothing changes. It carries the view's own banner and Ely's is not
-    /// drawn, so no "Make editable" is on screen; an `Unlock` the code editor
-    /// announces anyway (the one word it has for it) is taken back before a key
-    /// arrives.
+    /// A snapshot's revision is drawn read-only: its text is on screen, and
+    /// typing, a paste, the view's own edits (a replacement, a Markdown format,
+    /// a save) leave it as it was and clean. An `Unlock` the code editor
+    /// announces (the one word it has for "Make editable") is taken back before
+    /// the next key arrives, so a key after it changes nothing either.
     #[gpui::test]
     async fn a_snapshot_shows_the_revisions_text_and_refuses_every_edit(
         cx: &mut gpui::TestAppContext,

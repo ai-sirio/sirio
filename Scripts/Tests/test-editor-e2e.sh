@@ -48,7 +48,10 @@ set -eEuo pipefail
 #                     the text byte-identical with a clipboard and a selection to prove it,
 #                     Copy and find still work; captured with find open (the banner above
 #                     the find bar) and as Markdown in Code, whose formatting buttons are
-#                     not drawn (format_buttons=hidden)
+#                     not drawn (format_buttons=hidden); a file the revision has and the
+#                     worktree does not opens with no local file to offer (banner_action
+#                     empty, ely_banner=false); the tabs the scenario opened are closed at
+#                     its end, the Secondary pane with them (secondaryVisible as it was)
 #   git_marks         a file's changes against HEAD mark its gutter: the disk's when the
 #                     file opens, an adopted change, a save; a mark opens its hunk in
 #                     place, Escape closes it; a file restored to HEAD, a commit made
@@ -907,6 +910,24 @@ expect_active_tab() { # title
   done
   fail "$SCENARIO: the active tab is '$got', expected '$1'"
 }
+# How many tabs the window holds. The list `surface tabs read` gives is the one
+# `surface tabs close` takes positions from, and a new tab is appended to it.
+tab_count() {
+  "$CTL" surface tabs read --json | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["count"])'
+}
+# The positions of the window's snapshot tabs: a tab is "kind|snapshot|title".
+snapshot_tab_positions() {
+  "$CTL" surface tabs read --json | python3 -c '
+import json, sys
+report = json.load(sys.stdin)[0]
+for key, value in report.items():
+    if key.startswith("tab.") and value.split("|")[1] == "yes":
+        print(key[len("tab."):])'
+}
+# One key of `surface layout read`, such as secondaryVisible.
+layout_field() { # key
+  "$CTL" surface layout read --json | python3 -c 'import json, sys; print(json.load(sys.stdin)[0][sys.argv[1]])' "$1"
+}
 # Sets one key of the fake language server's answers. It reads them again for
 # each message, so the next message sees the new value; the file is replaced
 # whole, so the server never reads half of it.
@@ -1265,9 +1286,13 @@ scenario_snapshot() {
   # view's own, and refuses every edit: typing, a paste, the menu's Cut and
   # Paste and replace-all each leave the text byte-identical, with something on
   # the clipboard to paste and a selection to cut, so a refusal is the cause.
-  local sha label snap_text refused out
+  # A revision's file the worktree no longer has offers no local file, and the
+  # tabs the scenario opened are closed at its end.
+  local sha label snap_text refused out tabs_before secondary_before gone_sha
   sha="$(git -C "$WT" rev-parse HEAD)"
   label="Read-only · #7 at ${sha:0:7}"
+  tabs_before="$(tab_count)"
+  secondary_before="$(layout_field secondaryVisible)"
 
   # Something on the clipboard: copied out of findme.txt, shown by a paste into
   # the empty scratch file, then undone.
@@ -1377,6 +1402,46 @@ scenario_snapshot() {
     fail "$SCENARIO: a path that climbs was accepted: $out"
   fi
   echo "OK: a short sha and a climbing path are refused"
+
+  # A file the revision has and the worktree does not: committed, then removed
+  # from the worktree and the index by a second commit, so the worktree is clean
+  # again. The bar has no local file to offer, so banner_action is empty, and
+  # Ely's banner is still not drawn. sfield reads a missing key as empty too, so
+  # the banner, reported with banner_action, is checked first.
+  printf 'the revision keeps this file\n' >"$WT/gone.txt"
+  git -C "$WT" add gone.txt
+  git -C "$WT" commit -q -m "throwaway file for the snapshot scenario"
+  gone_sha="$(git -C "$WT" rev-parse HEAD)"
+  git -C "$WT" rm -q gone.txt
+  git -C "$WT" commit -q -m "remove the throwaway file again"
+  git -C "$WT" show "$gone_sha:gone.txt" >"$RUN_DIR/snap-gone.txt"
+  ctl surface editor open-snapshot --sha="$gone_sha" --path=gone.txt >/dev/null
+  settle
+  expect_state state loaded
+  expect_state snapshot true
+  expect_state banner "Read-only · #7 at ${gone_sha:0:7}"
+  expect_state banner_action ""
+  expect_state ely_banner false
+  expect_state text "$(escaped "$RUN_DIR/snap-gone.txt")"
+  expect_state dirty false
+  echo "OK: a revision's file the worktree lacks opens with no local file to offer"
+
+  # Closes what the scenario opened, newest first: the snapshots, and the two
+  # files it copied the clipboard through. The Secondary pane is drawn only while
+  # it holds a tab, so it goes with them when this scenario opened it.
+  local count
+  count="$(tab_count)"
+  while [ "$count" -gt "$tabs_before" ]; do
+    ctl surface tabs close "$count" >/dev/null
+    count=$((count - 1))
+  done
+  [ -z "$(snapshot_tab_positions)" ] \
+    || fail "$SCENARIO: a snapshot tab is still open at $(snapshot_tab_positions | tr '\n' ' ')"
+  [ "$(tab_count)" = "$tabs_before" ] \
+    || fail "$SCENARIO: the window has $(tab_count) tabs, expected $tabs_before"
+  [ "$(layout_field secondaryVisible)" = "$secondary_before" ] \
+    || fail "$SCENARIO: secondaryVisible is $(layout_field secondaryVisible), expected $secondary_before"
+  echo "OK: the scenario's tabs are closed: $tabs_before tabs, secondaryVisible=$secondary_before"
 }
 
 scenario_git_marks() {

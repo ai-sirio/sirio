@@ -537,7 +537,5 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
   `read_only_banner` both set. The render and `surface.editor.state`
   (`ely_banner=`) both ask it.
 - `src/editor/view.rs`: the banner is drawn when `draws_read_only_banner()` is
-  true, inside a `div` with the debug selector `code-editor-read-only-banner`,
-  which is how a test tells that Ely's banner is or is not on screen. The text,
-  the button and the `Unlock` event are unchanged. A sync must keep that call
-  in the render, and the wrapper.
+  true. The text, the button and the `Unlock` event are unchanged. A sync must
+  keep that call in the render.
