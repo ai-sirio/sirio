@@ -1495,6 +1495,14 @@ struct RetainedChat {
     agent_id: Option<String>,
 }
 
+/// The Settings install whose outcome a report answers: Install Skill or
+/// Install Hooks, each with its own card.
+#[derive(Clone, Copy)]
+enum SettingsInstall {
+    Skill,
+    Hooks,
+}
+
 enum WorkspaceAction {
     NewTab(NewTabAction),
     /// F-SID-14: the sidebar worktree context menu's New Terminal/agent-panel/
@@ -17132,15 +17140,10 @@ impl SirioWorkspace {
     /// background executor (a few small files, no prompt) and hands each
     /// location's outcome back to the Settings card. Nothing opens a terminal.
     fn begin_skill_install(&mut self, cx: &mut Context<Self>) {
-        let report = |workspace: &mut Self, text: String, cx: &mut Context<Self>| {
-            workspace.settings.update(cx, |settings, cx| {
-                settings.set_skill_install_report(Some(text), cx);
-            });
-        };
         let process: BTreeMap<String, String> = std::env::vars().collect();
         let Some((home, environment)) = cli_install::skill_home_and_environment(&process) else {
-            report(
-                self,
+            self.report_settings_install(
+                SettingsInstall::Skill,
                 "home directory not found: no HOME or USERPROFILE in the environment".into(),
                 cx,
             );
@@ -17157,9 +17160,25 @@ impl SirioWorkspace {
                         .join("\n")
                 })
                 .await;
-            let _ = this.update(cx, |workspace, cx| report(workspace, summary, cx));
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.report_settings_install(SettingsInstall::Skill, summary, cx);
+            });
         })
         .detach();
+    }
+
+    /// Hands an install's outcome to the Settings card that started it. Install
+    /// Skill and Install Hooks both answer through this, each through its own card.
+    fn report_settings_install(
+        &mut self,
+        install: SettingsInstall,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.update(cx, |settings, cx| match install {
+            SettingsInstall::Skill => settings.set_skill_install_report(Some(text), cx),
+            SettingsInstall::Hooks => settings.set_hooks_install_report(Some(text), cx),
+        });
     }
 
     /// Settings → Install Hooks: writes every agent's user-global sirioctl
@@ -17167,11 +17186,6 @@ impl SirioWorkspace {
     /// back to the Settings card. The only place Sirio ever writes under
     /// the home directory — `prepare()` on a launch never does.
     fn begin_global_hooks_install(&mut self, cx: &mut Context<Self>) {
-        let report = |workspace: &mut Self, text: String, cx: &mut Context<Self>| {
-            workspace.settings.update(cx, |settings, cx| {
-                settings.set_hooks_install_report(Some(text), cx);
-            });
-        };
         // User-global hooks always name the release copy, from any build. A
         // release build makes that copy first, on the background executor.
         let environment: BTreeMap<String, String> = std::env::vars().collect();
@@ -17181,13 +17195,13 @@ impl SirioWorkspace {
             } else {
                 "sirioctl not found: no absolute data directory (XDG_DATA_HOME or HOME)"
             };
-            report(self, missing.into(), cx);
+            self.report_settings_install(SettingsInstall::Hooks, missing.into(), cx);
             return;
         };
         let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();
         let Some(home) = user_home_dir() else {
-            report(
-                self,
+            self.report_settings_install(
+                SettingsInstall::Hooks,
                 "home directory not found: no HOME or USERPROFILE in the environment".into(),
                 cx,
             );
@@ -17220,7 +17234,9 @@ impl SirioWorkspace {
                     .join("\n"),
                 Err(error) => format!("sirioctl not found: {error}"),
             };
-            let _ = this.update(cx, |workspace, cx| report(workspace, summary, cx));
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.report_settings_install(SettingsInstall::Hooks, summary, cx);
+            });
         })
         .detach();
     }
@@ -22906,12 +22922,28 @@ fn replay_pane_events<T>(
     tree
 }
 
-/// `prepare` writes the worktree's copy of Sirio's skill for Codex, Pi and the
-/// agents that share their folder. That file is Sirio's, not the user's, so it
-/// stays out of git the way the hand-off's context folder does. Only untracked
-/// files are affected, and a failure is logged rather than stopping the pane.
-fn keep_agent_skill_out_of_git(worktree: &Path) {
-    if let Err(error) = sirio_git::exclude(worktree, ".agents/skills/sirio/") {
+/// The adapters whose `prepare` writes `.agents/skills/sirio/` through
+/// `install_skill`, which they share. Claude writes its own folder instead.
+const SHARED_SKILL_ADAPTERS: [&str; 4] = ["codex", "pi", "opencode", "omp"];
+
+/// Keeps the worktree's copy of Sirio's skill out of git, the way the hand-off's
+/// context folder is, for the adapters in `SHARED_SKILL_ADAPTERS`. That file is
+/// Sirio's, not the user's. Only untracked files are affected. The exclude runs
+/// `git`, so it is made on a thread of its own rather than on the UI thread that
+/// starts or restores the pane; its outcome is only logged.
+fn keep_agent_skill_out_of_git(adapter_id: &str, worktree: &Path) {
+    if !SHARED_SKILL_ADAPTERS.contains(&adapter_id) {
+        return;
+    }
+    let worktree = worktree.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("sirio-skill-exclude".into())
+        .spawn(move || {
+            if let Err(error) = sirio_git::exclude(&worktree, ".agents/skills/sirio/") {
+                eprintln!("[sirio] agent skill not kept out of git: {error}");
+            }
+        });
+    if let Err(error) = spawned {
         eprintln!("[sirio] agent skill not kept out of git: {error}");
     }
 }
@@ -22938,7 +22970,7 @@ fn fresh_agent_shell(
     {
         warning = Some(format!("hooks not written: {error}"));
     }
-    keep_agent_skill_out_of_git(Path::new(worktree));
+    keep_agent_skill_out_of_git(adapter.id(), Path::new(worktree));
     let command = adapter.command_with_prompt(worktree, pane_key, &sirioctl, prompt);
     let (program, args) = command_shell_invocation(&command);
     (TerminalShell::WithArguments { program, args }, warning)
@@ -23073,7 +23105,7 @@ fn restored_agent_shell(
             adapter.display_name()
         );
     }
-    keep_agent_skill_out_of_git(Path::new(&worktree_path));
+    keep_agent_skill_out_of_git(adapter.id(), Path::new(&worktree_path));
     let command = resumable
         .get(pane_key)
         .and_then(|session_ref| {

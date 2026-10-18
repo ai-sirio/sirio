@@ -897,6 +897,28 @@ fn install_skill_overwrites_its_own_previously_installed_file() {
 }
 
 #[test]
+fn install_skill_refuses_a_file_that_only_mentions_the_marker_in_prose() {
+    let worktree = TempDir::new();
+    let destination = worktree.path().join(".claude/skills/sirio/SKILL.md");
+    std::fs::create_dir_all(destination.parent().unwrap()).expect("dir");
+    let notes = concat!(
+        "Sirio writes files that begin with <!-- Machine-managed by Sirio --> , ",
+        "not this.\n"
+    );
+    std::fs::write(&destination, notes).expect("seed the user's file");
+
+    let markdown = format!("{SKILL_MANAGED_MARKER}\n# Sirio\n");
+    let error = install_skill(&markdown, "claude", worktree.path().to_str().unwrap())
+        .expect_err("a file that only mentions the marker mid-line is not Sirio's");
+    assert!(matches!(error, PrepareError::UnmanagedSkillFile(path) if path == destination));
+    assert_eq!(
+        std::fs::read_to_string(&destination).expect("still there"),
+        notes,
+        "the user's note survives a refused install byte for byte"
+    );
+}
+
+#[test]
 fn claude_prepare_installs_the_bundled_skill_with_its_marker() {
     let worktree = TempDir::new();
     ClaudeCodeAdapter

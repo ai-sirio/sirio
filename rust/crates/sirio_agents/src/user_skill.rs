@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::{SKILL_MANAGED_PREFIX, write_atomic};
+use crate::{is_managed_skill, write_atomic};
 
 /// The skill this binary ships: what every user-level location receives.
 const BUNDLED_SKILL: &str = include_str!("../../../../skills/sirio/SKILL.md");
@@ -96,7 +96,7 @@ pub fn refresh_user_skills(
 /// Sirio did not write.
 fn install_one(path: &Path) -> Result<PathBuf, String> {
     match existing_copy(path)? {
-        Some(text) if !is_managed(&text) => Err(not_ours(path)),
+        Some(text) if !is_managed_skill(&text) => Err(not_ours(path)),
         _ => write_bundled(path),
     }
 }
@@ -107,26 +107,35 @@ fn refresh_one(path: &Path) -> Option<Result<PathBuf, String>> {
     match existing_copy(path) {
         Err(error) => Some(Err(error)),
         Ok(None) => None,
-        Ok(Some(text)) if !is_managed(&text) => Some(Err(not_ours(path))),
+        Ok(Some(text)) if !is_managed_skill(&text) => Some(Err(not_ours(path))),
         // Already current: leave the file, and its modification time, alone.
         Ok(Some(text)) if text == BUNDLED_SKILL => Some(Ok(path.to_path_buf())),
         Ok(Some(_)) => Some(write_bundled(path)),
     }
 }
 
-/// The text at `path`, or `None` when nothing is there.
+/// The text at `path`, or `None` when nothing is there. The file itself is
+/// inspected without following a link: a link, or anything that is not a
+/// regular file, is refused before it is read or written. A folder on the way
+/// may still be a link.
 fn existing_copy(path: &Path) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("could not read {}: {error}", path.display())),
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("could not read {}: {error}", path.display())),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(format!("{} is a link, so it is left as it is", path.display()));
     }
-}
-
-/// A file carrying the shared managed-file prefix is one Sirio wrote, even
-/// under an older build's marker wording (see `install_skill`).
-fn is_managed(text: &str) -> bool {
-    text.contains(SKILL_MANAGED_PREFIX)
+    if !metadata.is_file() {
+        return Err(format!(
+            "{} is not a regular file, so it is left as it is",
+            path.display()
+        ));
+    }
+    std::fs::read_to_string(path)
+        .map(Some)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))
 }
 
 fn not_ours(path: &Path) -> String {
@@ -151,6 +160,7 @@ fn write_bundled(path: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SKILL_MANAGED_MARKER;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A throwaway directory under TMPDIR, removed on drop. Canonicalized, so
@@ -271,7 +281,89 @@ mod tests {
         assert!(reports.is_empty(), "nothing to refresh, so nothing to report: {reports:?}");
         for (_, path) in user_skill_paths(home.path(), &env) {
             assert!(!path.exists(), "refresh created {}", path.display());
+            let folder = path.parent().expect("a skill file has a folder");
+            assert!(!folder.exists(), "refresh created the folder {}", folder.display());
         }
+    }
+
+    /// Sirio's marker prefix in the middle of a sentence is a user's note about
+    /// Sirio, not a copy Sirio wrote: the check is anchored to the start of a line.
+    #[test]
+    fn a_user_file_that_mentions_the_marker_in_prose_is_left_alone() {
+        let home = TempDir::new();
+        let path = home.path().join(".agents/skills/sirio/SKILL.md");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+        let notes = concat!(
+            "My notes: files that begin with <!-- Machine-managed by Sirio --> ",
+            "are generated.\n"
+        );
+        std::fs::write(&path, notes).expect("seed the user's file");
+        let env = environment(&[]);
+
+        let installed = install_user_skills(home.path(), &env);
+        let refreshed = refresh_user_skills(home.path(), &env);
+
+        for reports in [&installed, &refreshed] {
+            assert!(
+                report(reports, "Codex, Pi, Oh-My-Pi").outcome.is_err(),
+                "prose that mentions the marker is not Sirio's copy: {reports:?}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("still there"),
+            notes,
+            "the user's note survives both the button and the startup refresh byte for byte"
+        );
+    }
+
+    /// A link at the skill file is never followed for a write: the target stays
+    /// as it was and the link stays a link. A folder on the way may be a link
+    /// (a dotfiles `~/.claude`), and the copy lands where that link points.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_user_skill_file_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new();
+        let home = root.path().join("home");
+        // A copy Sirio wrote, so only the link itself can be the reason for a refusal.
+        let target = root.path().join("outside.md");
+        let copy = format!("{SKILL_MANAGED_MARKER}\nan older copy\n");
+        std::fs::write(&target, &copy).expect("seed the file the link points at");
+        let link = home.join(".agents/skills/sirio/SKILL.md");
+        std::fs::create_dir_all(link.parent().unwrap()).expect("dir");
+        symlink(&target, &link).expect("link the skill file");
+        let env = environment(&[]);
+
+        let installed = install_user_skills(&home, &env);
+        let refreshed = refresh_user_skills(&home, &env);
+
+        for reports in [&installed, &refreshed] {
+            assert!(
+                report(reports, "Codex, Pi, Oh-My-Pi").outcome.is_err(),
+                "a linked skill file is refused: {reports:?}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("still there"),
+            copy,
+            "the link's target is never written through"
+        );
+        let link_metadata = std::fs::symlink_metadata(&link).expect("the link is still there");
+        assert!(link_metadata.file_type().is_symlink(), "the link is left in place");
+
+        let dotfiles_home = root.path().join("dotfiles-home");
+        let dotfiles = root.path().join("dotfiles/claude");
+        std::fs::create_dir_all(&dotfiles_home).expect("home");
+        std::fs::create_dir_all(&dotfiles).expect("the dotfiles folder exists");
+        symlink(&dotfiles, dotfiles_home.join(".claude")).expect("link the config folder");
+        let reports = install_user_skills(&dotfiles_home, &env);
+        assert_eq!(
+            report(&reports, "Claude Code").outcome,
+            Ok(dotfiles_home.join(".claude/skills/sirio/SKILL.md")),
+            "a linked folder on the way is followed"
+        );
+        assert!(dotfiles.join("skills/sirio/SKILL.md").is_file());
     }
 
     #[test]

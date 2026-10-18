@@ -68,9 +68,9 @@ impl AgentAvailability {
     /// The documented command that installs this provider's CLI, or `None`
     /// when no such command is known here (F-SET-18). Deliberately absent
     /// rather than guessed for an adapter this table has no entry for —
-    /// the same "never fabricate a command" rule `agent_skill_install_command`
-    /// and the sirioctl card already follow: a button that ran a made-up
-    /// install line would be worse than no button at all.
+    /// the same "never fabricate a command" rule the sirioctl card already
+    /// follows: a button that ran a made-up install line would be worse than
+    /// no button at all.
     pub fn install_command(&self) -> Option<&'static str> {
         match self.id {
             "claude" => Some("npm install -g @anthropic-ai/claude-code"),
@@ -340,7 +340,7 @@ pub fn install_skill(
         other => return Err(PrepareError::UnsupportedSkillAgent(other.to_string())),
     };
     if let Some(existing) = read_in_worktree(Path::new(worktree_path), Path::new(relative))?
-        && !existing.contains(SKILL_MANAGED_PREFIX)
+        && !is_managed_skill(&existing)
     {
         return Err(PrepareError::UnmanagedSkillFile(Path::new(worktree_path).join(relative)));
     }
@@ -358,6 +358,13 @@ pub const SKILL_MANAGED_MARKER: &str =
 /// current [`SKILL_MANAGED_MARKER`] string, lets the wording evolve across
 /// releases without locking out worktrees a previous build provisioned.
 const SKILL_MANAGED_PREFIX: &str = "<!-- Machine-managed by Sirio";
+
+/// Whether `text` is a skill file Sirio wrote: one of its lines starts with the
+/// managed-file prefix. Anchored to the start of a line, so a note that mentions
+/// the marker mid-sentence is not taken for a copy Sirio made.
+pub(crate) fn is_managed_skill(text: &str) -> bool {
+    text.lines().any(|line| line.starts_with(SKILL_MANAGED_PREFIX))
+}
 
 /// Why an availability sweep could not produce an answer (F-SET-17).
 ///

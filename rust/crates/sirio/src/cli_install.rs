@@ -380,9 +380,13 @@ pub(crate) fn ensure_at_startup(
         .spawn(move || {
             let (outcome, link) = copy_and_link(&current_exe, &environment, false);
             store_outcomes(outcome, link);
-            refresh_user_skills_at_startup(&environment);
             // The receiver is gone only if the app is, and then nothing is left to tell.
             let _ = sender.send(());
+            // After the signal, so a slow refresh never holds up the CLI card. A
+            // debug build never touches the user's skills at startup (R22).
+            if !stable_is_debug() {
+                refresh_user_skills_at_startup(&environment);
+            }
         });
     if let Err(error) = spawned {
         eprintln!("[sirio] sirioctl copy not started: {error}");
