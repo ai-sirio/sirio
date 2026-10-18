@@ -17501,7 +17501,17 @@ impl SirioWorkspace {
         if !self.show_settings {
             return Err("Settings surface is not open".to_string());
         }
-        settings_report_pairs(&self.settings.read(cx).report())
+        let mut pairs = settings_report_pairs(&self.settings.read(cx).report())?;
+        // The sirioctl card, as the startup job stored it: the same words the
+        // card draws. Absent until that job has finished.
+        if let Some(status) = cli_install::card_status() {
+            pairs.extend([
+                ("cliPath".to_string(), status.stable_path),
+                ("cliVersion".to_string(), status.version_line),
+                ("cliLink".to_string(), status.path_line),
+            ]);
+        }
+        Ok(pairs)
     }
 
     fn control_show_change_requests(&mut self, cx: &mut Context<Self>) -> Result<Vec<(String, String)>, String> {

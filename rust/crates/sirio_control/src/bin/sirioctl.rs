@@ -936,6 +936,12 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ("settings", "read") => {
             require_ok(socket, &sirio_control::protocol::request::settings_read())
         }
+        ("settings", "act") => {
+            let action = parsed
+                .value("action")
+                .ok_or_else(|| "Missing --action install-hooks|install-skill|install-cli".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::settings_act(action))
+        }
         ("change-requests", "show") => {
             require_ok(socket, &sirio_control::protocol::request::change_requests_show())
         }
@@ -1128,6 +1134,10 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             "rightPanelView",
             "openListChatExpanded",
             "openListAgents",
+            "cliPath",
+            "cliVersion",
+            "cliLink",
+            "report",
         ],
         parsed.flag("json"),
     );

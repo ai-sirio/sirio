@@ -553,6 +553,15 @@ pub mod request {
         request("surface.settings.read", BTreeMap::new())
     }
 
+    /// Debug-only `surface.settings.act {action}`: runs the install a Settings
+    /// button runs, and replies with the card's words under `report`.
+    pub fn settings_act(action: &str) -> ControlRequest {
+        request(
+            "surface.settings.act",
+            BTreeMap::from([("action".to_string(), action.to_string())]),
+        )
+    }
+
     pub fn change_requests_show() -> ControlRequest {
         request("surface.change_requests.show", BTreeMap::new())
     }

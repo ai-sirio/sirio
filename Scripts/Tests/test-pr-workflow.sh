@@ -63,6 +63,12 @@ grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-term-e2e\.sh --out-dir
 grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-host-sessions-e2e\.sh --xvfb --out-dir host-sessions-e2e[[:space:]]*$" "$PR_CODE" \
   || fail "pr.yml must run the host sessions E2E under Xvfb"
 
+# The sirioctl E2E (ADE project 1, Task 11) proves the stable copy, the pane
+# environment, the skill and the hooks on the same Xvfb, so it runs after the
+# host sessions E2E in the same job. Anchored to the `run:` line, as above.
+grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-sirioctl-e2e\.sh --xvfb --out-dir sirioctl-e2e[[:space:]]*$" "$PR_CODE" \
+  || fail "pr.yml must run the sirioctl E2E under Xvfb"
+
 # Scripts/ci.sh runs check-cycle-version.sh, which compares the workspace
 # version against the last released tag. A shallow clone carries no tags, so
 # the check would pass by knowing nothing -- the exact failure it exists to

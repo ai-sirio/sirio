@@ -119,3 +119,17 @@ jobs:
           name: host-sessions-e2e-macos
           path: host-sessions-e2e
           if-no-files-found: warn
+
+      # The sirioctl E2E, state-only: no window capture exists for macOS, and the
+      # link checks are Linux's (the script prints SKIP for them here).
+      - name: sirioctl E2E
+        if: success() || failure()
+        run: Scripts/Tests/test-sirioctl-e2e.sh --state-only --out-dir sirioctl-e2e
+
+      - name: Upload sirioctl E2E evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sirioctl-e2e-macos
+          path: sirioctl-e2e
+          if-no-files-found: warn
