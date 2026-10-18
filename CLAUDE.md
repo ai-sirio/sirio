@@ -182,15 +182,16 @@ sirio_env        (below everything, beside sirio_perf — no dependencies. It is
                     launch snapshot minus the launcher's own variables (APPIMAGE,
                     APPDIR, ARGV0, OWD, SIRIO_LAUNCH_ENV), the stable `sirioctl`
                     directory first on `PATH`, the per-pane names stripped
-                    (`SIRIO_WORKTREE_ID`), and `for_child()` for a site that
-                    cannot spawn through `command`. Its dependents are sirio_acp,
-                    sirio_control, sirio_forge, sirio_git, sirio_lsp,
-                    sirio_project, sirio_registry, sirio_terminal, sirio_ui,
-                    sirio_usage and sirio. With the host's `term.env_exact`
-                    (`sirio_host_protocol::term`) a session's environment is
-                    exactly the client's map; a host without it gets that map
-                    plus an empty value for each app variable the user
-                    environment lacks, except `SHELL` (`sirio_env::host_create_env`).
+                    (`SIRIO_WORKTREE_ID`, `SIRIO_PANE_ID`, `TILLER_PANE_ID`), and
+                    `for_child()` for a site that cannot spawn through `command`.
+                    Its dependents are sirio_acp, sirio_control, sirio_diagram,
+                    sirio_forge, sirio_git, sirio_lsp, sirio_project,
+                    sirio_registry, sirio_terminal, sirio_ui, sirio_usage and sirio.
+                    With the host's `term.env_exact` (`sirio_host_protocol::term`)
+                    a session's environment is exactly the client's map; a host
+                    without it gets that map plus an empty value for each app
+                    variable the user environment lacks, except `SHELL`
+                    (`sirio_env::host_create_env`).
                     The panel resolver (`worktree_environment_resolver` in
                     `sirio/src/main.rs`) sets `SIRIO_WORKTREE_ID` from the deepest
                     worktree holding the pane's starting directory)

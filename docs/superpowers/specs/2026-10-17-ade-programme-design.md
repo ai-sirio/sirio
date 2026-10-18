@@ -316,8 +316,9 @@ saves, before it changes anything, the whole environment as one hex snapshot in
 `SIRIO_LAUNCH_ENV`, taken only when it fits in 131000 characters. The app takes
 the user environment from that snapshot, less the launcher's own variables
 (`APPIMAGE`, `APPDIR`, `ARGV0`, `OWD`, `SIRIO_LAUNCH_ENV`). The snapshot is
-`env -0 | od -An -tx1 -v`, which needs only POSIX tools, so the crate that
-reads it has no dependency (decided during implementation). The app does not
+`env -0 | od -An -tx1 -v`, which needs only `env -0` and `od`, which every Linux
+the AppImage runs on has, so the crate that reads it has no dependency
+(decided during implementation). The app does not
 guess by matching `/tmp/.mount_*` paths. Without a wrapper (macOS, Windows, a
 checkout), or with a snapshot that does not decode, the app's environment is
 the user environment.
@@ -379,6 +380,19 @@ implementation).
 otherwise the user's home. The launcher's own directory is never used
 (decided during implementation).
 
+**The default workspace never starts in the AppImage mount (R33).** When `APPDIR`
+is set and the app's working directory is inside it, the default workspace starts at
+`OWD`, the directory the AppImage was launched from, when that is an absolute existing
+directory outside the mount; otherwise it starts at the user's home. The nearest
+repository above that starting point is then used, as before (decided during
+implementation).
+
+**Links open in the user environment (R35).** gpui starts `xdg-open` for every link it
+opens, and those children run in the user environment too: the vendored `gpui_linux`
+clears each one's environment and applies the map `sirio` gives it at startup
+(`set_child_environment`, recorded in `rust/vendor/README.md`), so a browser a link opens
+never inherits the mount's variables (decided during implementation).
+
 **A chat agent's PATH keeps only absolute entries (R32).** The agent's `PATH`
 keeps its absolute entries, in order. On unix a `PATH` left with none becomes
 `/usr/bin:/bin`, because an empty `PATH` is the current directory to `execvp`.
@@ -405,6 +419,10 @@ The card that shows "Bundled binary: sirioctl" becomes the CLI's status:
   (foreign file, directory not on PATH, permission);
 - an **Install in PATH** button (§5.2), which says what it did;
 - the hooks' state per adapter (§5.6), with today's *Install Hooks*.
+
+**Follow-up (R36):** the per-adapter hook state on this card is deferred. This project
+shows the copy and the link; the hooks stay with *Install Hooks* until a later project
+puts their state here.
 
 ### §5.6 The hooks, proven
 
