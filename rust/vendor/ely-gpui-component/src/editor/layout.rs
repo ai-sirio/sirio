@@ -153,21 +153,31 @@ impl Rows {
 pub(crate) struct MinimapPlan {
     /// Height one row takes, in pixels.
     pub tall: f32,
-    /// Rows from one drawn row to the next: one while a row is a pixel tall or more, else enough that each drawn row stands for a pixel.
-    pub stride: usize,
+}
+
+impl MinimapPlan {
+    /// The rows the minimap draws among `rows`, each as its top in pixels and its row. While a row is a pixel tall or more every row is drawn, at `tall` times its number. Below that, one row a pixel: the pixel `y` shows the row at `floor(y / tall)`, so one more line in the file moves no pixel's row by more than one, where stepping through the rows a fixed stride apart took all new rows each time the stride changed.
+    pub(crate) fn samples(&self, rows: usize) -> Vec<(f32, usize)> {
+        if self.tall >= 1.0 {
+            return (0..rows)
+                .map(|row| (self.tall * row as f32, row))
+                .collect();
+        }
+        if self.tall <= 0.0 {
+            return Vec::new();
+        }
+        (0..)
+            .map(|pixel| (pixel as f32, (pixel as f32 / self.tall).floor() as usize))
+            .take_while(|(_, row)| *row < rows)
+            .collect()
+    }
 }
 
 pub(crate) fn minimap_plan(rows: usize, line: f32, height: f32) -> MinimapPlan {
     let rows = rows.max(1);
-    let tall = (line * 0.15).min(height / rows as f32);
-    let stride = if tall >= 1.0 {
-        1
-    } else if tall > 0.0 {
-        ((1.0 / tall).ceil() as usize).clamp(1, rows)
-    } else {
-        rows
-    };
-    MinimapPlan { tall, stride }
+    MinimapPlan {
+        tall: (line * 0.15).min(height / rows as f32),
+    }
 }
 
 /// Styles laid over one another in order, later ones on top, as runs that do not overlap.
@@ -318,16 +328,13 @@ mod tests {
         );
     }
 
-    // Task 12b fix 1: two shortcuts that must not change what is drawn. The
-    // ways they can fail, written before the code:
+    // Task 12b fix 1: a shortcut that must not change what is drawn. The ways
+    // it can fail, written before the code:
     //   1. `rows_are_lines` true while a lens, a removed line, a ghost line, the
     //      chat or a fold adds or removes a row (the row numbers would drift);
-    //   2. `rows_are_lines` false for a plain buffer (the shortcut never runs);
-    //   3. the minimap plan drawing a row per file line however long the file;
-    //   4. a short file's rows moved or resized (it must lay out as before);
-    //   5. a minimap of no height (its first frame) panicking or looping;
-    //   6. a thin row drawn thinner than the pixel it stands for, so a long
-    //      file's minimap shows nothing.
+    //   2. `rows_are_lines` false for a plain buffer (the shortcut never runs).
+    // Its second shortcut, the minimap's cap on the rows it draws, is covered by
+    // fix 2's test below, which replaced the fix-1 test of the stride.
 
     #[test]
     fn rows_are_lines_only_when_nothing_adds_or_hides_a_row() {
@@ -368,25 +375,65 @@ mod tests {
         assert_eq!(rows(&buffer, &hidden(4, &[], &none), &added_only), identity);
     }
 
+    // Task 12b fix 2: the minimap samples a long file by pixel row, so an edit
+    // that adds a line does not pick every sampled line again. Stepping through
+    // the rows `stride` apart picked rows 0, s, 2s, ..., and `stride` itself
+    // changes with the file's length. The ways it can fail, written before the
+    // code:
+    //   1. a row drawn per file line however long the file (cost follows pixels);
+    //   2. a short file's rows moved or resized (each row at `tall * row`);
+    //   3. a thin row's samples not one pixel apart, or the sample at pixel y not
+    //      the row at floor(y / tall);
+    //   4. one more row in the file moving any pixel's sampled row by more than
+    //      one (a change of stride moved all of them);
+    //   5. a minimap of no height, or a file of no rows, panicking or drawing;
+    //   6. a sample past the last row, the first not row 0, rows out of order.
+
     #[test]
-    fn the_minimap_draws_about_a_row_a_pixel_however_long_the_file() {
-        let short = minimap_plan(100, 22.0, 800.0);
-        assert_eq!(short.stride, 1, "a short file draws every row");
-        assert!((short.tall - 22.0 * 0.15).abs() < 1e-4, "at a line's 15%: {}", short.tall);
-        let fits = minimap_plan(500, 22.0, 800.0);
-        assert_eq!(fits.stride, 1, "rows a pixel tall or more are all drawn");
-        assert!((fits.tall - 1.6).abs() < 1e-4, "squeezed to the height: {}", fits.tall);
-        for rows in [2_000usize, 39_247, 1_000_000] {
+    fn the_minimap_samples_one_row_a_pixel_and_one_more_line_moves_no_sample_far() {
+        let short = minimap_plan(100, 22.0, 800.0).samples(100);
+        assert_eq!(short.len(), 100, "a short file draws every row");
+        for (ix, (y, row)) in short.iter().enumerate() {
+            assert_eq!(*row, ix);
+            assert!((y - 3.3 * ix as f32).abs() < 1e-3, "row {ix} at a line's 15%: {y}");
+        }
+        let squeezed = minimap_plan(500, 22.0, 800.0).samples(500);
+        assert_eq!(squeezed.len(), 500, "rows a pixel tall or more are all drawn");
+
+        for rows in [2_000usize, 24_000, 39_247, 1_000_000] {
             let plan = minimap_plan(rows, 22.0, 800.0);
-            let drawn = rows.div_ceil(plan.stride);
-            assert!(drawn <= 801, "{rows} rows drew {drawn}");
+            let samples = plan.samples(rows);
+            assert!(samples.len() <= 801, "{rows} rows drew {}", samples.len());
+            assert_eq!(samples[0].1, 0);
+            for (pixel, (y, row)) in samples.iter().enumerate() {
+                assert!((y - pixel as f32).abs() < 1e-3, "{rows}: sample {pixel} at {y}");
+                assert_eq!(*row, ((pixel as f32 / plan.tall).floor() as usize).min(rows - 1));
+                assert!(*row < rows, "{rows}: row {row} is past the end");
+            }
             assert!(
-                plan.tall * plan.stride as f32 >= 1.0 - 1e-3,
-                "{rows}: a drawn row stands for at least a pixel"
+                samples.windows(2).all(|pair| pair[0].1 < pair[1].1),
+                "{rows}: rows ascend"
             );
         }
-        let blind = minimap_plan(39_247, 22.0, 0.0);
-        assert!(39_247usize.div_ceil(blind.stride) <= 1, "no height, nothing drawn");
+
+        for rows in 20_000..30_000usize {
+            let before = minimap_plan(rows, 22.0, 800.0).samples(rows);
+            let after = minimap_plan(rows + 1, 22.0, 800.0).samples(rows + 1);
+            assert!(before.len().abs_diff(after.len()) <= 1, "{rows}: sample counts");
+            for (pixel, (b, a)) in before.iter().zip(&after).enumerate() {
+                assert!(
+                    b.1.abs_diff(a.1) <= 1,
+                    "{rows} -> {}: pixel {pixel} moved from row {} to row {}",
+                    rows + 1,
+                    b.1,
+                    a.1
+                );
+            }
+        }
+
+        let blind = minimap_plan(39_247, 22.0, 0.0).samples(39_247);
+        assert!(blind.len() <= 1, "no height, nothing drawn: {}", blind.len());
+        assert!(minimap_plan(0, 22.0, 800.0).samples(0).is_empty(), "no rows, nothing drawn");
     }
 
     #[test]

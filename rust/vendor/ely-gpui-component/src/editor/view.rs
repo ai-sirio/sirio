@@ -126,17 +126,18 @@ impl CodeEditor {
         )
     }
 
-    /// The rows the minimap draws for a height: every row while a row is a pixel tall, else one a pixel, each with the colors of its line's characters (start, length, color).
+    /// The rows the minimap draws for a height, each at its top in pixels with the colors of its line's characters (start, length, color): every row while a row is a pixel tall, else one a pixel.
     fn minimap_rows(
         &self,
         height: Pixels,
         cx: &App,
-    ) -> (MinimapPlan, Vec<(usize, Vec<(usize, usize, gpui::Hsla)>)>) {
+    ) -> (MinimapPlan, Vec<(f32, Vec<(usize, usize, gpui::Hsla)>)>) {
         let rows = self.frame.rows.len();
         let plan = minimap_plan(rows, f32::from(self.frame.line), f32::from(height));
-        let drawn = (0..rows)
-            .step_by(plan.stride)
-            .filter_map(|ix| match self.frame.rows.get(ix)? {
+        let drawn = plan
+            .samples(rows)
+            .into_iter()
+            .filter_map(|(y, ix)| match self.frame.rows.get(ix)? {
                 Row::Line(at) => {
                     let text = self.buffer.line(at);
                     let tokens: Vec<_> = self
@@ -148,7 +149,7 @@ impl CodeEditor {
                             style.color.map(|color| (start, len, color))
                         })
                         .collect();
-                    (!tokens.is_empty()).then_some((ix, tokens))
+                    (!tokens.is_empty()).then_some((y, tokens))
                 }
                 _ => None,
             })
@@ -178,12 +179,15 @@ impl CodeEditor {
                     move |bounds, _, cx| {
                         entity.update(cx, |editor, cx| {
                             editor.frame.minimap = bounds;
-                            let _scan = sirio_perf::span("CodeEditor.minimap_rows", 0);
+                            let _scan =
+                                sirio_perf::span("CodeEditor.minimap_rows", cx.entity_id().as_u64());
                             editor.minimap_rows(bounds.size.height, cx)
                         })
                     },
                     move |bounds, (plan, tokens), window, _| {
-                        let (tall, stride) = (plan.tall, plan.stride as f32);
+                        let tall = plan.tall;
+                        // A row a pixel tall or more keeps its proportion, a thinner one is drawn as most of its pixel.
+                        let thick = tall.max(1.0) * 0.7;
                         let wide = advance * 0.12;
                         let state = scroll.0.borrow();
                         let viewport = state.base_handle.bounds().size.height;
@@ -194,13 +198,13 @@ impl CodeEditor {
                             Bounds::new(point(bounds.origin.x, top), extent),
                             shade,
                         ));
-                        for (ix, spans) in &tokens {
+                        for (y, spans) in &tokens {
                             for (start, len, color) in spans {
                                 let origin = point(
                                     bounds.origin.x + wide * (*start + 2) as f32,
-                                    bounds.origin.y + px(tall * *ix as f32),
+                                    bounds.origin.y + px(*y),
                                 );
-                                let extent = size(wide * *len as f32, px(tall * 0.7 * stride));
+                                let extent = size(wide * *len as f32, px(thick));
                                 window.paint_quad(fill(
                                     Bounds::new(origin, extent),
                                     color.opacity(0.7),
