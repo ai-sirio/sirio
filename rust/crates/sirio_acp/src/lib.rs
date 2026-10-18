@@ -1246,6 +1246,34 @@ fn command_for_process(command: AgentCommand) -> AgentCommand {
     command
 }
 
+/// The PATH a chat agent is started with: only its absolute entries, in order.
+/// A chat agent starts in its worktree, which may be an untrusted clone, so its
+/// program must never be found through an empty, relative or `.` entry, which
+/// would name a directory inside that worktree (CWE-427).
+fn agent_search_path(path: &str, separator: char) -> String {
+    let windows = separator == ';';
+    path.split(separator)
+        .filter(|entry| is_absolute_search_entry(entry, windows))
+        .collect::<Vec<_>>()
+        .join(&separator.to_string())
+}
+
+/// Whether a PATH entry names an absolute directory, judged on its text: nothing
+/// expands `~`, and a relative entry resolves against the worktree the agent starts
+/// in. Windows has drive-letter and UNC paths; unix has a leading `/`.
+fn is_absolute_search_entry(entry: &str, windows: bool) -> bool {
+    if windows {
+        let bytes = entry.as_bytes();
+        let drive = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/');
+        drive || entry.starts_with("\\\\")
+    } else {
+        entry.starts_with('/')
+    }
+}
+
 /// Where a chat agent starts: the directory its session is created for, when
 /// that is an absolute directory; otherwise the user's home, as the user
 /// environment resolves it. The process's own directory is never used: under the
@@ -1402,6 +1430,16 @@ fn run_connection(
     let command = in_user_environment(command);
     let mut environment = sirio_env::for_child();
     environment.insert("TERM".to_string(), "xterm-256color".to_string());
+    // The agent's PATH keeps only absolute entries, so its program is never found
+    // in the worktree it starts in (agent_search_path). On Windows, cmd also stops
+    // searching the working directory before PATH. Only the agent's environment
+    // changes: sirio_env keeps the user's PATH.
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    if let Some(path) = environment.get("PATH").map(|path| agent_search_path(path, separator)) {
+        environment.insert("PATH".to_string(), path);
+    }
+    #[cfg(windows)]
+    environment.insert("NoDefaultCurrentDirectoryInExePath".to_string(), "1".to_string());
     // The directory the session is created for: the agent starts in it, as the
     // session's own working directory, and never in the process's directory.
     let spawned = match agent_start_dir(&cwd) {
@@ -2785,6 +2823,37 @@ fn prompt_blocks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The PATH a chat agent is started with keeps only absolute entries: a relative or
+    // empty entry is a directory the agent's program could be found in, and the
+    // agent starts in a worktree that may be an untrusted clone (CWE-427).
+    #[test]
+    fn agent_search_path_keeps_only_absolute_unix_entries() {
+        assert_eq!(agent_search_path("", ':'), "");
+        assert_eq!(agent_search_path("/usr/bin", ':'), "/usr/bin");
+        assert_eq!(agent_search_path("/usr/bin::/bin", ':'), "/usr/bin:/bin");
+        assert_eq!(agent_search_path(":/usr/bin", ':'), "/usr/bin");
+        assert_eq!(agent_search_path("/usr/bin:", ':'), "/usr/bin");
+        assert_eq!(agent_search_path(".:/usr/bin", ':'), "/usr/bin");
+        assert_eq!(agent_search_path("bin:/usr/bin", ':'), "/usr/bin");
+        assert_eq!(agent_search_path("./x:/usr/bin", ':'), "/usr/bin");
+        assert_eq!(agent_search_path("~/bin:/usr/bin", ':'), "/usr/bin");
+    }
+
+    // The Windows shapes are tested as strings on every platform, so the rule is
+    // checked on Linux too: a drive-letter path or a UNC path is absolute.
+    #[test]
+    fn agent_search_path_keeps_only_absolute_windows_entries() {
+        assert_eq!(
+            agent_search_path("C:\\Windows;;.;tools;C:\\bin", ';'),
+            "C:\\Windows;C:\\bin"
+        );
+        assert_eq!(agent_search_path("D:/tools;bin;C:\\bin", ';'), "D:/tools;C:\\bin");
+        assert_eq!(
+            agent_search_path("\\\\server\\share;.\\x;C:\\bin", ';'),
+            "\\\\server\\share;C:\\bin"
+        );
+    }
     use agent_client_protocol::schema::v1::{
         Diff, ToolCall, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
     };
