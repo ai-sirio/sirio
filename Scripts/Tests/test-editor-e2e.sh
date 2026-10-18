@@ -318,6 +318,13 @@ elif command == "offset":
     sys.stdout.write(str(len(text[:index].encode("utf-8"))))
 elif command == "length":
     sys.stdout.write(str(len(unescape(sys.argv[2]).encode("utf-8"))))
+elif command == "line-of":
+    # line-of ESCAPED_TEXT NEEDLE: the 0-based line NEEDLE is on.
+    text = unescape(sys.argv[2])
+    index = text.find(sys.argv[3])
+    if index < 0:
+        sys.exit(f"'{sys.argv[3]}' is not in the text")
+    sys.stdout.write(str(text[:index].count("\n")))
 elif command == "line-after":
     # line-after ESCAPED_TEXT NEEDLE LINES: the byte offset of the start of the line
     # LINES lines below the line NEEDLE is on.
@@ -1301,29 +1308,30 @@ PY
 }
 
 scenario_send_to_agent() {
-  open_file "$WT/main.rs"
+  # calls.rs: no other scenario edits it, so its text is the fixture's whatever ran before.
+  open_file "$WT/calls.rs"
   expect_state state loaded
   local text start end composer expected
   text="$(sfield text)"
-  start="$(python3 "$TOOLS" offset "$text" "fn line_2")"
-  end=$(($(python3 "$TOOLS" offset "$text" "fn line_4") - 1))
+  start="$(python3 "$TOOLS" offset "$text" "fn caller")"
+  end=$(($(python3 "$TOOLS" offset "$text" "outer(1)") + 8))
   [ -z "$(chat_composer)" ] || fail "$SCENARIO: the chat's composer was not empty before the action"
-  # Lines 2 and 3 selected; the menu's Send to agent, run on the selection, appends
+  # Lines 1 and 2 selected; the menu's Send to agent, run on the selection, appends
   # the file, the line range and the lines in a fenced block to the chat's composer.
   ctl surface editor select --ranges="$start..$end" >/dev/null
   ctl surface editor context --offset=$((start + 3)) --action=send-to-agent >/dev/null
   expect_state selections "$start..$end"
   composer="$(chat_composer)"
-  expected="$(printf 'main.rs:2-3\n\n```rust\nfn line_2() -> u32 { 2 }\nfn line_3() -> u32 { 3 }\n```\n')"
+  expected="$(printf 'calls.rs:1-2\n\n```rust\nfn caller() -> u32 {\n    outer(1)\n```\n')"
   [ "$composer" = "$expected" ] \
     || fail "$SCENARIO: the chat's composer reads $(printf '%s' "$composer" | cut -c1-300 | sed 's/$/<eol>/'), expected $(printf '%s' "$expected" | cut -c1-300 | sed 's/$/<eol>/')"
-  echo "OK: the chat's composer holds main.rs:2-3 and the two selected lines"
+  echo "OK: the chat's composer holds calls.rs:1-2 and the two selected lines"
   # A second send appends after a blank line instead of replacing the first.
   ctl surface editor select --ranges="$start..$((start + 9))" >/dev/null
   ctl surface editor context --offset=$((start + 3)) --action=send-to-agent >/dev/null
   composer="$(chat_composer)"
   case "$composer" in
-    "$expected"*"main.rs:2"*) ;;
+    "$expected"*"calls.rs:1"*) ;;
     *) fail "$SCENARIO: a second send did not append to the draft: $(printf '%s' "$composer" | cut -c1-400)" ;;
   esac
   echo "OK: a second send is appended to the draft, the first kept"
@@ -3079,21 +3087,24 @@ sweep_for_the_error_card() { # x y_first
 ERROR_COLUMN=830
 
 scenario_hover_leave() {
-  local fixture="$WT/main.rs" error_row bar_row
+  local fixture="$WT/main.rs" error_row bar_row rows_above
   open_file "$fixture"
   expect_state state loaded
   expect_state diagnostics 2
   focus_window
+  # Earlier scenarios leave their edits in main.rs, so the Error's line is read from
+  # the text: the code's first row is that many rows (21 px each) above it.
+  rows_above="$(python3 "$TOOLS" line-of "$(sfield text)" "fn line_7")"
   cp "$fixture" "$RUN_DIR/hover-leave-0.txt"
 
   # (i) The find bar. Open above the code, it pushes the code down; the sweep
-  # finds where the Error is now, and the pointer then jumps straight onto the bar,
-  # about 150 px above that row (six rows of 21 px, and what the bar is tall).
+  # finds where the Error is now, and the pointer then jumps straight onto the bar:
+  # the rows above the Error, and 17 px more, which is inside the bar whatever its height.
   ctl surface editor find --query=fn >/dev/null
   expect_state find_matches "$(grep -o -i fn "$fixture" | wc -l | tr -d ' ')"
   error_row="$(sweep_for_the_error_card $ERROR_COLUMN 120)"
   echo "OK: the card shows the Error with the pointer resting at y=$error_row"
-  bar_row=$((error_row - 143))
+  bar_row=$((error_row - rows_above * 21 - 17))
   move_to $ERROR_COLUMN "$bar_row"
   expect_state hover ""
   expect_state_stays hover ""
@@ -3114,7 +3125,7 @@ PY
   expect_state conflict changed
   error_row="$(sweep_for_the_error_card $ERROR_COLUMN 120)"
   echo "OK: the card shows the Error again, under the conflict banner, at y=$error_row"
-  move_to $ERROR_COLUMN $((error_row - 143))
+  move_to $ERROR_COLUMN $((error_row - rows_above * 21 - 17))
   expect_state hover ""
   expect_state_stays hover ""
   echo "OK: a pointer that left the code for the conflict banner left no card behind"
