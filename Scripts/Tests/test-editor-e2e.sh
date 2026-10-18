@@ -87,16 +87,22 @@ set -eEuo pipefail
 #                     (`highlight=`, what the highlighter gave line 1); each popover captured
 #                     open
 #   notifications     the bell behind the status row: a language server that cannot start
-#                     (a failing entry added to languages.toml) and a save refused over a
-#                     disk change (a real Ctrl+S) each raise a message, and each lands in
-#                     the tab's list; the bell counts what was added since the list was
-#                     opened, a dismissed corner card leaves list and count alone, opening
-#                     the list clears the count and keeps the list, `value=clear` empties
-#                     both; a real click opens the panel and Clear closes it with the
-#                     keyboard back in the code; a snapshot's and a Preview's bell take a
-#                     press and a snapshot keeps its own list; the list keeps the newest
-#                     50; the compact row still draws the bell; captured with a count, the
-#                     list and the empty list
+#                     (a failing entry added to languages.toml, drawn "did not start") and
+#                     a save refused over a disk change (a real Ctrl+S, "Save failed: ...",
+#                     one message) each raise a message, and each lands in the tab's list;
+#                     the bell counts what arrived since the list was opened, a dismissed
+#                     corner card leaves list and count alone and does not let its press
+#                     reach the code, opening the list clears the count and keeps the list,
+#                     the same message again is one row marked "(x3)", a message that
+#                     arrives while the list is open is seen already, `value=clear` empties
+#                     both; a real click opens the panel, an Enter in it wipes nothing, a
+#                     row's Copy and `copy:<n>` reach the clipboard (read by a paste), and
+#                     Clear closes it with the keyboard back in the code; a snapshot's and a
+#                     Preview's bell take a press, a snapshot keeps its own list and a real
+#                     Ctrl+S on it raises one message; the list keeps the newest 50 rows
+#                     (the oldest five of 55 go); the compact row's bell takes real clicks;
+#                     captured with a count, the list, a repeat, the Copy buttons, the
+#                     compact row's panel and the empty list
 #   find              Find over findme.txt: the match count against grep (case-insensitive,
 #                     then case-sensitive), two steps forward and one back, a pattern that
 #                     does not compile, close; captured with the replace row open and the
@@ -2293,15 +2299,15 @@ scenario_status_actions() {
   # panel) and comes back full.
   ctl surface editor status --item=indent --open=true >/dev/null
   expect_state_stays status_popover indent
-  x_key ctrl+shift+s
-  x_key ctrl+shift+i
+  ctl surface editor keys --keys=ctrl-shift-s >/dev/null
+  ctl surface editor keys --keys=ctrl-shift-i >/dev/null
   expect_state status_set compact
   expect_status_refused "compact" --item=indent --open=true
   expect_status_refused "compact" --item=line_ending --open=true
   expect_state_stays status_popover none
   expect_state_stays status_popover none
-  x_key ctrl+shift+s
-  x_key ctrl+shift+i
+  ctl surface editor keys --keys=ctrl-shift-s >/dev/null
+  ctl surface editor keys --keys=ctrl-shift-i >/dev/null
   expect_state status_set full
   expect_state_stays status_popover none
   echo "OK: an open indent panel went when the compact row stopped drawing its item, and did not come back with it"
@@ -2343,8 +2349,14 @@ scenario_status_actions() {
 # panel when two messages are listed.
 STATUS_BELL_ITEM=(1454 775)
 STATUS_BELL_CLEAR=(1431 744)
-# The corner card, over the file's bottom right corner.
+# The bell as the compact row draws it, with the sidebar and the right panel
+# shown, and the Copy of the older of two rows in the full row's panel.
+STATUS_BELL_COMPACT=(1128 775)
+STATUS_BELL_COPY_OLDER=(1445 690)
+# The corner card, over the file's bottom right corner: a point of a card of
+# three lines, and one inside the card whatever its size.
 NOTIFY_CARD=(1300 720)
+NOTIFY_CARD_CORNER=(1438 735)
 
 # The bell's count and the length of the list, both polled.
 expect_bell() { # unseen listed
@@ -2352,8 +2364,20 @@ expect_bell() { # unseen listed
   expect_state notifications "$2"
 }
 
+# What the clipboard holds, read the way copy_propagates reads it: a paste into
+# the empty scratch file, then undone. Leaves the tab on the scratch file.
+expect_clipboard() { # text
+  open_file "$WT/empty.txt"
+  expect_state state loaded
+  ctl surface editor keys --keys=ctrl-v >/dev/null
+  expect_state text "$1"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text ""
+  expect_state dirty false
+}
+
 scenario_notifications() {
-  local notify="$WT/notify.nfy" tabs_before secondary_before sha count i
+  local notify="$WT/notify.nfy" tabs_before secondary_before sha count i before after note
   tabs_before="$(tab_count)"
   secondary_before="$(layout_field secondaryVisible)"
   mkdir -p "$XDG_CONFIG_HOME/sirio"
@@ -2365,18 +2389,22 @@ extensions = ["nfy"]
 command = "sh"
 args = ["-c", "exit 1"]
 TOML
-  printf 'one\ntwo\nthree\n' >"$notify"
+  # Forty lines, so the corner card sits over text and a press that fell
+  # through it would land on a line and move the caret.
+  { printf 'one\ntwo\nthree\n'; seq -f 'line %g' 4 40; } >"$notify"
 
   # ---- the first message: a language server that cannot start, on opening
   open_file "$notify"
   expect_state state loaded
   ctl surface editor keys --keys=ctrl-shift-s >/dev/null
   ctl surface editor keys --keys=ctrl-shift-i >/dev/null
-  # The failed server's reason is long: the row draws its compact set, which
-  # keeps the bell.
-  expect_state status_set compact
+  # With the sidebar and the right panel hidden the row is the full set; the
+  # failed server is drawn as "did not start", whole (the reason is in the card
+  # and the bell), and the state still says it failed.
+  expect_state status_set full
   expect_status lsp sh:failed
   expect_bell 1 1
+  expect_state notification_repeats 1
   [ -n "$(sfield message)" ] || fail "$SCENARIO: the corner card names nothing after the server failed"
   expect_state_stays notifications 1
   echo "OK: a server that failed to start raised a message: bell 1, one notification"
@@ -2384,7 +2412,8 @@ TOML
   focus_window
   capture bell-count-one
 
-  # ---- the second: a save refused over a disk change, by a real Ctrl+S
+  # ---- the second: a save refused over a disk change, by a real Ctrl+S: one
+  # message, worded "Save failed: ..." with no log tag
   ctl surface editor status --item=line_ending --value=crlf >/dev/null
   expect_state dirty true
   printf 'changed\non disk\n' >"$notify"
@@ -2394,18 +2423,23 @@ TOML
   expect_bell 2 2
   expect_state dirty true
   case "$(sfield message)" in
-    *"save failed"*) ;;
-    *) fail "$SCENARIO: the corner card reads '$(sfield message)', expected the save failure" ;;
+    "Save failed: "*) ;;
+    *) fail "$SCENARIO: the corner card reads '$(sfield message)', expected 'Save failed: ...'" ;;
   esac
   echo "OK: a refused save raised the second: bell 2, two notifications"
   capture bell-count
 
-  # The corner card goes with a click on it; the list and the count do not.
+  # The corner card goes with a click on it; the list and the count do not, and
+  # the press does not reach the code under the card (the caret stays).
+  before="$(status_field cursor)"
   click_at "${NOTIFY_CARD[@]}"
   expect_state message ""
   expect_state_stays notifications 2
   expect_status bell 2
-  echo "OK: dismissing the corner card left the list and the count alone"
+  after="$(status_field cursor)"
+  [ "$before" = "$after" ] \
+    || fail "$SCENARIO: a click on the corner card moved the caret from '$before' to '$after'"
+  echo "OK: dismissing the corner card left the list and the count alone, and the caret at $after"
 
   # ---- opening the list: it clears the count and keeps the list
   ctl surface editor status --item=bell --open=true >/dev/null
@@ -2415,10 +2449,35 @@ TOML
   ctl surface editor status --item=bell --open=false >/dev/null
   expect_state_stays status_popover none
   expect_bell 0 2
+
+  # ---- the same message again is the same row: counted into it ("(x3)"), and
+  # still one on the bell each time it arrives while the list is closed
   x_key ctrl+s
-  expect_bell 1 3
-  expect_state_stays notifications 3
-  echo "OK: opening the list took the count to 0 and kept both; a third message while closed: bell 1, three"
+  expect_bell 1 2
+  expect_state notification_repeats 2
+  x_key ctrl+s
+  expect_bell 2 2
+  expect_state_stays notification_repeats 3
+  echo "OK: the same message twice more is one row marked x3, and 2 on the bell"
+  ctl surface editor status --item=bell --open=true >/dev/null
+  expect_state_stays status_popover bell
+  expect_bell 0 2
+  capture bell-repeat
+  # A message that arrives while the list is open is seen already: no count on
+  # the bell, and its own row.
+  ctl surface editor status --item=bell --value="raise:arrived while the list was open" >/dev/null
+  expect_state notifications 3
+  expect_state_stays notification_newest "arrived while the list was open"
+  expect_status bell 0
+  ctl surface editor status --item=bell --open=false >/dev/null
+  expect_state_stays status_popover none
+  expect_bell 0 3
+  echo "OK: a message that arrived while the list was open was seen: bell 0, a third row"
+  # A different message is a new row again.
+  x_key ctrl+s
+  expect_bell 1 4
+  expect_state_stays notifications 4
+  echo "OK: opening the list took the count to 0 and kept both; a message while closed: bell 1, four rows"
   ctl surface editor status --item=bell --value=clear >/dev/null
   expect_bell 0 0
   expect_state_stays notifications 0
@@ -2436,10 +2495,10 @@ TOML
   # it and closes it with the keyboard in the code
   x_key ctrl+s
   x_key ctrl+s
-  expect_bell 2 2
+  expect_bell 2 1
   click_at "${STATUS_BELL_ITEM[@]}"
   expect_state_stays status_popover bell
-  expect_bell 0 2
+  expect_bell 0 1
   click_at "${STATUS_BELL_ITEM[@]}"
   expect_state_stays status_popover none
   ctl surface editor select --ranges=0..0 >/dev/null
@@ -2463,16 +2522,64 @@ TOML
   expect_status cursor "Ln 4, Col 1"
   echo "OK: Escape closed the bell's panel and the keyboard is in the code"
 
-  # ---- the compact row draws the bell too (this tab's row is compact)
+  # ---- a stray Enter in a freshly opened panel wipes nothing (the panel's first
+  # tab stop is the newest row's Copy, Clear is the second), and a row's Copy
+  # puts that row on the clipboard
+  x_key ctrl+s
+  ctl surface editor status --item=bell --value="raise:a later note" >/dev/null
+  expect_bell 2 2
+  click_at "${NOTIFY_CARD_CORNER[@]}"
+  expect_state message ""
+  click_at "${STATUS_BELL_ITEM[@]}"
+  expect_state_stays status_popover bell
+  expect_bell 0 2
+  x_key Return
+  expect_state_stays notifications 2
+  expect_bell 0 2
+  echo "OK: an Enter in the freshly opened panel left both rows"
+  ctl surface editor status --item=bell --open=false >/dev/null
+  expect_state_stays status_popover none
+  click_at "${STATUS_BELL_ITEM[@]}"
+  expect_state_stays status_popover bell
+  capture bell-list-copy
+  click_at "${STATUS_BELL_COPY_OLDER[@]}"
+  expect_state_stays notifications 2
+  ctl surface editor status --item=bell --open=false >/dev/null
+  expect_state_stays status_popover none
+  expect_clipboard "Save failed: the file changed on disk; choose Reload or Keep before saving"
+  echo "OK: the older row's Copy put its text on the clipboard"
+  open_file "$notify"
+  expect_state state loaded
+  ctl surface editor status --item=bell --value=copy:0 >/dev/null
+  expect_clipboard "a later note"
+  open_file "$notify"
+  expect_state state loaded
+  expect_status_refused "no notification 9" --item=bell --value=copy:9
+  expect_status_refused "not a notification number" --item=bell --value=copy:x
+  expect_bell 0 2
+  echo "OK: copy:0 put the newest row on the clipboard; a row that is not there is refused"
+  ctl surface editor status --item=bell --value=clear >/dev/null
+  expect_bell 0 0
+
+  # ---- the compact row draws the bell too: the real clicks under it prove it
+  # (the sidebar and the right panel shown narrow the file's pane)
+  ctl surface editor keys --keys=ctrl-shift-s >/dev/null
+  ctl surface editor keys --keys=ctrl-shift-i >/dev/null
   expect_state status_set compact
   x_key ctrl+s
   expect_bell 1 1
-  ctl surface editor status --item=bell --open=true >/dev/null
+  focus_window
+  capture bell-compact
+  click_at "${STATUS_BELL_COMPACT[@]}"
   expect_state_stays status_popover bell
   expect_bell 0 1
-  ctl surface editor status --item=bell --open=false >/dev/null
+  capture bell-list-compact
+  click_at "${STATUS_BELL_COMPACT[@]}"
   expect_state_stays status_popover none
-  echo "OK: the compact row drew the bell and opened its panel"
+  ctl surface editor keys --keys=ctrl-shift-s >/dev/null
+  ctl surface editor keys --keys=ctrl-shift-i >/dev/null
+  expect_state status_set full
+  echo "OK: the compact row drew the bell, and a real click opened and closed its panel"
 
   # ---- a snapshot has its own list, and the bell takes a press there
   sha="$(git -C "$WT" rev-parse HEAD)"
@@ -2489,24 +2596,34 @@ TOML
   ctl surface editor status --item=bell --open=false >/dev/null
   expect_state_stays status_popover none
   "$CTL" surface editor save >/dev/null 2>&1 || true
-  expect_bell 1 2
+  expect_bell 1 1
+  expect_state notification_repeats 2
   click_at "${STATUS_BELL_ITEM[@]}"
   expect_state_stays status_popover bell
-  expect_bell 0 2
+  expect_bell 0 1
   click_at "${STATUS_BELL_ITEM[@]}"
   expect_state_stays status_popover none
-  echo "OK: a snapshot's Save raised its message into its own list, and its bell opened, by the verb and by a click"
-  # The newest 50 are kept: 55 more refused saves.
-  i=0
-  while [ "$i" -lt 54 ]; do
-    "$CTL" surface editor save >/dev/null 2>&1 || true
+  # A real Ctrl+S on the snapshot is one message, not two: the view raises its
+  # own refusal and the handler only logs it.
+  x_key ctrl+s
+  expect_bell 1 1
+  expect_state_stays notification_repeats 3
+  echo "OK: a snapshot's Save raised its message into its own list once, by the verb and by a real Ctrl+S, and its bell opened by the verb and by a click"
+  # The newest 50 rows are kept: 54 distinct messages after the one row of
+  # refusals make 55 rows, and the oldest five go.
+  i=1
+  while [ "$i" -le 54 ]; do
+    note="$(printf 'note %02d' "$i")"
+    ctl surface editor status --item=bell --value="raise:$note" >/dev/null
     i=$((i + 1))
   done
   expect_bell 50 50
   expect_state_stays notifications 50
+  expect_state notification_newest "note 54"
+  expect_state notification_oldest "note 05"
   ctl surface editor status --item=bell --value=clear >/dev/null
   expect_bell 0 0
-  echo "OK: 55 messages left the newest 50, and 50 on the bell"
+  echo "OK: 55 rows left the newest 50 (note 05 to note 54), and 50 on the bell"
 
   # ---- Markdown Preview: the bell is about the tab, not the code
   open_file "$WT/notes.md"
