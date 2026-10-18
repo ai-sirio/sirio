@@ -306,6 +306,7 @@ impl FileView {
             Some(false) => {
                 if self.status_popover == Some(item) {
                     self.status_popover = None;
+                    self.focus_code_on_close = true;
                     cx.notify();
                 }
                 Ok(())
@@ -346,6 +347,7 @@ impl FileView {
     ) {
         if self.status_popover == Some(item) {
             self.status_popover = None;
+            self.focus_code_on_close = true;
             cx.notify();
         } else if let Err(why) = self.open_status_popover(item, window, cx) {
             eprintln!("[files] status {}: {why}", item.word());
@@ -364,9 +366,9 @@ impl FileView {
             self.status_popover = None;
             cx.notify();
         }
-        // Escape and a finished choice send the keyboard to the code, whatever
-        // held it before the panel opened; a press outside leaves it where the
-        // press put it.
+        // Escape, a finished choice, Enter and the item pressed again send the
+        // keyboard to the code, whatever held it before the panel opened; a
+        // press outside leaves it where the press put it.
         if std::mem::take(&mut self.focus_code_on_close) {
             self.focus_target(cx).focus(window, cx);
         }

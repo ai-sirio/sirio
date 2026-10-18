@@ -2103,11 +2103,23 @@ scenario_status_actions() {
   expect_state dirty false
   expect_state status_popover none
   echo "OK: a click on CRLF and then on LF applied each, closed the panel and left the keyboard in the code"
+  # The item pressed a second time closes its panel, and the keyboard is in the
+  # code.
+  click_at "${STATUS_LANGUAGE_ITEM[@]}"
+  expect_state status_popover language
+  click_at "${STATUS_LANGUAGE_ITEM[@]}"
+  expect_state status_popover none
+  x_key Down
+  expect_status cursor "Ln 44, Col 1"
+  echo "OK: the item pressed again closed its panel and the keyboard is in the code"
   # The verb closes a panel as well.
   ctl surface editor status --item=line_ending --open=true >/dev/null
   expect_state status_popover line_ending
   ctl surface editor status --item=line_ending --open=false >/dev/null
   expect_state status_popover none
+  x_key Down
+  expect_status cursor "Ln 45, Col 1"
+  echo "OK: the verb's open=false hands the keyboard to the code too"
   ctl surface editor status --item=indent --open=true >/dev/null
   expect_state status_popover indent
   ctl surface editor status --item=language --open=true >/dev/null
