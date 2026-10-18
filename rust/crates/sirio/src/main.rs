@@ -7969,6 +7969,7 @@ impl SirioWorkspace {
                             workspace.refresh_symbols_now(path, cx);
                         }
                         workspace.refresh_git_diff(path, &view, cx);
+                        workspace.push_language_server_status(path, &view, cx);
                     }
                     FileViewEvent::GitDiffStale(path) => {
                         workspace.refresh_git_diff(path, &view, cx);
@@ -8049,6 +8050,12 @@ impl SirioWorkspace {
     /// Fetches the diff of `path` against HEAD, with no context lines, off the
     /// GPUI thread, and shows it in `view`: the gutter's git marks and the hunk a
     /// mark opens. A file outside a repository, or a clean one, has none.
+    ///
+    /// The same trip refreshes the status row's git facts (branch, whether the
+    /// worktree has changes, how far it is from its upstream): the whole-worktree
+    /// `status` the diff already reads says whether there are changes, so the row
+    /// costs no second `status`, and it follows the diff's timing (a load, a
+    /// save, a reload, a focus, an outside change).
     fn refresh_git_diff(&self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
         if !view.update(cx, |view, _| view.begin_git_diff()) {
             return;
@@ -8067,15 +8074,29 @@ impl SirioWorkspace {
         let path = path.to_path_buf();
         let view = view.downgrade();
         cx.spawn(async move |_, cx| {
-            let result = cx
-                .background_spawn(async move { Self::head_diff(&root, &relative) })
+            let (result, branch, sync) = cx
+                .background_spawn(async move {
+                    let result = Self::head_diff(&root, &relative);
+                    let (branch, sync) = Self::branch_and_sync(&root);
+                    (result, branch, sync)
+                })
                 .await;
             // A view closed while the fetch ran has no answer to take.
             let _ = view.update(cx, |view, cx| {
-                let diff = result.unwrap_or_else(|error| {
-                    eprintln!("[git] the diff of {} could not be read: {error}", path.display());
-                    None
-                });
+                let mut facts = view.status_facts().clone();
+                facts.branch = branch;
+                facts.sync = sync;
+                let diff = match result {
+                    Ok((diff, dirty)) => {
+                        facts.worktree_dirty = dirty;
+                        diff
+                    }
+                    Err(error) => {
+                        eprintln!("[git] the diff of {} could not be read: {error}", path.display());
+                        None
+                    }
+                };
+                view.set_status_facts(facts, cx);
                 view.land_git_diff(diff, cx);
             });
         })
@@ -8083,14 +8104,101 @@ impl SirioWorkspace {
     }
 
     /// The diff of `relative` against HEAD with no context lines, or `None` when
-    /// git lists the file as clean. `status` reads the whole worktree; the file's
-    /// own entry is the only one kept.
-    fn head_diff(root: &Path, relative: &Path) -> Result<Option<sirio_git::FileDiff>, GitError> {
+    /// git lists the file as clean, and whether git lists any change in the
+    /// worktree at all. `status` reads the whole worktree; the file's own entry
+    /// is the only one diffed.
+    fn head_diff(
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(Option<sirio_git::FileDiff>, bool), GitError> {
         let snapshot = sirio_git::status(root)?;
+        let dirty = !snapshot.entries.is_empty();
         let Some(entry) = snapshot.entries.iter().find(|entry| entry.path == relative) else {
-            return Ok(None);
+            return Ok((None, dirty));
         };
-        sirio_git::diff_entry(root, entry, 0).map(Some)
+        sirio_git::diff_entry(root, entry, 0).map(|diff| (Some(diff), dirty))
+    }
+
+    /// What the status row says of the checkout at `root` that needs no
+    /// `status`: the branch its `HEAD` file names (a short commit id when
+    /// detached) and how far it is from its upstream, `None` for no upstream.
+    /// A git failure is logged and reads as no upstream.
+    fn branch_and_sync(root: &Path) -> (Option<String>, Option<(usize, usize)>) {
+        let sync = sirio_git::ahead_behind(root).unwrap_or_else(|error| {
+            eprintln!("[git] how far {} is from its upstream could not be read: {error}", root.display());
+            None
+        });
+        (read_head_label(root), sync)
+    }
+
+    /// Refreshes the status row's branch and upstream distance for `path`'s
+    /// view without a `status` (the worktree's own state is left as it was
+    /// last read). Run when a worktree is switched to: a push, a fetch or a
+    /// commit made in a terminal meanwhile moved them.
+    fn refresh_branch_and_sync(&self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        let Some(root) = self
+            .worktree_root_for(path)
+            .filter(|root| is_git_repository(root))
+        else {
+            return;
+        };
+        let view = view.downgrade();
+        cx.spawn(async move |_, cx| {
+            let (branch, sync) = cx
+                .background_spawn(async move { Self::branch_and_sync(&root) })
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                let mut facts = view.status_facts().clone();
+                facts.branch = branch;
+                facts.sync = sync;
+                view.set_status_facts(facts, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// `refresh_branch_and_sync` for every file open in the strip.
+    fn refresh_branch_and_sync_of_open_files(&self, cx: &mut Context<Self>) {
+        for (path, view) in Self::open_file_views(&self.tabs, cx) {
+            if !view.read(cx).is_snapshot() {
+                self.refresh_branch_and_sync(&path, &view, cx);
+            }
+        }
+    }
+
+    /// The language server the status row names for `path`, and where it
+    /// stands. The name is the program the entry runs (`rust-analyzer`), without
+    /// its directory. `None` for a file with no entry, or whose server is not
+    /// there to run: nothing is volunteered about a missing one.
+    fn language_server_status(&self, path: &Path) -> Option<(String, sirio_ui::file_view::LspState)> {
+        let entry = self.lsp.known_entry_for(path)?;
+        let root = self.worktree_root_for(path)?;
+        let state = self.lsp.state_of(&self.lsp.key_for(path, &root, &entry))?;
+        let name = Path::new(&entry.command)
+            .file_name()
+            .map_or_else(|| entry.command.clone(), |name| name.to_string_lossy().into_owned());
+        Some((name, state))
+    }
+
+    /// Pushes the language server's state for `path` to its status row.
+    fn push_language_server_status(&self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        let lsp = self.language_server_status(path);
+        view.update(cx, |view, cx| {
+            let mut facts = view.status_facts().clone();
+            facts.lsp = lsp;
+            view.set_status_facts(facts, cx);
+        });
+    }
+
+    /// `push_language_server_status` for every file open in the strip: one
+    /// server serves every file of its language under one root, so a launch
+    /// that starts, ends or fails changes them all.
+    fn push_language_server_status_to_open_files(&self, cx: &mut Context<Self>) {
+        for (path, view) in Self::open_file_views(&self.tabs, cx) {
+            if !view.read(cx).is_snapshot() {
+                self.push_language_server_status(&path, &view, cx);
+            }
+        }
     }
 
     /// The context-menu facts only this workspace can answer. `in_git_repo`
@@ -8121,8 +8229,8 @@ impl SirioWorkspace {
             // install for one Sirio can fetch, the thing that has to come
             // first for a `Manual` one, or — for an entry of the reader's
             // own, which carries no recipe — the name they wrote.
-            // `Dead::Failed` carries nothing, having already been reported
-            // at the moment it broke.
+            // `Dead::Failed` offers nothing here: it was already reported at
+            // the moment it broke.
             missing_language_server: worktree.as_deref().and_then(|root| {
                 let dead = self.lsp.dead_reason_for(path, root)?;
                 let command = self.lsp.known_entry_for(path)?.command.clone();
@@ -8160,7 +8268,7 @@ impl SirioWorkspace {
                             command: command.clone(),
                         })
                     }
-                    crate::lsp::Dead::Failed => None,
+                    crate::lsp::Dead::Failed { .. } => None,
                 }
             }),
             // Answered by the view itself; see `FileView::menu_facts`.
@@ -11538,6 +11646,7 @@ impl SirioWorkspace {
         }
         self.worktree_label = context.activity_label;
         self.rebind_changes_tabs(cx);
+        self.refresh_branch_and_sync_of_open_files(cx);
         // The old worktree's pane list is NOT wiped here. `sync_control_panes`
         // re-registers this window's own panes under the newly selected path
         // by pane id, and the registry is keyed by id, so those entries leave
@@ -14381,9 +14490,15 @@ impl SirioWorkspace {
         };
         let key = self.lsp.key_for(path, &worktree_root, &entry);
         if self.lsp.is_running(&key) || self.lsp.is_dead(&key) {
+            self.push_language_server_status(path, view, cx);
             self.sync_document_with_server(path, view, cx);
             return;
         }
+        // The launch is under way from here to its answer, which the status
+        // row shows as "starting" in every tab this server serves.
+        self.lsp.mark_starting(key.clone());
+        self.push_language_server_status(path, view, cx);
+        self.push_language_server_status_to_open_files(cx);
 
         let command = entry.command.clone();
         let args = entry.args.clone();
@@ -14442,6 +14557,7 @@ impl SirioWorkspace {
 
             let _ = this.update(cx, |workspace, cx| match launched {
                 Ok((server, read_loop)) => {
+                    workspace.lsp.finish_starting(&key);
                     let task = cx.background_executor().spawn(read_loop);
                     let router = Self::spawn_router(&server, cx);
                     workspace.lsp.insert(
@@ -14458,8 +14574,10 @@ impl SirioWorkspace {
                     let facts = workspace.file_context_facts(&path_for_facts);
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
                     workspace.sync_document_with_server(&path_for_facts, &view, cx);
+                    workspace.push_language_server_status_to_open_files(cx);
                 }
                 Err(sirio_lsp::LspError::NotInstalled { command }) => {
+                    workspace.lsp.finish_starting(&key);
                     // The shipped table offers a server for every language
                     // Sirio can open, so "not installed" is the answer for
                     // most of it on any given machine. Saying so on every
@@ -14494,6 +14612,8 @@ impl SirioWorkspace {
                         },
                     };
                     workspace.lsp.mark_dead(key, reason.clone());
+                    // Nothing to name: the row draws no server for a missing one.
+                    workspace.push_language_server_status_to_open_files(cx);
                     let facts = workspace.file_context_facts(&path_for_facts);
                     view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
                     // The offer, once per language: a silenced language
@@ -14509,7 +14629,14 @@ impl SirioWorkspace {
                     );
                 }
                 Err(error) => {
-                    workspace.lsp.mark_dead(key, crate::lsp::Dead::Failed);
+                    workspace.lsp.finish_starting(&key);
+                    workspace.lsp.mark_dead(
+                        key,
+                        crate::lsp::Dead::Failed {
+                            message: error.to_string(),
+                        },
+                    );
+                    workspace.push_language_server_status_to_open_files(cx);
                     // Naming the command is the point: it came from the
                     // user's languages.toml, and naming it turns a mystery
                     // into a line they can edit.
@@ -14712,7 +14839,7 @@ impl SirioWorkspace {
             crate::lsp::Dead::Manual { needs, .. } => OfferKind::Manual {
                 text: format!("{command} needs {needs}."),
             },
-            crate::lsp::Dead::NotInstalled { .. } | crate::lsp::Dead::Failed => return,
+            crate::lsp::Dead::NotInstalled { .. } | crate::lsp::Dead::Failed { .. } => return,
         };
         self.offered.insert(language.to_owned());
         #[cfg(test)]
@@ -18484,6 +18611,9 @@ impl SirioWorkspace {
             ("git_marks".to_string(), view.git_marks_text()),
             ("diff_open".to_string(), Self::open_hunk_text(view)),
             ("breadcrumb".to_string(), Self::escaped_field(&view.breadcrumb_text())),
+            // The row under the file, as drawn: empty until it is drawn.
+            ("status".to_string(), view.status_text(cx)),
+            ("worktree_dirty".to_string(), view.status_facts().worktree_dirty.to_string()),
             ("prefs".to_string(), EditorPrefs::current(cx).describe()),
         ];
         fields.extend(Self::find_fields(view));

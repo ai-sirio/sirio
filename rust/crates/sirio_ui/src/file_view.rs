@@ -43,7 +43,8 @@ use std::time::Duration;
 
 use ely_gpui_component::editor::{CodeEditor, ReadOnlyBanner, SingleCursor};
 // `sirio` has no Ely dependency; `open_find` takes these, and the socket verbs build them.
-pub use ely_gpui_component::editor::FindOptions;
+pub use ely_gpui_component::editor::{FindOptions, LspState};
+pub use status_row::StatusFacts;
 use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection,
@@ -62,6 +63,7 @@ mod breadcrumb;
 mod code_surface;
 mod find;
 mod git_marks;
+mod status_row;
 mod sync;
 
 use sync::minimal_edit;
@@ -270,6 +272,10 @@ pub struct FileView {
     git_diff_in_flight: bool,
     /// Whether the diff went stale while that fetch ran, so one more is due when it lands.
     git_diff_again: bool,
+    /// What the row under the file shows that only the app knows
+    /// (`set_status_facts`): the branch, how far it is from its upstream, the
+    /// language server.
+    status_facts: StatusFacts,
     /// The open find: its fields, its matches and the one that is current.
     /// `None` while find is closed.
     find: Option<find::FindState>,
@@ -503,6 +509,7 @@ impl FileView {
             open_hunk: None,
             git_diff_in_flight: false,
             git_diff_again: false,
+            status_facts: StatusFacts::default(),
             find: None,
             hover_offset: None,
             hover_point: point(px(0.), px(0.)),
@@ -1685,6 +1692,7 @@ impl Render for FileView {
                 window,
                 cx,
             )))
+            .when_some(self.render_status_row(theme, cx), |this, row| this.child(row))
     }
 }
 
