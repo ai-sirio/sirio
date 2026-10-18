@@ -1204,8 +1204,10 @@ impl FileView {
         }
     }
 
-    /// Saves the buffer (F-EDIT-04/06), recreating a deleted file. Errors
-    /// are returned and kept visible on the editor.
+    /// Saves the buffer (F-EDIT-04/06), recreating a deleted file. A failure
+    /// is returned and raised here, once, as a message of this tab (the corner
+    /// card and the bell), so no caller raises it again: the Ctrl+S handler
+    /// only logs it.
     pub fn save(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         if self.snapshot.is_some() {
             let reason = "Read-only: open the local copy to edit".to_string();
@@ -1216,9 +1218,12 @@ impl FileView {
             Some(editor) => editor.save(),
             None => Err("the file is still loading".to_string()),
         };
-        if result.is_ok() {
-            cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
-            cx.emit(FileViewEvent::Saved(self.path.clone()));
+        match &result {
+            Ok(()) => {
+                cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
+                cx.emit(FileViewEvent::Saved(self.path.clone()));
+            }
+            Err(error) => self.set_message(format!("Save failed: {error}"), cx),
         }
         cx.notify();
         result

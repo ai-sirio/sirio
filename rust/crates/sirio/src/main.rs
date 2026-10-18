@@ -22645,10 +22645,10 @@ impl SirioWorkspace {
             })
             .unwrap_or_default();
         for view in views {
+            // `FileView::save` raises its own failure (the card and the bell),
+            // so this only logs it.
             if let Err(error) = view.update(cx, |view, cx| view.save(cx)) {
-                view.update(cx, |view, cx| {
-                    view.set_message(format!("[files] save failed: {error}"), cx)
-                });
+                eprintln!("[files] save failed: {error}");
             }
         }
     }
