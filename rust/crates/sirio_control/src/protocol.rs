@@ -811,8 +811,8 @@ pub mod request {
         )
     }
 
-    /// Debug-only `surface.terminal.state {pane}`: `sessionLost` of an
-    /// application terminal tab.
+    /// Debug-only `surface.terminal.state {pane}`: `sessionLost` and the
+    /// `agentStatus` of an application terminal tab.
     pub fn terminal_state(pane: &str) -> ControlRequest {
         request(
             "surface.terminal.state",

@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Stand-in for the `opencode` CLI in the hook E2E. OpenCode's worktree plugin,
+# `.opencode/plugin/sirio-session.js`, reports the session id with
+# `sirioctl session-ref` when OpenCode updates a session. It sends no status, so
+# the pane's status does not change when this fires. This stub runs that plugin
+# with node against one `session.updated` event: a minimal driver calls the
+# plugin's factory with a `$` shell, then sends the event to its handler.
+#
+# Handshake, through $HOOK_STUB_OUT:
+#   opencode.pane  the pane id, written first and atomically;
+#   opencode.go    the one step: it waits for this file, takes it, then fires;
+#   opencode.log   `opencode session.updated exit=<status>`, or a SKIP.
+# The pane stays up after the event until one more opencode.go. Without node the
+# stub records a SKIP and holds the pane the same way.
+set -euo pipefail
+
+out=${HOOK_STUB_OUT:?HOOK_STUB_OUT must name the handshake directory}
+: "${SIRIO_PANE_ID:?opencode must run inside a Sirio pane}"
+go="$out/opencode.go"
+log="$out/opencode.log"
+
+printf '%s\n' "$SIRIO_PANE_ID" > "$out/opencode.pane.tmp"
+mv -f "$out/opencode.pane.tmp" "$out/opencode.pane"
+
+await_go() {
+  local deadline=$((SECONDS + 30))
+  until [ -e "$go" ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "opencode: timed out waiting for $go" >&2
+      exit 1
+    fi
+    sleep 0.2
+  done
+  rm -f "$go"
+}
+
+hold() {
+  until [ -e "$go" ]; do sleep 0.2; done
+  rm -f "$go"
+}
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "SKIP: node is not on PATH" >> "$log"
+  hold
+  exit 0
+fi
+
+# The OpenCode plugin API, reduced to what the plugin uses: `$` runs a command
+# with its words split as the template splits them, and `.quiet().nothrow()`
+# resolves to the command's result.
+driver="$out/opencode-driver.mjs"
+cat > "$driver" <<'JS'
+import { spawnSync } from 'node:child_process';
+
+const [plugin, eventType] = process.argv.slice(2);
+let status = 0;
+
+const $ = (strings, ...values) => {
+  const words = [];
+  let word = null;
+  strings.forEach((text, index) => {
+    for (const piece of text.split(/(\s+)/)) {
+      if (piece === '') continue;
+      if (/^\s+$/.test(piece)) {
+        if (word !== null) {
+          words.push(word);
+          word = null;
+        }
+      } else {
+        word = (word ?? '') + piece;
+      }
+    }
+    if (index < values.length) word = (word ?? '') + String(values[index]);
+  });
+  if (word !== null) words.push(word);
+  const shell = {
+    quiet: () => shell,
+    nothrow: async () => {
+      const result = spawnSync(words[0], words.slice(1), { stdio: 'ignore' });
+      status = result.status ?? 1;
+      return result;
+    },
+  };
+  return shell;
+};
+
+const { SirioSession } = await import(plugin);
+const hooks = await SirioSession({ $ });
+await hooks.event({
+  event: { type: eventType, properties: { info: { id: 'stub-opencode' } } },
+});
+process.exitCode = status;
+JS
+
+await_go
+status=0
+node "$driver" "$PWD/.opencode/plugin/sirio-session.js" session.updated || status=$?
+echo "opencode session.updated exit=$status" >> "$log"
+
+hold

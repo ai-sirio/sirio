@@ -1300,9 +1300,15 @@ enum ControlAction {
         reply: ControlReply,
     },
     /// Debug-only `surface.terminal.state {pane}`: whether the tab shows
-    /// *Session lost*.
+    /// *Session lost*, and the agent status its pane reports.
     TerminalState {
         pane: String,
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.settings.act {action}`: runs the install its Settings
+    /// button runs, and answers with the report its card receives once it ends.
+    SettingsAct {
+        action: String,
         reply: ControlReply,
     },
 }
@@ -2879,6 +2885,25 @@ impl ControlHandler for AppControlHandler {
                 let pane = request.params.get("pane").cloned().unwrap_or_default();
                 self.queue_action(request, move |reply| ControlAction::TerminalState { pane, reply })
             }
+            "surface.settings.act" if cfg!(debug_assertions) => {
+                let action = request.params.get("action").cloned().unwrap_or_default();
+                if !matches!(action.as_str(), "install-hooks" | "install-skill" | "install-cli") {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.settings.act requires action install-hooks, install-skill or install-cli",
+                    );
+                }
+                // The install waits on a copy, a link or an administrator's
+                // prompt, and the reply waits for it. `queue_action` bounds the
+                // wait by the request's own `timeoutMs`, so one is supplied when
+                // the caller left it out.
+                let mut waiting = request.clone();
+                waiting
+                    .params
+                    .entry("timeoutMs".to_string())
+                    .or_insert_with(|| "120000".to_string());
+                self.queue_action(&waiting, move |reply| ControlAction::SettingsAct { action, reply })
+            }
             "surface.tabs.read" => self.queue_action(request, |reply| ControlAction::ReadTabs { reply }),
             "surface.layout.read" => self.queue_action(request, |reply| ControlAction::ReadLayout { reply }),
             "surface.open_list.open" if cfg!(debug_assertions) => {
@@ -4410,6 +4435,18 @@ fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Ico
     }
 }
 
+/// The `agentStatus` words `surface.terminal.state` answers with, which the
+/// stub agents and the E2E read. They are not `human_label`'s words.
+fn agent_status_word(status: Option<AgentStatus>) -> &'static str {
+    match status {
+        Some(AgentStatus::Running) => "running",
+        Some(AgentStatus::NeedsInput) => "needs-input",
+        Some(AgentStatus::Done) => "done",
+        Some(AgentStatus::Error) => "error",
+        None => "none",
+    }
+}
+
 fn activity_status_for_agent(status: AgentStatus) -> ActivityStatus {
     match status {
         AgentStatus::Running => ActivityStatus::Running,
@@ -5449,13 +5486,13 @@ impl SirioWorkspace {
                                     );
                                 }
                                 WorkspaceAction::InstallSkill => {
-                                    workspace.begin_skill_install(cx);
+                                    workspace.begin_skill_install(None, cx);
                                 }
                                 WorkspaceAction::InstallHooks => {
-                                    workspace.begin_global_hooks_install(cx);
+                                    workspace.begin_global_hooks_install(None, cx);
                                 }
                                 WorkspaceAction::InstallCli => {
-                                    workspace.begin_cli_install(cx);
+                                    workspace.begin_cli_install(None, cx);
                                 }
                                 WorkspaceAction::OpenSettings => {
                                     workspace.open_settings(None, cx);
@@ -5687,6 +5724,9 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::TerminalState { pane, reply } => {
                                     let _ = reply.send(workspace.control_terminal_state(&pane, cx));
+                                }
+                                ControlAction::SettingsAct { action, reply } => {
+                                    workspace.control_settings_act(&action, reply, cx);
                                 }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
@@ -17008,12 +17048,13 @@ impl SirioWorkspace {
     /// Settings → Install Skill: writes Sirio's skill for every agent on the
     /// background executor (a few small files, no prompt) and hands each
     /// location's outcome back to the Settings card. Nothing opens a terminal.
-    fn begin_skill_install(&mut self, cx: &mut Context<Self>) {
+    fn begin_skill_install(&mut self, reply: Option<ControlReply>, cx: &mut Context<Self>) {
         let process: BTreeMap<String, String> = std::env::vars().collect();
         let Some((home, environment)) = cli_install::skill_home_and_environment(&process) else {
             self.report_settings_install(
                 SettingsInstall::Skill,
                 "home directory not found: no HOME or USERPROFILE in the environment".into(),
+                reply,
                 cx,
             );
             return;
@@ -17030,7 +17071,7 @@ impl SirioWorkspace {
                 })
                 .await;
             let _ = this.update(cx, |workspace, cx| {
-                workspace.report_settings_install(SettingsInstall::Skill, summary, cx);
+                workspace.report_settings_install(SettingsInstall::Skill, summary, reply, cx);
             });
         })
         .detach();
@@ -17038,12 +17079,17 @@ impl SirioWorkspace {
 
     /// Hands an install's outcome to the Settings card that started it. Install
     /// Skill and Install Hooks both answer through this, each through its own card.
+    /// A control request that started the install gets the same text back.
     fn report_settings_install(
         &mut self,
         install: SettingsInstall,
         text: String,
+        reply: Option<ControlReply>,
         cx: &mut Context<Self>,
     ) {
+        if let Some(reply) = reply {
+            let _ = reply.send(Ok(vec![("report".to_string(), text.clone())]));
+        }
         self.settings.update(cx, |settings, cx| match install {
             SettingsInstall::Skill => settings.set_skill_install_report(Some(text), cx),
             SettingsInstall::Hooks => settings.set_hooks_install_report(Some(text), cx),
@@ -17054,7 +17100,7 @@ impl SirioWorkspace {
     /// hooks on the background executor and hands the per-agent outcome
     /// back to the Settings card. The only place Sirio ever writes under
     /// the home directory — `prepare()` on a launch never does.
-    fn begin_global_hooks_install(&mut self, cx: &mut Context<Self>) {
+    fn begin_global_hooks_install(&mut self, reply: Option<ControlReply>, cx: &mut Context<Self>) {
         // User-global hooks always name the release copy, from any build. A
         // release build makes that copy first, on the background executor.
         let environment: BTreeMap<String, String> = std::env::vars().collect();
@@ -17064,7 +17110,7 @@ impl SirioWorkspace {
             } else {
                 "sirioctl not found: no absolute data directory (XDG_DATA_HOME or HOME)"
             };
-            self.report_settings_install(SettingsInstall::Hooks, missing.into(), cx);
+            self.report_settings_install(SettingsInstall::Hooks, missing.into(), reply, cx);
             return;
         };
         let sirioctl_path = sirioctl_path.to_string_lossy().into_owned();
@@ -17072,6 +17118,7 @@ impl SirioWorkspace {
             self.report_settings_install(
                 SettingsInstall::Hooks,
                 "home directory not found: no HOME or USERPROFILE in the environment".into(),
+                reply,
                 cx,
             );
             return;
@@ -17104,7 +17151,7 @@ impl SirioWorkspace {
                 Err(error) => format!("sirioctl not found: {error}"),
             };
             let _ = this.update(cx, |workspace, cx| {
-                workspace.report_settings_install(SettingsInstall::Hooks, summary, cx);
+                workspace.report_settings_install(SettingsInstall::Hooks, summary, reply, cx);
             });
         })
         .detach();
@@ -17113,7 +17160,7 @@ impl SirioWorkspace {
     /// Settings → Install in PATH: the copy and the link are made on a thread of
     /// their own, because the macOS administrator prompt blocks and must not hold
     /// a background-executor worker. The card is told what they came to after.
-    fn begin_cli_install(&mut self, cx: &mut Context<Self>) {
+    fn begin_cli_install(&mut self, reply: Option<ControlReply>, cx: &mut Context<Self>) {
         let environment: BTreeMap<String, String> = std::env::vars().collect();
         let current_exe = std::env::current_exe().unwrap_or_default();
         let (sender, finished) = futures::channel::oneshot::channel();
@@ -17131,8 +17178,19 @@ impl SirioWorkspace {
             // reads what is stored, which also ends the button's disabled state.
             let _ = finished.await;
             let _ = this.update(cx, |workspace, cx| {
+                let status = cli_install::card_status();
+                if let Some(reply) = reply {
+                    let answer = match &status {
+                        Some(status) => Ok(vec![(
+                            "report".to_string(),
+                            cli_install::card_words(status),
+                        )]),
+                        None => Err("sirioctl install reported no status".to_string()),
+                    };
+                    let _ = reply.send(answer);
+                }
                 workspace.settings.update(cx, |settings, cx| {
-                    settings.set_cli_status(cli_install::card_status(), cx);
+                    settings.set_cli_status(status, cx);
                 });
             });
         })
@@ -17654,7 +17712,28 @@ impl SirioWorkspace {
     ) -> Result<Vec<(String, String)>, String> {
         let view = self.control_terminal_view(pane)?;
         let lost = view.read(cx).session_lost();
-        Ok(vec![("sessionLost".to_string(), lost.to_string())])
+        // Keyed by the id the pane exports as `SIRIO_PANE_ID`, which is the id a
+        // hook's `notify --session` sends back: the activity model's key for it.
+        let exported = view.read(cx).identity().pane_id().to_owned();
+        let status = self.activity.status(&exported);
+        Ok(vec![
+            ("sessionLost".to_string(), lost.to_string()),
+            ("agentStatus".to_string(), agent_status_word(status).to_string()),
+        ])
+    }
+
+    /// Debug-only `surface.settings.act`: runs the install its Settings button
+    /// runs. The socket side has already named the action; the reply waits
+    /// until the install ends and carries the text its card receives.
+    fn control_settings_act(&mut self, action: &str, reply: ControlReply, cx: &mut Context<Self>) {
+        match action {
+            "install-skill" => self.begin_skill_install(Some(reply), cx),
+            "install-hooks" => self.begin_global_hooks_install(Some(reply), cx),
+            "install-cli" => self.begin_cli_install(Some(reply), cx),
+            other => {
+                let _ = reply.send(Err(format!("surface.settings.act has no action {other}")));
+            }
+        }
     }
 
     /// Every tab as `<kind>|<snapshot yes|no>|<title>`, and which is active.
@@ -27981,6 +28060,44 @@ done
             Some("https://example.test/from-terminal"),
             "a terminal link click must queue OpenBrowserLink (the same in-app \
              Browser tab route bind_chat's ChatEvent::OpenLink uses)"
+        );
+    }
+
+    /// `surface.terminal.state` reports the agent status the activity model
+    /// holds under the pane's own id, the id it exports as `SIRIO_PANE_ID` and
+    /// that a hook's `notify --session` sends back.
+    #[gpui::test]
+    fn terminal_state_reports_the_agent_status_of_its_own_pane(cx: &mut TestAppContext) {
+        let workspace = cx.new(|cx| {
+            let workspace = palette_test_workspace(cx);
+            let terminal = match &workspace.tabs[0].panes {
+                PaneNode::Leaf {
+                    content: Some(TabContent::Terminal { view }),
+                    ..
+                } => view.clone(),
+                _ => panic!("test tab 0 must be a terminal pane"),
+            };
+            terminal.update(cx, |terminal, _| {
+                terminal.set_identity(TerminalIdentity::new("pane-0", "terminal-0"));
+            });
+            workspace
+        });
+        workspace.update(cx, |workspace, _| {
+            workspace
+                .activity
+                .notify("pane-0", AgentStatus::NeedsInput, Instant::now());
+        });
+        let pairs = workspace.read_with(cx, |workspace, app| {
+            workspace.control_terminal_state("pane-0", app)
+        });
+        let pairs = pairs.expect("tab 0 is a terminal pane");
+        assert!(
+            pairs.contains(&("agentStatus".to_string(), "needs-input".to_string())),
+            "a pane whose hook reported needs-input must say so: {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("sessionLost".to_string(), "false".to_string())),
+            "the session-lost answer must stay: {pairs:?}"
         );
     }
 
@@ -40631,6 +40748,66 @@ done
         assert!(response.ok, "queued compose response: {response:?}");
     }
 
+    /// `surface.settings.act` runs one of the three Settings installs and
+    /// nothing else: any other action is refused before anything is queued,
+    /// and the three are queued with the action the socket named.
+    #[test]
+    fn settings_act_queues_only_the_three_installs() {
+        let actions = Arc::new(Mutex::new(Vec::new()));
+        let handler = Arc::new(AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                project_settings: BTreeMap::new(),
+                workspaces: Vec::new(),
+                current: None,
+            })),
+            actions.clone(),
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/sirio-settings-act-test.sock")),
+        ));
+        let act = |action: &str| ControlRequest {
+            id: format!("settings-act-{action}"),
+            method: "surface.settings.act".into(),
+            params: BTreeMap::from([("action".into(), action.into())]),
+        };
+
+        let refused = handler.handle(&act("reinstall-everything"));
+        assert!(!refused.ok, "an unknown action must fail: {refused:?}");
+        let message = refused.error.clone().unwrap_or_default();
+        for install in ["install-hooks", "install-skill", "install-cli"] {
+            assert!(message.contains(install), "the refusal must name {install}: {message}");
+        }
+        assert!(
+            actions.lock().expect("action queue").is_empty(),
+            "a refused action must queue nothing"
+        );
+
+        let worker = std::thread::spawn({
+            let handler = handler.clone();
+            move || handler.handle(&act("install-hooks"))
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let action = loop {
+            if let Some(action) = actions.lock().expect("action queue").pop() {
+                break action;
+            }
+            assert!(Instant::now() < deadline, "install-hooks was never queued");
+            std::thread::yield_now();
+        };
+        let ControlAction::SettingsAct { action, reply } = action else {
+            panic!("settings.act must cross the existing GPUI control-action queue");
+        };
+        assert_eq!(action, "install-hooks");
+        reply
+            .send(Ok(vec![("report".into(), "done".into())]))
+            .expect("reply to socket worker");
+        let response = worker.join().expect("socket worker did not panic");
+        assert!(response.ok, "queued settings.act response: {response:?}");
+    }
+
     #[cfg(windows)]
     const VERBATIM_PATH: &str = r"\\?\D:\x\y";
     #[cfg(windows)]
@@ -40720,6 +40897,7 @@ done
             | ControlAction::OpenTerminal { reply, .. }
             | ControlAction::TerminalRestart { reply, .. }
             | ControlAction::TerminalState { reply, .. }
+            | ControlAction::SettingsAct { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -40848,6 +41026,7 @@ done
             "surface.change_request.act" => request::change_request_act("close", &BTreeMap::new()),
             "surface.host.end_all" => request_with_params(method, &[]),
             "surface.terminal.open" => request_with_params(method, &[]),
+            "surface.settings.act" => request_with_params(method, &[("action", "install-hooks")]),
             "surface.terminal.restart" | "surface.terminal.state" => {
                 request_with_params(method, &[("pane", "pane-1")])
             }

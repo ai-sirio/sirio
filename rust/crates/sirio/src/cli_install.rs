@@ -507,6 +507,16 @@ pub(crate) fn card_status() -> Option<CliStatus> {
     Some(status_for(&copy, &link))
 }
 
+/// The CLI card's lines as one report: the PATH line, then the copy's build
+/// when it has one. A control request's `report` carries this text.
+pub(crate) fn card_words(status: &CliStatus) -> String {
+    [status.path_line.as_str(), status.version_line.as_str()]
+        .into_iter()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn status_for(copy: &CopyResult, link: &LinkOutcome) -> CliStatus {
     let (stable_path, version_line) = match copy {
         Ok((path, outcome)) => (path.display().to_string(), version_words(*outcome)),

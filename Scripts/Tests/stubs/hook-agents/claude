@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Stand-in for the `claude` CLI in the hook E2E. It fires the hooks Sirio's
+# adapter wrote into `.claude/settings.local.json` of the worktree it runs in,
+# exactly as written: each event's command, through `sh -c`, with the payload
+# Claude sends on stdin. It does not model Claude itself.
+#
+# Handshake, through $HOOK_STUB_OUT:
+#   claude.pane  the pane id, written first and atomically;
+#   claude.go    one file per step: a step waits for it, takes it, then fires;
+#   claude.log   one line per fired hook: `claude <event> exit=<status>`.
+# After the last hook the pane stays up until one more claude.go, so the E2E can
+# read the status that hook left behind. Neither jq nor python3 is a SKIP.
+set -euo pipefail
+
+out=${HOOK_STUB_OUT:?HOOK_STUB_OUT must name the handshake directory}
+: "${SIRIO_PANE_ID:?claude must run inside a Sirio pane}"
+go="$out/claude.go"
+log="$out/claude.log"
+
+printf '%s\n' "$SIRIO_PANE_ID" > "$out/claude.pane.tmp"
+mv -f "$out/claude.pane.tmp" "$out/claude.pane"
+
+# Waits for the E2E's go for the next step, then takes it. A step the E2E never
+# releases fails the stub rather than holding the pane forever.
+await_go() {
+  local deadline=$((SECONDS + 30))
+  until [ -e "$go" ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "claude: timed out waiting for $go" >&2
+      exit 1
+    fi
+    sleep 0.2
+  done
+  rm -f "$go"
+}
+
+# Holds the pane after the last hook: an exit would read as the agent finishing.
+hold() {
+  until [ -e "$go" ]; do sleep 0.2; done
+  rm -f "$go"
+}
+
+# The commands an event's hooks run, one per line.
+hook_commands() {
+  local event=$1
+  local file=.claude/settings.local.json
+  if command -v jq >/dev/null 2>&1; then
+    jq -r --arg event "$event" '.hooks[$event][]?.hooks[]?.command // empty' "$file"
+  else
+    python3 -I -c '
+import json, sys
+settings = json.load(open(sys.argv[1]))
+for group in settings.get("hooks", {}).get(sys.argv[2], []):
+    for hook in group.get("hooks", []):
+        if "command" in hook:
+            print(hook["command"])
+' "$file" "$event"
+  fi
+}
+
+if ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+  echo "SKIP: neither jq nor python3 is on PATH" >> "$log"
+  hold
+  exit 0
+fi
+
+# Claude fires UserPromptSubmit when the user submits, and Stop when a turn ends.
+for event in UserPromptSubmit Stop; do
+  count=0
+  while IFS= read -r command; do
+    [ -n "$command" ] || continue
+    count=$((count + 1))
+    await_go
+    status=0
+    sh -c "$command" <<< '{"session_id":"stub-claude"}' || status=$?
+    echo "claude $event exit=$status" >> "$log"
+  done < <(hook_commands "$event")
+  if [ "$count" -eq 0 ]; then
+    echo "claude $event no hook in .claude/settings.local.json" >> "$log"
+  fi
+done
+
+hold

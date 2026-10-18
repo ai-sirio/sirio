@@ -58,7 +58,9 @@ retries = 2
 # still accepts the document.
 # The five initial-prompt tests join them for the same reason: they read the
 # installed CLI's `--help`.
-default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with) and not test(=claude_takes_an_initial_prompt_argument) and not test(=codex_takes_an_initial_prompt_argument) and not test(=opencode_takes_an_initial_prompt_flag) and not test(=pi_takes_initial_messages) and not test(=omp_takes_an_initial_prompt_argument)'
+# The three hooks_live tests each run one live turn of an installed CLI through its
+# hook config: they cost money and need a login or credit, which a runner does not have.
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with) and not test(=claude_takes_an_initial_prompt_argument) and not test(=codex_takes_an_initial_prompt_argument) and not test(=opencode_takes_an_initial_prompt_flag) and not test(=pi_takes_initial_messages) and not test(=omp_takes_an_initial_prompt_argument) and not test(=claude_fires_its_hooks_for_one_turn) and not test(=codex_fires_its_notify_hook_for_one_turn) and not test(=opencode_reports_its_session_for_one_turn)'
 
 [profile.pr]
 # .github/workflows/pr.yml selects this profile, by way of Scripts/ci.sh mapping
@@ -93,7 +95,9 @@ default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and no
 # elsewhere are worth.
 # The five initial-prompt tests join them for the same reason: they read the
 # installed CLI's `--help`.
-default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with) and not test(=claude_takes_an_initial_prompt_argument) and not test(=codex_takes_an_initial_prompt_argument) and not test(=opencode_takes_an_initial_prompt_flag) and not test(=pi_takes_initial_messages) and not test(=omp_takes_an_initial_prompt_argument)'
+# The three hooks_live tests each run one live turn of an installed CLI through its
+# hook config: they cost money and need a login or credit, which a runner does not have.
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with) and not test(=claude_takes_an_initial_prompt_argument) and not test(=codex_takes_an_initial_prompt_argument) and not test(=opencode_takes_an_initial_prompt_flag) and not test(=pi_takes_initial_messages) and not test(=omp_takes_an_initial_prompt_argument) and not test(=claude_fires_its_hooks_for_one_turn) and not test(=codex_fires_its_notify_hook_for_one_turn) and not test(=opencode_reports_its_session_for_one_turn)'
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 3 }
 

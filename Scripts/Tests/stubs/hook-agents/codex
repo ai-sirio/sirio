@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Stand-in for the `codex` CLI in the hook E2E. Codex has no hooks file: Sirio's
+# adapter passes its notify hook on the command line as `-c notify=[...]`, a TOML
+# array of JSON strings. This stub reads that array out of its own argv, parses
+# it as TOML, and runs it with a Codex notify payload appended, as Codex does
+# when a turn ends.
+#
+# Handshake, through $HOOK_STUB_OUT:
+#   codex.pane  the pane id, written first and atomically;
+#   codex.go    the one step: it waits for this file, takes it, then fires;
+#   codex.log   `codex notify exit=<status>`.
+# The pane stays up after the hook until one more codex.go. Python 3.11 or later
+# (tomllib) is required; without it the stub records a SKIP.
+set -euo pipefail
+
+out=${HOOK_STUB_OUT:?HOOK_STUB_OUT must name the handshake directory}
+: "${SIRIO_PANE_ID:?codex must run inside a Sirio pane}"
+go="$out/codex.go"
+log="$out/codex.log"
+
+printf '%s\n' "$SIRIO_PANE_ID" > "$out/codex.pane.tmp"
+mv -f "$out/codex.pane.tmp" "$out/codex.pane"
+
+await_go() {
+  local deadline=$((SECONDS + 30))
+  until [ -e "$go" ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "codex: timed out waiting for $go" >&2
+      exit 1
+    fi
+    sleep 0.2
+  done
+  rm -f "$go"
+}
+
+hold() {
+  until [ -e "$go" ]; do sleep 0.2; done
+  rm -f "$go"
+}
+
+notify=""
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "-c" ] && [[ $argument == notify=* ]]; then
+    notify=$argument
+  fi
+  previous=$argument
+done
+if [ -z "$notify" ]; then
+  echo "codex: no -c notify= override on the command line" >&2
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -I -c 'import tomllib' 2>/dev/null; then
+  echo "SKIP: python3 3.11 or later (tomllib) is not on PATH" >> "$log"
+  hold
+  exit 0
+fi
+
+# The notify value is TOML: the array's elements come out NUL-separated, so a
+# path with spaces stays one argument.
+argv=()
+while IFS= read -r -d '' part; do
+  argv+=("$part")
+done < <(python3 -I -c '
+import sys, tomllib
+argv = tomllib.loads("notify = " + sys.argv[1])["notify"]
+sys.stdout.buffer.write("".join(part + "\0" for part in argv).encode("utf-8"))
+' "${notify#notify=}")
+if [ "${#argv[@]}" -eq 0 ]; then
+  echo "codex: the notify value in $notify is not a TOML array of strings" >&2
+  exit 1
+fi
+
+payload='{"type":"agent-turn-complete","thread-id":"stub-codex","turn-id":"stub-codex-turn","input-messages":[],"last-assistant-message":"ok"}'
+
+await_go
+status=0
+"${argv[@]}" "$payload" || status=$?
+echo "codex notify exit=$status" >> "$log"
+
+hold

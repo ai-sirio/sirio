@@ -67,11 +67,12 @@ pub const BROWSER_NOT_SUPPORTED: &[&str] = &[
 
 /// Served by debug builds only. A release build leaves these out of
 /// `system.capabilities`, and answers them with "unknown method".
-const DEBUG_METHODS: [&str; 10] = [
+const DEBUG_METHODS: [&str; 11] = [
     "surface.change_request.act",
     "surface.open_list.open",
     "surface.changes.confirm",
     "surface.host.end_all",
+    "surface.settings.act",
     "surface.terminal.open",
     "surface.terminal.restart",
     "surface.terminal.state",
@@ -170,4 +171,18 @@ pub fn served_methods(debug: bool) -> Vec<&'static str> {
         methods.extend(DEBUG_METHODS);
     }
     methods
+}
+
+#[cfg(test)]
+mod tests {
+    use super::served_methods;
+
+    /// `surface.settings.act` runs a Settings install, which writes the user's
+    /// home directory. Only a debug build may serve it, so a release build must
+    /// neither list it nor answer it.
+    #[test]
+    fn settings_act_is_served_by_debug_builds_only() {
+        assert!(served_methods(true).contains(&"surface.settings.act"));
+        assert!(!served_methods(false).contains(&"surface.settings.act"));
+    }
 }
