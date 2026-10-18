@@ -259,6 +259,15 @@ impl FileView {
             left.push(indicator.into_any_element());
         }
         if let Some((name, state)) = items.lsp {
+            // The row says that a server did not start, in a word: the reason
+            // is the error's whole text, and it is already in the corner card
+            // and the bell, where it can wrap and be copied. Drawn here it ran
+            // out of the item and was cut mid-glyph. `lsp=…:failed` in the
+            // state is the same either way.
+            let state = match state {
+                LspState::Failed(_) => LspState::Failed(SharedString::from("did not start")),
+                other => other,
+            };
             left.push(
                 LspStatus::new("status-lsp", SharedString::from(name), state).into_any_element(),
             );
