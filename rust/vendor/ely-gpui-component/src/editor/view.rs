@@ -163,6 +163,7 @@ impl CodeEditor {
         let scroll = self.scroll.clone();
         let entity = cx.entity();
         let (drag, press) = (cx.entity(), cx.entity());
+        let id = cx.entity_id().as_u64();
         let shade = colors.hover;
         div()
             .id("minimap")
@@ -185,6 +186,7 @@ impl CodeEditor {
                         })
                     },
                     move |bounds, (plan, tokens), window, _| {
+                        let _paint = sirio_perf::span("CodeEditor.minimap_paint", id);
                         let tall = plan.tall;
                         // A row a pixel tall or more keeps its proportion, a thinner one is drawn as most of its pixel.
                         let thick = tall.max(1.0) * 0.7;
@@ -198,19 +200,22 @@ impl CodeEditor {
                             Bounds::new(point(bounds.origin.x, top), extent),
                             shade,
                         ));
-                        for (y, spans) in &tokens {
-                            for (start, len, color) in spans {
-                                let origin = point(
-                                    bounds.origin.x + wide * (*start + 2) as f32,
-                                    bounds.origin.y + px(*y),
-                                );
-                                let extent = size(wide * *len as f32, px(thick));
-                                window.paint_quad(fill(
-                                    Bounds::new(origin, extent),
-                                    color.opacity(0.7),
-                                ));
+                        // The tokens sit side by side on rows a pixel apart: one layer gives them a single draw order, so each is not placed among everything painted before it (a quad costs about a microsecond that way, and a screenful of code has thousands).
+                        window.paint_layer(bounds, |window| {
+                            for (y, spans) in &tokens {
+                                for (start, len, color) in spans {
+                                    let origin = point(
+                                        bounds.origin.x + wide * (*start + 2) as f32,
+                                        bounds.origin.y + px(*y),
+                                    );
+                                    let extent = size(wide * *len as f32, px(thick));
+                                    window.paint_quad(fill(
+                                        Bounds::new(origin, extent),
+                                        color.opacity(0.7),
+                                    ));
+                                }
                             }
-                        }
+                        });
                     },
                 )
                 .absolute()

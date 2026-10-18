@@ -649,6 +649,16 @@ before, 0.04 ms after, on a 1 MiB file of 39,247 lines).
   pixels (sampling cannot avoid that), so the picture changes at the sampled
   rows below the edit, by neighbouring lines. Files up to the minimap's height
   in rows are drawn as before.
+- `src/editor/view.rs`: the minimap's tokens are painted inside one
+  `Window::paint_layer`. Each `paint_quad` otherwise looks up everything
+  already painted for its draw order, about a microsecond a quad, and a
+  screenful of Rust is some 3,000 quads a frame (a `CodeEditor.minimap_paint`
+  span times it): 3.4 ms a frame on a 24k-line Rust file, 0.3 ms in a layer. The
+  quads are the same, so the picture is the same. (The first version of the
+  pixel-row sampling had drawn a row at every pixel and cost 1.1 ms more than
+  the stride sampling it replaced, which had been dropping about a third of its
+  rows by accident: a 0.7 px quad whose top falls between .5 and .8 of a device
+  pixel snaps to a box of no height and is not painted.)
 - `src/editor/anchors.rs`, `state.rs`, `line.rs`, `gutter.rs`: a row's washes
   (`Marks.backgrounds`) and diagnostics are found by range, not by testing every
   one for every drawn row (a find on `e` washes ~117k places). `Reach` keeps,
