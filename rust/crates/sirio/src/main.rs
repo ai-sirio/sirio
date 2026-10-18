@@ -22827,16 +22827,39 @@ fn seed_sidebar_identity_and_worktree_defaults(
 }
 
 /// Starts in the nearest repository when launched from one of its subdirectories.
-fn initial_working_directory() -> PathBuf {
-    let current = std::env::current_dir().unwrap_or_else(|error| {
-        eprintln!("[sirio] cannot read the current directory: {error}");
-        user_home_dir().unwrap_or_else(|| PathBuf::from("."))
-    });
-    current
+///
+/// Under an AppImage the process runs inside its mount (`APPDIR`), which is
+/// no place to start a workspace: the walk starts at `OWD`, the directory the
+/// AppImage was launched from, when that is an absolute existing directory
+/// outside the mount, and at `home` otherwise. Without an `APPDIR` the walk
+/// starts at `current`, as it always did.
+fn initial_working_directory(
+    current: &Path,
+    process: &BTreeMap<String, String>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    let mount = process
+        .get("APPDIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|mount| mount.is_absolute());
+    let start = match mount {
+        Some(mount) if current.starts_with(&mount) => {
+            let launched = process
+                .get("OWD")
+                .map(PathBuf::from)
+                .filter(|owd| {
+                    owd.is_absolute() && owd.is_dir() && !owd.starts_with(&mount)
+                });
+            launched.or(home).unwrap_or_else(|| current.to_path_buf())
+        }
+        _ => current.to_path_buf(),
+    };
+    start
         .ancestors()
         .find(|path| is_git_repository(path))
         .map(PathBuf::from)
-        .unwrap_or(current)
+        .unwrap_or(start)
 }
 
 /// Replays a persisted pane event history through `PaneNode`'s public
@@ -25691,7 +25714,7 @@ fn main() {
     // gpui finds nothing and paints nothing. Sirio's own icons embed their
     // bytes and never needed this.
     let app = application().with_assets(sirio_ui::ely::AppAssets);
-    app.run(|cx: &mut App| {
+    app.run(move |cx: &mut App| {
         #[cfg(feature = "perf-native")]
         native_perf::init(cx);
         // Must land before `Theme::init`: Theme caches resolved font names.
@@ -25719,7 +25742,15 @@ fn main() {
         // The working directory can vanish between launches (a terminal
         // whose cwd was deleted): fall back rather than abort before the
         // window exists.
-        let fallback_directory = initial_working_directory();
+        let current_directory = std::env::current_dir().unwrap_or_else(|error| {
+            eprintln!("[sirio] cannot read the current directory: {error}");
+            user_home_dir().unwrap_or_else(|| PathBuf::from("."))
+        });
+        let fallback_directory = initial_working_directory(
+            &current_directory,
+            &process_environment,
+            user_home_dir(),
+        );
         let restored = session::restore(&database_path, &fallback_directory);
         for diagnostic in &restored.diagnostics {
             eprintln!("[session] {diagnostic}");
@@ -46613,6 +46644,146 @@ browser  profile  "
             );
         });
         shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A scratch tree for `initial_working_directory`, under the temp dir
+    /// (`TMPDIR` in the gate's environment) and unique to this test.
+    fn initial_directory_scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "sirio-initial-dir-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create the scratch tree");
+        root
+    }
+
+    fn initial_directory_environment(entries: &[(&str, &Path)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.display().to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn initial_directory_without_an_appimage_is_the_process_directory() {
+        let root = initial_directory_scratch("no-appimage");
+        let plain = root.join("plain");
+        let repo = root.join("repo");
+        let home = root.join("home");
+        for dir in [&plain, &repo.join(".git"), &repo.join("sub"), &home] {
+            std::fs::create_dir_all(dir).expect("create a directory");
+        }
+        let nothing = BTreeMap::new();
+        assert_eq!(
+            initial_working_directory(&plain, &nothing, Some(home.clone())),
+            plain,
+            "a directory outside any repository starts where it is"
+        );
+        assert_eq!(
+            initial_working_directory(&repo.join("sub"), &nothing, Some(home.clone())),
+            repo,
+            "a subdirectory of a repository starts at its root"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn inside_the_appimage_mount_the_walk_starts_where_it_was_launched() {
+        let root = initial_directory_scratch("launch-dir");
+        let mount = root.join("mount");
+        let mount_bin = mount.join("usr").join("bin");
+        let launched = root.join("launched");
+        let home = root.join("home");
+        for dir in [&mount_bin, &launched, &home] {
+            std::fs::create_dir_all(dir).expect("create a directory");
+        }
+        let process = initial_directory_environment(&[
+            ("APPDIR", mount.as_path()),
+            ("OWD", launched.as_path()),
+        ]);
+        assert_eq!(
+            initial_working_directory(&mount_bin, &process, Some(home)),
+            launched,
+            "a launch directory outside the mount is the starting point"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_launch_directory_inside_a_repository_starts_at_its_root() {
+        let root = initial_directory_scratch("launch-repo");
+        let mount = root.join("mount");
+        let mount_bin = mount.join("usr").join("bin");
+        let repo = root.join("repo");
+        let launched = repo.join("sub");
+        let home = root.join("home");
+        for dir in [&mount_bin, &repo.join(".git"), &launched, &home] {
+            std::fs::create_dir_all(dir).expect("create a directory");
+        }
+        let process = initial_directory_environment(&[
+            ("APPDIR", mount.as_path()),
+            ("OWD", launched.as_path()),
+        ]);
+        assert_eq!(
+            initial_working_directory(&mount_bin, &process, Some(home)),
+            repo,
+            "the git-ancestor walk runs from the launch directory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unusable_launch_directory_starts_at_home() {
+        let root = initial_directory_scratch("unusable-owd");
+        let mount = root.join("mount");
+        let mount_bin = mount.join("usr").join("bin");
+        let inside_mount = mount.join("inside");
+        let home = root.join("home");
+        for dir in [&mount_bin, &inside_mount, &home] {
+            std::fs::create_dir_all(dir).expect("create a directory");
+        }
+        let missing = root.join("missing");
+        let relative = PathBuf::from("relative/launch");
+        for (case, owd) in [
+            ("missing", missing),
+            ("relative", relative),
+            ("empty", PathBuf::new()),
+            ("under the mount", inside_mount),
+        ] {
+            let process = initial_directory_environment(&[
+                ("APPDIR", mount.as_path()),
+                ("OWD", owd.as_path()),
+            ]);
+            assert_eq!(
+                initial_working_directory(&mount_bin, &process, Some(home.clone())),
+                home,
+                "an OWD that is {case} never becomes the starting point"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_directory_outside_the_appimage_mount_ignores_the_launch_directory() {
+        let root = initial_directory_scratch("outside-mount");
+        let mount = root.join("mount");
+        let elsewhere = root.join("elsewhere");
+        let launched = root.join("launched");
+        let home = root.join("home");
+        for dir in [&mount, &elsewhere, &launched, &home] {
+            std::fs::create_dir_all(dir).expect("create a directory");
+        }
+        let process = initial_directory_environment(&[
+            ("APPDIR", mount.as_path()),
+            ("OWD", launched.as_path()),
+        ]);
+        assert_eq!(
+            initial_working_directory(&elsewhere, &process, Some(home)),
+            elsewhere,
+            "a directory outside the mount starts where it is"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
