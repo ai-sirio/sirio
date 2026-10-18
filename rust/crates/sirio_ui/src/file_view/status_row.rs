@@ -45,6 +45,9 @@ use sirio_markdown::LineEnding;
 /// shortened in the middle to this many, the ellipsis included.
 const BRANCH_CHARS: usize = 24;
 
+/// The row's height; the corner message card sits above it.
+pub(super) const STATUS_ROW_HEIGHT: Pixels = px(26.0);
+
 /// The row's side padding and the gap between its two groups, which the fit
 /// test adds to the groups' widths.
 const ROW_PADDING: Pixels = px(8.0);
@@ -341,7 +344,7 @@ impl FileView {
                 .relative()
                 .debug_selector(|| "file-status-row".to_owned())
                 .w_full()
-                .h(px(26.0))
+                .h(STATUS_ROW_HEIGHT)
                 .px(ROW_PADDING)
                 .flex()
                 .flex_none()

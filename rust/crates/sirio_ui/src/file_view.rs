@@ -1695,7 +1695,7 @@ impl Render for FileView {
                 .into_any_element(),
                 None => div()
                     .absolute()
-                    .bottom(px(16.0))
+                    .bottom(px(16.0) + status_row::STATUS_ROW_HEIGHT)
                     .right(px(16.0))
                     .child(card)
                     .into_any_element(),
@@ -1729,7 +1729,6 @@ impl Render for FileView {
             )
             .when_some(context_menu, |this, menu| this.child(menu))
             .when_some(hover_card, |this, card| this.child(card))
-            .when_some(message, |this, card| this.child(card))
             .when_some(
                 self.snapshot
                     .as_ref()
@@ -1744,6 +1743,9 @@ impl Render for FileView {
                 cx,
             )))
             .when_some(self.render_status_row(theme, &entity, cx), |this, row| this.child(row))
+            // Last, so it paints over the content and the row: an absolute child
+            // earlier in the order sits under the code's own background.
+            .when_some(message, |this, card| this.child(card))
     }
 }
 
