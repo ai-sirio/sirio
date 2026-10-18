@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fmt, ops::Range, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::BTreeSet, fmt, ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
     App, AppContext as _, Context, EventEmitter, FocusHandle, Focusable, HighlightStyle, Pixels,
@@ -180,6 +180,8 @@ pub struct CodeEditor {
     focused: bool,
     pub(crate) chat_field: gpui::Entity<TextInput>,
     pub(crate) frame: Frame,
+    /// Folds and brackets of the text as it stands, kept between frames.
+    structure: RefCell<syntax::Structure>,
     blink_epoch: u64,
     _blink: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -273,6 +275,7 @@ impl CodeEditor {
             focused: false,
             chat_field,
             frame: Frame::default(),
+            structure: RefCell::default(),
             blink_epoch: 0,
             _blink: None,
             _subscriptions: subscriptions,
@@ -666,6 +669,16 @@ impl CodeEditor {
             })
         });
         cx.notify();
+    }
+
+    /// The blocks the text opens, read once per revision of the text.
+    pub(crate) fn folds(&self) -> Rc<Vec<(usize, usize)>> {
+        self.structure.borrow_mut().folds(&self.buffer)
+    }
+
+    /// The brackets of the text, read once per revision of the text and, after an edit, only on the lines it touched.
+    pub(crate) fn brackets(&self) -> Rc<Vec<syntax::Bracket>> {
+        self.structure.borrow_mut().brackets(&self.buffer)
     }
 
     pub(crate) fn editable(&self) -> bool {

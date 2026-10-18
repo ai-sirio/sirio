@@ -12,6 +12,7 @@ use super::{
     layout::{Shown, stack},
     measure::Measured,
     state::{CodeEditor, CursorShape, EditorEvent, Press},
+    syntax,
 };
 use crate::{
     compat::tint,
@@ -36,12 +37,17 @@ impl CodeEditor {
         let mut spans = self.piece_colors(line, 0, self.row_text(line), cx);
         // Offsets found in an older text are left out.
         let fresh = self.frame.stamp == self.buffer.stamp();
-        let brackets = self
-            .frame
-            .brackets
-            .iter()
-            .filter(|bracket| fresh && range.contains(&bracket.offset));
-        for bracket in brackets {
+        // Brackets lie in the order of their offsets, so the line's are found by search.
+        let all = &self.frame.brackets;
+        let (first, last) = if fresh {
+            (
+                all.partition_point(|bracket| bracket.offset < range.start),
+                all.partition_point(|bracket| bracket.offset < range.end),
+            )
+        } else {
+            (0, 0)
+        };
+        for bracket in &all[first..last] {
             let at = bracket.offset - range.start;
             // With the owner's highlighter its colors stand; only rainbow brackets recolour them.
             let color = if self.options.rainbow {
@@ -54,12 +60,15 @@ impl CodeEditor {
             spans.retain(|(span, _)| *span != (at..at + 1));
             spans.push((at..at + 1, color.into()));
         }
-        for span in self
+        // The washed text is looked for on this line alone: the frame holds the needle, not every place it appears.
+        let others = self
             .frame
-            .occurrences
-            .iter()
-            .filter(|span| fresh && touches(span))
-        {
+            .needle
+            .as_deref()
+            .filter(|_| fresh)
+            .map(|needle| syntax::occurrences(&self.buffer, needle, line..line + 1))
+            .unwrap_or_default();
+        for span in others.iter().filter(|span| touches(span)) {
             spans.push((
                 local(span),
                 HighlightStyle {
@@ -213,16 +222,7 @@ impl CodeEditor {
                     })
             })
         });
-        let active = self
-            .frame
-            .folds
-            .iter()
-            .filter(|(header, end)| {
-                let at = self.buffer.line_of(primary.head);
-                *header < at && at <= *end
-            })
-            .map(|(header, _)| self.buffer.indent(*header))
-            .next_back();
+        let active = self.frame.active;
         let guides = if self.options.guides {
             self.guides(line)
         } else {

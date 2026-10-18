@@ -240,7 +240,7 @@ impl CodeEditor {
     fn frame_shows(&self, line: usize) -> bool {
         let hide = super::layout::hidden(
             self.buffer.lines(),
-            &super::syntax::folds(&self.buffer),
+            &self.folds(),
             &self.folded,
         );
         super::layout::rows(&self.buffer, &hide, &self.marks).contains(&Row::Line(line))

@@ -562,3 +562,59 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
   In Tabs mode N drives only the indent guides and the status label: the text
   system draws a tab character at its own advance, so a file indented with tabs
   looks the same at Tab Size 2 and 8 (measured in a capture of both).
+
+### Performance (Task 12b)
+
+The editor's frame cost grew with the file: on a 1 MiB, 39,247-line file a typed
+character drew in 29 ms and a scrolled frame in 37 ms (main: 4 ms), because
+`CodeEditor::render` read the whole text on every frame. Each change below makes
+a frame's work follow what is drawn, or what an edit touched, and none changes
+what is drawn. Measured in `docs/perf/` terms by the render spans in the
+Task 12b report (`CodeEditor.render` median 25.5 ms before, 0.04 ms after, on
+that file).
+
+- `Cargo.toml`: depends on `sirio_perf` (path `../../crates/sirio_perf`, which
+  has no dependencies of its own, so no cycle). `CodeEditor::render` and its
+  steps (`CodeEditor.folds`, `.brackets`, `.rows`, `.sticky`, `.minimap`), the
+  list's row builder (`CodeEditor.visible_rows`, with the row count in the
+  entity column) and the minimap's colour read (`CodeEditor.minimap_rows`) carry
+  content-free `sirio_perf` spans, the way every Sirio `Render::render` does.
+- `src/editor/buffer.rs`: `Buffer` keeps a log of its last 32 edits and
+  `Buffer::kept_since(stamp) -> Option<Kept>` says how many bytes at the start
+  and at the end no edit since that stamp touched (`None` for another text's
+  stamp or an edit that has left the log). It is the one reader of the log.
+- `src/editor/syntax.rs`: `brackets(&Buffer)` is now a test-only reference;
+  `BracketIndex` keeps every bracket between frames and, after an edit, reads
+  again only the lines between the first and last ones the edits touched
+  (`kept_since`), shifting the brackets after them; pairing and depth are a pass
+  over the brackets alone. A text it has not seen is read whole. `folds` is one
+  pass over the lines (a stack of open headers) instead of a scan to the end of
+  each block, giving the same list. `opens(buffer, line)` and
+  `enclosing(buffer, line)` answer for one line what `folds` answers for all:
+  whether a block opens there, and the headers of the blocks that hold it. A
+  `Structure` on the editor keeps the fold list and the bracket index per text
+  revision (`CodeEditor::folds`, `CodeEditor::brackets`).
+- `src/editor/view.rs`: the frame no longer holds the folds or the places the
+  selected word appears. The sticky header and the strong guide ask `enclosing`
+  about one line; the gutter's chevron asks `opens`; `Frame` holds the needle
+  (`Frame.needle`) and each drawn line looks for it on itself
+  (`src/editor/line.rs`, `syntax::occurrences` over that line). A selection over
+  several lines is no longer copied to make a needle that could never match. A
+  line's brackets are found by search in the offset-ordered list, not by a pass
+  over all of them (`line.rs`).
+- `src/editor/layout.rs`: `Rows` holds the rows as a count when row `n` is line
+  `n` (no fold, lens, removed line, ghost line or chat: `rows_are_lines`), so a
+  file of any length costs nothing to hold, and as a list otherwise; `row_of`,
+  `line_from`, `get` and `len` are what the list, the gutter, the sticky header
+  and the input method ask. `CodeEditor::primary_row` answers the caret's line
+  directly in the first case, and the caret motions skip the fold scan while
+  nothing is folded (a held Down key had read every fold of the file per press).
+  `around` is gone with its only caller.
+- The minimap (`view.rs`, `layout::minimap_plan`) reads its colours in the
+  canvas's prepaint, where its height is known, and for the rows it will draw:
+  every row while a row is a pixel tall or more (all that a file of up to its
+  height in rows has, drawn exactly as before), else one row per pixel, drawn a
+  pixel tall. A taller file used to paint every line's colours as sub-pixel
+  quads on top of one another each frame; it now shows one line's colours per
+  pixel of its height. `tall` (the row height used to jump from a click) is
+  unchanged.

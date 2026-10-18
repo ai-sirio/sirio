@@ -18,7 +18,7 @@ impl CodeEditor {
             .w_full()
             .h(self.frame.line)
             .flex();
-        match self.frame.rows[ix] {
+        match self.frame.rows.get(ix).expect("the list draws only rows that exist") {
             Row::Line(line) => self.line_row(
                 base.debug_selector(move || format!("code-editor-line-{line}")),
                 ix,

@@ -2555,6 +2555,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sirio_perf",
  "smallvec",
  "unicode-segmentation",
  "web-time",

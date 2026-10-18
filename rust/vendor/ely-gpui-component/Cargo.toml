@@ -15,6 +15,7 @@ test-support = ["gpui/test-support"]
 
 [dependencies]
 ely-palette.workspace = true
+sirio_perf = { path = "../../crates/sirio_perf" }
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true

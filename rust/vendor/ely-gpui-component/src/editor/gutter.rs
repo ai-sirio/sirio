@@ -138,7 +138,7 @@ impl CodeEditor {
                 .into_any_element(),
             (false, None) => div().into_any_element(),
         };
-        let opens = self.frame.folds.iter().any(|(header, _)| *header == line);
+        let opens = super::syntax::opens(&self.buffer, line);
         let folded = self.folded.contains(&line);
         let chevron = opens.then(|| Disclosure::new(("fold", line), !folded).into_any_element());
         let entity = cx.entity();

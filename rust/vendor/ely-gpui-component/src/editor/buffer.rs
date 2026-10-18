@@ -9,7 +9,21 @@ pub struct Buffer {
     text: String,
     starts: Vec<usize>,
     stamp: u64,
+    /// The last edits, oldest first, so a reader of the whole text can ask what they left alone.
+    log: Vec<Edit>,
 }
+
+/// One edit: the stamp of the text it began from, where it reached in that text, and how long that text was.
+#[derive(Clone, Copy, Debug)]
+struct Edit {
+    from: u64,
+    start: usize,
+    end: usize,
+    len: usize,
+}
+
+/// Edits the buffer remembers.
+const LOG: usize = 32;
 
 impl PartialEq for Buffer {
     fn eq(&self, other: &Self) -> bool {
@@ -39,6 +53,7 @@ impl Buffer {
             text,
             starts,
             stamp: stamp(),
+            log: Vec::new(),
         }
     }
 
@@ -132,9 +147,49 @@ impl Buffer {
             "an edit covers whole characters inside the text: {range:?} of {}",
             self.text.len()
         );
+        if self.log.len() == LOG {
+            self.log.remove(0);
+        }
+        self.log.push(Edit {
+            from: self.stamp,
+            start: range.start,
+            end: range.end,
+            len: self.text.len(),
+        });
         self.text.replace_range(range, text);
         self.starts = starts(&self.text);
         self.stamp = stamp();
+    }
+}
+
+/// What stayed as it was across the edits after a stamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Kept {
+    /// Bytes at the start that no edit touched.
+    pub prefix: usize,
+    /// Bytes at the end that no edit touched.
+    pub suffix: usize,
+    /// The text's length at that stamp.
+    pub len: usize,
+}
+
+impl Buffer {
+    /// What stayed as it was across the edits since the text had `stamp`; `None` when the buffer cannot say (a stamp of another text, or edits too long ago).
+    pub(crate) fn kept_since(&self, stamp: u64) -> Option<Kept> {
+        if stamp == self.stamp {
+            return Some(Kept {
+                prefix: self.text.len(),
+                suffix: self.text.len(),
+                len: self.text.len(),
+            });
+        }
+        let first = self.log.iter().position(|edit| edit.from == stamp)?;
+        let edits = &self.log[first..];
+        Some(Kept {
+            prefix: edits.iter().map(|edit| edit.start).min()?,
+            suffix: edits.iter().map(|edit| edit.len - edit.end).min()?,
+            len: edits[0].len,
+        })
     }
 }
 
@@ -266,6 +321,72 @@ mod tests {
         assert_eq!(buffer.text(), "a\nc\nb");
         assert_eq!(buffer.lines(), 3);
         assert_eq!(buffer.line(2), "b");
+    }
+
+    // Task 12b fix 1: `kept_since` says what the edits after a stamp left alone,
+    // so a reader of the whole text (the bracket index) reads only what they
+    // touched. The ways it can fail, written before the code:
+    //   1. a prefix or a suffix too long: it names a byte an edit changed;
+    //   2. several edits: only the last one's reach counted;
+    //   3. an edit at the very start or the very end (prefix or suffix zero);
+    //   4. a stamp the buffer never had, or one older than the edits it keeps,
+    //      answered as if it knew;
+    //   5. the stamp of the text as it stands: nothing changed, all kept.
+
+    #[test]
+    fn the_edits_after_a_stamp_leave_a_prefix_and_a_suffix() {
+        let mut buffer = Buffer::new("0123456789");
+        let first = buffer.stamp();
+        assert_eq!(
+            buffer.kept_since(first),
+            Some(Kept { prefix: 10, suffix: 10, len: 10 }),
+            "the text as it stands: all kept"
+        );
+        buffer.replace(4..6, "abc");
+        let second = buffer.stamp();
+        assert_eq!(
+            buffer.kept_since(first),
+            Some(Kept { prefix: 4, suffix: 4, len: 10 })
+        );
+        buffer.replace(8..9, "");
+        assert_eq!(
+            buffer.kept_since(first),
+            Some(Kept { prefix: 4, suffix: 2, len: 10 }),
+            "the later edit reaches 2 from the end of the text as it was then"
+        );
+        assert_eq!(
+            buffer.kept_since(second),
+            Some(Kept { prefix: 8, suffix: 2, len: 11 }),
+            "from the second stamp only the second edit counts"
+        );
+        buffer.replace(0..0, "x");
+        assert_eq!(
+            buffer.kept_since(first),
+            Some(Kept { prefix: 0, suffix: 2, len: 10 }),
+            "an edit at the start keeps no prefix"
+        );
+        let end = buffer.len();
+        buffer.replace(end..end, "y");
+        assert_eq!(
+            buffer.kept_since(first),
+            Some(Kept { prefix: 0, suffix: 0, len: 10 }),
+            "an edit at the end keeps no suffix"
+        );
+        assert_eq!(buffer.kept_since(Buffer::new("other").stamp()), None, "a stamp of another text");
+    }
+
+    #[test]
+    fn edits_older_than_the_log_are_not_remembered() {
+        let mut buffer = Buffer::new("a");
+        let first = buffer.stamp();
+        for _ in 0..200 {
+            let end = buffer.len();
+            buffer.replace(end..end, "b");
+        }
+        assert_eq!(buffer.kept_since(first), None, "the first edit has left the log");
+        let recent = buffer.stamp();
+        buffer.replace(0..0, "c");
+        assert!(buffer.kept_since(recent).is_some(), "a recent one is still there");
     }
 
     #[test]

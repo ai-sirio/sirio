@@ -292,10 +292,11 @@ pub(crate) fn listen<E: InteractiveElement>(root: E, cx: &mut Context<CodeEditor
     let root = on!(root, ToggleComment, |e, _, cx| e.toggle_comment(cx));
     let root = on!(root, Fold, |e, _, cx| {
         let line = e.buffer.line_of(e.primary().head);
-        let header = super::syntax::folds(&e.buffer)
-            .into_iter()
+        let header = e
+            .folds()
+            .iter()
             .filter(|(header, end)| *header <= line && line <= *end)
-            .map(|(header, _)| header)
+            .map(|(header, _)| *header)
             .next_back();
         if let Some(header) = header.filter(|header| !e.folded.contains(header)) {
             e.toggle_fold(header, cx);

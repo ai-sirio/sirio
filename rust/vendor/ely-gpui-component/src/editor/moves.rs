@@ -2,22 +2,27 @@ use gpui::{Context, ScrollStrategy};
 
 use super::{
     cursor::{Motion, Selection, merged, moved},
-    layout::{Row, hidden, rows},
+    layout::{Row, hidden, rows, rows_are_lines},
     state::CodeEditor,
-    syntax::folds,
 };
 
 impl CodeEditor {
     /// Moves every cursor. Up and down step over folded lines.
     pub(crate) fn motion(&mut self, motion: Motion, extend: bool, cx: &mut Context<Self>) {
-        let hide = hidden(self.buffer.lines(), &folds(&self.buffer), &self.folded);
+        // Nothing is hidden while nothing is folded.
+        let hide = (!self.folded.is_empty())
+            .then(|| hidden(self.buffer.lines(), &self.folds(), &self.folded));
         let vertical = matches!(motion, Motion::Up | Motion::Down | Motion::Page(_));
         let moved: Vec<Selection> = self
             .selections
             .iter()
             .map(|selection| {
                 let mut next = moved(&self.buffer, *selection, motion, extend);
-                while vertical && hide[self.buffer.line_of(next.head)] {
+                while vertical
+                    && hide
+                        .as_ref()
+                        .is_some_and(|hide| hide[self.buffer.line_of(next.head)])
+                {
                     let again = moved(&self.buffer, next, motion, extend);
                     if again.head == next.head {
                         break;
@@ -105,8 +110,9 @@ impl CodeEditor {
     /// Folds the block that opens on a line, or opens it again; cursors inside move to its header.
     pub(crate) fn toggle_fold(&mut self, line: usize, cx: &mut Context<Self>) {
         if !self.folded.remove(&line) {
-            let Some((_, end)) = folds(&self.buffer)
-                .into_iter()
+            let Some(&(_, end)) = self
+                .folds()
+                .iter()
                 .find(|(header, _)| *header == line)
             else {
                 return;
@@ -135,7 +141,7 @@ impl CodeEditor {
         if self.folded.is_empty() {
             return;
         }
-        let folds = folds(&self.buffer);
+        let folds = self.folds();
         let lines: Vec<usize> = self
             .selections
             .iter()
@@ -153,7 +159,11 @@ impl CodeEditor {
     /// The row the primary cursor draws on, or the fold header above it when a fold hides it.
     pub(crate) fn primary_row(&self) -> usize {
         let line = self.buffer.line_of(self.primary().head);
-        let hide = hidden(self.buffer.lines(), &folds(&self.buffer), &self.folded);
+        // With a row to a line, the cursor's row is its line.
+        if rows_are_lines(&self.marks, &self.folded) {
+            return line;
+        }
+        let hide = hidden(self.buffer.lines(), &self.folds(), &self.folded);
         rows(&self.buffer, &hide, &self.marks)
             .iter()
             .rposition(|row| matches!(row, Row::Line(shown) if *shown <= line))

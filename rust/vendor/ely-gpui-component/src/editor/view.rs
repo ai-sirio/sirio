@@ -1,31 +1,33 @@
-use std::ops::Range;
+use std::{ops::Range, rc::Rc};
 
 use gpui::{
-    AnyElement, Bounds, Context, ElementInputHandler, InteractiveElement, IntoElement, MouseButton,
+    AnyElement, App, Bounds, Context, ElementInputHandler, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
-    StatefulInteractiveElement, Styled, StyledText, Window, canvas, div, fill, font, point, size,
+    StatefulInteractiveElement, Styled, StyledText, Window, canvas, div, fill, font, point, px, size,
     uniform_list,
 };
 
 use super::{
     decor::ReadOnlyBanner,
     keys::{CONTEXT, listen},
-    layout::{Row, around, hidden, rows},
+    layout::{MinimapPlan, Row, Rows, hidden, minimap_plan},
     state::{CodeEditor, EditorEvent},
-    syntax::{self, Bracket, brackets, folds},
+    syntax::{self, Bracket},
 };
 use crate::theme::{ActiveTheme, TextSize};
 
 /// What one render worked out, for the rows the list builds after it.
 #[derive(Default)]
 pub(crate) struct Frame {
-    pub rows: Vec<Row>,
-    pub folds: Vec<(usize, usize)>,
-    pub brackets: Vec<Bracket>,
+    pub rows: Rows,
+    pub brackets: Rc<Vec<Bracket>>,
     pub advance: Pixels,
     pub line: Pixels,
     pub matched: Option<(usize, usize)>,
-    pub occurrences: Vec<Range<usize>>,
+    /// The text whose other appearances are washed, found on the lines as they are drawn.
+    pub needle: Option<String>,
+    /// The indent of the innermost block around the caret, whose guide is the strong one.
+    pub active: Option<usize>,
     /// The buffer stamp these offsets were found in.
     pub stamp: u64,
     /// The minimap's box, from its last paint.
@@ -52,25 +54,25 @@ impl CodeEditor {
         } else {
             primary.range()
         };
-        (!range.is_empty()).then(|| self.buffer.text()[range].to_string())
+        // Only a piece of one line is washed; a selection over several lines is never copied.
+        let one_line = self.buffer.line_of(range.start) == self.buffer.line_of(range.end);
+        (!range.is_empty() && one_line).then(|| self.buffer.text()[range].to_string())
     }
 
     /// The first line the list shows, after scrolling.
     fn top_line(&self) -> Option<usize> {
         let scrolled = -self.scroll.0.borrow().base_handle.offset().y;
         let first = (scrolled / self.frame.line).floor().max(0.0) as usize;
-        self.frame.rows[first.min(self.frame.rows.len().saturating_sub(1))..]
-            .iter()
-            .find_map(|row| match row {
-                Row::Line(line) => Some(*line),
-                _ => None,
-            })
+        self.frame
+            .rows
+            .line_from(first.min(self.frame.rows.len().saturating_sub(1)))
     }
 
     fn sticky(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let colors = cx.theme().colors.clone();
         let top = self.top_line()?;
-        let headers = around(&self.frame.folds, top, STICKY);
+        let mut headers = syntax::enclosing(&self.buffer, top);
+        headers.truncate(STICKY);
         if headers.is_empty() {
             return None;
         }
@@ -124,28 +126,39 @@ impl CodeEditor {
         )
     }
 
-    fn minimap_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.theme().colors.clone();
-        let (advance, line) = (self.frame.advance, self.frame.line);
-        let tokens: Vec<Vec<(usize, usize, gpui::Hsla)>> = self
-            .frame
-            .rows
-            .iter()
-            .map(|row| match row {
+    /// The rows the minimap draws for a height: every row while a row is a pixel tall, else one a pixel, each with the colors of its line's characters (start, length, color).
+    fn minimap_rows(
+        &self,
+        height: Pixels,
+        cx: &App,
+    ) -> (MinimapPlan, Vec<(usize, Vec<(usize, usize, gpui::Hsla)>)>) {
+        let rows = self.frame.rows.len();
+        let plan = minimap_plan(rows, f32::from(self.frame.line), f32::from(height));
+        let drawn = (0..rows)
+            .step_by(plan.stride)
+            .filter_map(|ix| match self.frame.rows.get(ix)? {
                 Row::Line(at) => {
-                    let text = self.buffer.line(*at);
-                    self.piece_colors(*at, 0, text, cx)
+                    let text = self.buffer.line(at);
+                    let tokens: Vec<_> = self
+                        .piece_colors(at, 0, text, cx)
                         .into_iter()
                         .filter_map(|(range, style)| {
                             let start = text[..range.start].chars().count();
                             let len = text[range].chars().count();
                             style.color.map(|color| (start, len, color))
                         })
-                        .collect()
+                        .collect();
+                    (!tokens.is_empty()).then_some((ix, tokens))
                 }
-                _ => Vec::new(),
+                _ => None,
             })
             .collect();
+        (plan, drawn)
+    }
+
+    fn minimap_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors.clone();
+        let (advance, line) = (self.frame.advance, self.frame.line);
         let scroll = self.scroll.clone();
         let entity = cx.entity();
         let (drag, press) = (cx.entity(), cx.entity());
@@ -161,29 +174,33 @@ impl CodeEditor {
             .cursor_pointer()
             .child(
                 canvas(
+                    // The colors are read here, where the minimap's height is known, so the work follows the pixels it has and not the file's length.
                     move |bounds, _, cx| {
-                        entity.update(cx, |editor, _| editor.frame.minimap = bounds);
+                        entity.update(cx, |editor, cx| {
+                            editor.frame.minimap = bounds;
+                            let _scan = sirio_perf::span("CodeEditor.minimap_rows", 0);
+                            editor.minimap_rows(bounds.size.height, cx)
+                        })
                     },
-                    move |bounds, _, window, _| {
-                        let rows = tokens.len().max(1) as f32;
-                        let tall = (line * 0.15).min(bounds.size.height / rows);
+                    move |bounds, (plan, tokens), window, _| {
+                        let (tall, stride) = (plan.tall, plan.stride as f32);
                         let wide = advance * 0.12;
                         let state = scroll.0.borrow();
                         let viewport = state.base_handle.bounds().size.height;
                         let scrolled = -state.base_handle.offset().y;
-                        let top = bounds.origin.y + scrolled / line * tall;
-                        let extent = size(bounds.size.width, viewport / line * tall);
+                        let top = bounds.origin.y + scrolled / line * px(tall);
+                        let extent = size(bounds.size.width, viewport / line * px(tall));
                         window.paint_quad(fill(
                             Bounds::new(point(bounds.origin.x, top), extent),
                             shade,
                         ));
-                        for (ix, spans) in tokens.iter().enumerate() {
+                        for (ix, spans) in &tokens {
                             for (start, len, color) in spans {
                                 let origin = point(
                                     bounds.origin.x + wide * (*start + 2) as f32,
-                                    bounds.origin.y + tall * ix as f32,
+                                    bounds.origin.y + px(tall * *ix as f32),
                                 );
-                                let extent = size(wide * *len as f32, tall * 0.7);
+                                let extent = size(wide * *len as f32, px(tall * 0.7 * stride));
                                 window.paint_quad(fill(
                                     Bounds::new(origin, extent),
                                     color.opacity(0.7),
@@ -239,6 +256,8 @@ impl CodeEditor {
 
 impl Render for CodeEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = cx.entity_id().as_u64();
+        let _render = sirio_perf::span("CodeEditor.render", id);
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let mono_family = theme.mono_family.clone();
@@ -257,41 +276,54 @@ impl Render for CodeEditor {
             }
         };
         let line = (pixels * LEADING).round();
-        let found = folds(&self.buffer);
-        let hide = hidden(self.buffer.lines(), &found, &self.folded);
-        let found_brackets = brackets(&self.buffer);
+        let scan = sirio_perf::span("CodeEditor.folds", id);
+        // The blocks are asked about where the frame looks, not read over the whole file.
+        let caret_line = self.buffer.line_of(self.primary().head);
+        let active = syntax::enclosing(&self.buffer, caret_line)
+            .last()
+            .map(|header| self.buffer.indent(*header));
+        drop(scan);
+        let scan = sirio_perf::span("CodeEditor.brackets", id);
+        let found_brackets = self.brackets();
         let matched = syntax::matched(&found_brackets, self.primary().head);
-        let occurrences = match self.needle() {
-            Some(needle) if self.focus.is_focused(window) => {
-                syntax::occurrences(&self.buffer, &needle, 0..self.buffer.lines())
-            }
-            _ => Vec::new(),
-        };
+        drop(scan);
+        let needle = self.needle().filter(|_| self.focus.is_focused(window));
         let minimap = self.frame.minimap;
+        let scan = sirio_perf::span("CodeEditor.rows", id);
+        let laid = Rows::of(
+            &self.buffer,
+            || hidden(self.buffer.lines(), &self.folds(), &self.folded),
+            &self.marks,
+            &self.folded,
+        );
+        drop(scan);
         self.frame = Frame {
-            rows: rows(&self.buffer, &hide, &self.marks),
-            folds: found,
+            rows: laid,
             brackets: found_brackets,
             advance,
             line,
             matched,
-            occurrences,
+            needle,
+            active,
             stamp: self.buffer.stamp(),
             minimap,
         };
         self.metrics.advance = advance;
         self.metrics.line = line;
         self.metrics.size = pixels;
+        let scan = sirio_perf::span("CodeEditor.sticky", id);
         let sticky = if self.options.sticky {
             self.sticky(cx)
         } else {
             None
         };
+        drop(scan);
         let count = self.frame.rows.len();
         let list = uniform_list(
             "editor-rows",
             count,
             cx.processor(|editor, range: Range<usize>, window, cx| {
+                let _rows = sirio_perf::span("CodeEditor.visible_rows", range.len() as u64);
                 range.map(|ix| editor.row(ix, window, cx)).collect()
             }),
         )
@@ -360,6 +392,9 @@ impl Render for CodeEditor {
                     });
                 }),
             );
+        let scan = sirio_perf::span("CodeEditor.minimap", id);
+        let minimap_view = self.options.minimap.then(|| self.minimap_view(cx));
+        drop(scan);
         let root = div()
             .id(("code-editor", cx.entity_id().as_u64()))
             .key_context(CONTEXT)
@@ -393,7 +428,7 @@ impl Render for CodeEditor {
                     .min_h_0()
                     .flex()
                     .child(body)
-                    .children(self.options.minimap.then(|| self.minimap_view(cx))),
+                    .children(minimap_view),
             )
             .child(
                 canvas(
