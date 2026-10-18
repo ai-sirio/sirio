@@ -42,6 +42,29 @@ pub const BROWSER_CAPABILITIES: [&str; 9] = [
     "browser.permission",
 ];
 
+/// The browser actions the skill's `not_supported` table names. Sirio V1 does not
+/// serve them, so `sirioctl` refuses each one itself, without sending a request.
+pub const BROWSER_NOT_SUPPORTED: &[&str] = &[
+    "offline",
+    "trace",
+    "screencast",
+    "record",
+    "network-route",
+    "network-mock",
+    "network-intercept",
+    "raw-input",
+    "download",
+    "upload",
+    "pdf",
+    "viewport",
+    "devtools",
+    "extensions",
+    "bookmarks",
+    "history",
+    "errors",
+    "screenshot",
+];
+
 /// Served by debug builds only. A release build leaves these out of
 /// `system.capabilities`, and answers them with "unknown method".
 const DEBUG_METHODS: [&str; 10] = [

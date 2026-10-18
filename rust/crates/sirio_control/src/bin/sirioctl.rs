@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use sirio_control::protocol::rows;
 use sirio_control::protocol::request::ThreadOp;
+use sirio_control::served::BROWSER_NOT_SUPPORTED;
 use sirio_control::{
     ControlRequest, ControlResponse, default_socket_path,
     extract::{session_ref_from_json, session_ref_from_payload_arguments},
@@ -27,12 +28,11 @@ use sirio_host_protocol::version::{PROTOCOL_MAJOR, majors_spoken};
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    // `--dry-run` is global, and it comes out before any command reads its
-    // options: left in place, a command would take it for a value or a flag
-    // and send for real.
-    if args.iter().any(|arg| arg == "--dry-run") {
+    // A `--dry-run` that leads the line is global: it comes out before anything
+    // parses the rest. Anywhere else it is an option of its command, read below.
+    if args.first().map(String::as_str) == Some("--dry-run") {
         DRY_RUN.store(true, Ordering::Relaxed);
-        args.retain(|arg| arg != "--dry-run");
+        args.remove(0);
     }
     let (subcommand_index, leading_socket) = if args.first().map(String::as_str) == Some("--socket")
     {
@@ -63,6 +63,11 @@ fn main() {
             exit(2);
         }
     };
+    // `--dry-run` after the command is an option like any other. A value after it
+    // counts too, because the flag was given: the command must not send.
+    if parsed.flag("dry-run") || parsed.value("dry-run").is_some() {
+        DRY_RUN.store(true, Ordering::Relaxed);
+    }
 
     // --socket overrides $SIRIO_SOCKET, which overrides the default path.
     let environment = current_environment();
@@ -786,7 +791,16 @@ fn cmd_panel(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 &sirio_control::protocol::request::panel_wait(&id, timeout_ms),
             );
             print_result(&response, &["exitCode"], parsed.flag("json"));
-            Ok(())
+            // The waited child's exit code is this command's (ruling R25): a child
+            // that failed fails the wait. An answer without a number is a failure.
+            exit(
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("exitCode"))
+                    .and_then(|code| code.parse::<i32>().ok())
+                    .unwrap_or(1),
+            )
         }
         "focus" => {
             let id = panel_id(parsed)?;
@@ -1384,11 +1398,9 @@ fn cmd_browser(
         "eval" => browser_eval_command(&socket, parsed, workspace.as_deref()),
         "console" => browser_console(&socket, parsed, workspace.as_deref()),
         // The skill's `not_supported` table: refused here, whatever the app serves.
-        "offline" | "trace" | "screencast" | "record" | "network-route" | "network-mock"
-        | "network-intercept" | "raw-input" | "download" | "upload" | "pdf" | "viewport"
-        | "devtools" | "extensions" | "bookmarks" | "history" | "screenshot" | "errors" => Err(
-            format!("not_supported: browser.{action} is not available in Sirio V1"),
-        ),
+        other if BROWSER_NOT_SUPPORTED.contains(&other) => Err(format!(
+            "not_supported: browser.{other} is not available in Sirio V1"
+        )),
         other => Err(format!("unknown browser action '{other}'")),
     }
 }

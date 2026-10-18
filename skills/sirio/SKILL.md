@@ -40,7 +40,7 @@ sirioctl panel focus --id "$TAB_ID"
 sirioctl panel close --id "$TAB_ID"
 ```
 
-`panel read` and `panel scrollback` print the pane's scrollback as base64 in `data`; `panel scrollback` also prints `bytes`. `panel state` prints `workingDirectory` and `exitStatus`, and `exitCode` once the child has exited with one. `--json` changes the envelope, not the encoding, and `panel state --json` also carries the scrollback as base64 in `scrollback` while Sirio is running. Decode it (`base64 -d`) before treating it as text.
+Plain output prints the values, tab-separated, not the field names. `panel read` prints the pane's scrollback as base64. `panel scrollback` prints that base64, then its byte count. `panel state` prints the working directory and the exit status, then the exit code once the child has exited with one. `--json` carries the keys instead: `data` and `bytes` for `panel read` and `panel scrollback`, and `workingDirectory`, `exitStatus` and `exitCode` for `panel state`. While Sirio is running, `panel state --json` also carries `scrollback` as base64. `--json` changes the envelope, not the encoding. Decode the base64 (`base64 -d`) before treating it as text.
 
 `panel wait` propagates the child process exit code. Preserve it when doing post-wait work so a failed child remains a failure:
 
