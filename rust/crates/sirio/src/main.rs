@@ -22,6 +22,7 @@ use sirio_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
     PaneInfo, PaneRegistry, PaneStateSnapshot, ScrollbackSource, base64_encode,
 };
+use sirio_control::served::{BROWSER_CAPABILITIES, BROWSER_METHODS, served_methods};
 use sirio_git::{
     GitBranches, GitError, discard, discard_all, init_repository, stage, stage_all, unstage,
 };
@@ -710,44 +711,6 @@ fn clamp_first_visible(
 }
 
 const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
-const BROWSER_METHODS: [&str; 11] = [
-    "browser.open",
-    "browser.navigate",
-    "browser.get",
-    "browser.screenshot",
-    "browser.snapshot",
-    "browser.act",
-    "browser.wait",
-    "browser.eval",
-    "browser.console",
-    "browser.errors",
-    "browser.permission",
-];
-// F-CTRL-BROWSER-03/04/05/06/F-PER-08: browser.get, browser.wait,
-// browser.eval, browser.console, browser.snapshot and browser.permission
-// are real, implemented methods (see handle_browser_action) — they must not
-// be turned away here as "not implemented" before ever reaching that
-// dispatch.
-//
-// browser.screenshot stays out of this list on purpose: wry 0.56's public
-// WebView API (crates/sirio_ui/src/browser.rs's `build_webview`/
-// `build_production_webview`) has no pixel-capture entry point on the
-// webkitgtk backend, and there is no other dependency in this workspace
-// that reaches WebKitGTK's own `webkit_web_view_get_snapshot`. A true
-// screenshot needs a new `webkit2gtk` FFI dependency plus a GAsyncResult
-// callback bridged back into GPUI — out of this row's file list. See
-// F-CTRL-BROWSER-04's row in the wave report for the sketch.
-const BROWSER_CAPABILITIES: [&str; 9] = [
-    "browser.open",
-    "browser.navigate",
-    "browser.act",
-    "browser.get",
-    "browser.wait",
-    "browser.eval",
-    "browser.console",
-    "browser.snapshot",
-    "browser.permission",
-];
 
 // F-CTRL-BROWSER-04: a lightweight structural snapshot — role, accessible
 // name and bounding box for interactive/labelled elements — serialized as
@@ -2512,101 +2475,7 @@ impl ControlHandler for AppControlHandler {
             }
             "system.ping" => Self::success(&request.id, [("pong".to_string(), "true".to_string())]),
             "system.capabilities" => {
-                let mut methods = vec![
-                    "system.ping",
-                    "system.capabilities",
-                    "system.identify",
-                    "system.quit",
-                    "project.list",
-                    "project.add",
-                    "workspace.list",
-                    "workspace.create",
-                    "workspace.select",
-                    "tray.jump",
-                    "workspace.current",
-                    "workspace.close",
-                    "worktree.set",
-                    "notify",
-                    "panel.create",
-                    "panel.split",
-                    "panel.list",
-                    "panel.write",
-                    "panel.key",
-                    "panel.read",
-                    "panel.state",
-                    "panel.scrollback",
-                    "panel.wait",
-                    "panel.focus",
-                    "panel.show",
-                    "panel.close",
-                    "pane.split",
-                    "pane.focus",
-                    "pane.close",
-                    "tab.cycle",
-                    "tab.select",
-                    "notification.create",
-                    "notification.list",
-                    "notification.clear",
-                    "session.ref",
-                    "session.restore",
-                    "session.transcript",
-                    "surface.changes.open",
-                    "surface.changes.read",
-                    "surface.changes.stage",
-                    "surface.changes.unstage",
-                    "surface.changes.discard",
-                    "surface.changes.stage_all",
-                    "surface.changes.discard_all",
-                    "surface.changes.view",
-                    "surface.changes.dialog",
-                    "git.branches",
-                    "surface.settings.open",
-                    "surface.settings.select",
-                    "surface.settings.read",
-                    "surface.change_requests.show",
-                    "surface.change_requests.read",
-                    "surface.change_requests.filter",
-                    "surface.change_requests.search",
-                    "surface.change_requests.token",
-                    "surface.change_request.open",
-                    "surface.change_request.tab",
-                    "surface.change_request.read",
-                    "surface.change_request.checkout",
-                    "surface.change_request.handoff",
-                    "surface.ci_log.open",
-                    "surface.ci_log.read",
-                    "surface.ci_log.view",
-                    "surface.change_request.reveal",
-                    "surface.change_request.thread",
-                    "surface.change_request.open_file",
-                    "surface.change_request.open_commit",
-                    "surface.tabs.read",
-                    "surface.tabs.select",
-                    "surface.tabs.close",
-                    "surface.layout.read",
-                    "surface.file.read",
-                    "settings.account.add",
-                    "settings.account.select",
-                    "surface.chat.open",
-                    "surface.chat.send",
-                    "surface.chat.compose",
-                    "surface.chat.permission",
-                    "surface.chat.stop",
-                    "surface.chat.read",
-                ];
-                methods.extend(BROWSER_CAPABILITIES);
-                if cfg!(debug_assertions) {
-                    methods.push("surface.change_request.act");
-                    methods.push("surface.open_list.open");
-                    methods.push("surface.changes.confirm");
-                    methods.push("surface.host.end_all");
-                    methods.push("surface.terminal.open");
-                    methods.push("surface.terminal.restart");
-                    methods.push("surface.terminal.state");
-                    methods.push("surface.update.read");
-                    methods.push("surface.update.act");
-                    methods.push("surface.update.inject");
-                }
+                let methods = served_methods(cfg!(debug_assertions));
                 let rows: Vec<BTreeMap<String, String>> = methods
                     .iter()
                     .map(|method| BTreeMap::from([("method".to_string(), (*method).to_string())]))
@@ -16639,7 +16508,7 @@ impl SirioWorkspace {
             // F-CTRL-BROWSER-04: a structural (accessibility-tree-shaped)
             // snapshot of the page, distinct from a pixel screenshot (which
             // this build has no capture path for — see the comment on
-            // BROWSER_CAPABILITIES above). Reuses the same
+            // BROWSER_CAPABILITIES in `sirio_control::served`). Reuses the same
             // evaluate_script/GTK-pump plumbing browser.eval and
             // browser.console already rely on, so it inherits their real
             // "Browser child is unavailable" failure mode rather than a

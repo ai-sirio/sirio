@@ -12,6 +12,7 @@ use std::process::exit;
 use std::time::{Duration, Instant};
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sirio_control::protocol::rows;
 use sirio_control::protocol::request::ThreadOp;
@@ -25,7 +26,14 @@ use sirio_host_protocol::paths::HostPaths;
 use sirio_host_protocol::version::{PROTOCOL_MAJOR, majors_spoken};
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--dry-run` is global, and it comes out before any command reads its
+    // options: left in place, a command would take it for a value or a flag
+    // and send for real.
+    if args.iter().any(|arg| arg == "--dry-run") {
+        DRY_RUN.store(true, Ordering::Relaxed);
+        args.retain(|arg| arg != "--dry-run");
+    }
     let (subcommand_index, leading_socket) = if args.first().map(String::as_str) == Some("--socket")
     {
         if args.len() < 2 {
@@ -166,7 +174,6 @@ fn usage() {
          \x20 browser open <url> [--id-format uuids|both] [--json]\n\
          \x20 browser navigate <surface> <back|forward|reload>\n\
          \x20 browser get <surface> <url|text|html> [--selector s] [--json]\n\
-         \x20 browser screenshot <surface> [--path f]\n\
          \x20 browser snapshot <surface> [--json]\n\
          \x20 browser act <surface> <click|fill|type|press|scroll> [--ref r|--selector s]\n\
          \x20   [--value v] [--key k] [--generation g] [--delta-x n] [--delta-y n] [--snapshot-after]\n\
@@ -189,6 +196,7 @@ fn usage() {
          \n\
          options:\n\
          \x20 --socket <path>   socket path (default: $SIRIO_SOCKET or app support)\n\
+         \x20 --dry-run         print the request as one JSON line, and contact nothing\n\
          \x20 --json            output raw JSON\n\
          \x20 --stdin-json      (notify) read a hook JSON payload from stdin and extract the agent session id"
     );
@@ -258,9 +266,26 @@ fn current_environment() -> BTreeMap<String, String> {
 // Round trip plumbing
 // ---------------------------------------------------------------------------
 
+/// Set by `--dry-run`: every send prints its request instead, see `dry_run_gate`.
+static DRY_RUN: AtomicBool = AtomicBool::new(false);
+
+/// Under `--dry-run`, prints the request as one JSON line and exits 0. Every send
+/// passes here before a socket is touched, the route probe included, so a dry run
+/// reaches neither the app nor the host.
+fn dry_run_gate(request: &ControlRequest) {
+    if DRY_RUN.load(Ordering::Relaxed) {
+        println!(
+            "{}",
+            serde_json::json!({ "method": request.method, "params": request.params })
+        );
+        exit(0);
+    }
+}
+
 /// Sends the request and returns the response, or exits with the canonical
 /// connection-failure message on a transport error.
 fn round_trip_or_die(socket: PathBuf, request: &ControlRequest) -> ControlResponse {
+    dry_run_gate(request);
     match round_trip(&socket, request, Duration::from_secs(3600)) {
         Ok(response) => response,
         Err(error) => {
@@ -276,6 +301,7 @@ fn round_trip_or_die(socket: PathBuf, request: &ControlRequest) -> ControlRespon
 /// listening (spec SP2 §5). A socket that accepts and does not answer is
 /// not bypassed: loss of contact is not evidence of death (SP1 §5).
 fn panel_call(socket: PathBuf, request: &ControlRequest) -> ControlResponse {
+    dry_run_gate(request);
     match route::decide(route::probe(&socket)) {
         route::Route::App => require_ok(socket, request),
         route::Route::Host => host_panel_call(request),
@@ -389,14 +415,12 @@ fn cmd_ping(socket: PathBuf, _parsed: &ParsedArgs) -> Result<(), String> {
 }
 
 fn cmd_version(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
-    let app_version = round_trip(
-        &socket,
-        &sirio_control::protocol::request::system_capabilities(),
-        Duration::from_secs(1),
-    )
-    .ok()
-    .and_then(|response| response.result)
-    .and_then(|result| result.get("version").cloned());
+    let capabilities = sirio_control::protocol::request::system_capabilities();
+    dry_run_gate(&capabilities);
+    let app_version = round_trip(&socket, &capabilities, Duration::from_secs(1))
+        .ok()
+        .and_then(|response| response.result)
+        .and_then(|result| result.get("version").cloned());
 
     if parsed.flag("json") {
         println!(
@@ -1354,13 +1378,17 @@ fn cmd_browser(
         "open" => browser_open(&socket, parsed, workspace.as_deref()),
         "navigate" => browser_navigate(&socket, parsed, workspace.as_deref()),
         "get" => browser_get(&socket, parsed, workspace.as_deref()),
-        "screenshot" => browser_screenshot(&socket, parsed, workspace.as_deref()),
         "snapshot" => browser_snapshot_command(&socket, parsed, workspace.as_deref()),
         "act" => browser_act(&socket, parsed, workspace.as_deref()),
         "wait" => browser_wait(&socket, parsed, workspace.as_deref()),
         "eval" => browser_eval_command(&socket, parsed, workspace.as_deref()),
         "console" => browser_console(&socket, parsed, workspace.as_deref()),
-        "errors" => Err("not_supported: browser.errors is not available in Sirio V1".to_string()),
+        // The skill's `not_supported` table: refused here, whatever the app serves.
+        "offline" | "trace" | "screencast" | "record" | "network-route" | "network-mock"
+        | "network-intercept" | "raw-input" | "download" | "upload" | "pdf" | "viewport"
+        | "devtools" | "extensions" | "bookmarks" | "history" | "screenshot" | "errors" => Err(
+            format!("not_supported: browser.{action} is not available in Sirio V1"),
+        ),
         other => Err(format!("unknown browser action '{other}'")),
     }
 }
@@ -1598,26 +1626,6 @@ fn browser_get(socket: &Path, parsed: &ParsedArgs, workspace: Option<&str>) -> R
     let mut row = BTreeMap::new();
     row.insert("value".to_string(), value);
     print_browser_row(&row, &["value"], parsed.flag("json"));
-    Ok(())
-}
-
-fn browser_screenshot(
-    socket: &Path,
-    parsed: &ParsedArgs,
-    workspace: Option<&str>,
-) -> Result<(), String> {
-    let surface = browser_surface(parsed)?;
-    let mut params = browser_params(Some(&surface), workspace);
-    if let Some(path) = parsed.value("path") {
-        params.insert("path".to_string(), path.to_string());
-    }
-    let result = browser_call(socket, "browser.screenshot", params)?;
-    let mut row = BTreeMap::new();
-    row.insert(
-        "path".to_string(),
-        result.get("path").cloned().unwrap_or_default(),
-    );
-    print_browser_row(&row, &["path"], parsed.flag("json"));
     Ok(())
 }
 
@@ -2074,6 +2082,7 @@ fn agent_session_target(
 /// the agent kept running, and a user-global hook must never turn that into
 /// noise inside the agent.
 fn send_agent_status(socket: PathBuf, target: &AgentSessionTarget, request: &ControlRequest) {
+    dry_run_gate(request);
     if target.implicit {
         let _ = round_trip(&socket, request, Duration::from_secs(5));
     } else {

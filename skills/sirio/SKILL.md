@@ -40,7 +40,7 @@ sirioctl panel focus --id "$TAB_ID"
 sirioctl panel close --id "$TAB_ID"
 ```
 
-`panel read`, `panel state`, and `panel scrollback` return the pane's scrollback as base64 in their `data`/`scrollback` field — `--json` changes the envelope, not the encoding. Decode it (`base64 -d`) before treating it as text.
+`panel read` and `panel scrollback` print the pane's scrollback as base64 in `data`; `panel scrollback` also prints `bytes`. `panel state` prints `workingDirectory` and `exitStatus`, and `exitCode` once the child has exited with one. `--json` changes the envelope, not the encoding, and `panel state --json` also carries the scrollback as base64 in `scrollback` while Sirio is running. Decode it (`base64 -d`) before treating it as text.
 
 `panel wait` propagates the child process exit code. Preserve it when doing post-wait work so a failed child remains a failure:
 
@@ -82,7 +82,6 @@ The V1 browser verbs are:
 - `get <surface> url` reads the current URL without reading page content.
 - `get <surface> text [--selector <css>]` reads text from the page or selector.
 - `get <surface> html [--selector <css>]` reads HTML from the page or selector.
-- `screenshot <surface> [--path <file>]` captures the rendered page.
 - `snapshot <surface>` returns a `generation` and interactive nodes with refs
   such as `e1`, `role`, `name`, optional `value`, and `box`. There is no
   `--interactive` flag: this snapshot is always the interactive one. Use
@@ -125,7 +124,7 @@ stale ref: re-snapshot and use the new generation and refs.
 `localhost`, `127.0.0.1`, `::1`, and `*.local` are local origins and do not
 prompt. On every other origin, the first content-reading verb — including
 `get text`, `get html`, `snapshot`, `eval`, `act`, content predicates in
-`wait`, `console`, and `screenshot` — waits for a user permission prompt. It
+`wait` and `console` — waits for a user permission prompt. It
 can return `origin_denied` if the user denies the request or no grant is
 available. The grant is remembered per worktree and origin until revoked.
 `open`, navigation, `get url`, and Sirio's own title/favicon metadata do not
@@ -160,6 +159,7 @@ These capabilities return `not_supported`, never a silent success:
 | `pdf`, `viewport` | These controls are outside V1. |
 | `devtools`, `extensions`, `bookmarks`, `history` | Browser-wide features are not surface verbs in V1. |
 | `errors` | The protocol name is reserved, but error-log retrieval is not implemented. |
+| `screenshot` | Page capture is not available on this WebKit surface in V1. |
 
 ## Report durable and user-visible status
 
