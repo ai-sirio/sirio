@@ -181,6 +181,7 @@ fn usage() {
          \x20 surface editor save               (debug builds) save the active file tab\n\
          \x20 surface editor conflict --action=reload|keep  (debug builds) answer a disk conflict\n\
          \x20 surface editor mode --mode=code|preview  (debug builds) switch the Markdown mode\n\
+         \x20 surface editor status --item=language|line_ending|indent|goto [--value=v | --open=true|false]  (debug builds) a status row item: --value is a language (name or id), lf|crlf, spaces:N|tabs:N or a line number; --open opens or closes its popover\n\
          \x20 surface editor pref --key=k --value=v  (debug builds) set one Editor setting, as Settings does\n\
          \x20 browser open <url> [--id-format uuids|both] [--json]\n\
          \x20 browser navigate <surface> <back|forward|reload>\n\
@@ -1198,6 +1199,21 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             socket,
             &sirio_control::protocol::request::editor_mode(&parsed.require("mode")?),
         ),
+        ("editor", "status") => {
+            let open = if parsed.flag("open") || parsed.value("open").is_some() {
+                Some(editor_bool(parsed, "open")?)
+            } else {
+                None
+            };
+            require_ok(
+                socket,
+                &sirio_control::protocol::request::editor_status(
+                    &parsed.require("item")?,
+                    parsed.value("value"),
+                    open,
+                ),
+            )
+        }
         ("editor", "pref") => require_ok(
             socket,
             &sirio_control::protocol::request::editor_pref(

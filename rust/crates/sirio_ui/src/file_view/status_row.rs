@@ -2,9 +2,10 @@
 //! caret's place, the indent, the encoding, the line ending, the language and
 //! the bell on the right, each one an Ely status item.
 //!
-//! The row only shows, for now: no item takes a press. Three of its facts come
-//! from the file (the caret, the line ending, the language) and are read as the
-//! row is drawn. The rest are the app's to know (`StatusFacts`: the branch, the
+//! Four of its items take a press (`status_actions`): the caret's place goes to
+//! a line, and the indent, the line ending and the language open a short list.
+//! Three of its facts come from the file (the caret, the line ending, the
+//! language) and are read as the row is drawn. The rest are the app's to know (`StatusFacts`: the branch, the
 //! worktree's state, how far it is from its upstream, the language server) and
 //! are pushed into the view, which draws them as they were last pushed.
 //!
@@ -32,13 +33,12 @@ use ely_gpui_component::editor::{
     BranchIndicator, CursorPosition, Encoding, IndentSettings, LanguageMode,
     LineEnding as ElyLineEnding, LspStatus, NotificationBell,
 };
-use gpui::{AnyElement, App, Context, Pixels, SharedString, canvas, prelude::*, px};
+use gpui::{AnyElement, App, Context, Entity, Pixels, SharedString, canvas, prelude::*, px};
 use sirio_theme::Theme;
 use std::cell::Cell;
 
-use super::{FileView, LspState, MarkdownMode};
+use super::{FileView, LspState, MarkdownMode, StatusItem};
 use crate::editor::LoadStatus;
-use crate::editor_prefs::EditorPrefs;
 use sirio_markdown::LineEnding;
 
 /// The longest branch name the row draws whole, in characters; a longer one is
@@ -215,8 +215,7 @@ impl FileView {
                 .sum();
             (line, column, selected)
         });
-        // Until the settings screen can set an indent per file, every file
-        // indents with spaces as wide as the Editor setting says.
+        let (spaces, indent) = self.effective_indent(cx);
         let facts = &self.status_facts;
         Some(StatusItems {
             branch: facts.branch.clone().filter(|_| !snapshot),
@@ -224,16 +223,21 @@ impl FileView {
             sync: facts.sync.filter(|_| !snapshot),
             lsp: facts.lsp.clone().filter(|_| !snapshot),
             cursor,
-            spaces: true,
-            indent: EditorPrefs::current(cx).tab_size,
+            spaces,
+            indent,
             crlf: editor.line_ending() == LineEnding::Crlf,
-            language: editor.language().name(),
+            language: self.effective_language().name(),
             bell: 0,
         })
     }
 
     /// The row under the file, or `None` while there is nothing to show.
-    pub(super) fn render_status_row(&self, theme: Theme, cx: &App) -> Option<AnyElement> {
+    pub(super) fn render_status_row(
+        &self,
+        theme: Theme,
+        entity: &Entity<Self>,
+        cx: &App,
+    ) -> Option<AnyElement> {
         let items = self.status_items(cx)?;
         let layout = self.status_layout.clone();
         let compact = layout.compact.get();
@@ -256,11 +260,13 @@ impl FileView {
         }
         let mut right: Vec<AnyElement> = Vec::new();
         if let Some((line, column, selected)) = items.cursor {
-            right.push(
-                CursorPosition::new("status-cursor", line, column)
-                    .selected(selected)
-                    .into_any_element(),
-            );
+            right.push(self.with_status_popover(entity, StatusItem::Goto, theme, move |press| {
+                let mut item = CursorPosition::new("status-cursor", line, column).selected(selected);
+                if let Some(press) = press {
+                    item = item.on_click(move |window, cx| press(window, cx));
+                }
+                item.into_any_element()
+            }));
         }
         if !compact {
             let measure_extras = measure(layout.clone(), |layout, size| layout.extras.set(size));
@@ -272,16 +278,43 @@ impl FileView {
                     .items_center()
                     .gap(px(2.0))
                     .child(measure_extras)
-                    .child(
-                        IndentSettings::new("status-indent", items.spaces, items.indent)
-                            .into_any_element(),
-                    )
+                    .child(self.with_status_popover(
+                        entity,
+                        StatusItem::Indent,
+                        theme,
+                        move |press| {
+                            let mut item =
+                                IndentSettings::new("status-indent", items.spaces, items.indent);
+                            if let Some(press) = press {
+                                item = item.on_click(move |window, cx| press(window, cx));
+                            }
+                            item.into_any_element()
+                        },
+                    ))
                     .child(Encoding::new("status-encoding", "UTF-8").into_any_element())
-                    .child(ElyLineEnding::new("status-line-ending", items.crlf).into_any_element())
+                    .child(self.with_status_popover(
+                        entity,
+                        StatusItem::LineEnding,
+                        theme,
+                        move |press| {
+                            let mut item = ElyLineEnding::new("status-line-ending", items.crlf);
+                            if let Some(press) = press {
+                                item = item.on_click(move |window, cx| press(window, cx));
+                            }
+                            item.into_any_element()
+                        },
+                    ))
                     .into_any_element(),
             );
         }
-        right.push(LanguageMode::new("status-language", items.language).into_any_element());
+        let language = items.language;
+        right.push(self.with_status_popover(entity, StatusItem::Language, theme, move |press| {
+            let mut item = LanguageMode::new("status-language", language);
+            if let Some(press) = press {
+                item = item.on_click(move |window, cx| press(window, cx));
+            }
+            item.into_any_element()
+        }));
         right.push(NotificationBell::new("status-bell", items.bell).into_any_element());
         // Each group reports the width it takes; the row's own measure is the
         // last to run, so it decides with this frame's numbers, and a change

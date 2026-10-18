@@ -968,6 +968,19 @@ pub mod request {
         )
     }
 
+    /// `surface.editor.status`: `value` is the choice, `open` opens (`true`) or
+    /// closes (`false`) the item's popover instead.
+    pub fn editor_status(item: &str, value: Option<&str>, open: Option<bool>) -> ControlRequest {
+        let mut params = BTreeMap::from([("item".to_string(), item.to_string())]);
+        if let Some(value) = value {
+            params.insert("value".to_string(), value.to_string());
+        }
+        if let Some(open) = open {
+            params.insert("open".to_string(), open.to_string());
+        }
+        request("surface.editor.status", params)
+    }
+
     pub fn editor_pref(key: &str, value: &str) -> ControlRequest {
         request(
             "surface.editor.pref",

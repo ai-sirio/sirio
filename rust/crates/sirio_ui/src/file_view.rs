@@ -42,8 +42,10 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use ely_gpui_component::editor::{CodeEditor, ReadOnlyBanner, SingleCursor};
+use ely_gpui_component::forms::TextInput;
 // `sirio` has no Ely dependency; `open_find` takes these, and the socket verbs build them.
 pub use ely_gpui_component::editor::{FindOptions, LspState};
+pub use status_actions::StatusItem;
 pub use status_row::StatusFacts;
 use crate::chat::{Chat, LinkClickOverride};
 use crate::editor::{
@@ -63,6 +65,7 @@ mod breadcrumb;
 mod code_surface;
 mod find;
 mod git_marks;
+mod status_actions;
 mod status_row;
 mod sync;
 
@@ -279,6 +282,23 @@ pub struct FileView {
     /// What the row under the file has measured of itself, which decides
     /// whether it draws every item or only the ones that matter at a glance.
     status_layout: Rc<status_row::StatusLayout>,
+    /// The language this tab colours its code as, when the user chose one in
+    /// the status row (`set_language_override`); `None` is the path's. Colour
+    /// only, and not kept across a relaunch.
+    language_override: Option<Language>,
+    /// How this tab indents, `(spaces, width)`, when the user chose in the
+    /// status row (`set_indent`); `None` follows the Editor setting. Not kept
+    /// across a relaunch.
+    indent_override: Option<(bool, usize)>,
+    /// The status row's open popover; at most one.
+    status_popover: Option<StatusItem>,
+    /// The go-to-line field, made the first time its popover opens.
+    goto_input: Option<Entity<TextInput>>,
+    /// Whether the go-to-line field takes the keyboard when it is drawn.
+    goto_focus_pending: bool,
+    /// Whether the code takes the keyboard when the open popover closes: set by
+    /// Escape and by a finished choice, cleared by the close.
+    focus_code_on_close: bool,
     /// The open find: its fields, its matches and the one that is current.
     /// `None` while find is closed.
     find: Option<find::FindState>,
@@ -514,6 +534,12 @@ impl FileView {
             git_diff_again: false,
             status_facts: StatusFacts::default(),
             status_layout: Rc::default(),
+            language_override: None,
+            indent_override: None,
+            status_popover: None,
+            goto_input: None,
+            goto_focus_pending: false,
+            focus_code_on_close: false,
             find: None,
             hover_offset: None,
             hover_point: point(px(0.), px(0.)),
@@ -1703,7 +1729,7 @@ impl Render for FileView {
                 window,
                 cx,
             )))
-            .when_some(self.render_status_row(theme, cx), |this, row| this.child(row))
+            .when_some(self.render_status_row(theme, &entity, cx), |this, row| this.child(row))
     }
 }
 

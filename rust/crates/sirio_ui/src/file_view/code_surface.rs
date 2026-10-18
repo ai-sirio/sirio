@@ -49,10 +49,12 @@ impl FileView {
         if editor.status() != &LoadStatus::Loaded {
             return;
         }
-        let language = editor.language();
+        let language = self.effective_language();
         let text = editor.buffer().to_owned();
         let read_only = self.snapshot.is_some();
-        let prefs = EditorPrefs::current(cx).view_options();
+        let (spaces, size) = self.effective_indent(cx);
+        let mut prefs = EditorPrefs::current(cx).view_options();
+        prefs.tab_size = size;
         let spans = self.span_cache.clone();
         let code = cx.new(|cx| {
             let mut code = CodeEditor::new(text, window, cx)
@@ -65,6 +67,7 @@ impl FileView {
                 code = code.read_only().without_read_only_banner();
             }
             code.set_view_options(prefs, cx);
+            code.set_hard_tabs(!spaces, cx);
             code
         });
         let focus = code.read(cx).focus_handle(cx);
@@ -372,10 +375,45 @@ impl FileView {
         let Some(code) = &self.code_editor else {
             return;
         };
-        let prefs = EditorPrefs::current(cx).view_options();
+        // This tab's own indent, when it has one, is what the code editor
+        // indents with; the rest of the settings are the app's.
+        let (spaces, size) = self.effective_indent(cx);
+        let mut prefs = EditorPrefs::current(cx).view_options();
+        prefs.tab_size = size;
         if prefs != code.read(cx).view_options() {
             code.update(cx, |code, cx| code.set_view_options(prefs, cx));
         }
+        if code.read(cx).uses_hard_tabs() == spaces {
+            code.update(cx, |code, cx| code.set_hard_tabs(!spaces, cx));
+        }
+    }
+
+    /// The language the code is coloured as: the one this tab was given
+    /// (`set_language_override`), else the path's. Only the colour follows it;
+    /// the language server and the Markdown Preview stay the path's.
+    pub(super) fn effective_language(&self) -> Language {
+        self.language_override
+            .or_else(|| self.editor().map(|editor| editor.language()))
+            .unwrap_or(Language::PlainText)
+    }
+
+    /// How this tab indents: spaces or tabs, and how wide. Its own choice when
+    /// it has one (`set_indent`), else spaces as wide as the Editor setting, so
+    /// a settings change still moves a tab that was never given one.
+    pub(super) fn effective_indent(&self, cx: &App) -> (bool, usize) {
+        self.indent_override
+            .unwrap_or_else(|| (true, EditorPrefs::current(cx).tab_size))
+    }
+
+    /// Colours the code as `effective_language` says. The span cache is keyed by
+    /// a line's text alone, so it is emptied: its spans are another language's.
+    pub(super) fn refresh_highlighter(&mut self, cx: &mut Context<Self>) {
+        self.span_cache.borrow_mut().clear();
+        let Some(code) = &self.code_editor else {
+            return;
+        };
+        let highlighter = code_highlighter(self.effective_language(), self.span_cache.clone());
+        code.update(cx, |code, cx| code.set_highlighter(highlighter, cx));
     }
 
     /// The code editor's text changed. The `Editor` takes it unless it already
@@ -546,6 +584,12 @@ impl SpanCache {
         self.previous = std::mem::take(&mut self.current);
     }
 
+    /// Drops every entry, in both generations.
+    pub(super) fn clear(&mut self) {
+        self.current.clear();
+        self.previous.clear();
+    }
+
     /// The spans of `line`, which is line `index`.
     fn spans(&mut self, index: usize, language: Language, line: &str) -> &[CodeSpan] {
         self.highest = self.highest.max(index);
@@ -591,7 +635,7 @@ fn code_highlighter(
 
 /// Where line `line` (0-based) begins. A line past the end begins where the
 /// last line does.
-fn line_start_offset(text: &str, line: usize) -> usize {
+pub(super) fn line_start_offset(text: &str, line: usize) -> usize {
     if line == 0 {
         return 0;
     }

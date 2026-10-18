@@ -1306,6 +1306,12 @@ enum ControlAction {
         mode: String,
         reply: ControlReply,
     },
+    EditorStatus {
+        item: String,
+        value: Option<String>,
+        open: Option<bool>,
+        reply: ControlReply,
+    },
     EditorPref {
         key: String,
         value: String,
@@ -2676,6 +2682,7 @@ impl ControlHandler for AppControlHandler {
                     methods.push("surface.editor.save");
                     methods.push("surface.editor.conflict");
                     methods.push("surface.editor.mode");
+                    methods.push("surface.editor.status");
                     methods.push("surface.editor.pref");
                     methods.push("surface.host.end_all");
                     methods.push("surface.terminal.open");
@@ -2964,6 +2971,24 @@ impl ControlHandler for AppControlHandler {
                     );
                 }
                 self.queue_action(request, move |reply| ControlAction::EditorMode { mode, reply })
+            }
+            "surface.editor.status" if cfg!(debug_assertions) => {
+                let Some(item) = request.params.get("item").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.editor.status requires item");
+                };
+                let value = request.params.get("value").cloned();
+                let open = match request.params.get("open").map(String::as_str) {
+                    None => None,
+                    Some("true" | "1" | "yes") => Some(true),
+                    Some("false" | "0" | "no") => Some(false),
+                    Some(other) => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            format!("open must be true or false, not '{other}'"),
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorStatus { item, value, open, reply })
             }
             "surface.editor.pref" if cfg!(debug_assertions) => {
                 let (Some(key), Some(value)) = (
@@ -6097,6 +6122,15 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::EditorMode { mode, reply } => {
                                     let _ = reply.send(workspace.control_editor_mode(&mode, cx));
+                                }
+                                ControlAction::EditorStatus { item, value, open, reply } => {
+                                    let _ = reply.send(workspace.control_editor_status(
+                                        &item,
+                                        value.as_deref(),
+                                        open,
+                                        window,
+                                        cx,
+                                    ));
                                 }
                                 ControlAction::EditorPref { key, value, reply } => {
                                     let _ = reply.send(workspace.control_editor_pref(&key, &value, cx));
@@ -18628,6 +18662,10 @@ impl SirioWorkspace {
             ("status".to_string(), view.status_text(cx)),
             ("status_set".to_string(), view.status_set(cx).to_string()),
             ("worktree_dirty".to_string(), view.status_facts().worktree_dirty.to_string()),
+            (
+                "status_popover".to_string(),
+                view.status_popover().map_or("none", |item| item.word()).to_string(),
+            ),
             ("prefs".to_string(), EditorPrefs::current(cx).describe()),
         ];
         fields.extend(Self::find_fields(view));
@@ -19092,6 +19130,27 @@ impl SirioWorkspace {
             other => return Err(format!("unknown mode '{other}'")),
         };
         view.update(cx, |view, cx| view.set_markdown_mode(mode, cx));
+        self.control_editor_state(cx)
+    }
+
+    /// `surface.editor.status item= [value=] [open=]`: one of the status row's
+    /// items, acted on through the functions its popover calls. `open=true`
+    /// opens the item's popover and `open=false` closes it; otherwise `value`
+    /// is a choice in it (a language name or id, `lf|crlf`, `spaces:N|tabs:N`,
+    /// a line number). Answers the file's state, as `open` does, so what the
+    /// choice did is in the same reply.
+    fn control_editor_status(
+        &mut self,
+        item: &str,
+        value: Option<&str>,
+        open: Option<bool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        view.update(cx, |view, cx| view.control_status(item, value, open, window, cx))?;
         self.control_editor_state(cx)
     }
 
@@ -42615,6 +42674,7 @@ done
             | ControlAction::EditorSave { reply }
             | ControlAction::EditorConflict { reply, .. }
             | ControlAction::EditorMode { reply, .. }
+            | ControlAction::EditorStatus { reply, .. }
             | ControlAction::EditorPref { reply, .. }
             | ControlAction::EditorHover { reply, .. }
             | ControlAction::EditorClick { reply, .. }
@@ -42785,6 +42845,9 @@ done
             "surface.editor.save" => request::editor_save(),
             "surface.editor.conflict" => request_with_params(method, &[("action", "keep")]),
             "surface.editor.mode" => request_with_params(method, &[("mode", "code")]),
+            "surface.editor.status" => {
+                request_with_params(method, &[("item", "goto"), ("value", "1")])
+            }
             "surface.editor.pref" => {
                 request_with_params(method, &[("key", "minimap"), ("value", "true")])
             }
