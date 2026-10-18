@@ -24,16 +24,19 @@ printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/sirio"
 chmod +x "$FIXTURE/sirio"
 printf '#!/bin/sh\nexit 0\n' > "$FIXTURE/sirio-host"
 chmod +x "$FIXTURE/sirio-host"
+printf '#!/bin/sh\necho sirioctl\nexit 0\n' > "$FIXTURE/sirioctl"
+chmod +x "$FIXTURE/sirioctl"
 
 CODESIGN_ARGS="$FIXTURE/codesign.args" \
 CODESIGN_IDENTITY="Developer ID Application: Test" \
 PATH="$FIXTURE/bin:$PATH" \
-  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/Sirio.app" "$FIXTURE/sirio-host" >/dev/null
+  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/Sirio.app" "$FIXTURE/sirio-host" "$FIXTURE/sirioctl" >/dev/null
 
 for path in \
   "$FIXTURE/Sirio.app/Contents/Info.plist" \
   "$FIXTURE/Sirio.app/Contents/MacOS/sirio" \
   "$FIXTURE/Sirio.app/Contents/MacOS/sirio-host" \
+  "$FIXTURE/Sirio.app/Contents/MacOS/sirioctl" \
   "$FIXTURE/Sirio.app/Contents/Resources/icon.icns"
 do
   if [ ! -f "$path" ]; then
@@ -42,12 +45,20 @@ do
   fi
 done
 
-for binary in sirio sirio-host; do
+for binary in sirio sirio-host sirioctl; do
   if [ ! -x "$FIXTURE/Sirio.app/Contents/MacOS/$binary" ]; then
     echo "FAIL: the bundled $binary must be executable" >&2
     exit 1
   fi
 done
+
+# The bundle must carry the sirioctl it was handed, byte for byte. The fixtures
+# differ, so a copy of the wrong argument (sirio-host under the sirioctl name)
+# fails here rather than passing every other check.
+if ! cmp -s "$FIXTURE/sirioctl" "$FIXTURE/Sirio.app/Contents/MacOS/sirioctl"; then
+  echo "FAIL: Contents/MacOS/sirioctl must be the sirioctl binary that was passed in" >&2
+  exit 1
+fi
 
 PLIST="$FIXTURE/Sirio.app/Contents/Info.plist"
 
@@ -87,7 +98,7 @@ fi
 CODESIGN_ARGS="$FIXTURE/codesign-nightly.args" \
 CODESIGN_IDENTITY="Developer ID Application: Test" \
 PATH="$FIXTURE/bin:$PATH" \
-  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0-nightly.202609072133" "$FIXTURE/Nightly.app" "$FIXTURE/sirio-host" >/dev/null
+  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0-nightly.202609072133" "$FIXTURE/Nightly.app" "$FIXTURE/sirio-host" "$FIXTURE/sirioctl" >/dev/null
 NIGHTLY_PLIST="$FIXTURE/Nightly.app/Contents/Info.plist"
 if ! grep -A1 'CFBundleShortVersionString' "$NIGHTLY_PLIST" | grep -q '<string>0.6.0-nightly.202609072133</string>'; then
   echo "FAIL: CFBundleShortVersionString must carry the full nightly version" >&2
@@ -100,11 +111,11 @@ if ! grep -A1 '<key>CFBundleVersion</key>' "$NIGHTLY_PLIST" | grep -q '<string>0
   exit 1
 fi
 
-# Two calls: sirio-host first, then the bundle that seals it. Signing the
-# bundle signs only its main executable; a second, unsigned Mach-O in
-# Contents/MacOS makes notarization refuse the submission.
-if [ "$(wc -l < "$FIXTURE/codesign.args")" -ne 2 ]; then
-  echo "FAIL: expected two codesign calls (sirio-host, then the bundle)" >&2
+# Three calls: sirio-host and sirioctl first, then the bundle that seals them.
+# Signing the bundle signs only its main executable; a second, unsigned Mach-O
+# in Contents/MacOS makes notarization refuse the submission.
+if [ "$(wc -l < "$FIXTURE/codesign.args")" -ne 3 ]; then
+  echo "FAIL: expected three codesign calls (sirio-host, sirioctl, then the bundle)" >&2
   cat "$FIXTURE/codesign.args" >&2
   exit 1
 fi
@@ -117,6 +128,14 @@ case "$(sed -n 1p "$FIXTURE/codesign.args")" in
     ;;
 esac
 case "$(sed -n 2p "$FIXTURE/codesign.args")" in
+  *" $FIXTURE/Sirio.app/Contents/MacOS/sirioctl") ;;
+  *)
+    echo "FAIL: sirioctl must be signed second, before the bundle" >&2
+    cat "$FIXTURE/codesign.args" >&2
+    exit 1
+    ;;
+esac
+case "$(sed -n 3p "$FIXTURE/codesign.args")" in
   *" $FIXTURE/Sirio.app") ;;
   *)
     echo "FAIL: the bundle must be signed last" >&2
@@ -163,17 +182,44 @@ if ! grep -A1 '<key>com.apple.security.automation.apple-events</key>' "$ENTITLEM
   exit 1
 fi
 
-if "$BUNDLE_SCRIPT" "$FIXTURE/missing-binary" "0.6.0" "$FIXTURE/X.app" "$FIXTURE/sirio-host" >/dev/null 2>&1; then
+if "$BUNDLE_SCRIPT" "$FIXTURE/missing-binary" "0.6.0" "$FIXTURE/X.app" "$FIXTURE/sirio-host" "$FIXTURE/sirioctl" >/dev/null 2>&1; then
   echo "FAIL: a missing binary must exit non-zero" >&2
   exit 1
 fi
 
 ERR=$(CODESIGN_IDENTITY="Developer ID Application: Test" \
-  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/Z.app" "$FIXTURE/missing-host" 2>&1 >/dev/null || true)
+  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/Z.app" "$FIXTURE/missing-host" "$FIXTURE/sirioctl" 2>&1 >/dev/null || true)
 case "$ERR" in
   *"sirio-host binary not found"*) ;;
   *)
     echo "FAIL: a missing sirio-host binary must be rejected by name, got: $ERR" >&2
+    exit 1
+    ;;
+esac
+
+# sirioctl is the CLI every agent hook and PATH link reaches, so a bundle
+# without it is the bug this argument exists to close. It is required: the
+# old four-argument call must fail, and the usage line must name the argument.
+if "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/W.app" "$FIXTURE/sirio-host" >/dev/null 2>&1; then
+  echo "FAIL: a call without the sirioctl argument must exit non-zero" >&2
+  exit 1
+fi
+ERR=$(CODESIGN_IDENTITY="Developer ID Application: Test" \
+  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/W.app" "$FIXTURE/sirio-host" 2>&1 >/dev/null || true)
+case "$ERR" in
+  *"<sirioctl-binary>"*) ;;
+  *)
+    echo "FAIL: a call without sirioctl must print the usage line naming it, got: $ERR" >&2
+    exit 1
+    ;;
+esac
+
+ERR=$(CODESIGN_IDENTITY="Developer ID Application: Test" \
+  "$BUNDLE_SCRIPT" "$FIXTURE/sirio" "0.6.0" "$FIXTURE/V.app" "$FIXTURE/sirio-host" "$FIXTURE/missing-sirioctl" 2>&1 >/dev/null || true)
+case "$ERR" in
+  *"sirioctl binary not found"*) ;;
+  *)
+    echo "FAIL: a missing sirioctl binary must be rejected by name, got: $ERR" >&2
     exit 1
     ;;
 esac
@@ -183,7 +229,7 @@ esac
 # that the *version* is what gets named. An empty version otherwise substitutes
 # into `<string></string>` in both version keys and yields a bundle that signs,
 # notarizes and launches with no version anywhere a user or Sparkle can read one.
-ERR=$("$BUNDLE_SCRIPT" "$FIXTURE/sirio" "" "$FIXTURE/Y.app" "$FIXTURE/sirio-host" 2>&1 >/dev/null || true)
+ERR=$("$BUNDLE_SCRIPT" "$FIXTURE/sirio" "" "$FIXTURE/Y.app" "$FIXTURE/sirio-host" "$FIXTURE/sirioctl" 2>&1 >/dev/null || true)
 case "$ERR" in
   *"version must not be empty"*) ;;
   *)

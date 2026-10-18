@@ -1,5 +1,6 @@
 #!/bin/bash
-# Wraps already-compiled `sirio` and `sirio-host` binaries in a signed Sirio.app.
+# Wraps already-compiled `sirio`, `sirio-host` and `sirioctl` binaries in a
+# signed Sirio.app.
 #
 # Deliberately compiles nothing. Taking a binary rather than building one is
 # what makes this runnable by hand against a debug build in two seconds, which
@@ -12,11 +13,13 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 <binary> <version> <output-app-path> <sirio-host-binary>" >&2
+  echo "Usage: $0 <binary> <version> <output-app-path> <sirio-host-binary> <sirioctl-binary>" >&2
   exit 2
 }
 
-if [ $# -lt 4 ]; then
+# sirioctl is required, not optional: the release job is the only caller, and a
+# bundle without it leaves every agent hook and PATH link pointing at nothing.
+if [ $# -lt 5 ]; then
   usage
 fi
 
@@ -24,6 +27,7 @@ BINARY="$1"
 VERSION="$2"
 APP_PATH="$3"
 HOST_BINARY="$4"
+SIRIOCTL_BINARY="$5"
 
 if [ -z "$APP_PATH" ]; then
   echo "error: output app path must not be empty" >&2
@@ -51,6 +55,11 @@ fi
 
 if [ ! -f "$HOST_BINARY" ]; then
   echo "error: sirio-host binary not found at $HOST_BINARY" >&2
+  exit 1
+fi
+
+if [ ! -f "$SIRIOCTL_BINARY" ]; then
+  echo "error: sirioctl binary not found at $SIRIOCTL_BINARY" >&2
   exit 1
 fi
 
@@ -82,6 +91,11 @@ chmod +x "$APP_PATH/Contents/MacOS/sirio"
 # bundle never pulls the binary out from under a running host.
 cp "$HOST_BINARY" "$APP_PATH/Contents/MacOS/sirio-host"
 chmod +x "$APP_PATH/Contents/MacOS/sirio-host"
+# sirioctl sits beside the app's executable, where the app's sibling lookup
+# (`cli_install`'s sibling candidate) finds it. The app copies it from there to
+# its stable path, so a bundle without it leaves nothing for that copy to take.
+cp "$SIRIOCTL_BINARY" "$APP_PATH/Contents/MacOS/sirioctl"
+chmod +x "$APP_PATH/Contents/MacOS/sirioctl"
 cp "$ICON" "$APP_PATH/Contents/Resources/icon.icns"
 
 # CFBundleVersion repeats CFBundleShortVersionString on purpose. They carry
@@ -142,14 +156,19 @@ EOF
 # Signing the bundle signs only its main executable (CFBundleExecutable): a
 # second Mach-O in Contents/MacOS is nested code, which must be signed first,
 # inside-out, or the bundle's seal names an unsigned subcomponent and
-# notarization refuses it. So sirio-host is signed on its own, with the same
-# identity, runtime and entitlements, before the bundle that seals it. The
-# signature is embedded in the binary, so the staged copy the app runs
-# carries it too.
+# notarization refuses it. So sirio-host and sirioctl are each signed on their
+# own, with the same identity, runtime and entitlements, before the bundle that
+# seals them. The signature is embedded in the binary, so the staged copies the
+# app runs carry it too.
 codesign --force --options runtime --timestamp \
   --entitlements "$SCRIPT_DIR/sirio.entitlements" \
   --sign "$CODESIGN_IDENTITY" \
   "$APP_PATH/Contents/MacOS/sirio-host"
+
+codesign --force --options runtime --timestamp \
+  --entitlements "$SCRIPT_DIR/sirio.entitlements" \
+  --sign "$CODESIGN_IDENTITY" \
+  "$APP_PATH/Contents/MacOS/sirioctl"
 
 codesign --force --options runtime --timestamp \
   --entitlements "$SCRIPT_DIR/sirio.entitlements" \

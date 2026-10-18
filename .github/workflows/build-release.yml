@@ -293,8 +293,9 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" ci.keychain
           rm -f cert.p12
 
-      # The whole workspace (no -p): sirio, sirioctl and sirio-host, the
-      # three binaries the package below ships.
+      # The whole workspace (no -p) builds sirio, sirioctl and sirio-host: the
+      # three binaries the bundle step below takes. sirioctl is one of them, and
+      # the bundle puts it beside sirio, where the app finds it.
       - name: Build the release binary
         working-directory: rust
         run: cargo build --release --target aarch64-apple-darwin
@@ -334,7 +335,8 @@ jobs:
             rust/target/aarch64-apple-darwin/release/sirio \
             "$VERSION" \
             build/Sirio.app \
-            rust/target/aarch64-apple-darwin/release/sirio-host
+            rust/target/aarch64-apple-darwin/release/sirio-host \
+            rust/target/aarch64-apple-darwin/release/sirioctl
           echo "app=build/Sirio.app" >> "$GITHUB_OUTPUT"
 
       - name: Notarize and staple
