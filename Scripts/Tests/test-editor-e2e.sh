@@ -129,13 +129,15 @@ set -eEuo pipefail
 # in frames/. Rerunning the script reproduces it.
 #
 # Usage: Scripts/Tests/test-editor-e2e.sh [--xvfb | --display :N] [--state-only]
-#          [--out-dir DIR] [--appearance light|dark]
+#          [--out-dir DIR] [--appearance light|dark] [--only NAME[,NAME...]]
 #
 #   --xvfb        start a private Xvfb on a free display between :90 and :99
 #   --display :N  use an Xvfb this user started (never your own $DISPLAY)
 #   --state-only  take no window captures and no capture comparisons; the window
 #                 still draws, so the editor's state is read from a drawn app
 #   --appearance  seed light or dark (default dark)
+#   --only        run the named scenarios alone and print "EDITOR E2E PARTIAL"
+#                 instead of "EDITOR E2E OK"; only the whole run is the artifact
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
@@ -149,6 +151,7 @@ START_XVFB=0
 DISPLAY_TARGET=""
 OUT_DIR=""
 APPEARANCE="dark"
+ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --xvfb) START_XVFB=1; shift ;;
@@ -156,6 +159,7 @@ while [ $# -gt 0 ]; do
     --state-only) STATE_ONLY=1; shift ;;
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --appearance) APPEARANCE="${2:?--appearance needs light or dark}"; shift 2 ;;
+    --only) ONLY=",${2:?--only needs scenario names},"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -761,6 +765,16 @@ click_at() { # x y
   [ "$size" = "$CLICK_WINDOW" ] || fail "$SCENARIO: the window is $size, not the $CLICK_WINDOW these clicks are placed for"
   DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$1" "$2" click 1
 }
+# The pointer warped to (X, Y), counted from the window's corner, with no press: one
+# motion event at the destination, none on the way. The same window-size guard.
+move_to() { # x y
+  local window size
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$SCENARIO: no window to move the pointer in"
+  size="$(xwininfo -display "$DISPLAY_TARGET" -id "$window" | awk '/Width:/ {w = $2} /Height:/ {h = $2} END {print w "x" h}')"
+  [ "$size" = "$CLICK_WINDOW" ] || fail "$SCENARIO: the window is $size, not the $CLICK_WINDOW these moves are placed for"
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$1" "$2"
+}
 # The app's window takes X input focus. Without a window manager a click-away
 # does not blur a Settings field (the Blur never commits, measured on this
 # Xvfb); with the window focused it does.
@@ -768,8 +782,9 @@ focus_window() {
   local window
   window="$(find_window)"
   [ -n "$window" ] || fail "$SCENARIO: no window to focus"
-  DISPLAY="$DISPLAY_TARGET" xdotool windowfocus --sync "$window" \
-    || fail "$SCENARIO: the window could not take X input focus"
+  # --sync waits for the focus to land and has no bound of its own.
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool windowfocus --sync "$window" \
+    || fail "$SCENARIO: the window could not take X input focus within 10 s"
 }
 # The Ruler column field and the Tab size field of Settings → Editor, in the
 # window's own coordinates (the Ruler column field is enabled with Ruler on).
@@ -790,6 +805,9 @@ PY
 
 scenario() { # name function
   SCENARIO="$1"
+  if [ -n "$ONLY" ]; then
+    case "$ONLY" in *",$1,"*) ;; *) return 0 ;; esac
+  fi
   say "scenario $1"
   "$2"
   SCENARIOS_PASSED=$((SCENARIOS_PASSED + 1))
@@ -1245,8 +1263,63 @@ scenario_context() {
   expect_state text ""
   expect_state dirty false
   echo "OK: the menu's Copy reached the clipboard: the paste read line_2"
-  # Send to agent is not run here: no agent chat can be opened in this world (see
-  # the report), and a chat is what the selection would go to.
+  # Send to agent is `scenario_send_to_agent`.
+}
+
+# The composer of the workspace's chat, asked over the control socket as the chat
+# E2E (test-ely-chat-ui-e2e.py) asks it: `surface.chat.open` answers the first
+# chat tab's state, and `composerText` is its unsent draft. No agent runs for it.
+chat_composer() {
+  python3 - "$SIRIO_SOCKET" <<'PY'
+import json, socket, sys
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+    connection.settimeout(20)
+    connection.connect(sys.argv[1])
+    connection.sendall(json.dumps({"id": "e2e-chat", "method": "surface.chat.open", "params": {}}).encode() + b"\n")
+    buffer = b""
+    while not buffer.endswith(b"\n"):
+        chunk = connection.recv(65536)
+        if not chunk:
+            break
+        buffer += chunk
+reply = json.loads(buffer.decode())
+if reply.get("error") or not reply.get("ok", True):
+    sys.exit(f"surface.chat.open failed: {reply}")
+result = reply.get("result", {})
+if isinstance(result, dict) and "composerText" in result:
+    sys.stdout.write(result["composerText"])
+else:
+    sys.exit(f"surface.chat.open answered no composerText: {reply}")
+PY
+}
+
+scenario_send_to_agent() {
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  local text start end composer expected
+  text="$(sfield text)"
+  start="$(python3 "$TOOLS" offset "$text" "fn line_2")"
+  end=$(($(python3 "$TOOLS" offset "$text" "fn line_4") - 1))
+  [ -z "$(chat_composer)" ] || fail "$SCENARIO: the chat's composer was not empty before the action"
+  # Lines 2 and 3 selected; the menu's Send to agent, run on the selection, appends
+  # the file, the line range and the lines in a fenced block to the chat's composer.
+  ctl surface editor select --ranges="$start..$end" >/dev/null
+  ctl surface editor context --offset=$((start + 3)) --action=send-to-agent >/dev/null
+  expect_state selections "$start..$end"
+  composer="$(chat_composer)"
+  expected="$(printf 'main.rs:2-3\n\n```rust\nfn line_2() -> u32 { 2 }\nfn line_3() -> u32 { 3 }\n```\n')"
+  [ "$composer" = "$expected" ] \
+    || fail "$SCENARIO: the chat's composer reads $(printf '%s' "$composer" | cut -c1-300 | sed 's/$/<eol>/'), expected $(printf '%s' "$expected" | cut -c1-300 | sed 's/$/<eol>/')"
+  echo "OK: the chat's composer holds main.rs:2-3 and the two selected lines"
+  # A second send appends after a blank line instead of replacing the first.
+  ctl surface editor select --ranges="$start..$((start + 9))" >/dev/null
+  ctl surface editor context --offset=$((start + 3)) --action=send-to-agent >/dev/null
+  composer="$(chat_composer)"
+  case "$composer" in
+    "$expected"*"main.rs:2"*) ;;
+    *) fail "$SCENARIO: a second send did not append to the draft: $(printf '%s' "$composer" | cut -c1-400)" ;;
+  esac
+  echo "OK: a second send is appended to the draft, the first kept"
 }
 
 scenario_breadcrumb() {
@@ -2937,6 +3010,116 @@ scenario_settings_resync() {
   echo "OK: rulerColumn stayed 40 after the field lost focus"
 }
 
+# ---- the carries of Task 12a that need a real pointer
+
+# The terminal pane's body and a point inside the code of a file open beside it,
+# in the window's own coordinates (a window of CLICK_WINDOW, nothing else open).
+TERMINAL_PANE=(500 300)
+CODE_POINT=(900 400)
+
+# How many times the app asked for this file's diff, once it has stopped moving:
+# a load, a focus or an outside change each ask, and a fetch that lands may ask
+# once more, so two equal reads half a second apart.
+settled_git_diff_requests() {
+  local last="" now tries=0
+  while [ "$tries" -lt 60 ]; do
+    read_state
+    now="$(sfield git_diff_requests)"
+    [ "$now" != "$last" ] || { printf '%s' "$now"; return 0; }
+    last="$now"
+    tries=$((tries + 1))
+    sleep 0.5
+  done
+  fail "$SCENARIO: git_diff_requests never settled (last $last)"
+}
+
+scenario_focus_refresh() {
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  focus_window
+  # The caret placed by the verb, then the keyboard taken away by a press in the
+  # terminal pane: the next press in the code is a gain of focus, and the code's.
+  ctl surface editor select --ranges=0..0 >/dev/null
+  click_at "${TERMINAL_PANE[0]}" "${TERMINAL_PANE[1]}"
+  local before
+  before="$(settled_git_diff_requests)"
+  echo "OK: git_diff_requests=$before before the press in the code"
+  click_at "${CODE_POINT[0]}" "${CODE_POINT[1]}"
+  # One real press into the code is one ask for the diff, the whole-worktree
+  # `git status` behind it, and not one per handler that sees the focus.
+  expect_state_stays git_diff_requests $((before + 1))
+  [ "$(sfield selections)" != "0..0" ] \
+    || fail "$SCENARIO: the press did not reach the code (the caret is still at 0..0)"
+  echo "OK: one press into the code asked for the diff once"
+}
+
+# Moves the pointer down the code at column X, from Y_FIRST in steps of 7 px, until
+# the card of the Error on line_7 is drawn; answers the y it was first drawn at.
+# A step is one real motion event, so the card is the one the pointer made.
+sweep_for_the_error_card() { # x y_first
+  local y="$2"
+  while [ "$y" -lt 720 ]; do
+    move_to "$1" "$y"
+    sleep 0.25
+    read_state
+    case "$(sfield hover)" in *"$FAKE_ERROR"*) printf '%s' "$y"; return 0 ;; esac
+    y=$((y + 7))
+  done
+  fail "$SCENARIO: the pointer never found the Error's card in column $1"
+}
+# The Error's name on line_7 sits at about this column (after `fn `, in a window of
+# CLICK_WINDOW at the default size and font).
+ERROR_COLUMN=830
+
+scenario_hover_leave() {
+  local fixture="$WT/main.rs" error_row bar_row
+  open_file "$fixture"
+  expect_state state loaded
+  expect_state diagnostics 2
+  focus_window
+  cp "$fixture" "$RUN_DIR/hover-leave-0.txt"
+
+  # (i) The find bar. Open above the code, it pushes the code down; the sweep
+  # finds where the Error is now, and the pointer then jumps straight onto the bar,
+  # about 150 px above that row (six rows of 21 px, and what the bar is tall).
+  ctl surface editor find --query=fn >/dev/null
+  expect_state find_matches "$(grep -o -i fn "$fixture" | wc -l | tr -d ' ')"
+  error_row="$(sweep_for_the_error_card $ERROR_COLUMN 120)"
+  echo "OK: the card shows the Error with the pointer resting at y=$error_row"
+  bar_row=$((error_row - 143))
+  move_to $ERROR_COLUMN "$bar_row"
+  expect_state hover ""
+  expect_state_stays hover ""
+  echo "OK: a pointer that left the code for the find bar left no card behind"
+  ctl surface editor find-close >/dev/null
+  expect_state find_matches none
+
+  # (ii) The conflict banner: a dirty buffer, and the file changed on disk.
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor type --text=y >/dev/null
+  expect_state dirty true
+  python3 - "$RUN_DIR/hover-leave-0.txt" "$RUN_DIR/hover-leave-1.txt" <<'PY'
+import sys
+with open(sys.argv[1], "rb") as source, open(sys.argv[2], "wb") as target:
+    target.write(b"// external\n" + source.read())
+PY
+  write_disk "$fixture" "$RUN_DIR/hover-leave-1.txt"
+  expect_state conflict changed
+  error_row="$(sweep_for_the_error_card $ERROR_COLUMN 120)"
+  echo "OK: the card shows the Error again, under the conflict banner, at y=$error_row"
+  move_to $ERROR_COLUMN $((error_row - 143))
+  expect_state hover ""
+  expect_state_stays hover ""
+  echo "OK: a pointer that left the code for the conflict banner left no card behind"
+
+  # The file as it was, for the scenarios after this one.
+  ctl surface editor conflict --action=reload >/dev/null
+  expect_state conflict none
+  write_disk "$fixture" "$RUN_DIR/hover-leave-0.txt"
+  expect_state text "$(escaped "$RUN_DIR/hover-leave-0.txt")"
+  expect_state dirty false
+}
+
 # ---------------------------------------------------------------- run
 
 scenario load_states scenario_load_states
@@ -2962,7 +3145,15 @@ scenario find scenario_find
 scenario replace scenario_replace
 scenario multibyte scenario_multibyte
 scenario escape scenario_escape
+scenario send_to_agent scenario_send_to_agent
+scenario focus_refresh scenario_focus_refresh
+scenario hover_leave scenario_hover_leave
 scenario prefs scenario_prefs
 
 stop_hosts
+if [ -n "$ONLY" ]; then
+  [ "$SCENARIOS_PASSED" -gt 0 ] || fail "--only named no scenario of this script: ${ONLY//,/ }"
+  echo "EDITOR E2E PARTIAL ($SCENARIOS_PASSED scenarios of --only, appearance $APPEARANCE, state-only $STATE_ONLY)"
+  exit 0
+fi
 echo "EDITOR E2E OK ($SCENARIOS_PASSED scenarios, appearance $APPEARANCE, state-only $STATE_ONLY)"
