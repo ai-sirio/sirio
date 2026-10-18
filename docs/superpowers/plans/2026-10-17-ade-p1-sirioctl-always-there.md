@@ -214,8 +214,8 @@
 
 **Interfaces:**
 - Consumes: `CopyOutcome`, `LinkOutcome` (Tasks 4–5).
-- Produces: `pub struct CliStatus { pub stable_path: String, pub version_matches: bool, pub path_line: String }` in `sirio_ui::settings`; `Settings::set_cli_status(&mut self, Option<CliStatus>, cx)`; `Settings::on_install_cli(self, impl Fn() + 'static) -> Self`; `WorkspaceAction::InstallCli`; button id `general-install-cli`; selectors `settings-cli-path`, `settings-cli-link`.
-- Copy, exact (`path_line` per `LinkOutcome`): `Linked`/`AlreadyLinked` → "On PATH at {place}"; `NotOnLoginPath` → "Linked at {place}, but your login shell does not search {dir}"; `Foreign` → "{place} is not Sirio's ({points_to})— left as it is"; `NeedsAdmin` → "Not on PATH — Install in PATH asks for your password"; `Skipped` → "Not installed: {reason}"; `Failed` → "Could not link: {error}". Button label: "Install in PATH".
+- Produces: `pub struct CliStatus { pub stable_path: String, pub version_line: String, pub path_line: String }` in `sirio_ui::settings`; `Settings::set_cli_status(&mut self, Option<CliStatus>, cx)`; `Settings::on_install_cli(self, impl Fn() + 'static) -> Self`; `WorkspaceAction::InstallCli`; button id `general-install-cli`; selectors `settings-cli-path`, `settings-cli-link`.
+- Copy, exact (`path_line` per `LinkOutcome`): `Linked`/`AlreadyLinked` → "On PATH at {place}"; `NotOnLoginPath` → "Linked at {place}, but your login shell does not search {dir}"; `Foreign` → "{place} is not Sirio's ({points_to}) — left as it is"; `NeedsAdmin` → "Not on PATH — Install in PATH asks for your password"; `Skipped` → "Not installed: {reason}"; `Failed` → "Could not link: {error}". Button label: "Install in PATH".
 - The host status line, when the host lacks `term.env_exact`, ends with " — terminals opened before it restarts keep Sirio's launcher environment".
 
 - [ ] **Step 1: Write the failing test** `cli_card_reports_a_link_off_the_login_path` — set a `CliStatus` with the `NotOnLoginPath` line; the `settings-cli-link` element's text equals it; `general-install-cli` click calls the callback once.

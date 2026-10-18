@@ -312,20 +312,31 @@ environment** (§2), with:
   than remove it from the skill; a director needs to name its own worktree).
 
 How the user environment is known: the packaging wrapper records it. AppRun
-saves, before it changes anything, the original value — or the absence — of
-every variable it or the gtk hooks set, in variables of its own. The app
-does not guess by matching `/tmp/.mount_*` paths. Without a wrapper (macOS,
-Windows, a checkout), the app's environment is the user environment.
+saves, before it changes anything, the whole environment as one hex snapshot in
+`SIRIO_LAUNCH_ENV`, taken only when it fits in 131000 characters. The app takes
+the user environment from that snapshot, less the launcher's own variables
+(`APPIMAGE`, `APPDIR`, `ARGV0`, `OWD`, `SIRIO_LAUNCH_ENV`). The snapshot is
+`env -0 | od -An -tx1 -v`, which needs only POSIX tools, so the crate that
+reads it has no dependency (decided during implementation). The app does not
+guess by matching `/tmp/.mount_*` paths. Without a wrapper (macOS, Windows, a
+checkout), or with a snapshot that does not decode, the app's environment is
+the user environment.
 
 *Claude's call:* **the restore is for children only.** The app's own process
 keeps AppRun's environment: its browser pane (wry/WebKit) dlopens the WPE
 backend through AppRun's `LD_LIBRARY_PATH` and resolves its helpers through
 `././` paths (`Scripts/build-appimage.sh:199-208`), and gdk-pixbuf and GIO
-load modules lazily from the gtk variables. One function computes the user
-environment from the recording, and every spawn site passes it explicitly:
-the host launch, `CreateParams.env` from the terminal link and from
-`panel.create` (`sirio_control/src/host_panels.rs`), the `LocalLink`
-fallback, chat agents, and whatever the audit below moves.
+load modules lazily from the gtk variables. The user environment is computed
+once and lives in a leaf crate, `sirio_env`, with a process-wide setter like
+`sirio_perf`, rather than as a parameter threaded through every API, because
+every crate that spawns a process needs it. A site applies it through
+`sirio_env::command`, which clears the child's environment and applies the
+user's, so the site's own `.env(..)` calls come after the clear and survive it;
+a site that starts its child another way takes `sirio_env::for_child()`. The
+sites include the host launch, `CreateParams.env` from the terminal link and
+from `panel.create` (`sirio_control/src/host_panels.rs`), the `LocalLink`
+fallback, chat agents, and whatever the audit below moves (decided during
+implementation).
 
 **The host must be able to honour it.** Today a session's environment is the
 host's own `std::env::vars()` *extended* by `CreateParams.env`
@@ -336,8 +347,11 @@ additive, capability-advertised way to say "this map is the whole
 environment" (the exact field and its ledger entry in `protocol/host-v1/`
 are the builder's); a host that advertises it builds the session from the
 client's map alone; with a host that does not — one adopted from before this
-change — the app keeps today's behaviour, and that gap lasts until the host
-is next started, which the Settings host status says. The host itself is
+change — the client sends the user environment with an empty value for each
+variable the app has and the user environment lacks, except `SHELL`. That is
+best effort: a launcher variable the session would inherit is blank, not
+present. That gap lasts until the host is next started, which the Settings host
+status says (decided during implementation). The host itself is
 launched in the user environment, so its fallback is clean too.
 
 *Left to the builder:* the full list of other processes Sirio starts (git,
@@ -347,6 +361,32 @@ app's.
 
 Sessions already running keep the environment they were born with; nothing
 reaches into a live process. A new pane is clean.
+
+The stable copy of `sirioctl` is always a copy, never a symlink (§5.1); the PATH
+link of §5.2 is the only link (decided during implementation).
+
+**A login shell can drop the stable directory.** The default pane shell is a
+login shell (`$SHELL -il`). A login profile that reassigns `PATH` drops the
+stable directory from it, so `sirioctl` then resolves only through the
+`~/.local/bin` link, and only when the profile keeps `~/.local/bin` on `PATH`,
+as distro skeleton profiles do. In that case the link is what keeps `sirioctl`
+in panes. A `cmd=` pane runs its command as `$SHELL -c`, which is not a login
+shell, and keeps the stable directory (found by the E2E, decided during
+implementation).
+
+**A chat agent starts in its worktree (R31).** The agent's process directory and
+`PWD` are the directory its session was created for, when that is absolute, and
+otherwise the user's home. The launcher's own directory is never used
+(decided during implementation).
+
+**A chat agent's PATH keeps only absolute entries (R32).** The agent's `PATH`
+keeps its absolute entries, in order. On unix a `PATH` left with none becomes
+`/usr/bin:/bin`, because an empty `PATH` is the current directory to `execvp`.
+An empty or relative entry would name a directory inside a worktree that may be
+an untrusted clone (CWE-427). On Windows the agent's environment sets
+`NoDefaultCurrentDirectoryInExePath=1`, so `cmd` does not search the working
+directory first and a cloned repository cannot supply the agent's program
+(decided during implementation).
 
 ### §5.4 macOS ships `sirioctl`
 
