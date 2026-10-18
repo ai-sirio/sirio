@@ -78,7 +78,14 @@ set -eEuo pipefail
 #                     requests are untouched, two captures differ); go to line (a line, past
 #                     the end, a word and zero); a snapshot's refusals and a Markdown
 #                     Preview's; one popover at a time, Escape and Enter, focus back in the
-#                     code; each popover captured open
+#                     code (also from a list, and after the keyboard was elsewhere); Down and
+#                     Return choose in an open list; a panel is dropped with its item (the
+#                     compact row, Markdown Preview) and stays dropped; the verb's switch
+#                     from one open panel to another, either way; each choice stays after a
+#                     pause (`expect_state_stays`); Tabs mode's block indent, Enter after an
+#                     opener and Shift-Tab on spaces; the colour follows the language
+#                     (`highlight=`, what the highlighter gave line 1); each popover captured
+#                     open
 #   find              Find over findme.txt: the match count against grep (case-insensitive,
 #                     then case-sensitive), two steps forward and one back, a pattern that
 #                     does not compile, close; captured with the replace row open and the
@@ -607,6 +614,41 @@ expect_state() { # key value
     sleep 0.2
   done
   fail "$SCENARIO: $1 expected $(printf '%s' "$2" | cut -c1-400), got $(printf '%s' "$got" | cut -c1-400)"
+}
+# expect_state, then the same value again after a pause: a value that is true
+# for one frame (a panel closing and opening itself) does not pass.
+expect_state_stays() { # key value
+  local got
+  expect_state "$1" "$2"
+  sleep 0.6
+  read_state
+  got="$(sfield "$1")"
+  [ "$got" = "$2" ] \
+    || fail "$SCENARIO: $1 was $2 and a moment later $got"
+}
+# What the code's highlighter last gave the first line (`highlight`:
+# `<language id>;spans=<n>`), polled: LANGUAGE is the one it was built with and
+# COLOURED is 1 for at least one coloured span, 0 for none. A highlighter
+# that serves another language's cached colours reads here as spans on a
+# language that has none.
+expect_highlight() { # language coloured
+  local got="" spans tries=0
+  while [ "$tries" -lt 150 ]; do
+    read_state
+    got="$(sfield highlight)"
+    case "$got" in
+      "$1;spans="*)
+        spans="${got#*;spans=}"
+        if { [ "$2" = 1 ] && [ "$spans" -gt 0 ]; } || { [ "$2" = 0 ] && [ "$spans" = 0 ]; }; then
+          echo "OK: highlight=$got"
+          return 0
+        fi
+        ;;
+    esac
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$SCENARIO: highlight expected $1 with coloured=$2, got '$got'"
 }
 # One field of the status row (`status`: `branch=main;ahead=1;...`), polled the
 # way expect_state polls a key. The row's values hold no `;`.
@@ -1717,7 +1759,7 @@ scenario_status() {
   expect_status indent "Spaces: 4"
   expect_status encoding UTF-8
   expect_status eol LF
-  expect_status language "plain text"
+  expect_status language "Plain text"
   expect_status bell 0
   expect_state worktree_dirty true
   ctl surface editor select --ranges=0..0 >/dev/null
@@ -1891,6 +1933,8 @@ STATUS_CURSOR_ITEM=(1212 775)
 STATUS_INDENT_ITEM=(1274 775)
 STATUS_LINE_ENDING_ITEM=(1376 775)
 STATUS_LANGUAGE_ITEM=(1412 775)
+# A point in the terminal pane to the left of the file's.
+TERMINAL_AREA=(400 400)
 # The two rows of the line ending's panel.
 STATUS_LF_ROW=(1310 702)
 STATUS_CRLF_ROW=(1318 733)
@@ -1964,18 +2008,81 @@ scenario_status_actions() {
   expect_status_refused "not an indent" --item=indent --value=eight
   expect_status indent "Spaces: 2"
 
+  # ---- the indent in Tabs mode: a block, a new line after an opener, Shift-Tab
+  # on spaces
+  printf 'a\nb\n' >"$WT/status-tabs-block.txt"
+  open_file "$WT/status-tabs-block.txt"
+  expect_state state loaded
+  ctl surface editor status --item=indent --value=tabs:4 >/dev/null
+  expect_status indent "Tab Size: 4"
+  ctl surface editor select --ranges=0..3 >/dev/null
+  ctl surface editor keys --keys=tab >/dev/null
+  expect_state text "$(printf '\ta\\n\tb\\n')"
+  ctl surface editor save >/dev/null
+  expect_state dirty false
+  [ "$(grep -c "^$(printf '\t')[ab]$" "$WT/status-tabs-block.txt")" = 2 ] \
+    || fail "$SCENARIO: the saved file does not hold a tab character before each of its two lines"
+  echo "OK: with tabs, Tab over two lines puts one tab character before each, on disk too"
+  printf '{' >"$WT/status-tabs-brace.txt"
+  open_file "$WT/status-tabs-brace.txt"
+  expect_state state loaded
+  ctl surface editor status --item=indent --value=tabs:4 >/dev/null
+  ctl surface editor select --ranges=1..1 >/dev/null
+  ctl surface editor keys --keys=enter >/dev/null
+  expect_state text "$(printf '{\\n\t')"
+  ctl surface editor save >/dev/null
+  expect_state dirty false
+  printf '{}' >"$WT/status-tabs-pair.txt"
+  open_file "$WT/status-tabs-pair.txt"
+  expect_state state loaded
+  ctl surface editor status --item=indent --value=tabs:4 >/dev/null
+  ctl surface editor select --ranges=1..1 >/dev/null
+  ctl surface editor keys --keys=enter >/dev/null
+  expect_state text "$(printf '{\\n\t\\n}')"
+  ctl surface editor save >/dev/null
+  expect_state dirty false
+  echo "OK: with tabs, Enter after an opener indents the new line by one tab character, and a closer after the caret drops to its own line"
+  printf '  x\n' >"$WT/status-tabs-outdent.txt"
+  open_file "$WT/status-tabs-outdent.txt"
+  expect_state state loaded
+  ctl surface editor status --item=indent --value=tabs:4 >/dev/null
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor keys --keys=shift-tab >/dev/null
+  expect_state text 'x\n'
+  ctl surface editor save >/dev/null
+  expect_state dirty false
+  echo "OK: with tabs, Shift-Tab on a line indented with spaces takes the spaces off"
+  # What Tab Size does to a tab character: the same file at 2 and at 8. The two
+  # captures are for the eye, not compared: in Tabs mode the text system draws a
+  # tab at its own advance, so N moves the guides and the row's label only
+  # (rust/vendor/ely-gpui-component/LOCAL-CHANGES.md).
+  printf '\tabc\n' >"$WT/status-tabsize.txt"
+  open_file "$WT/status-tabsize.txt"
+  expect_state state loaded
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor status --item=indent --value=tabs:2 >/dev/null
+  expect_status indent "Tab Size: 2"
+  capture status-tabsize-2
+  ctl surface editor status --item=indent --value=tabs:8 >/dev/null
+  expect_status indent "Tab Size: 8"
+  capture status-tabsize-8
+
   # ---- the language: colour only
   open_file "$main"
   expect_state state loaded
   ctl surface editor select --ranges=0..0 >/dev/null
   expect_status language Rust
   expect_status lsp fake-lsp:ready
+  expect_highlight rust 1
   capture status-language-rust
   mark="$(lsp_mark)"
   ctl surface editor status --item=language --value=plain >/dev/null
-  expect_status language "plain text"
+  expect_status language "Plain text"
   expect_status lsp fake-lsp:ready
   expect_state language Rust
+  # The colour itself: the highlighter was rebuilt for plain text and gave the
+  # first line no span (a stale cache would still give it Rust's).
+  expect_highlight plain 0
   capture status-language-plain
   must_differ "the language's colour" status-language-rust status-language-plain
   ctl surface editor status --item=language --value=C++ >/dev/null
@@ -1984,6 +2091,7 @@ scenario_status_actions() {
   expect_status language Shell
   ctl surface editor status --item=language --value=rust >/dev/null
   expect_status language Rust
+  expect_highlight rust 1
   expect_status lsp fake-lsp:ready
   [ "$(lsp_count textDocument/didOpen "$mark")" = 0 ] && [ "$(lsp_count textDocument/didClose "$mark")" = 0 ] \
     || fail "$SCENARIO: the language server was told something when only the colour changed"
@@ -2035,7 +2143,7 @@ scenario_status_actions() {
   expect_status indent "Spaces: 4"
   expect_status eol LF
   ctl surface editor status --item=language --value=plain >/dev/null
-  expect_status language "plain text"
+  expect_status language "Plain text"
   expect_state dirty false
   echo "OK: a snapshot refuses an indent and a line ending, and takes a language"
 
@@ -2048,19 +2156,19 @@ scenario_status_actions() {
   ctl surface editor keys --keys=ctrl-shift-i >/dev/null
   expect_state status_set full
   focus_window
-  expect_state status_popover none
+  expect_state_stays status_popover none
   capture status-row-items
   click_at "${STATUS_LANGUAGE_ITEM[@]}"
-  expect_state status_popover language
+  expect_state_stays status_popover language
   capture status-popover-language
   click_at "${STATUS_LINE_ENDING_ITEM[@]}"
-  expect_state status_popover line_ending
+  expect_state_stays status_popover line_ending
   capture status-popover-line-ending
   click_at "${STATUS_INDENT_ITEM[@]}"
-  expect_state status_popover indent
+  expect_state_stays status_popover indent
   capture status-popover-indent
   click_at "${STATUS_CURSOR_ITEM[@]}"
-  expect_state status_popover goto
+  expect_state_stays status_popover goto
   capture status-popover-goto
   echo "OK: a click on each item opened its popover, the one before closed"
   # A real key goes where the keyboard is: the field, which took it as the
@@ -2069,63 +2177,143 @@ scenario_status_actions() {
   x_key 0
   x_key Return
   expect_status cursor "Ln 40, Col 1"
-  expect_state status_popover none
+  expect_state_stays status_popover none
   x_key Down
   expect_status cursor "Ln 41, Col 1"
   echo "OK: Enter in the field went to line 40 and closed it; the next key moved the code's caret"
   # Not a number: nothing happens, the field and the panel stay.
   click_at "${STATUS_CURSOR_ITEM[@]}"
-  expect_state status_popover goto
+  expect_state_stays status_popover goto
   x_key a
   x_key Return
-  expect_state status_popover goto
+  expect_state_stays status_popover goto
   expect_status cursor "Ln 41, Col 1"
   x_key Escape
-  expect_state status_popover none
+  expect_state_stays status_popover none
   x_key Down
   expect_status cursor "Ln 42, Col 1"
   echo "OK: a word does nothing; Escape closed the panel and the keyboard is in the code"
   # A choice in a list applies, closes the panel and gives the keyboard back:
   # the CRLF row, then the LF row, in the panel the item opens above itself.
   click_at "${STATUS_LINE_ENDING_ITEM[@]}"
-  expect_state status_popover line_ending
+  expect_state_stays status_popover line_ending
   expect_state line_ending lf
   click_at "${STATUS_CRLF_ROW[@]}"
   expect_state line_ending crlf
   expect_state dirty true
-  expect_state status_popover none
+  expect_state_stays status_popover none
   x_key Down
   expect_status cursor "Ln 43, Col 1"
   click_at "${STATUS_LINE_ENDING_ITEM[@]}"
-  expect_state status_popover line_ending
+  expect_state_stays status_popover line_ending
   click_at "${STATUS_LF_ROW[@]}"
   expect_state line_ending lf
   expect_state dirty false
-  expect_state status_popover none
+  expect_state_stays status_popover none
   echo "OK: a click on CRLF and then on LF applied each, closed the panel and left the keyboard in the code"
   # The item pressed a second time closes its panel, and the keyboard is in the
   # code.
   click_at "${STATUS_LANGUAGE_ITEM[@]}"
-  expect_state status_popover language
+  expect_state_stays status_popover language
   click_at "${STATUS_LANGUAGE_ITEM[@]}"
-  expect_state status_popover none
+  expect_state_stays status_popover none
   x_key Down
   expect_status cursor "Ln 44, Col 1"
   echo "OK: the item pressed again closed its panel and the keyboard is in the code"
   # The verb closes a panel as well.
   ctl surface editor status --item=line_ending --open=true >/dev/null
-  expect_state status_popover line_ending
+  expect_state_stays status_popover line_ending
   ctl surface editor status --item=line_ending --open=false >/dev/null
-  expect_state status_popover none
+  expect_state_stays status_popover none
   x_key Down
   expect_status cursor "Ln 45, Col 1"
   echo "OK: the verb's open=false hands the keyboard to the code too"
+  # Escape in a list reaches the panel: it closes, and the keyboard is in the
+  # code, not on whatever held it before the panel opened: here the terminal,
+  # which a click on it gives the keyboard.
+  click_at "${TERMINAL_AREA[@]}"
+  click_at "${STATUS_LANGUAGE_ITEM[@]}"
+  expect_state_stays status_popover language
+  x_key Escape
+  expect_state_stays status_popover none
+  x_key Down
+  expect_status cursor "Ln 46, Col 1"
+  echo "OK: Escape in the language list closed it, and the next key moved the code's caret"
+  # Up and Down act in an open list without a Tab: Down and Return take the
+  # row after the first.
+  click_at "${STATUS_LINE_ENDING_ITEM[@]}"
+  expect_state_stays status_popover line_ending
+  x_key Down
+  x_key Return
+  expect_state_stays line_ending crlf
+  expect_state_stays status_popover none
+  x_key Down
+  expect_status cursor "Ln 47, Col 1"
+  ctl surface editor status --item=line_ending --value=lf >/dev/null
+  expect_state dirty false
+  click_at "${STATUS_LANGUAGE_ITEM[@]}"
+  expect_state_stays status_popover language
+  x_key Down
+  x_key Return
+  expect_status language Markdown
+  expect_state_stays status_popover none
+  ctl surface editor status --item=language --value=rust >/dev/null
+  expect_status language Rust
+  echo "OK: Down and Return in a list chose the row after the first (CRLF; Markdown), and closed it"
   ctl surface editor status --item=indent --open=true >/dev/null
-  expect_state status_popover indent
+  expect_state_stays status_popover indent
   ctl surface editor status --item=language --open=true >/dev/null
-  expect_state status_popover language
+  expect_state_stays status_popover language
+  # A panel to the left of the open one: the one open closes first, and the new
+  # one stays.
+  ctl surface editor status --item=indent --open=true >/dev/null
+  expect_state_stays status_popover indent
+  ctl surface editor status --item=line_ending --open=true >/dev/null
+  expect_state_stays status_popover line_ending
+  ctl surface editor status --item=language --open=true >/dev/null
+  expect_state_stays status_popover language
+  ctl surface editor status --item=indent --open=true >/dev/null
+  expect_state_stays status_popover indent
+  echo "OK: the verb switched the open panel right to left and left to right, and each stayed open"
+  ctl surface editor status --item=indent --open=false >/dev/null
+  expect_state_stays status_popover none
+  # An item that stops being drawn takes its panel with it, for good: the row
+  # goes compact (the panes' toggles, as real keys: the keyboard stays in the
+  # panel) and comes back full.
+  ctl surface editor status --item=indent --open=true >/dev/null
+  expect_state_stays status_popover indent
+  x_key ctrl+shift+s
+  x_key ctrl+shift+i
+  expect_state status_set compact
+  expect_status_refused "compact" --item=indent --open=true
+  expect_status_refused "compact" --item=line_ending --open=true
+  expect_state_stays status_popover none
+  expect_state_stays status_popover none
+  x_key ctrl+shift+s
+  x_key ctrl+shift+i
+  expect_state status_set full
+  expect_state_stays status_popover none
+  echo "OK: an open indent panel went when the compact row stopped drawing its item, and did not come back with it"
+  # Likewise for a language panel when the file switches to Markdown Preview.
+  open_file "$WT/notes.md"
+  expect_state state loaded
+  ctl surface editor status --item=language --open=true >/dev/null
+  expect_state_stays status_popover language
+  ctl surface editor mode --mode=preview >/dev/null
+  expect_state mode preview
+  expect_state_stays status_popover none
+  ctl surface editor mode --mode=code >/dev/null
+  expect_state mode code
+  expect_state_stays status_popover none
+  echo "OK: an open language panel went when Preview took the code away, and did not come back"
+  ctl surface editor status --item=language --open=true >/dev/null
+  expect_state_stays status_popover language
   ctl surface editor status --item=language --open=false >/dev/null
-  expect_state status_popover none
+  expect_state_stays status_popover none
+  # Back to main.rs, whose server item makes the row wide enough to go compact
+  # (notes.md has none), and to the compact set.
+  open_file "$main"
+  expect_state state loaded
   ctl surface editor keys --keys=ctrl-shift-s >/dev/null
   ctl surface editor keys --keys=ctrl-shift-i >/dev/null
   expect_state status_set compact
