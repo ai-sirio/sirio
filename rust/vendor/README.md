@@ -48,8 +48,9 @@ action against a Terminal pane (see `docs/linux-rewrite/WAYLAND-LANE.md`'s XDND 
   entry-point coordinate, which was a real bug caught live while building this fix). See the
   `pending_drop`/`PendingDrop`/`pending_drop_submit_position` doc comments in
   `src/linux/wayland/client.rs` for the exact mechanism, and the `tests` module at the bottom of
-  that file for regression coverage. Every other file in this crate is byte-for-byte the released
-  `bezel-gpui-linux` 0.3.8 source.
+  that file for regression coverage. Apart from that fix and the child environment described under
+  `gpui_linux — links open in the user's environment` below, every file in this crate is
+  byte-for-byte the released `bezel-gpui-linux` 0.3.8 source.
 - **`gpui_platform`** is **not** patched, and `vendor/gpui_platform/` no longer exists. It was
   patched under the old zed-git-rev dependency only because that `gpui_platform`'s own
   `gpui_linux = { workspace = true }` dependency was a *path* dependency inside the zed checkout —
@@ -117,6 +118,20 @@ This is a real, standing fork of one crate, not a one-line patch. Bumping
 dropping this override entirely, if upstream has fixed the race some other way by then — worth
 checking first). Nothing else in the vendored crate should ever need hand-merging, since nothing
 else was changed from upstream.
+
+## `gpui_linux` — links open in the user's environment
+
+`set_child_environment(env)` is a process-wide setter, its pairs held in a `OnceLock` in
+`src/linux.rs` and re-exported from `src/gpui_linux.rs`. gpui starts `xdg-open` for
+`open_with_system` and the URL opener for every `cx.open_url`, and both inherited the app's
+environment: under an AppImage that is the mount's `LD_LIBRARY_PATH`, `XDG_DATA_DIRS` and GTK
+variables, so the user's browser started with them. Once the setter has been called, each of those
+commands is started with its environment cleared and the pairs given instead
+(`with_child_environment`, applied in `open_with_system` and `open_uri_internal` in
+`src/linux/platform.rs`). `sirio`'s `main` calls it on Linux, right after `sirio_env::install`, with
+the user's environment. The crate takes no dependency on Sirio's environment crate: the caller
+passes the pairs in. Not covered: the `open::that_detached` fallback of `reveal_path_internal`,
+which opens a folder in the file manager with the app's environment.
 
 ## `gpui_windows` — a bitblt swap chain so translucency can show (ADR 0003)
 

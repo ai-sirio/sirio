@@ -25705,6 +25705,10 @@ fn main() {
         login.as_deref(),
         cli_prefix.as_deref(),
     ));
+    // gpui starts `xdg-open` for every link: it gets the user's environment
+    // like the other children, not the AppImage mount's variables.
+    #[cfg(target_os = "linux")]
+    gpui_linux::set_child_environment(sirio_env::for_child().into_iter().collect());
     // The login PATH the PATH link checks, recorded once so nothing runs the
     // login shell a second time (cli_path.rs).
     cli_path::set_login_path(login);

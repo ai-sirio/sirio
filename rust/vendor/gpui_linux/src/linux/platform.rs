@@ -22,7 +22,7 @@ use gpui_util::{ResultExt as _, new_std_command};
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
-use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
+use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver, with_child_environment};
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
     ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
@@ -538,7 +538,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                     clippy::disallowed_methods,
                     reason = "running on a background thread, so blocking is fine"
                 )]
-                new_std_command("xdg-open")
+                with_child_environment(new_std_command("xdg-open"))
                     .arg(path)
                     .status()
                     .context("invoking xdg-open")
@@ -761,7 +761,10 @@ pub(super) fn open_uri_internal(
         executor
             .spawn(async move {
                 let mut xdg_open_failed = false;
-                for mut command in open::commands(uri.to_string()) {
+                let commands = open::commands(uri.to_string())
+                    .into_iter()
+                    .map(with_child_environment);
+                for mut command in commands {
                     if let Some(token) = activation_token.as_ref() {
                         command.env("XDG_ACTIVATION_TOKEN", token);
                     }

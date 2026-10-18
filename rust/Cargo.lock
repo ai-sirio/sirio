@@ -7310,6 +7310,7 @@ dependencies = [
  "anyhow",
  "bezel",
  "bezel-gpui",
+ "bezel-gpui-linux",
  "bezel-gpui-platform",
  "bezel-zed-scheduler",
  "chrono",
