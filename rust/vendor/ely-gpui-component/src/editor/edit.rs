@@ -130,7 +130,7 @@ impl CodeEditor {
         if !self.editable() {
             return;
         }
-        let tab = self.options.tab;
+        let step = self.indent_step();
         let edits = self
             .selections
             .iter()
@@ -148,9 +148,9 @@ impl CodeEditor {
                 let opens = before.is_some_and(|ch| "{[(:".contains(ch));
                 let text = match (opens, after) {
                     (true, Some(close)) if "}])".contains(close) => {
-                        format!("\n{indent}{}\n{indent}", " ".repeat(tab))
+                        format!("\n{indent}{step}\n{indent}")
                     }
-                    (true, _) => format!("\n{indent}{}", " ".repeat(tab)),
+                    (true, _) => format!("\n{indent}{step}"),
                     _ => format!("\n{indent}"),
                 };
                 (selection.range(), text)
@@ -175,6 +175,15 @@ impl CodeEditor {
             })
             .collect();
         self.set_selections(placed, cx);
+    }
+
+    /// What one level of indent is made of: a tab character with hard tabs (Sirio: LOCAL-CHANGES.md), else a tab size of spaces.
+    fn indent_step(&self) -> String {
+        if self.options.hard_tabs {
+            "\t".to_owned()
+        } else {
+            " ".repeat(self.options.tab)
+        }
     }
 
     /// The lines the selections touch, each once.
@@ -208,6 +217,7 @@ impl CodeEditor {
             return self.insert(&ghost.text, false, cx);
         }
         let tab = self.options.tab;
+        let step = self.indent_step();
         let spans_lines = self.selections.iter().any(|selection| {
             self.buffer.line_of(selection.range().start)
                 != self.buffer.line_of(selection.range().end)
@@ -218,7 +228,12 @@ impl CodeEditor {
                 .iter()
                 .map(|selection| {
                     let column = self.buffer.point(selection.range().start).1;
-                    (selection.range(), " ".repeat(tab - column % tab))
+                    let fill = if self.options.hard_tabs {
+                        step.clone()
+                    } else {
+                        " ".repeat(tab - column % tab)
+                    };
+                    (selection.range(), fill)
                 })
                 .collect();
             return self.apply(edits, false, cx);
@@ -230,7 +245,7 @@ impl CodeEditor {
             .filter(|line| !self.buffer.line(*line).trim().is_empty())
             .map(|line| {
                 let start = self.buffer.line_range(line).start;
-                (start..start, " ".repeat(tab))
+                (start..start, step.clone())
             })
             .collect();
         self.shift_lines(edits, kept, cx);
@@ -248,7 +263,12 @@ impl CodeEditor {
             .into_iter()
             .filter_map(|line| {
                 let start = self.buffer.line_range(line).start;
-                let cut = self.buffer.indent(line).min(tab);
+                // With hard tabs one level is one leading tab, when the line has one.
+                let cut = if self.options.hard_tabs && self.buffer.line(line).starts_with('\t') {
+                    1
+                } else {
+                    self.buffer.indent(line).min(tab)
+                };
                 (cut > 0).then(|| (start..start + cut, String::new()))
             })
             .collect();

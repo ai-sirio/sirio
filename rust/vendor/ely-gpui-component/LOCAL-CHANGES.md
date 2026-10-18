@@ -539,3 +539,18 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
 - `src/editor/view.rs`: the banner is drawn when `draws_read_only_banner()` is
   true. The text, the button and the `Unlock` event are unchanged. A sync must
   keep that call in the render.
+
+### Indenting with tabs (Task 11b)
+
+- `src/editor/state.rs`: `Options::hard_tabs` (default `false`), with the builder
+  `CodeEditor::hard_tabs()`, the setter `set_hard_tabs(bool, cx)` and the reader
+  `uses_hard_tabs()`. It is a separate setter, not a `ViewOptions` field, so no
+  literal of `ViewOptions` changes. The text already in the buffer is left as it is.
+- `src/editor/edit.rs`: with `hard_tabs` set, Tab inserts one `\t` at each caret
+  (without it, spaces up to the next tab stop, as before), a Tab over a selection
+  that spans lines adds one `\t` to each touched line, Shift-Tab takes one leading
+  `\t` off a line that starts with one (else up to a tab size of leading
+  whitespace, as before), and Enter after an opener indents the new line one `\t`
+  deeper. `indent_step()` is the one place that says what a level is made of.
+  The tab size still drives the indent guides and the non-tab path.
+  Sirio's status row switches it per file (Indent: Spaces or Tabs).

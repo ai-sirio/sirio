@@ -109,6 +109,8 @@ pub(crate) struct Options {
     /// Whether a read-only editor draws its own banner and its "Make editable".
     pub read_only_banner: bool,
     pub tab: usize,
+    /// Whether Tab, Enter after an opener and indent write a tab character in place of spaces (Sirio: LOCAL-CHANGES.md).
+    pub hard_tabs: bool,
     pub highlighter: Option<LineHighlighter>,
     /// Whether the gutter's breakpoint slot takes presses and draws breakpoints.
     pub breakpoints: bool,
@@ -257,6 +259,7 @@ impl CodeEditor {
                 read_only: false,
                 read_only_banner: true,
                 tab: 4,
+                hard_tabs: false,
                 highlighter: None,
                 breakpoints: true,
             },
@@ -340,6 +343,12 @@ impl CodeEditor {
     pub fn tab_size(mut self, size: usize) -> Self {
         assert!(size > 0, "a tab spans at least one column");
         self.options.tab = size;
+        self
+    }
+
+    /// Indents with a tab character in place of spaces: Tab, Shift-Tab, a selection's indent and the line after an opener.
+    pub fn hard_tabs(mut self) -> Self {
+        self.options.hard_tabs = true;
         self
     }
 
@@ -454,6 +463,19 @@ impl CodeEditor {
     ) {
         self.options.highlighter = Some(LineHighlighter(Rc::new(highlight)));
         cx.notify();
+    }
+
+    /// Whether the editor indents with a tab character in place of spaces.
+    pub fn uses_hard_tabs(&self) -> bool {
+        self.options.hard_tabs
+    }
+
+    /// Chooses between a tab character and spaces for what the editor indents with; the text already there is left as it is.
+    pub fn set_hard_tabs(&mut self, hard_tabs: bool, cx: &mut Context<Self>) {
+        if self.options.hard_tabs != hard_tabs {
+            self.options.hard_tabs = hard_tabs;
+            cx.notify();
+        }
     }
 
     /// Sets the view settings together. A tab size of zero is raised to one and logged.
