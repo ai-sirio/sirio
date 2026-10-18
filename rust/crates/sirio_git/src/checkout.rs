@@ -256,9 +256,15 @@ pub fn exclude(repo: &Path, pattern: &str) -> Result<(), String> {
     let file = info.join("exclude");
     // Followed through links: a symlink to a regular file is written through,
     // and anything else (a directory, a FIFO) is refused by name before it is
-    // read or opened.
+    // read or opened. A link that points nowhere is refused too: appending
+    // would create its target wherever it points.
     if std::fs::metadata(&file).is_ok_and(|metadata| !metadata.is_file()) {
         return Err(format!("could not write {}: it is not a regular file", file.display()));
+    }
+    if std::fs::metadata(&file).is_err()
+        && std::fs::symlink_metadata(&file).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(format!("could not write {}: it is a link that points nowhere", file.display()));
     }
     let existing = match std::fs::read_to_string(&file) {
         Ok(text) => text,

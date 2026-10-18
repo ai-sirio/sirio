@@ -127,11 +127,12 @@ else was changed from upstream.
 environment: under an AppImage that is the mount's `LD_LIBRARY_PATH`, `XDG_DATA_DIRS` and GTK
 variables, so the user's browser started with them. Once the setter has been called, each of those
 commands is started with its environment cleared and the pairs given instead
-(`with_child_environment`, applied in `open_with_system` and `open_uri_internal` in
-`src/linux/platform.rs`). `sirio`'s `main` calls it on Linux, right after `sirio_env::install`, with
-the user's environment. The crate takes no dependency on Sirio's environment crate: the caller
-passes the pairs in. Not covered: the `open::that_detached` fallback of `reveal_path_internal`,
-which opens a folder in the file manager with the app's environment.
+(`with_child_environment`, applied in `open_with_system`, `open_uri_internal` and the file-manager
+fallback of `reveal_path_internal` in `src/linux/platform.rs`; the last replaces
+`open::that_detached` with the same `open::commands` loop, first command that starts wins, nothing
+waits). `sirio`'s `main` calls it on Linux, right after `sirio_env::install`, with the user's
+environment. The crate takes no dependency on Sirio's environment crate: the caller passes the pairs
+in.
 
 ## `gpui_windows` — a bitblt swap chain so translucency can show (ADR 0003)
 

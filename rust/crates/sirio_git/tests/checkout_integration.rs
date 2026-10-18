@@ -347,6 +347,20 @@ fn exclude_refuses_a_target_that_is_not_a_regular_file() {
     assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none(), "nothing was written into it");
 }
 
+// A dangling link would otherwise have its target created wherever it points.
+#[cfg(unix)]
+#[test]
+fn exclude_refuses_a_link_that_points_nowhere() {
+    let (_scratch, repo, _bare, _feat) = fixture("exclude-dangling");
+    let file = repo.join(".git/info/exclude");
+    let nowhere = repo.parent().unwrap().join("nowhere");
+    let _ = std::fs::remove_file(&file);
+    std::os::unix::fs::symlink(&nowhere, &file).unwrap();
+    let error = exclude(&repo, ".sirio/handoff/").expect_err("a dangling link is refused");
+    assert!(error.contains(&file.display().to_string()), "{error}");
+    assert!(!nowhere.exists(), "the link's target was not created");
+}
+
 #[cfg(unix)]
 #[test]
 fn exclude_writes_through_a_symlink_to_a_regular_file() {

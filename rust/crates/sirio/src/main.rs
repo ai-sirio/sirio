@@ -22851,7 +22851,8 @@ fn initial_working_directory(
                 .filter(|owd| {
                     owd.is_absolute() && owd.is_dir() && !owd.starts_with(&mount)
                 });
-            launched.or(home).unwrap_or_else(|| current.to_path_buf())
+            // With neither, `/`: never the mount, which vanishes on quit.
+            launched.or(home).unwrap_or_else(|| PathBuf::from("/"))
         }
         _ => current.to_path_buf(),
     };
@@ -46766,6 +46767,9 @@ browser  profile  "
                 "an OWD that is {case} never becomes the starting point"
             );
         }
+        // With no home either, the mount is still never the answer.
+        let process = initial_directory_environment(&[("APPDIR", mount.as_path())]);
+        assert_eq!(initial_working_directory(&mount_bin, &process, None), PathBuf::from("/"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

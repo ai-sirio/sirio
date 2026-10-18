@@ -824,10 +824,22 @@ pub(super) fn reveal_path_internal(
                     Ok(_) => return,
                     Err(e) => log::error!("Failed to open with dbus: {}", e),
                 }
-                if path.is_dir() {
-                    open::that_detached(path).log_err();
+                let target = if path.is_dir() {
+                    path.as_path()
                 } else {
-                    open::that_detached(path.parent().unwrap_or(Path::new(""))).log_err();
+                    path.parent().unwrap_or(Path::new(""))
+                };
+                // `open::that_detached`, with the opener in the child environment:
+                // the first command that starts wins, and nothing waits for it.
+                for command in open::commands(target).into_iter().map(with_child_environment) {
+                    let mut command = command;
+                    command
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
+                    if command.spawn().log_err().is_some() {
+                        break;
+                    }
                 }
             }
         })
