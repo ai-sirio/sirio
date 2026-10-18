@@ -464,6 +464,15 @@ fn link_copy(
     if stable_is_debug() {
         return LinkOutcome::Skipped("debug build");
     }
+    link_release_copy(copy, environment, admin)
+}
+
+/// The PATH link to a release copy, once the build has decided it is one.
+fn link_release_copy(
+    copy: &CopyResult,
+    environment: &BTreeMap<String, String>,
+    admin: bool,
+) -> LinkOutcome {
     if release_sirioctl_path(environment).is_none() {
         return LinkOutcome::Skipped("no data directory");
     }
@@ -472,6 +481,11 @@ fn link_copy(
     let Ok((stable, _)) = copy else {
         return LinkOutcome::Skipped("the copy failed");
     };
+    // A directory other users can write to must not lead anyone's PATH, and a
+    // link into it would put it on the user's. The card says so.
+    if let Some(dir) = stable.parent().filter(|dir| !safe_path_prefix(dir)) {
+        return LinkOutcome::UnsafeDirectory(dir.to_path_buf());
+    }
     // Only the unix arms read a home; the Windows arm names none, so a Windows
     // launch (which never sets HOME) reaches the link.
     #[cfg(unix)]
@@ -536,7 +550,7 @@ fn version_words(outcome: CopyOutcome) -> String {
         CopyOutcome::Installed | CopyOutcome::Replaced | CopyOutcome::Current => {
             "Same build as Sirio"
         }
-        CopyOutcome::Stale => "Older than this Sirio — it could not be replaced",
+        CopyOutcome::Stale => "Differs from this Sirio — it could not be replaced",
         CopyOutcome::SourceMissing => "Not checked: Sirio has no sirioctl beside it",
     })
 }
@@ -570,6 +584,9 @@ fn path_line(link: &LinkOutcome) -> String {
         } => format!("{} is not Sirio's — left as it is", place.display()),
         LinkOutcome::NeedsAdmin => "Not on PATH — Install in PATH asks for your password".into(),
         LinkOutcome::Skipped(reason) => format!("Not installed: {reason}"),
+        LinkOutcome::UnsafeDirectory(dir) => {
+            format!("Not linked: {} is not safe to put on PATH", dir.display())
+        }
         LinkOutcome::Failed(error) => format!("Could not link: {error}"),
     }
 }
@@ -750,6 +767,40 @@ mod tests {
             .expect("make it group-writable");
         assert!(!safe_path_prefix(&dir));
         assert!(!safe_path_prefix(&root.join("missing")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A stable directory other users can write to is never put on PATH: no
+    /// link is made, and the card names the directory and says why.
+    #[cfg(unix)]
+    #[test]
+    fn an_unsafe_stable_directory_is_never_linked() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = fixture("unsafe-link");
+        let data = root.join("data");
+        let bin = data.join("Sirio").join("bin");
+        std::fs::create_dir_all(&bin).expect("create the stable directory");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o775))
+            .expect("make it group-writable");
+        let stable = bin.join(sirioctl_binary_name());
+        std::fs::write(&stable, b"copy").expect("write the stable copy");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).expect("create the home");
+        let environment = BTreeMap::from([
+            (DATA_BASE.to_string(), data.to_string_lossy().into_owned()),
+            ("HOME".to_string(), home.to_string_lossy().into_owned()),
+        ]);
+        let copy: CopyResult = Ok((stable, CopyOutcome::Installed));
+        let outcome = link_release_copy(&copy, &environment, false);
+        assert_eq!(outcome, LinkOutcome::UnsafeDirectory(bin.clone()), "{outcome:?}");
+        assert_eq!(
+            path_line(&outcome),
+            format!("Not linked: {} is not safe to put on PATH", bin.display())
+        );
+        assert!(
+            !home.join(".local").join("bin").join(sirioctl_binary_name()).exists(),
+            "no link is made into the home's bin"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1054,10 +1105,6 @@ mod tests {
             release,
             Some(data.join("Sirio").join("bin").join(sirioctl_binary_name()))
         );
-        assert_eq!(
-            release,
-            sirioctl_install_dir(&environment, false).map(|dir| dir.join(sirioctl_binary_name()))
-        );
         assert_ne!(
             release,
             sirioctl_install_dir(&environment, true).map(|dir| dir.join(sirioctl_binary_name()))
@@ -1336,7 +1383,7 @@ mod tests {
         }
         assert_eq!(
             status_for(&copy(CopyOutcome::Stale), &linked).version_line,
-            "Older than this Sirio — it could not be replaced"
+            "Differs from this Sirio — it could not be replaced"
         );
         assert_eq!(
             status_for(&copy(CopyOutcome::SourceMissing), &linked).version_line,

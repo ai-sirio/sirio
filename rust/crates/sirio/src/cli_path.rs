@@ -42,6 +42,9 @@ pub(crate) enum LinkOutcome {
     NeedsAdmin,
     /// Not attempted, and why.
     Skipped(&'static str),
+    /// The stable copy's directory is one other users can write to, so it is
+    /// never put on PATH. Named here, because `Skipped` carries only a fixed reason.
+    UnsafeDirectory(PathBuf),
     /// Attempted and failed, and why.
     Failed(String),
 }
