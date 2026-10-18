@@ -86,6 +86,17 @@ set -eEuo pipefail
 #                     opener and Shift-Tab on spaces; the colour follows the language
 #                     (`highlight=`, what the highlighter gave line 1); each popover captured
 #                     open
+#   notifications     the bell behind the status row: a language server that cannot start
+#                     (a failing entry added to languages.toml) and a save refused over a
+#                     disk change (a real Ctrl+S) each raise a message, and each lands in
+#                     the tab's list; the bell counts what was added since the list was
+#                     opened, a dismissed corner card leaves list and count alone, opening
+#                     the list clears the count and keeps the list, `value=clear` empties
+#                     both; a real click opens the panel and Clear closes it with the
+#                     keyboard back in the code; a snapshot's and a Preview's bell take a
+#                     press and a snapshot keeps its own list; the list keeps the newest
+#                     50; the compact row still draws the bell; captured with a count, the
+#                     list and the empty list
 #   find              Find over findme.txt: the match count against grep (case-insensitive,
 #                     then case-sensitive), two steps forward and one back, a pattern that
 #                     does not compile, close; captured with the replace row open and the
@@ -2327,6 +2338,209 @@ scenario_status_actions() {
     || fail "$SCENARIO: secondaryVisible is $(layout_field secondaryVisible), expected $secondary_before"
 }
 
+# The bell's place in the window of CLICK_WINDOW with the sidebar and the right
+# panel hidden (measured on the captures this scenario takes), and Clear in its
+# panel when two messages are listed.
+STATUS_BELL_ITEM=(1454 775)
+STATUS_BELL_CLEAR=(1431 744)
+# The corner card, over the file's bottom right corner.
+NOTIFY_CARD=(1300 720)
+
+# The bell's count and the length of the list, both polled.
+expect_bell() { # unseen listed
+  expect_status bell "$1"
+  expect_state notifications "$2"
+}
+
+scenario_notifications() {
+  local notify="$WT/notify.nfy" tabs_before secondary_before sha count i
+  tabs_before="$(tab_count)"
+  secondary_before="$(layout_field secondaryVisible)"
+  mkdir -p "$XDG_CONFIG_HOME/sirio"
+  cat >>"$XDG_CONFIG_HOME/sirio/languages.toml" <<'TOML'
+
+[[language]]
+name = "notify-failing"
+extensions = ["nfy"]
+command = "sh"
+args = ["-c", "exit 1"]
+TOML
+  printf 'one\ntwo\nthree\n' >"$notify"
+
+  # ---- the first message: a language server that cannot start, on opening
+  open_file "$notify"
+  expect_state state loaded
+  ctl surface editor keys --keys=ctrl-shift-s >/dev/null
+  ctl surface editor keys --keys=ctrl-shift-i >/dev/null
+  # The failed server's reason is long: the row draws its compact set, which
+  # keeps the bell.
+  expect_state status_set compact
+  expect_status lsp sh:failed
+  expect_bell 1 1
+  [ -n "$(sfield message)" ] || fail "$SCENARIO: the corner card names nothing after the server failed"
+  expect_state_stays notifications 1
+  echo "OK: a server that failed to start raised a message: bell 1, one notification"
+  expect_state status_popover none
+  focus_window
+  capture bell-count-one
+
+  # ---- the second: a save refused over a disk change, by a real Ctrl+S
+  ctl surface editor status --item=line_ending --value=crlf >/dev/null
+  expect_state dirty true
+  printf 'changed\non disk\n' >"$notify"
+  expect_state conflict changed
+  ctl surface editor keys --keys=right >/dev/null
+  x_key ctrl+s
+  expect_bell 2 2
+  expect_state dirty true
+  case "$(sfield message)" in
+    *"save failed"*) ;;
+    *) fail "$SCENARIO: the corner card reads '$(sfield message)', expected the save failure" ;;
+  esac
+  echo "OK: a refused save raised the second: bell 2, two notifications"
+  capture bell-count
+
+  # The corner card goes with a click on it; the list and the count do not.
+  click_at "${NOTIFY_CARD[@]}"
+  expect_state message ""
+  expect_state_stays notifications 2
+  expect_status bell 2
+  echo "OK: dismissing the corner card left the list and the count alone"
+
+  # ---- opening the list: it clears the count and keeps the list
+  ctl surface editor status --item=bell --open=true >/dev/null
+  expect_state_stays status_popover bell
+  expect_bell 0 2
+  capture bell-list
+  ctl surface editor status --item=bell --open=false >/dev/null
+  expect_state_stays status_popover none
+  expect_bell 0 2
+  x_key ctrl+s
+  expect_bell 1 3
+  expect_state_stays notifications 3
+  echo "OK: opening the list took the count to 0 and kept both; a third message while closed: bell 1, three"
+  ctl surface editor status --item=bell --value=clear >/dev/null
+  expect_bell 0 0
+  expect_state_stays notifications 0
+  expect_status_refused "not a bell value" --item=bell --value=empty
+  expect_status_refused "needs a value" --item=bell
+  echo "OK: value=clear emptied the list and the count"
+  ctl surface editor status --item=bell --open=true >/dev/null
+  expect_state_stays status_popover bell
+  capture bell-empty
+  ctl surface editor status --item=bell --open=false >/dev/null
+  expect_state_stays status_popover none
+  expect_bell 0 0
+
+  # ---- a real click opens the panel, a second one closes it, Clear empties
+  # it and closes it with the keyboard in the code
+  x_key ctrl+s
+  x_key ctrl+s
+  expect_bell 2 2
+  click_at "${STATUS_BELL_ITEM[@]}"
+  expect_state_stays status_popover bell
+  expect_bell 0 2
+  click_at "${STATUS_BELL_ITEM[@]}"
+  expect_state_stays status_popover none
+  ctl surface editor select --ranges=0..0 >/dev/null
+  x_key Down
+  expect_status cursor "Ln 2, Col 1"
+  echo "OK: a click on the bell opened its panel and a second one closed it, the keyboard in the code"
+  click_at "${STATUS_BELL_ITEM[@]}"
+  expect_state_stays status_popover bell
+  click_at "${STATUS_BELL_CLEAR[@]}"
+  expect_state_stays status_popover none
+  expect_bell 0 0
+  x_key Down
+  expect_status cursor "Ln 3, Col 1"
+  echo "OK: Clear in the panel emptied the list, closed it, and the keyboard is in the code"
+  # Escape closes the panel, from where the panel left the keyboard.
+  click_at "${STATUS_BELL_ITEM[@]}"
+  expect_state_stays status_popover bell
+  x_key Escape
+  expect_state_stays status_popover none
+  x_key Down
+  expect_status cursor "Ln 4, Col 1"
+  echo "OK: Escape closed the bell's panel and the keyboard is in the code"
+
+  # ---- the compact row draws the bell too (this tab's row is compact)
+  expect_state status_set compact
+  x_key ctrl+s
+  expect_bell 1 1
+  ctl surface editor status --item=bell --open=true >/dev/null
+  expect_state_stays status_popover bell
+  expect_bell 0 1
+  ctl surface editor status --item=bell --open=false >/dev/null
+  expect_state_stays status_popover none
+  echo "OK: the compact row drew the bell and opened its panel"
+
+  # ---- a snapshot has its own list, and the bell takes a press there
+  sha="$(git -C "$WT" rev-parse HEAD)"
+  ctl surface editor open-snapshot --sha="$sha" --path=src/shapes.rs >/dev/null
+  settle
+  expect_state snapshot true
+  expect_state status_set full
+  expect_bell 0 0
+  "$CTL" surface editor save >/dev/null 2>&1 && fail "$SCENARIO: a snapshot's save was accepted"
+  expect_bell 1 1
+  ctl surface editor status --item=bell --open=true >/dev/null
+  expect_state_stays status_popover bell
+  expect_bell 0 1
+  ctl surface editor status --item=bell --open=false >/dev/null
+  expect_state_stays status_popover none
+  "$CTL" surface editor save >/dev/null 2>&1 || true
+  expect_bell 1 2
+  click_at "${STATUS_BELL_ITEM[@]}"
+  expect_state_stays status_popover bell
+  expect_bell 0 2
+  click_at "${STATUS_BELL_ITEM[@]}"
+  expect_state_stays status_popover none
+  echo "OK: a snapshot's Save raised its message into its own list, and its bell opened, by the verb and by a click"
+  # The newest 50 are kept: 55 more refused saves.
+  i=0
+  while [ "$i" -lt 54 ]; do
+    "$CTL" surface editor save >/dev/null 2>&1 || true
+    i=$((i + 1))
+  done
+  expect_bell 50 50
+  expect_state_stays notifications 50
+  ctl surface editor status --item=bell --value=clear >/dev/null
+  expect_bell 0 0
+  echo "OK: 55 messages left the newest 50, and 50 on the bell"
+
+  # ---- Markdown Preview: the bell is about the tab, not the code
+  open_file "$WT/notes.md"
+  expect_state state loaded
+  ctl surface editor mode --mode=preview >/dev/null
+  expect_state mode preview
+  ctl surface editor status --item=bell --open=true >/dev/null
+  expect_state_stays status_popover bell
+  ctl surface editor status --item=bell --open=false >/dev/null
+  expect_state_stays status_popover none
+  ctl surface editor mode --mode=code >/dev/null
+  expect_state mode code
+  echo "OK: Preview's bell opened its panel"
+  # The first file's tab kept its own list through all of it: the one message
+  # the compact row's Ctrl+S raised, seen.
+  open_file "$notify"
+  expect_state state loaded
+  expect_bell 0 1
+  ctl surface editor keys --keys=ctrl-shift-s >/dev/null
+  ctl surface editor keys --keys=ctrl-shift-i >/dev/null
+  # Reload takes the disk's text, so the tab closes without asking.
+  ctl surface editor conflict --action=reload >/dev/null
+  expect_state dirty false
+  expect_state conflict none
+
+  count="$(tab_count)"
+  while [ "$count" -gt "$tabs_before" ]; do
+    ctl surface tabs close "$count" >/dev/null
+    count=$((count - 1))
+  done
+  [ "$(layout_field secondaryVisible)" = "$secondary_before" ] \
+    || fail "$SCENARIO: secondaryVisible is $(layout_field secondaryVisible), expected $secondary_before"
+}
+
 scenario_find() {
   local fixture="$WT/findme.txt" all cased
   open_file "$fixture"
@@ -2623,6 +2837,7 @@ scenario snapshot scenario_snapshot
 scenario git_marks scenario_git_marks
 scenario status scenario_status
 scenario status_actions scenario_status_actions
+scenario notifications scenario_notifications
 scenario find scenario_find
 scenario replace scenario_replace
 scenario multibyte scenario_multibyte
