@@ -242,6 +242,11 @@ pub fn fast_forward(worktree: &Path, target: &str) -> Result<FastForward, GitErr
 /// worktrees, never committed). A pattern already on its own line is left
 /// alone, so calling this again changes nothing.
 pub fn exclude(repo: &Path, pattern: &str) -> Result<(), String> {
+    // Callers run on their own threads (one per agent pane), and this is a
+    // read-modify-write: without the lock two appends can each read the file
+    // before the other writes, and one pattern is lost.
+    static EXCLUDE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _held = EXCLUDE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let output = git::run_accepting(&["rev-parse", "--git-common-dir"], repo, &[0])
         .map_err(|error| error.to_string())?;
     // Relative to `repo` in the main worktree, absolute in a linked one.
@@ -264,6 +269,13 @@ pub fn exclude(repo: &Path, pattern: &str) -> Result<(), String> {
     text.push('\n');
     std::fs::create_dir_all(&info)
         .map_err(|error| format!("could not create {}: {error}", info.display()))?;
-    std::fs::write(&file, text)
-        .map_err(|error| format!("could not write {}: {error}", file.display()))
+    // A temp file and a rename, so a reader (git, or another process doing
+    // this) never sees the file truncated to nothing.
+    let temporary = info.join(format!("exclude.sirio-{}.tmp", std::process::id()));
+    std::fs::write(&temporary, text)
+        .and_then(|()| std::fs::rename(&temporary, &file))
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&temporary);
+            format!("could not write {}: {error}", file.display())
+        })
 }
