@@ -1249,13 +1249,22 @@ fn command_for_process(command: AgentCommand) -> AgentCommand {
 /// The PATH a chat agent is started with: only its absolute entries, in order.
 /// A chat agent starts in its worktree, which may be an untrusted clone, so its
 /// program must never be found through an empty, relative or `.` entry, which
-/// would name a directory inside that worktree (CWE-427).
+/// would name a directory inside that worktree (CWE-427). On unix an empty PATH
+/// is itself the current directory to execvp, so a PATH with no absolute entry
+/// becomes the system default instead. Windows needs no fallback: neither its
+/// process spawn nor cmd (given NoDefaultCurrentDirectoryInExePath) reads an
+/// empty PATH as the working directory.
 fn agent_search_path(path: &str, separator: char) -> String {
     let windows = separator == ';';
-    path.split(separator)
+    let kept = path
+        .split(separator)
         .filter(|entry| is_absolute_search_entry(entry, windows))
         .collect::<Vec<_>>()
-        .join(&separator.to_string())
+        .join(&separator.to_string());
+    if kept.is_empty() && !windows {
+        return "/usr/bin:/bin".to_string();
+    }
+    kept
 }
 
 /// Whether a PATH entry names an absolute directory, judged on its text: nothing
@@ -2829,7 +2838,10 @@ mod tests {
     // agent starts in a worktree that may be an untrusted clone (CWE-427).
     #[test]
     fn agent_search_path_keeps_only_absolute_unix_entries() {
-        assert_eq!(agent_search_path("", ':'), "");
+        // An empty PATH means the current directory to execvp, so a PATH left with
+        // no absolute entry falls back to the system default, never to "".
+        assert_eq!(agent_search_path("", ':'), "/usr/bin:/bin");
+        assert_eq!(agent_search_path(".:bin:", ':'), "/usr/bin:/bin");
         assert_eq!(agent_search_path("/usr/bin", ':'), "/usr/bin");
         assert_eq!(agent_search_path("/usr/bin::/bin", ':'), "/usr/bin:/bin");
         assert_eq!(agent_search_path(":/usr/bin", ':'), "/usr/bin");
