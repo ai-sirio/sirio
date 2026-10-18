@@ -925,6 +925,9 @@ PY
   expect_state conflict changed
   expect_state dirty true
   expect_state text "$(escaped "$RUN_DIR/conflict-buffer.txt")"
+  # The banner is drawn on a danger-subtle surface under the normal text colour:
+  # the capture is for the eye (readable text, in both appearances).
+  capture conflict-banner
   ctl surface editor conflict --action=keep >/dev/null
   expect_state conflict none
   expect_state text "$(escaped "$RUN_DIR/conflict-buffer.txt")"
