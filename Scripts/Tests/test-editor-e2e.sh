@@ -57,6 +57,13 @@ set -eEuo pipefail
 #                     place, Escape closes it; a file restored to HEAD, a commit made
 #                     elsewhere (cleared when the editor takes focus), a file outside
 #                     the repository and a clean file have no marks
+#   status            the row under the file (its `status` state): the branch, and ahead and
+#                     behind against an upstream set up here with one commit on each side
+#                     (counted with git itself); the cursor in characters (an emoji and an
+#                     accent) with a two-range selection's total; the fake server named and
+#                     ready for a .rs file, failed for one that launches and ends at once,
+#                     and no server at all for a .txt and for a .zig with none installed; LF and CRLF; Markdown in Preview has no cursor;
+#                     a snapshot has neither branch nor server; captured
 #   find              Find over findme.txt: the match count against grep (case-insensitive,
 #                     then case-sensitive), two steps forward and one back, a pattern that
 #                     does not compile, close; captured with the replace row open and the
@@ -545,6 +552,25 @@ expect_state() { # key value
     sleep 0.2
   done
   fail "$SCENARIO: $1 expected $(printf '%s' "$2" | cut -c1-400), got $(printf '%s' "$got" | cut -c1-400)"
+}
+# One field of the status row (`status`: `branch=main;ahead=1;...`), polled the
+# way expect_state polls a key. The row's values hold no `;`.
+status_field() { # key
+  sfield status | tr ';' '\n' | sed -n "s/^$1=//p" | head -n 1
+}
+expect_status() { # key value
+  local got="" tries=0
+  while [ "$tries" -lt 150 ]; do
+    read_state
+    got="$(status_field "$1")"
+    if [ "$got" = "$2" ]; then
+      echo "OK: status $1=$2"
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$SCENARIO: status $1 expected $2, got $got (status: $(sfield status))"
 }
 # Waits until the editor is past loading (loaded or error), then answers it.
 settle() {
@@ -1600,6 +1626,130 @@ expect_state_set() { # key
   echo "OK: $1 is set: $(sfield "$1" | cut -c1-120)"
 }
 
+scenario_status() {
+  # The row under the file draws what the file and the app know. The app's part
+  # is read from git, so the repository gets a real upstream with one commit on
+  # each side, and the expected counts are git's own.
+  local upstream="$RUN_DIR/status-upstream.git" other="$RUN_DIR/status-other"
+  local counts text first second tabs_before secondary_before count sha
+  git init -q --bare "$upstream"
+  git -C "$WT" remote add origin "$upstream"
+  git -C "$WT" push -q -u origin main
+  git clone -q -b main "$upstream" "$other"
+  git -C "$other" config user.email tester@example.invalid
+  git -C "$other" config user.name Tester
+  printf 'only upstream\n' >"$other/upstream-only.txt"
+  git -C "$other" add upstream-only.txt
+  git -C "$other" commit -q -m "a commit only upstream"
+  git -C "$other" push -q origin main
+  printf 'only here\n' >"$WT/local-only.txt"
+  git -C "$WT" add local-only.txt
+  git -C "$WT" commit -q -m "a commit only here" -- local-only.txt
+  git -C "$WT" fetch -q origin
+  counts="$(git -C "$WT" rev-list --left-right --count '@{upstream}...HEAD' | tr '\t' ' ')"
+  [ "$counts" = "1 1" ] || fail "$SCENARIO: the fixture's upstream is not one behind and one ahead: behind/ahead $counts"
+  tabs_before="$(tab_count)"
+  secondary_before="$(layout_field secondaryVisible)"
+
+  # A plain text file with an accent and an emoji: columns count characters.
+  printf 'héllo wörld\n😀 emoji\nthird line\n' >"$WT/status-a.txt"
+  open_file "$WT/status-a.txt"
+  expect_state state loaded
+  expect_status branch main
+  expect_status ahead 1
+  expect_status behind 1
+  expect_status lsp none
+  expect_status indent "Spaces: 4"
+  expect_status encoding UTF-8
+  expect_status eol LF
+  expect_status language "plain text"
+  expect_status bell 0
+  expect_state worktree_dirty true
+  ctl surface editor select --ranges=0..0 >/dev/null
+  expect_status cursor "Ln 1, Col 1"
+  # Two ranges: "héllo" (5 characters, 6 bytes) and "😀 e" (3 characters, 6
+  # bytes). The primary caret is the last range's end, the fourth character of
+  # line 2 (byte columns would say 7).
+  text="$(sfield text)"
+  first="$(python3 "$TOOLS" offset "$text" "héllo")"
+  second="$(python3 "$TOOLS" offset "$text" "😀")"
+  ctl surface editor select --ranges="$first..$((first + 6));$second..$((second + 6))" >/dev/null
+  expect_status cursor "Ln 2, Col 4 (8 selected)"
+  echo "OK: the cursor counts characters and the selections' total"
+
+  # The fake server, named by the program the entry runs, ready for a .rs file.
+  printf 'fn a() {}\n// héllo\n' >"$WT/status-c.rs"
+  open_file "$WT/status-c.rs"
+  expect_state state loaded
+  expect_status lsp python3:ready
+  expect_status language Rust
+  expect_status branch main
+  expect_status ahead 1
+  ctl surface editor select --ranges=3..12 >/dev/null
+  expect_status cursor "Ln 2, Col 3 (9 selected)"
+  capture status-row
+
+  # A language with a server entry that is not installed says nothing.
+  printf 'const a = 1;\n' >"$WT/status-b.zig"
+  open_file "$WT/status-b.zig"
+  expect_state state loaded
+  expect_status language Zig
+  expect_status lsp none
+  expect_status branch main
+
+  # A server that launches and fails: the table is read again at each open, so
+  # an entry added now is found. `sh -c "exit 1"` is there and ends at once.
+  cat >>"$XDG_CONFIG_HOME/sirio/languages.toml" <<'TOML'
+
+[[language]]
+name = "failing"
+extensions = ["xyz"]
+command = "sh"
+args = ["-c", "exit 1"]
+TOML
+  printf 'nothing to serve\n' >"$WT/status-f.xyz"
+  open_file "$WT/status-f.xyz"
+  expect_state state loaded
+  expect_status lsp sh:failed
+
+  # CRLF, read from the file.
+  open_file "$WT/crlf.txt"
+  expect_state state loaded
+  expect_status eol CRLF
+
+  # Markdown: the Preview hides the code, so it has no cursor to show; Code does.
+  open_file "$WT/notes.md"
+  expect_state state loaded
+  ctl surface editor mode --mode=preview >/dev/null
+  expect_state mode preview
+  expect_status cursor none
+  expect_status language Markdown
+  ctl surface editor mode --mode=code >/dev/null
+  expect_state mode code
+  ctl surface editor select --ranges=0..0 >/dev/null
+  expect_status cursor "Ln 1, Col 1"
+
+  # A revision has no branch of its own and no server.
+  sha="$(git -C "$WT" rev-parse HEAD)"
+  ctl surface editor open-snapshot --sha="$sha" --path=src/shapes.rs >/dev/null
+  settle
+  expect_state snapshot true
+  expect_status branch none
+  expect_status ahead none
+  expect_status lsp none
+  expect_status language Rust
+  expect_status eol LF
+  echo "OK: a snapshot's row names neither a branch nor a server"
+
+  count="$(tab_count)"
+  while [ "$count" -gt "$tabs_before" ]; do
+    ctl surface tabs close "$count" >/dev/null
+    count=$((count - 1))
+  done
+  [ "$(layout_field secondaryVisible)" = "$secondary_before" ] \
+    || fail "$SCENARIO: secondaryVisible is $(layout_field secondaryVisible), expected $secondary_before"
+}
+
 scenario_find() {
   local fixture="$WT/findme.txt" all cased
   open_file "$fixture"
@@ -1894,6 +2044,7 @@ scenario context scenario_context
 scenario breadcrumb scenario_breadcrumb
 scenario snapshot scenario_snapshot
 scenario git_marks scenario_git_marks
+scenario status scenario_status
 scenario find scenario_find
 scenario replace scenario_replace
 scenario multibyte scenario_multibyte
