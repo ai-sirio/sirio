@@ -27,8 +27,8 @@ use std::rc::Rc;
 use ely_gpui_component::forms::{Choice, Input, InputEvent, ListBox};
 use ely_gpui_component::overlays::Popover;
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, KeyDownEvent, SharedString, Window, div,
-    prelude::*, px,
+    AnyElement, App, Context, Entity, Focusable as _, KeyDownEvent, MouseButton, SharedString,
+    Window, div, prelude::*, px,
 };
 use sirio_markdown::LineEnding;
 use sirio_theme::Theme;
@@ -434,7 +434,13 @@ impl FileView {
                 let press: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| {
                     opener.update(cx, |view, cx| view.toggle_status_popover(item, window, cx));
                 });
-                trigger(Some(press))
+                // A press on the item is not a press elsewhere: it must not move
+                // the keyboard (the file view takes it on a press, and the panel
+                // would read that as focus leaving and close before the click
+                // that closes it, which would then open it again).
+                div()
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                    .child(trigger(Some(press)))
             },
             move |close, window, cx| {
                 let entity = body.clone();
