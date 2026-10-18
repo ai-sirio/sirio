@@ -18,19 +18,28 @@
 //!   server is not volunteered (a row with a "no server" mark would sit on
 //!   nearly every file).
 //! - Until the file has loaded and drawn, there is no row.
+//! - A pane narrower than `COMPACT_BELOW` (a file beside a terminal and the
+//!   right panel is one) draws the items that matter at a glance and leaves out
+//!   the indent, the encoding and the line ending; the state still reads them.
+//!   The row measures itself, so the frame after a resize is the one that
+//!   changes.
 
 use ely_gpui_component::editor::{
     BranchIndicator, CursorPosition, Encoding, IndentSettings, LanguageMode,
     LineEnding as ElyLineEnding, LspStatus, NotificationBell,
 };
 use ely_gpui_component::theme::Theme as ElyTheme;
-use gpui::{AnyElement, App, Context, SharedString, prelude::*, px};
+use gpui::{AnyElement, App, Context, Pixels, SharedString, canvas, prelude::*, px};
 use sirio_theme::Theme;
 
 use super::{FileView, LspState, MarkdownMode};
 use crate::editor::LoadStatus;
 use crate::editor_prefs::EditorPrefs;
 use sirio_markdown::LineEnding;
+
+/// The row's width under which it draws the compact set of items. Measured on
+/// the row in this app's type size: the full set needs about this much.
+const COMPACT_BELOW: Pixels = px(620.0);
 
 /// What only the workspace knows about the file's place, pushed by the app.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -195,6 +204,7 @@ impl FileView {
                 LspStatus::new("status-lsp", SharedString::from(name), state).into_any_element(),
             );
         }
+        let compact = self.status_width.get() < COMPACT_BELOW;
         let mut right: Vec<AnyElement> = Vec::new();
         if let Some((line, column, selected)) = items.cursor {
             right.push(
@@ -203,14 +213,33 @@ impl FileView {
                     .into_any_element(),
             );
         }
-        right.push(IndentSettings::new("status-indent", items.spaces, items.indent).into_any_element());
-        right.push(Encoding::new("status-encoding", "UTF-8").into_any_element());
-        right.push(ElyLineEnding::new("status-line-ending", items.crlf).into_any_element());
+        if !compact {
+            right.push(
+                IndentSettings::new("status-indent", items.spaces, items.indent).into_any_element(),
+            );
+            right.push(Encoding::new("status-encoding", "UTF-8").into_any_element());
+            right.push(ElyLineEnding::new("status-line-ending", items.crlf).into_any_element());
+        }
         right.push(LanguageMode::new("status-language", items.language).into_any_element());
         right.push(NotificationBell::new("status-bell", items.bell).into_any_element());
+        // Measures the row as it is laid out; a width that moves it across the
+        // threshold asks for the frame that draws the other set.
+        let width = self.status_width.clone();
+        let measure = canvas(
+            move |bounds, window, _| {
+                let before = width.replace(bounds.size.width);
+                if (before < COMPACT_BELOW) != (bounds.size.width < COMPACT_BELOW) {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
         Some(
             gpui::div()
                 .id("file-status-row")
+                .relative()
                 .debug_selector(|| "file-status-row".to_owned())
                 .w_full()
                 .h(px(26.0))
@@ -226,9 +255,19 @@ impl FileView {
                 .bg(theme.ely.surface)
                 .text_size(theme.typography.footnote)
                 .text_color(theme.ely.fg_muted)
-                .children(left)
+                .child(measure)
+                .child(
+                    gpui::div()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .min_w(px(0.0))
+                        .flex_shrink(1.0)
+                        .overflow_hidden()
+                        .children(left),
+                )
                 .child(gpui::div().flex_1())
-                .children(right)
+                .child(gpui::div().flex().items_center().gap(px(2.0)).flex_none().children(right))
                 .into_any_element(),
         )
     }
