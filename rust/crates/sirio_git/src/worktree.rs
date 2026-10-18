@@ -304,8 +304,8 @@ pub fn upstream_of(repo: &Path, branch: &str) -> Result<Option<UpstreamBranch>, 
 /// are decided from plumbing output (`symbolic-ref`'s exit status and
 /// `for-each-ref`'s fields), never from git's localized messages, so a git
 /// failure is still an error. `rev-list --left-right --count
-/// @{upstream}...HEAD` prints the upstream-only count first (behind) and the
-/// HEAD-only count second (ahead), hence the swap.
+/// <upstream>...<branch>` prints the upstream-only count first (behind) and the
+/// branch-only count second (ahead), hence the swap.
 pub fn ahead_behind(repo: &Path) -> Result<Option<(usize, usize)>, GitError> {
     let head = git::run_accepting(&["symbolic-ref", "-q", "HEAD"], repo, &[0, 1])?;
     if head.status != Some(0) {
@@ -329,8 +329,15 @@ pub fn ahead_behind(repo: &Path) -> Result<Option<(usize, usize)>, GitError> {
     if upstream.trim().is_empty() || track.trim() == "[gone]" {
         return Ok(None);
     }
+    // The refnames just read, not `@{upstream}` and `HEAD`: a checkout that
+    // moves between the calls cannot pair one branch with another's upstream.
     let counts = git::run_accepting(
-        &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{}...{refname}", upstream.trim()),
+        ],
         repo,
         &[0],
     )?;
