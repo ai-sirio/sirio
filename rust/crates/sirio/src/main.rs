@@ -709,6 +709,9 @@ fn clamp_first_visible(
 }
 
 const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long typing must pause before the breadcrumb's symbols are asked for again.
+const SYMBOLS_DEBOUNCE: Duration = Duration::from_secs(1);
 const BROWSER_METHODS: [&str; 11] = [
     "browser.open",
     "browser.navigate",
@@ -1318,6 +1321,11 @@ enum ControlAction {
     /// A press on the gutter's git mark at `line`: draws or closes its hunk.
     EditorGitMark {
         line: usize,
+        reply: ControlReply,
+    },
+    /// A press on the breadcrumb's part at `index`.
+    EditorCrumb {
+        index: usize,
         reply: ControlReply,
     },
     /// Find and replace: open find (`replace` present opens the replace row with
@@ -2650,6 +2658,7 @@ impl ControlHandler for AppControlHandler {
                     methods.push("surface.editor.click");
                     methods.push("surface.editor.context");
                     methods.push("surface.editor.git_mark");
+                    methods.push("surface.editor.crumb");
                     methods.push("surface.editor.find");
                     methods.push("surface.editor.find_step");
                     methods.push("surface.editor.replace");
@@ -2885,6 +2894,12 @@ impl ControlHandler for AppControlHandler {
                     return ControlResponse::failure(&request.id, "surface.editor.git_mark requires line");
                 };
                 self.queue_action(request, move |reply| ControlAction::EditorGitMark { line, reply })
+            }
+            "surface.editor.crumb" if cfg!(debug_assertions) => {
+                let Some(index) = request.params.get("index").and_then(|index| index.parse::<usize>().ok()) else {
+                    return ControlResponse::failure(&request.id, "surface.editor.crumb requires index");
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorCrumb { index, reply })
             }
             "surface.editor.find" if cfg!(debug_assertions) => {
                 let query = request.params.get("query").cloned();
@@ -5522,6 +5537,12 @@ struct SirioWorkspace {
     /// Language servers, started lazily when a file that wants one is
     /// opened and stopped on app quit. See `crate::lsp`.
     lsp: crate::lsp::LspSupervisor,
+    /// The newest symbols fetch of each open document: an answer that arrives
+    /// under an older number is dropped, and a closed document has none.
+    symbol_generations: HashMap<PathBuf, u64>,
+    /// The pending fetch of symbols after an edit, per document. A new edit
+    /// replaces it, which cancels its timer, so a burst of typing asks once.
+    symbol_debounce: HashMap<PathBuf, gpui::Task<()>>,
     /// Languages already offered this session, keyed by language name.
     /// Checked before raising the install card and never cleared: ten
     /// .java files are one card, not ten, which is what separates this
@@ -6069,6 +6090,9 @@ impl SirioWorkspace {
                                 ControlAction::EditorGitMark { line, reply } => {
                                     let _ = reply.send(workspace.control_editor_git_mark(line, cx));
                                 }
+                                ControlAction::EditorCrumb { index, reply } => {
+                                    let _ = reply.send(workspace.control_editor_crumb(index, cx));
+                                }
                                 ControlAction::EditorFind { query, case, word, regex, replace, reply } => {
                                     let options = FindOptions { case, word, regex };
                                     let _ = reply.send(workspace.control_editor_find(
@@ -6527,6 +6551,8 @@ impl SirioWorkspace {
                     &user_home_dir().unwrap_or_default(),
                 ),
             )),
+            symbol_generations: HashMap::new(),
+            symbol_debounce: HashMap::new(),
             offered: HashSet::new(),
             #[cfg(test)]
             offer_count: 0,
@@ -7913,11 +7939,18 @@ impl SirioWorkspace {
                     FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
                     // The one moment a freshly opened tab has text to describe.
                     FileViewEvent::Loaded(path) => {
-                        workspace.sync_document_with_server(path, &view, cx);
+                        // A document the server already holds (a second view of
+                        // it) is not sent again, and still wants its symbols.
+                        if !workspace.sync_document_with_server(path, &view, cx) {
+                            workspace.refresh_symbols_now(path, &view, cx);
+                        }
                         workspace.refresh_git_diff(path, &view, cx);
                     }
                     FileViewEvent::GitDiffStale(path) => {
                         workspace.refresh_git_diff(path, &view, cx);
+                    }
+                    FileViewEvent::Saved(path) => {
+                        workspace.refresh_symbols_now(path, &view, cx);
                     }
                     FileViewEvent::RevealInFileManager(path) => {
                         if let Some(mut command) = reveal_command(path) {
@@ -8792,7 +8825,11 @@ impl SirioWorkspace {
             return;
         }
         let facts = self.file_context_facts(path);
-        view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+        let location = self.repo_relative(path);
+        view.update(cx, |view, cx| {
+            view.set_shell_facts(facts, cx);
+            view.set_location(location, cx);
+        });
         self.start_language_server_for(path, view, cx);
     }
 
@@ -14766,53 +14803,158 @@ impl SirioWorkspace {
     ///
     /// Returning early is the whole fix: `FileViewEvent::Loaded` brings the
     /// text back here the moment there is any.
+    ///
+    /// Returns whether it sent the server anything (a `didOpen` or a
+    /// `didChange`).
     fn sync_document_with_server(
         &mut self,
         path: &Path,
         view: &Entity<FileView>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         // Ordered by cost, because the observer in `subscribe_file_view`
         // reaches this on every notify a file view makes — a caret blink
         // included. Nothing here reads the disk (`known_entry_for` uses the
         // table already loaded) and nothing copies the buffer until a send
         // is certain.
         let Some(entry) = self.lsp.known_entry_for(path) else {
-            return;
+            return false;
         };
         let Some(worktree_root) = self.worktree_root_for(path) else {
-            return;
+            return false;
         };
         let key = self.lsp.key_for(path, &worktree_root, &entry);
         let Some(server) = self.lsp.server_for(&key) else {
-            return;
+            return false;
         };
         let client = server.client().clone();
+        let offers_symbols = server.capabilities().document_symbols;
         let view_state = view.read(cx);
         let Some(buffer) = view_state.editor().map(|editor| editor.buffer()) else {
-            return;
+            return false;
         };
         if self.lsp.is_synced(path, buffer) {
-            return;
+            return false;
         }
         let text = buffer.to_owned();
         let Some(sync) = self.lsp.sync_text(path, &text) else {
-            return;
+            return false;
         };
-        let path = path.to_path_buf();
+        let opened = matches!(sync, crate::lsp::DocumentSync::Open { .. });
+        // A document just opened has its symbols asked for as soon as the
+        // server has the text, and the request waits for the `didOpen` it is
+        // about: two spawned futures start in no fixed order. After an edit the
+        // `didChange` is long sent when the debounce ends.
+        let (sent, after_send) = if opened && offers_symbols {
+            let (sent, after_send) = futures::channel::oneshot::channel();
+            (Some(sent), Some(after_send))
+        } else {
+            (None, None)
+        };
+        let owned_path = path.to_path_buf();
         let language = entry.name.clone();
         cx.background_executor()
             .spawn(async move {
                 let _ = match sync {
                     crate::lsp::DocumentSync::Open { version } => {
-                        sirio_lsp::did_open(&client, &path, &language, version, &text).await
+                        sirio_lsp::did_open(&client, &owned_path, &language, version, &text).await
                     }
                     crate::lsp::DocumentSync::Change { version } => {
-                        sirio_lsp::did_change(&client, &path, version, &text).await
+                        sirio_lsp::did_change(&client, &owned_path, version, &text).await
                     }
                 };
+                if let Some(sent) = sent {
+                    let _ = sent.send(());
+                }
             })
             .detach();
+        if offers_symbols {
+            if opened {
+                self.fetch_symbols(path, view, after_send, cx);
+            } else {
+                self.schedule_symbols(path, view, cx);
+            }
+        }
+        true
+    }
+
+    /// The client of the server holding `path`, when it offers document symbols.
+    fn symbols_client(&self, path: &Path) -> Option<sirio_lsp::Client> {
+        let entry = self.lsp.known_entry_for(path)?;
+        let worktree_root = self.worktree_root_for(path)?;
+        let key = self.lsp.key_for(path, &worktree_root, &entry);
+        let server = self.lsp.server_for(&key)?;
+        server
+            .capabilities()
+            .document_symbols
+            .then(|| server.client().clone())
+    }
+
+    /// Asks the server for `path`'s symbols, off the GPUI thread, and hands them
+    /// to `view` for the breadcrumb. The newest ask wins: an answer that comes
+    /// back after a later ask began is dropped, and so is one for a view that
+    /// closed. `after_send` is a text still on its way to the server, waited for
+    /// first. A failed ask keeps the symbols the view has: the next edit asks again.
+    fn fetch_symbols(
+        &mut self,
+        path: &Path,
+        view: &Entity<FileView>,
+        after_send: Option<futures::channel::oneshot::Receiver<()>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.symbols_client(path) else {
+            return;
+        };
+        let generation = self.symbol_generations.entry(path.to_path_buf()).or_insert(0);
+        *generation += 1;
+        let generation = *generation;
+        let view = view.downgrade();
+        let path = path.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let source = path.clone();
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    if let Some(after_send) = after_send {
+                        let _ = after_send.await;
+                    }
+                    sirio_lsp::document_symbols(&client, &source).await
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.symbol_generations.get(&path) != Some(&generation) {
+                    return;
+                }
+                if let Ok(symbols) = found {
+                    let _ = view.update(cx, |view, cx| {
+                        view.set_symbols(crate::lsp::view_symbols(&symbols), cx)
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Asks again for `path`'s symbols once the typing has paused for
+    /// `SYMBOLS_DEBOUNCE`. Each call replaces the one before it.
+    fn schedule_symbols(&mut self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        let view = view.downgrade();
+        let source = path.to_path_buf();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SYMBOLS_DEBOUNCE).await;
+            let _ = this.update(cx, |workspace, cx| {
+                if let Some(view) = view.upgrade() {
+                    workspace.fetch_symbols(&source, &view, None, cx);
+                }
+            });
+        });
+        self.symbol_debounce.insert(path.to_path_buf(), task);
+    }
+
+    /// Asks for `path`'s symbols now, in place of a pending debounced ask.
+    fn refresh_symbols_now(&mut self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        self.symbol_debounce.remove(path);
+        self.fetch_symbols(path, view, None, cx);
     }
 
     fn request_hover(
@@ -15099,6 +15241,8 @@ impl SirioWorkspace {
         };
         let client = server.client().clone();
         self.lsp.forget_synced(path);
+        self.symbol_generations.remove(path);
+        self.symbol_debounce.remove(path);
         let path = path.to_path_buf();
         cx.background_executor()
             .spawn(async move {
@@ -15372,8 +15516,12 @@ impl SirioWorkspace {
         );
         let facts = self.file_context_facts(&path);
         let view = cx.new(|cx| FileView::new(path.clone(), cx));
+        let location = self.repo_relative(&path);
         Self::subscribe_file_view(&view, cx);
-        view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+        view.update(cx, |view, cx| {
+            view.set_shell_facts(facts, cx);
+            view.set_location(location, cx);
+        });
         self.start_language_server_for(&path, &view, cx);
         let tab_id = self.next_tab_id;
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
@@ -18236,6 +18384,7 @@ impl SirioWorkspace {
             ("diagnostics".to_string(), diagnostics.to_string()),
             ("git_marks".to_string(), view.git_marks_text()),
             ("diff_open".to_string(), Self::open_hunk_text(view)),
+            ("breadcrumb".to_string(), Self::escaped_field(&view.breadcrumb_text())),
             ("prefs".to_string(), EditorPrefs::current(cx).describe()),
         ];
         fields.extend(Self::find_fields(view));
@@ -18569,6 +18718,27 @@ impl SirioWorkspace {
             .ok_or_else(|| "no file tab is active".to_string())?;
         view.update(cx, |view, cx| view.close_find(window, cx));
         Ok(Self::find_fields(view.read(cx)))
+    }
+
+    /// `surface.editor.crumb index=`: a press on the breadcrumb's part at
+    /// `index` (its order, the path's parts first), through the call the row's
+    /// click makes. A part that is not a symbol is the error. Answers the
+    /// selections and the breadcrumb the press leaves.
+    fn control_editor_crumb(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        view.update(cx, |view, cx| view.press_crumb(index, cx))?;
+        let mut fields = Self::selections_reply(&view, cx)?;
+        fields.push((
+            "breadcrumb".to_string(),
+            Self::escaped_field(&view.read(cx).breadcrumb_text()),
+        ));
+        Ok(fields)
     }
 
     /// The line of the hunk drawn in place, or `none`.
@@ -42144,6 +42314,7 @@ done
             | ControlAction::EditorClick { reply, .. }
             | ControlAction::EditorContext { reply, .. }
             | ControlAction::EditorGitMark { reply, .. }
+            | ControlAction::EditorCrumb { reply, .. }
             | ControlAction::EditorFind { reply, .. }
             | ControlAction::EditorFindStep { reply, .. }
             | ControlAction::EditorReplace { reply, .. }
@@ -42316,6 +42487,7 @@ done
                 request_with_params(method, &[("offset", "0"), ("action", "copy")])
             }
             "surface.editor.git_mark" => request_with_params(method, &[("line", "0")]),
+            "surface.editor.crumb" => request_with_params(method, &[("index", "0")]),
             "surface.editor.find" => request_with_params(method, &[("query", "x")]),
             "surface.editor.find_step" => request_with_params(method, &[("forward", "true")]),
             "surface.editor.replace" => request_with_params(method, &[("all", "false")]),

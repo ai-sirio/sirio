@@ -54,9 +54,11 @@ use crate::loading;
 use crate::markdown_preview::{
     self, DiagramRequest, DiagramSettings, DiagramState, Diagrams, PlantUmlQueue,
 };
+use crate::outline::OutlineSymbol;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
+mod breadcrumb;
 mod code_surface;
 mod find;
 mod git_marks;
@@ -234,6 +236,16 @@ pub struct FileView {
     /// terms. Replaced wholesale on every publish — an empty list is how a
     /// server says the errors are gone, so it must clear, not be ignored.
     diagnostics: Vec<FileDiagnostic>,
+    /// The file's symbols from its language server, as the app last pushed
+    /// them (`set_symbols`): what the breadcrumb names the caret's place by.
+    symbols: Vec<OutlineSymbol>,
+    /// The path the breadcrumb starts with, relative to the file's worktree
+    /// (`set_location`); `None` shows the file's own name.
+    location: Option<String>,
+    /// The line the caret was on when the code editor last changed, which the
+    /// breadcrumb names the symbols around. The code editor tells this view
+    /// nothing about a caret move, so an observer of it keeps this current.
+    caret_line: usize,
     /// The file's diff against HEAD, as the app last pushed it (`set_git_diff`):
     /// the gutter's marks and the hunk drawn in place. `None` for a file that is
     /// not in a repository, is clean, or is a snapshot.
@@ -325,6 +337,9 @@ pub enum FileViewEvent {
     /// a save or a reload that succeeded, and after a check that adopted a
     /// change from disk or found one.
     GitDiffStale(PathBuf),
+    /// A save succeeded: the file's symbols may have moved. Apart from
+    /// `GitDiffStale`, which also fires when the editor takes focus.
+    Saved(PathBuf),
     SendSelectionToAgent {
         path: PathBuf,
         lines: (usize, usize),
@@ -470,6 +485,9 @@ impl FileView {
             definition_gesture: None,
             shell_facts: FileContextFacts::default(),
             diagnostics: Vec::new(),
+            symbols: Vec::new(),
+            location: None,
+            caret_line: 0,
             git_diff: None,
             open_hunk: None,
             git_diff_in_flight: false,
@@ -1087,6 +1105,7 @@ impl FileView {
         };
         if result.is_ok() {
             cx.emit(FileViewEvent::GitDiffStale(self.path.clone()));
+            cx.emit(FileViewEvent::Saved(self.path.clone()));
         }
         cx.notify();
         result
@@ -1414,6 +1433,10 @@ impl FileView {
                         .size_full()
                         .flex()
                         .flex_col()
+                        .when_some(
+                            self.render_breadcrumb(theme, entity.clone()),
+                            |this, row| this.child(row),
+                        )
                         .when(conflict != Conflict::None, |this| {
                             this.child(render_conflict_banner(conflict, theme, entity.clone()))
                         })

@@ -176,6 +176,7 @@ fn usage() {
          \x20 surface editor find-step [--forward=false]  (debug builds) the next find match, or the previous\n\
          \x20 surface editor replace [--all=true]  (debug builds) replace the current match, or every one, with the replace row's text\n\
          \x20 surface editor find-close         (debug builds) close find\n\
+         \x20 surface editor crumb --index=n   (debug builds) press the breadcrumb's part n (the path's parts first): a symbol reveals its line\n\
          \x20 surface editor save               (debug builds) save the active file tab\n\
          \x20 surface editor conflict --action=reload|keep  (debug builds) answer a disk conflict\n\
          \x20 surface editor mode --mode=code|preview  (debug builds) switch the Markdown mode\n\
@@ -1170,6 +1171,15 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ("editor", "find-close") => require_ok(
             socket,
             &sirio_control::protocol::request::editor_find_close(),
+        ),
+        ("editor", "crumb") => require_ok(
+            socket,
+            &sirio_control::protocol::request::editor_crumb(
+                parsed
+                    .require("index")?
+                    .parse::<usize>()
+                    .map_err(|_| "--index must be a number".to_string())?,
+            ),
         ),
         ("editor", "save") => require_ok(socket, &sirio_control::protocol::request::editor_save()),
         ("editor", "conflict") => require_ok(

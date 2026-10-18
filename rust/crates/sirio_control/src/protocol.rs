@@ -933,6 +933,13 @@ pub mod request {
         request("surface.editor.find_close", BTreeMap::new())
     }
 
+    pub fn editor_crumb(index: usize) -> ControlRequest {
+        request(
+            "surface.editor.crumb",
+            BTreeMap::from([("index".to_string(), index.to_string())]),
+        )
+    }
+
     pub fn editor_save() -> ControlRequest {
         request("surface.editor.save", BTreeMap::new())
     }

@@ -92,6 +92,13 @@ impl FileView {
                 }
             }),
             cx.on_focus(&focus, window, |view, _window, cx| view.gained_focus(cx)),
+            // The editor says nothing of a caret move, but it notifies, and the
+            // breadcrumb names the caret's line. Cheap: a blink notifies too.
+            cx.observe(&code, |view, _code, cx| {
+                if view.refresh_caret_line(cx) {
+                    cx.notify();
+                }
+            }),
             // Any key on the code dismisses the hover card. An observer, not a
             // key-down listener: gpui runs a bound key's action (arrows, Enter,
             // Backspace) before key-down listeners and stops there, capture
@@ -108,6 +115,7 @@ impl FileView {
         ];
         self.code_subscriptions.extend(subscriptions);
         self.code_editor = Some(code);
+        self.refresh_caret_line(cx);
         // Diagnostics may have arrived before the first draw.
         self.push_diagnostics(cx);
         self.push_git(cx);
