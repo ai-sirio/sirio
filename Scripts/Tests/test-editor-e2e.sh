@@ -1685,9 +1685,14 @@ scenario_status() {
   expect_status language Rust
   expect_status branch main
   expect_status ahead 1
+  # Captured with a bare caret: the pane is narrow (the row draws its compact set,
+  # without indent, encoding and line ending), and a selection's count would take
+  # the room the language server's name has.
+  ctl surface editor select --ranges=3..3 >/dev/null
+  expect_status cursor "Ln 1, Col 4"
+  capture status-row
   ctl surface editor select --ranges=3..12 >/dev/null
   expect_status cursor "Ln 2, Col 3 (9 selected)"
-  capture status-row
 
   # A language with a server entry that is not installed says nothing.
   printf 'const a = 1;\n' >"$WT/status-b.zig"
