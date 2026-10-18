@@ -1616,6 +1616,8 @@ impl FileView {
 
 impl Render for FileView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = cx.entity_id().as_u64();
+        let _render = sirio_perf::span("FileView.render", id);
         if self.focus_subscription.is_none() {
             let editor_focus = self.editor_focus.clone();
             self.focus_subscription =
@@ -1645,11 +1647,21 @@ impl Render for FileView {
         // minimap asks for every row, so this frame's rows come back from the
         // previous generation and nothing a frame still shows is dropped.
         self.span_cache.borrow_mut().rotate();
+        let step = sirio_perf::span("FileView.ensure_code_editor", id);
         self.ensure_code_editor(window, cx);
+        drop(step);
+        let step = sirio_perf::span("FileView.sync_code_prefs", id);
         self.sync_code_prefs(cx);
+        drop(step);
+        let step = sirio_perf::span("FileView.settle_status_popover", id);
         self.settle_status_popover(window, cx);
+        drop(step);
+        let step = sirio_perf::span("FileView.sync_find_washes", id);
         self.sync_find_washes(cx);
+        drop(step);
+        let step = sirio_perf::span("FileView.hand_over_focus", id);
         self.hand_over_focus(window, cx);
+        drop(step);
         let context_menu = self.context_menu.map(|position| {
             let entity = cx.entity();
             let dismiss_entity = entity.clone();
@@ -1746,7 +1758,9 @@ impl Render for FileView {
         // because a stale coordinate is worse than an honest default.
         // Either way it sits *over* the file — priority 2 so it stays above
         // the menu that may have raised it.
+        let step = sirio_perf::span("FileView.status_row", id);
         let status_row = self.render_status_row(theme, &entity, cx);
+        drop(step);
         let message = self.message.as_ref().map(|message| {
             let card = message_card(&message.text, &message.actions, theme, entity.clone());
             match message.at {
@@ -1809,13 +1823,10 @@ impl Render for FileView {
                     .map(|origin| render_snapshot_bar(origin, cx.entity())),
                 |this, bar| this.child(bar),
             )
-            .child(div().flex_1().min_h(px(0.0)).child(self.render_state(
-                theme,
-                cx.entity(),
-                preview,
-                window,
-                cx,
-            )))
+            .child(div().flex_1().min_h(px(0.0)).child({
+                let _step = sirio_perf::span("FileView.render_state", id);
+                self.render_state(theme, cx.entity(), preview, window, cx)
+            }))
             .when_some(status_row, |this, row| this.child(row))
             // Last, so it paints over the content and the row: an absolute child
             // earlier in the order sits under the code's own background.
