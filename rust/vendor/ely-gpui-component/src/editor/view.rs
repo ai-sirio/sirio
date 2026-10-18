@@ -298,7 +298,7 @@ impl Render for CodeEditor {
         .size_full();
         let (top, focus, input) = (cx.entity(), self.focus.clone(), cx.entity());
         let unlock = cx.entity();
-        let banner = (self.options.read_only && self.options.read_only_banner).then(|| {
+        let banner = self.draws_read_only_banner().then(|| {
             div()
                 .debug_selector(|| "code-editor-read-only-banner".to_owned())
                 .child(

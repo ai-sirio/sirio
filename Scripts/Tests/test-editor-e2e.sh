@@ -15,7 +15,8 @@ set -eEuo pipefail
 #   crlf              a CRLF file keeps its line endings through an edit and a save
 #   conflict          a clean disk change is adopted; a dirty one asks, then Keep
 #                     and Reload answer it
-#   markdown          a Markdown file's Preview and its code mode
+#   markdown          a Markdown file's Preview and its code mode; in Code its formatting
+#                     buttons are drawn (format_buttons=shown)
 #   colour            a multi-line raw string, captured (a capture cannot be judged
 #                     for colour here: it must exist, be non-blank and be named)
 #   copy_propagates   an empty-selection copy copies nothing; a selection's copy is
@@ -42,10 +43,12 @@ set -eEuo pipefail
 #                     pane keeps its symbols in the capture; captured
 #   snapshot          src/shapes.rs and notes.md at HEAD, opened as a change request's file
 #                     is (the debug verb open-snapshot): read-only, one banner (the view's,
-#                     with its local-file action), typing, a paste, the menu's Cut and Paste
-#                     and replace-all each leave the text byte-identical with a clipboard
-#                     and a selection to prove it, Copy and find still work; captured with
-#                     find open (the banner above the find bar) and as Markdown in Code
+#                     with its local-file action) and no banner of Ely's (ely_banner=false),
+#                     typing, a paste, the menu's Cut and Paste and replace-all each leave
+#                     the text byte-identical with a clipboard and a selection to prove it,
+#                     Copy and find still work; captured with find open (the banner above
+#                     the find bar) and as Markdown in Code, whose formatting buttons are
+#                     not drawn (format_buttons=hidden)
 #   git_marks         a file's changes against HEAD mark its gutter: the disk's when the
 #                     file opens, an adopted change, a save; a mark opens its hunk in
 #                     place, Escape closes it; a file restored to HEAD, a commit made
@@ -799,6 +802,7 @@ scenario_markdown() {
   ctl surface editor mode --mode=code >/dev/null
   expect_state mode code
   expect_state text "$(escaped "$WT/notes.md")"
+  expect_state format_buttons shown
   capture markdown-code
 }
 
@@ -1289,6 +1293,7 @@ scenario_snapshot() {
   expect_state read_only true
   expect_state banner "$label"
   expect_state banner_action "Open local file"
+  expect_state ely_banner false
   expect_state text "$snap_text"
   expect_state dirty false
   expect_state language Rust
@@ -1344,8 +1349,9 @@ scenario_snapshot() {
   capture snapshot
   ctl surface editor find-close >/dev/null
 
-  # A Markdown snapshot, in Code: the buttons that format are not drawn (a unit
-  # test proves their absence in the drawn frame; the capture shows the row).
+  # A Markdown snapshot, in Code: the formatting buttons are not drawn. The
+  # same state reads `shown` for an ordinary Markdown file in Code (scenario
+  # markdown), so the value here is the snapshot's own, not a default.
   git -C "$WT" show "$sha:notes.md" >"$RUN_DIR/snap-md.txt"
   ctl surface editor open-snapshot --sha="$sha" --path=notes.md >/dev/null
   settle
@@ -1355,6 +1361,7 @@ scenario_snapshot() {
   expect_state text "$(escaped "$RUN_DIR/snap-md.txt")"
   ctl surface editor mode --mode=code >/dev/null
   expect_state mode code
+  expect_state format_buttons hidden
   ctl surface editor type --text=Q >/dev/null
   sleep 1
   expect_state text "$(escaped "$RUN_DIR/snap-md.txt")"

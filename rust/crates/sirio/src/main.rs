@@ -18439,6 +18439,11 @@ impl SirioWorkspace {
             MarkdownMode::Code => "code",
             MarkdownMode::Preview => "preview",
         };
+        let format_buttons = if view.formatting_controls_shown() {
+            "shown"
+        } else {
+            "hidden"
+        };
         let mut fields = vec![
             ("path".to_string(), display_absolute_path(view.path())),
             ("state".to_string(), state.to_string()),
@@ -18466,6 +18471,11 @@ impl SirioWorkspace {
                 "read_only".to_string(),
                 code.map_or(view.is_snapshot(), |code| code.is_read_only()).to_string(),
             ),
+            (
+                "ely_banner".to_string(),
+                code.is_some_and(|code| code.draws_read_only_banner()).to_string(),
+            ),
+            ("format_buttons".to_string(), format_buttons.to_string()),
             ("conflict".to_string(), conflict.to_string()),
             ("mode".to_string(), mode.to_string()),
             ("hover".to_string(), hover),

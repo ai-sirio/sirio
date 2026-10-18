@@ -396,6 +396,12 @@ impl CodeEditor {
         self.options.read_only
     }
 
+    /// Whether the editor draws its own read-only banner: read-only, and not
+    /// built `without_read_only_banner`. The render asks the same question.
+    pub fn draws_read_only_banner(&self) -> bool {
+        self.options.read_only && self.options.read_only_banner
+    }
+
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         let before = self.snapshot();
         self.buffer = Buffer::new(text);

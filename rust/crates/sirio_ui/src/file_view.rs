@@ -855,6 +855,17 @@ impl FileView {
             .is_some_and(|editor| editor.language() == Language::Markdown)
     }
 
+    /// Whether the Markdown row draws its formatting controls: a loaded
+    /// Markdown file in Code, and not a snapshot. The render and
+    /// `surface.editor.state` (`format_buttons`) both ask this, so the state
+    /// reports what is drawn.
+    pub fn formatting_controls_shown(&self) -> bool {
+        self.editor()
+            .is_some_and(|editor| editor.status() == &LoadStatus::Loaded)
+            && self.is_markdown()
+            && formatting_controls_drawn(self.effective_mode(), !self.is_snapshot())
+    }
+
     /// The shell's facts plus the three this view answers itself.
     fn menu_facts(&self, cx: &App) -> FileContextFacts {
         let has_selection = self
@@ -1418,7 +1429,7 @@ impl FileView {
                 LoadStatus::Loaded => {
                     let conflict = editor.conflict();
                     let mode = self.effective_mode();
-                    let is_markdown = editor.language() == Language::Markdown;
+                    let is_markdown = self.is_markdown();
                     let editor_entity = entity.clone();
                     let editor_focus = self.editor_focus.clone();
                     // The press bubbles up from the code editor after it has
@@ -1885,6 +1896,12 @@ fn render_conflict_banner(
         })
 }
 
+/// Whether the Markdown row draws the formatting controls for a file in `mode`:
+/// Code only, and only when the file is editable (a snapshot is not).
+fn formatting_controls_drawn(mode: MarkdownMode, editable: bool) -> bool {
+    mode == MarkdownMode::Code && editable
+}
+
 /// The Markdown row: the formatting controls (F-EDIT-02) on the left, the
 /// Code/Preview icons (F-EDIT-01) at its right end.
 ///
@@ -1917,7 +1934,7 @@ fn render_markdown_bar(
         .border_b_1()
         .border_color(theme.ely.border)
         .bg(theme.ely.surface)
-        .when(mode == MarkdownMode::Code && editable, move |this| {
+        .when(formatting_controls_drawn(mode, editable), move |this| {
             this.child(render_format_button(
                 "B",
                 "file-format-bold",
