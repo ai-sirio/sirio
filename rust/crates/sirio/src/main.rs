@@ -8157,10 +8157,13 @@ impl SirioWorkspace {
         .detach();
     }
 
-    /// `refresh_branch_and_sync` for every file open in the strip.
+    /// `refresh_branch_and_sync` for every file open in the strip that has
+    /// loaded; one still loading is refreshed by its own `Loaded`, so a
+    /// switch does not read git twice for it.
     fn refresh_branch_and_sync_of_open_files(&self, cx: &mut Context<Self>) {
         for (path, view) in Self::open_file_views(&self.tabs, cx) {
-            if !view.read(cx).is_snapshot() {
+            let view_state = view.read(cx);
+            if view_state.is_loaded() && !view_state.is_snapshot() {
                 self.refresh_branch_and_sync(&path, &view, cx);
             }
         }
@@ -18613,6 +18616,7 @@ impl SirioWorkspace {
             ("breadcrumb".to_string(), Self::escaped_field(&view.breadcrumb_text())),
             // The row under the file, as drawn: empty until it is drawn.
             ("status".to_string(), view.status_text(cx)),
+            ("status_set".to_string(), view.status_set(cx).to_string()),
             ("worktree_dirty".to_string(), view.status_facts().worktree_dirty.to_string()),
             ("prefs".to_string(), EditorPrefs::current(cx).describe()),
         ];
@@ -36250,6 +36254,8 @@ done
     #[gpui::test]
     async fn drawn_active_tab_underline_follows_pane_focus(cx: &mut TestAppContext) {
         cx.set_global(Theme::light());
+        // The file tab draws its status row with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let window = cx.add_window(|_window, cx| palette_test_workspace_with_tab_count(cx, 1));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -36401,6 +36407,8 @@ done
         cx: &mut TestAppContext,
     ) {
         cx.set_global(Theme::light());
+        // The file tab draws its status row with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let working_directory =
             std::env::temp_dir().join(format!("sirio-wsp01-kinds-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).expect("create wsp01 test directory");
@@ -37448,6 +37456,8 @@ done
             std::env::temp_dir().join(format!("sirio-open-file-menu-{}.md", std::process::id()));
         std::fs::write(&path, "# opened from tab menu\n").expect("write picker fixture");
         cx.set_global(Theme::light());
+        // The file tab draws its status row with Ely, as the app does after `ely::init`.
+        cx.update(sirio_ui::ely::init);
         let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();

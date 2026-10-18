@@ -18,28 +18,66 @@
 //!   server is not volunteered (a row with a "no server" mark would sit on
 //!   nearly every file).
 //! - Until the file has loaded and drawn, there is no row.
-//! - A pane narrower than `COMPACT_BELOW` (a file beside a terminal and the
-//!   right panel is one) draws the items that matter at a glance and leaves out
-//!   the indent, the encoding and the line ending; the state still reads them.
-//!   The row measures itself, so the frame after a resize is the one that
-//!   changes.
+//! - A row too narrow for every item draws the ones that matter at a glance and
+//!   leaves out the indent, the encoding and the line ending; the state still
+//!   reads them. The row measures itself (`StatusLayout`): it is full while the
+//!   left group's natural width and the right group's natural width fit side by
+//!   side, and compact from the frame after they stop fitting. A file beside a
+//!   terminal and the right panel is that narrow.
+//! - A branch name longer than `BRANCH_CHARS` is drawn shortened in the middle
+//!   (`feature/a-ve…the-status-row`), so the server item after it is never
+//!   pushed out of the row by a long name. The state reads the whole name.
 
 use ely_gpui_component::editor::{
     BranchIndicator, CursorPosition, Encoding, IndentSettings, LanguageMode,
     LineEnding as ElyLineEnding, LspStatus, NotificationBell,
 };
-use ely_gpui_component::theme::Theme as ElyTheme;
 use gpui::{AnyElement, App, Context, Pixels, SharedString, canvas, prelude::*, px};
 use sirio_theme::Theme;
+use std::cell::Cell;
 
 use super::{FileView, LspState, MarkdownMode};
 use crate::editor::LoadStatus;
 use crate::editor_prefs::EditorPrefs;
 use sirio_markdown::LineEnding;
 
-/// The row's width under which it draws the compact set of items. Measured on
-/// the row in this app's type size: the full set needs about this much.
-const COMPACT_BELOW: Pixels = px(620.0);
+/// The longest branch name the row draws whole, in characters; a longer one is
+/// shortened in the middle to this many, the ellipsis included.
+const BRANCH_CHARS: usize = 24;
+
+/// The row's side padding and the gap between its two groups, which the fit
+/// test adds to the groups' widths.
+const ROW_PADDING: Pixels = px(8.0);
+const GROUP_GAP: Pixels = px(2.0);
+
+/// What the row has measured of itself, written as it is laid out and read by
+/// the next frame's render. Widths start at nothing, so the first frame draws
+/// every item and the measure that follows decides.
+#[derive(Default)]
+pub(super) struct StatusLayout {
+    /// The whole row.
+    row: Cell<Pixels>,
+    /// The left group at its natural width (the group itself shrinks and clips).
+    left: Cell<Pixels>,
+    /// The right group as drawn.
+    right: Cell<Pixels>,
+    /// The indent, encoding and line ending items together, as they were last
+    /// drawn; what a compact row would need to grow back to the full set.
+    extras: Cell<Pixels>,
+    /// Whether the last decision was the compact set.
+    compact: Cell<bool>,
+}
+
+impl StatusLayout {
+    /// Decides from the measures whether the next frame draws the compact set,
+    /// and whether that is a change.
+    fn settle(&self) -> bool {
+        let regrown = if self.compact.get() { self.extras.get() + GROUP_GAP } else { px(0.0) };
+        let needed = self.left.get() + self.right.get() + regrown + GROUP_GAP + ROW_PADDING * 2.0;
+        let compact = self.row.get() < needed;
+        self.compact.replace(compact) != compact
+    }
+}
 
 /// What only the workspace knows about the file's place, pushed by the app.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -82,7 +120,10 @@ impl StatusItems {
     /// lsp=<name>:<starting|ready|failed>|none;cursor=Ln a, Col b (n selected);
     /// indent=Spaces: 4;encoding=UTF-8;eol=LF;language=Rust;bell=0`. A field the
     /// row does not draw reads `none`; `(n selected)` is there only while
-    /// something is selected.
+    /// something is selected. The fields are separated by `;` without escaping,
+    /// so a branch name that contains one makes the line ambiguous; a reader of
+    /// the line splits on the keys it knows, and the E2E's branch names have
+    /// none.
     pub(super) fn text(&self) -> String {
         let number = |value: Option<usize>| value.map_or("none".to_owned(), |n| n.to_string());
         let lsp = match &self.lsp {
@@ -144,6 +185,16 @@ impl FileView {
         self.status_items(cx).map(|items| items.text()).unwrap_or_default()
     }
 
+    /// Which set of items the row draws now, `compact` or `full`; empty while
+    /// the row is not drawn.
+    pub fn status_set(&self, cx: &App) -> &'static str {
+        match self.status_items(cx) {
+            None => "",
+            Some(_) if self.status_layout.compact.get() => "compact",
+            Some(_) => "full",
+        }
+    }
+
     /// What the row draws, or `None` while it is not drawn: the file has not
     /// loaded, or the code editor has not been made yet.
     pub(super) fn status_items(&self, cx: &App) -> Option<StatusItems> {
@@ -170,7 +221,7 @@ impl FileView {
         Some(StatusItems {
             branch: facts.branch.clone().filter(|_| !snapshot),
             dirty: facts.worktree_dirty,
-            sync: facts.sync,
+            sync: facts.sync.filter(|_| !snapshot),
             lsp: facts.lsp.clone().filter(|_| !snapshot),
             cursor,
             spaces: true,
@@ -183,17 +234,16 @@ impl FileView {
 
     /// The row under the file, or `None` while there is nothing to show.
     pub(super) fn render_status_row(&self, theme: Theme, cx: &App) -> Option<AnyElement> {
-        // Ely's items read Ely's theme, which the shell installs beside Sirio's
-        // (`ely::init`); a fixture that sets only Sirio's has nothing to draw
-        // them with, and draws no row.
-        if !cx.has_global::<ElyTheme>() {
-            return None;
-        }
         let items = self.status_items(cx)?;
+        let layout = self.status_layout.clone();
+        let compact = layout.compact.get();
         let mut left: Vec<AnyElement> = Vec::new();
         if let Some(branch) = items.branch {
-            let mut indicator =
-                BranchIndicator::new("status-branch", SharedString::from(branch)).dirty(items.dirty);
+            let mut indicator = BranchIndicator::new(
+                "status-branch",
+                SharedString::from(shorten_branch(&branch)),
+            )
+            .dirty(items.dirty);
             if let Some((ahead, behind)) = items.sync {
                 indicator = indicator.sync(ahead, behind);
             }
@@ -204,7 +254,6 @@ impl FileView {
                 LspStatus::new("status-lsp", SharedString::from(name), state).into_any_element(),
             );
         }
-        let compact = self.status_width.get() < COMPACT_BELOW;
         let mut right: Vec<AnyElement> = Vec::new();
         if let Some((line, column, selected)) = items.cursor {
             right.push(
@@ -214,22 +263,39 @@ impl FileView {
             );
         }
         if !compact {
+            let measure_extras = measure(layout.clone(), |layout, size| layout.extras.set(size));
             right.push(
-                IndentSettings::new("status-indent", items.spaces, items.indent).into_any_element(),
+                gpui::div()
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(2.0))
+                    .child(measure_extras)
+                    .child(
+                        IndentSettings::new("status-indent", items.spaces, items.indent)
+                            .into_any_element(),
+                    )
+                    .child(Encoding::new("status-encoding", "UTF-8").into_any_element())
+                    .child(ElyLineEnding::new("status-line-ending", items.crlf).into_any_element())
+                    .into_any_element(),
             );
-            right.push(Encoding::new("status-encoding", "UTF-8").into_any_element());
-            right.push(ElyLineEnding::new("status-line-ending", items.crlf).into_any_element());
         }
         right.push(LanguageMode::new("status-language", items.language).into_any_element());
         right.push(NotificationBell::new("status-bell", items.bell).into_any_element());
-        // Measures the row as it is laid out; a width that moves it across the
-        // threshold asks for the frame that draws the other set.
-        let width = self.status_width.clone();
-        let measure = canvas(
-            move |bounds, window, _| {
-                let before = width.replace(bounds.size.width);
-                if (before < COMPACT_BELOW) != (bounds.size.width < COMPACT_BELOW) {
-                    window.request_animation_frame();
+        // Each group reports the width it takes; the row's own measure is the
+        // last to run, so it decides with this frame's numbers, and a change
+        // asks for the frame that draws the other set.
+        let measure_left = measure(layout.clone(), |layout, size| layout.left.set(size));
+        let measure_right = measure(layout.clone(), |layout, size| layout.right.set(size));
+        let decide = canvas(
+            {
+                let layout = layout.clone();
+                move |bounds, window, _| {
+                    layout.row.set(bounds.size.width);
+                    if layout.settle() {
+                        window.request_animation_frame();
+                    }
                 }
             },
             |_, _, _, _| {},
@@ -243,11 +309,11 @@ impl FileView {
                 .debug_selector(|| "file-status-row".to_owned())
                 .w_full()
                 .h(px(26.0))
-                .px(px(8.0))
+                .px(ROW_PADDING)
                 .flex()
                 .flex_none()
                 .items_center()
-                .gap(px(2.0))
+                .gap(GROUP_GAP)
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .border_t_1()
@@ -255,20 +321,68 @@ impl FileView {
                 .bg(theme.ely.surface)
                 .text_size(theme.typography.footnote)
                 .text_color(theme.ely.fg_muted)
-                .child(measure)
                 .child(
+                    // The group shrinks and clips; its content keeps its
+                    // natural width, which is what the left measure reads.
                     gpui::div()
                         .flex()
                         .items_center()
-                        .gap(px(2.0))
                         .min_w(px(0.0))
                         .flex_shrink(1.0)
                         .overflow_hidden()
-                        .children(left),
+                        .child(
+                            gpui::div()
+                                .relative()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap(px(2.0))
+                                .child(measure_left)
+                                .children(left),
+                        ),
                 )
                 .child(gpui::div().flex_1())
-                .child(gpui::div().flex().items_center().gap(px(2.0)).flex_none().children(right))
+                .child(
+                    gpui::div()
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .flex_none()
+                        .child(measure_right)
+                        .children(right),
+                )
+                .child(decide)
                 .into_any_element(),
         )
     }
+}
+
+/// A canvas that fills its parent (which must be `relative`) and hands the
+/// layout the parent's size as it is laid out.
+fn measure(
+    layout: std::rc::Rc<StatusLayout>,
+    record: impl Fn(&StatusLayout, Pixels) + 'static,
+) -> impl IntoElement {
+    canvas(
+        move |bounds, _, _| record(&layout, bounds.size.width),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
+}
+
+/// `branch` as the row draws it: whole up to `BRANCH_CHARS` characters, else its
+/// beginning and its end around an ellipsis.
+fn shorten_branch(branch: &str) -> String {
+    let length = branch.chars().count();
+    if length <= BRANCH_CHARS {
+        return branch.to_owned();
+    }
+    let kept = BRANCH_CHARS - 1;
+    let head = kept / 2 + kept % 2;
+    let tail = kept - head;
+    let start: String = branch.chars().take(head).collect();
+    let end: String = branch.chars().skip(length - tail).collect();
+    format!("{start}…{end}")
 }

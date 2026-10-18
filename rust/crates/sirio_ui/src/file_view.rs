@@ -276,10 +276,9 @@ pub struct FileView {
     /// (`set_status_facts`): the branch, how far it is from its upstream, the
     /// language server.
     status_facts: StatusFacts,
-    /// The width the row under the file was last laid out at, which decides
+    /// What the row under the file has measured of itself, which decides
     /// whether it draws every item or only the ones that matter at a glance.
-    /// Wide until the first layout has measured it.
-    status_width: Rc<std::cell::Cell<Pixels>>,
+    status_layout: Rc<status_row::StatusLayout>,
     /// The open find: its fields, its matches and the one that is current.
     /// `None` while find is closed.
     find: Option<find::FindState>,
@@ -514,7 +513,7 @@ impl FileView {
             git_diff_in_flight: false,
             git_diff_again: false,
             status_facts: StatusFacts::default(),
-            status_width: Rc::new(std::cell::Cell::new(px(10_000.0))),
+            status_layout: Rc::default(),
             find: None,
             hover_offset: None,
             hover_point: point(px(0.), px(0.)),
@@ -865,6 +864,13 @@ impl FileView {
     fn is_markdown(&self) -> bool {
         self.editor()
             .is_some_and(|editor| editor.language() == Language::Markdown)
+    }
+
+    /// Whether the file has been read: a view still loading, or one that
+    /// failed, is not.
+    pub fn is_loaded(&self) -> bool {
+        self.editor()
+            .is_some_and(|editor| editor.status() == &LoadStatus::Loaded)
     }
 
     /// Whether the Markdown row draws its formatting controls: a loaded
@@ -4811,6 +4817,7 @@ mod tests {
         std::fs::write(&note, "# Notes\n\nSelect this paragraph.\n").expect("write file");
 
         cx.update(::editor::init);
+        cx.update(crate::ely::init);
         let path = note.clone();
         let (view, _, cx) = testing::host(cx, move |_, cx| FileView::new(path, cx));
         cx.cx.executor().allow_parking();
