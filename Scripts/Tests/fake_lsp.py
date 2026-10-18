@@ -25,7 +25,8 @@ the editor's pointer features ask:
 - `textDocument/definition` answers the `definition` of ANSWERS: a file's
   `needle`, read from disk when asked, as one Location.
 - `textDocument/documentSymbol` answers the `symbols` of ANSWERS, but only for
-  the file named by `symbols_file` (every other document gets an empty list). A
+  the file named by `symbols_file`, a file name or a list of them (every other
+  document gets an empty list). A
   symbol is `{"name", "kind", "needle", "children"}`; its range, and its
   selectionRange, is the first occurrence of `needle` in the document as the
   server holds it, so the lines follow the text through every edit. `children`
@@ -158,7 +159,9 @@ def main():
         }
 
     def symbols_for(uri, config):
-        if uri.rsplit("/", 1)[-1] != config.get("symbols_file", "") or uri not in documents:
+        names = config.get("symbols_file", "")
+        names = [names] if isinstance(names, str) else names
+        if uri.rsplit("/", 1)[-1] not in names or uri not in documents:
             return []
         found = [symbol_of(entry, documents[uri]) for entry in config.get("symbols", [])]
         return [symbol for symbol in found if symbol is not None]

@@ -712,6 +712,9 @@ const CONTROL_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long typing must pause before the breadcrumb's symbols are asked for again.
 const SYMBOLS_DEBOUNCE: Duration = Duration::from_secs(1);
+/// How long a server that said it is still indexing is given before the one
+/// more ask of its symbols.
+const SYMBOLS_RETRY: Duration = Duration::from_secs(1);
 const BROWSER_METHODS: [&str; 11] = [
     "browser.open",
     "browser.navigate",
@@ -5543,6 +5546,10 @@ struct SirioWorkspace {
     /// The pending fetch of symbols after an edit, per document. A new edit
     /// replaces it, which cancels its timer, so a burst of typing asks once.
     symbol_debounce: HashMap<PathBuf, gpui::Task<()>>,
+    /// The symbols failures already logged, per document and kind of failure,
+    /// so an edit that fails again does not log again. Cleared with the
+    /// document's last view.
+    symbol_failures_logged: HashSet<(PathBuf, String)>,
     /// Languages already offered this session, keyed by language name.
     /// Checked before raising the install card and never cleared: ten
     /// .java files are one card, not ten, which is what separates this
@@ -6553,6 +6560,7 @@ impl SirioWorkspace {
             )),
             symbol_generations: HashMap::new(),
             symbol_debounce: HashMap::new(),
+            symbol_failures_logged: HashSet::new(),
             offered: HashSet::new(),
             #[cfg(test)]
             offer_count: 0,
@@ -7942,7 +7950,7 @@ impl SirioWorkspace {
                         // A document the server already holds (a second view of
                         // it) is not sent again, and still wants its symbols.
                         if !workspace.sync_document_with_server(path, &view, cx) {
-                            workspace.refresh_symbols_now(path, &view, cx);
+                            workspace.refresh_symbols_now(path, cx);
                         }
                         workspace.refresh_git_diff(path, &view, cx);
                     }
@@ -7950,7 +7958,7 @@ impl SirioWorkspace {
                         workspace.refresh_git_diff(path, &view, cx);
                     }
                     FileViewEvent::Saved(path) => {
-                        workspace.refresh_symbols_now(path, &view, cx);
+                        workspace.refresh_symbols_now(path, cx);
                     }
                     FileViewEvent::RevealInFileManager(path) => {
                         if let Some(mut command) = reveal_command(path) {
@@ -13256,7 +13264,22 @@ impl SirioWorkspace {
             }
         });
         for path in closed_files {
-            self.close_document_on_server(&path, cx);
+            // The closing tab is still in `self.tabs`; any other view of the
+            // path is in another tab.
+            let shown_elsewhere = self.tabs.iter().enumerate().any(|(other, tab)| {
+                let mut found = false;
+                if other != index {
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::File { view } = content
+                            && paths_name_the_same_document(view.read(cx).path(), &path)
+                        {
+                            found = true;
+                        }
+                    });
+                }
+                found
+            });
+            self.close_document_on_server(&path, !shown_elsewhere, cx);
         }
         self.tabs.remove(index);
         self.tab_worktree_paths.remove(&tab_id);
@@ -14870,9 +14893,9 @@ impl SirioWorkspace {
             .detach();
         if offers_symbols {
             if opened {
-                self.fetch_symbols(path, view, after_send, cx);
+                self.fetch_symbols(path, after_send, cx);
             } else {
-                self.schedule_symbols(path, view, cx);
+                self.schedule_symbols(path, cx);
             }
         }
         true
@@ -14891,14 +14914,16 @@ impl SirioWorkspace {
     }
 
     /// Asks the server for `path`'s symbols, off the GPUI thread, and hands them
-    /// to `view` for the breadcrumb. The newest ask wins: an answer that comes
-    /// back after a later ask began is dropped, and so is one for a view that
-    /// closed. `after_send` is a text still on its way to the server, waited for
-    /// first. A failed ask keeps the symbols the view has: the next edit asks again.
+    /// to every open view of the file for the breadcrumb. The newest ask wins:
+    /// an answer that comes back after a later ask began is dropped, and a file
+    /// with no view left has none to give it to. `after_send` is a text still on
+    /// its way to the server, waited for first. A server still indexing
+    /// (`NotReady`) is asked once more after a second. Any other failure keeps
+    /// the symbols the views have, is logged once per file and kind, and the
+    /// next edit asks again.
     fn fetch_symbols(
         &mut self,
         path: &Path,
-        view: &Entity<FileView>,
         after_send: Option<futures::channel::oneshot::Receiver<()>>,
         cx: &mut Context<Self>,
     ) {
@@ -14908,53 +14933,85 @@ impl SirioWorkspace {
         let generation = self.symbol_generations.entry(path.to_path_buf()).or_insert(0);
         *generation += 1;
         let generation = *generation;
-        let view = view.downgrade();
         let path = path.to_path_buf();
         cx.spawn(async move |this, cx| {
             let source = path.clone();
+            let executor = cx.background_executor().clone();
             let found = cx
                 .background_executor()
                 .spawn(async move {
                     if let Some(after_send) = after_send {
                         let _ = after_send.await;
                     }
-                    sirio_lsp::document_symbols(&client, &source).await
+                    let mut found = sirio_lsp::document_symbols(&client, &source).await;
+                    if matches!(found, Err(sirio_lsp::LspError::NotReady)) {
+                        executor.timer(SYMBOLS_RETRY).await;
+                        found = sirio_lsp::document_symbols(&client, &source).await;
+                    }
+                    found
                 })
                 .await;
             let _ = this.update(cx, |workspace, cx| {
                 if workspace.symbol_generations.get(&path) != Some(&generation) {
                     return;
                 }
-                if let Ok(symbols) = found {
-                    let _ = view.update(cx, |view, cx| {
-                        view.set_symbols(crate::lsp::view_symbols(&symbols), cx)
-                    });
+                match found {
+                    Ok(symbols) => {
+                        let symbols = crate::lsp::view_symbols(&symbols);
+                        for (open_path, view) in Self::open_file_views(&workspace.tabs, cx) {
+                            if paths_name_the_same_document(&open_path, &path)
+                                && !view.read(cx).is_snapshot()
+                            {
+                                view.update(cx, |view, cx| view.set_symbols(symbols.clone(), cx));
+                            }
+                        }
+                    }
+                    Err(error) => workspace.note_symbols_failure(&path, &error),
                 }
             });
         })
         .detach();
     }
 
+    /// Logs a failed symbols ask once per file and kind of failure: the file's
+    /// path and the kind (a server's error code too), never the server's own
+    /// message, which can quote the file.
+    fn note_symbols_failure(&mut self, path: &Path, error: &sirio_lsp::LspError) {
+        use sirio_lsp::LspError;
+        let kind = match error {
+            LspError::Launch(_) => "launch".to_owned(),
+            LspError::NotInstalled { .. } => "not installed".to_owned(),
+            LspError::Transport(_) => "transport".to_owned(),
+            LspError::Server { code, .. } => format!("server error {code}"),
+            LspError::NotReady => "still indexing".to_owned(),
+            LspError::Timeout { .. } => "timeout".to_owned(),
+        };
+        if self
+            .symbol_failures_logged
+            .insert((path.to_path_buf(), kind.clone()))
+        {
+            eprintln!("[lsp] document symbols for {}: {kind}", path.display());
+        }
+    }
+
     /// Asks again for `path`'s symbols once the typing has paused for
     /// `SYMBOLS_DEBOUNCE`. Each call replaces the one before it.
-    fn schedule_symbols(&mut self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
-        let view = view.downgrade();
+    fn schedule_symbols(&mut self, path: &Path, cx: &mut Context<Self>) {
         let source = path.to_path_buf();
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SYMBOLS_DEBOUNCE).await;
             let _ = this.update(cx, |workspace, cx| {
-                if let Some(view) = view.upgrade() {
-                    workspace.fetch_symbols(&source, &view, None, cx);
-                }
+                workspace.fetch_symbols(&source, None, cx);
             });
         });
         self.symbol_debounce.insert(path.to_path_buf(), task);
     }
 
-    /// Asks for `path`'s symbols now, in place of a pending debounced ask.
-    fn refresh_symbols_now(&mut self, path: &Path, view: &Entity<FileView>, cx: &mut Context<Self>) {
-        self.symbol_debounce.remove(path);
-        self.fetch_symbols(path, view, None, cx);
+    /// Asks for `path`'s symbols now. A pending debounced ask stays: the edit
+    /// it waits for may not have reached the server before this ask does, and
+    /// its later answer wins by generation.
+    fn refresh_symbols_now(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.fetch_symbols(path, None, cx);
     }
 
     fn request_hover(
@@ -15227,8 +15284,16 @@ impl SirioWorkspace {
     }
 
     /// Tells the server a file is closed and forgets its version, so a
-    /// reopen starts over at 1.
-    fn close_document_on_server(&mut self, path: &Path, cx: &mut Context<Self>) {
+    /// reopen starts over at 1. `last_view` is whether no other tab shows the
+    /// file: the symbols bookkeeping (the newest ask, the pending debounce, the
+    /// failures logged) is dropped only then, before anything can return early,
+    /// so a view that stays keeps its pending ask.
+    fn close_document_on_server(&mut self, path: &Path, last_view: bool, cx: &mut Context<Self>) {
+        if last_view {
+            self.symbol_generations.remove(path);
+            self.symbol_debounce.remove(path);
+            self.symbol_failures_logged.retain(|(logged, _)| logged != path);
+        }
         let Some(entry) = self.lsp.entry_for(path) else {
             return;
         };
@@ -15241,8 +15306,6 @@ impl SirioWorkspace {
         };
         let client = server.client().clone();
         self.lsp.forget_synced(path);
-        self.symbol_generations.remove(path);
-        self.symbol_debounce.remove(path);
         let path = path.to_path_buf();
         cx.background_executor()
             .spawn(async move {
