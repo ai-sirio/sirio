@@ -424,6 +424,11 @@ runs 120 tests after Task 1c, all passed.
   is `None` past the last row and on a row that is not text (a lens, a removed
   line, ghost text or the chat). `offset_at` itself is unchanged; IME uses it.
   `Pointer` fires only without a button down.
+  The `body` also takes an id (`code-editor-body`) and an `on_hover`: when the
+  pointer leaves it, `Pointer { offset: None, position }` is emitted once, so an
+  owner that drew something for the place the pointer last rested (Sirio's hover
+  card) drops it when the pointer slides onto a neighbouring surface instead of
+  patching each surface.
 - `EditorEvent::PlatformClick { offset }`: `press()` records
   `pressed: Option<Press>` (`Press` in `state.rs`: the offset, whether the
   platform modifier was held, and `single`, which is `click_count == 1` with

@@ -2,8 +2,9 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Bounds, Context, ElementInputHandler, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, Styled,
-    StyledText, Window, canvas, div, fill, font, point, size, uniform_list,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
+    StatefulInteractiveElement, Styled, StyledText, Window, canvas, div, fill, font, point, size,
+    uniform_list,
 };
 
 use super::{
@@ -311,6 +312,7 @@ impl Render for CodeEditor {
             })
         });
         let body = div()
+            .id(("code-editor-body", cx.entity_id().as_u64()))
             .relative()
             .flex_1()
             .h_full()
@@ -337,6 +339,16 @@ impl Render for CodeEditor {
                     offset,
                     position: event.position,
                 });
+            }))
+            // A pointer that leaves the code moves nothing here, so the owner
+            // would keep what it drew for the place the pointer last rested.
+            .on_hover(cx.listener(|_, hovered: &bool, window, cx| {
+                if !hovered {
+                    cx.emit(EditorEvent::Pointer {
+                        offset: None,
+                        position: window.mouse_position(),
+                    });
+                }
             }))
             .on_mouse_down(
                 MouseButton::Right,

@@ -27,7 +27,8 @@
 //!   nothing, so the next key goes nowhere. Test:
 //!   `escape_in_the_query_closes_find_and_hands_the_keyboard_to_the_code`.
 //! - A card already drawn for the code stays when the pointer slides from the
-//!   code onto the bar. Test:
+//!   code onto the bar. The code editor itself says when the pointer leaves it
+//!   (vendored Ely, `LOCAL-CHANGES.md`). Test:
 //!   `the_pointer_sliding_from_the_code_onto_the_find_bar_drops_the_card`.
 //! - Find pressed in the query field, or with the current match selected in
 //!   the code, replaces the pattern being typed with the text it matched.
@@ -490,9 +491,7 @@ impl FileView {
             }
         }
         // The press stops here: the tab's own press hands the keyboard to the
-        // code, which would take it back from the field the press was for. A
-        // pointer that slides from the code onto the bar drops the code's
-        // hover card, which the bar would otherwise leave drawn.
+        // code, which would take it back from the field the press was for.
         // The bar spans the code's width with the widget right-aligned in it;
         // the widget shrinks in a pane narrower than its own fixed width
         // rather than running off the left edge, and `overflow_hidden` clips
@@ -513,7 +512,6 @@ impl FileView {
                 .bg(theme.ely.surface)
                 .border_b_1()
                 .border_color(theme.ely.border)
-                .on_mouse_move(cx.listener(|view, _, _, cx| view.dismiss_hover(cx)))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .child(

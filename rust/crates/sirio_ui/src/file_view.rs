@@ -4128,6 +4128,109 @@ mod tests {
     async fn the_find_key_in_the_query_selects_it_and_never_reseeds_it(
         cx: &mut gpui::TestAppContext,
     ) {
+    // How a hover card can outlive the pointer's visit to the code (task 12a, from
+    // 9b's review): Ely emits no `Pointer { offset: None }` when the pointer
+    // leaves the code, so a card drawn for the code stays when the pointer slides
+    // onto another surface of the tab. The cure is at the source (vendored Ely says
+    // so when the pointer leaves the code); the find bar's test above is the third
+    // of these.
+    //
+    // - A card stays when the pointer slides onto the conflict banner.
+    // - A card stays when the pointer slides onto the Markdown row.
+
+    /// Rests the pointer on the first line's code until its diagnostic card is
+    /// drawn, slides it onto `surface`, and answers the card before and after.
+    fn card_before_and_after_sliding_onto(
+        extension: &str,
+        surface: &'static str,
+        prepare: impl FnOnce(&gpui::Entity<FileView>, &mut VisualTestContext),
+        cx: &mut gpui::TestAppContext,
+    ) -> (Option<String>, Option<String>) {
+        let line = "x".repeat(400);
+        let text = format!("{line}\n{line}\n{line}\n");
+        let file = TempFile::with_extension(extension, &text);
+        let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
+        let whole = 0..text.len();
+        prepare(&view, &mut cx);
+        view.update(&mut cx.cx, |view, cx| {
+            view.set_diagnostics(
+                vec![FileDiagnostic {
+                    line: 0,
+                    range: whole,
+                    severity: DiagnosticSeverity::Error,
+                    message: "boom".into(),
+                }],
+                cx,
+            );
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        let card = |cx: &VisualTestContext| {
+            view.read_with(&cx.cx, |view, _| view.hover_card().map(str::to_owned))
+        };
+        let line_bounds = cx
+            .debug_bounds("code-editor-line-0")
+            .expect("the first line is drawn");
+        let on_code = point(line_bounds.origin.x + px(300.), line_bounds.center().y);
+        cx.simulate_mouse_move(on_code, None, Modifiers::none());
+        cx.run_until_parked();
+        let before = card(&cx);
+        let target = cx.debug_bounds(surface).expect("the surface is drawn");
+        cx.simulate_mouse_move(target.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        (before, card(&cx))
+    }
+
+    #[gpui::test]
+    async fn the_pointer_sliding_from_the_code_onto_the_conflict_banner_drops_the_card(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (before, after) = card_before_and_after_sliding_onto(
+            "rs",
+            "file-conflict-banner",
+            |view, cx| {
+                view.update(&mut cx.cx, |view, cx| {
+                    let editor = view.editor_mut().expect("editor loaded");
+                    editor.insert(0, "user edit\n").expect("local edit");
+                    cx.notify();
+                });
+                std::fs::write(view.read_with(&cx.cx, |view, _| view.path().to_path_buf()), "external\n")
+                    .expect("external write");
+                view.update(&mut cx.cx, |view, cx| view.check_external(cx));
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.simulate_next_frame(cx);
+                    window.simulate_next_frame(cx);
+                });
+            },
+            cx,
+        );
+        assert_eq!(before.as_deref(), Some("boom"), "resting on the code shows it");
+        assert_eq!(after, None, "the banner does not keep the code's card");
+    }
+
+    #[gpui::test]
+    async fn the_pointer_sliding_from_the_code_onto_the_markdown_row_drops_the_card(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (before, after) =
+            card_before_and_after_sliding_onto(
+                "md",
+                "file-markdown-row",
+                |view, cx| {
+                    view.update(&mut cx.cx, |view, cx| {
+                        view.set_markdown_mode(MarkdownMode::Code, cx)
+                    });
+                },
+                cx,
+            );
+        assert_eq!(before.as_deref(), Some("boom"), "resting on the code shows it");
+        assert_eq!(after, None, "the Markdown row does not keep the code's card");
+    }
+
         let file = TempFile::with_extension("rs", "foo fooo foo\n");
         let (mut cx, view) = mounted_file_view(cx, file.path().to_path_buf());
         cx.update(|_, app| init(app));
