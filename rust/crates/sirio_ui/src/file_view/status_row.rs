@@ -2,8 +2,9 @@
 //! caret's place, the indent, the encoding, the line ending, the language and
 //! the bell on the right, each one an Ely status item.
 //!
-//! Four of its items take a press (`status_actions`): the caret's place goes to
-//! a line, and the indent, the line ending and the language open a short list.
+//! Five of its items take a press (`status_actions`): the caret's place goes to
+//! a line, the indent, the line ending and the language open a short list, and
+//! the bell opens the tab's notifications.
 //! Three of its facts come from the file (the caret, the line ending, the
 //! language) and are read as the row is drawn. The rest are the app's to know (`StatusFacts`: the branch, the
 //! worktree's state, how far it is from its upstream, the language server) and
@@ -121,9 +122,10 @@ pub(super) struct StatusItems {
 impl StatusItems {
     /// The row as the control socket reads it: `branch=…;ahead=…;behind=…;
     /// lsp=<name>:<starting|ready|failed>|none;cursor=Ln a, Col b (n selected);
-    /// indent=Spaces: 4;encoding=UTF-8;eol=LF;language=Rust;bell=0`. A field the
-    /// row does not draw reads `none`; `(n selected)` is there only while
-    /// something is selected. The fields are separated by `;` without escaping,
+    /// indent=Spaces: 4;encoding=UTF-8;eol=LF;language=Rust;bell=0`. The bell
+    /// reads the notifications not yet seen; how many the tab holds is its own
+    /// key, `notifications`. A field the row does not draw reads `none`;
+    /// `(n selected)` is there only while something is selected. The fields are separated by `;` without escaping,
     /// so a branch name that contains one makes the line ambiguous; a reader of
     /// the line splits on the keys it knows, and the E2E's branch names have
     /// none.
@@ -230,7 +232,7 @@ impl FileView {
             indent,
             crlf: editor.line_ending() == LineEnding::Crlf,
             language: self.effective_language().name(),
-            bell: 0,
+            bell: self.notifications_unseen,
         })
     }
 
@@ -318,7 +320,14 @@ impl FileView {
             }
             item.into_any_element()
         }));
-        right.push(NotificationBell::new("status-bell", items.bell).into_any_element());
+        let bell = items.bell;
+        right.push(self.with_status_popover(entity, StatusItem::Bell, theme, move |press| {
+            let mut item = NotificationBell::new("status-bell", bell);
+            if let Some(press) = press {
+                item = item.on_click(move |window, cx| press(window, cx));
+            }
+            item.into_any_element()
+        }));
         // Each group reports the width it takes; the row's own measure is the
         // last to run, so it decides with this frame's numbers, and a change
         // asks for the frame that draws the other set.

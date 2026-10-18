@@ -18666,6 +18666,9 @@ impl SirioWorkspace {
                 "status_popover".to_string(),
                 view.status_popover().map_or("none", |item| item.word()).to_string(),
             ),
+            // How many notifications the tab holds behind the bell; the
+            // bell's own count (those not yet seen) is `status=`'s `bell`.
+            ("notifications".to_string(), view.notification_count().to_string()),
             // What the code's highlighter last gave the first line: its language
             // and how many coloured spans.
             ("highlight".to_string(), view.highlight_text()),
@@ -19140,8 +19143,8 @@ impl SirioWorkspace {
     /// items, acted on through the functions its popover calls. `open=true`
     /// opens the item's popover and `open=false` closes it; otherwise `value`
     /// is a choice in it (a language name or id, `lf|crlf`, `spaces:N|tabs:N`,
-    /// a line number). Answers the file's state, as `open` does, so what the
-    /// choice did is in the same reply.
+    /// a line number, `clear` for the bell's list). Answers the file's state,
+    /// as `open` does, so what the choice did is in the same reply.
     fn control_editor_status(
         &mut self,
         item: &str,

@@ -27,8 +27,8 @@ use bezel::ui::scroll::{self, ScrollbarState};
 use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, HighlightStyle, KeyBinding, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, ScrollHandle, Subscription, Task, UnderlineStyle,
-    Window, actions, anchored, canvas, deferred, div, point, prelude::*, px,
+    MouseDownEvent, Pixels, Point, Render, ScrollHandle, SharedString, Subscription, Task,
+    UnderlineStyle, Window, actions, anchored, canvas, deferred, div, point, prelude::*, px,
 };
 use sirio_diagram::{DiagramError, DiagramKind, Palette};
 use sirio_git::FileDiff;
@@ -208,6 +208,15 @@ pub struct FileView {
     /// would not start. It is *about* the file, never instead of it —
     /// see `TransientMessage` for why that distinction is load-bearing.
     message: Option<TransientMessage>,
+    /// What this tab has been told, oldest first, kept behind the status row's
+    /// bell: the text of every `set_message` and `offer`, the newest
+    /// `MAX_NOTIFICATIONS` of them. Dismissing the corner card leaves it
+    /// alone, and so does opening the list; only Clear empties it. Not kept
+    /// across a relaunch, and a snapshot tab has its own.
+    notifications: Vec<SharedString>,
+    /// How many of `notifications` were added since the list was last opened:
+    /// the number on the bell.
+    notifications_unseen: usize,
     /// Where the gesture asking "where is this defined?" happened,
     /// window-absolute, so the answer can be put back where the question
     /// was asked. Recorded when the request is made because the two places
@@ -469,6 +478,9 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+/// How many notifications a tab keeps; the oldest are dropped past it.
+const MAX_NOTIFICATIONS: usize = 50;
+
 const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl FileView {
@@ -524,6 +536,8 @@ impl FileView {
             snapshot: None,
             snapshot_error: None,
             message: None,
+            notifications: Vec::new(),
+            notifications_unseen: 0,
             markdown_mode: MarkdownMode::Preview,
             code_editor: None,
             code_subscriptions: Vec::new(),
@@ -684,12 +698,31 @@ impl FileView {
     /// view's corner, over the content rather than in place of it, and
     /// carries no buttons: a message is news, and news is dismissed.
     pub fn set_message(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        let text = text.into();
+        self.note(&text);
         self.message = Some(TransientMessage {
-            text: text.into(),
+            text,
             at: None,
             actions: Vec::new(),
         });
         cx.notify();
+    }
+
+    /// Adds `text` to the tab's notifications (the status row's bell). Only
+    /// what nothing pointed at is news: `set_message` and `offer` call it, and
+    /// `answer_definition` does not, because it answers a gesture where it was
+    /// made and a list of past answers would only hold the user's own
+    /// questions. Past `MAX_NOTIFICATIONS` the oldest is dropped. A
+    /// notification that arrives while the list is open is seen already.
+    fn note(&mut self, text: &str) {
+        self.notifications.push(SharedString::from(text.to_owned()));
+        if self.notifications.len() > MAX_NOTIFICATIONS {
+            self.notifications.remove(0);
+        }
+        if self.status_popover != Some(StatusItem::Bell) {
+            self.notifications_unseen =
+                (self.notifications_unseen + 1).min(self.notifications.len());
+        }
     }
 
     /// Raises an offer about this file: a sentence and the buttons that end
@@ -703,8 +736,10 @@ impl FileView {
         actions: Vec<MessageAction>,
         cx: &mut Context<Self>,
     ) {
+        let text = text.into();
+        self.note(&text);
         self.message = Some(TransientMessage {
-            text: text.into(),
+            text,
             at: None,
             actions,
         });

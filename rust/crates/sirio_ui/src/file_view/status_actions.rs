@@ -2,6 +2,9 @@
 //! the line ending each open a short list; the caret's place opens a field that
 //! goes to a line.
 //!
+//! The bell opens the tab's notifications, newest first, with a Clear that
+//! empties them; opening the list is what clears the count on the bell.
+//!
 //! The popovers and the control socket's `surface.editor.status` verb act
 //! through the same functions (`apply_status_value`, `open_status_popover`), so
 //! what the E2E drives is what a click does.
@@ -24,9 +27,11 @@
 
 use std::rc::Rc;
 
+use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::forms::{Choice, Input, InputEvent, ListBox};
 use ely_gpui_component::overlays::Popover;
 use ely_gpui_component::primitives::FocusNext;
+use ely_gpui_component::theme::ControlSize;
 use gpui::{
     AnyElement, App, Context, Entity, Focusable as _, KeyDownEvent, MouseButton, SharedString,
     Window, div, prelude::*, px,
@@ -43,6 +48,10 @@ use crate::ely_ui::new_input;
 /// insert that many spaces.
 const MAX_INDENT: usize = 32;
 
+/// The bell's panel is this wide, and its list scrolls past this tall.
+const BELL_WIDTH: f32 = 360.0;
+const BELL_LIST_HEIGHT: f32 = 260.0;
+
 /// An item of the status row that takes a press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusItem {
@@ -51,17 +60,20 @@ pub enum StatusItem {
     LineEnding,
     /// The caret's place.
     Goto,
+    /// The bell: this tab's notifications.
+    Bell,
 }
 
 impl StatusItem {
     /// The item named as the control socket names it: `language`, `indent`,
-    /// `line_ending` or `goto`.
+    /// `line_ending`, `goto` or `bell`.
     pub fn parse(word: &str) -> Option<Self> {
         match word {
             "language" => Some(Self::Language),
             "indent" => Some(Self::Indent),
             "line_ending" => Some(Self::LineEnding),
             "goto" => Some(Self::Goto),
+            "bell" => Some(Self::Bell),
             _ => None,
         }
     }
@@ -73,6 +85,7 @@ impl StatusItem {
             Self::Indent => "indent",
             Self::LineEnding => "line_ending",
             Self::Goto => "goto",
+            Self::Bell => "bell",
         }
     }
 
@@ -82,6 +95,7 @@ impl StatusItem {
             Self::Indent => "status-indent-popover",
             Self::LineEnding => "status-line-ending-popover",
             Self::Goto => "status-goto-popover",
+            Self::Bell => "status-bell-popover",
         }
     }
 }
@@ -153,6 +167,24 @@ impl FileView {
     /// The status row's open popover, if any.
     pub fn status_popover(&self) -> Option<StatusItem> {
         self.status_popover
+    }
+
+    /// How many notifications the tab holds (the list the bell opens).
+    pub fn notification_count(&self) -> usize {
+        self.notifications.len()
+    }
+
+    /// The number on the bell: the notifications added since its list was last
+    /// opened.
+    pub fn notifications_unseen(&self) -> usize {
+        self.notifications_unseen
+    }
+
+    /// Empties the tab's notifications and the bell's count.
+    pub fn clear_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notifications.clear();
+        self.notifications_unseen = 0;
+        cx.notify();
     }
 
     /// Why `item` takes no press now, or `None` when it does.
@@ -278,6 +310,13 @@ impl FileView {
                 let line_ending = parse_line_ending(value)?;
                 self.set_line_ending_choice(line_ending, cx)
             }
+            StatusItem::Bell => match value.trim().to_ascii_lowercase().as_str() {
+                "clear" => {
+                    self.clear_notifications(cx);
+                    Ok(())
+                }
+                _ => Err(format!("'{value}' is not a bell value: use clear")),
+            },
             StatusItem::Goto => {
                 let line: usize = value
                     .trim()
@@ -300,7 +339,7 @@ impl FileView {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let item = StatusItem::parse(item).ok_or_else(|| {
-            format!("'{item}' is not a status item: use language, indent, line_ending or goto")
+            format!("'{item}' is not a status item: use language, indent, line_ending, goto or bell")
         })?;
         match open {
             Some(true) => self.open_status_popover(item, window, cx),
@@ -354,6 +393,10 @@ impl FileView {
             self.list_focus_pending = true;
         }
         self.status_popover = Some(item);
+        if item == StatusItem::Bell {
+            // Opening the list is seeing what is in it.
+            self.notifications_unseen = 0;
+        }
         cx.notify();
         Ok(())
     }
@@ -560,6 +603,7 @@ impl FileView {
                 )
             }
             StatusItem::Goto => return self.goto_body(theme, window, cx),
+            StatusItem::Bell => return self.bell_body(theme, entity, close, window),
         };
         let id = match item {
             StatusItem::Language => "status-language-list",
@@ -594,6 +638,79 @@ impl FileView {
                         close(window, cx);
                         entity.update(cx, |view, cx| view.focus_target(cx).focus(window, cx));
                     }),
+            )
+            .into_any_element()
+    }
+
+    /// The bell's panel: the notifications newest first, each wrapped, in a box
+    /// that scrolls past `BELL_LIST_HEIGHT`, and Clear under them.
+    ///
+    /// The rows are plain text, not `selectable_text`: a selection moves the
+    /// keyboard into the workspace's sink, which the popover reads as focus
+    /// leaving it, so a double click or a drag on a row closed the panel (seen
+    /// in the E2E's captures). The corner card, which holds the newest one
+    /// until it is dismissed, can be selected.
+    fn bell_body(
+        &mut self,
+        theme: Theme,
+        entity: Entity<Self>,
+        close: Close,
+        window: &mut Window,
+    ) -> AnyElement {
+        if std::mem::take(&mut self.list_focus_pending) {
+            // The panel holds the keyboard on its own handle, above Clear: one
+            // Tab step, once it is drawn, puts it on Clear, where Escape and
+            // Enter reach the panel's keys.
+            window.on_next_frame(|window, cx| window.dispatch_action(Box::new(FocusNext), cx));
+        }
+        let escaping = entity.clone();
+        let rows = self.notifications.iter().rev().enumerate().map(|(index, text)| {
+            div()
+                .py(px(4.0))
+                .when(index > 0, |row| row.border_t_1().border_color(theme.ely.border))
+                .child(text.clone())
+        });
+        let list = if self.notifications.is_empty() {
+            div()
+                .py(px(4.0))
+                .text_color(theme.ely.fg_muted)
+                .child("No notifications")
+                .into_any_element()
+        } else {
+            div()
+                .id("status-bell-notes")
+                .debug_selector(|| "status-bell-notes".to_owned())
+                .max_h(px(BELL_LIST_HEIGHT))
+                .overflow_y_scroll()
+                .children(rows)
+                .into_any_element()
+        };
+        div()
+            .debug_selector(|| "status-bell-panel".to_owned())
+            .w(px(BELL_WIDTH))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .text_size(theme.typography.footnote)
+            .text_color(theme.ely.fg)
+            // The row the panel hangs from keeps its text on one line, and the
+            // panel inherits it: a notification wraps.
+            .whitespace_normal()
+            .on_key_down(move |event, _, cx| escape_returns_focus(event, &escaping, cx))
+            .child(list)
+            .child(
+                div().flex().justify_end().child(
+                    Button::new("status-bell-clear", "Clear")
+                        .variant(ButtonVariant::Ghost)
+                        .size(ControlSize::Sm)
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |view, cx| {
+                                view.clear_notifications(cx);
+                                view.focus_target(cx).focus(window, cx);
+                            });
+                            close(window, cx);
+                        }),
+                ),
             )
             .into_any_element()
     }
