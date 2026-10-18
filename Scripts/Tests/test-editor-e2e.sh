@@ -32,6 +32,13 @@ set -eEuo pipefail
 #                     line (the reveal)
 #   link              a platform click on a Markdown link's label opens its target
 #   context           the menu's Copy, run by a right press, reaches the clipboard
+#   breadcrumb        the row over src/shapes.rs names the file's path and the symbols the
+#                     fake server's outline puts around the caret (impl Foo > bar): none
+#                     before the first symbol, a shallower symbol closes the deeper ones,
+#                     a sibling replaces its sibling; a press on a symbol part reveals its
+#                     line and one on the path is refused; five typed characters ask for
+#                     the symbols once, after the pause, and a save asks at once;
+#                     captured
 #   git_marks         a file's changes against HEAD mark its gutter: the disk's when the
 #                     file opens, an adopted change, a save; a mark opens its hunk in
 #                     place, Escape closes it; a file restored to HEAD, a commit made
@@ -398,6 +405,33 @@ findme = [
 ]
 findme += [f"plain filler line {n}\n" for n in range(1, 71)]
 write("findme.txt", "".join(findme).encode("utf-8"))
+# src/shapes.rs: what the breadcrumb scenario walks: a function, a struct, an impl
+# with two methods, and a function after it. The fake server's outline (below)
+# names each by the text that opens it. Line 0 mentions no symbol's name.
+os.makedirs(os.path.join(root, "src"))
+shapes = [
+    "// shapes.rs: a free function, a struct, two methods and a last function.\n",
+    "fn free() -> u32 {\n",
+    "    1\n",
+    "}\n",
+    "\n",
+    "struct Foo;\n",
+    "\n",
+    "impl Foo {\n",
+    "    fn first(&self) -> u32 {\n",
+    "        2\n",
+    "    }\n",
+    "\n",
+    "    fn bar(&self) -> u32 {\n",
+    "        3\n",
+    "    }\n",
+    "}\n",
+    "\n",
+    "fn tail() -> u32 {\n",
+    "    4\n",
+    "}\n",
+]
+write("src/shapes.rs", "".join(shapes).encode("utf-8"))
 PY
 git -C "$WT" add -A
 git -C "$WT" commit -q -m first
@@ -419,7 +453,17 @@ cat >"$RUN_DIR/fake-lsp/answers.json" <<JSON
     {"needle": "line_7", "severity": 1, "message": "$FAKE_ERROR"},
     {"needle": "line_12", "severity": 2, "message": "$FAKE_WARNING"}
   ],
-  "definition": {"path": "$WT/nested.rs", "needle": "fn outer"}
+  "definition": {"path": "$WT/nested.rs", "needle": "fn outer"},
+  "symbols_file": "shapes.rs",
+  "symbols": [
+    {"name": "free", "kind": 12, "needle": "fn free"},
+    {"name": "Foo", "kind": 23, "needle": "struct Foo"},
+    {"name": "impl Foo", "kind": 5, "needle": "impl Foo", "children": [
+      {"name": "first", "kind": 6, "needle": "fn first"},
+      {"name": "bar", "kind": 6, "needle": "fn bar"}
+    ]},
+    {"name": "tail", "kind": 12, "needle": "fn tail"}
+  ]
 }
 JSON
 cat >"$XDG_CONFIG_HOME/sirio/languages.toml" <<TOML
@@ -872,6 +916,10 @@ lsp_mark() { # the log's line count now
   local log="$RUN_DIR/fake-lsp/requests.log"
   if [ -f "$log" ]; then wc -l <"$log"; else echo 0; fi
 }
+# How many requests of a method the log holds after the mark.
+lsp_count() { # method mark
+  tail -n +"$(($2 + 1))" "$RUN_DIR/fake-lsp/requests.log" 2>/dev/null | grep -c " $1\$" || true
+}
 lsp_asked() { # method mark
   tail -n +"$(($2 + 1))" "$RUN_DIR/fake-lsp/requests.log" 2>/dev/null | grep -q " $1\$" \
     || fail "$SCENARIO: the language server was never asked $1 after the verb"
@@ -1021,6 +1069,115 @@ scenario_context() {
   echo "OK: the menu's Copy reached the clipboard: the paste read line_2"
   # Send to agent is not run here: no agent chat can be opened in this world (see
   # the report), and a chat is what the selection would go to.
+}
+
+scenario_breadcrumb() {
+  # The row over the code reads the path from the worktree's root, then the
+  # symbols the fake server's outline (answers.json, `symbols`) puts around the
+  # caret. A symbol is placed by its start line: it holds the caret from there
+  # until a symbol at its depth or a shallower one starts.
+  local file="$WT/src/shapes.rs" base="src › shapes.rs" text mark
+  local at_first at_bar at_tail impl_at refused
+  mark="$(lsp_mark)"
+  open_file "$file"
+  expect_state state loaded
+  text="$(sfield text)"
+  at_first="$(python3 "$TOOLS" offset "$text" "        2")"
+  at_bar="$(python3 "$TOOLS" offset "$text" "        3")"
+  at_tail="$(python3 "$TOOLS" offset "$text" "    4")"
+  impl_at="$(python3 "$TOOLS" offset "$text" "impl Foo {")"
+
+  # In bar's body: its impl, then bar. Reading this waits for the server's answer,
+  # which the load asks for as soon as the server has the text.
+  ctl surface editor select --ranges="$at_bar..$at_bar" >/dev/null
+  expect_state breadcrumb "$base › impl Foo › bar"
+  lsp_asked textDocument/documentSymbol "$mark"
+  capture breadcrumb
+
+  # A sibling replaces its sibling: first's body is in impl Foo, and not in bar.
+  ctl surface editor select --ranges="$at_first..$at_first" >/dev/null
+  expect_state breadcrumb "$base › impl Foo › first"
+  ctl surface editor select --ranges="$at_bar..$at_bar" >/dev/null
+  expect_state breadcrumb "$base › impl Foo › bar"
+  # A shallower symbol closes the deeper ones: tail begins after bar's method.
+  ctl surface editor select --ranges="$at_tail..$at_tail" >/dev/null
+  expect_state breadcrumb "$base › tail"
+  # Above every symbol there is only the path.
+  ctl surface editor select --ranges=0..0 >/dev/null
+  expect_state breadcrumb "$base"
+  echo "OK: the chain follows the caret through a method, a sibling, a shallower symbol and the top"
+
+  # A press on a symbol reveals its line: the caret goes to the start of the impl.
+  ctl surface editor select --ranges="$at_bar..$at_bar" >/dev/null
+  expect_state breadcrumb "$base › impl Foo › bar"
+  ctl surface editor crumb --index=2 >/dev/null
+  expect_state selections "$impl_at..$impl_at"
+  expect_state breadcrumb "$base › impl Foo"
+  # The path's parts are text, and a part that is not there is refused.
+  refused=""
+  if refused="$(ctl surface editor crumb --index=0 2>&1)"; then
+    fail "$SCENARIO: a press on the path was accepted; the verb answered: $refused"
+  fi
+  case "$refused" in
+    *'"src" is part of the path, not a symbol'*) ;;
+    *) fail "$SCENARIO: a press on the path answered '$refused'" ;;
+  esac
+  if refused="$(ctl surface editor crumb --index=9 2>&1)"; then
+    fail "$SCENARIO: a press past the last part was accepted; the verb answered: $refused"
+  fi
+  expect_state selections "$impl_at..$impl_at"
+  echo "OK: a press on impl Foo put the caret on its line; the path and a missing part are refused"
+
+  # Five characters typed one after another are one ask for the symbols, made
+  # after the pause (1 s) and none during the typing. The fake's outline gains a
+  # symbol named by the typed text, so the answer that lands is the new one.
+  python3 - "$RUN_DIR/fake-lsp/answers.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    answers = json.load(handle)
+answers["symbols"].append({"name": "typed", "kind": 12, "needle": "zzzzz"})
+with open(path + ".tmp", "w", encoding="utf-8") as handle:
+    json.dump(answers, handle)
+os.replace(path + ".tmp", path)
+PY
+  ctl surface editor select --ranges=0..0 >/dev/null
+  expect_state breadcrumb "$base"
+  mark="$(lsp_mark)"
+  for _ in 1 2 3 4 5; do ctl surface editor type --text=z >/dev/null; done
+  [ "$(lsp_count textDocument/documentSymbol "$mark")" -eq 0 ] \
+    || fail "$SCENARIO: the symbols were asked for during the typing, not after the pause"
+  expect_state breadcrumb "$base › typed"
+  [ "$(lsp_count textDocument/documentSymbol "$mark")" -eq 1 ] \
+    || fail "$SCENARIO: five typed characters asked for the symbols $(lsp_count textDocument/documentSymbol "$mark") times, expected once"
+  sleep 1.5
+  [ "$(lsp_count textDocument/documentSymbol "$mark")" -eq 1 ] \
+    || fail "$SCENARIO: the symbols were asked for $(lsp_count textDocument/documentSymbol "$mark") times after the pause, expected once"
+  echo "OK: five characters, one ask for the symbols, after the pause"
+
+  # Undo returns the text; the symbol named by the typed text goes with it, once
+  # the pause has passed and the symbols are asked for again.
+  for _ in 1 2 3 4 5; do ctl surface editor keys --keys=ctrl-z >/dev/null; done
+  expect_state dirty false
+  expect_state breadcrumb "$base"
+  sleep 1.5
+
+  # A save asks for the symbols with no edit behind it, so the pause after an edit
+  # cannot be what asks: the text is as it was when the pauses above ended. The ask
+  # is polled for (a busy window delays it), and it must come once.
+  mark="$(lsp_mark)"
+  ctl surface editor save >/dev/null
+  local tries=0
+  while [ "$tries" -lt 50 ] && [ "$(lsp_count textDocument/documentSymbol "$mark")" -eq 0 ]; do
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  [ "$(lsp_count textDocument/documentSymbol "$mark")" -ge 1 ] \
+    || fail "$SCENARIO: a save never asked for the symbols"
+  sleep 2
+  [ "$(lsp_count textDocument/documentSymbol "$mark")" -eq 1 ] \
+    || fail "$SCENARIO: after a save the symbols were asked for $(lsp_count textDocument/documentSymbol "$mark") times, expected once"
+  echo "OK: a save asked for the symbols, once, with no edit to wait for"
 }
 
 scenario_git_marks() {
@@ -1470,6 +1627,7 @@ scenario hover scenario_hover
 scenario definition scenario_definition
 scenario link scenario_link
 scenario context scenario_context
+scenario breadcrumb scenario_breadcrumb
 scenario git_marks scenario_git_marks
 scenario find scenario_find
 scenario replace scenario_replace

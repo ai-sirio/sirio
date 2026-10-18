@@ -24,7 +24,14 @@ the editor's pointer features ask:
 - `textDocument/hover` answers the `hover` text of ANSWERS for every position.
 - `textDocument/definition` answers the `definition` of ANSWERS: a file's
   `needle`, read from disk when asked, as one Location.
-- `textDocument/documentSymbol` answers an empty list.
+- `textDocument/documentSymbol` answers the `symbols` of ANSWERS, but only for
+  the file named by `symbols_file` (every other document gets an empty list). A
+  symbol is `{"name", "kind", "needle", "children"}`; its range, and its
+  selectionRange, is the first occurrence of `needle` in the document as the
+  server holds it, so the lines follow the text through every edit. `children`
+  are symbols of the same shape, answered nested as `DocumentSymbol` has them. A
+  symbol whose needle is not in the text is left out with its children. `kind`
+  is the protocol's number (default 12, a function; a method is 6).
 - Any other request is answered with null; notifications are ignored.
 
 ANSWERS is read again for every message, so a test may rewrite it between
@@ -137,6 +144,25 @@ def main():
             "params": {"uri": uri, "diagnostics": diagnostics_for(uri, text, answers())},
         })
 
+    def symbol_of(entry, text):
+        found_range = range_of(text, entry["needle"])
+        if found_range is None:
+            return None
+        children = [symbol_of(child, text) for child in entry.get("children", [])]
+        return {
+            "name": entry["name"],
+            "kind": entry.get("kind", 12),
+            "range": found_range,
+            "selectionRange": found_range,
+            "children": [child for child in children if child is not None],
+        }
+
+    def symbols_for(uri, config):
+        if uri.rsplit("/", 1)[-1] != config.get("symbols_file", "") or uri not in documents:
+            return []
+        found = [symbol_of(entry, documents[uri]) for entry in config.get("symbols", [])]
+        return [symbol for symbol in found if symbol is not None]
+
     def definition_for(config):
         target = config.get("definition")
         if not target:
@@ -197,7 +223,8 @@ def main():
         elif method == "textDocument/definition":
             send({"jsonrpc": "2.0", "id": message["id"], "result": definition_for(answers())})
         elif method == "textDocument/documentSymbol":
-            send({"jsonrpc": "2.0", "id": message["id"], "result": []})
+            uri = (params.get("textDocument") or {}).get("uri", "")
+            send({"jsonrpc": "2.0", "id": message["id"], "result": symbols_for(uri, answers())})
         elif is_request:
             send({"jsonrpc": "2.0", "id": message["id"], "result": None})
     log.close()
