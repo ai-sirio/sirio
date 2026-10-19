@@ -135,6 +135,19 @@ set -eEuo pipefail
 #                     say is named
 #   problems_park     a second worktree has a drawer of its own; the first, switched away and back,
 #                     keeps its drawer, height and problems, one that arrived while parked included
+#   search_keys       Ctrl+Shift+F (a real X key) opens the drawer on Search with the selection as the query;
+#                     the keyboard is in the query field (a typed key lands there), and Escape in it
+#                     hands the keyboard to the code of the tab
+#   search_scope      the worktree is searched as git lists it: an untracked file is found, an ignored
+#                     one is not; the summary names what was left unread
+#   search_options    case, whole word and a regular expression count what the in-file find counts on the
+#                     same file; an invalid pattern is the summary
+#   search_dirty      an unsaved edit is found in its buffer (never on disk), listed as unsaved, and its
+#                     result opens at the buffer position
+#   search_open       a result opens its file with the match selected; that tab's drawer shows the same
+#                     search with the result chosen, and the next result keeps the thread; captured
+#   search_supersede  a second query typed while a slow first run is under way: only the second's results stand
+#   search_cap        more than 20 000 matches stop at 20 000 and the summary says so
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
 #                     stickyScroll, lineNumbers, cursorShape, and the ruler at
@@ -333,6 +346,15 @@ elif command == "offset":
     sys.stdout.write(str(len(text[:index].encode("utf-8"))))
 elif command == "length":
     sys.stdout.write(str(len(unescape(sys.argv[2]).encode("utf-8"))))
+elif command == "offset-nth":
+    # offset-nth ESCAPED_TEXT NEEDLE N: the byte offset of the Nth (0-based) NEEDLE.
+    text = unescape(sys.argv[2])
+    index = -1
+    for _ in range(int(sys.argv[4]) + 1):
+        index = text.find(sys.argv[3], index + 1)
+        if index < 0:
+            sys.exit(f"'{sys.argv[3]}' has no occurrence {sys.argv[4]}")
+    sys.stdout.write(str(len(text[:index].encode("utf-8"))))
 elif command == "line-of":
     # line-of ESCAPED_TEXT NEEDLE: the 0-based line NEEDLE is on.
     text = unescape(sys.argv[2])
@@ -3645,6 +3667,311 @@ scenario_problems_park() {
   ctl select-workspace --workspace "$WT" >/dev/null
 }
 
+# ---------------------------------------------------------------- search
+
+# Search in the drawer (editor panels, Task 7): the whole worktree, from inside the
+# file tab. The fixtures are made here, in the run's own repository, by the
+# scenario that needs them, and every scenario's needles are its own, so a result
+# left by one cannot satisfy another. Nothing is committed: the files are
+# untracked (git lists them) or ignored (`target/`), which is what `search_scope`
+# is about.
+
+# The files the search scenarios read: two small .rs files that both hold
+# `host_root` (the first with the needle on lines 0 and 1, the second on lines
+# 1, 2 and 4), written once.
+search_fixtures() {
+  mkdir -p "$WT/search"
+  python3 - "$WT" <<'PY'
+import os, sys
+root = sys.argv[1]
+with open(os.path.join(root, "search/other.rs"), "wb") as handle:
+    handle.write(b"fn a() { host_root(); }\nfn b() { let x = host_root(); }\nfn c() {}\n")
+with open(os.path.join(root, "search/session.rs"), "wb") as handle:
+    handle.write(
+        b"// session.rs: what the search scenarios read.\n"
+        b"pub fn host_root(db: &str) -> String {\n"
+        b"    let root = host_root_of(db);\n"
+        b"    let data_root = root.clone();\n"
+        b"    host_root_of(&data_root)\n"
+        b"}\n"
+    )
+PY
+}
+# The drawer on Search, over search/session.rs, with an empty query, no filters
+# and every option off: where each search scenario starts. The verb is how the
+# state is set, never what a scenario is about.
+search_reset() {
+  search_fixtures
+  open_file "$WT/search/session.rs"
+  expect_state state loaded
+  ctl surface editor drawer --show=search >/dev/null
+  expect_state drawer_tab search
+  ctl surface editor search --query= --include= --exclude= --case=false --word=false \
+    --regex=false >/dev/null
+  ctl surface editor search --wait >/dev/null
+  expect_state search_query ""
+  expect_state search_results 0
+}
+search_wait() {
+  ctl surface editor search --wait >/dev/null
+}
+search_done() {
+  ctl surface editor search --query= --include= --exclude= --case=false --word=false \
+    --regex=false >/dev/null
+  ctl surface editor search --wait >/dev/null
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+}
+# The state's KEY contains NEEDLE (polled).
+expect_state_has() { # key needle
+  local got="" tries=0
+  while [ "$tries" -lt 150 ]; do
+    read_state
+    got="$(sfield "$1")"
+    case "$got" in *"$2"*) echo "OK: $1 holds '$2': $(printf '%s' "$got" | cut -c1-160)"; return 0 ;; esac
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$SCENARIO: $1 expected to hold '$2', got '$(printf '%s' "$got" | cut -c1-400)'"
+}
+
+scenario_search_keys() {
+  local at end
+  search_reset
+  at="$(python3 "$TOOLS" offset "$(sfield text)" host_root)"
+  end=$((at + 9))
+  cp "$WT/search/session.rs" "$RUN_DIR/search-keys-0.rs"
+  python3 "$TOOLS" sub "$WT/search/session.rs" "$RUN_DIR/search-keys-q.rs" host_root q 1 0
+  # The code has the keyboard and the host_root of line 1 is selected; the key is
+  # a real X key at the window.
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  # The keys verb gives the code the keyboard (a select does not), and the
+  # selection is made after it.
+  ctl surface editor keys --keys=left >/dev/null
+  ctl surface editor select --ranges="$at..$end" >/dev/null
+  expect_state selections "$at..$end"
+  focus_window
+  x_key ctrl+shift+f
+  expect_state drawer_open 1
+  expect_state drawer_tab search
+  expect_state search_query host_root
+  search_wait
+  expect_state search_results 5
+  echo "OK: Ctrl+Shift+F opened Search with the selection as the query, and searched it"
+  # The keyboard is in the query field: its text is selected, so a typed z
+  # replaces it. The code is untouched.
+  x_key z
+  expect_state search_query z
+  expect_state text "$(escaped "$RUN_DIR/search-keys-0.rs")"
+  echo "OK: a real key typed after it landed in the query field"
+  # Escape in the field hands the keyboard to the code of this tab: the next key
+  # replaces the code's selection, and the query keeps its z.
+  x_key Escape
+  x_key q
+  expect_state text "$(escaped "$RUN_DIR/search-keys-q.rs")"
+  expect_state search_query z
+  echo "OK: Escape in the query field gave the keyboard back to the code"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/search-keys-0.rs")"
+  expect_state dirty false
+  search_done
+}
+
+scenario_search_scope() {
+  search_reset
+  mkdir -p "$WT/notes" "$WT/target"
+  printf 'fn made() { scope_needle_41(); }\n' >"$WT/notes/new.rs"
+  printf 'fn built() { scope_needle_41(); }\n' >"$WT/target/gen.rs"
+  printf 'target/\n' >"$WT/.gitignore"
+  git -C "$WT" status --short --ignored | grep -q 'target/' \
+    || fail "$SCENARIO: git does not ignore target/ (status: $(git -C "$WT" status --short --ignored))"
+  ctl surface editor search --query=scope_needle_41 >/dev/null
+  search_wait
+  expect_state search_paths notes/new.rs
+  expect_state search_results 1
+  expect_state search_files 1
+  # The summary: the count, then what the run left unread. big.txt is above the
+  # size bound, binary.bin is not UTF-8 and unreadable.txt is mode 000.
+  expect_state search_summary "1 results in 1 files · 3 skipped (too large/not UTF-8/unreadable)"
+  expect_state search_capped 0
+  echo "OK: an untracked file is searched, an ignored one is not, and the skips are named"
+  ctl surface editor search --query=scope_needle_41 --include='target/**' >/dev/null
+  search_wait
+  expect_state search_results 0
+  echo "OK: an include glob cannot bring an ignored file in"
+  rm -rf "$WT/notes" "$WT/target" "$WT/.gitignore"
+  search_done
+}
+
+scenario_search_options() {
+  local fixture="$WT/findme.txt" all cased word regex
+  search_reset
+  open_file "$fixture"
+  expect_state state loaded
+  # What the in-file find counts with each option, asked of the open file; the
+  # drawer's Search, limited to that file, must count the same.
+  ctl surface editor find --query=fn >/dev/null
+  expect_state_set find_matches
+  all="$(sfield find_matches)"
+  ctl surface editor find --query=fn --case=true >/dev/null
+  expect_state_set find_matches
+  cased="$(sfield find_matches)"
+  ctl surface editor find --query=fn --word=true >/dev/null
+  expect_state_set find_matches
+  word="$(sfield find_matches)"
+  ctl surface editor find --query='f\w+' --regex=true >/dev/null
+  expect_state_set find_matches
+  regex="$(sfield find_matches)"
+  ctl surface editor find-close >/dev/null
+  [ "$all" != "$cased" ] && [ "$all" != "$word" ] && [ "$all" != "$regex" ] \
+    || fail "$SCENARIO: the options do not change the counts ($all $cased $word $regex)"
+  ctl surface editor drawer --show=search >/dev/null
+  ctl surface editor search --query=fn --include=findme.txt >/dev/null
+  search_wait
+  expect_state search_results "$all"
+  ctl surface editor search --case=true >/dev/null
+  search_wait
+  expect_state search_results "$cased"
+  ctl surface editor search --case=false --word=true >/dev/null
+  search_wait
+  expect_state search_results "$word"
+  ctl surface editor search --word=false --regex=true --query='f\w+' >/dev/null
+  search_wait
+  expect_state search_results "$regex"
+  echo "OK: case ($cased of $all), whole word ($word) and a regular expression ($regex) count as the in-file find does"
+  # A pattern that does not compile is said in the summary, with no results and no panic.
+  ctl surface editor search --query='(' >/dev/null
+  search_wait
+  expect_state search_results 0
+  expect_state_has search_summary "unclosed group"
+  echo "OK: an invalid regular expression is the summary, not a crash or an empty list"
+  search_done
+}
+
+scenario_search_dirty() {
+  search_reset
+  open_file "$WT/search/session.rs"
+  expect_state state loaded
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor type --text=dirty_needle_77 >/dev/null
+  expect_state dirty true
+  ctl surface editor drawer --show=search >/dev/null
+  ctl surface editor search --query=dirty_needle_77 >/dev/null
+  search_wait
+  expect_state search_results 1
+  expect_state search_paths search/session.rs
+  expect_state search_unsaved search/session.rs
+  ! grep -q dirty_needle_77 "$WT/search/session.rs" || fail "$SCENARIO: the needle reached the disk"
+  ctl surface editor search --open=0 >/dev/null
+  expect_state selections "0..15"
+  echo "OK: an unsaved edit is found in its buffer, listed as unsaved, and opened at its place"
+  # Undone, and searched again: nothing is left, and nothing is marked.
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state dirty false
+  ctl surface editor search --refresh >/dev/null
+  search_wait
+  expect_state search_results 0
+  expect_state search_unsaved ""
+  search_done
+}
+
+scenario_search_open() {
+  local at
+  search_reset
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  ctl surface editor drawer --show=search >/dev/null
+  ctl surface editor drawer --height=300 >/dev/null
+  ctl surface editor search --query=host_root --include='search/**' >/dev/null
+  search_wait
+  expect_state search_results 5
+  expect_state search_files 2
+  expect_state search_paths "search/other.rs;search/session.rs"
+  ctl surface editor search --open=1 >/dev/null
+  expect_active_tab other.rs
+  expect_state path "$WT/search/other.rs"
+  expect_state state loaded
+  at="$(python3 "$TOOLS" offset "$(sfield text)" "let x = host_root")"
+  at=$((at + 8))
+  expect_state selections "$at..$((at + 9))"
+  expect_state search_query host_root
+  expect_state search_selected search/other.rs:2
+  expect_state drawer_tab search
+  echo "OK: a result opened its file with the match selected, and that tab's drawer shows the same search with it chosen"
+  capture search-results
+  ctl surface editor search --open=2 >/dev/null
+  expect_active_tab session.rs
+  expect_state search_selected search/session.rs:2
+  echo "OK: the next result, in another file, kept the thread"
+  search_done
+}
+
+# A tree big enough that a broad regular expression takes seconds: 150 files of
+# about 900 KB each, every line a few words long.
+search_big_tree() {
+  rm -rf "$WT/search-big"
+  mkdir -p "$WT/search-big"
+  python3 - "$WT/search-big" <<'PY'
+import os, sys
+root = sys.argv[1]
+line = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do\n"
+body = line * (900000 // len(line))
+for n in range(150):
+    with open(os.path.join(root, f"f{n:03}.txt"), "w") as handle:
+        handle.write(body)
+        if n == 0:
+            handle.write("supersede_b_needle\n")
+PY
+}
+
+scenario_search_supersede() {
+  search_reset
+  search_big_tree
+  # A: a regular expression no literal can pre-filter, over the whole big tree. It
+  # is under way (the debounce has passed) when B arrives, and B reads one file.
+  ctl surface editor search --query='(\w+\s+){4}supersede_a_needle' --regex=true \
+    --include='search-big/**' >/dev/null
+  sleep 0.6
+  ctl surface editor search --query=supersede_b_needle --regex=false \
+    --include='search-big/f000.txt' >/dev/null
+  search_wait
+  expect_state search_query supersede_b_needle
+  expect_state search_results 1
+  expect_state search_paths search-big/f000.txt
+  # Longer than A could have run on its own: its answer, if it arrived late,
+  # would have overwritten B's by now.
+  sleep 4
+  read_state
+  [ "$(sfield search_results)" = 1 ] && [ "$(sfield search_paths)" = search-big/f000.txt ] \
+    || fail "$SCENARIO: B's results were replaced: $(sfield search_results) in $(sfield search_paths)"
+  echo "OK: the second query's results stand; the first run was superseded"
+  rm -rf "$WT/search-big"
+  search_done
+}
+
+scenario_search_cap() {
+  search_reset
+  mkdir -p "$WT/search-cap"
+  python3 - "$WT/search-cap/many.txt" <<'PY'
+import sys
+with open(sys.argv[1], "w") as handle:
+    for n in range(25000):
+        handle.write(f"cap_needle_88 {n}\n")
+PY
+  ctl surface editor search --query=cap_needle_88 --include='search-cap/**' >/dev/null
+  search_wait
+  expect_state search_capped 1
+  expect_state search_results 20000
+  expect_state_has search_summary "stopped at 20 000 matches"
+  # The window still answers after drawing it.
+  read_state
+  [ "$(sfield state)" = loaded ] || fail "$SCENARIO: the editor stopped answering after the capped search"
+  echo "OK: 25 000 matches stop at 20 000 and the summary says so"
+  rm -rf "$WT/search-cap"
+  search_done
+}
+
 # ---------------------------------------------------------------- run
 
 scenario load_states scenario_load_states
@@ -3681,6 +4008,13 @@ scenario problems_relaunch scenario_problems_relaunch
 scenario problems_open scenario_problems_open
 scenario problems_server_exit scenario_problems_server_exit
 scenario problems_park scenario_problems_park
+scenario search_keys scenario_search_keys
+scenario search_scope scenario_search_scope
+scenario search_options scenario_search_options
+scenario search_dirty scenario_search_dirty
+scenario search_open scenario_search_open
+scenario search_supersede scenario_search_supersede
+scenario search_cap scenario_search_cap
 scenario prefs scenario_prefs
 
 stop_hosts

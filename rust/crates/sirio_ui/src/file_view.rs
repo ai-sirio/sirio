@@ -48,7 +48,7 @@ pub use ely_gpui_component::editor::{FindOptions, LspState};
 pub use status_actions::StatusItem;
 pub use status_row::StatusFacts;
 use crate::chat::{Chat, LinkClickOverride};
-use crate::drawer::{DrawerTab, WorktreeDrawer};
+use crate::drawer::WorktreeDrawer;
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection,
 };
@@ -735,6 +735,29 @@ impl FileView {
     /// file is still loading (nothing to lose yet).
     pub fn is_dirty(&self) -> bool {
         self.editor().is_some_and(Editor::is_dirty)
+    }
+
+    /// The text of this file as the tab holds it now, LF only, for a search
+    /// that must see what is on screen rather than what is on disk. `None`
+    /// while the file is loading or failed to load.
+    pub fn buffer_text(&self, cx: &App) -> Option<String> {
+        if let Some(code) = &self.code_editor {
+            if self.code_shown() {
+                return Some(code.read(cx).text().to_owned());
+            }
+        }
+        let editor = self.editor()?;
+        (editor.status() == &LoadStatus::Loaded).then(|| editor.buffer().to_owned())
+    }
+
+    /// The primary selection, when it is not empty and lies on one line: what
+    /// `Ctrl+Shift+F` seeds the worktree search with.
+    pub fn selection_query(&self, cx: &App) -> Option<String> {
+        let code = self.code_editor.as_ref().filter(|_| self.code_shown())?;
+        let code = code.read(cx);
+        let range = code.primary().range();
+        let text = code.text().get(range)?;
+        (!text.is_empty() && !text.contains('\n') && !text.contains('\r')).then(|| text.to_owned())
     }
 
     /// The current conflict state, or none while loading.
@@ -1616,11 +1639,16 @@ impl FileView {
                                 drawer.update(cx, |drawer, cx| drawer.toggle(cx));
                             }
                         }))
-                        .on_action(cx.listener(|view, _: &SearchInWorktree, _, cx| {
-                            if let Some(drawer) = &view.drawer {
-                                drawer.update(cx, |drawer, cx| drawer.show(DrawerTab::Search, cx));
-                            }
-                        }))
+                        .on_action(cx.listener(
+                            |view, _: &SearchInWorktree, window, cx| {
+                                let seed = view.selection_query(cx);
+                                if let Some(drawer) = &view.drawer {
+                                    drawer.update(cx, |drawer, cx| {
+                                        drawer.search_in_worktree(seed, window, cx)
+                                    });
+                                }
+                            },
+                        ))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             editor_entity.update(cx, |view, cx| {
                                 view.focus_target(cx).focus(window, cx);
@@ -1672,7 +1700,23 @@ impl FileView {
                                     .absolute()
                                     .size_full(),
                                 )
-                                .child(drawer)
+                                .child(
+                                    // Escape in any field of the drawer gives the keyboard
+                                    // back to this tab's code, as it does from find's query.
+                                    div()
+                                        .on_key_down({
+                                            let entity = entity.clone();
+                                            move |event, window, cx| {
+                                                if event.keystroke.key == "escape" {
+                                                    cx.stop_propagation();
+                                                    entity.update(cx, |view, cx| {
+                                                        view.focus_target(cx).focus(window, cx);
+                                                    });
+                                                }
+                                            }
+                                        })
+                                        .child(drawer),
+                                )
                         })
                         .into_any_element()
                 }

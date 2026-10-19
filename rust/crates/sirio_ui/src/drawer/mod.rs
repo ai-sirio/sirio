@@ -3,12 +3,15 @@
 //! `ProblemStore` keeps what each language server last said about each file;
 //! `ErrorAlarm` decides, from the errors' identities, whether the drawer should
 //! open by itself. Both are pure. `WorktreeDrawer` is the entity a file tab
-//! draws under its code: open or closed, how tall, which tab.
+//! draws under its code: open or closed, how tall, which tab. Search is the
+//! worktree's query and results, `search_engine` run in the background and
+//! `search_view` drawn.
 
 mod alarm;
 mod problems;
 mod problems_view;
 mod search_engine;
+mod search_view;
 mod view;
 
 use std::collections::BTreeMap;
@@ -19,6 +22,7 @@ pub use problems::{ProblemCounts, ProblemStore, StoredProblem};
 pub use search_engine::{
     FileResult, FoundHit, SearchOutcome, SearchQuery, Skip, hits_in, replace_in, search_worktree,
 };
+pub use search_view::{BufferSource, SearchFields, SearchRequest};
 pub use view::{DrawerTab, WorktreeDrawer, WorktreeDrawerEvent};
 
 /// A language server's identity, as `LspSupervisor` keys it: the project root

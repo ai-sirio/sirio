@@ -45,7 +45,7 @@ use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent},
-    drawer::{DrawerTab, WorktreeDrawer, WorktreeDrawerEvent},
+    drawer::{DrawerTab, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
     editor::{Conflict, LineEnding},
     editor_prefs::EditorPrefs,
@@ -1322,6 +1322,12 @@ enum ControlAction {
     /// Chooses the `index`-th row of the drawer's Problems, in the order drawn.
     EditorProblem {
         index: usize,
+        reply: ControlReply,
+    },
+    /// The drawer's Search: sets the query, the options and the filters, runs it,
+    /// chooses a drawn line.
+    EditorSearch {
+        request: SearchRequest,
         reply: ControlReply,
     },
     /// Find and replace: open find (`replace` present opens the replace row with
@@ -2849,6 +2855,35 @@ impl ControlHandler for AppControlHandler {
                 };
                 self.queue_action(request, move |reply| {
                     ControlAction::EditorProblem { index, reply }
+                })
+            }
+            "surface.editor.search" if cfg!(debug_assertions) => {
+                let text = |key: &str| request.params.get(key).cloned();
+                let on = |key: &str| request.params.get(key).map(|value| value == "true");
+                let open = match request.params.get("open").map(|open| open.parse::<usize>()) {
+                    Some(Err(_)) => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.editor.search open needs a line number",
+                        );
+                    }
+                    Some(Ok(open)) => Some(open),
+                    None => None,
+                };
+                let search = SearchRequest {
+                    query: text("query"),
+                    replace: text("replace"),
+                    include: text("include"),
+                    exclude: text("exclude"),
+                    case: on("case"),
+                    word: on("word"),
+                    regex: on("regex"),
+                    open,
+                    refresh: on("refresh").unwrap_or(false),
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorSearch {
+                    request: search,
+                    reply,
                 })
             }
             "surface.editor.find" if cfg!(debug_assertions) => {
@@ -6160,6 +6195,10 @@ impl SirioWorkspace {
                                 ControlAction::EditorFindClose { reply } => {
                                     let _ = reply.send(workspace.control_editor_find_close(window, cx));
                                 }
+                                ControlAction::EditorSearch { request, reply } => {
+                                    let _ = reply
+                                        .send(workspace.control_editor_search(request, window, cx));
+                                }
                                 ControlAction::EditorDrawer { op, reply } => {
                                     let _ = reply.send(workspace.control_editor_drawer(op, cx));
                                 }
@@ -7987,11 +8026,23 @@ impl SirioWorkspace {
                         cx,
                     );
                 }
-                // Task 7 (Search) wires OpenHit, to open the file with the hit selected.
-                WorktreeDrawerEvent::OpenHit { .. } => {}
+                WorktreeDrawerEvent::OpenHit { path, range } => {
+                    workspace.open_reveal(path.clone(), RevealTarget::Range(range.clone()), cx);
+                }
             }
         })
         .detach();
+        // The dirty tabs' text, which a search reads instead of their files. Asked
+        // only from the search's own task, never inside an update of the workspace.
+        let workspace = cx.weak_entity();
+        let root = worktree.to_path_buf();
+        drawer.update(cx, |drawer, _| {
+            drawer.set_buffer_source(std::rc::Rc::new(move |cx: &App| {
+                workspace
+                    .read_with(cx, |workspace, cx| workspace.dirty_buffers(&root, cx))
+                    .unwrap_or_default()
+            }));
+        });
         self.drawers.insert(worktree.to_path_buf(), drawer.clone());
         // A server may be running there already: the drawer names it from the start.
         self.refresh_running_servers(cx);
@@ -19101,13 +19152,46 @@ impl SirioWorkspace {
                 String::new(),
             ),
         };
-        vec![
+        let mut fields = vec![
             ("drawer_open".to_string(), open),
             ("drawer_tab".to_string(), tab),
             ("drawer_height".to_string(), height),
             ("problems".to_string(), problems),
             ("problem_files".to_string(), files),
             ("problems_note".to_string(), note),
+        ];
+        fields.extend(Self::search_fields(read, cx));
+        fields
+    }
+
+    /// The worktree's Search as the state answers it: `search_query`,
+    /// `search_results` (every match), `search_files`, `search_paths` (the files
+    /// drawn, `;` between them, relative to the worktree), `search_unsaved` (the
+    /// files read from an unsaved tab), `search_summary` (the totals line as
+    /// drawn), `search_capped` (0 or 1), `search_selected` (`path:line`, the line
+    /// from 1) and `search_running` (0 or 1: a query waits for its pause or a run
+    /// is going). The worktree's own path never appears in them.
+    fn search_fields(drawer: Option<&WorktreeDrawer>, cx: &App) -> Vec<(String, String)> {
+        let found = drawer.map(|drawer| (drawer.search_fields(cx), drawer.worktree()));
+        let (search, root) = match found {
+            Some((search, root)) => (search, Some(root)),
+            None => (Default::default(), None),
+        };
+        let summary = match root {
+            Some(root) => search.summary.replace(&display_absolute_path(root), "<worktree>"),
+            None => search.summary,
+        };
+        let flag = |on: bool| u8::from(on).to_string();
+        vec![
+            ("search_query".to_string(), Self::escaped_field(&search.query)),
+            ("search_results".to_string(), search.results.to_string()),
+            ("search_files".to_string(), search.files.to_string()),
+            ("search_paths".to_string(), Self::escaped_field(&search.paths.join(";"))),
+            ("search_unsaved".to_string(), Self::escaped_field(&search.unsaved.join(";"))),
+            ("search_summary".to_string(), Self::escaped_field(&summary)),
+            ("search_capped".to_string(), flag(search.capped)),
+            ("search_selected".to_string(), Self::escaped_field(&search.selected)),
+            ("search_running".to_string(), flag(search.running)),
         ]
     }
 
@@ -19132,6 +19216,49 @@ impl SirioWorkspace {
         if !drawer.update(cx, |drawer, cx| drawer.open_drawn_problem(index, cx)) {
             return Err(format!("Problems draws no row {index}"));
         }
+        self.control_editor_state(cx)
+    }
+
+    /// The text of every open, dirty file tab of `worktree`, by path relative to
+    /// it, as the tab holds it: what a search reads in place of the file on disk.
+    fn dirty_buffers(&self, worktree: &Path, cx: &App) -> HashMap<PathBuf, String> {
+        let mut buffers = HashMap::new();
+        for tab in &self.tabs {
+            for (path, view) in Self::open_file_views(std::slice::from_ref(tab), cx) {
+                let view = view.read(cx);
+                if view.is_snapshot() || !view.is_dirty() {
+                    continue;
+                }
+                let Ok(relative) = path.strip_prefix(worktree) else {
+                    continue;
+                };
+                if let Some(text) = view.buffer_text(cx) {
+                    buffers.insert(relative.to_path_buf(), text);
+                }
+            }
+        }
+        buffers
+    }
+
+    /// `surface.editor.search`: the active file tab's drawer is put on Search and
+    /// given what the call names (the query, the options, the filters), run
+    /// again when asked, and a drawn line is chosen as a press on it does, which
+    /// opens its file. Answers the editor's state, of the tab that is active after.
+    fn control_editor_search(
+        &mut self,
+        request: SearchRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let drawer = view
+            .read(cx)
+            .drawer()
+            .cloned()
+            .ok_or_else(|| "the file tab has no drawer".to_string())?;
+        drawer.update(cx, |drawer, cx| drawer.search_control(request, window, cx))?;
         self.control_editor_state(cx)
     }
 
@@ -42792,6 +42919,7 @@ done
             | ControlAction::EditorGitMark { reply, .. }
             | ControlAction::EditorCrumb { reply, .. }
             | ControlAction::EditorProblem { reply, .. }
+            | ControlAction::EditorSearch { reply, .. }
             | ControlAction::EditorFind { reply, .. }
             | ControlAction::EditorFindStep { reply, .. }
             | ControlAction::EditorReplace { reply, .. }
@@ -42975,6 +43103,7 @@ done
             "surface.editor.git_mark" => request_with_params(method, &[("line", "0")]),
             "surface.editor.crumb" => request_with_params(method, &[("index", "0")]),
             "surface.editor.problem" => request_with_params(method, &[("index", "0")]),
+            "surface.editor.search" => request_with_params(method, &[("query", "x")]),
             "surface.editor.find" => request_with_params(method, &[("query", "x")]),
             "surface.editor.find_step" => request_with_params(method, &[("forward", "true")]),
             "surface.editor.replace" => request_with_params(method, &[("all", "false")]),

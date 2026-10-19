@@ -238,6 +238,16 @@ Vendored files:
   `SearchFilters` behave as before. A search over many files compiles the
   query and the globs once per run instead of once per file, and a glob too big
   for a regex logs once. `mod.rs` also re-exports `Finder` and `GlobFilter`.
+  Local change (the drawer's Search tab): `SearchPanel` gains `unsaved(paths)`
+  (a file whose open tab holds unsaved text shows `unsaved` beside its count),
+  `selected(path, line)` (that result's row is drawn with the hover wash, via a
+  `selected` builder on `SearchResultItem`) and `without_summary()` (the owner
+  draws a totals line of its own, with the skips and the cap, so the built-in
+  one is left out). `results()` takes its per-list inputs in a `Drawing` struct
+  instead of seven arguments; `ReferencesPanel` passes the empty values, so it
+  draws as before. `SearchFilters` is not used by Sirio: its stacked labels and
+  always-drawn ignore toggle cost more drawer height than the three-row mockup
+  allows, so the drawer places two `Input`s itself.
 - `src/editor/{buffer,cursor,edit,keys,moves,line,row,view,layout,gutter,decor,syntax,ime,find,status,state}.rs`:
   verbatim, except the local changes listed below, the ports in "Ports from
   upstream `main`" (which change `buffer`, `edit`, `ime`, `line`, `moves`,

@@ -1,8 +1,8 @@
 //! The drawer under a file tab: its header, its height and what is open.
 //!
 //! One `WorktreeDrawer` belongs to a worktree and is drawn by every file tab
-//! of that worktree, so switching tabs never changes it. Problems draws into the
-//! panel under the header; Search is still an empty shell.
+//! of that worktree, so switching tabs never changes it. Problems and Search draw
+//! into the panel under the header.
 //!
 //! Ways this can fail, written before the code:
 //! - a height the user never chose reaches the database: a NaN or an infinity
@@ -39,6 +39,7 @@ use sirio_persistence::EditorDrawerRecord;
 use sirio_theme::Theme;
 
 use super::problems_view::{self, ALL_SEVERITIES};
+use super::search_view::{self, WorktreeSearch};
 use super::{ErrorAlarm, ProblemCounts, ProblemStore, ServerKey, StoredProblem};
 use crate::ely_ui;
 
@@ -122,6 +123,8 @@ pub struct WorktreeDrawer {
     tab_height: Cell<Pixels>,
     drag: Option<DragAnchor>,
     drag_moved: bool,
+    /// What Search holds. Not saved: results are never persisted.
+    pub(super) search: WorktreeSearch,
 }
 
 /// `height` held between the floor and the ceiling for a tab `tab_height`
@@ -167,6 +170,7 @@ impl WorktreeDrawer {
             tab_height: Cell::new(unknown),
             drag: None,
             drag_moved: false,
+            search: WorktreeSearch::default(),
         }
     }
 
@@ -448,11 +452,14 @@ fn problems_label(counts: &ProblemCounts) -> String {
 }
 
 impl Render for WorktreeDrawer {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _render = sirio_perf::span("WorktreeDrawer.render", cx.entity_id().as_u64());
         let theme = *Theme::get(cx);
         let entity = cx.entity();
         let open = self.open;
+        if open && self.tab == DrawerTab::Search {
+            self.ensure_search_fields(window, cx);
+        }
         let tabs = Tabs::new(
             "drawer-tabs",
             [
@@ -497,7 +504,7 @@ impl Render for WorktreeDrawer {
                     move |_, cx| entity.update(cx, |drawer, cx| drawer.close(cx)),
                 ))
             });
-        // Problems draws into it; Search is empty until it does.
+        // Problems and Search draw into it.
         let panel = div()
             .id("file-drawer-panel")
             .debug_selector(|| "file-drawer-panel".to_owned())
@@ -513,6 +520,9 @@ impl Render for WorktreeDrawer {
                 entity.clone(),
                 &theme,
             )),
+            DrawerTab::Search if open => panel
+                .overflow_hidden()
+                .child(search_view::render(self, entity.clone(), &theme, cx)),
             _ => panel.overflow_hidden(),
         };
         let edge = div()

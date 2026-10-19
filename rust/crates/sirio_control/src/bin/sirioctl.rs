@@ -192,6 +192,7 @@ fn usage() {
          \x20 surface editor find-close         (debug builds) close find\n\
          \x20 surface editor drawer --toggle|--close|--show=problems|search|--height=N  (debug builds) the file tab's drawer; answers drawer_open, drawer_tab, drawer_height\n\
          \x20 surface editor problem --open=N   (debug builds) choose the N-th row of the drawer's Problems, in the order drawn: its file opens at the problem; answers the editor state\n\
+         \x20 surface editor search [--query=T] [--replace=T] [--include=G] [--exclude=G] [--case[=bool]] [--word[=bool]] [--regex[=bool]] [--open=N] [--refresh] [--wait]  (debug builds) the drawer's Search: set what is named (the drawer opens on Search), run it, choose the N-th drawn line (from 0), wait for the run to end; answers the editor state, whose search_* fields are the results\n\
          \x20 surface editor crumb --index=n   (debug builds) press the breadcrumb's part n (the path's parts first): a symbol reveals its line\n\
          \x20 surface editor save               (debug builds) save the active file tab\n\
          \x20 surface editor conflict --action=reload|keep  (debug builds) answer a disk conflict\n\
@@ -1255,6 +1256,69 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                     .map_err(|_| "--open must be a number".to_string())?,
             ),
         ),
+        ("editor", "search") => {
+            let mut sent: Vec<(&str, String)> = Vec::new();
+            for key in ["query", "replace", "include", "exclude"] {
+                if let Some(value) = parsed.value(key) {
+                    sent.push((key, value.to_string()));
+                }
+            }
+            for key in ["case", "word", "regex"] {
+                if parsed.flag(key) || parsed.value(key).is_some() {
+                    sent.push((key, editor_bool(parsed, key)?.to_string()));
+                }
+            }
+            if let Some(open) = parsed.value("open") {
+                open.parse::<usize>()
+                    .map_err(|_| "--open must be a number".to_string())?;
+                sent.push(("open", open.to_string()));
+            }
+            if parsed.flag("refresh") {
+                sent.push(("refresh", "true".to_string()));
+            }
+            let wait = parsed.flag("wait");
+            if sent.is_empty() && !wait {
+                return Err(
+                    "surface editor search needs --query=, --replace=, --include=, --exclude=, \
+                     --case, --word, --regex, --open=N, --refresh or --wait"
+                        .to_string(),
+                );
+            }
+            let mut response = if sent.is_empty() {
+                None
+            } else {
+                let fields: Vec<(&str, &str)> =
+                    sent.iter().map(|(key, value)| (*key, value.as_str())).collect();
+                Some(require_ok(
+                    socket.clone(),
+                    &sirio_control::protocol::request::editor_search(&fields),
+                ))
+            };
+            if wait {
+                // Polls the state: a verb answers on the GPUI thread, which must not wait.
+                let deadline = Instant::now() + Duration::from_secs(60);
+                loop {
+                    let state = require_ok(
+                        socket.clone(),
+                        &sirio_control::protocol::request::editor_state(),
+                    );
+                    let running = state
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.get("search_running"))
+                        .is_some_and(|running| running == "1");
+                    response = Some(state);
+                    if !running {
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("the search was still running after 60 s".to_string());
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            response.expect("a request was sent or the state was read")
+        }
         ("editor", "crumb") => require_ok(
             socket,
             &sirio_control::protocol::request::editor_crumb(

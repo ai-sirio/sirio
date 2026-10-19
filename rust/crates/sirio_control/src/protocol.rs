@@ -971,6 +971,20 @@ pub mod request {
         )
     }
 
+    /// The drawer's Search: each `(key, value)` names what to set or do, and only
+    /// those are sent. Keys: `query`, `replace`, `include`, `exclude`, `case`,
+    /// `word`, `regex` (`true` or `false`), `open` (a drawn line, from 0) and
+    /// `refresh` (`true`).
+    pub fn editor_search(fields: &[(&str, &str)]) -> ControlRequest {
+        request(
+            "surface.editor.search",
+            fields
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        )
+    }
+
     pub fn editor_crumb(index: usize) -> ControlRequest {
         request(
             "surface.editor.crumb",
