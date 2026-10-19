@@ -3,12 +3,12 @@
 //! An error is known by its identity (`ErrorKey`: server, worktree-relative
 //! file, message), never by its line or by when it arrived, so no ordering of
 //! publishes, clears, restarts or a relaunch's refill can make an old error
-//! look new. The alarm holds the `seen` counts and changes them in one place,
-//! `look`: seen becomes the current errors, plus the old seen entries of every
-//! (server, file) that no live server has reported since it started, so a look
-//! in the middle of a refill never forgets the files not reported yet. The
-//! drawer is called for when some identity's current count is above its seen
-//! count.
+//! look new (with no look between a clear and its republish). The alarm holds
+//! the `seen` counts and changes them in one place, `look`: seen becomes the
+//! current errors, plus the old seen entries of every (server, file) that no
+//! live server has reported since it started, so a look in the middle of a
+//! refill never forgets the files not reported yet. The drawer is called for
+//! when some identity's current count is above its seen count.
 //!
 //! Two accepted costs (spec §4.4):
 //! - an error the user saw, fixed while they were not looking, that returns
@@ -29,15 +29,21 @@
 //! - after a relaunch the refill arrives in any order, with dips (a server
 //!   clears a file and republishes it), and some prefix of it calls for the
 //!   drawer;
-//! - a server that exits and comes back, or a file cleared and republished,
-//!   reads as new errors;
+//! - a server that exits and comes back, or a file cleared and republished
+//!   with no look between them, reads as new errors;
 //! - a look in the middle of a refill forgets the seen entries of the files
 //!   no server has reported yet, so their return calls for the drawer;
 //! - a look after a real fix keeps the fixed key, so the error that returns
 //!   later is judged against a count the user saw before the fix;
 //! - the persisted text does not read back to the same set, or malformed text
 //!   (a raw newline in a string, a wrong arity, a negative count, trailing
-//!   text) panics or yields a half-read set instead of an empty one.
+//!   text) panics or yields a half-read set instead of an empty one;
+//! - accepted (spec §4.4): an error the user saw, fixed while they were not
+//!   looking, that returns identically does not call for the drawer
+//!   (`a_clear_then_republish_does_not`);
+//! - accepted (spec §4.4): a look or close between a clear and its republish
+//!   records the file as fixed, so the identical republish calls for the
+//!   drawer once (`a_close_between_a_clear_and_its_republish_calls_once`).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -127,7 +133,7 @@ type Row = (String, String, String, String, usize);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drawer::{ErrorKey, ProblemStore, ServerKey, StoredProblem};
+    use crate::drawer::{ErrorKey, ProblemStore, StoredProblem};
     use sirio_lsp::Severity;
     use std::path::Path;
 
