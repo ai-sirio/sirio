@@ -20,35 +20,52 @@ pub struct FindOptions {
     pub regex: bool,
 }
 
+/// A query compiled once, for a caller that looks in many texts.
+pub struct Finder(Option<regex::Regex>);
+
+impl Finder {
+    /// A pattern that does not compile is an error to show; an empty query finds nothing.
+    pub fn new(query: &str, options: FindOptions) -> Result<Self, String> {
+        if query.is_empty() {
+            return Ok(Self(None));
+        }
+        let pattern = if options.regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        let pattern = if options.word {
+            format!(r"\b(?:{pattern})\b")
+        } else {
+            pattern
+        };
+        regex::RegexBuilder::new(&pattern)
+            .case_insensitive(!options.case)
+            .multi_line(true)
+            .build()
+            .map(|found| Self(Some(found)))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn find_all(&self, text: &str) -> Vec<Range<usize>> {
+        let Some(found) = &self.0 else {
+            return Vec::new();
+        };
+        found
+            .find_iter(text)
+            .filter(|hit| !hit.is_empty())
+            .map(|hit| hit.range())
+            .collect()
+    }
+}
+
 /// Where `query` appears in `text` under `options`; a pattern that does not compile is an error to show.
 pub fn find_all(
     text: &str,
     query: &str,
     options: FindOptions,
 ) -> Result<Vec<Range<usize>>, String> {
-    if query.is_empty() {
-        return Ok(Vec::new());
-    }
-    let pattern = if options.regex {
-        query.to_string()
-    } else {
-        regex::escape(query)
-    };
-    let pattern = if options.word {
-        format!(r"\b(?:{pattern})\b")
-    } else {
-        pattern
-    };
-    let found = regex::RegexBuilder::new(&pattern)
-        .case_insensitive(!options.case)
-        .multi_line(true)
-        .build()
-        .map_err(|error| error.to_string())?;
-    Ok(found
-        .find_iter(text)
-        .filter(|hit| !hit.is_empty())
-        .map(|hit| hit.range())
-        .collect())
+    Ok(Finder::new(query, options)?.find_all(text))
 }
 
 type OnOptions = Rc<dyn Fn(FindOptions, &mut Window, &mut App)>;

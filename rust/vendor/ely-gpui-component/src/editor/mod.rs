@@ -28,8 +28,8 @@ pub use decor::{
     CodeLens, Diagnostic, DiffHunk, GhostText, GitMark, InlayHint, ReadOnlyBanner, VimMode,
     VimModeIndicator,
 };
-pub use filters::{SearchFilters, passes};
-pub use find::{FindOptions, FindWidget, find_all};
+pub use filters::{GlobFilter, SearchFilters, passes};
+pub use find::{FindOptions, Finder, FindWidget, find_all};
 pub(crate) use keys::bind_keys;
 pub use keys::SingleCursor;
 pub use problems::{Problem, ProblemsPanel};

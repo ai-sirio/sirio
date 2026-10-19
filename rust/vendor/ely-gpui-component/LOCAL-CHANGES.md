@@ -230,6 +230,14 @@ Vendored files:
   panel. `mod.rs` re-exports `Problem`, `ProblemsPanel`, `FileHits`, `Hit`,
   `ReferencesPanel`, `SearchPanel`, `SearchResultItem`, `SearchFilters` and
   `passes`.
+  Local change (Sirio's worktree search): `find.rs` gains `Finder`
+  (`Finder::new(query, options)` compiles the pattern once, `find_all(text)`
+  runs it) and `filters.rs` gains `GlobFilter` (`GlobFilter::new(include,
+  exclude)`, `passes(path)`), each the old body of `find_all` and `passes`
+  split in two; both functions stay and delegate, so the in-file find and
+  `SearchFilters` behave as before. A search over many files compiles the
+  query and the globs once per run instead of once per file, and a glob too big
+  for a regex logs once. `mod.rs` also re-exports `Finder` and `GlobFilter`.
 - `src/editor/{buffer,cursor,edit,keys,moves,line,row,view,layout,gutter,decor,syntax,ime,find,status,state}.rs`:
   verbatim, except the local changes listed below, the ports in "Ports from
   upstream `main`" (which change `buffer`, `edit`, `ime`, `line`, `moves`,

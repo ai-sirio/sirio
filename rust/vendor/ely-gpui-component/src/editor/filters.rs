@@ -9,45 +9,65 @@ use crate::{
     theme::{ActiveTheme, ControlSize, TextSize},
 };
 
+/// Comma-separated include and exclude globs, compiled once: a caller that tests many paths pays
+/// for the translation (and for the log of a glob too big for a regex) one time.
+pub struct GlobFilter {
+    include: Vec<Option<regex::Regex>>,
+    exclude: Vec<Option<regex::Regex>>,
+}
+
+impl GlobFilter {
+    pub fn new(include: &str, exclude: &str) -> Self {
+        let patterns = |list: &str| -> Vec<Option<regex::Regex>> {
+            list.split(',')
+                .map(str::trim)
+                .filter(|glob| !glob.is_empty())
+                .map(|glob| {
+                    let mut pattern = String::from("(^|/)");
+                    let mut chars = glob.chars().peekable();
+                    while let Some(ch) = chars.next() {
+                        match ch {
+                            '*' if chars.peek() == Some(&'*') => {
+                                chars.next();
+                                if chars.next_if_eq(&'/').is_some() {
+                                    pattern.push_str("(?:.*/)?");
+                                } else {
+                                    pattern.push_str(".*");
+                                }
+                            }
+                            '*' => pattern.push_str("[^/]*"),
+                            '?' => pattern.push_str("[^/]"),
+                            other => pattern.push_str(&regex::escape(&other.to_string())),
+                        }
+                    }
+                    pattern.push('$');
+                    regex::Regex::new(&pattern)
+                        .inspect_err(|error| {
+                            log::error!(
+                                "search filter: a glob of {} bytes matches nothing: {error}",
+                                pattern.len()
+                            )
+                        })
+                        .ok()
+                })
+                .collect()
+        };
+        Self {
+            include: patterns(include),
+            exclude: patterns(exclude),
+        }
+    }
+
+    /// Whether `path` passes: some include pattern when there are any, and no exclude one.
+    pub fn passes(&self, path: &str) -> bool {
+        (self.include.is_empty() || self.include.iter().flatten().any(|glob| glob.is_match(path)))
+            && !self.exclude.iter().flatten().any(|glob| glob.is_match(path))
+    }
+}
+
 /// Whether a path passes comma-separated globs: some include pattern when there are any, and no exclude one.
 pub fn passes(path: &str, include: &str, exclude: &str) -> bool {
-    let patterns = |list: &str| -> Vec<Option<regex::Regex>> {
-        list.split(',')
-            .map(str::trim)
-            .filter(|glob| !glob.is_empty())
-            .map(|glob| {
-                let mut pattern = String::from("(^|/)");
-                let mut chars = glob.chars().peekable();
-                while let Some(ch) = chars.next() {
-                    match ch {
-                        '*' if chars.peek() == Some(&'*') => {
-                            chars.next();
-                            if chars.next_if_eq(&'/').is_some() {
-                                pattern.push_str("(?:.*/)?");
-                            } else {
-                                pattern.push_str(".*");
-                            }
-                        }
-                        '*' => pattern.push_str("[^/]*"),
-                        '?' => pattern.push_str("[^/]"),
-                        other => pattern.push_str(&regex::escape(&other.to_string())),
-                    }
-                }
-                pattern.push('$');
-                regex::Regex::new(&pattern)
-                    .inspect_err(|error| {
-                        log::error!(
-                            "search filter: a glob of {} bytes matches nothing: {error}",
-                            pattern.len()
-                        )
-                    })
-                    .ok()
-            })
-            .collect()
-    };
-    let (include, exclude) = (patterns(include), patterns(exclude));
-    (include.is_empty() || include.iter().flatten().any(|glob| glob.is_match(path)))
-        && !exclude.iter().flatten().any(|glob| glob.is_match(path))
+    GlobFilter::new(include, exclude).passes(path)
 }
 
 type OnBool = Rc<dyn Fn(bool, &mut Window, &mut App)>;

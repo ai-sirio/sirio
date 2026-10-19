@@ -192,8 +192,8 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     let temp = parent.join(format!(".{name}.sirio-{}-{nonce}-tmp", std::process::id()));
-    std::fs::write(&temp, bytes)?;
     let finish = || -> std::io::Result<()> {
+        std::fs::write(&temp, bytes)?;
         // The sync handle needs write access: Windows rejects flushing a
         // read-only handle with os error 5 (access denied — FlushFileBuffers
         // demands GENERIC_WRITE), while Unix fsync accepts any open mode,
@@ -201,7 +201,9 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         // only failed on Windows. The handle is scoped to end before the
         // rename so no handle is live across it on any platform. The
         // `fs::write` handle above is already closed — it was dropped when
-        // that call returned.
+        // that call returned. Any failure from the write on removes the
+        // temporary file below: a partial one would sit in the worktree as an
+        // untracked file.
         {
             let file = std::fs::OpenOptions::new().write(true).open(&temp)?;
             file.sync_all()?;
@@ -298,7 +300,11 @@ mod tests {
     /// - the temp-and-rename gives a replaced executable the default mode, so a
     ///   script loses its exec bit (`keeps_the_mode_of_the_file_it_replaces`);
     /// - a path that does not exist yet has no mode to copy and the write
-    ///   errors instead of creating it (`creates_a_file_that_did_not_exist`).
+    ///   errors instead of creating it (`creates_a_file_that_did_not_exist`);
+    /// - a write that fails leaves its temporary sibling behind, an untracked
+    ///   file in the worktree (`a_failed_write_leaves_no_temporary_file`; only
+    ///   the rename can be made to fail deterministically, the write's own
+    ///   failure, a full disk, is covered by the same cleanup scope).
     #[cfg(unix)]
     #[test]
     fn keeps_the_mode_of_the_file_it_replaces() {
@@ -326,6 +332,24 @@ mod tests {
         write_atomically(&path, b"hello\n").unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file() {
+        let dir = crate::scratch_dir("sirio-markdown-atomic-fail");
+        fs::create_dir_all(&dir).unwrap();
+        // A file cannot be renamed over a directory, on any platform.
+        let target = dir.join("target");
+        fs::create_dir(&target).unwrap();
+
+        assert!(write_atomically(&target, b"x").is_err());
+
+        let left: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("target")]);
         let _ = fs::remove_dir_all(dir);
     }
 }
