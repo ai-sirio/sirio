@@ -348,7 +348,7 @@ pub struct FileView {
     /// rather than applied because a tab opened by "go to definition" is
     /// still loading its content: revealing immediately addresses lines
     /// that do not exist yet, and does nothing at all.
-    pending_reveal: Option<usize>,
+    pending_reveal: Option<RevealTarget>,
     /// The Preview's diagrams, by cache key (design §3).
     diagrams: Diagrams,
     /// The diagram settings the last frame saw. A change forgets every
@@ -453,6 +453,19 @@ pub enum DiagnosticSeverity {
     Warning,
     Information,
     Hint,
+}
+
+/// Where a reveal puts the caret. Held by the view until the file has loaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RevealTarget {
+    /// The start of a line (0-based).
+    Line(usize),
+    /// A line (0-based) and a column counted in UTF-16 code units, as the
+    /// protocol counts: the caret goes there, past the end of a short line to
+    /// its end.
+    LineColumnUtf16(usize, usize),
+    /// A range of bytes of the buffer, selected.
+    Range(Range<usize>),
 }
 
 /// One finding, already in this view's own terms: a line index and a byte
@@ -908,8 +921,10 @@ impl FileView {
         self.hover_card.as_deref()
     }
 
-    pub fn reveal_at(&mut self, line: usize, cx: &mut Context<Self>) {
-        self.pending_reveal = Some(line);
+    /// Puts the caret (or a selection) where `target` names and scrolls it into
+    /// view, now or as soon as the file has loaded.
+    pub fn reveal(&mut self, target: RevealTarget, cx: &mut Context<Self>) {
+        self.pending_reveal = Some(target);
         self.apply_pending_reveal(cx);
     }
 
@@ -1544,6 +1559,11 @@ impl FileView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The drawer lists this tab's file first (a snapshot's is not the worktree's).
+        if let Some(drawer) = &self.drawer {
+            let file = (!self.is_snapshot()).then(|| self.path());
+            drawer.update(cx, |drawer, _| drawer.set_current_file(file));
+        }
         match &self.state {
             ViewState::Loading if self.snapshot_error.is_some() => render_snapshot_failure(
                 self.snapshot_error.as_deref().unwrap_or_default(),
@@ -3508,7 +3528,7 @@ mod tests {
             cx.debug_bounds("code-editor-line-350").is_none(),
             "line 350 starts off screen, or the test proves nothing"
         );
-        view.update(&mut cx.cx, |view, cx| view.reveal_at(350, cx));
+        view.update(&mut cx.cx, |view, cx| view.reveal(RevealTarget::Line(350), cx));
         cx.update(|window, cx| {
             window.refresh();
             window.simulate_next_frame(cx);
@@ -3538,7 +3558,7 @@ mod tests {
         let window = cx.add_window(|_window, cx| {
             let mut view = FileView::new(file.path().to_path_buf(), cx);
             // Before any load has completed.
-            view.reveal_at(350, cx);
+            view.reveal(RevealTarget::Line(350), cx);
             view
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -5665,7 +5685,7 @@ mod tests {
         });
         let window = cx.add_window(|_window, cx| {
             let mut view = FileView::snapshot_pending(snapshot_origin_for_tests(), cx);
-            view.reveal_at(350, cx);
+            view.reveal(RevealTarget::Line(350), cx);
             view.finish_snapshot(Err("boom".to_string()), cx);
             view
         });

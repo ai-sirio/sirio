@@ -50,7 +50,7 @@ use sirio_ui::{
     editor::{Conflict, LineEnding},
     editor_prefs::EditorPrefs,
     file_context_menu::{FileContextFacts, MissingServer},
-    file_view::{FileView, FileViewEvent, FindOptions, MarkdownMode, SnapshotOrigin},
+    file_view::{FileView, FileViewEvent, FindOptions, MarkdownMode, RevealTarget, SnapshotOrigin},
     loading,
     modal::{ModalButton, ModalButtonTone, ModalFocus, ModalSpec, ModalTextField, render_modal},
     orbit::{EMPTY_SURFACE_MARK, orbit},
@@ -1316,6 +1316,11 @@ enum ControlAction {
     },
     /// A press on the breadcrumb's part at `index`.
     EditorCrumb {
+        index: usize,
+        reply: ControlReply,
+    },
+    /// Chooses the `index`-th row of the drawer's Problems, in the order drawn.
+    EditorProblem {
         index: usize,
         reply: ControlReply,
     },
@@ -2833,6 +2838,18 @@ impl ControlHandler for AppControlHandler {
                     return ControlResponse::failure(&request.id, "surface.editor.crumb requires index");
                 };
                 self.queue_action(request, move |reply| ControlAction::EditorCrumb { index, reply })
+            }
+            "surface.editor.problem" if cfg!(debug_assertions) => {
+                let index = request.params.get("index").and_then(|i| i.parse::<usize>().ok());
+                let Some(index) = index else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.editor.problem requires index",
+                    );
+                };
+                self.queue_action(request, move |reply| {
+                    ControlAction::EditorProblem { index, reply }
+                })
             }
             "surface.editor.find" if cfg!(debug_assertions) => {
                 let query = request.params.get("query").cloned();
@@ -6125,6 +6142,9 @@ impl SirioWorkspace {
                                 ControlAction::EditorCrumb { index, reply } => {
                                     let _ = reply.send(workspace.control_editor_crumb(index, cx));
                                 }
+                                ControlAction::EditorProblem { index, reply } => {
+                                    let _ = reply.send(workspace.control_editor_problem(index, cx));
+                                }
                                 ControlAction::EditorFind { query, case, word, regex, replace, reply } => {
                                     let options = FindOptions { case, word, regex };
                                     let _ = reply.send(workspace.control_editor_find(
@@ -7960,13 +7980,21 @@ impl SirioWorkspace {
                 WorktreeDrawerEvent::Changed => {
                     workspace.session.save_editor_drawer(drawer.read(cx).record());
                 }
-                // Nothing emits these yet: Task 5 (Problems) wires OpenProblem and
-                // Task 7 (Search) wires OpenHit, each to open the file.
-                WorktreeDrawerEvent::OpenProblem { .. } | WorktreeDrawerEvent::OpenHit { .. } => {}
+                WorktreeDrawerEvent::OpenProblem { path, line, column } => {
+                    workspace.open_reveal(
+                        path.clone(),
+                        RevealTarget::LineColumnUtf16(*line as usize, *column as usize),
+                        cx,
+                    );
+                }
+                // Task 7 (Search) wires OpenHit, to open the file with the hit selected.
+                WorktreeDrawerEvent::OpenHit { .. } => {}
             }
         })
         .detach();
         self.drawers.insert(worktree.to_path_buf(), drawer.clone());
+        // A server may be running there already: the drawer names it from the start.
+        self.refresh_running_servers(cx);
         drawer
     }
 
@@ -14654,7 +14682,7 @@ impl SirioWorkspace {
                 Ok((server, read_loop)) => {
                     workspace.lsp.finish_starting(&key);
                     let task = cx.background_executor().spawn(read_loop);
-                    let router = Self::spawn_router(&server, cx);
+                    let router = Self::spawn_router(&server, key.clone(), cx);
                     workspace.lsp.insert(
                         key.clone(),
                         crate::lsp::ServerHandle {
@@ -14677,6 +14705,7 @@ impl SirioWorkspace {
                         }
                     }
                     workspace.push_language_server_status_to_open_files(cx);
+                    workspace.refresh_running_servers(cx);
                 }
                 Err(sirio_lsp::LspError::NotInstalled { command }) => {
                     workspace.lsp.finish_starting(&key);
@@ -14987,8 +15016,13 @@ impl SirioWorkspace {
     /// One task per server, on the **foreground** executor because it
     /// updates entities. Holds its own clone of the `Client` — `Client` is
     /// `Clone` — so answering never has to reach back into the supervisor
-    /// and take a second lease on the workspace.
-    fn spawn_router(server: &sirio_lsp::Server, cx: &mut Context<Self>) -> Task<()> {
+    /// and take a second lease on the workspace. When the server's stream
+    /// closes the loop ends, and the router says so (`language_server_gone`).
+    fn spawn_router(
+        server: &sirio_lsp::Server,
+        key: sirio_ui::drawer::ServerKey,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         let incoming = server.incoming().clone();
         let client = server.client().clone();
         cx.spawn(async move |this, cx| {
@@ -15008,7 +15042,7 @@ impl SirioWorkspace {
                         if method == "textDocument/publishDiagnostics" =>
                     {
                         let _ = this.update(cx, |workspace, cx| {
-                            workspace.apply_diagnostics(&params, cx);
+                            workspace.apply_diagnostics(&key, &params, cx);
                         });
                     }
                     // `$/progress`, `window/logMessage` and the rest. Read
@@ -15017,16 +15051,103 @@ impl SirioWorkspace {
                     _ => sirio_perf::event("lsp.message.dropped", 0),
                 }
             }
+            // The stream closed: the server ended (it crashed, or was told to
+            // exit). A server dropped on purpose cancels this task instead, so
+            // this is only ever the server's own end.
+            let _ = this.update(cx, |workspace, cx| workspace.language_server_gone(&key, cx));
         })
     }
 
-    /// Routes one publish to every view showing that file. Views are found
-    /// by path rather than remembered per server, because the same file can
-    /// be open in more than one tab.
-    fn apply_diagnostics(&mut self, params: &serde_json::Value, cx: &mut Context<Self>) {
+    /// A language server ended. Its handle goes (so it reads as not running
+    /// and the next file of its language starts one again), every drawer drops
+    /// what it reported, the open files of its key stop showing its findings
+    /// and are told to the next server from the start, and the drawers name the
+    /// servers still running.
+    fn language_server_gone(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
+        self.lsp.forget(key);
+        let drawers: Vec<_> = self.drawers.values().cloned().collect();
+        for drawer in drawers {
+            drawer.update(cx, |drawer, cx| drawer.server_gone(key, cx));
+        }
+        // Its copy of every file died with it, in a parked worktree as well as
+        // the shown one: the next server is sent the text again.
+        for path in self.lsp.synced_paths() {
+            if self.server_key_for(&path).as_ref() == Some(key) {
+                self.lsp.forget_synced(&path);
+            }
+        }
+        // And the gutter of an open file does not keep what a dead server said.
+        for (path, view) in Self::open_file_views(&self.tabs, cx) {
+            if self.server_key_for(&path).as_ref() == Some(key) {
+                view.update(cx, |view, cx| view.set_diagnostics(Vec::new(), cx));
+            }
+        }
+        self.refresh_running_servers(cx);
+        self.push_language_server_status_to_open_files(cx);
+    }
+
+    /// The key of the server `path` would use, from the table as loaded.
+    fn server_key_for(&self, path: &Path) -> Option<sirio_ui::drawer::ServerKey> {
+        let entry = self.lsp.known_entry_for(path)?;
+        let worktree_root = self.worktree_root_for(path)?;
+        Some(self.lsp.key_for(path, &worktree_root, &entry))
+    }
+
+    /// Tells every drawer which servers run in its worktree, by the file name
+    /// of the program each was started from (`rust-analyzer`), for the line
+    /// Problems says when it has nothing to list.
+    fn refresh_running_servers(&mut self, cx: &mut Context<Self>) {
+        let mut named: Vec<(PathBuf, String)> = Vec::new();
+        for key in self.lsp.running_keys() {
+            let Some(root) = self.worktree_root_for(&key.0) else {
+                continue;
+            };
+            let Some(entry) = self.lsp.known_entry_for_language(&key.1) else {
+                continue;
+            };
+            let program = Path::new(&entry.command)
+                .file_name()
+                .map_or_else(|| entry.command.clone(), |name| name.to_string_lossy().into_owned());
+            named.push((root, program));
+        }
+        // Stable between runs, whatever order the supervisor's map yields.
+        named.sort();
+        let drawers: Vec<_> = self
+            .drawers
+            .iter()
+            .map(|(path, drawer)| (path.clone(), drawer.clone()))
+            .collect();
+        for (worktree, drawer) in drawers {
+            let names = named
+                .iter()
+                .filter(|(root, _)| paths_name_the_same_document(root, &worktree))
+                .map(|(_, program)| program.clone())
+                .collect();
+            drawer.update(cx, |drawer, cx| drawer.set_running_servers(names, cx));
+        }
+    }
+
+    /// Routes one publish: into the drawer of the worktree the file lies in
+    /// (for every file of a known worktree, open or not), then to every view
+    /// showing that file, so the gutter and Problems read the same publish.
+    /// Views are found by path rather than remembered per server, because the
+    /// same file can be open in more than one tab.
+    fn apply_diagnostics(
+        &mut self,
+        key: &sirio_ui::drawer::ServerKey,
+        params: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
         let Some((path, raw)) = sirio_lsp::parse_publish(params) else {
             return;
         };
+        if let Some(root) = self.worktree_root_for(&path)
+            && let Ok(relative) = path.strip_prefix(&root)
+        {
+            let stored = crate::lsp::stored_problems(&raw);
+            let drawer = self.drawer_for(&root, cx);
+            drawer.update(cx, |drawer, cx| drawer.publish(key, relative, stored, cx));
+        }
         for (open_path, view) in Self::open_file_views(&self.tabs, cx) {
             if !paths_name_the_same_document(&open_path, &path) {
                 continue;
@@ -15521,10 +15642,17 @@ impl SirioWorkspace {
     /// Opens a file (or selects the tab already showing it) and reveals a
     /// line, whether or not the content has loaded yet.
     fn open_at_line(&mut self, path: PathBuf, line: usize, cx: &mut Context<Self>) {
+        self.open_reveal(path, RevealTarget::Line(line), cx);
+    }
+
+    /// Opens a file (or selects the tab already showing it) and puts the caret
+    /// or the selection where `target` names, whether or not the content has
+    /// loaded yet.
+    fn open_reveal(&mut self, path: PathBuf, target: RevealTarget, cx: &mut Context<Self>) {
         self.add_file_tab(path.clone(), cx);
         for (open_path, view) in Self::open_file_views(&self.tabs, cx) {
             if paths_name_the_same_document(&open_path, &path) {
-                view.update(cx, |view, cx| view.reveal_at(line, cx));
+                view.update(cx, |view, cx| view.reveal(target.clone(), cx));
             }
         }
     }
@@ -16772,7 +16900,8 @@ impl SirioWorkspace {
             let tab_id = self.tabs[index].id;
             self.select_tab(tab_id, None, cx);
             if let Some(line) = line {
-                view.update(cx, |view, cx| view.reveal_at(line.saturating_sub(1) as usize, cx));
+                let target = RevealTarget::Line(line.saturating_sub(1) as usize);
+                view.update(cx, |view, cx| view.reveal(target, cx));
             }
             return;
         }
@@ -16789,7 +16918,8 @@ impl SirioWorkspace {
         let worktree = self.working_directory.clone();
         self.give_drawer(&view, &worktree, cx);
         if let Some(line) = line {
-            view.update(cx, |view, cx| view.reveal_at(line.saturating_sub(1) as usize, cx));
+            let target = RevealTarget::Line(line.saturating_sub(1) as usize);
+            view.update(cx, |view, cx| view.reveal(target, cx));
         }
         let tab_id = self.next_tab_id;
         let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
@@ -16888,7 +17018,8 @@ impl SirioWorkspace {
                 if let TabContent::File { view } = content
                     && paths_name_the_same_document(view.read(cx).path(), &path)
                 {
-                    view.update(cx, |view, cx| view.reveal_at(line.saturating_sub(1) as usize, cx));
+                    let target = RevealTarget::Line(line.saturating_sub(1) as usize);
+                    view.update(cx, |view, cx| view.reveal(target, cx));
                 }
             });
         }
@@ -18873,22 +19004,66 @@ impl SirioWorkspace {
     }
 
     /// The worktree's drawer as the state and the drawer verb answer it:
-    /// `drawer_open` (0 or 1), `drawer_tab` (`problems` or `search`) and
-    /// `drawer_height`, the kept height in pixels. None of them names a path.
+    /// `drawer_open` (0 or 1), `drawer_tab` (`problems` or `search`),
+    /// `drawer_height`, the kept height in pixels, `problems` (errors, warnings
+    /// and notes, `e/w/n`), `problem_files` (the files Problems draws, `;`
+    /// between them, in the order drawn, relative to the worktree) and
+    /// `problems_note`, the line Problems says when it has nothing to list.
     fn drawer_fields(drawer: Option<&Entity<WorktreeDrawer>>, cx: &App) -> Vec<(String, String)> {
-        let (open, tab, height) = match drawer.map(|drawer| drawer.read(cx)) {
-            Some(drawer) => (
-                u8::from(drawer.is_open()).to_string(),
-                drawer.tab().as_str().to_string(),
-                f32::from(drawer.height()).to_string(),
+        let read = drawer.map(|drawer| drawer.read(cx));
+        let (open, tab, height, problems, files, note) = match read {
+            Some(drawer) => {
+                let counts = drawer.problem_counts();
+                (
+                    u8::from(drawer.is_open()).to_string(),
+                    drawer.tab().as_str().to_string(),
+                    f32::from(drawer.height()).to_string(),
+                    format!("{}/{}/{}", counts.errors, counts.warnings, counts.notes),
+                    Self::escaped_field(&drawer.problem_files().join(";")),
+                    Self::escaped_field(&drawer.problems_note()),
+                )
+            }
+            None => (
+                "0".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
             ),
-            None => ("0".to_string(), String::new(), String::new()),
         };
         vec![
             ("drawer_open".to_string(), open),
             ("drawer_tab".to_string(), tab),
             ("drawer_height".to_string(), height),
+            ("problems".to_string(), problems),
+            ("problem_files".to_string(), files),
+            ("problems_note".to_string(), note),
         ]
+    }
+
+    /// `surface.editor.problem index=`: the `index`-th row of the active file
+    /// tab's drawer's Problems, in the order drawn, chosen through the call a
+    /// press on it makes: its file opens at the problem. A drawer with no such
+    /// row is the error. Answers the editor's state, of the tab the choice
+    /// leaves active.
+    fn control_editor_problem(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let drawer = view
+            .read(cx)
+            .drawer()
+            .cloned()
+            .ok_or_else(|| "the file tab has no drawer".to_string())?;
+        if !drawer.update(cx, |drawer, cx| drawer.open_drawn_problem(index, cx)) {
+            return Err(format!("Problems draws no row {index}"));
+        }
+        self.control_editor_state(cx)
     }
 
     /// `surface.editor.drawer action= value=`: the active file tab's drawer is
@@ -42547,6 +42722,7 @@ done
             | ControlAction::EditorContext { reply, .. }
             | ControlAction::EditorGitMark { reply, .. }
             | ControlAction::EditorCrumb { reply, .. }
+            | ControlAction::EditorProblem { reply, .. }
             | ControlAction::EditorFind { reply, .. }
             | ControlAction::EditorFindStep { reply, .. }
             | ControlAction::EditorReplace { reply, .. }
@@ -42729,6 +42905,7 @@ done
             }
             "surface.editor.git_mark" => request_with_params(method, &[("line", "0")]),
             "surface.editor.crumb" => request_with_params(method, &[("index", "0")]),
+            "surface.editor.problem" => request_with_params(method, &[("index", "0")]),
             "surface.editor.find" => request_with_params(method, &[("query", "x")]),
             "surface.editor.find_step" => request_with_params(method, &[("forward", "true")]),
             "surface.editor.replace" => request_with_params(method, &[("all", "false")]),

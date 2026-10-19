@@ -120,6 +120,21 @@ set -eEuo pipefail
 #   hover_leave       with the card of an Error drawn for a real resting pointer, a pointer
 #                     that jumps onto the find bar, and onto the conflict banner, leaves no
 #                     card (`hover=` empty) -- Ely says when the pointer leaves the code
+#   problems_unopened  the fake server (fake_lsp.py `publish`) reports an error for a file nobody
+#                     opened: the drawer opens itself on Problems, lists it, and the caret does not move
+#   problems_alarm    the seen set (spec 4.4) end to end: the same error rewritten, or cleared and
+#                     republished, leaves a closed drawer closed; an error with a new message opens it;
+#                     a seen error fixed and returning identically does not (the accepted cost);
+#                     warnings never; on Search it stays on Search
+#   problems_relaunch two errors seen and closed, a quit and relaunch, the server reports them one
+#                     file at a time: the drawer stays closed; a new message opens it
+#   problems_open     a problem's row opens its file with the caret at the needle's byte offset (the
+#                     server's column is UTF-16, past an accent and an emoji)
+#   problems_server_exit  a server that ends takes its problems with it and is no longer named; the
+#                     next .rs file starts it again; after a relaunch a running server with nothing to
+#                     say is named
+#   problems_park     a second worktree has a drawer of its own; the first, switched away and back,
+#                     keeps its drawer, height and problems, one that arrived while parked included
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
 #                     stickyScroll, lineNumbers, cursorShape, and the ruler at
@@ -546,6 +561,22 @@ cat >"$RUN_DIR/fake-lsp/answers.json" <<JSON
   ]
 }
 JSON
+# The drawer opens itself on an error the user has not seen, and the fake server
+# reports FAKE_ERROR for main.rs in every scenario: recorded as seen, as it is for
+# a user who closed the drawer on it, so only the problems scenarios (which bring
+# errors of their own) ever open it.
+python3 - "$SIRIO_DB" "$WT" "$FAKE_ERROR" <<'PY'
+import json, sqlite3, sys
+database, worktree, message = sys.argv[1:4]
+connection = sqlite3.connect(database)
+connection.execute(
+    "INSERT INTO editor_drawer (worktree_path, open, height, tab, seen_errors) "
+    "VALUES (?, 0, 240.0, 'problems', ?) "
+    "ON CONFLICT(worktree_path) DO UPDATE SET seen_errors = excluded.seen_errors",
+    (worktree, json.dumps([[worktree, "rust", "main.rs", message, 1]])))
+connection.commit()
+connection.close()
+PY
 # The server's program is a stub on the app's PATH, so the status row names it
 # the way it names a real one (`fake-lsp`, as it names `rust-analyzer`).
 # `slow-lsp` is the same server that takes two seconds to start: the status
@@ -3276,6 +3307,326 @@ scenario_drawer() {
   echo "OK: the corner card rose with the drawer and came back down with it"
 }
 
+# ---------------------------------------------------------------- problems
+
+# Problems over the worktree (editor panels, Task 5). The fake language server
+# reports files nobody opened (its `publish` answers, Scripts/Tests/fake_lsp.py)
+# and the drawer lists them, opens itself on an error the user has not seen, and
+# notices a server that ends. Each scenario's "new" errors carry messages no other
+# scenario uses, so a seen set left behind by an earlier one cannot mask a step.
+#
+# The rows the earlier scenarios rely on are not disturbed: the setup records the
+# one error their fake server always reports (main.rs, FAKE_ERROR) as already
+# seen, the way a user who closed the drawer on it would have.
+
+# The fixtures the scenarios report on: a file with an accent and an emoji before
+# its needle (the column is UTF-16, the selection bytes), and a second file.
+problems_fixtures() {
+  mkdir -p "$WT/src"
+  python3 - "$WT" <<'PY'
+import os, sys
+root = sys.argv[1]
+with open(os.path.join(root, "src/lib.rs"), "wb") as handle:
+    handle.write("fn alpha() -> u32 { 1 }\nfn beta() -> u32 { 2 }\n// é\U0001F600 target_marker\n".encode("utf-8"))
+with open(os.path.join(root, "src/util.rs"), "wb") as handle:
+    handle.write(b"fn util() {}\nfn helper() {}\n")
+PY
+  [ -f "$RUN_DIR/fake-lsp/answers.base.json" ] || cp "$RUN_DIR/fake-lsp/answers.json" "$RUN_DIR/fake-lsp/answers.base.json"
+}
+# One finding of the fake server's `publish` map: the text it names, an LSP
+# severity (1 error, 2 warning), and its message.
+pf() { # needle severity message
+  printf '{"needle":"%s","severity":%s,"message":"%s","source":"fake-lsp"}' "$1" "$2" "$3"
+}
+# Rewrites the fake server's answers so it reports exactly PUBLISH, a JSON object
+# of path (relative to the worktree) to findings, and nothing in main.rs; whatever
+# it reported before and no longer lists is published empty. Every call changes
+# the file (a nonce), so the server's poll sees a change even for the same map.
+problems_publish() { # json
+  python3 - "$RUN_DIR/fake-lsp/answers.json" "$RUN_DIR/fake-lsp/answers.base.json" "$1" <<'PY'
+import json, os, sys, time
+path, base, publish = sys.argv[1:4]
+with open(base, encoding="utf-8") as handle:
+    answers = json.load(handle)
+answers["diagnostics_file"] = ""
+answers["publish"] = json.loads(publish)
+answers["nonce"] = time.time_ns()
+with open(path + ".tmp", "w", encoding="utf-8") as handle:
+    json.dump(answers, handle)
+os.replace(path + ".tmp", path)
+PY
+}
+# The answers as the earlier scenarios know them (no `publish`): the server puts
+# main.rs's own findings back and rests.
+problems_restore() {
+  cp "$RUN_DIR/fake-lsp/answers.base.json" "$RUN_DIR/fake-lsp/answers.json.tmp"
+  mv "$RUN_DIR/fake-lsp/answers.json.tmp" "$RUN_DIR/fake-lsp/answers.json"
+}
+# A drawer closed over a store with nothing in it, main.rs open: the state every
+# problems scenario starts from. The seen set is whatever the empty store leaves.
+problems_reset() {
+  problems_fixtures
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  ctl surface editor drawer --show=problems >/dev/null
+  problems_publish '{}'
+  expect_state problems 0/0/0
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  # A server's silence is not a look: nothing below may be affected by a poll
+  # that is still on its way.
+  sleep 0.6
+  expect_state drawer_open 0
+}
+problems_done() {
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  # The answers back as the earlier scenarios know them: main.rs's Error and
+  # Warning return, which is an error the drawer has not seen (a reset's look
+  # saw none). A look at Problems, then a close, is the user having seen them.
+  problems_restore
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state diagnostics 2
+  expect_state problems 1/1/0
+  ctl surface editor drawer --show=problems >/dev/null
+  ctl surface editor drawer --close >/dev/null
+  expect_state_stays drawer_open 0
+}
+
+scenario_problems_unopened() {
+  problems_reset
+  # The caret at a known place: the drawer opens over it and must not move it.
+  ctl surface editor select --ranges=5..5 >/dev/null
+  expect_state selections "5..5"
+  problems_publish "{\"src/lib.rs\":[$(pf alpha 1 'unopened: alpha cannot be found')]}"
+  expect_state drawer_open 1
+  expect_state drawer_tab problems
+  expect_state problems 1/0/0
+  expect_state problem_files src/lib.rs
+  expect_state selections "5..5"
+  echo "OK: an error in a file nobody opened opened the drawer on Problems, listed it, and left the caret"
+  capture problems-open
+  problems_done
+}
+
+scenario_problems_alarm() {
+  problems_reset
+  local one two three four
+  one="$(pf alpha 1 'alarm one: alpha is wrong')"
+  two="$(pf beta 1 'alarm two: beta is wrong')"
+  three="$(pf alpha 1 'alarm three: alpha again')"
+  four="$(pf beta 1 'alarm four: beta again')"
+  # The first error is new: it opens the drawer. Closing is the user seeing it.
+  problems_publish "{\"src/lib.rs\":[$one]}"
+  expect_state drawer_open 1
+  expect_state problems 1/0/0
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  # The same error written again, and cleared then republished with no look
+  # between: neither is new.
+  problems_publish "{\"src/lib.rs\":[$one]}"
+  sleep 1
+  expect_state_stays drawer_open 0
+  problems_publish '{}'
+  expect_state problems 0/0/0
+  problems_publish "{\"src/lib.rs\":[$one]}"
+  expect_state problems 1/0/0
+  expect_state_stays drawer_open 0
+  echo "OK: the same error, rewritten and then cleared and republished, left the drawer closed"
+  # A message the user has not seen opens it.
+  problems_publish "{\"src/lib.rs\":[$one,$two]}"
+  expect_state drawer_open 1
+  expect_state problems 2/0/0
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  echo "OK: an error with a new message opened the drawer"
+  # Fixed while nobody looked, then back identically: the accepted cost, it stays
+  # closed. A new message opens it again.
+  problems_publish '{}'
+  expect_state problems 0/0/0
+  problems_publish "{\"src/lib.rs\":[$one]}"
+  expect_state problems 1/0/0
+  expect_state_stays drawer_open 0
+  echo "OK: a seen error fixed and returning identically left the drawer closed (the accepted cost)"
+  problems_publish "{\"src/lib.rs\":[$one,$three]}"
+  expect_state drawer_open 1
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  # Warnings never open it.
+  problems_publish "{\"src/lib.rs\":[$(pf alpha 2 'alarm warning: alpha is odd')]}"
+  expect_state problems 0/1/0
+  expect_state_stays drawer_open 0
+  echo "OK: a warning left the drawer closed"
+  # On Search the drawer stays on Search however new the error is.
+  ctl surface editor drawer --show=search >/dev/null
+  expect_state drawer_tab search
+  problems_publish "{\"src/lib.rs\":[$one,$four]}"
+  expect_state problems 2/0/0
+  expect_state_stays drawer_open 1
+  expect_state drawer_tab search
+  echo "OK: with the drawer on Search a new error left it on Search"
+  problems_done
+}
+
+scenario_problems_relaunch() {
+  problems_reset
+  local lib util
+  lib="$(pf alpha 1 'relaunch lib: alpha is wrong')"
+  util="$(pf helper 1 'relaunch util: helper is wrong')"
+  problems_publish "{\"src/lib.rs\":[$lib],\"src/util.rs\":[$util]}"
+  expect_state drawer_open 1
+  expect_state problems 2/0/0
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  app_restart
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state drawer_open 0
+  # The server starts with the first .rs file and reports the two files one at a
+  # time; whatever prefix of them is listed, the drawer stays closed.
+  expect_state problems 2/0/0
+  expect_state_stays drawer_open 0
+  echo "OK: after a quit and relaunch the same two errors came back one file at a time and the drawer stayed closed"
+  problems_publish "{\"src/lib.rs\":[$lib,$(pf beta 1 'relaunch new: beta is wrong')],\"src/util.rs\":[$util]}"
+  expect_state drawer_open 1
+  echo "OK: an error with a new message opened it"
+  problems_done
+}
+
+# The message of Problems' first row, in a window of CLICK_WINDOW with the drawer
+# open at its default height (240 px) over main.rs: problems-open.png shows it
+# when the drawer is at that height.
+PROBLEM_ROW=(900 626)
+
+scenario_problems_open() {
+  problems_reset
+  local at
+  # The default height, whatever an earlier scenario left (the drawer scenario drags it).
+  ctl surface editor drawer --height=240 >/dev/null
+  expect_state drawer_height 240
+  problems_publish "{\"src/lib.rs\":[$(pf target_marker 1 'open: target_marker is wrong')]}"
+  expect_state drawer_open 1
+  expect_state problems 1/0/0
+  expect_state problem_files src/lib.rs
+  # A real press on the row.
+  focus_window
+  click_at "${PROBLEM_ROW[@]}"
+  expect_active_tab lib.rs
+  expect_state path "$WT/src/lib.rs"
+  expect_state state loaded
+  at="$(python3 "$TOOLS" offset "$(sfield text)" "target_marker")"
+  # The column the server gave is in UTF-16 units (the accent is one, the emoji
+  # two); the caret is at the needle's byte offset.
+  expect_state selections "$at..$at"
+  echo "OK: a press on the problem's row opened src/lib.rs with the caret on the needle, past an accent and an emoji"
+  # The verb chooses the same row without a pointer, from another tab, with the
+  # caret of lib.rs put somewhere else first.
+  ctl surface editor select --ranges=0..0 >/dev/null
+  expect_state selections "0..0"
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state drawer_open 1
+  ctl surface editor problem --open=0 >/dev/null
+  expect_active_tab lib.rs
+  expect_state selections "$at..$at"
+  echo "OK: the verb opened the same row the same way"
+  problems_done
+}
+
+scenario_problems_server_exit() {
+  problems_reset
+  local mark
+  # A running server with nothing to say is named (the store is empty, so the line is drawn).
+  expect_state problems_note "fake-lsp: no problems"
+  problems_publish "{\"src/lib.rs\":[$(pf alpha 1 'exit: alpha is wrong')]}"
+  expect_state drawer_open 1
+  expect_state problems 1/0/0
+  # The server ends the way a crashed one does: its entries go, and it is no longer named.
+  python3 - "$RUN_DIR/fake-lsp/answers.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    answers = json.load(handle)
+answers["exit"] = True
+with open(path + ".tmp", "w", encoding="utf-8") as handle:
+    json.dump(answers, handle)
+os.replace(path + ".tmp", path)
+PY
+  expect_state problems 0/0/0
+  expect_state problems_note "No language server is running in this worktree."
+  echo "OK: the server ended: its problem is gone and Problems says no server is running"
+  # The next .rs file opened starts it again.
+  problems_restore
+  mark="$(lsp_mark)"
+  printf 'fn fresh() {}\n' >"$WT/src/fresh_exit.rs"
+  open_file "$WT/src/fresh_exit.rs"
+  expect_state state loaded
+  local tries=0
+  while [ "$tries" -lt 100 ] && [ "$(lsp_count initialize "$mark")" -eq 0 ]; do
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  [ "$(lsp_count initialize "$mark")" -eq 1 ] \
+    || fail "$SCENARIO: after the server ended, a new .rs file started it $(lsp_count initialize "$mark") times, expected once"
+  expect_state problems_note "fake-lsp: no problems"
+  echo "OK: opening another .rs file started the server again"
+  # And after a relaunch with a running server and no findings (main.rs reports
+  # none either: the answers list nothing).
+  problems_publish '{}'
+  expect_state problems 0/0/0
+  app_restart
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state problems 0/0/0
+  expect_state problems_note "fake-lsp: no problems"
+  echo "OK: after a relaunch a running server with no findings is named"
+  problems_done
+}
+
+scenario_problems_park() {
+  problems_reset
+  local park listed park_error
+  park_error="$(pf alpha 1 'park: alpha is wrong')"
+  # A second worktree of the repository, made the way the app makes one.
+  ctl new-workspace --project "$WT" --branch park-problems >/dev/null
+  listed="$("$CTL" list-workspaces 2>&1 || true)"
+  park="$(printf '%s\n' "$listed" | awk -F'\t' '$3 == "park-problems" {print $4}' | head -n 1)"
+  [ -n "$park" ] && [ -d "$park" ] || fail "$SCENARIO: the second worktree is not listed: $listed"
+  ctl select-workspace --workspace "$WT" >/dev/null
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  problems_publish "{\"src/lib.rs\":[$park_error]}"
+  expect_state drawer_open 1
+  expect_state problems 1/0/0
+  ctl surface editor drawer --height=280 >/dev/null
+  expect_state drawer_height 280
+  ctl select-workspace --workspace "$park" >/dev/null
+  open_file "$park/main.rs"
+  expect_state state loaded
+  # The other worktree has a drawer of its own, closed over nothing.
+  expect_state path "$park/main.rs"
+  expect_state drawer_open 0
+  expect_state problems 0/0/0
+  # What its sibling's server says meanwhile lands in the sibling's drawer.
+  problems_publish "{\"src/lib.rs\":[$park_error,$(pf beta 2 'park: beta is odd')]}"
+  sleep 1
+  ctl select-workspace --workspace "$WT" >/dev/null
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state path "$WT/main.rs"
+  expect_state drawer_open 1
+  expect_state drawer_tab problems
+  expect_state drawer_height 280
+  expect_state problems 1/1/0
+  expect_state problem_files src/lib.rs
+  echo "OK: a worktree switched away and back keeps its drawer, its height and every problem, the one that came while it was parked included"
+  problems_done
+  ctl close-workspace --workspace "$park" >/dev/null 2>&1 || true
+  git -C "$WT" worktree remove --force "$park" >/dev/null 2>&1 || true
+  ctl select-workspace --workspace "$WT" >/dev/null
+}
+
 # ---------------------------------------------------------------- run
 
 scenario load_states scenario_load_states
@@ -3306,6 +3657,12 @@ scenario focus_refresh scenario_focus_refresh
 scenario hover_leave scenario_hover_leave
 # Before prefs: that scenario leaves Settings drawn, where no file tab takes a key.
 scenario drawer scenario_drawer
+scenario problems_unopened scenario_problems_unopened
+scenario problems_alarm scenario_problems_alarm
+scenario problems_relaunch scenario_problems_relaunch
+scenario problems_open scenario_problems_open
+scenario problems_server_exit scenario_problems_server_exit
+scenario problems_park scenario_problems_park
 scenario prefs scenario_prefs
 
 stop_hosts

@@ -108,6 +108,21 @@ pub fn view_diagnostics(
         .collect()
 }
 
+/// What the drawer's store keeps of a publish: the protocol's own positions
+/// (the store keeps most of its files with no buffer to convert against, so
+/// the line and the UTF-16 column stay as the server gave them).
+pub fn stored_problems(raw: &[sirio_lsp::RawDiagnostic]) -> Vec<sirio_ui::drawer::StoredProblem> {
+    raw.iter()
+        .map(|finding| sirio_ui::drawer::StoredProblem {
+            line: finding.start.line,
+            column: finding.start.character,
+            severity: finding.severity,
+            message: finding.message.clone(),
+            source: finding.source.clone(),
+        })
+        .collect()
+}
+
 /// Converts the protocol's symbol kinds into the ones the overlay draws.
 ///
 /// The mirror of [`view_diagnostics`], and for the same reason: a
@@ -226,9 +241,10 @@ impl LspSupervisor {
     /// Where the server for `key` stands, as the status row names it:
     /// launching, running, or failed to launch. `None` when there is nothing
     /// to name: no launch was tried, or the program is not there to run (the
-    /// row says nothing about a missing server, which nearly every file has).
-    /// A server that dies after it started is not noticed today, so `Failed`
-    /// covers launch failures only.
+    /// row says nothing about a missing server, which nearly every file has),
+    /// or the server ended after it started (`forget`: it reads as not running,
+    /// and the next file of its language starts one). `Failed` covers launch
+    /// failures only.
     pub fn state_of(&self, key: &(PathBuf, String)) -> Option<sirio_ui::file_view::LspState> {
         use sirio_ui::file_view::LspState;
         if self.starting.contains(key) {
@@ -316,6 +332,11 @@ impl LspSupervisor {
         self.synced.get(path).is_some_and(|sent| sent == text)
     }
 
+    /// Every document the servers have been told about.
+    pub fn synced_paths(&self) -> Vec<PathBuf> {
+        self.synced.keys().cloned().collect()
+    }
+
     /// Forgets what a closed document was synced with, so reopening it is a
     /// fresh `didOpen` rather than a `didChange` against a document the
     /// server no longer holds.
@@ -390,6 +411,23 @@ impl LspSupervisor {
 
     pub fn insert(&mut self, key: (PathBuf, String), handle: ServerHandle) {
         self.servers.insert(key, handle);
+    }
+
+    /// Lets go of a server that has ended (its stream closed), so that
+    /// `is_running` is false for the key, the status row stops reading Ready and
+    /// the next file opened in that language starts a server again. The key is
+    /// not marked dead: a server that ended is not one that could not start.
+    pub fn forget(&mut self, key: &(PathBuf, String)) {
+        if let Some(handle) = self.servers.remove(key) {
+            // The router is the task that noticed, and it is still running its
+            // last step: it ends on its own, so it is not cancelled from inside.
+            handle.router.detach();
+        }
+    }
+
+    /// The key of every server that is running.
+    pub fn running_keys(&self) -> Vec<(PathBuf, String)> {
+        self.servers.keys().cloned().collect()
     }
 
     /// The running server a path would use, if there is one.

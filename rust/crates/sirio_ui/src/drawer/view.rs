@@ -1,8 +1,8 @@
 //! The drawer under a file tab: its header, its height and what is open.
 //!
 //! One `WorktreeDrawer` belongs to a worktree and is drawn by every file tab
-//! of that worktree, so switching tabs never changes it. The panel under the
-//! header is an empty shell here: Problems and Search draw into it.
+//! of that worktree, so switching tabs never changes it. Problems draws into the
+//! panel under the header; Search is still an empty shell.
 //!
 //! Ways this can fail, written before the code:
 //! - a height the user never chose reaches the database: a NaN or an infinity
@@ -17,20 +17,29 @@
 //! - the drawer is saved from a drop the pointer never delivers (released
 //!   outside the drawer), so the dragged height is lost at the next relaunch;
 //! - a closed drawer draws a panel, or keeps its drag handle, so the code
-//!   loses rows to a drawer that is only a header.
+//!   loses rows to a drawer that is only a header;
+//! - the drawer opens itself while it is open on Search, or while the user is
+//!   already looking at Problems (where every publish is a look instead), or
+//!   moves focus when it does;
+//! - a look is missed (the drawer shown on Problems, a close) or made at the
+//!   wrong time (a server that exits), so the seen set is stale, or the one
+//!   the user saw is forgotten;
+//! - a change of the seen set is not saved, so a relaunch announces what the
+//!   user had seen.
 
 use std::cell::Cell;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ely_gpui_component::forms::Choice;
 use ely_gpui_component::navigation::Tabs;
-use ely_gpui_component::primitives::IconName;
+use ely_gpui_component::primitives::{IconName, Severity};
 use gpui::{Context, DragMoveEvent, EventEmitter, MouseButton, Pixels, Render, Window, div, prelude::*, px};
 use sirio_persistence::EditorDrawerRecord;
 use sirio_theme::Theme;
 
-use super::{ErrorAlarm, ProblemCounts, ProblemStore};
+use super::problems_view::{self, ALL_SEVERITIES};
+use super::{ErrorAlarm, ProblemCounts, ProblemStore, ServerKey, StoredProblem};
 use crate::ely_ui;
 
 /// The height a worktree's drawer opens to the first time.
@@ -100,6 +109,14 @@ pub struct WorktreeDrawer {
     tab: DrawerTab,
     alarm: ErrorAlarm,
     problems: ProblemStore,
+    /// The severities Problems lists. Not saved: a relaunch lists all three.
+    shown: Vec<Severity>,
+    /// The file of the tab drawing the drawer now, relative to the worktree:
+    /// Problems lists it first.
+    current_file: Option<PathBuf>,
+    /// The program of every language server running in the worktree, which is
+    /// what Problems names when it has nothing to list.
+    running_servers: Vec<String>,
     /// The file tab's height as it was last drawn, which caps the drawer. Written
     /// while the tab is laid out, so it is a `Cell`; unknown until then.
     tab_height: Cell<Pixels>,
@@ -144,6 +161,9 @@ impl WorktreeDrawer {
             tab,
             alarm,
             problems: ProblemStore::default(),
+            shown: ALL_SEVERITIES.to_vec(),
+            current_file: None,
+            running_servers: Vec::new(),
             tab_height: Cell::new(unknown),
             drag: None,
             drag_moved: false,
@@ -188,6 +208,10 @@ impl WorktreeDrawer {
 
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
+        // Closing is a look, and so is opening on Problems.
+        if !self.open || self.tab == DrawerTab::Problems {
+            self.look();
+        }
         self.changed(cx);
     }
 
@@ -198,6 +222,9 @@ impl WorktreeDrawer {
         }
         self.open = true;
         self.tab = tab;
+        if tab == DrawerTab::Problems {
+            self.look();
+        }
         self.changed(cx);
     }
 
@@ -205,8 +232,135 @@ impl WorktreeDrawer {
         if !self.open {
             return;
         }
+        self.look();
         self.open = false;
         self.changed(cx);
+    }
+
+    /// The worktree this drawer belongs to.
+    pub fn worktree(&self) -> &Path {
+        &self.worktree
+    }
+
+    /// The user is looking at Problems, or closes the drawer: what the store
+    /// holds now is what they have seen. True when that moved the seen set.
+    fn look(&mut self) -> bool {
+        let before = self.alarm.seen().clone();
+        self.alarm.look(&self.problems.error_counts(), &self.problems.reported());
+        *self.alarm.seen() != before
+    }
+
+    /// `server` reported `problems` for `path` (relative to the worktree; an
+    /// empty list is the server saying the file is fine). Then the drawer asks
+    /// what the new store means for it (spec 4.4): on Problems the user is
+    /// looking, so this is a look; closed, an error they have not seen opens it
+    /// on Problems, and nothing else moves the focus; on Search nothing.
+    pub fn publish(
+        &mut self,
+        server: &ServerKey,
+        path: &Path,
+        problems: Vec<StoredProblem>,
+        cx: &mut Context<Self>,
+    ) {
+        self.problems.publish(server, path, problems);
+        if self.open && self.tab == DrawerTab::Problems {
+            if self.look() {
+                cx.emit(WorktreeDrawerEvent::Changed);
+            }
+        } else if !self.open && self.alarm.calls_for_drawer(&self.problems.error_counts()) {
+            self.open = true;
+            self.tab = DrawerTab::Problems;
+            self.look();
+            self.changed(cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    /// `server` ended: everything it reported goes. It is never a look, and
+    /// nothing it leaves can call for the drawer.
+    pub fn server_gone(&mut self, server: &ServerKey, cx: &mut Context<Self>) {
+        self.problems.server_gone(server);
+        cx.notify();
+    }
+
+    /// The programs of the servers running in this worktree, for the line
+    /// Problems says when it has nothing to list.
+    pub fn set_running_servers(&mut self, names: Vec<String>, cx: &mut Context<Self>) {
+        if self.running_servers != names {
+            self.running_servers = names;
+            cx.notify();
+        }
+    }
+
+    /// The file of the tab that draws the drawer now (`None`: a tab with no
+    /// file of this worktree). Drawn on the way, so it does not ask for a frame.
+    pub fn set_current_file(&mut self, file: Option<&Path>) {
+        self.current_file = file
+            .and_then(|file| file.strip_prefix(&self.worktree).ok())
+            .map(Path::to_path_buf);
+    }
+
+    /// The severities Problems lists.
+    pub(super) fn set_shown(&mut self, shown: Vec<Severity>, cx: &mut Context<Self>) {
+        self.shown = shown;
+        cx.notify();
+    }
+
+    /// The totals Problems' title and the debug state show.
+    pub fn problem_counts(&self) -> ProblemCounts {
+        self.problems.counts()
+    }
+
+    /// What Problems says when it has nothing to list.
+    pub fn problems_note(&self) -> String {
+        problems_view::empty_note(&self.running_servers)
+    }
+
+    fn listed_files(&self) -> Vec<(PathBuf, Vec<StoredProblem>)> {
+        self.problems.files(self.current_file.as_deref())
+    }
+
+    /// The files Problems draws, in the order it draws them, relative to the
+    /// worktree with `/` between the parts.
+    pub fn problem_files(&self) -> Vec<String> {
+        let mut files: Vec<String> = Vec::new();
+        for row in problems_view::drawn_rows(&self.listed_files(), &self.shown) {
+            let path = problems_view::display_path(&row.path);
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+        files
+    }
+
+    /// A row of Problems was chosen: tells the owner to open its file there.
+    /// `line` and `column` are the protocol's (0-based, UTF-16).
+    pub(super) fn open_problem(
+        &mut self,
+        path: &str,
+        line: usize,
+        column: usize,
+        cx: &mut Context<Self>,
+    ) {
+        cx.emit(WorktreeDrawerEvent::OpenProblem {
+            path: self.worktree.join(path),
+            line: u32::try_from(line).unwrap_or(u32::MAX),
+            column: u32::try_from(column).unwrap_or(u32::MAX),
+        });
+    }
+
+    /// Chooses the `index`-th row Problems draws, as a press on it does. False
+    /// when there is no such row.
+    pub fn open_drawn_problem(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
+        let rows = problems_view::drawn_rows(&self.listed_files(), &self.shown);
+        let Some(row) = rows.get(index) else {
+            return false;
+        };
+        let path = problems_view::display_path(&row.path);
+        let (line, column) = (row.problem.line as usize, row.problem.column as usize);
+        self.open_problem(&path, line, column, cx);
+        true
     }
 
     /// Keeps `px` as the height, between the floor and `tab_height` less the
@@ -337,15 +491,24 @@ impl Render for WorktreeDrawer {
                     move |_, cx| entity.update(cx, |drawer, cx| drawer.close(cx)),
                 ))
             });
-        // Empty until Problems and Search draw into it.
+        // Problems draws into it; Search is empty until it does.
         let panel = div()
             .id("file-drawer-panel")
             .debug_selector(|| "file-drawer-panel".to_owned())
             .flex_1()
             .min_h(px(0.0))
             .w_full()
-            .overflow_hidden()
             .bg(theme.ely.bg);
+        let panel = match self.tab {
+            DrawerTab::Problems if open => panel.overflow_y_scroll().child(problems_view::render(
+                &self.listed_files(),
+                &self.shown,
+                &self.problems_note(),
+                entity.clone(),
+                &theme,
+            )),
+            _ => panel.overflow_hidden(),
+        };
         let edge = div()
             .id("file-drawer-edge")
             .debug_selector(|| "file-drawer-edge".to_owned())

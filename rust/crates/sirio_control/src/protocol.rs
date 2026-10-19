@@ -962,6 +962,15 @@ pub mod request {
         request("surface.editor.drawer", params)
     }
 
+    /// Chooses the `index`-th row of the drawer's Problems, in the order it is
+    /// drawn, as a press on it does.
+    pub fn editor_problem(index: usize) -> ControlRequest {
+        request(
+            "surface.editor.problem",
+            BTreeMap::from([("index".to_string(), index.to_string())]),
+        )
+    }
+
     pub fn editor_crumb(index: usize) -> ControlRequest {
         request(
             "surface.editor.crumb",

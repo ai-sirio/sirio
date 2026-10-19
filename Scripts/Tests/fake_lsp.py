@@ -33,6 +33,17 @@ the editor's pointer features ask:
   are symbols of the same shape, answered nested as `DocumentSymbol` has them. A
   symbol whose needle is not in the text is left out with its children. `kind`
   is the protocol's number (default 12, a function; a method is 6).
+- ANSWERS may hold `publish`: `{"<path relative to the root>": [FINDING, ...]}`
+  with a FINDING of `{needle, severity, message, source}`. The server then reports
+  those files without being asked, as a language server reports its whole project:
+  on `initialized` and again whenever ANSWERS changes (a polling thread looks every
+  200 ms), one `publishDiagnostics` per file under the root `initialize` named
+  (`rootUri`), the needles found in the file on disk, or in the document the client
+  opened when it did. A file that left the map is published empty, once; so is
+  every open document, as `diagnostics_file` and `publish` now say. When `publish`
+  goes away (the answers are put back) the thread publishes everything once more
+  and rests, so a test that never sets it sees none of this. `"exit": true` ends
+  the process at the next look, as a crashed server ends.
 - Any other request is answered with null; notifications are ignored.
 
 ANSWERS is read again for every message, so a test may rewrite it between
@@ -47,8 +58,12 @@ Python standard library only; run it as `python3 -I`.
 """
 
 import json
+import os
 import sys
+import threading
+import time
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 
 def utf16_position(text, index):
@@ -77,10 +92,17 @@ def main():
     documents = {}
     incoming = sys.stdin.buffer
     outgoing = sys.stdout.buffer
+    # One lock for every write to stdout and every read of `documents`: the main
+    # loop and the polling thread share both. Re-entrant, so the thread may hold it
+    # across the few sends of one round.
+    lock = threading.RLock()
+    root = {"path": None}
+    published = set()
 
     def log_line(text):
-        log.write(text + "\n")
-        log.flush()
+        with lock:
+            log.write(text + "\n")
+            log.flush()
 
     def answers():
         with open(answers_path, "rb") as handle:
@@ -88,8 +110,9 @@ def main():
 
     def send(message):
         body = json.dumps(message).encode("utf-8")
-        outgoing.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
-        outgoing.flush()
+        with lock:
+            outgoing.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+            outgoing.flush()
 
     def read_message():
         # Headers, a blank line, then Content-Length bytes. A malformed header is
@@ -122,27 +145,44 @@ def main():
                     continue
             log_line("skipped a message without a usable Content-Length")
 
-    def diagnostics_for(uri, text, config):
-        if uri.rsplit("/", 1)[-1] != config.get("diagnostics_file", ""):
-            return []
-        found = []
-        for finding in config.get("diagnostics", []):
-            found_range = range_of(text, finding["needle"])
-            if found_range is None:
-                continue
-            found.append({
-                "range": found_range,
-                "severity": finding["severity"],
-                "message": finding["message"],
-                "source": "fake-lsp",
-            })
-        return found
+    def relative_path(uri):
+        # The file's path under the root `initialize` named, or None outside it.
+        if root["path"] is None:
+            return None
+        path = unquote(urlparse(uri).path)
+        try:
+            return Path(path).relative_to(root["path"]).as_posix()
+        except ValueError:
+            return None
 
-    def publish(uri, text):
+    def finding_of(finding, text):
+        found_range = range_of(text, finding["needle"])
+        if found_range is None:
+            return None
+        return {
+            "range": found_range,
+            "severity": finding["severity"],
+            "message": finding["message"],
+            "source": finding.get("source", "fake-lsp"),
+        }
+
+    def diagnostics_for(uri, text, config):
+        found = []
+        if uri.rsplit("/", 1)[-1] == config.get("diagnostics_file", ""):
+            found = [finding_of(f, text) for f in config.get("diagnostics", [])]
+        relative = relative_path(uri)
+        if relative is not None:
+            found += [finding_of(f, text) for f in config.get("publish", {}).get(relative, [])]
+        return [finding for finding in found if finding is not None]
+
+    def publish(uri, text, config=None):
         send({
             "jsonrpc": "2.0",
             "method": "textDocument/publishDiagnostics",
-            "params": {"uri": uri, "diagnostics": diagnostics_for(uri, text, answers())},
+            "params": {
+                "uri": uri,
+                "diagnostics": diagnostics_for(uri, text, config or answers()),
+            },
         })
 
     def symbol_of(entry, text):
@@ -177,6 +217,67 @@ def main():
             return None
         return {"uri": Path(target["path"]).as_uri(), "range": found_range}
 
+    def text_of(uri):
+        # The document as the client holds it, else the file on disk, else None.
+        with lock:
+            if uri in documents:
+                return documents[uri]
+        try:
+            with open(unquote(urlparse(uri).path), "rb") as handle:
+                return handle.read().decode("utf-8")
+        except (OSError, ValueError):
+            return None
+
+    def publish_all(config):
+        # Every file the map lists, every file it listed before and every open
+        # document, once each; a file with no findings now is published empty.
+        # The files that are listed are remembered, so leaving the map clears them.
+        with lock:
+            uris = set(published) | set(documents)
+            if root["path"] is not None:
+                for relative in config.get("publish", {}):
+                    uris.add((Path(root["path"]) / relative).as_uri())
+            published.clear()
+            for relative in config.get("publish", {}):
+                if root["path"] is not None:
+                    published.add((Path(root["path"]) / relative).as_uri())
+            for uri in sorted(uris):
+                text = text_of(uri)
+                if text is None:
+                    continue
+                publish(uri, text, config)
+
+    def stamp_of_answers():
+        try:
+            status = os.stat(answers_path)
+            return (status.st_mtime_ns, status.st_size)
+        except OSError:
+            return None
+
+    def watch(seen, was_active):
+        # Looks at ANSWERS every 200 ms against the stamp `seen` (taken before the
+        # answers were read for the first publish); a change republishes. Reads that
+        # fail (the file is being replaced) are tried again next time. The thread is
+        # a daemon: it dies with the process.
+        while True:
+            time.sleep(0.2)
+            try:
+                status = os.stat(answers_path)
+                stamp = (status.st_mtime_ns, status.st_size)
+                if stamp == seen:
+                    continue
+                config = answers()
+            except (OSError, ValueError):
+                continue
+            seen = stamp
+            if config.get("exit"):
+                log_line("exit: the answers say to end")
+                os._exit(0)
+            active = "publish" in config
+            if active or was_active:
+                publish_all(config)
+            was_active = active
+
     while True:
         message = read_message()
         if message is None:
@@ -189,6 +290,8 @@ def main():
             log_line(f"{'request' if is_request else 'notification'} {method}")
         params = message.get("params") or {}
         if method == "initialize":
+            root_uri = params.get("rootUri") or ""
+            root["path"] = unquote(urlparse(root_uri).path) if root_uri else None
             send({
                 "jsonrpc": "2.0",
                 "id": message["id"],
@@ -202,21 +305,34 @@ def main():
                     "serverInfo": {"name": "fake-lsp"},
                 },
             })
+        elif method == "initialized":
+            stamp = stamp_of_answers()
+            config = answers()
+            # A server started while `publish` is there has to publish again when
+            # it goes (a test puts the answers back), as one that saw it come does.
+            threading.Thread(
+                target=watch, args=(stamp, "publish" in config), daemon=True
+            ).start()
+            if "publish" in config:
+                publish_all(config)
         elif method == "shutdown":
             send({"jsonrpc": "2.0", "id": message["id"], "result": None})
         elif method == "exit":
             break
         elif method == "textDocument/didOpen":
             uri = params["textDocument"]["uri"]
-            documents[uri] = params["textDocument"]["text"]
+            with lock:
+                documents[uri] = params["textDocument"]["text"]
             publish(uri, documents[uri])
         elif method == "textDocument/didChange":
             uri = params["textDocument"]["uri"]
-            documents[uri] = params["contentChanges"][-1]["text"]
+            with lock:
+                documents[uri] = params["contentChanges"][-1]["text"]
             if answers().get("publish_on_change", True):
                 publish(uri, documents[uri])
         elif method == "textDocument/didClose":
-            documents.pop(params["textDocument"]["uri"], None)
+            with lock:
+                documents.pop(params["textDocument"]["uri"], None)
         elif method == "textDocument/hover":
             text = answers().get("hover")
             result = None

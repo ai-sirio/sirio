@@ -7,6 +7,7 @@
 
 mod alarm;
 mod problems;
+mod problems_view;
 mod view;
 
 use std::collections::BTreeMap;
