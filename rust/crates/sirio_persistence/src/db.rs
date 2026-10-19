@@ -20,7 +20,8 @@ use crate::error::PersistenceError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChangeRequestLinkRecord,
-    ChatSessionSummary, EditorCursorShape, EditorDrawerRecord, EditorLineNumbers, HandoffChoiceRecord, ChatTranscript,
+    ChatSessionSummary, EditorCursorShape, EditorDrawerRecord, EditorLineNumbers,
+    HandoffChoiceRecord, ChatTranscript,
     ChatTurn, ClosedChatSummary, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
     SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
 };

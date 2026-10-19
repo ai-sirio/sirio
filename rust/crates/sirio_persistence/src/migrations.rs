@@ -1019,6 +1019,9 @@ mod tests {
         );
     }
 
+    /// Fails if a saved drawer reads back different (height's `REAL` losing an
+    /// f32, `seen_errors` altered), if another worktree's row answers, or if a
+    /// second save inserts or is ignored instead of replacing the first.
     #[test]
     fn v24_round_trips_an_editor_drawer_and_upserts() {
         let db = AppDatabase::in_memory().expect("open");
