@@ -221,6 +221,15 @@ the ports below change the files they name.
 
 Vendored files:
 
+- `src/editor/{problems,search,filters}.rs` (editor panels, project 2):
+  verbatim from `e17e31a6`, with their inline tests (`files_with_worse_problems_lead_and_filters_hide`,
+  `globs_take_includes_then_drop_excludes` and the three of `search.rs`). They
+  need nothing the crate lacked, so no closure file was added. `src/editor/
+  console.rs` is deliberately not vendored: the programme dropped the Output
+  panel. `mod.rs` re-exports `Problem`, `ProblemsPanel`, `FileHits`, `Hit`,
+  `ReferencesPanel`, `SearchPanel`, `SearchResultItem`, `SearchFilters` and
+  `passes`. The `tests/stale.rs` test `a_glob_too_big_for_a_regex_matches_nothing`
+  (see the `b29d66c` port) stays dropped: `tests/stale.rs` is not changed by this vendoring.
 - `src/editor/{buffer,cursor,edit,keys,moves,line,row,view,layout,gutter,decor,syntax,ime,find,status,state}.rs`:
   verbatim, except the local changes listed below, the ports in "Ports from
   upstream `main`" (which change `buffer`, `edit`, `ime`, `line`, `moves`,
@@ -231,9 +240,10 @@ Vendored files:
   as upstream. Nothing was removed: none of its 15 tests names a module this
   crate does not declare.
 - `src/editor/mod.rs`: local. It declares only the files above. Upstream's
-  `mod.rs` also declares `chat`, `console`, `extensions`, `filters`, `hints`,
-  `hover`, `keybindings`, `preview`, `problems`, `refactor`, `search`,
-  `settings`, `symbols`, `tasks` and `welcome`, all excluded, and their
+  `mod.rs` also declares `chat`, `console`, `extensions`, `hints`,
+  `hover`, `keybindings`, `preview`, `refactor`,
+  `settings`, `symbols`, `tasks` and `welcome`, all excluded (`problems`,
+  `search` and `filters` now come in, see the first entry above), and their
   re-exports with them. `anchors` and `measure` arrive from `main` in Task 1b.
   Task 1c adds `pub use keys::SingleCursor;` and deletes two dead re-exports;
   see "Keys and hosting hooks".
