@@ -8,6 +8,7 @@
 mod alarm;
 mod problems;
 mod problems_view;
+mod search_engine;
 mod view;
 
 use std::collections::BTreeMap;
@@ -15,6 +16,9 @@ use std::path::PathBuf;
 
 pub use alarm::ErrorAlarm;
 pub use problems::{ProblemCounts, ProblemStore, StoredProblem};
+pub use search_engine::{
+    FileResult, FoundHit, SearchOutcome, SearchQuery, Skip, hits_in, replace_in, search_worktree,
+};
 pub use view::{DrawerTab, WorktreeDrawer, WorktreeDrawerEvent};
 
 /// A language server's identity, as `LspSupervisor` keys it: the project root

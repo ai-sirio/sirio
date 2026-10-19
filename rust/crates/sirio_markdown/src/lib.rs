@@ -63,7 +63,7 @@ pub(crate) fn scratch_dir(prefix: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()))
 }
 
-pub use document::{DocumentChange, DocumentError, MarkdownDocument};
+pub use document::{DocumentChange, DocumentError, MarkdownDocument, write_atomically};
 pub use editing::{EditedText, SelectionRange, prefix_selected_lines, wrap_selection};
 pub use file_events::{FileEventKind, FileSystemEvent, FileSystemEventMonitor};
 pub use html::expand_html;

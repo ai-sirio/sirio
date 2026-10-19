@@ -48,6 +48,7 @@ mod fetch;
 mod git;
 mod graph;
 mod ignored;
+mod listed;
 mod log;
 mod range;
 mod remote;
@@ -76,6 +77,7 @@ pub use fetch::{
 pub use git::{GitCancellationToken, GitCommandResult, GitRunner, run_streaming};
 pub use graph::{GraphRow, LayoutChunk, LayoutCursor, extend_layout, layout};
 pub use ignored::{IgnoredPaths, ignored_paths, parse_ignored};
+pub use listed::listed_files;
 pub use log::{CommitRecord, GitLog, LogFilter, looks_like_hash, parse_log};
 pub use range::{
     RangeFile, is_commit_id, range_file_diff, range_files, range_stats, show_blob,
