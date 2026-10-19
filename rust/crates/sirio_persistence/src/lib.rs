@@ -60,7 +60,7 @@ pub use error::PersistenceError;
 pub use migrations::{CURRENT_SCHEMA_VERSION, migrate_up_to};
 pub use model::{
     AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChangeRequestLinkRecord, ChatEntry,
-    HandoffChoiceRecord,
+    EditorDrawerRecord, HandoffChoiceRecord,
     ChatPermissionOption,
     ChatPermissionOutcome, ChatPlanEntry, ChatSessionSummary, ChatToolLocation, ChatTranscript,
     ChatTurn, ClosedChatSummary, EditorCursorShape, EditorLineNumbers, MAX_CHAT_TRANSCRIPT_BYTES,
