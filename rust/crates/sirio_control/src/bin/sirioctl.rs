@@ -192,7 +192,7 @@ fn usage() {
          \x20 surface editor find-close         (debug builds) close find\n\
          \x20 surface editor drawer --toggle|--close|--show=problems|search|--height=N  (debug builds) the file tab's drawer; answers drawer_open, drawer_tab, drawer_height\n\
          \x20 surface editor problem --open=N   (debug builds) choose the N-th row of the drawer's Problems, in the order drawn: its file opens at the problem; answers the editor state\n\
-         \x20 surface editor search [--query=T] [--replace=T] [--include=G] [--exclude=G] [--case[=bool]] [--word[=bool]] [--regex[=bool]] [--open=N] [--refresh] [--wait]  (debug builds) the drawer's Search: set what is named (the drawer opens on Search), run it, choose the N-th drawn line (from 0), wait for the run to end; answers the editor state, whose search_* fields are the results\n\
+         \x20 surface editor search [--query=T] [--replace=T] [--include=G] [--exclude=G] [--case[=bool]] [--word[=bool]] [--regex[=bool]] [--open=N] [--refresh] [--replace-all] [--wait]  (debug builds) the drawer's Search: set what is named (the drawer opens on Search), run it, choose the N-th drawn line (from 0), press Replace all when it is enabled, wait for the run or the replace to end; answers the editor state, whose search_* fields are the results\n\
          \x20 surface editor crumb --index=n   (debug builds) press the breadcrumb's part n (the path's parts first): a symbol reveals its line\n\
          \x20 surface editor save               (debug builds) save the active file tab\n\
          \x20 surface editor conflict --action=reload|keep  (debug builds) answer a disk conflict\n\
@@ -1276,11 +1276,14 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             if parsed.flag("refresh") {
                 sent.push(("refresh", "true".to_string()));
             }
+            if parsed.flag("replace-all") {
+                sent.push(("replace_all", "true".to_string()));
+            }
             let wait = parsed.flag("wait");
             if sent.is_empty() && !wait {
                 return Err(
                     "surface editor search needs --query=, --replace=, --include=, --exclude=, \
-                     --case, --word, --regex, --open=N, --refresh or --wait"
+                     --case, --word, --regex, --open=N, --refresh, --replace-all or --wait"
                         .to_string(),
                 );
             }

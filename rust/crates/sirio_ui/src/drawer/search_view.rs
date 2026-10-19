@@ -26,9 +26,20 @@
 //!   them (folded files, the row budget), so it opens a different hit than the
 //!   N-th drawn: both read `drawn_layout`;
 //! - an open dirty tab's text is read while its owner is being updated (a
-//!   double borrow): the buffers are asked for only inside the run's own task.
+//!   double borrow): the buffers are asked for only inside the run's own task;
+//! - Replace all is offered, or acts, on results that are not the whole answer
+//!   (a run still going, capped, cancelled, an invalid pattern) or with nothing
+//!   to put in their place (`replace_is_offered_only_for_a_settled_answer`);
+//! - the button promises what it will not do: a label that reads "Replace all"
+//!   at zero matches, or counts of thousands run together
+//!   (`the_replace_label_says_what_it_will_do`);
+//! - the report hides what Replace all left alone, or reads as a success when
+//!   every file was skipped (`the_report_names_every_skipped_file`);
+//! - the report is wiped by the run that follows the replace, so it is never
+//!   seen: only a query the user changes clears it;
+//! - a long totals line or report is cut off in a narrow drawer: both wrap.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -48,7 +59,9 @@ use gpui::{
 use sirio_theme::Theme;
 
 use super::problems_view::display_path;
-use super::search_engine::{FileResult, MATCH_CAP, SearchOutcome, SearchQuery, Skip};
+use super::search_engine::{
+    FileResult, MATCH_CAP, ReplaceReport, SearchOutcome, SearchQuery, Skip,
+};
 use super::{WorktreeDrawer, WorktreeDrawerEvent, search_engine};
 
 /// How long a query rests before it runs.
@@ -93,6 +106,10 @@ pub(super) struct WorktreeSearch {
     /// The pause and then the run, as one task: dropping it ends the pause.
     task: Option<Task<()>>,
     buffer_source: Option<BufferSource>,
+    /// What the last Replace all did, until the user changes the query.
+    replace_report: Option<String>,
+    /// Replace all, from the click to the search that follows it.
+    replace_task: Option<Task<()>>,
 }
 
 /// The files and lines the panel is given: which results are drawn, in order.
@@ -117,8 +134,14 @@ pub struct SearchFields {
     pub capped: bool,
     /// `path:line`, the line counted from 1 as the panel draws it.
     pub selected: String,
-    /// A query is waiting for its pause, or a run is going.
+    /// A query is waiting for its pause, a run is going, or Replace all is.
     pub running: bool,
+    /// Whether the Replace all button can be pressed.
+    pub replace_enabled: bool,
+    /// What the button says.
+    pub replace_label: String,
+    /// What the last Replace all did, empty before one.
+    pub replace_report: String,
 }
 
 /// What a debug call asks of Search; each field left `None` is left as it is.
@@ -135,9 +158,12 @@ pub struct SearchRequest {
     pub open: Option<usize>,
     /// Runs the current query again, with no pause.
     pub refresh: bool,
+    /// Presses Replace all, if it can be pressed.
+    pub replace_all: bool,
 }
 
-/// `12 345` as `12 345`: groups of three, a space between.
+/// `12345` as `12 345`: groups of three, a space between. Every count the
+/// drawer prints goes through here.
 fn thousands(count: usize) -> String {
     let digits = count.to_string();
     let mut out = String::new();
@@ -178,7 +204,11 @@ fn summary_line(totals: &Totals) -> String {
     if totals.running {
         line.push_str("Searching… ");
     }
-    line.push_str(&format!("{} results in {} files", totals.matches, totals.files));
+    line.push_str(&format!(
+        "{} results in {} files",
+        thousands(totals.matches),
+        thousands(totals.files)
+    ));
     let left_out: usize = totals.skipped.values().sum();
     if left_out > 0 {
         let reasons: Vec<&str> = totals
@@ -191,13 +221,77 @@ fn summary_line(totals: &Totals) -> String {
                 Skip::Unreadable => "unreadable",
             })
             .collect();
-        line.push_str(&format!(" · {left_out} skipped ({})", reasons.join("/")));
+        line.push_str(&format!(" · {} skipped ({})", thousands(left_out), reasons.join("/")));
     }
     if totals.capped {
         line.push_str(&format!(" · stopped at {} matches", thousands(MATCH_CAP)));
     }
     if totals.cancelled {
         line.push_str(" · cancelled");
+    }
+    line
+}
+
+/// What the Replace all button says: what it will do, or why it will not.
+fn replace_label(
+    matches: usize,
+    files: usize,
+    capped: bool,
+    replacing: bool,
+    settled: bool,
+) -> String {
+    if replacing {
+        "Replacing…".to_owned()
+    } else if capped {
+        "Too many results — narrow the search".to_owned()
+    } else if matches == 0 {
+        // Before a search has said anything the button has no zero to report.
+        if settled { "No matches to replace" } else { "Replace all" }.to_owned()
+    } else {
+        format!("Replace {} in {} files", thousands(matches), thousands(files))
+    }
+}
+
+/// What decides whether Replace all can be pressed.
+struct ReplaceInputs {
+    query_empty: bool,
+    with_empty: bool,
+    /// A search or a replace is going.
+    busy: bool,
+    capped: bool,
+    cancelled: bool,
+    errored: bool,
+    /// The results on screen were found by a query that ran.
+    ran: bool,
+    matches: usize,
+}
+
+impl ReplaceInputs {
+    /// Only a settled, whole answer with something to put in its place.
+    fn offered(&self) -> bool {
+        !self.query_empty
+            && !self.with_empty
+            && !self.busy
+            && !self.capped
+            && !self.cancelled
+            && !self.errored
+            && self.ran
+            && self.matches > 0
+    }
+}
+
+/// What Replace all answers with: `Replaced X in Y files.`, then each file it
+/// left alone with the reason.
+fn report_line(report: &ReplaceReport) -> String {
+    let mut line =
+        format!("Replaced {} in {} files.", thousands(report.replaced), thousands(report.files));
+    if !report.skipped.is_empty() {
+        let skipped: Vec<String> = report
+            .skipped
+            .iter()
+            .map(|(path, why)| format!("{} ({})", display_path(path), why.reason()))
+            .collect();
+        line.push_str(&format!(" Skipped: {}", skipped.join(", ")));
     }
     line
 }
@@ -251,6 +345,43 @@ impl WorktreeSearch {
 
     fn running(&self) -> bool {
         self.task.is_some()
+    }
+
+    /// A search is going or Replace all is.
+    fn busy(&self) -> bool {
+        self.running() || self.replace_task.is_some()
+    }
+
+    /// Whether Replace all can be pressed, and what the button says: the results
+    /// are a settled, whole answer to the query that found them, and there is
+    /// something to put in their place.
+    fn replace_state(&self, cx: &App) -> (bool, String) {
+        let (query_empty, with_empty) = match &self.fields {
+            Some(fields) => (
+                fields.query.read(cx).text().is_empty(),
+                fields.replace.read(cx).text().is_empty(),
+            ),
+            None => (true, true),
+        };
+        let label = replace_label(
+            self.matches(),
+            self.files.len(),
+            self.capped,
+            self.replace_task.is_some(),
+            !query_empty && !self.running(),
+        );
+        let offered = ReplaceInputs {
+            query_empty,
+            with_empty,
+            busy: self.busy(),
+            capped: self.capped,
+            cancelled: self.cancelled,
+            errored: self.error.is_some(),
+            ran: self.ran.is_some(),
+            matches: self.matches(),
+        }
+        .offered();
+        (offered, label)
     }
 
     fn summary(&self, empty_query: bool) -> String {
@@ -334,6 +465,7 @@ impl WorktreeSearch {
             .as_ref()
             .map(|fields| fields.query.read(cx).text().to_string())
             .unwrap_or_default();
+        let (replace_enabled, replace_label) = self.replace_state(cx);
         SearchFields {
             summary: self.summary(query.is_empty()),
             query,
@@ -352,7 +484,10 @@ impl WorktreeSearch {
                 .as_ref()
                 .map(|(path, line)| format!("{}:{}", display_path(path), line + 1))
                 .unwrap_or_default(),
-            running: self.running(),
+            running: self.busy(),
+            replace_enabled,
+            replace_label,
+            replace_report: self.replace_report.clone().unwrap_or_default(),
         }
     }
 }
@@ -404,9 +539,16 @@ impl WorktreeDrawer {
         });
     }
 
-    /// Asks for a run after `delay`: the run before it, pause or search, is
-    /// superseded. An empty query clears the results instead.
+    /// Asks for a run after `delay`, because the user changed what is searched:
+    /// the report of the last Replace all goes, being about the results before.
     pub(super) fn search_run(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        self.search.replace_report = None;
+        self.start_run(delay, cx);
+    }
+
+    /// Runs after `delay`: the run before it, pause or search, is superseded. An
+    /// empty query clears the results instead.
+    fn start_run(&mut self, delay: Duration, cx: &mut Context<Self>) {
         let search = &mut self.search;
         search.generation += 1;
         let generation = search.generation;
@@ -561,6 +703,9 @@ impl WorktreeDrawer {
         if changed || request.refresh {
             self.search_run(if request.refresh { Duration::ZERO } else { DEBOUNCE }, cx);
         }
+        if request.replace_all {
+            self.replace_all(cx);
+        }
         if let Some(index) = request.open {
             if !self.open_drawn_hit(index, cx) {
                 return Err(format!("Search draws no line {index}"));
@@ -573,6 +718,58 @@ impl WorktreeDrawer {
     /// What the debug state reads of this worktree's Search.
     pub fn search_fields(&self, cx: &App) -> SearchFields {
         self.search.fields(cx)
+    }
+
+    /// Replace all, as the button does: every file of the results, off the GPUI
+    /// thread, except the ones whose tab holds unsaved text. A press that finds
+    /// the button disabled does nothing.
+    ///
+    /// The files are read when the task runs, on a turn of its own (the tabs are
+    /// asked for then, never while another entity is being updated), and again
+    /// by `replace_files`; the stored positions are never used. A tab that becomes
+    /// dirty after that turn is not protected from the write: its `check_external`
+    /// meets the changed file as a conflict, and asks.
+    pub fn replace_all(&mut self, cx: &mut Context<Self>) {
+        if !self.search.replace_state(cx).0 {
+            return;
+        }
+        let Some(query) = self.search.ran.clone() else {
+            return;
+        };
+        let Some(with) = self.search.fields.as_ref().map(|fields| fields.replace.read(cx).text())
+        else {
+            return;
+        };
+        let with = with.to_string();
+        let files: Vec<PathBuf> = self.search.files.iter().map(|file| file.path.clone()).collect();
+        let worktree = self.worktree().to_path_buf();
+        self.search.replace_report = None;
+        self.search.replace_task = Some(cx.spawn(async move |drawer, cx| {
+            let Ok(dirty) = drawer.update(cx, |drawer, cx| {
+                let source = drawer.search.buffer_source.clone();
+                let buffers = source.map(|source| source(cx)).unwrap_or_default();
+                buffers.into_keys().collect::<HashSet<PathBuf>>()
+            }) else {
+                return;
+            };
+            let root = worktree.clone();
+            let report = cx
+                .background_spawn(async move {
+                    search_engine::replace_files(&root, &files, &query, &with, &dirty)
+                })
+                .await;
+            let _ = drawer.update(cx, |drawer, cx| {
+                drawer.search.replace_task = None;
+                drawer.search.replace_report = Some(report_line(&report));
+                // Open clean tabs adopt what was written now: macOS has no watcher.
+                let paths = report.written.iter().map(|path| worktree.join(path)).collect();
+                cx.emit(WorktreeDrawerEvent::Replaced { paths });
+                // The report is about the results before; the run that follows
+                // keeps it, since nothing the user changed started it.
+                drawer.start_run(Duration::ZERO, cx);
+            });
+        }));
+        cx.notify();
     }
 
     /// Chooses the `index`-th line Search draws, as a press on it does. False
@@ -643,18 +840,6 @@ impl WorktreeDrawer {
     }
 }
 
-/// What the replace button says. It is disabled in this build; the label is
-/// the one it will carry.
-fn replace_label(matches: usize, files: usize, capped: bool) -> String {
-    if capped {
-        "Too many results — narrow the search".to_owned()
-    } else if matches == 0 {
-        "Replace all".to_owned()
-    } else {
-        format!("Replace {matches} in {files} files")
-    }
-}
-
 /// The Search tab's contents, for a drawer whose fields exist.
 pub(super) fn render(
     drawer: &WorktreeDrawer,
@@ -706,7 +891,7 @@ pub(super) fn render(
         .child(toggle("regex", IconName::Regex, "Regular expression", options.regex, |next, on| {
             next.regex = on
         }));
-    // Disabled until Replace all exists: it only draws the label it will carry.
+    let (replace_enabled, replace_text) = search.replace_state(cx);
     let replace_row = div()
         .flex_1()
         .min_w(px(340.0))
@@ -716,13 +901,16 @@ pub(super) fn render(
         .child(field(&fields.replace))
         .child(
             div().flex_none().child(
-                Button::new(
-                    "search-replace-all",
-                    replace_label(search.matches(), search.files.len(), search.capped),
-                )
-                .variant(ButtonVariant::Ghost)
-                .size(ControlSize::Sm)
-                .disabled(true),
+                Button::new("search-replace-all", replace_text)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .disabled(!replace_enabled)
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            entity.update(cx, |drawer, cx| drawer.replace_all(cx));
+                        }
+                    }),
             ),
         );
     let refresh = {
@@ -751,13 +939,12 @@ pub(super) fn render(
         .gap(px(4.0))
         .child(refresh)
         .child(
+            // Wraps, so a narrow drawer shows the whole line and never cuts a word.
             div()
                 .id("search-summary")
                 .debug_selector(|| "search-summary".to_owned())
                 .flex_1()
                 .min_w(px(0.0))
-                .overflow_hidden()
-                .whitespace_nowrap()
                 .text_size(theme.typography.footnote)
                 .text_color(if danger { theme.ely.danger } else { theme.ely.fg_subtle })
                 .child(summary),
@@ -777,7 +964,17 @@ pub(super) fn render(
         .child(replace_row)
         .child(filter(&fields.include))
         .child(filter(&fields.exclude))
-        .child(totals);
+        .child(totals)
+        .children(search.replace_report.as_ref().map(|report| {
+            // A row of its own, as wide as the drawer, wrapping.
+            div()
+                .id("search-replace-report")
+                .debug_selector(|| "search-replace-report".to_owned())
+                .w_full()
+                .text_size(theme.typography.footnote)
+                .text_color(theme.ely.fg_subtle)
+                .child(report.clone())
+        }));
 
     let layout = drawn_layout(&search.files, &search.folded, DRAW_ROWS);
     let hits: Vec<FileHits> = layout
@@ -921,6 +1118,70 @@ mod tests {
         assert!(summary_line(&running).starts_with("Searching… "));
         let cancelled = Totals { cancelled: true, ..totals(&none) };
         assert!(summary_line(&cancelled).ends_with("cancelled"));
+    }
+
+    #[test]
+    fn replace_is_offered_only_for_a_settled_answer() {
+        let ready = || ReplaceInputs {
+            query_empty: false,
+            with_empty: false,
+            busy: false,
+            capped: false,
+            cancelled: false,
+            errored: false,
+            ran: true,
+            matches: 3,
+        };
+        assert!(ready().offered());
+        assert!(!ReplaceInputs { with_empty: true, ..ready() }.offered());
+        assert!(!ReplaceInputs { query_empty: true, ..ready() }.offered());
+        assert!(!ReplaceInputs { busy: true, ..ready() }.offered());
+        assert!(!ReplaceInputs { capped: true, ..ready() }.offered());
+        assert!(!ReplaceInputs { cancelled: true, ..ready() }.offered());
+        assert!(!ReplaceInputs { errored: true, ..ready() }.offered());
+        assert!(!ReplaceInputs { ran: false, ..ready() }.offered());
+        assert!(!ReplaceInputs { matches: 0, ..ready() }.offered());
+    }
+
+    #[test]
+    fn the_replace_label_says_what_it_will_do() {
+        assert_eq!(replace_label(9, 3, false, false, true), "Replace 9 in 3 files");
+        assert_eq!(
+            replace_label(20_000, 1_200, false, false, true),
+            "Replace 20 000 in 1 200 files"
+        );
+        assert_eq!(replace_label(0, 0, false, false, true), "No matches to replace");
+        assert_eq!(replace_label(0, 0, false, false, false), "Replace all");
+        assert_eq!(
+            replace_label(20_000, 4, true, false, true),
+            "Too many results — narrow the search"
+        );
+        assert_eq!(replace_label(9, 3, false, true, true), "Replacing…");
+    }
+
+    #[test]
+    fn the_report_names_every_skipped_file() {
+        use super::super::search_engine::ReplaceSkip;
+
+        let mut report = ReplaceReport { replaced: 1_234, files: 5, ..Default::default() };
+        assert_eq!(report_line(&report), "Replaced 1 234 in 5 files.");
+        report.skipped = vec![
+            (PathBuf::from("src/a.rs"), ReplaceSkip::Unsaved),
+            (PathBuf::from("b.rs"), ReplaceSkip::Symlink),
+            (PathBuf::from("c.rs"), ReplaceSkip::Missing),
+            (PathBuf::from("d.rs"), ReplaceSkip::Unreadable),
+        ];
+        assert_eq!(
+            report_line(&report),
+            "Replaced 1 234 in 5 files. Skipped: src/a.rs (unsaved changes), b.rs (symbolic \
+             link), c.rs (missing), d.rs (unreadable)"
+        );
+        // Everything skipped is not dressed as a success with a zero.
+        let none = ReplaceReport {
+            skipped: vec![(PathBuf::from("a.rs"), ReplaceSkip::Unsaved)],
+            ..Default::default()
+        };
+        assert!(report_line(&none).ends_with("Skipped: a.rs (unsaved changes)"));
     }
 
     #[test]

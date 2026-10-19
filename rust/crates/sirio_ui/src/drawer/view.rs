@@ -92,6 +92,9 @@ pub enum WorktreeDrawerEvent {
     /// if the text still has that match (`query` is what found it, `line` the
     /// hit's 0-based line, which is all that is shown when the text moved).
     OpenHit { path: PathBuf, range: Range<usize>, line: usize, query: SearchQuery },
+    /// Replace all wrote these files (absolute): an open tab on one of them
+    /// re-reads it now, where no watcher would say so.
+    Replaced { paths: Vec<PathBuf> },
 }
 
 /// The payload of a drag of the drawer's top edge.

@@ -2880,6 +2880,7 @@ impl ControlHandler for AppControlHandler {
                     regex: on("regex"),
                     open,
                     refresh: on("refresh").unwrap_or(false),
+                    replace_all: on("replace_all").unwrap_or(false),
                 };
                 self.queue_action(request, move |reply| ControlAction::EditorSearch {
                     request: search,
@@ -8030,6 +8031,7 @@ impl SirioWorkspace {
                     let target = workspace.hit_target(path, range, *line, query, cx);
                     workspace.open_reveal(path.clone(), target, cx);
                 }
+                WorktreeDrawerEvent::Replaced { paths } => workspace.adopt_replaced(paths, cx),
             }
         })
         .detach();
@@ -19170,8 +19172,10 @@ impl SirioWorkspace {
     /// drawn, `;` between them, relative to the worktree), `search_unsaved` (the
     /// files read from an unsaved tab), `search_summary` (the totals line as
     /// drawn), `search_capped` (0 or 1), `search_selected` (`path:line`, the line
-    /// from 1) and `search_running` (0 or 1: a query waits for its pause or a run
-    /// is going). The worktree's own path never appears in them.
+    /// from 1) and `search_running` (0 or 1: a query waits for its pause, a run is
+    /// going or Replace all is), `replace_enabled` (0 or 1), `replace_label` (the
+    /// button's words) and `replace_report` (what the last Replace all did, empty
+    /// before one). The worktree's own path never appears in them.
     fn search_fields(drawer: Option<&WorktreeDrawer>, cx: &App) -> Vec<(String, String)> {
         let found = drawer.map(|drawer| (drawer.search_fields(cx), drawer.worktree()));
         let (search, root) = match found {
@@ -19182,6 +19186,7 @@ impl SirioWorkspace {
             Some(root) => search.summary.replace(&display_absolute_path(root), "<worktree>"),
             None => search.summary,
         };
+        let report = search.replace_report.clone();
         let flag = |on: bool| u8::from(on).to_string();
         vec![
             ("search_query".to_string(), Self::escaped_field(&search.query)),
@@ -19193,6 +19198,9 @@ impl SirioWorkspace {
             ("search_capped".to_string(), flag(search.capped)),
             ("search_selected".to_string(), Self::escaped_field(&search.selected)),
             ("search_running".to_string(), flag(search.running)),
+            ("replace_enabled".to_string(), flag(search.replace_enabled)),
+            ("replace_label".to_string(), Self::escaped_field(&search.replace_label)),
+            ("replace_report".to_string(), Self::escaped_field(&report)),
         ]
     }
 
@@ -19273,6 +19281,26 @@ impl SirioWorkspace {
             }
         }
         buffers
+    }
+
+    /// Replace all wrote `paths`: every open tab on one of them reads the file
+    /// again now. Where a watcher runs it would say so, but macOS has none, and a
+    /// clean tab left showing the old text would take the next save for the truth.
+    /// A tab with unsaved text meets the change as a conflict, as any other
+    /// external write.
+    fn adopt_replaced(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let views: Vec<Entity<FileView>> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| Self::open_file_views(std::slice::from_ref(tab), cx))
+            .filter(|(open, _)| paths.iter().any(|path| paths_name_the_same_document(path, open)))
+            .map(|(_, view)| view)
+            .collect();
+        for view in views {
+            view.update(cx, |view, cx| {
+                view.check_external(cx);
+            });
+        }
     }
 
     /// `surface.editor.search`: the active file tab's drawer is put on Search and

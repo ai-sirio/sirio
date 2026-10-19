@@ -150,6 +150,15 @@ set -eEuo pipefail
 #   search_stale      a hit opened after its file changed selects the match as the text reads now
 #                     where it still starts, and otherwise shows only its line (buffer and disk)
 #   search_cap        more than 20 000 matches stop at 20 000 and the summary says so
+#   replace_mixed     Replace all over a worktree: a.rs open and dirty, b.rs open and clean (caret kept),
+#                     c.rs closed, d.rs rewritten after the search so its match moved, run.sh (0755), a
+#                     file turned into a symlink after the search and its target. The dirty file is
+#                     left alone and named, the symlink named and kept, every other file replaced at
+#                     its current place, the open clean tab shows the new text at once and the search
+#                     runs again; captured
+#   replace_crlf      a CRLF file and a file of mixed line endings keep every ending outside the
+#                     replaced span, a multi-line regex span included
+#   replace_capped    over 20 000 matches the button is disabled and says why
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
 #                     stickyScroll, lineNumbers, cursorShape, and the ruler at
@@ -4027,6 +4036,186 @@ PY
   search_done
 }
 
+# ---------------------------------------------------------------- replace
+
+# Replace all (editor panels, Task 8). Every scenario's fixtures are its own, in a
+# directory of the run's repository that the include glob names, with needles no
+# other scenario uses.
+
+scenario_replace_mixed() {
+  local dir="$WT/replace-mixed" needle=repl_needle_62 done=repl_done_62 caret=14
+  local expected
+  search_reset
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  python3 - "$dir" <<'PY'
+import os, sys
+root = sys.argv[1]
+def write(name, text, mode=None):
+    path = os.path.join(root, name)
+    with open(path, "wb") as handle:
+        handle.write(text.encode("utf-8"))
+    if mode:
+        os.chmod(path, mode)
+write("a.rs", "fn a() { repl_needle_62(); }\n")
+write("b.rs", "fn first() {}\nfn second() {}\nfn b() { repl_needle_62(); }\n")
+write("c.rs", "fn c() { repl_needle_62(); repl_needle_62(); }\n")
+write("d.rs", "fn d() { repl_needle_62(); }\n")
+write("run.sh", "#!/bin/sh\necho repl_needle_62\n", 0o755)
+write("target.rs", "fn t() { repl_needle_62(); }\n")
+write("link.rs", "fn l() { repl_needle_62(); }\n")
+PY
+  cp "$dir/a.rs" "$RUN_DIR/replace-a-0.rs"
+  # a.rs is open with an unsaved edit; b.rs is open and clean, its caret at line 2.
+  open_file "$dir/a.rs"
+  expect_state state loaded
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor type --text="// edit " >/dev/null
+  expect_state dirty true
+  open_file "$dir/b.rs"
+  expect_state state loaded
+  ctl surface editor select --ranges="$caret..$caret" >/dev/null
+  expect_state selections "$caret..$caret"
+  ctl surface editor drawer --show=search >/dev/null
+  ctl surface editor search --query=$needle --include='replace-mixed/**' >/dev/null
+  search_wait
+  expect_state search_results 8
+  expect_state search_files 7
+  expect_state search_unsaved replace-mixed/a.rs
+  # Nothing to replace with yet: the button says what it will do and is off.
+  expect_state replace_label "Replace 8 in 7 files"
+  expect_state replace_enabled 0
+  ctl surface editor search --replace=$done >/dev/null
+  expect_state replace_enabled 1
+  # After the search: d.rs moves its needle on disk; link.rs becomes a symlink to
+  # target.rs. Replace all reads each file when it is pressed, never the results.
+  printf '// moved\nfn d() { repl_needle_62(); }\n' >"$dir/d.rs"
+  rm "$dir/link.rs"
+  ln -s target.rs "$dir/link.rs"
+  cp "$dir/b.rs" "$RUN_DIR/replace-b-0.rs"
+  python3 "$TOOLS" sub "$RUN_DIR/replace-b-0.rs" "$RUN_DIR/replace-b-1.rs" $needle $done 0 0
+  ctl surface editor search --replace-all >/dev/null
+  search_wait
+  expect_state_has replace_report "Replaced 6 in 5 files."
+  expect_state_has replace_report "replace-mixed/a.rs (unsaved changes)"
+  expect_state_has replace_report "replace-mixed/link.rs (symbolic link)"
+  # The disk: the unsaved file untouched, the rest replaced where they are now.
+  python3 "$TOOLS" same-bytes "$dir/a.rs" "$RUN_DIR/replace-a-0.rs" \
+    || fail "$SCENARIO: a.rs, which had unsaved changes, was written"
+  python3 - "$dir" <<'PY' || fail "$SCENARIO: a replaced file is not what it should be"
+import os, stat, sys
+root = sys.argv[1]
+def read(name):
+    with open(os.path.join(root, name), "rb") as handle:
+        return handle.read().decode("utf-8")
+expect = {
+    "b.rs": "fn first() {}\nfn second() {}\nfn b() { repl_done_62(); }\n",
+    "c.rs": "fn c() { repl_done_62(); repl_done_62(); }\n",
+    "d.rs": "// moved\nfn d() { repl_done_62(); }\n",
+    "run.sh": "#!/bin/sh\necho repl_done_62\n",
+    "target.rs": "fn t() { repl_done_62(); }\n",
+}
+for name, text in expect.items():
+    got = read(name)
+    if got != text:
+        sys.exit(f"{name}: expected {text!r}, got {got!r}")
+mode = stat.S_IMODE(os.stat(os.path.join(root, "run.sh")).st_mode)
+if mode != 0o755:
+    sys.exit(f"run.sh lost its mode: {mode:o}")
+if not os.path.islink(os.path.join(root, "link.rs")):
+    sys.exit("link.rs is no longer a symlink")
+if os.readlink(os.path.join(root, "link.rs")) != "target.rs":
+    sys.exit("link.rs points elsewhere")
+PY
+  echo "OK: the files were replaced where they are now, run.sh kept 0755, link.rs stayed a symlink, a.rs was not written"
+  # b.rs is the active tab and clean: it shows the new text with no focus change,
+  # and its caret stays where it was.
+  expect_state path "$dir/b.rs"
+  expect_state text "$(escaped "$RUN_DIR/replace-b-1.rs")"
+  expect_state dirty false
+  expect_state selections "$caret..$caret"
+  echo "OK: the open clean tab adopted the replacement at once, its caret kept"
+  # The search ran again: only a.rs's buffer still holds the needle.
+  expect_state search_results 1
+  expect_state search_paths replace-mixed/a.rs
+  capture replace-report
+  # And a.rs's tab still holds its unsaved edit.
+  open_file "$dir/a.rs"
+  expect_state dirty true
+  { printf '// edit '; cat "$RUN_DIR/replace-a-0.rs"; } >"$RUN_DIR/replace-a-1.rs"
+  expect_state text "$(escaped "$RUN_DIR/replace-a-1.rs")"
+  echo "OK: the unsaved tab kept its text and its dirty mark"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state dirty false
+  search_done
+}
+
+scenario_replace_crlf() {
+  local dir="$WT/replace-crlf"
+  search_reset
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  python3 - "$dir" <<'PY'
+import os, sys
+root = sys.argv[1]
+def write(name, data):
+    with open(os.path.join(root, name), "wb") as handle:
+        handle.write(data)
+write("crlf.txt", b"head\r\nrcrlf_alpha\r\nrcrlf_beta\r\ntail\r\n")
+# Mostly CRLF, with one bare LF inside the span the regex will replace.
+write("mixed.txt", b"keep1\r\nrcrlf_a\r\nrcrlf_b\nrcrlf_c\r\nkeep2\nrcrlf_x\r\n")
+PY
+  ctl surface editor search --query='rcrlf_alpha\nrcrlf_beta|rcrlf_a\nrcrlf_b\nrcrlf_c|rcrlf_x' \
+    --regex=true --include='replace-crlf/**' --replace=ONE >/dev/null
+  search_wait
+  expect_state search_results 3
+  expect_state search_files 2
+  ctl surface editor search --replace-all >/dev/null
+  search_wait
+  expect_state_has replace_report "Replaced 3 in 2 files."
+  python3 - "$dir" <<'PY' || fail "$SCENARIO: a CRLF or mixed file did not round-trip"
+import os, sys
+root = sys.argv[1]
+def read(name):
+    with open(os.path.join(root, name), "rb") as handle:
+        return handle.read()
+want = {
+    "crlf.txt": b"head\r\nONE\r\ntail\r\n",
+    # Only the replaced spans change; the bare LF after keep2 and every CRLF stay.
+    "mixed.txt": b"keep1\r\nONE\r\nkeep2\nONE\r\n",
+}
+for name, data in want.items():
+    got = read(name)
+    if got != data:
+        sys.exit(f"{name}: expected {data!r}, got {got!r}")
+PY
+  echo "OK: a multi-line span over CRLF and LF breaks was replaced whole and every other ending is as it was"
+  search_done
+}
+
+scenario_replace_capped() {
+  search_reset
+  mkdir -p "$WT/replace-cap"
+  python3 - "$WT/replace-cap/many.txt" <<'PY'
+import sys
+with open(sys.argv[1], "w") as handle:
+    for n in range(25000):
+        handle.write(f"rcap_needle_91 {n}\n")
+PY
+  ctl surface editor search --query=rcap_needle_91 --include='replace-cap/**' --replace=x >/dev/null
+  search_wait
+  expect_state search_capped 1
+  expect_state replace_enabled 0
+  expect_state replace_label "Too many results — narrow the search"
+  ctl surface editor search --replace-all >/dev/null
+  search_wait
+  expect_state replace_report ""
+  grep -q rcap_needle_91 "$WT/replace-cap/many.txt" || fail "$SCENARIO: a capped Replace all wrote the file"
+  echo "OK: a capped search disables Replace all, says why, and a request for it writes nothing"
+  rm -rf "$WT/replace-cap"
+  search_done
+}
+
 # ---------------------------------------------------------------- run
 
 scenario load_states scenario_load_states
@@ -4071,6 +4260,9 @@ scenario search_open scenario_search_open
 scenario search_supersede scenario_search_supersede
 scenario search_stale scenario_search_stale
 scenario search_cap scenario_search_cap
+scenario replace_mixed scenario_replace_mixed
+scenario replace_crlf scenario_replace_crlf
+scenario replace_capped scenario_replace_capped
 scenario prefs scenario_prefs
 
 stop_hosts
