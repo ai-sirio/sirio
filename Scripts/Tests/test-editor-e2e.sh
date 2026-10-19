@@ -147,6 +147,8 @@ set -eEuo pipefail
 #   search_open       a result opens its file with the match selected; that tab's drawer shows the same
 #                     search with the result chosen, and the next result keeps the thread; captured
 #   search_supersede  a second query typed while a slow first run is under way: only the second's results stand
+#   search_stale      a hit opened after its file changed selects the match as the text reads now
+#                     where it still starts, and otherwise shows only its line (buffer and disk)
 #   search_cap        more than 20 000 matches stop at 20 000 and the summary says so
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
@@ -3950,6 +3952,58 @@ scenario_search_supersede() {
   search_done
 }
 
+# A hit is as old as its run. Opened after the file changed, it must select what
+# the query matches now where the match still starts, and otherwise show only its
+# line, never bytes that are something else.
+scenario_search_stale() {
+  local text
+  search_reset
+  printf 'alpha\nstale_needle_5 tail\n' >"$WT/search/stale.rs"
+  printf 'alpha\nstale_two_needle\n' >"$WT/search/stale2.rs"
+  open_file "$WT/search/stale.rs"
+  expect_state state loaded
+  ctl surface editor drawer --show=search >/dev/null
+  # (a) The needle moves: "pad " typed at the start of the buffer puts it at 10,
+  # where the run saw it at 6. Opened, the caret is at the start of its line
+  # (line 1 starts at byte 10: "pad alpha\n"), not on the 4 bytes of the old range.
+  ctl surface editor search --query=stale_needle_5 --regex=false >/dev/null
+  search_wait
+  expect_state search_results 1
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor type --text="pad " >/dev/null
+  expect_state dirty true
+  ctl surface editor search --open=0 >/dev/null
+  expect_state selections "10..10"
+  echo "OK: a hit whose text moved opened at its line, with no stale selection"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state dirty false
+  # (b) The match still starts where it did but is longer now: the selection is
+  # the match as it reads now (6..22), not the old 6..20.
+  ctl surface editor search --query='stale_n\w*' --regex=true >/dev/null
+  search_wait
+  expect_state search_results 1
+  ctl surface editor select --ranges=20..20 >/dev/null
+  ctl surface editor type --text=zz >/dev/null
+  expect_state dirty true
+  ctl surface editor search --open=0 >/dev/null
+  expect_state selections "6..22"
+  echo "OK: a hit whose match still starts there selects the match as it is now"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state dirty false
+  # (c) A file that is not open, changed on disk after the run: its line.
+  open_file "$WT/main.rs"
+  ctl surface editor search --query=stale_two_needle --regex=false >/dev/null
+  search_wait
+  expect_state search_paths search/stale2.rs
+  printf 'pad alpha\nstale_two_needle\n' >"$WT/search/stale2.rs"
+  ctl surface editor search --open=0 >/dev/null
+  expect_active_tab stale2.rs
+  expect_state state loaded
+  expect_state selections "10..10"
+  echo "OK: a hit in a file that changed on disk opened at its line"
+  search_done
+}
+
 scenario_search_cap() {
   search_reset
   mkdir -p "$WT/search-cap"
@@ -3968,6 +4022,7 @@ PY
   read_state
   [ "$(sfield state)" = loaded ] || fail "$SCENARIO: the editor stopped answering after the capped search"
   echo "OK: 25 000 matches stop at 20 000 and the summary says so"
+  capture search-cap
   rm -rf "$WT/search-cap"
   search_done
 }
@@ -4014,6 +4069,7 @@ scenario search_options scenario_search_options
 scenario search_dirty scenario_search_dirty
 scenario search_open scenario_search_open
 scenario search_supersede scenario_search_supersede
+scenario search_stale scenario_search_stale
 scenario search_cap scenario_search_cap
 scenario prefs scenario_prefs
 

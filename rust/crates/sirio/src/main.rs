@@ -45,7 +45,7 @@ use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent},
-    drawer::{DrawerTab, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent},
+    drawer::{DrawerTab, SearchQuery, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent, rematch},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
     editor::{Conflict, LineEnding},
     editor_prefs::EditorPrefs,
@@ -8026,8 +8026,9 @@ impl SirioWorkspace {
                         cx,
                     );
                 }
-                WorktreeDrawerEvent::OpenHit { path, range } => {
-                    workspace.open_reveal(path.clone(), RevealTarget::Range(range.clone()), cx);
+                WorktreeDrawerEvent::OpenHit { path, range, line, query } => {
+                    let target = workspace.hit_target(path, range, *line, query, cx);
+                    workspace.open_reveal(path.clone(), target, cx);
                 }
             }
         })
@@ -19219,6 +19220,35 @@ impl SirioWorkspace {
         self.control_editor_state(cx)
     }
 
+    /// Where opening a search hit puts the caret. The results are as old as their
+    /// run, so the hit is checked against the text the file has now (the open
+    /// tab's buffer, else the file read now): the match that starts where it
+    /// did is selected as it reads now; when none does the text has moved, and
+    /// only the hit's line is shown, never bytes that are something else.
+    fn hit_target(
+        &self,
+        path: &Path,
+        range: &std::ops::Range<usize>,
+        line: usize,
+        query: &SearchQuery,
+        cx: &App,
+    ) -> RevealTarget {
+        let open = Self::open_file_views(&self.tabs, cx)
+            .into_iter()
+            .find(|(open, _)| paths_name_the_same_document(open, path))
+            .and_then(|(_, view)| view.read(cx).buffer_text(cx));
+        let text = open.or_else(|| {
+            let fits = std::fs::metadata(path)
+                .is_ok_and(|meta| meta.len() <= sirio_ui::editor::MAX_FILE_BYTES);
+            let raw = fits.then(|| std::fs::read_to_string(path).ok()).flatten()?;
+            Some(LineEnding::normalize(&raw))
+        });
+        match text.and_then(|text| rematch(&text, query, range.start)) {
+            Some(current) => RevealTarget::Range(current),
+            None => RevealTarget::Line(line),
+        }
+    }
+
     /// The text of every open, dirty file tab of `worktree`, by path relative to
     /// it, as the tab holds it: what a search reads in place of the file on disk.
     fn dirty_buffers(&self, worktree: &Path, cx: &App) -> HashMap<PathBuf, String> {
@@ -19229,11 +19259,16 @@ impl SirioWorkspace {
                 if view.is_snapshot() || !view.is_dirty() {
                     continue;
                 }
-                let Ok(relative) = path.strip_prefix(worktree) else {
+                // The same matcher the server findings use: a tab reached through
+                // another spelling of the worktree is still its tab.
+                let Some((root, relative)) = self.worktree_and_relative(&path) else {
                     continue;
                 };
+                if !paths_name_the_same_document(&root, worktree) {
+                    continue;
+                }
                 if let Some(text) = view.buffer_text(cx) {
-                    buffers.insert(relative.to_path_buf(), text);
+                    buffers.insert(relative, text);
                 }
             }
         }

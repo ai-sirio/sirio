@@ -174,7 +174,7 @@ impl RenderOnce for SearchResultItem {
             .rounded(theme.radius(Radius::Sm))
             .cursor_pointer()
             .hover(|row| row.bg(colors.hover))
-            .when(self.selected, |row| row.bg(colors.hover))
+            .when(self.selected, |row| row.bg(colors.active))
             .text_size(theme.text_size(TextSize::Sm))
             .when_some(self.on_open, |row, open| {
                 row.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
@@ -210,6 +210,7 @@ impl RenderOnce for SearchResultItem {
 struct Drawing<'a> {
     folded: &'a [SharedString],
     unsaved: &'a [SharedString],
+    counts: &'a [(SharedString, usize)],
     selected: Option<&'a (SharedString, usize)>,
     replacement: Option<&'a SharedString>,
     on_open: Option<OnOpen>,
@@ -221,6 +222,7 @@ fn results(id: &ElementId, files: &[FileHits], drawing: Drawing, cx: &App) -> Ve
     let Drawing {
         folded,
         unsaved,
+        counts,
         selected,
         replacement,
         on_open,
@@ -237,6 +239,18 @@ fn results(id: &ElementId, files: &[FileHits], drawing: Drawing, cx: &App) -> Ve
         };
         let fold = on_fold.clone();
         let path = file.path.clone();
+        // A file given fewer lines than it matched on says so: `3 of 412`; a folded one
+        // shows its whole count.
+        let drawn = file.hits.len();
+        let full = counts
+            .iter()
+            .find(|(counted, _)| *counted == file.path)
+            .map_or(drawn, |(_, full)| *full);
+        let badge = if open && full > drawn {
+            format!("{drawn} of {full}")
+        } else {
+            full.max(drawn).to_string()
+        };
         out.push(
             div()
                 .id((id.clone(), format!("file-{file_ix}")))
@@ -276,7 +290,7 @@ fn results(id: &ElementId, files: &[FileHits], drawing: Drawing, cx: &App) -> Ve
                         .bg(colors.hover)
                         .text_size(theme.text_size(TextSize::Xs))
                         .text_color(colors.fg_muted)
-                        .child(file.hits.len().to_string()),
+                        .child(badge),
                 )
                 .when(unsaved.contains(&file.path), |row| {
                     row.child(
@@ -324,6 +338,7 @@ pub struct SearchPanel {
     files: Vec<FileHits>,
     folded: Vec<SharedString>,
     unsaved: Vec<SharedString>,
+    counts: Vec<(SharedString, usize)>,
     selected: Option<(SharedString, usize)>,
     summary: bool,
     replacement: Option<SharedString>,
@@ -338,6 +353,7 @@ impl SearchPanel {
             files: files.into_iter().collect(),
             folded: Vec::new(),
             unsaved: Vec::new(),
+            counts: Vec::new(),
             selected: None,
             summary: true,
             replacement: None,
@@ -349,6 +365,13 @@ impl SearchPanel {
     /// Paths whose files hold unsaved text: each is marked beside its count.
     pub fn unsaved(mut self, paths: impl IntoIterator<Item = impl Into<SharedString>>) -> Self {
         self.unsaved = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// How many lines each path matched on in all, for an owner that gives the
+    /// panel only some of them.
+    pub fn full_counts(mut self, counts: impl IntoIterator<Item = (SharedString, usize)>) -> Self {
+        self.counts = counts.into_iter().collect();
         self
     }
 
@@ -408,6 +431,7 @@ impl RenderOnce for SearchPanel {
             Drawing {
                 folded: &self.folded,
                 unsaved: &self.unsaved,
+                counts: &self.counts,
                 selected: self.selected.as_ref(),
                 replacement: self.replacement.as_ref(),
                 on_open: self.on_open,
@@ -476,6 +500,7 @@ impl RenderOnce for ReferencesPanel {
             Drawing {
                 folded: &[],
                 unsaved: &[],
+                counts: &[],
                 selected: None,
                 replacement: None,
                 on_open: self.on_open,

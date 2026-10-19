@@ -40,7 +40,7 @@ use sirio_theme::Theme;
 
 use super::problems_view::{self, ALL_SEVERITIES};
 use super::search_view::{self, WorktreeSearch};
-use super::{ErrorAlarm, ProblemCounts, ProblemStore, ServerKey, StoredProblem};
+use super::{ErrorAlarm, ProblemCounts, ProblemStore, SearchQuery, ServerKey, StoredProblem};
 use crate::ely_ui;
 
 /// The height a worktree's drawer opens to the first time.
@@ -88,8 +88,10 @@ pub enum WorktreeDrawerEvent {
     /// A row of Problems was chosen: open `path` there (0-based line, UTF-16
     /// column, as the protocol counts).
     OpenProblem { path: PathBuf, line: u32, column: u32 },
-    /// A hit of Search was chosen: open `path` with `range` (bytes) selected.
-    OpenHit { path: PathBuf, range: Range<usize> },
+    /// A hit of Search was chosen: open `path` with `range` (bytes) selected,
+    /// if the text still has that match (`query` is what found it, `line` the
+    /// hit's 0-based line, which is all that is shown when the text moved).
+    OpenHit { path: PathBuf, range: Range<usize>, line: usize, query: SearchQuery },
 }
 
 /// The payload of a drag of the drawer's top edge.
@@ -445,7 +447,8 @@ fn problems_label(counts: &ProblemCounts) -> String {
     let mut label = String::from("Problems");
     for (mark, count) in [("⊘", counts.errors), ("⚠", counts.warnings), ("ⓘ", counts.notes)] {
         if count > 0 {
-            label.push_str(&format!(" {mark} {count}"));
+            // U+FE0E asks for the text form of the mark, never a colour emoji.
+            label.push_str(&format!(" {mark}\u{FE0E} {count}"));
         }
     }
     label
@@ -619,7 +622,7 @@ mod tests {
     #[test]
     fn the_title_names_the_counts_that_are_not_zero() {
         let counts = ProblemCounts { errors: 3, warnings: 0, notes: 2 };
-        assert_eq!(problems_label(&counts), "Problems ⊘ 3 ⓘ 2");
+        assert_eq!(problems_label(&counts), "Problems ⊘\u{FE0E} 3 ⓘ\u{FE0E} 2");
         assert_eq!(problems_label(&ProblemCounts::default()), "Problems");
     }
 }

@@ -107,6 +107,13 @@ fn hits_found(lf_text: &str, finder: &Finder) -> Vec<FoundHit> {
     found
 }
 
+/// The match of `query` in `lf_text` that starts at `start`, as the text reads
+/// now: where a result found earlier still stands. `None` when the text moved
+/// on (or the query does not compile), and the caller must not select bytes.
+pub fn rematch(lf_text: &str, query: &SearchQuery, start: usize) -> Option<Range<usize>> {
+    compile(query).ok()?.find_all(lf_text).into_iter().find(|range| range.start == start)
+}
+
 /// `lf_text` with every match of `query` replaced by `with`, literally, and
 /// how many there were.
 pub fn replace_in(

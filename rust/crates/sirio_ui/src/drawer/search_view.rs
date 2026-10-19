@@ -84,6 +84,9 @@ pub(super) struct WorktreeSearch {
     unsaved: BTreeSet<PathBuf>,
     folded: Vec<PathBuf>,
     selected: Option<(PathBuf, usize)>,
+    /// What the results on screen were found with: a hit is re-checked against
+    /// it when it is opened.
+    ran: Option<SearchQuery>,
     /// The run asked for last. An answer of any other is stale.
     generation: u64,
     cancel: Option<Arc<AtomicBool>>,
@@ -422,6 +425,7 @@ impl WorktreeDrawer {
         let cancel = Arc::new(AtomicBool::new(false));
         search.cancel = Some(cancel.clone());
         let worktree = self.worktree().to_path_buf();
+        let ran = query.clone();
         self.search.task = Some(cx.spawn(async move |drawer, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
@@ -434,6 +438,7 @@ impl WorktreeDrawer {
                 let source = drawer.search.buffer_source.clone();
                 let buffers = source.map(|source| source(cx)).unwrap_or_default();
                 drawer.search.begin(buffers.keys().cloned().collect());
+                drawer.search.ran = Some(ran);
                 cx.notify();
                 Some(buffers)
             }) else {
@@ -588,9 +593,12 @@ impl WorktreeDrawer {
         cx: &mut Context<Self>,
     ) {
         self.search.selected = Some((path.clone(), line));
+        let query = self.search.ran.clone().unwrap_or_default();
         cx.emit(WorktreeDrawerEvent::OpenHit {
             path: self.worktree().join(&path),
             range,
+            line,
+            query,
         });
         cx.notify();
     }
@@ -790,8 +798,15 @@ pub(super) fn render(
         .iter()
         .map(|path| SharedString::from(display_path(path)))
         .collect();
+    // The badge of a file says how many lines matched in it, drawn or not.
+    let counts: Vec<(SharedString, usize)> = search
+        .files
+        .iter()
+        .map(|file| (SharedString::from(display_path(&file.path)), file.hits.len()))
+        .collect();
     let mut panel = SearchPanel::new("drawer-search", hits)
         .without_summary()
+        .full_counts(counts)
         .folded(folded)
         .unsaved(unsaved)
         .on_open({
