@@ -877,6 +877,17 @@ scenario_load_states() {
     "unreadable.txt|error|This file cannot be read (Permission denied (os error 13)): @WT@/unreadable.txt"
     "missing.rs|error|This file does not exist: @WT@/missing.rs"
   )
+  # The seed's precondition (see the setup's `editor_drawer` row): the fake server
+  # reports FAKE_ERROR for main.rs, the drawer holds it as seen and stays closed.
+  # When the app's seen-set row shape or its worktree key changes, the seed stops
+  # matching and the drawer opens here, over every scenario that follows.
+  ctl surface editor open --path="$WT/main.rs" >/dev/null
+  settle
+  expect_state problems 1/1/0
+  sleep 0.8
+  read_state
+  [ "$(sfield drawer_open)" = 0 ] \
+    || fail "$SCENARIO: the seeded editor_drawer row (worktree path, seen errors as [root, language, path, message, count]) no longer matches what the app persists: the drawer opened itself on main.rs's seen error. Update the seed in this script's setup."
   local row name want_state want_error
   for row in "${rows[@]}"; do
     IFS='|' read -r name want_state want_error <<<"$row"
@@ -3594,11 +3605,14 @@ scenario_problems_park() {
   park="$(printf '%s\n' "$listed" | awk -F'\t' '$3 == "park-problems" {print $4}' | head -n 1)"
   [ -n "$park" ] && [ -d "$park" ] || fail "$SCENARIO: the second worktree is not listed: $listed"
   ctl select-workspace --workspace "$WT" >/dev/null
-  open_file "$WT/main.rs"
+  # The file whose gutter must come back right is open before the worktree is parked.
+  open_file "$WT/src/lib.rs"
   expect_state state loaded
   problems_publish "{\"src/lib.rs\":[$park_error]}"
   expect_state drawer_open 1
   expect_state problems 1/0/0
+  # The gutter is drawn from the same store.
+  expect_state diagnostics 1
   ctl surface editor drawer --height=280 >/dev/null
   expect_state drawer_height 280
   ctl select-workspace --workspace "$park" >/dev/null
@@ -3612,15 +3626,19 @@ scenario_problems_park() {
   problems_publish "{\"src/lib.rs\":[$park_error,$(pf beta 2 'park: beta is odd')]}"
   sleep 1
   ctl select-workspace --workspace "$WT" >/dev/null
-  open_file "$WT/main.rs"
+  open_file "$WT/src/lib.rs"
   expect_state state loaded
-  expect_state path "$WT/main.rs"
+  expect_state path "$WT/src/lib.rs"
+  # The tab was made again on the way back, and the server holds its text as it
+  # was (nothing is sent again): its gutter is drawn from the store, with the
+  # warning that came while the worktree was parked.
+  expect_state diagnostics 2
   expect_state drawer_open 1
   expect_state drawer_tab problems
   expect_state drawer_height 280
   expect_state problems 1/1/0
   expect_state problem_files src/lib.rs
-  echo "OK: a worktree switched away and back keeps its drawer, its height and every problem, the one that came while it was parked included"
+  echo "OK: a worktree switched away and back keeps its drawer, its height and every problem, the one that came while it was parked included, in Problems and in the file's gutter"
   problems_done
   ctl close-workspace --workspace "$park" >/dev/null 2>&1 || true
   git -C "$WT" worktree remove --force "$park" >/dev/null 2>&1 || true

@@ -312,6 +312,12 @@ impl WorktreeDrawer {
         self.problems.counts()
     }
 
+    /// Every server's findings for `path` (relative to the worktree): what an
+    /// open file's gutter is drawn from, so it and Problems read one store.
+    pub fn problems_for(&self, path: &Path) -> Vec<StoredProblem> {
+        self.problems.for_path(path)
+    }
+
     /// What Problems says when it has nothing to list.
     pub fn problems_note(&self) -> String {
         problems_view::empty_note(&self.running_servers)

@@ -62,6 +62,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -271,12 +272,27 @@ def main():
                 continue
             seen = stamp
             if config.get("exit"):
-                log_line("exit: the answers say to end")
-                os._exit(0)
+                # Under the lock the main loop writes with, so no frame is cut in half.
+                with lock:
+                    log_line("exit: the answers say to end")
+                    os._exit(0)
             active = "publish" in config
             if active or was_active:
                 publish_all(config)
             was_active = active
+
+    def watch_loudly(*args):
+        # A thread that dies must not die quietly: the test would wait for a
+        # publish that never comes. It says so on stderr and in the log.
+        try:
+            watch(*args)
+        except BaseException:
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
+            try:
+                log_line("the watch thread died; no publish will follow")
+            except Exception:
+                pass
 
     while True:
         message = read_message()
@@ -311,7 +327,7 @@ def main():
             # A server started while `publish` is there has to publish again when
             # it goes (a test puts the answers back), as one that saw it come does.
             threading.Thread(
-                target=watch, args=(stamp, "publish" in config), daemon=True
+                target=watch_loudly, args=(stamp, "publish" in config), daemon=True
             ).start()
             if "publish" in config:
                 publish_all(config)

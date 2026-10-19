@@ -13,7 +13,9 @@
 //!   them with something else than ` · `, or says "no problems" with no server
 //!   at all, which is a different thing to say;
 //! - a path is drawn with the platform's separator, so Windows paths and the
-//!   debug state disagree with the panel's own grouping of file and folder.
+//!   debug state disagree with the panel's own grouping of file and folder; or
+//!   a backslash in a Unix file name is turned into a separator, so the row
+//!   opens a different file.
 
 use std::path::{Path, PathBuf};
 
@@ -47,9 +49,11 @@ fn weight(severity: Severity) -> u8 {
     }
 }
 
-/// A path as the panel and the debug state name it: `/` between its parts.
+/// A path as the panel and the debug state name it: `/` between its parts. Only
+/// Windows' separator is rewritten; a backslash in a Unix file name is part of it.
 pub(super) fn display_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let text = path.to_string_lossy();
+    if cfg!(windows) { text.replace('\\', "/") } else { text.into_owned() }
 }
 
 /// One row as drawn: its file and the finding.
@@ -175,6 +179,8 @@ mod tests {
         StoredProblem {
             line,
             column: 0,
+            end_line: line,
+            end_column: 0,
             severity,
             message: format!("m{line}"),
             source: None,
@@ -233,7 +239,10 @@ mod tests {
     }
 
     #[test]
-    fn a_path_is_drawn_with_forward_slashes() {
-        assert_eq!(display_path(Path::new("src\\lib.rs")), "src/lib.rs");
+    fn a_path_is_drawn_with_forward_slashes_and_a_unix_backslash_is_kept() {
+        assert_eq!(display_path(&Path::new("src").join("lib.rs")), "src/lib.rs");
+        if !cfg!(windows) {
+            assert_eq!(display_path(Path::new("a\\b.rs")), "a\\b.rs");
+        }
     }
 }

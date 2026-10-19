@@ -163,6 +163,8 @@ mod tests {
             .map(|(line, message)| StoredProblem {
                 line: line as u32,
                 column: 0,
+                end_line: line as u32,
+                end_column: 0,
                 severity: Severity::Error,
                 message: (*message).to_owned(),
                 source: None,

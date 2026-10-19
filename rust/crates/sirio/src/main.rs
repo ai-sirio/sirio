@@ -8044,6 +8044,7 @@ impl SirioWorkspace {
                     FileViewEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
                     // The one moment a freshly opened tab has text to describe.
                     FileViewEvent::Loaded(path) => {
+                        workspace.seed_diagnostics_from_store(path, &view, cx);
                         // A document the server already holds (a second view of
                         // it) is not sent again, and still wants its symbols.
                         if !workspace.sync_document_with_server(path, &view, cx) {
@@ -8445,14 +8446,45 @@ impl SirioWorkspace {
     /// a `String`, not a `PathBuf`; `workspace_rows()` is the control
     /// socket's wire encoding, not the live rows.
     fn worktree_root_for(&self, path: &Path) -> Option<PathBuf> {
+        self.worktree_roots()
+            .into_iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.as_os_str().len())
+    }
+
+    /// The root of every worktree the sidebar knows, as spelled there.
+    fn worktree_roots(&self) -> Vec<PathBuf> {
         self.control_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .workspaces
             .iter()
             .map(|workspace| PathBuf::from(&workspace.path))
-            .filter(|root| path.starts_with(root))
-            .max_by_key(|root| root.as_os_str().len())
+            .collect()
+    }
+
+    /// The worktree `path` lies in and `path` relative to it, matched as the
+    /// views match a document (`paths_name_the_same_document`): by spelling
+    /// first, then by what each names on disk, so a symlinked or differently
+    /// cased spelling of a worktree does not lose a server's findings. The root
+    /// is as the sidebar spells it. It touches the disk only when the spelling
+    /// matches no worktree, so it is for the rate of publishes, not of notifies.
+    fn worktree_and_relative(&self, path: &Path) -> Option<(PathBuf, PathBuf)> {
+        if let Some(root) = self.worktree_root_for(path)
+            && let Ok(relative) = path.strip_prefix(&root)
+        {
+            return Some((root.clone(), relative.to_path_buf()));
+        }
+        let canonical = path.canonicalize().ok()?;
+        self.worktree_roots()
+            .into_iter()
+            .filter_map(|root| root.canonicalize().ok().map(|named| (root, named)))
+            .filter(|(_, named)| canonical.starts_with(named))
+            .max_by_key(|(_, named)| named.as_os_str().len())
+            .and_then(|(root, named)| {
+                let relative = canonical.strip_prefix(&named).ok()?.to_path_buf();
+                Some((root, relative))
+            })
     }
 
     /// Chat-local edit summaries emit only an intent to open a file; the
@@ -15141,13 +15173,20 @@ impl SirioWorkspace {
         let Some((path, raw)) = sirio_lsp::parse_publish(params) else {
             return;
         };
-        if let Some(root) = self.worktree_root_for(&path)
-            && let Ok(relative) = path.strip_prefix(&root)
-        {
+        // A file of a known worktree goes into that worktree's store, and its open
+        // views draw what the store holds for it (every server's), so the gutter
+        // and Problems are made from one place. A file outside every worktree has
+        // no store: its views draw the publish itself.
+        let target = self.worktree_and_relative(&path);
+        if let Some((root, relative)) = &target {
             let stored = crate::lsp::stored_problems(&raw);
-            let drawer = self.drawer_for(&root, cx);
+            let drawer = self.drawer_for(root, cx);
             drawer.update(cx, |drawer, cx| drawer.publish(key, relative, stored, cx));
         }
+        let stored_here = target.map(|(root, relative)| {
+            let drawer = self.drawer_for(&root, cx);
+            drawer.read(cx).problems_for(&relative)
+        });
         for (open_path, view) in Self::open_file_views(&self.tabs, cx) {
             if !paths_name_the_same_document(&open_path, &path) {
                 continue;
@@ -15165,9 +15204,39 @@ impl SirioWorkspace {
             else {
                 continue;
             };
-            let converted = crate::lsp::view_diagnostics(&text, &raw);
+            let converted = match &stored_here {
+                Some(stored) => crate::lsp::view_diagnostics_from_store(&text, stored),
+                None => crate::lsp::view_diagnostics(&text, &raw),
+            };
             view.update(cx, |view, cx| view.set_diagnostics(converted, cx));
         }
+    }
+
+    /// Gives a view whose buffer has just loaded (a new tab, a tab made again
+    /// when its worktree came back, a reload) what its worktree's store holds
+    /// for the file: a server that has nothing new to say about an unchanged
+    /// document (it is not sent again) would leave the gutter empty while
+    /// Problems lists the file's errors.
+    fn seed_diagnostics_from_store(
+        &mut self,
+        path: &Path,
+        view: &Entity<FileView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((root, relative)) = self.worktree_and_relative(path) else {
+            return;
+        };
+        let drawer = self.drawer_for(&root, cx);
+        let stored = drawer.read(cx).problems_for(&relative);
+        let Some(text) = view
+            .read(cx)
+            .editor()
+            .map(|editor| editor.buffer().to_owned())
+        else {
+            return;
+        };
+        let converted = crate::lsp::view_diagnostics_from_store(&text, &stored);
+        view.update(cx, |view, cx| view.set_diagnostics(converted, cx));
     }
 
     /// Brings a server's copy of a file up to date with the view's buffer.

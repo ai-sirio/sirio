@@ -16,6 +16,9 @@
 //!   message in one file once;
 //! - `reported` forgets an empty publish (the file a server has cleared must
 //!   still say that server has spoken), or keeps a dead server's pairs;
+//! - `for_path` (what an open file's gutter is drawn from) leaves out a server's
+//!   findings, repeats one, or still lists them after the server cleared the
+//!   file or exited;
 //! - `files` lists the current tab's file in the middle, lists a path whose
 //!   entries are all gone, or invents the current path when it has none.
 
@@ -32,6 +35,10 @@ pub struct StoredProblem {
     pub line: u32,
     /// UTF-16 code units, 0-based, as the protocol counts.
     pub column: u32,
+    /// Where the finding ends, counted the same way: an open file's gutter is
+    /// drawn from this store, and it needs the whole range.
+    pub end_line: u32,
+    pub end_column: u32,
     pub severity: Severity,
     pub message: String,
     pub source: Option<String>,
@@ -109,6 +116,15 @@ impl ProblemStore {
         self.reported.clone()
     }
 
+    /// Every server's findings for `path`, in no particular order between
+    /// servers: what a view of that file draws.
+    pub fn for_path(&self, path: &Path) -> Vec<StoredProblem> {
+        self.by_path
+            .get(path)
+            .map(|servers| servers.values().flatten().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn errors(&self) -> usize {
         self.counts().errors
     }
@@ -156,6 +172,8 @@ mod tests {
         StoredProblem {
             line,
             column: 0,
+            end_line: line,
+            end_column: 0,
             severity,
             message: message.to_owned(),
             source: None,
@@ -180,6 +198,22 @@ mod tests {
         store.publish(&rust, path, vec![problem(2, Severity::Error, "new")]);
         assert_eq!(messages(&store, "/project/a.rs"), vec!["new"]);
         assert_eq!(store.errors(), 1);
+    }
+
+    #[test]
+    fn for_path_lists_every_servers_findings_until_they_are_cleared_or_gone() {
+        let mut store = ProblemStore::default();
+        let path = Path::new("a.ts");
+        store.publish(&key("ts"), path, vec![problem(1, Severity::Error, "tsc")]);
+        store.publish(&key("lint"), path, vec![problem(2, Severity::Warning, "lint")]);
+        let mut found: Vec<String> = store.for_path(path).into_iter().map(|p| p.message).collect();
+        found.sort();
+        assert_eq!(found, vec!["lint", "tsc"]);
+        store.publish(&key("ts"), path, Vec::new());
+        assert_eq!(store.for_path(path).len(), 1);
+        store.server_gone(&key("lint"));
+        assert!(store.for_path(path).is_empty());
+        assert!(store.for_path(Path::new("elsewhere.ts")).is_empty());
     }
 
     #[test]

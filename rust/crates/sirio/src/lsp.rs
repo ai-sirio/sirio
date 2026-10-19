@@ -116,11 +116,35 @@ pub fn stored_problems(raw: &[sirio_lsp::RawDiagnostic]) -> Vec<sirio_ui::drawer
         .map(|finding| sirio_ui::drawer::StoredProblem {
             line: finding.start.line,
             column: finding.start.character,
+            end_line: finding.end.line,
+            end_column: finding.end.character,
             severity: finding.severity,
             message: finding.message.clone(),
             source: finding.source.clone(),
         })
         .collect()
+}
+
+/// What a file's view draws, from what the drawer's store holds for it: the
+/// same conversion a publish gets (`view_diagnostics`), so the gutter and
+/// Problems are made from one store and cannot disagree.
+pub fn view_diagnostics_from_store(
+    text: &str,
+    stored: &[sirio_ui::drawer::StoredProblem],
+) -> Vec<sirio_ui::file_view::FileDiagnostic> {
+    use sirio_lsp::lsp_types::Position;
+
+    let raw: Vec<sirio_lsp::RawDiagnostic> = stored
+        .iter()
+        .map(|problem| sirio_lsp::RawDiagnostic {
+            start: Position { line: problem.line, character: problem.column },
+            end: Position { line: problem.end_line, character: problem.end_column },
+            severity: problem.severity,
+            message: problem.message.clone(),
+            source: problem.source.clone(),
+        })
+        .collect();
+    view_diagnostics(text, &raw)
 }
 
 /// Converts the protocol's symbol kinds into the ones the overlay draws.
