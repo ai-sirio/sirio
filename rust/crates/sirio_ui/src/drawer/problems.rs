@@ -11,15 +11,20 @@
 //!   its own to be listed forever;
 //! - Information and Hint are counted as nothing, or as warnings, instead of
 //!   as notes;
+//! - `error_counts` counts warnings and notes, or lets two servers' or two
+//!   files' identical messages share one key, or counts two copies of one
+//!   message in one file once;
+//! - `reported` forgets an empty publish (the file a server has cleared must
+//!   still say that server has spoken), or keeps a dead server's pairs;
 //! - `files` lists the current tab's file in the middle, lists a path whose
 //!   entries are all gone, or invents the current path when it has none.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use sirio_lsp::Severity;
 
-use super::ServerKey;
+use super::{ErrorCounts, ServerKey};
 
 /// One finding as Problems lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,14 +46,23 @@ pub struct ProblemCounts {
 }
 
 /// Findings keyed by path, then by the server that reported them.
+///
+/// Paths are kept as given. The caller passes them relative to the worktree,
+/// so the identities `error_counts` and `reported` name survive the worktree
+/// moving on disk.
 #[derive(Debug, Default)]
 pub struct ProblemStore {
     by_path: BTreeMap<PathBuf, BTreeMap<ServerKey, Vec<StoredProblem>>>,
+    /// Every (server, path) a live server has published since it started,
+    /// empty publishes included. Kept apart from the entries, which an empty
+    /// publish removes.
+    reported: BTreeSet<(ServerKey, PathBuf)>,
 }
 
 impl ProblemStore {
     /// Replaces `server`'s findings for `path`; an empty list clears them.
     pub fn publish(&mut self, server: &ServerKey, path: &Path, problems: Vec<StoredProblem>) {
+        self.reported.insert((server.clone(), path.to_path_buf()));
         if problems.is_empty() {
             if let Some(servers) = self.by_path.get_mut(path) {
                 servers.remove(server);
@@ -66,10 +80,32 @@ impl ProblemStore {
 
     /// Drops everything `server` reported, and nothing another server did.
     pub fn server_gone(&mut self, server: &ServerKey) {
+        self.reported.retain(|(reporter, _)| reporter != server);
         self.by_path.retain(|_, servers| {
             servers.remove(server);
             !servers.is_empty()
         });
+    }
+
+    /// The errors by identity (server, path, message), with how many copies
+    /// of each are listed. Warnings and notes are not here.
+    pub fn error_counts(&self) -> ErrorCounts {
+        let mut counts = ErrorCounts::new();
+        for (path, servers) in &self.by_path {
+            for (server, problems) in servers {
+                for problem in problems.iter().filter(|p| p.severity == Severity::Error) {
+                    let identity = (server.clone(), path.clone(), problem.message.clone());
+                    *counts.entry(identity).or_default() += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    /// Every (server, path) a live server has published about since it
+    /// started, an empty publish included.
+    pub fn reported(&self) -> BTreeSet<(ServerKey, PathBuf)> {
+        self.reported.clone()
     }
 
     pub fn errors(&self) -> usize {
@@ -241,5 +277,54 @@ mod tests {
             .collect();
         assert_eq!(none.len(), 3);
         assert!(!none.contains(&PathBuf::from("/project/zzz.rs")));
+    }
+
+    #[test]
+    fn error_counts_hold_only_errors_keyed_by_server_path_message() {
+        let mut store = ProblemStore::default();
+        let path = Path::new("a.rs");
+        store.publish(
+            &key("rust"),
+            path,
+            vec![
+                problem(1, Severity::Error, "boom"),
+                problem(9, Severity::Error, "boom"),
+                problem(2, Severity::Warning, "w"),
+                problem(3, Severity::Hint, "h"),
+            ],
+        );
+        store.publish(
+            &key("clippy"),
+            path,
+            vec![problem(1, Severity::Error, "boom")],
+        );
+        store.publish(
+            &key("rust"),
+            Path::new("b.rs"),
+            vec![problem(1, Severity::Error, "boom")],
+        );
+        let counts = store.error_counts();
+        assert_eq!(counts.len(), 3);
+        let id = |language: &str, file: &str| (key(language), PathBuf::from(file), "boom".to_owned());
+        assert_eq!(counts[&id("rust", "a.rs")], 2);
+        assert_eq!(counts[&id("clippy", "a.rs")], 1);
+        assert_eq!(counts[&id("rust", "b.rs")], 1);
+    }
+
+    #[test]
+    fn reported_includes_empty_publishes_and_server_gone_clears_it() {
+        let mut store = ProblemStore::default();
+        store.publish(&key("rust"), Path::new("a.rs"), vec![problem(1, Severity::Error, "e")]);
+        store.publish(&key("rust"), Path::new("a.rs"), Vec::new());
+        store.publish(&key("rust"), Path::new("b.rs"), Vec::new());
+        store.publish(&key("ts"), Path::new("a.rs"), Vec::new());
+        let reported = store.reported();
+        assert_eq!(reported.len(), 3);
+        assert!(reported.contains(&(key("rust"), PathBuf::from("a.rs"))));
+        assert!(reported.contains(&(key("rust"), PathBuf::from("b.rs"))));
+        store.server_gone(&key("rust"));
+        let reported = store.reported();
+        assert_eq!(reported.len(), 1);
+        assert!(reported.contains(&(key("ts"), PathBuf::from("a.rs"))));
     }
 }
