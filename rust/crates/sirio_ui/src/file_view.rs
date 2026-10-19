@@ -4686,6 +4686,9 @@ mod tests {
             focus_code(&view, window, cx);
             window.simulate_next_frame(cx);
         });
+        #[cfg(target_os = "macos")]
+        cx.simulate_keystrokes("cmd-down");
+        #[cfg(not(target_os = "macos"))]
         cx.simulate_keystrokes("ctrl-end");
         cx.run_until_parked();
         cx.simulate_input("qa-edit-probe");

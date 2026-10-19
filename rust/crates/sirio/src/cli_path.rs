@@ -738,7 +738,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[cfg(unix)]
+    /// macOS asks for the administrator instead (`macos_never_asks_without_admin`).
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn link_in_a_directory_off_the_login_path_is_reported() {
         let root = fixture("off-path");
