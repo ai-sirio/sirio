@@ -78,12 +78,19 @@ fn one(value: &Value) -> Option<RawDiagnostic> {
         source: value
             .get("source")
             .and_then(Value::as_str)
+            .filter(|source| !source.is_empty())
             .map(str::to_owned),
     })
 }
 
 #[cfg(test)]
 mod tests {
+    //! Ways `source` can fail, written before the code:
+    //! - a server that names its tool has it dropped (`None`), so Problems
+    //!   cannot say `clippy` or `rustc`;
+    //! - a server that names none reads as `Some("")` or invents a name, so
+    //!   Problems draws an empty label;
+    //! - an empty string (some servers send one) reads as a real name.
     use super::*;
 
     #[test]
@@ -142,11 +149,15 @@ mod tests {
                   "message": "named", "source": "clippy" },
                 { "range": { "start": {"line": 1, "character": 0},
                              "end":   {"line": 1, "character": 1} },
-                  "message": "anonymous" }
+                  "message": "anonymous" },
+                { "range": { "start": {"line": 2, "character": 0},
+                             "end":   {"line": 2, "character": 1} },
+                  "message": "blank", "source": "" }
             ]
         });
         let (_, found) = parse_publish(&params).expect("parses");
         assert_eq!(found[0].source.as_deref(), Some("clippy"));
         assert_eq!(found[1].source, None);
+        assert_eq!(found[2].source, None);
     }
 }

@@ -110,8 +110,6 @@ impl ProblemStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sirio_lsp::Severity;
-    use std::path::{Path, PathBuf};
 
     fn key(language: &str) -> ServerKey {
         (PathBuf::from("/project"), language.to_owned())
