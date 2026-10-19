@@ -2445,9 +2445,10 @@ STATUS_BELL_CLEAR=(1431 744)
 STATUS_BELL_COMPACT=(1128 775)
 STATUS_BELL_COPY_OLDER=(1445 690)
 # The corner card, over the file's bottom right corner: a point of a card of
-# three lines, and one inside the card whatever its size.
-NOTIFY_CARD=(1300 720)
-NOTIFY_CARD_CORNER=(1438 735)
+# three lines, and one inside the card whatever its size. The card sits above the
+# status row and the drawer's header row (30 px, the drawer closed).
+NOTIFY_CARD=(1300 690)
+NOTIFY_CARD_CORNER=(1438 705)
 
 # The bell's count and the length of the list, both polled.
 expect_bell() { # unseen listed
@@ -3138,6 +3139,110 @@ PY
   expect_state dirty false
 }
 
+# Quits the app the way a user does and starts it again on the same database,
+# host root and socket path, then selects the repository as the run began.
+app_restart() {
+  local tries=0
+  ctl quit >/dev/null 2>&1 || true
+  while kill -0 "$APP_PID" 2>/dev/null && [ "$tries" -lt 150 ]; do
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  if kill -0 "$APP_PID" 2>/dev/null; then
+    kill -KILL "$APP_PID" 2>/dev/null || true
+    fail "$SCENARIO: sirio did not quit within 15 s"
+  fi
+  wait "$APP_PID" 2>/dev/null || true
+  APP_PID=""
+  app_start
+  for _ in $(seq 1 40); do
+    "$CTL" select-workspace --workspace "$WT" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+}
+
+# A press at (X, Y), counted from the window's corner, dragged UP by DY pixels
+# in two steps, and released. The same window-size guard as the clicks.
+drag_up() { # x y dy
+  local window size
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$SCENARIO: no window to drag in"
+  size="$(xwininfo -display "$DISPLAY_TARGET" -id "$window" | awk '/Width:/ {w = $2} /Height:/ {h = $2} END {print w "x" h}')"
+  [ "$size" = "$CLICK_WINDOW" ] || fail "$SCENARIO: the window is $size, not the $CLICK_WINDOW this drag is placed for"
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$1" "$2" mousedown 1 \
+    mousemove_relative --sync -- 0 -$(($3 / 2)) mousemove_relative --sync -- 0 -$(($3 - $3 / 2)) mouseup 1 \
+    || fail "$SCENARIO: xdotool could not drag"
+}
+
+# The drawer under the code: opened by Ctrl+J, a tab and a height chosen
+# through the debug verb, kept by the worktree (a second file draws the same
+# drawer) and across a quit and relaunch, then closed by the key again.
+scenario_drawer() {
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state drawer_open 0
+  expect_state drawer_tab problems
+
+  # A real key: the code has the keyboard (the keys verb gives it, and a
+  # caret that is already at the start moves nowhere), the window has X focus.
+  focus_window
+  ctl surface editor keys --keys=left >/dev/null
+  x_key ctrl+j
+  expect_state drawer_open 1
+  expect_state drawer_tab problems
+  echo "OK: Ctrl+J opens the drawer on Problems"
+
+  ctl surface editor drawer --show=search >/dev/null
+  expect_state drawer_tab search
+  ctl surface editor drawer --height=300 >/dev/null
+  expect_state drawer_height 300
+  ctl surface editor drawer --height=10 >/dev/null
+  expect_state drawer_height 96
+  ctl surface editor drawer --height=300 >/dev/null
+  expect_state drawer_height 300
+  echo "OK: Search is shown, 300 px is kept and 10 px is raised to the 96 px floor"
+
+  open_file "$WT/crlf.txt"
+  expect_state state loaded
+  expect_state drawer_open 1
+  expect_state drawer_tab search
+  expect_state drawer_height 300
+  echo "OK: a second file of the worktree draws the same drawer"
+  ctl surface editor drawer --show=problems >/dev/null
+  expect_state drawer_tab problems
+  capture drawer-open
+
+  app_restart
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state drawer_open 1
+  expect_state drawer_tab problems
+  expect_state drawer_height 300
+  echo "OK: the drawer is as it was after a quit and relaunch"
+
+  # The top edge dragged up 50 px by a real pointer: the height follows it and
+  # the drop saves it (the relaunch reads it back). At 300 px in this window the
+  # drawer's edge is at y=462, and a press 3 px below it is on its 6 px strip.
+  drag_up 900 465 50
+  expect_state drawer_height 350
+  app_restart
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state drawer_height 350
+  echo "OK: a drag of the top edge sets the height, and the drop keeps it"
+
+  focus_window
+  ctl surface editor keys --keys=left >/dev/null
+  x_key ctrl+j
+  expect_state drawer_open 0
+  expect_state drawer_height 350
+  x_key ctrl+j
+  expect_state drawer_open 1
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  echo "OK: Ctrl+J and the close verb shut the drawer, the height stays"
+}
+
 # ---------------------------------------------------------------- run
 
 scenario load_states scenario_load_states
@@ -3166,6 +3271,8 @@ scenario escape scenario_escape
 scenario send_to_agent scenario_send_to_agent
 scenario focus_refresh scenario_focus_refresh
 scenario hover_leave scenario_hover_leave
+# Before prefs: that scenario leaves Settings drawn, where no file tab takes a key.
+scenario drawer scenario_drawer
 scenario prefs scenario_prefs
 
 stop_hosts

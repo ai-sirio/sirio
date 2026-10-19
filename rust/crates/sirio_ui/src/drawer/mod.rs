@@ -1,17 +1,20 @@
 //! The file tab's drawer: the worktree's problems and when they call for it.
 //!
-//! This module holds the pure parts. `ProblemStore` keeps what each language
-//! server last said about each file; `ErrorAlarm` decides, from the errors'
-//! identities, whether the drawer should open by itself.
+//! `ProblemStore` keeps what each language server last said about each file;
+//! `ErrorAlarm` decides, from the errors' identities, whether the drawer should
+//! open by itself. Both are pure. `WorktreeDrawer` is the entity a file tab
+//! draws under its code: open or closed, how tall, which tab.
 
 mod alarm;
 mod problems;
+mod view;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub use alarm::ErrorAlarm;
 pub use problems::{ProblemCounts, ProblemStore, StoredProblem};
+pub use view::{DrawerTab, WorktreeDrawer, WorktreeDrawerEvent};
 
 /// A language server's identity, as `LspSupervisor` keys it: the project root
 /// and the language name.

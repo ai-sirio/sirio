@@ -48,6 +48,7 @@ pub use ely_gpui_component::editor::{FindOptions, LspState};
 pub use status_actions::StatusItem;
 pub use status_row::StatusFacts;
 use crate::chat::{Chat, LinkClickOverride};
+use crate::drawer::{DrawerTab, WorktreeDrawer};
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection,
 };
@@ -299,6 +300,9 @@ pub struct FileView {
     /// What the row under the file has measured of itself, which decides
     /// whether it draws every item or only the ones that matter at a glance.
     status_layout: Rc<status_row::StatusLayout>,
+    /// The worktree's drawer under the code, shared by every file tab of the
+    /// worktree (`set_drawer`); `None` until the workspace hands it over.
+    drawer: Option<Entity<WorktreeDrawer>>,
     /// The language this tab colours its code as, when the user chose one in
     /// the status row (`set_language_override`); `None` is the path's. Colour
     /// only, and not kept across a relaunch.
@@ -461,8 +465,9 @@ pub struct FileDiagnostic {
 }
 
 // `Find` opens find on the file's code, or brings the open one back; `Replace`
-// opens it with the replace row.
-actions!(file_view, [Find, Replace]);
+// opens it with the replace row. `ToggleDrawer` opens the worktree's drawer or
+// closes it to its header; `SearchInWorktree` opens it on Search.
+actions!(file_view, [Find, Replace, ToggleDrawer, SearchInWorktree]);
 
 /// Installs bezel-editor's key bindings for the application, and the file
 /// tab's own: Find and Replace, in the tab's `FileEditor` context so they
@@ -480,6 +485,8 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-f", Find, Some("FileEditor")),
         KeyBinding::new(replace, Replace, Some("FileEditor")),
+        KeyBinding::new("secondary-j", ToggleDrawer, Some("FileEditor")),
+        KeyBinding::new("secondary-shift-f", SearchInWorktree, Some("FileEditor")),
     ]);
 }
 
@@ -572,6 +579,7 @@ impl FileView {
             git_diff_requests: 0,
             status_facts: StatusFacts::default(),
             status_layout: Rc::default(),
+            drawer: None,
             language_override: None,
             indent_override: None,
             status_popover: None,
@@ -611,6 +619,16 @@ impl FileView {
 
     pub fn is_snapshot(&self) -> bool {
         self.snapshot.is_some()
+    }
+
+    /// Gives the view the drawer of its worktree, which it draws under the code.
+    pub fn set_drawer(&mut self, drawer: Entity<WorktreeDrawer>, cx: &mut Context<Self>) {
+        self.drawer = Some(drawer);
+        cx.notify();
+    }
+
+    pub fn drawer(&self) -> Option<&Entity<WorktreeDrawer>> {
+        self.drawer.as_ref()
     }
 
     pub fn snapshot_origin(&self) -> Option<&SnapshotOrigin> {
@@ -1568,6 +1586,16 @@ impl FileView {
                         .on_action(cx.listener(|view, _: &Replace, window, cx| {
                             view.find_from_key(true, window, cx);
                         }))
+                        .on_action(cx.listener(|view, _: &ToggleDrawer, _, cx| {
+                            if let Some(drawer) = &view.drawer {
+                                drawer.update(cx, |drawer, cx| drawer.toggle(cx));
+                            }
+                        }))
+                        .on_action(cx.listener(|view, _: &SearchInWorktree, _, cx| {
+                            if let Some(drawer) = &view.drawer {
+                                drawer.update(cx, |drawer, cx| drawer.show(DrawerTab::Search, cx));
+                            }
+                        }))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             editor_entity.update(cx, |view, cx| {
                                 view.focus_target(cx).focus(window, cx);
@@ -1601,6 +1629,26 @@ impl FileView {
                             &self.scroll,
                             preview,
                         ))
+                        // The drawer is the last row of the column, so the
+                        // `FileEditor` context covers its fields. The canvas
+                        // tells it how tall the tab is, which caps it.
+                        .when_some(self.drawer.clone(), |this, drawer| {
+                            let measured = drawer.clone();
+                            this.relative()
+                                .child(
+                                    canvas(
+                                        move |bounds, window, cx| {
+                                            if measured.read(cx).note_tab_height(bounds.size.height) {
+                                                window.request_animation_frame();
+                                            }
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                                .child(drawer)
+                        })
                         .into_any_element()
                 }
                 _ => notice(
@@ -1763,6 +1811,10 @@ impl Render for FileView {
         let step = sirio_perf::span("FileView.status_row", id);
         let status_row = self.render_status_row(theme, &entity, cx);
         drop(step);
+        let drawer_height = self
+            .drawer
+            .as_ref()
+            .map_or(px(0.0), |drawer| drawer.read(cx).drawn_height());
         let message = self.message.as_ref().map(|message| {
             let card = message_card(&message.text, &message.actions, theme, entity.clone());
             match message.at {
@@ -1774,14 +1826,15 @@ impl Render for FileView {
                 )
                 .priority(2)
                 .into_any_element(),
-                // Above the row when there is one; without it (a file still
-                // loading) the card sits at the corner itself.
+                // Above the row, and the drawer over it, when there is one;
+                // without it (a file still loading) the card sits at the
+                // corner itself.
                 None => div()
                     .absolute()
                     .bottom(
                         px(16.0)
                             + if status_row.is_some() {
-                                status_row::STATUS_ROW_HEIGHT
+                                status_row::STATUS_ROW_HEIGHT + drawer_height
                             } else {
                                 px(0.0)
                             },

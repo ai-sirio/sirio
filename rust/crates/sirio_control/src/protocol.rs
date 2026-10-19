@@ -952,6 +952,16 @@ pub mod request {
         request("surface.editor.find_close", BTreeMap::new())
     }
 
+    /// The file tab's drawer: `action` is `toggle`, `show` (`value` names the
+    /// tab), `close` or `height` (`value` is pixels).
+    pub fn editor_drawer(action: &str, value: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::from([("action".to_string(), action.to_string())]);
+        if let Some(value) = value {
+            params.insert("value".to_string(), value.to_string());
+        }
+        request("surface.editor.drawer", params)
+    }
+
     pub fn editor_crumb(index: usize) -> ControlRequest {
         request(
             "surface.editor.crumb",

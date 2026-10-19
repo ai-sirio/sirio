@@ -45,6 +45,7 @@ use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
     chat::{Chat, ChatControlSnapshot, ChatEvent},
+    drawer::{DrawerTab, WorktreeDrawer, WorktreeDrawerEvent},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
     editor::{Conflict, LineEnding},
     editor_prefs::EditorPrefs,
@@ -1045,6 +1046,15 @@ fn handoff_command_from_params(params: &BTreeMap<String, String>) -> Result<Hand
     Ok(HandoffCommand::Start { scope, fields })
 }
 
+/// What a `surface.editor.drawer` call asks of the drawer.
+#[derive(Clone, Copy, Debug)]
+enum DrawerOp {
+    Toggle,
+    Show(DrawerTab),
+    Close,
+    Height(f32),
+}
+
 enum ControlAction {
     /// `panel.show` / `panel.focus`: the tab for a host session, on the GPUI thread.
     ShowSession {
@@ -1328,6 +1338,11 @@ enum ControlAction {
         reply: ControlReply,
     },
     EditorFindClose {
+        reply: ControlReply,
+    },
+    /// The file tab's drawer: toggle it, show a tab, close it, set its height.
+    EditorDrawer {
+        op: DrawerOp,
         reply: ControlReply,
     },
     AddAgentAccount {
@@ -2843,6 +2858,39 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.editor.find_close" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::EditorFindClose { reply })
+            }
+            "surface.editor.drawer" if cfg!(debug_assertions) => {
+                let value = request.params.get("value").map(String::as_str).unwrap_or_default();
+                let op = match request.params.get("action").map(String::as_str) {
+                    Some("toggle") => DrawerOp::Toggle,
+                    Some("close") => DrawerOp::Close,
+                    Some("show") => match value {
+                        "problems" => DrawerOp::Show(DrawerTab::Problems),
+                        "search" => DrawerOp::Show(DrawerTab::Search),
+                        _ => {
+                            return ControlResponse::failure(
+                                &request.id,
+                                "surface.editor.drawer show needs value problems or search",
+                            );
+                        }
+                    },
+                    Some("height") => match value.parse::<f32>() {
+                        Ok(height) if height.is_finite() => DrawerOp::Height(height),
+                        _ => {
+                            return ControlResponse::failure(
+                                &request.id,
+                                "surface.editor.drawer height needs a number as value",
+                            );
+                        }
+                    },
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.editor.drawer requires action toggle, show, close or height",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::EditorDrawer { op, reply })
             }
             "surface.editor.save" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::EditorSave { reply })
@@ -5221,6 +5269,10 @@ struct SirioWorkspace {
     /// deriving ownership from `working_directory` would then relabel the
     /// old tab under the newly selected worktree.
     tab_worktree_paths: BTreeMap<usize, PathBuf>,
+    /// The file tab's drawer of each worktree that has opened one, made on the
+    /// first file tab and saved whenever it changes. Parked worktrees keep
+    /// theirs: the map outlives `tabs`.
+    drawers: HashMap<PathBuf, Entity<WorktreeDrawer>>,
     next_tab_id: usize,
     next_retained_chat_id: usize,
     retained_chats: Vec<RetainedChat>,
@@ -6088,6 +6140,9 @@ impl SirioWorkspace {
                                 ControlAction::EditorFindClose { reply } => {
                                     let _ = reply.send(workspace.control_editor_find_close(window, cx));
                                 }
+                                ControlAction::EditorDrawer { op, reply } => {
+                                    let _ = reply.send(workspace.control_editor_drawer(op, cx));
+                                }
                                 ControlAction::AddAgentAccount {
                                     provider,
                                     label,
@@ -6442,6 +6497,7 @@ impl SirioWorkspace {
             tab_drag_snapshot: None,
             pane_drop_target: None,
             tab_worktree_paths,
+            drawers: HashMap::new(),
             next_tab_id: tabs_len,
             next_retained_chat_id: 0,
             retained_chats: Vec::new(),
@@ -7886,6 +7942,36 @@ impl SirioWorkspace {
         .detach();
     }
 
+    /// The drawer of `worktree`: the one made for it earlier, or one made now
+    /// from what was saved for it. Its changes are saved as they come.
+    fn drawer_for(&mut self, worktree: &Path, cx: &mut Context<Self>) -> Entity<WorktreeDrawer> {
+        if let Some(drawer) = self
+            .drawers
+            .iter()
+            .find(|(path, _)| paths_name_the_same_document(path, worktree))
+            .map(|(_, drawer)| drawer.clone())
+        {
+            return drawer;
+        }
+        let record = self.session.editor_drawer(worktree);
+        let drawer = cx.new(|_| WorktreeDrawer::new(worktree.to_path_buf(), record.as_ref()));
+        cx.subscribe(&drawer, |workspace, drawer, event: &WorktreeDrawerEvent, cx| {
+            // Opening a problem or a hit is the drawer's Problems and Search.
+            if matches!(event, WorktreeDrawerEvent::Changed) {
+                workspace.session.save_editor_drawer(drawer.read(cx).record());
+            }
+        })
+        .detach();
+        self.drawers.insert(worktree.to_path_buf(), drawer.clone());
+        drawer
+    }
+
+    /// Hands `view` the drawer of the worktree its tab belongs to.
+    fn give_drawer(&mut self, view: &Entity<FileView>, worktree: &Path, cx: &mut Context<Self>) {
+        let drawer = self.drawer_for(worktree, cx);
+        view.update(cx, |view, cx| view.set_drawer(drawer, cx));
+    }
+
     /// F-CORE-FILE-04: a link click inside a file view resolves a path but
     /// can only open it through the workspace, which owns tab identity.
     /// Routes through the same de-duplicating `add_file_tab` path as the
@@ -8918,6 +9004,7 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) {
         Self::subscribe_file_view(view, cx);
+        self.give_drawer(view, worktree, cx);
         if view.read(cx).is_snapshot() {
             // No shell facts and no language server for a file at a revision.
             self.begin_snapshot_load(view, worktree, cx);
@@ -15736,6 +15823,8 @@ impl SirioWorkspace {
         let view = cx.new(|cx| FileView::new(path.clone(), cx));
         let location = self.repo_relative(&path);
         Self::subscribe_file_view(&view, cx);
+        let worktree = self.working_directory.clone();
+        self.give_drawer(&view, &worktree, cx);
         view.update(cx, |view, cx| {
             view.set_shell_facts(facts, cx);
             view.set_location(location, cx);
@@ -16693,6 +16782,8 @@ impl SirioWorkspace {
             }
         });
         Self::subscribe_file_view(&view, cx);
+        let worktree = self.working_directory.clone();
+        self.give_drawer(&view, &worktree, cx);
         if let Some(line) = line {
             view.update(cx, |view, cx| view.reveal_at(line.saturating_sub(1) as usize, cx));
         }
@@ -18773,7 +18864,56 @@ impl SirioWorkspace {
             ("prefs".to_string(), EditorPrefs::current(cx).describe()),
         ];
         fields.extend(Self::find_fields(view));
+        fields.extend(Self::drawer_fields(view.drawer(), cx));
         Ok(fields)
+    }
+
+    /// The worktree's drawer as the state and the drawer verb answer it:
+    /// `drawer_open` (0 or 1), `drawer_tab` (`problems` or `search`) and
+    /// `drawer_height`, the kept height in pixels. None of them names a path.
+    fn drawer_fields(drawer: Option<&Entity<WorktreeDrawer>>, cx: &App) -> Vec<(String, String)> {
+        let (open, tab, height) = match drawer.map(|drawer| drawer.read(cx)) {
+            Some(drawer) => (
+                u8::from(drawer.is_open()).to_string(),
+                drawer.tab().as_str().to_string(),
+                f32::from(drawer.height()).to_string(),
+            ),
+            None => ("0".to_string(), String::new(), String::new()),
+        };
+        vec![
+            ("drawer_open".to_string(), open),
+            ("drawer_tab".to_string(), tab),
+            ("drawer_height".to_string(), height),
+        ]
+    }
+
+    /// `surface.editor.drawer action= value=`: the active file tab's drawer is
+    /// toggled, shown on a tab, closed or given a height, through the calls
+    /// the key, the tabs, the close button and the drag make. Answers the
+    /// drawer's fields.
+    fn control_editor_drawer(
+        &mut self,
+        op: DrawerOp,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let view = self
+            .active_file_view()
+            .ok_or_else(|| "no file tab is active".to_string())?;
+        let drawer = view
+            .read(cx)
+            .drawer()
+            .cloned()
+            .ok_or_else(|| "the file tab has no drawer".to_string())?;
+        drawer.update(cx, |drawer, cx| match op {
+            DrawerOp::Toggle => drawer.toggle(cx),
+            DrawerOp::Show(tab) => drawer.show(tab, cx),
+            DrawerOp::Close => drawer.close(cx),
+            DrawerOp::Height(height) => {
+                let tab_height = drawer.tab_height();
+                drawer.set_height(px(height), tab_height, cx);
+            }
+        });
+        Ok(Self::drawer_fields(Some(&drawer), cx))
     }
 
     /// Opens `path` as a file tab, as the shell opens a file, and answers with
@@ -42407,6 +42547,7 @@ done
             | ControlAction::EditorFindStep { reply, .. }
             | ControlAction::EditorReplace { reply, .. }
             | ControlAction::EditorFindClose { reply }
+            | ControlAction::EditorDrawer { reply, .. }
             | ControlAction::AddAgentAccount { reply, .. }
             | ControlAction::SelectAgentAccount { reply, .. }
             | ControlAction::ReadPane { reply, .. }
@@ -42588,6 +42729,9 @@ done
             "surface.editor.find_step" => request_with_params(method, &[("forward", "true")]),
             "surface.editor.replace" => request_with_params(method, &[("all", "false")]),
             "surface.editor.find_close" => request_with_params(method, &[]),
+            "surface.editor.drawer" => {
+                request_with_params(method, &[("action", "toggle")])
+            }
             "settings.account.add" => {
                 request_with_params(method, &[("provider", "claude"), ("label", "test")])
             }
