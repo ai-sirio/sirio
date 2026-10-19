@@ -514,6 +514,7 @@ mod tests {
             },
             severity: sirio_lsp::Severity::Warning,
             message: "unused variable".to_owned(),
+            source: None,
         }];
         let converted = view_diagnostics(text, &raw);
         assert_eq!(converted.len(), 1);
@@ -542,6 +543,7 @@ mod tests {
             },
             severity: sirio_lsp::Severity::Error,
             message: "stale".to_owned(),
+            source: None,
         }];
         let converted = view_diagnostics(text, &raw);
         assert_eq!(converted.len(), 1);
