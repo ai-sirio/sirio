@@ -7956,9 +7956,13 @@ impl SirioWorkspace {
         let record = self.session.editor_drawer(worktree);
         let drawer = cx.new(|_| WorktreeDrawer::new(worktree.to_path_buf(), record.as_ref()));
         cx.subscribe(&drawer, |workspace, drawer, event: &WorktreeDrawerEvent, cx| {
-            // Opening a problem or a hit is the drawer's Problems and Search.
-            if matches!(event, WorktreeDrawerEvent::Changed) {
-                workspace.session.save_editor_drawer(drawer.read(cx).record());
+            match event {
+                WorktreeDrawerEvent::Changed => {
+                    workspace.session.save_editor_drawer(drawer.read(cx).record());
+                }
+                // Nothing emits these yet: Task 5 (Problems) wires OpenProblem and
+                // Task 7 (Search) wires OpenHit, each to open the file.
+                WorktreeDrawerEvent::OpenProblem { .. } | WorktreeDrawerEvent::OpenHit { .. } => {}
             }
         })
         .detach();

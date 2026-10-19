@@ -362,6 +362,12 @@ impl Render for WorktreeDrawer {
                     entity.update(cx, |drawer, _| drawer.begin_drag(pointer_y));
                 }
             })
+            // A press on the edge released with no drag is not a drop: this ends
+            // it, so the anchor never outlives its press.
+            .on_mouse_up(MouseButton::Left, {
+                let entity = entity.clone();
+                move |_, _, cx| entity.update(cx, |drawer, cx| drawer.finish_drag(cx))
+            })
             .on_drag(DraggedDrawerEdge, |_, _, _, cx| cx.new(|_| gpui::Empty));
         div()
             .id("file-drawer")
@@ -375,6 +381,12 @@ impl Render for WorktreeDrawer {
             .border_t_1()
             .border_color(theme.ely.border)
             .bg(theme.ely.surface)
+            // The file editor around the drawer takes the focus on a left press
+            // and opens the code's menu on a right one. A press in the drawer is
+            // not the code's: the children (the edge, the tabs) have run by the
+            // time it bubbles here.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_drag_move::<DraggedDrawerEdge>(cx.listener(
                 |drawer, event: &DragMoveEvent<DraggedDrawerEdge>, _, cx| {
                     drawer.drag_to(f32::from(event.event.position.y), cx);

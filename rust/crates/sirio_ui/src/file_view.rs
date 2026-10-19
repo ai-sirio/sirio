@@ -303,6 +303,9 @@ pub struct FileView {
     /// The worktree's drawer under the code, shared by every file tab of the
     /// worktree (`set_drawer`); `None` until the workspace hands it over.
     drawer: Option<Entity<WorktreeDrawer>>,
+    /// Redraws this view when the drawer changes: the corner card's offset
+    /// reads the drawer's drawn height.
+    _drawer_subscription: Option<Subscription>,
     /// The language this tab colours its code as, when the user chose one in
     /// the status row (`set_language_override`); `None` is the path's. Colour
     /// only, and not kept across a relaunch.
@@ -580,6 +583,7 @@ impl FileView {
             status_facts: StatusFacts::default(),
             status_layout: Rc::default(),
             drawer: None,
+            _drawer_subscription: None,
             language_override: None,
             indent_override: None,
             status_popover: None,
@@ -623,6 +627,7 @@ impl FileView {
 
     /// Gives the view the drawer of its worktree, which it draws under the code.
     pub fn set_drawer(&mut self, drawer: Entity<WorktreeDrawer>, cx: &mut Context<Self>) {
+        self._drawer_subscription = Some(cx.observe(&drawer, |_, _, cx| cx.notify()));
         self.drawer = Some(drawer);
         cx.notify();
     }

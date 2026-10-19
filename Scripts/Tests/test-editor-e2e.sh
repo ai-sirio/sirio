@@ -3155,10 +3155,12 @@ app_restart() {
   wait "$APP_PID" 2>/dev/null || true
   APP_PID=""
   app_start
+  local selected=0
   for _ in $(seq 1 40); do
-    "$CTL" select-workspace --workspace "$WT" >/dev/null 2>&1 && break
+    "$CTL" select-workspace --workspace "$WT" >/dev/null 2>&1 && { selected=1; break; }
     sleep 0.5
   done
+  [ "$selected" -eq 1 ] || fail "$SCENARIO: the repository could not be selected after the relaunch"
 }
 
 # A press at (X, Y), counted from the window's corner, dragged UP by DY pixels
@@ -3173,6 +3175,10 @@ drag_up() { # x y dy
     mousemove_relative --sync -- 0 -$(($3 / 2)) mousemove_relative --sync -- 0 -$(($3 - $3 / 2)) mouseup 1 \
     || fail "$SCENARIO: xdotool could not drag"
 }
+
+# A point of the corner card over the file pane (the right panel shown), with the
+# drawer closed and the card one line.
+DRAWER_CARD=(1100 700)
 
 # The drawer under the code: opened by Ctrl+J, a tab and a height chosen
 # through the debug verb, kept by the worktree (a second file draws the same
@@ -3241,6 +3247,33 @@ scenario_drawer() {
   ctl surface editor drawer --close >/dev/null
   expect_state drawer_open 0
   echo "OK: Ctrl+J and the close verb shut the drawer, the height stays"
+
+  # The corner card sits above the drawer and follows it. Raised with the drawer
+  # closed, it is over DRAWER_CARD (a point of the file pane beside the right panel,
+  # in a window of CLICK_WINDOW); with the drawer open that point is inside the
+  # drawer, so a press there reaches the drawer (a stale card would take it and
+  # dismiss itself); closed again, the card is back at that point.
+  ctl surface editor status --item=bell --value="raise:a note over the drawer" >/dev/null
+  expect_state message "a note over the drawer"
+  capture drawer-card-closed
+  ctl surface editor drawer --show=problems >/dev/null
+  expect_state drawer_open 1
+  sleep 1
+  capture drawer-card-open
+  click_at "${DRAWER_CARD[@]}"
+  expect_state_stays message "a note over the drawer"
+  # A right press in the drawer is not the code's: no editor menu opens. The
+  # state does not name the menu, so this is a capture to look at.
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$(find_window)" 1000 600 click 3
+  sleep 1
+  capture drawer-right-click
+  x_key Escape
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  sleep 1
+  click_at "${DRAWER_CARD[@]}"
+  expect_state message ""
+  echo "OK: the corner card rose with the drawer and came back down with it"
 }
 
 # ---------------------------------------------------------------- run
