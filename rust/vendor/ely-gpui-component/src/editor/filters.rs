@@ -11,7 +11,7 @@ use crate::{
 
 /// Whether a path passes comma-separated globs: some include pattern when there are any, and no exclude one.
 pub fn passes(path: &str, include: &str, exclude: &str) -> bool {
-    let patterns = |list: &str| -> Vec<regex::Regex> {
+    let patterns = |list: &str| -> Vec<Option<regex::Regex>> {
         list.split(',')
             .map(str::trim)
             .filter(|glob| !glob.is_empty())
@@ -34,13 +34,20 @@ pub fn passes(path: &str, include: &str, exclude: &str) -> bool {
                     }
                 }
                 pattern.push('$');
-                regex::Regex::new(&pattern).expect("an escaped glob compiles")
+                regex::Regex::new(&pattern)
+                    .inspect_err(|error| {
+                        log::error!(
+                            "search filter: a glob of {} bytes matches nothing: {error}",
+                            pattern.len()
+                        )
+                    })
+                    .ok()
             })
             .collect()
     };
     let (include, exclude) = (patterns(include), patterns(exclude));
-    (include.is_empty() || include.iter().any(|glob| glob.is_match(path)))
-        && !exclude.iter().any(|glob| glob.is_match(path))
+    (include.is_empty() || include.iter().flatten().any(|glob| glob.is_match(path)))
+        && !exclude.iter().flatten().any(|glob| glob.is_match(path))
 }
 
 type OnBool = Rc<dyn Fn(bool, &mut Window, &mut App)>;

@@ -222,14 +222,14 @@ the ports below change the files they name.
 Vendored files:
 
 - `src/editor/{problems,search,filters}.rs` (editor panels, project 2):
-  verbatim from `e17e31a6`, with their inline tests (`files_with_worse_problems_lead_and_filters_hide`,
+  verbatim from `e17e31a6` (`filters.rs` then takes the `b29d66c` hunk, see
+  that port below), with their inline tests (`files_with_worse_problems_lead_and_filters_hide`,
   `globs_take_includes_then_drop_excludes` and the three of `search.rs`). They
   need nothing the crate lacked, so no closure file was added. `src/editor/
   console.rs` is deliberately not vendored: the programme dropped the Output
   panel. `mod.rs` re-exports `Problem`, `ProblemsPanel`, `FileHits`, `Hit`,
   `ReferencesPanel`, `SearchPanel`, `SearchResultItem`, `SearchFilters` and
-  `passes`. The `tests/stale.rs` test `a_glob_too_big_for_a_regex_matches_nothing`
-  (see the `b29d66c` port) stays dropped: `tests/stale.rs` is not changed by this vendoring.
+  `passes`.
 - `src/editor/{buffer,cursor,edit,keys,moves,line,row,view,layout,gutter,decor,syntax,ime,find,status,state}.rs`:
   verbatim, except the local changes listed below, the ports in "Ports from
   upstream `main`" (which change `buffer`, `edit`, `ime`, `line`, `moves`,
@@ -313,15 +313,18 @@ applied as upstream wrote it or was rewritten against the vendored code.
   returns `None` for a line the text has lost. `tests.rs` moved to
   `tests/mod.rs` (`mod stale;`, and `editor` made `pub(super)`).
   `src/editor/mod.rs` is local, so the port adds only `mod anchors;`.
-  `tests/stale.rs` is verbatim except two tests, dropped because they name
-  code in modules this crate does not vendor:
-  `an_output_channel_gone_from_its_list_draws` (`console::OutputPanel`) and
-  `a_glob_too_big_for_a_regex_matches_nothing` (`filters::passes`). The seven
-  stale-state tests that remain pass.
+  `tests/stale.rs` is verbatim except one test, dropped because it names
+  code in a module this crate does not vendor:
+  `an_output_channel_gone_from_its_list_draws` (`console::OutputPanel`).
   Skipped, not vendored: `src/editor/console.rs` (the output panel's shown
-  channel), `src/editor/filters.rs` (the glob size limit) and
-  `tasks/panics.md`. Their panics are not ported: the output panel and globs
-  are outside the closure.
+  channel) and `tasks/panics.md`; the output panel's panic is not ported.
+  `src/editor/filters.rs` came in with the editor panels (project 2) and takes
+  this commit's one hunk to it, applied with `patch -p1` from
+  `git diff e17e31a6 b29d66c -- src/editor/filters.rs`: a glob whose generated
+  regex fails to compile (a 500 000-byte one) logs through `inspect_err` and
+  matches nothing, instead of `expect` panicking. Its test
+  `a_glob_too_big_for_a_regex_matches_nothing` is restored in `tests/stale.rs`.
+  Nothing else of the commit is new here. The eight stale-state tests pass.
 - `9fb607b` "Code editor: columns sit where gpui lays them out": `ime.rs`,
   `measure.rs` (new) and `tests/wide.rs` (new) are verbatim. `state.rs`,
   `line.rs`, `view.rs`, `mod.rs` and `tests/mod.rs` did not apply:
