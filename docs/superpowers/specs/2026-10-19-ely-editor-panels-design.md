@@ -60,7 +60,7 @@ Theirs = the user's, in this brainstorm. Mine = my call, open to review.
 | One search per worktree, shared by every file tab's drawer | Yes | Mine |
 | `Ctrl/Cmd+Shift+F` with no file tab open | Does nothing | Mine |
 | Undo of a replace | None from Sirio; `git diff` / the Diff view remain | Mine |
-| What auto-opens the drawer | Errors only, when the count rises above a persisted baseline (§4.4) | Mine |
+| What auto-opens the drawer | An error the user has not seen, by identity (server, file, message), against a persisted seen set (§4.4) | Mine |
 | Replace all on a capped result set | Disabled until the search is narrowed | Mine |
 | A dirty tab's file in Search | Searched in its buffer, marked unsaved, skipped by Replace all | Mine |
 | Drawer state | Open/closed, height and tab per worktree, persisted | Mine |
@@ -118,7 +118,7 @@ status row
 ### §4.2 State
 
 One drawer state **per worktree**: open or closed, height, selected tab,
-and the auto-open baseline (§4.4).
+and the set of errors the user has seen (§4.4).
 Every file tab of that worktree draws the same state, so switching tabs does
 not change the drawer. The state is persisted (`sirio_persistence`, a new
 migration) and restored on relaunch. A change-request snapshot tab (read
@@ -144,26 +144,34 @@ worktree's problems and search are still the worktree's.
 
 ### §4.4 Opening by itself
 
-One rule, per worktree, on the debounced diagnostics store (§5), not per
-publish: the drawer opens on Problems when the worktree's **error** count
-rises above a **baseline**.
+One rule, per worktree, on the diagnostics store (§5): the drawer opens on
+Problems when the worktree holds an **error the user has not seen**.
 
-- The baseline is the error count at the last moment the user saw Problems
-  (Problems was the drawer's open tab) or closed the drawer. While the user
-  is not looking, it follows the count **down** when errors are fixed (a
-  real publish lowers it), never up. So: close at 3 errors, the agent fixes
-  them to 0, then breaks one — it opens (1 > 0); close at 3, the server
-  republishes the same 3 — it stays closed.
-- A server that exits or restarts does not lower the baseline: its entries
-  vanish and come back, which is not a fix.
-- The baseline is persisted with the drawer state (§4.2). After a relaunch
-  the store refills from zero; the drawer opens only if the refilled count
-  rises above the persisted baseline, so a drawer the user closed is not
-  reopened by the relaunch itself.
-- Warnings and notes never open it.
+- An error is known by its **identity**: the server that reported it, its
+  file (relative to the worktree) and its message — not its line, so an edit
+  that shifts lines never makes an error new. Two copies of the same message
+  in one file count twice.
+- The **seen set** holds those identities with their counts. It changes at
+  two moments only: while the drawer shows Problems, and when the user
+  closes the drawer. Then it becomes the current errors, plus the seen
+  entries of every (server, file) that no running server has reported since
+  it started — so a look in the middle of a refill never forgets what the
+  user saw before it. Nothing else moves it: not a fix, not a server exit or
+  restart, not Search.
+- The drawer opens when some identity's current count is above its seen
+  count. So: close with three errors, the server republishes them, clears
+  and republishes them, restarts, or Sirio relaunches and they come back in
+  any order — it stays closed; the agent breaks something with a message
+  the user has not seen, or a second copy of a seen one — it opens.
+- **Accepted cost** (my call): an error the user saw, fixed while they were
+  not looking at Problems, that then comes back identically (an agent
+  reverting its own fix) does not reopen the drawer. It is counted in
+  Problems' title all the same.
+- The seen set is persisted with the drawer state (§4.2), so a relaunch
+  does not reopen a drawer the user closed.
+- Warnings and notes never open it, and are not in the seen set.
 - If the drawer is already open on Search, it stays on Search: the user is
-  working there. Problems' title counts update, and the baseline is not
-  moved, so the drawer switches nothing later on its own either.
+  working there. Problems' title counts update; the seen set does not move.
 - It never steals focus from the code or from a terminal: it opens, the
   caret stays where it was.
 
@@ -312,11 +320,13 @@ drawer's and the store's state. Scenarios:
 
 - the fake server publishes an error for an unopened file: the drawer opens
   by itself on Problems, the file is listed, the caret did not move;
-- the user closes the drawer; the server republishes the same error: it
-  stays closed; a new error: it opens; the errors are fixed to zero and one
-  comes back: it opens; the server restarts with the same errors: it stays
-  closed; a quit and relaunch with the same errors: it stays closed;
-- errors rise while the drawer is on Search: it stays on Search;
+- the user closes the drawer; the server republishes the same error, or
+  clears and republishes it: it stays closed; an error with a new message: it
+  opens; the errors are fixed and an error with a new message comes: it
+  opens; a seen error fixed and returning identically: it stays closed (the
+  accepted cost); the server restarts with the same errors: it stays closed;
+  a quit and relaunch with the same errors: it stays closed;
+- new errors while the drawer is on Search: it stays on Search;
 - warnings only: it does not open;
 - a click on a problem opens that file at its line;
 - the server exits: its problems go; no server running: the empty line says
@@ -364,9 +374,8 @@ own.
 ## §11 Calls made by me, not by the user
 
 Every row marked "Mine" in §2, plus: the drawer's resize limits (§4.1);
-the snapshot tab drawing the drawer (§4.2); the baseline's rules — follows
-fixes down, ignores server restarts, persisted, never switches away from
-Search (§4.4); `Cmd+J` on macOS and the Windows `ctrl-shift-f` check (§4.3);
+the snapshot tab drawing the drawer (§4.2); errors known by identity
+against a persisted seen set, and its accepted cost (§4.4); `Cmd+J` on macOS and the Windows `ctrl-shift-f` check (§4.3);
 the selection-as-query rule and `Escape` returning to the code (§4.3); whole-file
 matching with a multi-line match as one result (§6.2); the store keyed by (server, path),
 in memory, paths outside the worktree ignored (§5.1); LSP Information and
