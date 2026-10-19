@@ -155,8 +155,8 @@ Problems when the worktree holds an **error the user has not seen**.
   two moments only: while the drawer shows Problems, and when the user
   closes the drawer. Then it becomes the current errors, plus the seen
   entries of every (server, file) that no running server has reported since
-  it started — so a look in the middle of a refill never forgets what the
-  user saw before it. Nothing else moves it: not a fix, not a server exit or
+  it started — so a look in the middle of a refill never forgets the files
+  not reported yet. Nothing else moves it: not a fix, not a server exit or
   restart, not Search.
 - The drawer opens when some identity's current count is above its seen
   count. So: close with three errors, the server republishes them, clears
@@ -166,7 +166,9 @@ Problems when the worktree holds an **error the user has not seen**.
 - **Accepted cost** (my call): an error the user saw, fixed while they were
   not looking at Problems, that then comes back identically (an agent
   reverting its own fix) does not reopen the drawer. It is counted in
-  Problems' title all the same.
+  Problems' title all the same. And the converse, rarer one: a close that
+  lands between a server clearing a file and republishing it records the
+  file as fixed, so the identical republish reopens the drawer once.
 - The seen set is persisted with the drawer state (§4.2), so a relaunch
   does not reopen a drawer the user closed.
 - Warnings and notes never open it, and are not in the seen set.
