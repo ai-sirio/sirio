@@ -6,13 +6,19 @@
 //! look new. The alarm holds the `seen` counts and changes them in one place,
 //! `look`: seen becomes the current errors, plus the old seen entries of every
 //! (server, file) that no live server has reported since it started, so a look
-//! in the middle of a refill keeps what the user saw before it. The drawer is
-//! called for when some identity's current count is above its seen count.
+//! in the middle of a refill never forgets the files not reported yet. The
+//! drawer is called for when some identity's current count is above its seen
+//! count.
 //!
-//! Accepted cost (spec §4.4): an error the user saw, fixed while they were
-//! not looking, that returns identically (an agent reverting its own fix)
-//! does not call for the drawer. `a_clear_then_republish_does_not` is that
-//! case. Problems' title still counts it.
+//! Two accepted costs (spec §4.4):
+//! - an error the user saw, fixed while they were not looking, that returns
+//!   identically (an agent reverting its own fix) does not call for the
+//!   drawer; `a_clear_then_republish_does_not` is that case, and Problems'
+//!   title still counts it;
+//! - the converse, rarer one: a look or close that lands between a server
+//!   clearing a file and republishing it records the file as fixed, so the
+//!   identical republish calls for the drawer once;
+//!   `a_close_between_a_clear_and_its_republish_calls_once` is that case.
 //!
 //! Ways this can fail, written before the code:
 //! - the first error of a worktree with an empty seen set does not call for
@@ -30,7 +36,8 @@
 //! - a look after a real fix keeps the fixed key, so the error that returns
 //!   later is judged against a count the user saw before the fix;
 //! - the persisted text does not read back to the same set, or malformed text
-//!   panics or yields a half-read set instead of an empty one.
+//!   (a raw newline in a string, a wrong arity, a negative count, trailing
+//!   text) panics or yields a half-read set instead of an empty one.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -80,154 +87,49 @@ impl ErrorAlarm {
     /// The seen set as persisted: an array of
     /// `[project root, language, path, message, count]`.
     pub fn to_json(&self) -> String {
-        let mut out = String::from("[");
-        for (n, ((server, path, message), count)) in self.seen.iter().enumerate() {
-            if n > 0 {
-                out.push(',');
-            }
-            out.push('[');
-            for text in [
-                server.0.to_string_lossy().as_ref(),
-                &server.1,
-                path.to_string_lossy().as_ref(),
-                message,
-            ] {
-                write_string(&mut out, text);
-                out.push(',');
-            }
-            out.push_str(&count.to_string());
-            out.push(']');
-        }
-        out.push(']');
-        out
+        let rows: Vec<Row> = self
+            .seen
+            .iter()
+            .map(|((server, path, message), count)| {
+                (
+                    server.0.to_string_lossy().into_owned(),
+                    server.1.clone(),
+                    path.to_string_lossy().into_owned(),
+                    message.clone(),
+                    *count,
+                )
+            })
+            .collect();
+        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_owned())
     }
 
     /// Reads what `to_json` wrote. Malformed text is an empty set, never a
     /// half-read one: an unseen error then opens the drawer once, which is the
     /// safe side.
     pub fn from_json(text: &str) -> Self {
-        Self::new(read_set(text).unwrap_or_default())
+        let rows: Vec<Row> = serde_json::from_str(text).unwrap_or_default();
+        Self::new(
+            rows.into_iter()
+                .map(|(root, language, path, message, count)| {
+                    (
+                        ((PathBuf::from(root), language), PathBuf::from(path), message),
+                        count,
+                    )
+                })
+                .collect(),
+        )
     }
 }
 
-fn write_string(out: &mut String, text: &str) {
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
-
-struct Reader<'a> {
-    rest: &'a str,
-}
-
-impl<'a> Reader<'a> {
-    fn eat(&mut self, c: char) -> Option<()> {
-        self.rest = self.rest.strip_prefix(c)?;
-        Some(())
-    }
-
-    fn string(&mut self) -> Option<String> {
-        self.eat('"')?;
-        let mut out = String::new();
-        let mut chars = self.rest.char_indices();
-        while let Some((at, c)) = chars.next() {
-            match c {
-                '"' => {
-                    self.rest = &self.rest[at + 1..];
-                    return Some(out);
-                }
-                '\\' => match chars.next()?.1 {
-                    '"' => out.push('"'),
-                    '\\' => out.push('\\'),
-                    '/' => out.push('/'),
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    'b' => out.push('\u{8}'),
-                    'f' => out.push('\u{c}'),
-                    'u' => {
-                        let mut unit = hex4(&mut chars)?;
-                        if (0xD800..0xDC00).contains(&unit) {
-                            if chars.next()?.1 != '\\' || chars.next()?.1 != 'u' {
-                                return None;
-                            }
-                            let low = hex4(&mut chars)?;
-                            if !(0xDC00..0xE000).contains(&low) {
-                                return None;
-                            }
-                            unit = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
-                        }
-                        out.push(char::from_u32(unit)?);
-                    }
-                    _ => return None,
-                },
-                c => out.push(c),
-            }
-        }
-        None
-    }
-
-    fn count(&mut self) -> Option<usize> {
-        let digits = self.rest.len() - self.rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        let (number, rest) = self.rest.split_at(digits);
-        let count = number.parse().ok()?;
-        self.rest = rest;
-        Some(count)
-    }
-}
-
-fn hex4(chars: &mut std::str::CharIndices<'_>) -> Option<u32> {
-    let mut unit = 0;
-    for _ in 0..4 {
-        unit = unit * 16 + chars.next()?.1.to_digit(16)?;
-    }
-    Some(unit)
-}
-
-fn read_set(text: &str) -> Option<ErrorCounts> {
-    let mut reader = Reader { rest: text.trim() };
-    let mut seen = ErrorCounts::new();
-    reader.eat('[')?;
-    if reader.eat(']').is_some() {
-        return reader.rest.is_empty().then_some(seen);
-    }
-    loop {
-        reader.eat('[')?;
-        let root = reader.string()?;
-        reader.eat(',')?;
-        let language = reader.string()?;
-        reader.eat(',')?;
-        let path = reader.string()?;
-        reader.eat(',')?;
-        let message = reader.string()?;
-        reader.eat(',')?;
-        let count = reader.count()?;
-        reader.eat(']')?;
-        seen.insert(((PathBuf::from(root), language), PathBuf::from(path), message), count);
-        if reader.eat(']').is_some() {
-            return reader.rest.is_empty().then_some(seen);
-        }
-        reader.eat(',')?;
-    }
-}
+/// One persisted entry: project root, language, path, message, count.
+type Row = (String, String, String, String, usize);
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::drawer::{ErrorKey, ProblemStore, ServerKey, StoredProblem};
     use sirio_lsp::Severity;
-    use std::collections::BTreeSet;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     fn server(language: &str) -> ServerKey {
         (PathBuf::from("/project"), language.to_owned())
@@ -315,7 +217,8 @@ mod tests {
             (key("rust", "b.rs", "e2"), 2),
             (key("rust", "c.rs", "e3"), 1),
         ];
-        let alarm = ErrorAlarm::new(counts(&seen));
+        let mut alarm = ErrorAlarm::new(counts(&seen));
+        let c_only = counts(&[(key("rust", "c.rs", "e3"), 1)]);
         let steps: [&[(ErrorKey, usize)]; 6] = [
             &[],
             &[(key("rust", "c.rs", "e3"), 1)],
@@ -324,8 +227,13 @@ mod tests {
             &[(key("rust", "b.rs", "e2"), 2), (key("rust", "a.rs", "e1"), 1)],
             &seen,
         ];
-        for step in steps {
+        for (n, step) in steps.into_iter().enumerate() {
             assert!(!alarm.calls_for_drawer(&counts(step)), "{step:?}");
+            if n == 1 {
+                // The drawer shows Problems while only c.rs has been reported.
+                alarm.look(&c_only, &reported(&[("rust", "c.rs")]));
+                assert_eq!(alarm.seen(), &counts(&seen), "a.rs and b.rs survive");
+            }
         }
     }
 
@@ -334,11 +242,34 @@ mod tests {
         let mut store = ProblemStore::default();
         let rust = server("rust");
         store.publish(&rust, Path::new("a.rs"), errors(&["boom", "boom", "bang"]));
+        store.publish(&rust, Path::new("b.rs"), errors(&["crash"]));
         let mut alarm = ErrorAlarm::new(ErrorCounts::new());
         alarm.look(&store.error_counts(), &store.reported());
+        let seen = alarm.seen().clone();
         store.server_gone(&rust);
         assert!(!alarm.calls_for_drawer(&store.error_counts()));
         store.publish(&rust, Path::new("a.rs"), errors(&["bang", "boom", "boom"]));
+        assert!(!alarm.calls_for_drawer(&store.error_counts()));
+        // The drawer shows Problems while only a.rs is back.
+        alarm.look(&store.error_counts(), &store.reported());
+        assert_eq!(alarm.seen(), &seen, "b.rs survives the look");
+        store.publish(&rust, Path::new("b.rs"), errors(&["crash"]));
+        assert!(!alarm.calls_for_drawer(&store.error_counts()));
+    }
+
+    #[test]
+    fn a_close_between_a_clear_and_its_republish_calls_once() {
+        // The accepted cost: the look records the cleared file as fixed.
+        let mut store = ProblemStore::default();
+        let rust = server("rust");
+        store.publish(&rust, Path::new("a.rs"), errors(&["boom"]));
+        let mut alarm = ErrorAlarm::new(ErrorCounts::new());
+        alarm.look(&store.error_counts(), &store.reported());
+        store.publish(&rust, Path::new("a.rs"), Vec::new());
+        alarm.look(&store.error_counts(), &store.reported());
+        store.publish(&rust, Path::new("a.rs"), errors(&["boom"]));
+        assert!(alarm.calls_for_drawer(&store.error_counts()));
+        alarm.look(&store.error_counts(), &store.reported());
         assert!(!alarm.calls_for_drawer(&store.error_counts()));
     }
 
@@ -387,7 +318,20 @@ mod tests {
         ]);
         let text = ErrorAlarm::new(seen.clone()).to_json();
         assert_eq!(ErrorAlarm::from_json(&text).seen(), &seen);
-        for bad in ["", "{", "[", "[[1]]", "[[\"a\",\"b\",\"c\",\"d\"]]", "null", "[] x", "[[\"a\",\"b\",\"c\",\"d\",-1]]"] {
+        let raw_newline = "[[\"a\",\"b\",\"c\",\"d\ne\",1]]";
+        let bad_texts = [
+            "",
+            "{",
+            "[",
+            "[[1]]",
+            "[[\"a\",\"b\",\"c\",\"d\"]]",
+            "null",
+            "[] x",
+            "[[\"a\",\"b\",\"c\",\"d\",-1]]",
+            "[[\"a\",\"b\",\"c\",\"d\",1,2]]",
+            raw_newline,
+        ];
+        for bad in bad_texts {
             assert!(ErrorAlarm::from_json(bad).seen().is_empty(), "{bad:?}");
         }
         assert!(ErrorAlarm::from_json("[]").seen().is_empty());

@@ -48,8 +48,9 @@ pub struct ProblemCounts {
 /// Findings keyed by path, then by the server that reported them.
 ///
 /// Paths are kept as given. The caller passes them relative to the worktree,
-/// so the identities `error_counts` and `reported` name survive the worktree
-/// moving on disk.
+/// so a persisted identity names the same file wherever the worktree's own
+/// folder is. (The `ServerKey`'s project root is absolute: an identity does
+/// not survive its project moving.)
 #[derive(Debug, Default)]
 pub struct ProblemStore {
     by_path: BTreeMap<PathBuf, BTreeMap<ServerKey, Vec<StoredProblem>>>,
