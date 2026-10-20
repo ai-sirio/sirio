@@ -78,11 +78,13 @@ impl CliMessage {
 }
 
 /// One MCP server's connection state, as `system/init` reports it.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct McpServerStatus {
     /// The server's name from the project's `.mcp.json`.
     pub name: String,
-    /// The CLI's own word for its state, e.g. `connected` or `failed`.
+    /// The CLI's own word for its state, e.g. `connected` or `failed`;
+    /// empty when the entry carried none.
     pub status: String,
 }
 
@@ -459,6 +461,17 @@ mod tests {
                 status: "failed".into()
             }]
         );
+    }
+
+    #[test]
+    fn system_init_survives_an_mcp_entry_without_a_status() {
+        let line = r#"{"type":"system","subtype":"init","session_id":"s","mcp_servers":[{"name":"x"}]}"#;
+        let Some(CliMessage::System(system)) = CliMessage::parse(line) else {
+            panic!("init with a statusless mcp entry should still parse as system");
+        };
+        assert_eq!(system.mcp_servers.len(), 1);
+        assert_eq!(system.mcp_servers[0].name, "x");
+        assert_eq!(system.mcp_servers[0].status, "");
     }
 
     #[test]
