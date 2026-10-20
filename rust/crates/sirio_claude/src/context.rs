@@ -103,13 +103,17 @@ impl ContextBreakdown {
         if raw_max_tokens == 0 {
             return None;
         }
+        let categories = entries(payload.get("categories"), parse_category);
+        // A report that forgot its total still has one: what its used
+        // categories add up to.
+        let total_tokens = payload
+            .get("totalTokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| used_tokens(&categories));
         Some(Self {
-            total_tokens: payload
-                .get("totalTokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            total_tokens,
             raw_max_tokens,
-            categories: entries(payload.get("categories"), parse_category),
+            categories,
             memory_files: entries(payload.get("memoryFiles"), parse_memory_file),
             skills: entries(
                 payload
@@ -126,9 +130,11 @@ impl ContextBreakdown {
     }
 
     /// Folds the breakdown by origin: what the user can reduce, and what is
-    /// fixed. Each group is the CLI's own category total; what the items do
-    /// not explain is an explicit `Other` child, and items that add up to more
-    /// than their category raise the group instead.
+    /// fixed. A group's weight is always the CLI's own category total: what
+    /// the items do not explain is an explicit `Other` child, and items that
+    /// add up to more are shown as reported without raising the group.
+    /// `counted` marks the nodes that are part of `totalTokens`, and a
+    /// top-level `other` node holds whatever those nodes leave unexplained.
     #[must_use]
     pub fn origins(&self) -> ContextOrigins {
         let mut reducible = Vec::new();
@@ -160,15 +166,14 @@ impl ContextBreakdown {
             "messages",
         ];
         for category in &self.categories {
-            let deferred = category.kind == CategoryKind::Deferred;
-            if !deferred && folded.contains(&category.id.as_str()) {
+            let counted = category.kind == CategoryKind::Used;
+            if counted && folded.contains(&category.id.as_str()) {
                 continue;
             }
-            let counted = !matches!(category.kind, CategoryKind::Deferred | CategoryKind::Free);
-            let key = match category.id.as_str() {
-                id if !counted => id.to_string(),
-                id @ "autocompact_buffer" => id.to_string(),
-                id => format!("other:{id}"),
+            let key = if counted {
+                format!("other:{}", category.id)
+            } else {
+                category.id.clone()
             };
             fixed.push(leaf(&key, &category.name, category.tokens, counted));
         }
@@ -176,6 +181,15 @@ impl ContextBreakdown {
         if self.categories.is_empty() {
             fixed.push(leaf("context", "Context", self.total_tokens, true));
         }
+        let explained = reducible
+            .iter()
+            .chain(&fixed)
+            .filter(|node| node.counted)
+            .fold(0u64, |sum, node| sum.saturating_add(node.tokens));
+        if self.total_tokens > explained {
+            fixed.push(leaf("other", "Other", self.total_tokens - explained, true));
+        }
+        unique_keys(&mut fixed);
         sort_nodes(&mut reducible);
         sort_nodes(&mut fixed);
         ContextOrigins { reducible, fixed }
@@ -184,7 +198,7 @@ impl ContextBreakdown {
     fn category(&self, id: &str) -> Option<&ContextCategory> {
         self.categories
             .iter()
-            .find(|c| c.id == id && c.kind != CategoryKind::Deferred)
+            .find(|c| c.id == id && c.kind == CategoryKind::Used)
     }
 
     fn memory_group(&self, category: &ContextCategory) -> OriginNode {
@@ -213,7 +227,9 @@ impl ContextBreakdown {
         if skills.is_none() && agents.is_none() {
             return None;
         }
-        let tokens = skills.map_or(0, |c| c.tokens) + agents.map_or(0, |c| c.tokens);
+        let tokens = skills
+            .map_or(0, |c| c.tokens)
+            .saturating_add(agents.map_or(0, |c| c.tokens));
 
         // One child per origin, in first-seen order; sorting happens last.
         let mut origins: Vec<OriginNode> = Vec::new();
@@ -249,7 +265,7 @@ impl ContextBreakdown {
                 _ => &item.name,
             };
             let origin = &mut origins[at];
-            origin.tokens += item.tokens;
+            origin.tokens = origin.tokens.saturating_add(item.tokens);
             if kind == "skill" {
                 counts[at].0 += 1;
             } else {
@@ -300,7 +316,7 @@ impl ContextBreakdown {
                     } else {
                         server
                     },
-                    tokens: tools.iter().map(|t| t.tokens).sum(),
+                    tokens: sum_tokens(&tools),
                     path: None,
                     tag: Some(match tools.len() {
                         1 => "1 tool".to_string(),
@@ -332,7 +348,7 @@ impl ContextBreakdown {
         if children.is_empty() {
             return None;
         }
-        let tokens = children.iter().map(|c| c.tokens).sum();
+        let tokens = sum_tokens(&children);
         Some(group("claude_code", "Claude Code", tokens, children))
     }
 }
@@ -491,8 +507,9 @@ fn leaf(key: &str, label: &str, tokens: u64, counted: bool) -> OriginNode {
     }
 }
 
-/// A group whose weight is its category's. Children that do not explain all of
-/// it leave an `Other` row; children that explain more raise the group.
+/// A group whose weight is its category's, whatever its children add up to:
+/// children that explain less leave an `Other` row, children that explain more
+/// are shown as the CLI reported them.
 fn group(
     key: &str,
     label: &str,
@@ -500,7 +517,7 @@ fn group(
     mut children: Vec<OriginNode>,
 ) -> OriginNode {
     unique_keys(&mut children);
-    let explained: u64 = children.iter().map(|c| c.tokens).sum();
+    let explained = sum_tokens(&children);
     if category_tokens > explained {
         children.push(leaf(
             &format!("{key}/other"),
@@ -508,16 +525,31 @@ fn group(
             category_tokens - explained,
             true,
         ));
+        unique_keys(&mut children);
     }
     OriginNode {
         key: key.to_string(),
         label: label.to_string(),
-        tokens: category_tokens.max(explained),
+        tokens: category_tokens,
         path: None,
         tag: None,
         counted: true,
         children,
     }
+}
+
+fn sum_tokens(nodes: &[OriginNode]) -> u64 {
+    nodes
+        .iter()
+        .fold(0, |sum, node| sum.saturating_add(node.tokens))
+}
+
+/// What a report's used categories add up to.
+fn used_tokens(categories: &[ContextCategory]) -> u64 {
+    categories
+        .iter()
+        .filter(|c| c.kind == CategoryKind::Used)
+        .fold(0, |sum, c| sum.saturating_add(c.tokens))
 }
 
 /// Two items can share a name; a key is still one row.
@@ -610,6 +642,14 @@ mod tests {
                  "pluginId": "plugin-dev@claude-plugins-official", "tokens": 408},
             ],
             "mcpTools": [],
+            "messageBreakdown": {
+                "toolCallTokens": 0, "toolResultTokens": 0, "attachmentTokens": 8731,
+                "assistantMessageTokens": 0, "userMessageTokens": 0,
+                "attachmentsByType": [
+                    {"name": "hook_success", "tokens": 6788},
+                    {"name": "hook_additional_context", "tokens": 1943},
+                ],
+            },
         })
     }
 
@@ -644,15 +684,22 @@ mod tests {
         );
         assert_eq!(agent.tokens, 408);
 
-        // The buffer is the one counted fixed node that is not in the total.
-        let counted_used: u64 = origins
+        // The attachments the CLI itemises (8731) outweigh its `messages`
+        // category (6586): the group keeps the CLI's count, the rows stay.
+        let conversation = node(&origins.reducible, "conversation");
+        assert_eq!(conversation.tokens, 6586);
+        let rows: Vec<u64> = conversation.children.iter().map(|c| c.tokens).collect();
+        assert_eq!(rows, [6788, 1943]);
+
+        let counted: u64 = origins
             .reducible
             .iter()
             .chain(&origins.fixed)
-            .filter(|n| n.counted && n.key != "autocompact_buffer")
+            .filter(|n| n.counted)
             .map(|n| n.tokens)
             .sum();
-        assert_eq!(counted_used, 64923);
+        assert_eq!(counted, 64923);
+        assert!(origins.fixed.iter().all(|n| n.key != "other"));
     }
 
     #[test]
@@ -671,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn children_larger_than_their_category_raise_the_group() {
+    fn children_larger_than_their_category_keep_the_categorys_count() {
         let breakdown = ContextBreakdown::parse(&json!({
             "totalTokens": 100, "rawMaxTokens": 10_000,
             "categories": [category("memory_files", "Memory files", 100, "used")],
@@ -683,8 +730,9 @@ mod tests {
         .expect("a breakdown");
         let origins = breakdown.origins();
         let memory = node(&origins.reducible, "memory");
-        assert_eq!(memory.tokens, 150);
-        assert_eq!(memory.children.len(), 2, "no Other when nothing is left");
+        assert_eq!(memory.tokens, 100);
+        let rows: Vec<u64> = memory.children.iter().map(|c| c.tokens).collect();
+        assert_eq!(rows, [90, 60], "the files as reported, and no Other");
     }
 
     #[test]
@@ -742,6 +790,113 @@ mod tests {
         assert!(!node(&origins.fixed, "system_tools_deferred").counted);
         assert!(!node(&origins.fixed, "free_space").counted);
         assert!(node(&origins.fixed, "claude_code").counted);
+    }
+
+    #[test]
+    fn buffer_and_unknown_kinds_are_not_part_of_the_total() {
+        let breakdown = ContextBreakdown::parse(&json!({
+            "totalTokens": 100, "rawMaxTokens": 10_000,
+            "categories": [
+                category("system_prompt", "System prompt", 100, "used"),
+                category("autocompact_buffer", "Autocompact buffer", 33000, "buffer"),
+                category("reserved", "Reserved", 500, "something_new"),
+            ],
+        }))
+        .expect("a breakdown");
+        let origins = breakdown.origins();
+        assert!(!node(&origins.fixed, "autocompact_buffer").counted);
+        assert!(!node(&origins.fixed, "reserved").counted);
+        let counted: u64 = origins
+            .fixed
+            .iter()
+            .filter(|n| n.counted)
+            .map(|n| n.tokens)
+            .sum();
+        assert_eq!(counted, 100);
+    }
+
+    #[test]
+    fn what_the_categories_leave_unexplained_is_an_other_node() {
+        let breakdown = ContextBreakdown::parse(&json!({
+            "totalTokens": 1000, "rawMaxTokens": 10_000,
+            "categories": [
+                category("system_prompt", "System prompt", 400, "used"),
+                category("messages", "Messages", 500, "used"),
+            ],
+        }))
+        .expect("a breakdown");
+        let origins = breakdown.origins();
+        let other = node(&origins.fixed, "other");
+        assert_eq!(
+            (other.label.as_str(), other.tokens, other.counted),
+            ("Other", 100, true)
+        );
+    }
+
+    #[test]
+    fn a_report_without_a_total_falls_back_to_its_used_categories() {
+        let breakdown = ContextBreakdown::parse(&json!({
+            "rawMaxTokens": 10_000,
+            "categories": [
+                category("system_prompt", "System prompt", 400, "used"),
+                category("messages", "Messages", 500, "used"),
+                category("free_space", "Free space", 9000, "free"),
+            ],
+        }))
+        .expect("a breakdown");
+        assert_eq!(breakdown.total_tokens, 900);
+        let origins = breakdown.origins();
+        assert!(origins.fixed.iter().all(|n| n.key != "other"));
+    }
+
+    #[test]
+    fn a_remainder_row_never_takes_a_siblings_key() {
+        let breakdown = ContextBreakdown::parse(&json!({
+            "totalTokens": 100, "rawMaxTokens": 10_000,
+            "categories": [category("messages", "Messages", 100, "used")],
+            "messageBreakdown": {"attachmentsByType": [{"name": "other", "tokens": 60}]},
+        }))
+        .expect("a breakdown");
+        let origins = breakdown.origins();
+        let conversation = node(&origins.reducible, "conversation");
+        let mut keys: Vec<&str> = conversation
+            .children
+            .iter()
+            .map(|c| c.key.as_str())
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn message_rows_come_from_the_breakdown_and_drop_empty_ones() {
+        let by_type = ContextBreakdown::parse(&json!({
+            "totalTokens": 1, "rawMaxTokens": 10,
+            "messageBreakdown": {
+                "toolCallTokens": 12, "toolResultTokens": 0, "attachmentTokens": 99,
+                "attachmentsByType": [
+                    {"name": "hook_success", "tokens": 7}, {"name": "empty", "tokens": 0},
+                    {"name": "broken", "tokens": "x"},
+                ],
+            },
+        }))
+        .expect("a breakdown");
+        // The by-type rows stand in for the attachment total, never beside it.
+        assert_eq!(
+            by_type.messages,
+            [
+                ("Tool calls".to_string(), 12),
+                ("hook_success".to_string(), 7)
+            ]
+        );
+
+        let total_only = ContextBreakdown::parse(&json!({
+            "totalTokens": 1, "rawMaxTokens": 10,
+            "messageBreakdown": {"attachmentTokens": 99, "attachmentsByType": []},
+        }))
+        .expect("a breakdown");
+        assert_eq!(total_only.messages, [("Attachments".to_string(), 99)]);
     }
 
     #[test]
