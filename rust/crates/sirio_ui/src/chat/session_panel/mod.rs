@@ -140,6 +140,16 @@ impl Chat {
         cx.notify();
     }
 
+    /// Puts the column back as a restored tab had it. It tells nobody: the
+    /// layout it was read from already says so.
+    pub fn restore_session_panel_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.session_panel.open = open;
+        if open {
+            self.refresh_session_environment(cx);
+        }
+        cx.notify();
+    }
+
     pub(super) fn toggle_session_panel(&mut self, cx: &mut Context<Self>) {
         self.set_session_panel_open(!self.session_panel.open, cx);
     }
@@ -186,8 +196,9 @@ impl Chat {
                 if !acts {
                     return Err(format!("no row with an action has key {key}"));
                 }
-                // No row carries an action yet: the sections that add them
+                // No row has a handler yet: the sections that add actions
                 // run them here.
+                return Err(format!("no handler for {key}"));
             }
         }
         Ok(())
@@ -195,27 +206,41 @@ impl Chat {
 
     /// The cards, in the order they are drawn. The sections that need the
     /// agent (Context, Connectors) and the forge (Change request) are added
-    /// here as they are built.
+    /// here as they are built. It runs every frame and for every snapshot, so
+    /// it reads only what the panel has cached: no disk, git or environment
+    /// work belongs in it.
     fn session_panel_sections(&self) -> Vec<Section> {
-        let home = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from);
         vec![environment::section(
             &self.session_panel.environment,
             &self.agent_cwd,
-            home.as_deref(),
         )]
     }
 
-    /// Resolves the chat's worktree and reads its branch. The lookup touches
-    /// the disk and the read spawns `git`, so this runs when the column opens
-    /// and never from a render; the answer is cached on the panel.
+    /// Resolves the chat's worktree and reads its branch afresh. The lookup
+    /// touches the disk and the read spawns `git`, so this runs when the
+    /// column opens and never from a render; the answers are cached on the
+    /// panel. The branch is unread until the new read lands, so a stale one
+    /// is not shown meanwhile.
     pub(super) fn refresh_session_environment(&mut self, cx: &mut Context<Self>) {
-        let worktree = crate::worktree_lookup::lookup(&self.agent_cwd, cx);
-        let root = worktree
+        let environment = &mut self.session_panel.environment;
+        environment.worktree = crate::worktree_lookup::lookup(&self.agent_cwd, cx);
+        environment.home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from);
+        environment.branch = environment::Branch::Unread;
+        self.reread_session_branch(cx);
+    }
+
+    /// Reads the branch again, keeping the one shown until the answer
+    /// arrives. A turn can switch it, so a turn's end asks while the column
+    /// is open.
+    pub(super) fn reread_session_branch(&mut self, cx: &mut Context<Self>) {
+        let root = self
+            .session_panel
+            .environment
+            .worktree
             .as_ref()
             .map_or_else(|| self.agent_cwd.clone(), |worktree| worktree.root.clone());
-        self.session_panel.environment.worktree = worktree;
         self.session_panel.environment_task = Some(cx.spawn(async move |this, cx| {
             let branch = cx
                 .background_spawn(async move { environment::read_branch(&root) })
@@ -495,11 +520,14 @@ mod tests {
         assert!(snapshot.session_panel.open);
         assert!(!snapshot.session_panel.drawn);
         assert!(cx.debug_bounds("session-panel").is_none());
-        let composer = cx.debug_bounds("composer").expect("composer is drawn");
-        assert!(
-            composer.right() <= px(600.0),
-            "the composer keeps the whole width: {composer:?}"
-        );
+
+        cx.simulate_resize(size(px(700.0), px(700.0)));
+        for _ in 0..3 {
+            refresh_frame(cx);
+        }
+        let snapshot = chat.read_with(&cx.cx, |chat, _| chat.control_snapshot());
+        assert!(snapshot.session_panel.drawn, "wide again, the column returns");
+        assert!(cx.debug_bounds("session-panel").is_some());
     }
 
     #[gpui::test]
@@ -564,8 +592,8 @@ mod tests {
             .collect();
         assert_eq!(rows[0].0, "p");
         assert!(
-            rows[1].0.ends_with("/.wt/a"),
-            "the directory is the chat's worktree, not the primary checkout: {rows:?}"
+            rows[1].0.ends_with("/.wt/a/src"),
+            "the directory is the chat's own cwd, not the worktree root: {rows:?}"
         );
         assert_eq!(rows[2], ("feat/x", "worktree"));
         assert_eq!(rows.len(), 3);

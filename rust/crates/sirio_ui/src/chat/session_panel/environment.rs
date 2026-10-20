@@ -5,7 +5,7 @@
 use super::{Row, Section};
 use crate::worktree_lookup::WorktreeInfo;
 use ely_gpui_component::primitives::IconName;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The directory line's budget, in characters, before its middle is elided.
 const DIRECTORY_BUDGET: usize = 34;
@@ -28,6 +28,9 @@ pub(super) struct Environment {
     /// published none or the directory is outside every root.
     pub(super) worktree: Option<WorktreeInfo>,
     pub(super) branch: Branch,
+    /// The user's home directory, read once when the column opens, so the
+    /// every-frame `section` does no environment work.
+    pub(super) home: Option<PathBuf>,
 }
 
 /// Reads the checkout's branch. It spawns `git`, so it runs off the GPUI
@@ -43,11 +46,9 @@ pub(super) fn read_branch(path: &Path) -> Branch {
     }
 }
 
-pub(super) fn section(environment: &Environment, cwd: &Path, home: Option<&Path>) -> Section {
-    let directory = environment
-        .worktree
-        .as_ref()
-        .map_or(cwd, |worktree| worktree.root.as_path());
+pub(super) fn section(environment: &Environment, cwd: &Path) -> Section {
+    let home = environment.home.as_deref();
+    let directory = cwd;
     let project = environment
         .worktree
         .as_ref()
@@ -133,7 +134,74 @@ fn display_path(path: &Path, home: Option<&Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+
+    fn worktree(project: &str, root: &str, is_primary: bool) -> Option<WorktreeInfo> {
+        Some(WorktreeInfo {
+            project_name: project.into(),
+            root: PathBuf::from(root),
+            is_primary,
+        })
+    }
+
+    fn labels(section: &Section) -> Vec<(&str, &str, &str)> {
+        section
+            .rows
+            .iter()
+            .map(|row| (row.key.as_str(), row.label.as_str(), row.detail.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn a_detached_head_says_so_and_is_never_named_a_branch() {
+        let environment = Environment {
+            worktree: worktree("p", "/p", true),
+            branch: Branch::Detached("abc1234".into()),
+            home: None,
+        };
+        let section = section(&environment, Path::new("/p"));
+        let rows = labels(&section);
+        assert_eq!(rows[2], ("environment.branch", "HEAD detached at abc1234", ""));
+    }
+
+    #[test]
+    fn a_directory_outside_every_worktree_shows_the_directory_alone() {
+        let environment = Environment {
+            worktree: None,
+            branch: Branch::Named("main".into()),
+            home: None,
+        };
+        let section = section(&environment, Path::new("/srv/scratch"));
+        let rows = labels(&section);
+        assert_eq!(rows[0], ("environment.project", "scratch", "project"));
+        assert_eq!(rows[1], ("environment.directory", "/srv/scratch", ""));
+        assert_eq!(rows[2], ("environment.branch", "main", ""), "no worktree tag");
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_checkout_has_no_branch_line() {
+        for branch in [Branch::Unread, Branch::Unavailable] {
+            let environment = Environment {
+                worktree: None,
+                branch,
+                home: None,
+            };
+            let section = section(&environment, Path::new("/srv/scratch"));
+            assert_eq!(section.rows.len(), 2, "project and directory only");
+        }
+    }
+
+    #[test]
+    fn the_directory_is_the_chats_own_not_the_worktree_root() {
+        let environment = Environment {
+            worktree: worktree("p", "/p/.wt/a", false),
+            branch: Branch::Named("feat/x".into()),
+            home: None,
+        };
+        let section = section(&environment, Path::new("/p/.wt/a/src"));
+        let rows = labels(&section);
+        assert_eq!(rows[1].1, "/p/.wt/a/src");
+        assert_eq!(rows[2], ("environment.branch", "feat/x", "worktree"));
+    }
 
     #[test]
     fn a_path_under_home_is_home_relative_and_a_long_one_loses_its_middle() {

@@ -3135,6 +3135,10 @@ impl Chat {
                 self.streaming = false;
                 self.has_completed_turn = true;
                 self.persist_settled_transcript();
+                // The turn may have switched the branch.
+                if self.session_panel_open() {
+                    self.reread_session_branch(cx);
+                }
                 // D-CHAT-03: a turn ended — completed or cancelled alike,
                 // one rule — drains the queue's front entry as the next
                 // turn, exactly once; the rest wait for that turn's end.

@@ -25571,7 +25571,7 @@ fn restore_tabs_with_terminal_cache(
                         chat.control_compose(&tab_state.chat_draft, cx);
                     }
                     if tab_state.chat_session_panel_open {
-                        chat.set_session_panel_open(true, cx);
+                        chat.restore_session_panel_open(true, cx);
                     }
                     chat
                 });
@@ -26163,7 +26163,7 @@ fn restore_tabs_in_workspace(
                         chat.control_compose(&tab_state.chat_draft, cx);
                     }
                     if tab_state.chat_session_panel_open {
-                        chat.set_session_panel_open(true, cx);
+                        chat.restore_session_panel_open(true, cx);
                     }
                     chat
                 });
