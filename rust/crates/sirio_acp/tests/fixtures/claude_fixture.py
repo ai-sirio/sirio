@@ -25,6 +25,9 @@ COUNT_PATH = next(
 )
 # The worker appends its protocol flags after our own argv, so a second
 # positional starting with "-" is one of those, not a pid file.
+# Where the project's memory file is said to live: a test that wants the row
+# to open a real file names its checkout here.
+REPO_PATH = os.environ.get("SIRIO_FIXTURE_REPO", "/repo")
 PID_PATH = (
     sys.argv[2]
     if len(sys.argv) > 2 and not sys.argv[2].startswith("-")
@@ -177,7 +180,7 @@ def session_panel_context():
             category("free_space", "Free space", 302077, "free"),
         ],
         "memoryFiles": [
-            {"path": "/repo/CLAUDE.md", "type": "Project", "tokens": 28941},
+            {"path": f"{REPO_PATH}/CLAUDE.md", "type": "Project", "tokens": 28941},
             {"path": "/home/u/.claude/CLAUDE.md", "type": "User", "tokens": 809},
         ],
         "skills": {"totalSkills": 1, "tokens": 7102, "skillFrontmatter": [
