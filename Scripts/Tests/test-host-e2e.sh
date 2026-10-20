@@ -340,7 +340,9 @@ shutdown_hosts_in() { # ROOT [cleanup]
     [ -f "$f" ] || continue
     major="${f##*host-v}"
     major="${major%.json}"
-    pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$f" | head -n 1)"
+    # A host removes its state file as it leaves, so the file can be gone by
+    # now even though the test above saw it: that host needs no shutdown.
+    pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null | head -n 1)" || continue
     [ -n "$pid" ] || continue
     if [ "$mode" = cleanup ] && [ "$OS" != windows ] && is_a_host "$pid"; then
       kill -CONT "$pid" 2>/dev/null || true # a host the case left stopped
