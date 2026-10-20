@@ -41,6 +41,8 @@ pub struct RawDiagnostic {
     pub end: Position,
     pub severity: Severity,
     pub message: String,
+    /// The tool that produced it (`rustc`, `clippy`), when the server says.
+    pub source: Option<String>,
 }
 
 /// The file a notification is about and what it says, or `None` when the
@@ -73,11 +75,22 @@ fn one(value: &Value) -> Option<RawDiagnostic> {
         end: read("end")?,
         severity: Severity::from_code(value.get("severity").and_then(Value::as_u64)),
         message: value.get("message")?.as_str()?.to_owned(),
+        source: value
+            .get("source")
+            .and_then(Value::as_str)
+            .filter(|source| !source.is_empty())
+            .map(str::to_owned),
     })
 }
 
 #[cfg(test)]
 mod tests {
+    //! Ways `source` can fail, written before the code:
+    //! - a server that names its tool has it dropped (`None`), so Problems
+    //!   cannot say `clippy` or `rustc`;
+    //! - a server that names none reads as `Some("")` or invents a name, so
+    //!   Problems draws an empty label;
+    //! - an empty string (some servers send one) reads as a real name.
     use super::*;
 
     #[test]
@@ -122,5 +135,29 @@ mod tests {
         });
         let (_, found) = parse_publish(&params).expect("parses");
         assert_eq!(found[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn source_is_read_when_present_and_none_when_absent() {
+        // Problems names the tool that spoke (`rustc`, `clippy`); a server
+        // that names none must read as `None`, not as an empty string.
+        let params = serde_json::json!({
+            "uri": "file:///tmp/a.rs",
+            "diagnostics": [
+                { "range": { "start": {"line": 0, "character": 0},
+                             "end":   {"line": 0, "character": 1} },
+                  "message": "named", "source": "clippy" },
+                { "range": { "start": {"line": 1, "character": 0},
+                             "end":   {"line": 1, "character": 1} },
+                  "message": "anonymous" },
+                { "range": { "start": {"line": 2, "character": 0},
+                             "end":   {"line": 2, "character": 1} },
+                  "message": "blank", "source": "" }
+            ]
+        });
+        let (_, found) = parse_publish(&params).expect("parses");
+        assert_eq!(found[0].source.as_deref(), Some("clippy"));
+        assert_eq!(found[1].source, None);
+        assert_eq!(found[2].source, None);
     }
 }

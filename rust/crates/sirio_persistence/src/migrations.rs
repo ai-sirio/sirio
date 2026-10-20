@@ -542,6 +542,21 @@ fn migrate_v23(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v24 — the file tab's drawer, per worktree (Ely editor panels): whether it
+/// is open, its height, its tab (`problems` or `search`) and the opaque set
+/// of errors already announced, which this layer never parses.
+fn migrate_v24(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "CREATE TABLE editor_drawer (
+             worktree_path TEXT PRIMARY KEY NOT NULL,
+             open INTEGER NOT NULL,
+             height REAL NOT NULL,
+             tab TEXT NOT NULL,
+             seen_errors TEXT NOT NULL
+         );",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -568,6 +583,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v21,
     migrate_v22,
     migrate_v23,
+    migrate_v24,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
@@ -1001,5 +1017,32 @@ mod tests {
             vec![("was-closed".to_owned(), 0), ("was-open".to_owned(), 0)],
             "no existing worktree starts with its pane hidden"
         );
+    }
+
+    /// Fails if a saved drawer reads back different (height's `REAL` losing an
+    /// f32, `seen_errors` altered), if another worktree's row answers, or if a
+    /// second save inserts or is ignored instead of replacing the first.
+    #[test]
+    fn v24_round_trips_an_editor_drawer_and_upserts() {
+        let db = AppDatabase::in_memory().expect("open");
+        assert_eq!(db.editor_drawer("/work/a").expect("read"), None);
+
+        let record = crate::EditorDrawerRecord {
+            worktree_path: "/work/a".to_owned(),
+            open: true,
+            height: 312.5,
+            tab: "search".to_owned(),
+            seen_errors: r#"[["rust-analyzer","src/lib.rs","expected `;`"]]"#.to_owned(),
+        };
+        db.save_editor_drawer(&record).expect("save");
+        assert_eq!(db.editor_drawer("/work/a").expect("read"), Some(record.clone()));
+        assert_eq!(db.editor_drawer("/work/b").expect("read"), None);
+
+        let closed = crate::EditorDrawerRecord {
+            open: false,
+            ..record
+        };
+        db.save_editor_drawer(&closed).expect("save again");
+        assert_eq!(db.editor_drawer("/work/a").expect("read"), Some(closed));
     }
 }

@@ -952,6 +952,39 @@ pub mod request {
         request("surface.editor.find_close", BTreeMap::new())
     }
 
+    /// The file tab's drawer: `action` is `toggle`, `show` (`value` names the
+    /// tab), `close` or `height` (`value` is pixels).
+    pub fn editor_drawer(action: &str, value: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::from([("action".to_string(), action.to_string())]);
+        if let Some(value) = value {
+            params.insert("value".to_string(), value.to_string());
+        }
+        request("surface.editor.drawer", params)
+    }
+
+    /// Chooses the `index`-th row of the drawer's Problems, in the order it is
+    /// drawn, as a press on it does.
+    pub fn editor_problem(index: usize) -> ControlRequest {
+        request(
+            "surface.editor.problem",
+            BTreeMap::from([("index".to_string(), index.to_string())]),
+        )
+    }
+
+    /// The drawer's Search: each `(key, value)` names what to set or do, and only
+    /// those are sent. Keys: `query`, `replace`, `include`, `exclude`, `case`,
+    /// `word`, `regex` (`true` or `false`), `open` (a drawn line, from 0) and
+    /// `refresh` (`true`).
+    pub fn editor_search(fields: &[(&str, &str)]) -> ControlRequest {
+        request(
+            "surface.editor.search",
+            fields
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        )
+    }
+
     pub fn editor_crumb(index: usize) -> ControlRequest {
         request(
             "surface.editor.crumb",

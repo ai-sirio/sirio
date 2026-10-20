@@ -48,6 +48,7 @@ pub use ely_gpui_component::editor::{FindOptions, LspState};
 pub use status_actions::StatusItem;
 pub use status_row::StatusFacts;
 use crate::chat::{Chat, LinkClickOverride};
+use crate::drawer::WorktreeDrawer;
 use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection,
 };
@@ -299,6 +300,12 @@ pub struct FileView {
     /// What the row under the file has measured of itself, which decides
     /// whether it draws every item or only the ones that matter at a glance.
     status_layout: Rc<status_row::StatusLayout>,
+    /// The worktree's drawer under the code, shared by every file tab of the
+    /// worktree (`set_drawer`); `None` until the workspace hands it over.
+    drawer: Option<Entity<WorktreeDrawer>>,
+    /// Redraws this view when the drawer changes: the corner card's offset
+    /// reads the drawer's drawn height.
+    _drawer_subscription: Option<Subscription>,
     /// The language this tab colours its code as, when the user chose one in
     /// the status row (`set_language_override`); `None` is the path's. Colour
     /// only, and not kept across a relaunch.
@@ -341,7 +348,7 @@ pub struct FileView {
     /// rather than applied because a tab opened by "go to definition" is
     /// still loading its content: revealing immediately addresses lines
     /// that do not exist yet, and does nothing at all.
-    pending_reveal: Option<usize>,
+    pending_reveal: Option<RevealTarget>,
     /// The Preview's diagrams, by cache key (design §3).
     diagrams: Diagrams,
     /// The diagram settings the last frame saw. A change forgets every
@@ -448,6 +455,19 @@ pub enum DiagnosticSeverity {
     Hint,
 }
 
+/// Where a reveal puts the caret. Held by the view until the file has loaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RevealTarget {
+    /// The start of a line (0-based).
+    Line(usize),
+    /// A line (0-based) and a column counted in UTF-16 code units, as the
+    /// protocol counts: the caret goes there, past the end of a short line to
+    /// its end.
+    LineColumnUtf16(usize, usize),
+    /// A range of bytes of the buffer, selected.
+    Range(Range<usize>),
+}
+
 /// One finding, already in this view's own terms: a line index and a byte
 /// range into the buffer. The conversion from the protocol's UTF-16
 /// positions happens in the app, which owns the buffer — this crate never
@@ -461,8 +481,9 @@ pub struct FileDiagnostic {
 }
 
 // `Find` opens find on the file's code, or brings the open one back; `Replace`
-// opens it with the replace row.
-actions!(file_view, [Find, Replace]);
+// opens it with the replace row. `ToggleDrawer` opens the worktree's drawer or
+// closes it to its header; `SearchInWorktree` opens it on Search.
+actions!(file_view, [Find, Replace, ToggleDrawer, SearchInWorktree]);
 
 /// Installs bezel-editor's key bindings for the application, and the file
 /// tab's own: Find and Replace, in the tab's `FileEditor` context so they
@@ -480,6 +501,8 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-f", Find, Some("FileEditor")),
         KeyBinding::new(replace, Replace, Some("FileEditor")),
+        KeyBinding::new("secondary-j", ToggleDrawer, Some("FileEditor")),
+        KeyBinding::new("secondary-shift-f", SearchInWorktree, Some("FileEditor")),
     ]);
 }
 
@@ -512,7 +535,12 @@ impl FileView {
                 cx.notify();
             });
         });
-        let file_monitor = FileSystemEventMonitor::new(&path).ok();
+        // The debug switch the E2E uses to stand where macOS stands: no file
+        // watcher, so a tab learns of a write only when something tells it to
+        // look (compiled out of release builds).
+        let watched =
+            !(cfg!(debug_assertions) && std::env::var_os("SIRIO_NO_FILE_WATCH").is_some());
+        let file_monitor = if watched { FileSystemEventMonitor::new(&path).ok() } else { None };
         let file_monitor_task = file_monitor.as_ref().map(|_| {
             cx.spawn(async move |this, cx| {
                 loop {
@@ -572,6 +600,8 @@ impl FileView {
             git_diff_requests: 0,
             status_facts: StatusFacts::default(),
             status_layout: Rc::default(),
+            drawer: None,
+            _drawer_subscription: None,
             language_override: None,
             indent_override: None,
             status_popover: None,
@@ -611,6 +641,17 @@ impl FileView {
 
     pub fn is_snapshot(&self) -> bool {
         self.snapshot.is_some()
+    }
+
+    /// Gives the view the drawer of its worktree, which it draws under the code.
+    pub fn set_drawer(&mut self, drawer: Entity<WorktreeDrawer>, cx: &mut Context<Self>) {
+        self._drawer_subscription = Some(cx.observe(&drawer, |_, _, cx| cx.notify()));
+        self.drawer = Some(drawer);
+        cx.notify();
+    }
+
+    pub fn drawer(&self) -> Option<&Entity<WorktreeDrawer>> {
+        self.drawer.as_ref()
     }
 
     pub fn snapshot_origin(&self) -> Option<&SnapshotOrigin> {
@@ -699,6 +740,29 @@ impl FileView {
     /// file is still loading (nothing to lose yet).
     pub fn is_dirty(&self) -> bool {
         self.editor().is_some_and(Editor::is_dirty)
+    }
+
+    /// The text of this file as the tab holds it now, LF only, for a search
+    /// that must see what is on screen rather than what is on disk. `None`
+    /// while the file is loading or failed to load.
+    pub fn buffer_text(&self, cx: &App) -> Option<String> {
+        if let Some(code) = &self.code_editor {
+            if self.code_shown() {
+                return Some(code.read(cx).text().to_owned());
+            }
+        }
+        let editor = self.editor()?;
+        (editor.status() == &LoadStatus::Loaded).then(|| editor.buffer().to_owned())
+    }
+
+    /// The primary selection, when it is not empty and lies on one line: what
+    /// `Ctrl+Shift+F` seeds the worktree search with.
+    pub fn selection_query(&self, cx: &App) -> Option<String> {
+        let code = self.code_editor.as_ref().filter(|_| self.code_shown())?;
+        let code = code.read(cx);
+        let range = code.primary().range();
+        let text = code.text().get(range)?;
+        (!text.is_empty() && !text.contains('\n') && !text.contains('\r')).then(|| text.to_owned())
     }
 
     /// The current conflict state, or none while loading.
@@ -885,8 +949,10 @@ impl FileView {
         self.hover_card.as_deref()
     }
 
-    pub fn reveal_at(&mut self, line: usize, cx: &mut Context<Self>) {
-        self.pending_reveal = Some(line);
+    /// Puts the caret (or a selection) where `target` names and scrolls it into
+    /// view, now or as soon as the file has loaded.
+    pub fn reveal(&mut self, target: RevealTarget, cx: &mut Context<Self>) {
+        self.pending_reveal = Some(target);
         self.apply_pending_reveal(cx);
     }
 
@@ -1521,6 +1587,11 @@ impl FileView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The drawer lists this tab's file first (a snapshot's is not the worktree's).
+        if let Some(drawer) = &self.drawer {
+            let file = (!self.is_snapshot()).then(|| self.path());
+            drawer.update(cx, |drawer, _| drawer.set_current_file(file));
+        }
         match &self.state {
             ViewState::Loading if self.snapshot_error.is_some() => render_snapshot_failure(
                 self.snapshot_error.as_deref().unwrap_or_default(),
@@ -1568,6 +1639,21 @@ impl FileView {
                         .on_action(cx.listener(|view, _: &Replace, window, cx| {
                             view.find_from_key(true, window, cx);
                         }))
+                        .on_action(cx.listener(|view, _: &ToggleDrawer, _, cx| {
+                            if let Some(drawer) = &view.drawer {
+                                drawer.update(cx, |drawer, cx| drawer.toggle(cx));
+                            }
+                        }))
+                        .on_action(cx.listener(
+                            |view, _: &SearchInWorktree, window, cx| {
+                                let seed = view.selection_query(cx);
+                                if let Some(drawer) = &view.drawer {
+                                    drawer.update(cx, |drawer, cx| {
+                                        drawer.search_in_worktree(seed, window, cx)
+                                    });
+                                }
+                            },
+                        ))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             editor_entity.update(cx, |view, cx| {
                                 view.focus_target(cx).focus(window, cx);
@@ -1601,6 +1687,42 @@ impl FileView {
                             &self.scroll,
                             preview,
                         ))
+                        // The drawer is the last row of the column, so the
+                        // `FileEditor` context covers its fields. The canvas
+                        // tells it how tall the tab is, which caps it.
+                        .when_some(self.drawer.clone(), |this, drawer| {
+                            let measured = drawer.clone();
+                            this.relative()
+                                .child(
+                                    canvas(
+                                        move |bounds, window, cx| {
+                                            if measured.read(cx).note_tab_height(bounds.size.height) {
+                                                window.request_animation_frame();
+                                            }
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                                .child(
+                                    // Escape in any field of the drawer gives the keyboard
+                                    // back to this tab's code, as it does from find's query.
+                                    div()
+                                        .on_key_down({
+                                            let entity = entity.clone();
+                                            move |event, window, cx| {
+                                                if event.keystroke.key == "escape" {
+                                                    cx.stop_propagation();
+                                                    entity.update(cx, |view, cx| {
+                                                        view.focus_target(cx).focus(window, cx);
+                                                    });
+                                                }
+                                            }
+                                        })
+                                        .child(drawer),
+                                )
+                        })
                         .into_any_element()
                 }
                 _ => notice(
@@ -1763,6 +1885,10 @@ impl Render for FileView {
         let step = sirio_perf::span("FileView.status_row", id);
         let status_row = self.render_status_row(theme, &entity, cx);
         drop(step);
+        let drawer_height = self
+            .drawer
+            .as_ref()
+            .map_or(px(0.0), |drawer| drawer.read(cx).drawn_height());
         let message = self.message.as_ref().map(|message| {
             let card = message_card(&message.text, &message.actions, theme, entity.clone());
             match message.at {
@@ -1774,14 +1900,15 @@ impl Render for FileView {
                 )
                 .priority(2)
                 .into_any_element(),
-                // Above the row when there is one; without it (a file still
-                // loading) the card sits at the corner itself.
+                // Above the row, and the drawer over it, when there is one;
+                // without it (a file still loading) the card sits at the
+                // corner itself.
                 None => div()
                     .absolute()
                     .bottom(
                         px(16.0)
                             + if status_row.is_some() {
-                                status_row::STATUS_ROW_HEIGHT
+                                status_row::STATUS_ROW_HEIGHT + drawer_height
                             } else {
                                 px(0.0)
                             },
@@ -3450,7 +3577,7 @@ mod tests {
             cx.debug_bounds("code-editor-line-350").is_none(),
             "line 350 starts off screen, or the test proves nothing"
         );
-        view.update(&mut cx.cx, |view, cx| view.reveal_at(350, cx));
+        view.update(&mut cx.cx, |view, cx| view.reveal(RevealTarget::Line(350), cx));
         cx.update(|window, cx| {
             window.refresh();
             window.simulate_next_frame(cx);
@@ -3480,7 +3607,7 @@ mod tests {
         let window = cx.add_window(|_window, cx| {
             let mut view = FileView::new(file.path().to_path_buf(), cx);
             // Before any load has completed.
-            view.reveal_at(350, cx);
+            view.reveal(RevealTarget::Line(350), cx);
             view
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
@@ -5607,7 +5734,7 @@ mod tests {
         });
         let window = cx.add_window(|_window, cx| {
             let mut view = FileView::snapshot_pending(snapshot_origin_for_tests(), cx);
-            view.reveal_at(350, cx);
+            view.reveal(RevealTarget::Line(350), cx);
             view.finish_snapshot(Err("boom".to_string()), cx);
             view
         });

@@ -24,7 +24,7 @@ use sirio_theme::Theme;
 
 use super::{
     CodeSpan, DiagnosticSeverity, FileDiagnostic, FileView, FileViewEvent, MarkdownMode, code_spans,
-    git_marks, line_highlights,
+    RevealTarget, git_marks, line_highlights,
 };
 use crate::editor::{Language, LoadStatus, Selection, markdown_links_in_line};
 use crate::editor_prefs::EditorPrefs;
@@ -554,12 +554,13 @@ impl FileView {
         });
     }
 
-    /// Jumps the caret to `line` (0-based) and scrolls it into view. Only the
-    /// code editor can place a caret, so this is a no-op until it exists.
+    /// Puts the caret (or the selection) where the pending target names and
+    /// scrolls it into view. Only the code editor can place a caret, so this
+    /// waits until it exists and holds the loaded text.
     pub(super) fn apply_pending_reveal(&mut self, cx: &mut Context<Self>) {
-        let Some(line) = self.pending_reveal else {
+        if self.pending_reveal.is_none() {
             return;
-        };
+        }
         // A code editor left over from before a load has the old text; the
         // reveal waits for the loaded one.
         if self
@@ -571,13 +572,49 @@ impl FileView {
         let Some(code) = self.code_editor.clone() else {
             return;
         };
-        self.pending_reveal = None;
+        let Some(target) = self.pending_reveal.take() else {
+            return;
+        };
         code.update(cx, |code, cx| {
-            let start = line_start_offset(code.text(), line);
-            code.select([start..start], cx);
+            let range = reveal_range(code.text(), &target);
+            code.select([range], cx);
             code.reveal_primary(cx);
         });
         cx.notify();
+    }
+}
+
+/// The bytes of `text` a reveal selects: a caret at a line's start, a caret at
+/// a UTF-16 column of a line, or a range kept inside the text and on character
+/// boundaries.
+fn reveal_range(text: &str, target: &RevealTarget) -> Range<usize> {
+    match target {
+        RevealTarget::Line(line) => {
+            let start = line_start_offset(text, *line);
+            start..start
+        }
+        RevealTarget::LineColumnUtf16(line, column) => {
+            let position = sirio_lsp::lsp_types::Position {
+                line: u32::try_from(*line).unwrap_or(u32::MAX),
+                character: u32::try_from(*column).unwrap_or(u32::MAX),
+            };
+            // A line past the end is the last line's start, as `Line` has it.
+            let offset = sirio_lsp::LineIndex::new(text)
+                .offset(position)
+                .unwrap_or_else(|| line_start_offset(text, *line));
+            offset..offset
+        }
+        RevealTarget::Range(range) => {
+            let floor = |mut at: usize| {
+                at = at.min(text.len());
+                while !text.is_char_boundary(at) {
+                    at -= 1;
+                }
+                at
+            };
+            let (start, end) = (floor(range.start), floor(range.end));
+            start..end.max(start)
+        }
     }
 }
 

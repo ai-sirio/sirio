@@ -152,7 +152,7 @@ impl FileView {
         let line = crumb
             .line
             .ok_or_else(|| format!("\"{}\" is part of the path, not a symbol", crumb.label))?;
-        self.reveal_at(line, cx);
+        self.reveal(super::RevealTarget::Line(line), cx);
         // The code editor's own notification reaches the observer after this
         // returns; the caller (the socket's reply) reads the breadcrumb now.
         if self.refresh_caret_line(cx) {

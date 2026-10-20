@@ -2292,6 +2292,36 @@ impl SessionStore {
         }
     }
 
+    /// The drawer state saved for a worktree, `None` for none yet or a read
+    /// error.
+    pub fn editor_drawer(&self, worktree: &Path) -> Option<sirio_persistence::EditorDrawerRecord> {
+        let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let db = db.as_ref()?;
+        match db.editor_drawer(&worktree.to_string_lossy()) {
+            Ok(record) => record,
+            Err(error) => {
+                eprintln!(
+                    "[session] failed to read the editor drawer of {}: {error}",
+                    worktree.display()
+                );
+                None
+            }
+        }
+    }
+
+    pub fn save_editor_drawer(&self, record: sirio_persistence::EditorDrawerRecord) {
+        let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return;
+        };
+        if let Err(error) = db.save_editor_drawer(&record) {
+            eprintln!(
+                "[session] failed to persist the editor drawer of {}: {error}",
+                record.worktree_path
+            );
+        }
+    }
+
     pub fn drop_change_request_link(&self, worktree: &Path) {
         let db = self.inner.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(db) = db.as_ref() else {

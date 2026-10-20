@@ -120,6 +120,56 @@ set -eEuo pipefail
 #   hover_leave       with the card of an Error drawn for a real resting pointer, a pointer
 #                     that jumps onto the find bar, and onto the conflict banner, leaves no
 #                     card (`hover=` empty) -- Ely says when the pointer leaves the code
+#   drawer            the worktree's drawer under the code: Ctrl+J (a real X key) opens and closes it,
+#                     a tab and a height are chosen through the debug verb, a second file draws the
+#                     same drawer, tab and height survive a quit and relaunch, a real drag of its top
+#                     edge sets the height, the corner card sits above it and follows it, a right
+#                     press in it opens no editor menu; captured
+#   problems_unopened  the fake server (fake_lsp.py `publish`) reports an error for a file nobody
+#                     opened: the drawer opens itself on Problems, lists it, and the caret does not move
+#   problems_alarm    the seen set (spec 4.4) end to end: the same error rewritten, or cleared and
+#                     republished, leaves a closed drawer closed; an error with a new message opens it;
+#                     a seen error fixed and returning identically does not (the accepted cost);
+#                     warnings never; on Search it stays on Search
+#   problems_relaunch two errors seen and closed, a quit and relaunch, the server reports them one
+#                     file at a time: the drawer stays closed; a new message opens it
+#   problems_open     a problem's row opens its file with the caret at the needle's byte offset (the
+#                     server's column is UTF-16, past an accent and an emoji)
+#   problems_server_exit  a server that ends takes its problems with it and is no longer named; the
+#                     next .rs file starts it again; after a relaunch a running server with nothing to
+#                     say is named
+#   problems_park     a second worktree has a drawer of its own; the first, switched away and back,
+#                     keeps its drawer, height and problems, one that arrived while parked included
+#   problems_volume   5 000 problems from one burst (50 files): the counts are the store's, the panel
+#                     draws at most 1 500 rows and says how many are not drawn, the window still
+#                     answers a verb; captured
+#   search_keys       Ctrl+Shift+F (a real X key) opens the drawer on Search with the selection as the query;
+#                     the keyboard is in the query field (a typed key lands there), and Escape in it
+#                     hands the keyboard to the code of the tab
+#   search_scope      the worktree is searched as git lists it: an untracked file is found, an ignored
+#                     one is not; the summary names what was left unread
+#   search_options    case, whole word and a regular expression count what the in-file find counts on the
+#                     same file; an invalid pattern is the summary
+#   search_dirty      an unsaved edit is found in its buffer (never on disk), listed as unsaved, and its
+#                     result opens at the buffer position
+#   search_open       a result opens its file with the match selected; that tab's drawer shows the same
+#                     search with the result chosen, and the next result keeps the thread; captured
+#   search_supersede  a second query typed while a slow first run is under way: only the second's results stand
+#   search_stale      a hit opened after its file changed selects the match as the text reads now
+#                     where it still starts, and otherwise shows only its line (buffer and disk)
+#   search_cap        more than 20 000 matches stop at 20 000 and the summary says so
+#   replace_mixed     Replace all over a worktree: a.rs open and dirty, b.rs open and clean (caret kept),
+#                     c.rs closed, d.rs rewritten after the search so its match moved, run.sh (0755), a
+#                     file turned into a symlink after the search and its target. The dirty file is
+#                     left alone and named, the symlink named and kept, every other file replaced at
+#                     its current place, the open clean tab shows the new text at once and the search
+#                     runs again; also a read-only file and a file over the size bound (neither
+#                     written, both named), the report's skip line, the preview on each result, and
+#                     the verb's refusal while the button is off; captured. With --no-file-watch
+#                     the open tab can only have been told by Replace all itself (the macOS path)
+#   replace_crlf      a CRLF file and a file of mixed line endings keep every ending outside the
+#                     replaced span, a multi-line regex span included; pressed with a real click
+#   replace_capped    over 20 000 matches the button is disabled and says why
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
 #                     stickyScroll, lineNumbers, cursorShape, and the ruler at
@@ -136,7 +186,7 @@ set -eEuo pipefail
 # in frames/. Rerunning the script reproduces it.
 #
 # Usage: Scripts/Tests/test-editor-e2e.sh [--xvfb | --display :N] [--state-only]
-#          [--out-dir DIR] [--appearance light|dark] [--only NAME[,NAME...]]
+#          [--out-dir DIR] [--appearance light|dark] [--only NAME[,NAME...]] [--no-file-watch]
 #
 #   --xvfb        start a private Xvfb on a free display between :90 and :99
 #   --display :N  use an Xvfb this user started (never your own $DISPLAY)
@@ -145,6 +195,9 @@ set -eEuo pipefail
 #   --appearance  seed light or dark (default dark)
 #   --only        run the named scenarios alone and print "EDITOR E2E PARTIAL"
 #                 instead of "EDITOR E2E OK"; only the whole run is the artifact
+#   --no-file-watch  the app starts with SIRIO_NO_FILE_WATCH=1 (debug builds): no file view
+#                 watches its file, as on macOS. Meant for `--only replace_mixed`, where it
+#                 proves Replace all itself tells the open tabs; other scenarios rely on the watcher
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
@@ -159,6 +212,7 @@ DISPLAY_TARGET=""
 OUT_DIR=""
 APPEARANCE="dark"
 ONLY=""
+NO_FILE_WATCH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --xvfb) START_XVFB=1; shift ;;
@@ -167,6 +221,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --appearance) APPEARANCE="${2:?--appearance needs light or dark}"; shift 2 ;;
     --only) ONLY=",${2:?--only needs scenario names},"; shift 2 ;;
+    --no-file-watch) NO_FILE_WATCH=1; export SIRIO_NO_FILE_WATCH=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -318,6 +373,15 @@ elif command == "offset":
     sys.stdout.write(str(len(text[:index].encode("utf-8"))))
 elif command == "length":
     sys.stdout.write(str(len(unescape(sys.argv[2]).encode("utf-8"))))
+elif command == "offset-nth":
+    # offset-nth ESCAPED_TEXT NEEDLE N: the byte offset of the Nth (0-based) NEEDLE.
+    text = unescape(sys.argv[2])
+    index = -1
+    for _ in range(int(sys.argv[4]) + 1):
+        index = text.find(sys.argv[3], index + 1)
+        if index < 0:
+            sys.exit(f"'{sys.argv[3]}' has no occurrence {sys.argv[4]}")
+    sys.stdout.write(str(len(text[:index].encode("utf-8"))))
 elif command == "line-of":
     # line-of ESCAPED_TEXT NEEDLE: the 0-based line NEEDLE is on.
     text = unescape(sys.argv[2])
@@ -546,6 +610,22 @@ cat >"$RUN_DIR/fake-lsp/answers.json" <<JSON
   ]
 }
 JSON
+# The drawer opens itself on an error the user has not seen, and the fake server
+# reports FAKE_ERROR for main.rs in every scenario: recorded as seen, as it is for
+# a user who closed the drawer on it, so only the problems scenarios (which bring
+# errors of their own) ever open it.
+python3 - "$SIRIO_DB" "$WT" "$FAKE_ERROR" <<'PY'
+import json, sqlite3, sys
+database, worktree, message = sys.argv[1:4]
+connection = sqlite3.connect(database)
+connection.execute(
+    "INSERT INTO editor_drawer (worktree_path, open, height, tab, seen_errors) "
+    "VALUES (?, 0, 240.0, 'problems', ?) "
+    "ON CONFLICT(worktree_path) DO UPDATE SET seen_errors = excluded.seen_errors",
+    (worktree, json.dumps([[worktree, "rust", "main.rs", message, 1]])))
+connection.commit()
+connection.close()
+PY
 # The server's program is a stub on the app's PATH, so the status row names it
 # the way it names a real one (`fake-lsp`, as it names `rust-analyzer`).
 # `slow-lsp` is the same server that takes two seconds to start: the status
@@ -803,6 +883,7 @@ focus_window() {
 # The Ruler column field and the Tab size field of Settings → Editor, in the
 # window's own coordinates (the Ruler column field is enabled with Ruler on).
 CLICK_WINDOW=1470x833
+REPLACE_ALL_BUTTON=(1100 596)
 RULER_FIELD=(1139 660)
 TABSIZE_FIELD=(1139 705)
 
@@ -846,6 +927,17 @@ scenario_load_states() {
     "unreadable.txt|error|This file cannot be read (Permission denied (os error 13)): @WT@/unreadable.txt"
     "missing.rs|error|This file does not exist: @WT@/missing.rs"
   )
+  # The seed's precondition (see the setup's `editor_drawer` row): the fake server
+  # reports FAKE_ERROR for main.rs, the drawer holds it as seen and stays closed.
+  # When the app's seen-set row shape or its worktree key changes, the seed stops
+  # matching and the drawer opens here, over every scenario that follows.
+  ctl surface editor open --path="$WT/main.rs" >/dev/null
+  settle
+  expect_state problems 1/1/0
+  sleep 0.8
+  read_state
+  [ "$(sfield drawer_open)" = 0 ] \
+    || fail "$SCENARIO: the seeded editor_drawer row (worktree path, seen errors as [root, language, path, message, count]) no longer matches what the app persists: the drawer opened itself on main.rs's seen error. Update the seed in this script's setup."
   local row name want_state want_error
   for row in "${rows[@]}"; do
     IFS='|' read -r name want_state want_error <<<"$row"
@@ -2445,9 +2537,10 @@ STATUS_BELL_CLEAR=(1431 744)
 STATUS_BELL_COMPACT=(1128 775)
 STATUS_BELL_COPY_OLDER=(1445 690)
 # The corner card, over the file's bottom right corner: a point of a card of
-# three lines, and one inside the card whatever its size.
-NOTIFY_CARD=(1300 720)
-NOTIFY_CARD_CORNER=(1438 735)
+# three lines, and one inside the card whatever its size. The card sits above the
+# status row and the drawer's header row (30 px, the drawer closed).
+NOTIFY_CARD=(1300 690)
+NOTIFY_CARD_CORNER=(1438 705)
 
 # The bell's count and the length of the list, both polled.
 expect_bell() { # unseen listed
@@ -3138,6 +3231,1099 @@ PY
   expect_state dirty false
 }
 
+# Quits the app the way a user does and starts it again on the same database,
+# host root and socket path, then selects the repository as the run began.
+app_restart() {
+  local tries=0
+  ctl quit >/dev/null 2>&1 || true
+  while kill -0 "$APP_PID" 2>/dev/null && [ "$tries" -lt 150 ]; do
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  if kill -0 "$APP_PID" 2>/dev/null; then
+    kill -KILL "$APP_PID" 2>/dev/null || true
+    fail "$SCENARIO: sirio did not quit within 15 s"
+  fi
+  wait "$APP_PID" 2>/dev/null || true
+  APP_PID=""
+  app_start
+  local selected=0
+  for _ in $(seq 1 40); do
+    "$CTL" select-workspace --workspace "$WT" >/dev/null 2>&1 && { selected=1; break; }
+    sleep 0.5
+  done
+  [ "$selected" -eq 1 ] || fail "$SCENARIO: the repository could not be selected after the relaunch"
+}
+
+# A press at (X, Y), counted from the window's corner, dragged UP by DY pixels
+# in two steps, and released. The same window-size guard as the clicks.
+drag_up() { # x y dy
+  local window size
+  window="$(find_window)"
+  [ -n "$window" ] || fail "$SCENARIO: no window to drag in"
+  size="$(xwininfo -display "$DISPLAY_TARGET" -id "$window" | awk '/Width:/ {w = $2} /Height:/ {h = $2} END {print w "x" h}')"
+  [ "$size" = "$CLICK_WINDOW" ] || fail "$SCENARIO: the window is $size, not the $CLICK_WINDOW this drag is placed for"
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" "$1" "$2" mousedown 1 \
+    mousemove_relative --sync -- 0 -$(($3 / 2)) mousemove_relative --sync -- 0 -$(($3 - $3 / 2)) mouseup 1 \
+    || fail "$SCENARIO: xdotool could not drag"
+}
+
+# A point of the corner card over the file pane (the right panel shown), with the
+# drawer closed and the card one line.
+DRAWER_CARD=(1100 700)
+
+# The drawer under the code: opened by Ctrl+J, a tab and a height chosen
+# through the debug verb, kept by the worktree (a second file draws the same
+# drawer) and across a quit and relaunch, then closed by the key again.
+scenario_drawer() {
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state drawer_open 0
+  expect_state drawer_tab problems
+
+  # A real key: the code has the keyboard (the keys verb gives it, and a
+  # caret that is already at the start moves nowhere), the window has X focus.
+  focus_window
+  ctl surface editor keys --keys=left >/dev/null
+  x_key ctrl+j
+  expect_state drawer_open 1
+  expect_state drawer_tab problems
+  echo "OK: Ctrl+J opens the drawer on Problems"
+
+  ctl surface editor drawer --show=search >/dev/null
+  expect_state drawer_tab search
+  ctl surface editor drawer --height=300 >/dev/null
+  expect_state drawer_height 300
+  ctl surface editor drawer --height=10 >/dev/null
+  expect_state drawer_height 96
+  ctl surface editor drawer --height=300 >/dev/null
+  expect_state drawer_height 300
+  echo "OK: Search is shown, 300 px is kept and 10 px is raised to the 96 px floor"
+
+  open_file "$WT/crlf.txt"
+  expect_state state loaded
+  expect_state drawer_open 1
+  expect_state drawer_tab search
+  expect_state drawer_height 300
+  echo "OK: a second file of the worktree draws the same drawer"
+  ctl surface editor drawer --show=problems >/dev/null
+  expect_state drawer_tab problems
+  capture drawer-open
+
+  app_restart
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state drawer_open 1
+  expect_state drawer_tab problems
+  expect_state drawer_height 300
+  echo "OK: the drawer is as it was after a quit and relaunch"
+
+  # The top edge dragged up 50 px by a real pointer: the height follows it and
+  # the drop saves it (the relaunch reads it back). At 300 px in this window the
+  # drawer's edge is at y=462, and a press 3 px below it is on its 6 px strip.
+  drag_up 900 465 50
+  expect_state drawer_height 350
+  app_restart
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state drawer_height 350
+  echo "OK: a drag of the top edge sets the height, and the drop keeps it"
+
+  focus_window
+  ctl surface editor keys --keys=left >/dev/null
+  x_key ctrl+j
+  expect_state drawer_open 0
+  expect_state drawer_height 350
+  x_key ctrl+j
+  expect_state drawer_open 1
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  echo "OK: Ctrl+J and the close verb shut the drawer, the height stays"
+
+  # The corner card sits above the drawer and follows it. Raised with the drawer
+  # closed, it is over DRAWER_CARD (a point of the file pane beside the right panel,
+  # in a window of CLICK_WINDOW); with the drawer open that point is inside the
+  # drawer, so a press there reaches the drawer (a stale card would take it and
+  # dismiss itself); closed again, the card is back at that point.
+  ctl surface editor status --item=bell --value="raise:a note over the drawer" >/dev/null
+  expect_state message "a note over the drawer"
+  capture drawer-card-closed
+  ctl surface editor drawer --show=problems >/dev/null
+  expect_state drawer_open 1
+  sleep 1
+  capture drawer-card-open
+  click_at "${DRAWER_CARD[@]}"
+  expect_state_stays message "a note over the drawer"
+  # A right press in the drawer is not the code's: no editor menu opens. The
+  # state does not name the menu, so this is a capture to look at.
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$(find_window)" 1000 600 click 3
+  sleep 1
+  capture drawer-right-click
+  x_key Escape
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  sleep 1
+  click_at "${DRAWER_CARD[@]}"
+  expect_state message ""
+  echo "OK: the corner card rose with the drawer and came back down with it"
+}
+
+# ---------------------------------------------------------------- problems
+
+# Problems over the worktree (editor panels, Task 5). The fake language server
+# reports files nobody opened (its `publish` answers, Scripts/Tests/fake_lsp.py)
+# and the drawer lists them, opens itself on an error the user has not seen, and
+# notices a server that ends. Each scenario's "new" errors carry messages no other
+# scenario uses, so a seen set left behind by an earlier one cannot mask a step.
+#
+# The rows the earlier scenarios rely on are not disturbed: the setup records the
+# one error their fake server always reports (main.rs, FAKE_ERROR) as already
+# seen, the way a user who closed the drawer on it would have.
+
+# The fixtures the scenarios report on: a file with an accent and an emoji before
+# its needle (the column is UTF-16, the selection bytes), and a second file.
+problems_fixtures() {
+  mkdir -p "$WT/src"
+  python3 - "$WT" <<'PY'
+import os, sys
+root = sys.argv[1]
+with open(os.path.join(root, "src/lib.rs"), "wb") as handle:
+    handle.write("fn alpha() -> u32 { 1 }\nfn beta() -> u32 { 2 }\n// é\U0001F600 target_marker\n".encode("utf-8"))
+with open(os.path.join(root, "src/util.rs"), "wb") as handle:
+    handle.write(b"fn util() {}\nfn helper() {}\n")
+PY
+  [ -f "$RUN_DIR/fake-lsp/answers.base.json" ] || cp "$RUN_DIR/fake-lsp/answers.json" "$RUN_DIR/fake-lsp/answers.base.json"
+}
+# One finding of the fake server's `publish` map: the text it names, an LSP
+# severity (1 error, 2 warning), and its message.
+pf() { # needle severity message
+  printf '{"needle":"%s","severity":%s,"message":"%s","source":"fake-lsp"}' "$1" "$2" "$3"
+}
+# Rewrites the fake server's answers so it reports exactly PUBLISH, a JSON object
+# of path (relative to the worktree) to findings, and nothing in main.rs; whatever
+# it reported before and no longer lists is published empty. Every call changes
+# the file (a nonce), so the server's poll sees a change even for the same map.
+problems_publish() { # json
+  python3 - "$RUN_DIR/fake-lsp/answers.json" "$RUN_DIR/fake-lsp/answers.base.json" "$1" <<'PY'
+import json, os, sys, time
+path, base, publish = sys.argv[1:4]
+with open(base, encoding="utf-8") as handle:
+    answers = json.load(handle)
+answers["diagnostics_file"] = ""
+if publish.startswith("@"):  # a map too long for an argument, in a file
+    with open(publish[1:], encoding="utf-8") as handle:
+        publish = handle.read()
+answers["publish"] = json.loads(publish)
+answers["nonce"] = time.time_ns()
+with open(path + ".tmp", "w", encoding="utf-8") as handle:
+    json.dump(answers, handle)
+os.replace(path + ".tmp", path)
+PY
+}
+# The answers as the earlier scenarios know them (no `publish`): the server puts
+# main.rs's own findings back and rests.
+problems_restore() {
+  cp "$RUN_DIR/fake-lsp/answers.base.json" "$RUN_DIR/fake-lsp/answers.json.tmp"
+  mv "$RUN_DIR/fake-lsp/answers.json.tmp" "$RUN_DIR/fake-lsp/answers.json"
+}
+# A drawer closed over a store with nothing in it, main.rs open: the state every
+# problems scenario starts from. The seen set is whatever the empty store leaves.
+problems_reset() {
+  problems_fixtures
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  ctl surface editor drawer --show=problems >/dev/null
+  problems_publish '{}'
+  expect_state problems 0/0/0
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  # A server's silence is not a look: nothing below may be affected by a poll
+  # that is still on its way.
+  sleep 0.6
+  expect_state drawer_open 0
+}
+problems_done() {
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  # The answers back as the earlier scenarios know them: main.rs's Error and
+  # Warning return, which is an error the drawer has not seen (a reset's look
+  # saw none). A look at Problems, then a close, is the user having seen them.
+  problems_restore
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state diagnostics 2
+  expect_state problems 1/1/0
+  ctl surface editor drawer --show=problems >/dev/null
+  ctl surface editor drawer --close >/dev/null
+  expect_state_stays drawer_open 0
+}
+
+scenario_problems_unopened() {
+  problems_reset
+  # The caret at a known place: the drawer opens over it and must not move it.
+  ctl surface editor select --ranges=5..5 >/dev/null
+  expect_state selections "5..5"
+  problems_publish "{\"src/lib.rs\":[$(pf alpha 1 'unopened: alpha cannot be found')]}"
+  expect_state drawer_open 1
+  expect_state drawer_tab problems
+  expect_state problems 1/0/0
+  expect_state problem_files src/lib.rs
+  expect_state selections "5..5"
+  echo "OK: an error in a file nobody opened opened the drawer on Problems, listed it, and left the caret"
+  capture problems-open
+  problems_done
+}
+
+scenario_problems_alarm() {
+  problems_reset
+  local one two three four
+  one="$(pf alpha 1 'alarm one: alpha is wrong')"
+  two="$(pf beta 1 'alarm two: beta is wrong')"
+  three="$(pf alpha 1 'alarm three: alpha again')"
+  four="$(pf beta 1 'alarm four: beta again')"
+  # The first error is new: it opens the drawer. Closing is the user seeing it.
+  problems_publish "{\"src/lib.rs\":[$one]}"
+  expect_state drawer_open 1
+  expect_state problems 1/0/0
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  # The same error written again, and cleared then republished with no look
+  # between: neither is new.
+  problems_publish "{\"src/lib.rs\":[$one]}"
+  sleep 1
+  expect_state_stays drawer_open 0
+  problems_publish '{}'
+  expect_state problems 0/0/0
+  problems_publish "{\"src/lib.rs\":[$one]}"
+  expect_state problems 1/0/0
+  expect_state_stays drawer_open 0
+  echo "OK: the same error, rewritten and then cleared and republished, left the drawer closed"
+  # A message the user has not seen opens it.
+  problems_publish "{\"src/lib.rs\":[$one,$two]}"
+  expect_state drawer_open 1
+  expect_state problems 2/0/0
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  echo "OK: an error with a new message opened the drawer"
+  # Fixed while nobody looked, then back identically: the accepted cost, it stays
+  # closed. A new message opens it again.
+  problems_publish '{}'
+  expect_state problems 0/0/0
+  problems_publish "{\"src/lib.rs\":[$one]}"
+  expect_state problems 1/0/0
+  expect_state_stays drawer_open 0
+  echo "OK: a seen error fixed and returning identically left the drawer closed (the accepted cost)"
+  problems_publish "{\"src/lib.rs\":[$one,$three]}"
+  expect_state drawer_open 1
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  # Warnings never open it.
+  problems_publish "{\"src/lib.rs\":[$(pf alpha 2 'alarm warning: alpha is odd')]}"
+  expect_state problems 0/1/0
+  expect_state_stays drawer_open 0
+  echo "OK: a warning left the drawer closed"
+  # On Search the drawer stays on Search however new the error is.
+  ctl surface editor drawer --show=search >/dev/null
+  expect_state drawer_tab search
+  problems_publish "{\"src/lib.rs\":[$one,$four]}"
+  expect_state problems 2/0/0
+  expect_state_stays drawer_open 1
+  expect_state drawer_tab search
+  echo "OK: with the drawer on Search a new error left it on Search"
+  problems_done
+}
+
+scenario_problems_relaunch() {
+  problems_reset
+  local lib util
+  lib="$(pf alpha 1 'relaunch lib: alpha is wrong')"
+  util="$(pf helper 1 'relaunch util: helper is wrong')"
+  problems_publish "{\"src/lib.rs\":[$lib],\"src/util.rs\":[$util]}"
+  expect_state drawer_open 1
+  expect_state problems 2/0/0
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  app_restart
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state drawer_open 0
+  # The server starts with the first .rs file and reports the two files one at a
+  # time; whatever prefix of them is listed, the drawer stays closed.
+  expect_state problems 2/0/0
+  expect_state_stays drawer_open 0
+  echo "OK: after a quit and relaunch the same two errors came back one file at a time and the drawer stayed closed"
+  problems_publish "{\"src/lib.rs\":[$lib,$(pf beta 1 'relaunch new: beta is wrong')],\"src/util.rs\":[$util]}"
+  expect_state drawer_open 1
+  echo "OK: an error with a new message opened it"
+  problems_done
+}
+
+# The message of Problems' first row, in a window of CLICK_WINDOW with the drawer
+# open at its default height (240 px) over main.rs: problems-open.png shows it
+# when the drawer is at that height.
+PROBLEM_ROW=(900 626)
+
+scenario_problems_open() {
+  problems_reset
+  local at
+  # The default height, whatever an earlier scenario left (the drawer scenario drags it).
+  ctl surface editor drawer --height=240 >/dev/null
+  expect_state drawer_height 240
+  problems_publish "{\"src/lib.rs\":[$(pf target_marker 1 'open: target_marker is wrong')]}"
+  expect_state drawer_open 1
+  expect_state problems 1/0/0
+  expect_state problem_files src/lib.rs
+  # A real press on the row.
+  focus_window
+  click_at "${PROBLEM_ROW[@]}"
+  expect_active_tab lib.rs
+  expect_state path "$WT/src/lib.rs"
+  expect_state state loaded
+  at="$(python3 "$TOOLS" offset "$(sfield text)" "target_marker")"
+  # The column the server gave is in UTF-16 units (the accent is one, the emoji
+  # two); the caret is at the needle's byte offset.
+  expect_state selections "$at..$at"
+  echo "OK: a press on the problem's row opened src/lib.rs with the caret on the needle, past an accent and an emoji"
+  # The verb chooses the same row without a pointer, from another tab, with the
+  # caret of lib.rs put somewhere else first.
+  ctl surface editor select --ranges=0..0 >/dev/null
+  expect_state selections "0..0"
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state drawer_open 1
+  ctl surface editor problem --open=0 >/dev/null
+  expect_active_tab lib.rs
+  expect_state selections "$at..$at"
+  echo "OK: the verb opened the same row the same way"
+  problems_done
+}
+
+scenario_problems_server_exit() {
+  problems_reset
+  local mark
+  # A running server with nothing to say is named (the store is empty, so the line is drawn).
+  expect_state problems_note "fake-lsp: no problems"
+  problems_publish "{\"src/lib.rs\":[$(pf alpha 1 'exit: alpha is wrong')]}"
+  expect_state drawer_open 1
+  expect_state problems 1/0/0
+  # The server ends the way a crashed one does: its entries go, and it is no longer named.
+  python3 - "$RUN_DIR/fake-lsp/answers.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    answers = json.load(handle)
+answers["exit"] = True
+with open(path + ".tmp", "w", encoding="utf-8") as handle:
+    json.dump(answers, handle)
+os.replace(path + ".tmp", path)
+PY
+  expect_state problems 0/0/0
+  expect_state problems_note "No language server is running in this worktree."
+  echo "OK: the server ended: its problem is gone and Problems says no server is running"
+  # The next .rs file opened starts it again.
+  problems_restore
+  mark="$(lsp_mark)"
+  printf 'fn fresh() {}\n' >"$WT/src/fresh_exit.rs"
+  open_file "$WT/src/fresh_exit.rs"
+  expect_state state loaded
+  local tries=0
+  while [ "$tries" -lt 100 ] && [ "$(lsp_count initialize "$mark")" -eq 0 ]; do
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  [ "$(lsp_count initialize "$mark")" -eq 1 ] \
+    || fail "$SCENARIO: after the server ended, a new .rs file started it $(lsp_count initialize "$mark") times, expected once"
+  expect_state problems_note "fake-lsp: no problems"
+  echo "OK: opening another .rs file started the server again"
+  # And after a relaunch with a running server and no findings (main.rs reports
+  # none either: the answers list nothing).
+  problems_publish '{}'
+  expect_state problems 0/0/0
+  app_restart
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  expect_state problems 0/0/0
+  expect_state problems_note "fake-lsp: no problems"
+  echo "OK: after a relaunch a running server with no findings is named"
+  problems_done
+}
+
+scenario_problems_park() {
+  problems_reset
+  local park listed park_error
+  park_error="$(pf alpha 1 'park: alpha is wrong')"
+  # A second worktree of the repository, made the way the app makes one.
+  ctl new-workspace --project "$WT" --branch park-problems >/dev/null
+  listed="$("$CTL" list-workspaces 2>&1 || true)"
+  park="$(printf '%s\n' "$listed" | awk -F'\t' '$3 == "park-problems" {print $4}' | head -n 1)"
+  [ -n "$park" ] && [ -d "$park" ] || fail "$SCENARIO: the second worktree is not listed: $listed"
+  ctl select-workspace --workspace "$WT" >/dev/null
+  # The file whose gutter must come back right is open before the worktree is parked.
+  open_file "$WT/src/lib.rs"
+  expect_state state loaded
+  problems_publish "{\"src/lib.rs\":[$park_error]}"
+  expect_state drawer_open 1
+  expect_state problems 1/0/0
+  # The gutter is drawn from the same store.
+  expect_state diagnostics 1
+  ctl surface editor drawer --height=280 >/dev/null
+  expect_state drawer_height 280
+  ctl select-workspace --workspace "$park" >/dev/null
+  open_file "$park/main.rs"
+  expect_state state loaded
+  # The other worktree has a drawer of its own, closed over nothing.
+  expect_state path "$park/main.rs"
+  expect_state drawer_open 0
+  expect_state problems 0/0/0
+  # What its sibling's server says meanwhile lands in the sibling's drawer.
+  problems_publish "{\"src/lib.rs\":[$park_error,$(pf beta 2 'park: beta is odd')]}"
+  sleep 1
+  ctl select-workspace --workspace "$WT" >/dev/null
+  open_file "$WT/src/lib.rs"
+  expect_state state loaded
+  expect_state path "$WT/src/lib.rs"
+  # The tab was made again on the way back, and the server holds its text as it
+  # was (nothing is sent again): its gutter is drawn from the store, with the
+  # warning that came while the worktree was parked.
+  expect_state diagnostics 2
+  expect_state drawer_open 1
+  expect_state drawer_tab problems
+  expect_state drawer_height 280
+  expect_state problems 1/1/0
+  expect_state problem_files src/lib.rs
+  echo "OK: a worktree switched away and back keeps its drawer, its height and every problem, the one that came while it was parked included, in Problems and in the file's gutter"
+  problems_done
+  ctl close-workspace --workspace "$park" >/dev/null 2>&1 || true
+  git -C "$WT" worktree remove --force "$park" >/dev/null 2>&1 || true
+  ctl select-workspace --workspace "$WT" >/dev/null
+}
+
+# Volume (final review I2/I3): a server that reports a whole project at once. 50 files
+# with 100 findings each (1 250 errors, 2 500 warnings, 1 250 notes) are published in
+# one burst: the counts are the store's, exact; the panel draws its budget of 1 500 rows
+# and the rest is counted (`problems_not_drawn`); and the window still answers verbs
+# while the burst's look and save are pending (they are made
+# once, after it).
+scenario_problems_volume() {
+  problems_reset
+  local file="$RUN_DIR/volume-publish.json"
+  mkdir -p "$WT/vol"
+  python3 - "$WT" "$file" <<'PY'
+import json, os, sys
+root, out = sys.argv[1:3]
+publish = {}
+for i in range(50):
+    name = f"vol/f{i}.rs"
+    with open(os.path.join(root, name), "w", encoding="utf-8") as handle:
+        handle.write("fn volume_marker() {}\n")
+    publish[name] = [
+        {"needle": "volume_marker", "severity": (1, 2, 2, 3)[j % 4],
+         "message": f"volume {i}-{j}", "source": "fake-lsp"}
+        for j in range(100)
+    ]
+with open(out, "w", encoding="utf-8") as handle:
+    json.dump(publish, handle)
+PY
+  problems_publish "@$file"
+  expect_state drawer_open 1
+  expect_state problems 1250/2500/1250
+  expect_state problems_not_drawn 3500
+  echo "OK: 5 000 problems: the counts are exact and 3 500 lie past the drawn budget"
+  # The window answers while the drawer holds the list.
+  ctl surface editor drawer --height=300 >/dev/null
+  expect_state drawer_height 300
+  expect_state state loaded
+  expect_state problems 1250/2500/1250
+  echo "OK: the window answered a verb and the drawer kept its list while the list was drawn"
+  capture problems-volume
+  # The files stay until the server has cleared them (it cannot read a deleted one).
+  problems_done
+  expect_state problems_not_drawn 0
+  rm -rf "$WT/vol" "$file"
+}
+
+# ---------------------------------------------------------------- search
+
+# Search in the drawer (editor panels, Task 7): the whole worktree, from inside the
+# file tab. The fixtures are made here, in the run's own repository, by the
+# scenario that needs them, and every scenario's needles are its own, so a result
+# left by one cannot satisfy another. Nothing is committed: the files are
+# untracked (git lists them) or ignored (`target/`), which is what `search_scope`
+# is about.
+
+# The files the search scenarios read: two small .rs files that both hold
+# `host_root` (the first with the needle on lines 0 and 1, the second on lines
+# 1, 2 and 4), written once.
+search_fixtures() {
+  mkdir -p "$WT/search"
+  python3 - "$WT" <<'PY'
+import os, sys
+root = sys.argv[1]
+with open(os.path.join(root, "search/other.rs"), "wb") as handle:
+    handle.write(b"fn a() { host_root(); }\nfn b() { let x = host_root(); }\nfn c() {}\n")
+with open(os.path.join(root, "search/session.rs"), "wb") as handle:
+    handle.write(
+        b"// session.rs: what the search scenarios read.\n"
+        b"pub fn host_root(db: &str) -> String {\n"
+        b"    let root = host_root_of(db);\n"
+        b"    let data_root = root.clone();\n"
+        b"    host_root_of(&data_root)\n"
+        b"}\n"
+    )
+PY
+}
+# The drawer on Search, over search/session.rs, with an empty query, no filters
+# and every option off: where each search scenario starts. The verb is how the
+# state is set, never what a scenario is about.
+search_reset() {
+  search_fixtures
+  open_file "$WT/search/session.rs"
+  expect_state state loaded
+  ctl surface editor drawer --show=search >/dev/null
+  expect_state drawer_tab search
+  ctl surface editor search --query= --replace= --include= --exclude= --case=false \
+    --word=false --regex=false >/dev/null
+  ctl surface editor search --wait >/dev/null
+  expect_state search_query ""
+  expect_state search_results 0
+}
+search_wait() {
+  ctl surface editor search --wait >/dev/null
+}
+search_done() {
+  ctl surface editor search --query= --replace= --include= --exclude= --case=false \
+    --word=false --regex=false >/dev/null
+  ctl surface editor search --wait >/dev/null
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+}
+# The state's KEY contains NEEDLE (polled).
+expect_state_has() { # key needle
+  local got="" tries=0
+  while [ "$tries" -lt 150 ]; do
+    read_state
+    got="$(sfield "$1")"
+    case "$got" in *"$2"*) echo "OK: $1 holds '$2': $(printf '%s' "$got" | cut -c1-160)"; return 0 ;; esac
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$SCENARIO: $1 expected to hold '$2', got '$(printf '%s' "$got" | cut -c1-400)'"
+}
+
+scenario_search_keys() {
+  local at end
+  search_reset
+  at="$(python3 "$TOOLS" offset "$(sfield text)" host_root)"
+  end=$((at + 9))
+  cp "$WT/search/session.rs" "$RUN_DIR/search-keys-0.rs"
+  python3 "$TOOLS" sub "$WT/search/session.rs" "$RUN_DIR/search-keys-q.rs" host_root q 1 0
+  # The code has the keyboard and the host_root of line 1 is selected; the key is
+  # a real X key at the window.
+  ctl surface editor drawer --close >/dev/null
+  expect_state drawer_open 0
+  # The keys verb gives the code the keyboard (a select does not), and the
+  # selection is made after it.
+  ctl surface editor keys --keys=left >/dev/null
+  ctl surface editor select --ranges="$at..$end" >/dev/null
+  expect_state selections "$at..$end"
+  focus_window
+  x_key ctrl+shift+f
+  expect_state drawer_open 1
+  expect_state drawer_tab search
+  expect_state search_query host_root
+  search_wait
+  expect_state search_results 5
+  echo "OK: Ctrl+Shift+F opened Search with the selection as the query, and searched it"
+  # The keyboard is in the query field: its text is selected, so a typed z
+  # replaces it. The code is untouched.
+  x_key z
+  expect_state search_query z
+  expect_state text "$(escaped "$RUN_DIR/search-keys-0.rs")"
+  echo "OK: a real key typed after it landed in the query field"
+  # Escape in the field hands the keyboard to the code of this tab: the next key
+  # replaces the code's selection, and the query keeps its z.
+  x_key Escape
+  x_key q
+  expect_state text "$(escaped "$RUN_DIR/search-keys-q.rs")"
+  expect_state search_query z
+  echo "OK: Escape in the query field gave the keyboard back to the code"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state text "$(escaped "$RUN_DIR/search-keys-0.rs")"
+  expect_state dirty false
+  search_done
+}
+
+scenario_search_scope() {
+  search_reset
+  mkdir -p "$WT/notes" "$WT/target"
+  printf 'fn made() { scope_needle_41(); }\n' >"$WT/notes/new.rs"
+  printf 'fn built() { scope_needle_41(); }\n' >"$WT/target/gen.rs"
+  printf 'target/\n' >"$WT/.gitignore"
+  git -C "$WT" status --short --ignored | grep -q 'target/' \
+    || fail "$SCENARIO: git does not ignore target/ (status: $(git -C "$WT" status --short --ignored))"
+  ctl surface editor search --query=scope_needle_41 >/dev/null
+  search_wait
+  expect_state search_paths notes/new.rs
+  expect_state search_results 1
+  expect_state search_files 1
+  # The summary: the count, then what the run left unread. big.txt is above the
+  # size bound, binary.bin is not UTF-8 and unreadable.txt is mode 000.
+  expect_state search_summary "1 result in 1 file · 3 skipped (too large/not UTF-8/unreadable)"
+  expect_state search_capped 0
+  echo "OK: an untracked file is searched, an ignored one is not, and the skips are named"
+  ctl surface editor search --query=scope_needle_41 --include='target/**' >/dev/null
+  search_wait
+  expect_state search_results 0
+  echo "OK: an include glob cannot bring an ignored file in"
+  rm -rf "$WT/notes" "$WT/target" "$WT/.gitignore"
+  search_done
+}
+
+scenario_search_options() {
+  local fixture="$WT/findme.txt" all cased word regex
+  search_reset
+  open_file "$fixture"
+  expect_state state loaded
+  # What the in-file find counts with each option, asked of the open file; the
+  # drawer's Search, limited to that file, must count the same.
+  ctl surface editor find --query=fn >/dev/null
+  expect_state_set find_matches
+  all="$(sfield find_matches)"
+  ctl surface editor find --query=fn --case=true >/dev/null
+  expect_state_set find_matches
+  cased="$(sfield find_matches)"
+  ctl surface editor find --query=fn --word=true >/dev/null
+  expect_state_set find_matches
+  word="$(sfield find_matches)"
+  ctl surface editor find --query='f\w+' --regex=true >/dev/null
+  expect_state_set find_matches
+  regex="$(sfield find_matches)"
+  ctl surface editor find-close >/dev/null
+  [ "$all" != "$cased" ] && [ "$all" != "$word" ] && [ "$all" != "$regex" ] \
+    || fail "$SCENARIO: the options do not change the counts ($all $cased $word $regex)"
+  ctl surface editor drawer --show=search >/dev/null
+  ctl surface editor search --query=fn --include=findme.txt >/dev/null
+  search_wait
+  expect_state search_results "$all"
+  ctl surface editor search --case=true >/dev/null
+  search_wait
+  expect_state search_results "$cased"
+  ctl surface editor search --case=false --word=true >/dev/null
+  search_wait
+  expect_state search_results "$word"
+  ctl surface editor search --word=false --regex=true --query='f\w+' >/dev/null
+  search_wait
+  expect_state search_results "$regex"
+  echo "OK: case ($cased of $all), whole word ($word) and a regular expression ($regex) count as the in-file find does"
+  # A pattern that does not compile is said in the summary, with no results and no panic.
+  ctl surface editor search --query='(' >/dev/null
+  search_wait
+  expect_state search_results 0
+  expect_state_has search_summary "unclosed group"
+  echo "OK: an invalid regular expression is the summary, not a crash or an empty list"
+  search_done
+}
+
+scenario_search_dirty() {
+  search_reset
+  open_file "$WT/search/session.rs"
+  expect_state state loaded
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor type --text=dirty_needle_77 >/dev/null
+  expect_state dirty true
+  ctl surface editor drawer --show=search >/dev/null
+  ctl surface editor search --query=dirty_needle_77 >/dev/null
+  search_wait
+  expect_state search_results 1
+  expect_state search_paths search/session.rs
+  expect_state search_unsaved search/session.rs
+  ! grep -q dirty_needle_77 "$WT/search/session.rs" || fail "$SCENARIO: the needle reached the disk"
+  ctl surface editor search --open=0 >/dev/null
+  expect_state selections "0..15"
+  echo "OK: an unsaved edit is found in its buffer, listed as unsaved, and opened at its place"
+  # Undone, and searched again: nothing is left, and nothing is marked.
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state dirty false
+  ctl surface editor search --refresh >/dev/null
+  search_wait
+  expect_state search_results 0
+  expect_state search_unsaved ""
+  search_done
+}
+
+scenario_search_open() {
+  local at
+  search_reset
+  open_file "$WT/main.rs"
+  expect_state state loaded
+  ctl surface editor drawer --show=search >/dev/null
+  ctl surface editor drawer --height=300 >/dev/null
+  ctl surface editor search --query=host_root --include='search/**' >/dev/null
+  search_wait
+  expect_state search_results 5
+  expect_state search_files 2
+  expect_state search_paths "search/other.rs;search/session.rs"
+  ctl surface editor search --open=1 >/dev/null
+  expect_active_tab other.rs
+  expect_state path "$WT/search/other.rs"
+  expect_state state loaded
+  at="$(python3 "$TOOLS" offset "$(sfield text)" "let x = host_root")"
+  at=$((at + 8))
+  expect_state selections "$at..$((at + 9))"
+  expect_state search_query host_root
+  expect_state search_selected search/other.rs:2
+  expect_state drawer_tab search
+  echo "OK: a result opened its file with the match selected, and that tab's drawer shows the same search with it chosen"
+  # With a replacement typed, each result previews it: the old text struck out
+  # beside the new.
+  ctl surface editor search --replace=session_root >/dev/null
+  expect_state replace_label "Replace 5 in 2 files"
+  capture search-results
+  ctl surface editor search --open=2 >/dev/null
+  expect_active_tab session.rs
+  expect_state search_selected search/session.rs:2
+  echo "OK: the next result, in another file, kept the thread"
+  search_done
+}
+
+# A tree big enough that a broad regular expression takes seconds: 150 files of
+# about 900 KB each, every line a few words long.
+search_big_tree() {
+  rm -rf "$WT/search-big"
+  mkdir -p "$WT/search-big"
+  python3 - "$WT/search-big" <<'PY'
+import os, sys
+root = sys.argv[1]
+line = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do\n"
+body = line * (900000 // len(line))
+for n in range(150):
+    with open(os.path.join(root, f"f{n:03}.txt"), "w") as handle:
+        handle.write(body)
+        if n == 0:
+            handle.write("supersede_b_needle\n")
+PY
+}
+
+scenario_search_supersede() {
+  search_reset
+  search_big_tree
+  # A: a regular expression no literal can pre-filter, over the whole big tree. It
+  # is under way (the debounce has passed) when B arrives, and B reads one file.
+  ctl surface editor search --query='(\w+\s+){4}supersede_a_needle' --regex=true \
+    --include='search-big/**' >/dev/null
+  sleep 0.6
+  ctl surface editor search --query=supersede_b_needle --regex=false \
+    --include='search-big/f000.txt' >/dev/null
+  search_wait
+  expect_state search_query supersede_b_needle
+  expect_state search_results 1
+  expect_state search_paths search-big/f000.txt
+  # Longer than A could have run on its own: its answer, if it arrived late,
+  # would have overwritten B's by now.
+  sleep 4
+  read_state
+  [ "$(sfield search_results)" = 1 ] && [ "$(sfield search_paths)" = search-big/f000.txt ] \
+    || fail "$SCENARIO: B's results were replaced: $(sfield search_results) in $(sfield search_paths)"
+  echo "OK: the second query's results stand; the first run was superseded"
+  rm -rf "$WT/search-big"
+  search_done
+}
+
+# A hit is as old as its run. Opened after the file changed, it must select what
+# the query matches now where the match still starts, and otherwise show only its
+# line, never bytes that are something else.
+scenario_search_stale() {
+  local text
+  search_reset
+  printf 'alpha\nstale_needle_5 tail\n' >"$WT/search/stale.rs"
+  printf 'alpha\nstale_two_needle\n' >"$WT/search/stale2.rs"
+  open_file "$WT/search/stale.rs"
+  expect_state state loaded
+  ctl surface editor drawer --show=search >/dev/null
+  # (a) The needle moves: "pad " typed at the start of the buffer puts it at 10,
+  # where the run saw it at 6. Opened, the caret is at the start of its line
+  # (line 1 starts at byte 10: "pad alpha\n"), not on the 4 bytes of the old range.
+  ctl surface editor search --query=stale_needle_5 --regex=false >/dev/null
+  search_wait
+  expect_state search_results 1
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor type --text="pad " >/dev/null
+  expect_state dirty true
+  ctl surface editor search --open=0 >/dev/null
+  expect_state selections "10..10"
+  echo "OK: a hit whose text moved opened at its line, with no stale selection"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state dirty false
+  # (b) The match still starts where it did but is longer now: the selection is
+  # the match as it reads now (6..22), not the old 6..20.
+  ctl surface editor search --query='stale_n\w*' --regex=true >/dev/null
+  search_wait
+  expect_state search_results 1
+  ctl surface editor select --ranges=20..20 >/dev/null
+  ctl surface editor type --text=zz >/dev/null
+  expect_state dirty true
+  ctl surface editor search --open=0 >/dev/null
+  expect_state selections "6..22"
+  echo "OK: a hit whose match still starts there selects the match as it is now"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state dirty false
+  # (c) A file that is not open, changed on disk after the run: its line.
+  open_file "$WT/main.rs"
+  ctl surface editor search --query=stale_two_needle --regex=false >/dev/null
+  search_wait
+  expect_state search_paths search/stale2.rs
+  printf 'pad alpha\nstale_two_needle\n' >"$WT/search/stale2.rs"
+  ctl surface editor search --open=0 >/dev/null
+  expect_active_tab stale2.rs
+  expect_state state loaded
+  expect_state selections "10..10"
+  echo "OK: a hit in a file that changed on disk opened at its line"
+  search_done
+}
+
+scenario_search_cap() {
+  search_reset
+  mkdir -p "$WT/search-cap"
+  python3 - "$WT/search-cap/many.txt" <<'PY'
+import sys
+with open(sys.argv[1], "w") as handle:
+    for n in range(25000):
+        handle.write(f"cap_needle_88 {n}\n")
+PY
+  ctl surface editor search --query=cap_needle_88 --include='search-cap/**' >/dev/null
+  search_wait
+  expect_state search_capped 1
+  expect_state search_results 20000
+  expect_state_has search_summary "stopped at 20 000 matches"
+  # The window still answers after drawing it.
+  read_state
+  [ "$(sfield state)" = loaded ] || fail "$SCENARIO: the editor stopped answering after the capped search"
+  echo "OK: 25 000 matches stop at 20 000 and the summary says so"
+  capture search-cap
+  rm -rf "$WT/search-cap"
+  search_done
+}
+
+# ---------------------------------------------------------------- replace
+
+# Replace all (editor panels, Task 8). Every scenario's fixtures are its own, in a
+# directory of the run's repository that the include glob names, with needles no
+# other scenario uses.
+
+scenario_replace_mixed() {
+  local dir="$WT/replace-mixed" needle=repl_needle_62 done=repl_done_62 caret=14 refused
+  search_reset
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  python3 - "$dir" <<'PY'
+import os, sys
+root = sys.argv[1]
+def write(name, text, mode=None):
+    path = os.path.join(root, name)
+    with open(path, "wb") as handle:
+        handle.write(text.encode("utf-8"))
+    if mode:
+        os.chmod(path, mode)
+write("a.rs", "fn a() { repl_needle_62(); }\n")
+write("b.rs", "fn first() {}\nfn second() {}\nfn b() { repl_needle_62(); }\n")
+write("c.rs", "fn c() { repl_needle_62(); repl_needle_62(); }\n")
+write("d.rs", "fn d() { repl_needle_62(); }\n")
+write("run.sh", "#!/bin/sh\necho repl_needle_62\n", 0o755)
+write("target.rs", "fn t() { repl_needle_62(); }\n")
+write("link.rs", "fn l() { repl_needle_62(); }\n")
+write("ro.rs", "fn r() { repl_needle_62(); }\n", 0o444)
+write("watch.rs", "fn w() {}\n")
+# Over the size bound: Search leaves it unread, so Replace all does not touch it.
+write("huge.txt", "repl_needle_62\n" + "x" * 1200000 + "\n")
+PY
+  cp "$dir/a.rs" "$RUN_DIR/replace-a-0.rs"
+  cp "$dir/ro.rs" "$RUN_DIR/replace-ro-0.rs"
+  cp "$dir/huge.txt" "$RUN_DIR/replace-huge-0.txt"
+  if [ "$NO_FILE_WATCH" -eq 1 ]; then
+    # The switch works: a clean open tab does not see a write from outside, as on
+    # macOS, so what b.rs shows below is what Replace all told it.
+    open_file "$dir/watch.rs"
+    expect_state state loaded
+    printf 'fn w() { watched(); }\n' >"$dir/watch.rs"
+    sleep 1.5
+    read_state
+    [ "$(sfield dirty)" = false ] && [ "$(sfield text)" = 'fn w() {}\n' ] \
+      || fail "$SCENARIO: the tab saw a write from outside although file watching is off: $(sfield text)"
+    echo "OK: with file watching off a clean tab does not follow the disk by itself"
+  fi
+  # a.rs is open with an unsaved edit; b.rs is open and clean, its caret at line 2.
+  open_file "$dir/a.rs"
+  expect_state state loaded
+  ctl surface editor select --ranges=0..0 >/dev/null
+  ctl surface editor type --text="// edit " >/dev/null
+  expect_state dirty true
+  open_file "$dir/b.rs"
+  expect_state state loaded
+  ctl surface editor select --ranges="$caret..$caret" >/dev/null
+  expect_state selections "$caret..$caret"
+  ctl surface editor drawer --show=search >/dev/null
+  ctl surface editor search --query=$needle --include='replace-mixed/**' >/dev/null
+  search_wait
+  expect_state search_results 9
+  expect_state search_files 8
+  expect_state search_unsaved replace-mixed/a.rs
+  # Nothing to replace with yet: the button says what it will do and is off, and
+  # the debug verb says why it did nothing.
+  expect_state replace_label "Replace 9 in 8 files"
+  expect_state replace_enabled 0
+  refused="$("$CTL" surface editor search --replace-all 2>&1)" \
+    && fail "$SCENARIO: Replace all with an empty replace field answered ok: $refused"
+  case "$refused" in *"replace field is empty"*) ;; *) fail "$SCENARIO: the refusal does not say why: $refused" ;; esac
+  echo "OK: Replace all off: the verb says the replace field is empty"
+  ctl surface editor search --replace=$done >/dev/null
+  expect_state replace_enabled 1
+  # After the search: d.rs moves its needle on disk; link.rs becomes a symlink to
+  # target.rs. Replace all reads each file when it is pressed, never the results.
+  printf '// moved\nfn d() { repl_needle_62(); }\n' >"$dir/d.rs"
+  rm "$dir/link.rs"
+  ln -s target.rs "$dir/link.rs"
+  cp "$dir/b.rs" "$RUN_DIR/replace-b-0.rs"
+  python3 "$TOOLS" sub "$RUN_DIR/replace-b-0.rs" "$RUN_DIR/replace-b-1.rs" $needle $done 0 0
+  capture replace-preview
+  ctl surface editor search --replace-all >/dev/null
+  search_wait
+  expect_state_has replace_report "Replaced 6 in 5 files."
+  expect_state_has replace_report "replace-mixed/a.rs (unsaved changes)"
+  expect_state_has replace_report "replace-mixed/link.rs (symbolic link)"
+  expect_state_has replace_report "replace-mixed/ro.rs (read-only)"
+  expect_state_has replace_report "Not searched, so not replaced: 1 file (too large)."
+  # The disk: the unsaved file untouched, the rest replaced where they are now.
+  python3 "$TOOLS" same-bytes "$dir/a.rs" "$RUN_DIR/replace-a-0.rs" \
+    || fail "$SCENARIO: a.rs, which had unsaved changes, was written"
+  python3 "$TOOLS" same-bytes "$dir/ro.rs" "$RUN_DIR/replace-ro-0.rs" \
+    || fail "$SCENARIO: ro.rs, which is read-only, was written"
+  python3 "$TOOLS" same-bytes "$dir/huge.txt" "$RUN_DIR/replace-huge-0.txt" \
+    || fail "$SCENARIO: huge.txt, which Search did not read, was written"
+  python3 - "$dir" <<'PY' || fail "$SCENARIO: a replaced file is not what it should be"
+import os, stat, sys
+root = sys.argv[1]
+def read(name):
+    with open(os.path.join(root, name), "rb") as handle:
+        return handle.read().decode("utf-8")
+expect = {
+    "b.rs": "fn first() {}\nfn second() {}\nfn b() { repl_done_62(); }\n",
+    "c.rs": "fn c() { repl_done_62(); repl_done_62(); }\n",
+    "d.rs": "// moved\nfn d() { repl_done_62(); }\n",
+    "run.sh": "#!/bin/sh\necho repl_done_62\n",
+    "target.rs": "fn t() { repl_done_62(); }\n",
+}
+for name, text in expect.items():
+    got = read(name)
+    if got != text:
+        sys.exit(f"{name}: expected {text!r}, got {got!r}")
+mode = stat.S_IMODE(os.stat(os.path.join(root, "run.sh")).st_mode)
+if mode != 0o755:
+    sys.exit(f"run.sh lost its mode: {mode:o}")
+mode = stat.S_IMODE(os.stat(os.path.join(root, "ro.rs")).st_mode)
+if mode != 0o444:
+    sys.exit(f"ro.rs changed its mode: {mode:o}")
+if not os.path.islink(os.path.join(root, "link.rs")):
+    sys.exit("link.rs is no longer a symlink")
+if os.readlink(os.path.join(root, "link.rs")) != "target.rs":
+    sys.exit("link.rs points elsewhere")
+PY
+  echo "OK: the files were replaced where they are now, run.sh kept 0755, link.rs stayed a symlink, a.rs, ro.rs and huge.txt were not written"
+  # b.rs is the active tab and clean: it shows the new text with no focus change,
+  # and its caret stays where it was. With --no-file-watch only Replace all can
+  # have told it.
+  expect_state path "$dir/b.rs"
+  expect_state text "$(escaped "$RUN_DIR/replace-b-1.rs")"
+  expect_state dirty false
+  expect_state selections "$caret..$caret"
+  echo "OK: the open clean tab adopted the replacement at once, its caret kept (file watching off: $NO_FILE_WATCH)"
+  # The search ran again: a.rs's buffer and the read-only file still hold the needle.
+  expect_state search_results 2
+  expect_state search_paths "replace-mixed/a.rs;replace-mixed/ro.rs"
+  capture replace-report
+  # And a.rs's tab still holds its unsaved edit.
+  open_file "$dir/a.rs"
+  expect_state dirty true
+  { printf '// edit '; cat "$RUN_DIR/replace-a-0.rs"; } >"$RUN_DIR/replace-a-1.rs"
+  expect_state text "$(escaped "$RUN_DIR/replace-a-1.rs")"
+  echo "OK: the unsaved tab kept its text and its dirty mark"
+  ctl surface editor keys --keys=ctrl-z >/dev/null
+  expect_state dirty false
+  chmod 644 "$dir/ro.rs"
+  search_done
+}
+
+scenario_replace_crlf() {
+  local dir="$WT/replace-crlf"
+  search_reset
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  python3 - "$dir" <<'PY'
+import os, sys
+root = sys.argv[1]
+def write(name, data):
+    with open(os.path.join(root, name), "wb") as handle:
+        handle.write(data)
+write("crlf.txt", b"head\r\nrcrlf_alpha\r\nrcrlf_beta\r\ntail\r\n")
+# Mostly CRLF, with one bare LF inside the span the regex will replace.
+write("mixed.txt", b"keep1\r\nrcrlf_a\r\nrcrlf_b\nrcrlf_c\r\nkeep2\nrcrlf_x\r\n")
+PY
+  ctl surface editor search --query='rcrlf_alpha\nrcrlf_beta|rcrlf_a\nrcrlf_b\nrcrlf_c|rcrlf_x' \
+    --regex=true --include='replace-crlf/**' --replace=ONE >/dev/null
+  search_wait
+  expect_state search_results 3
+  expect_state search_files 2
+  expect_state replace_label "Replace 3 in 2 files"
+  # A real click on the button, not the verb: the app reads which tabs are unsaved
+  # from the press itself. The button's place depends on the drawer's height.
+  ctl surface editor drawer --height=240 >/dev/null
+  expect_state drawer_height 240
+  click_at "${REPLACE_ALL_BUTTON[@]}"
+  expect_state_has replace_report "Replaced 3 in 2 files."
+  python3 - "$dir" <<'PY' || fail "$SCENARIO: a CRLF or mixed file did not round-trip"
+import os, sys
+root = sys.argv[1]
+def read(name):
+    with open(os.path.join(root, name), "rb") as handle:
+        return handle.read()
+want = {
+    "crlf.txt": b"head\r\nONE\r\ntail\r\n",
+    # Only the replaced spans change; the bare LF after keep2 and every CRLF stay.
+    "mixed.txt": b"keep1\r\nONE\r\nkeep2\nONE\r\n",
+}
+for name, data in want.items():
+    got = read(name)
+    if got != data:
+        sys.exit(f"{name}: expected {data!r}, got {got!r}")
+PY
+  echo "OK: a multi-line span over CRLF and LF breaks was replaced whole and every other ending is as it was"
+  search_done
+}
+
+scenario_replace_capped() {
+  local refused
+  search_reset
+  mkdir -p "$WT/replace-cap"
+  python3 - "$WT/replace-cap/many.txt" <<'PY'
+import sys
+with open(sys.argv[1], "w") as handle:
+    for n in range(25000):
+        handle.write(f"rcap_needle_91 {n}\n")
+PY
+  ctl surface editor search --query=rcap_needle_91 --include='replace-cap/**' --replace=x >/dev/null
+  search_wait
+  expect_state search_capped 1
+  expect_state replace_enabled 0
+  expect_state replace_label "Too many results — narrow the search"
+  refused="$("$CTL" surface editor search --replace-all 2>&1)" \
+    && fail "$SCENARIO: Replace all on a capped search answered ok: $refused"
+  case "$refused" in *"capped"*) ;; *) fail "$SCENARIO: the refusal does not say why: $refused" ;; esac
+  expect_state replace_report ""
+  grep -q rcap_needle_91 "$WT/replace-cap/many.txt" || fail "$SCENARIO: a capped Replace all wrote the file"
+  echo "OK: a capped search disables Replace all, says why, and a request for it writes nothing"
+  rm -rf "$WT/replace-cap"
+  search_done
+}
+
 # ---------------------------------------------------------------- run
 
 scenario load_states scenario_load_states
@@ -3166,6 +4352,26 @@ scenario escape scenario_escape
 scenario send_to_agent scenario_send_to_agent
 scenario focus_refresh scenario_focus_refresh
 scenario hover_leave scenario_hover_leave
+# Before prefs: that scenario leaves Settings drawn, where no file tab takes a key.
+scenario drawer scenario_drawer
+scenario problems_unopened scenario_problems_unopened
+scenario problems_alarm scenario_problems_alarm
+scenario problems_relaunch scenario_problems_relaunch
+scenario problems_open scenario_problems_open
+scenario problems_server_exit scenario_problems_server_exit
+scenario problems_park scenario_problems_park
+scenario problems_volume scenario_problems_volume
+scenario search_keys scenario_search_keys
+scenario search_scope scenario_search_scope
+scenario search_options scenario_search_options
+scenario search_dirty scenario_search_dirty
+scenario search_open scenario_search_open
+scenario search_supersede scenario_search_supersede
+scenario search_stale scenario_search_stale
+scenario search_cap scenario_search_cap
+scenario replace_mixed scenario_replace_mixed
+scenario replace_crlf scenario_replace_crlf
+scenario replace_capped scenario_replace_capped
 scenario prefs scenario_prefs
 
 stop_hosts

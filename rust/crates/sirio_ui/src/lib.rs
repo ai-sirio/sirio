@@ -22,6 +22,7 @@ pub mod changes;
 pub mod chat;
 pub mod controls;
 pub mod diff_annotations;
+pub mod drawer;
 pub mod editor;
 pub mod editor_prefs;
 pub mod ely;

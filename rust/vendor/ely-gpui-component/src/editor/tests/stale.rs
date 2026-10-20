@@ -34,6 +34,13 @@ fn ranges_from_an_older_text_are_left(cx: &mut TestAppContext) {
     });
 }
 
+#[test]
+fn a_glob_too_big_for_a_regex_matches_nothing() {
+    let huge = "?".repeat(500_000);
+    assert!(!crate::editor::passes("src/a.rs", &huge, ""));
+    assert!(crate::editor::passes("src/a.rs", "", &huge));
+}
+
 #[gpui::test]
 fn new_text_drops_what_named_the_old(cx: &mut TestAppContext) {
     let (editor, cx) = editor("abcd", cx);

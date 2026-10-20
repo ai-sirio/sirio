@@ -236,6 +236,19 @@ pub struct HandoffChoiceRecord {
     pub surface: String,
 }
 
+/// The file tab's drawer for one worktree (Ely editor panels).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EditorDrawerRecord {
+    /// The worktree's path, as the sidebar spells it.
+    pub worktree_path: String,
+    pub open: bool,
+    pub height: f32,
+    /// `problems` or `search`.
+    pub tab: String,
+    /// Opaque to this crate: the errors the drawer already opened for.
+    pub seen_errors: String,
+}
+
 /// A stored row removed from active state because its payload could not be
 /// materialized. The original bytes remain available for diagnosis or recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]

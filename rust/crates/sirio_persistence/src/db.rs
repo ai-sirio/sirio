@@ -20,7 +20,8 @@ use crate::error::PersistenceError;
 use crate::migrations::{CURRENT_SCHEMA_VERSION, migrate};
 use crate::model::{
     AgentAccountRecord, AppSettings, AppearanceMode, BaseColor, ChangeRequestLinkRecord,
-    ChatSessionSummary, EditorCursorShape, EditorLineNumbers, HandoffChoiceRecord, ChatTranscript,
+    ChatSessionSummary, EditorCursorShape, EditorDrawerRecord, EditorLineNumbers,
+    HandoffChoiceRecord, ChatTranscript,
     ChatTurn, ClosedChatSummary, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
     SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
 };
@@ -954,6 +955,46 @@ impl AppDatabase {
                 project_id: row.get(0)?,
                 agent: row.get(1)?,
                 surface: row.get(2)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Saves a worktree's drawer, replacing its earlier state.
+    pub fn save_editor_drawer(&self, record: &EditorDrawerRecord) -> Result<(), PersistenceError> {
+        self.conn.execute(
+            "INSERT INTO editor_drawer (worktree_path, open, height, tab, seen_errors)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(worktree_path) DO UPDATE SET
+                 open = excluded.open, height = excluded.height,
+                 tab = excluded.tab, seen_errors = excluded.seen_errors",
+            params![
+                record.worktree_path,
+                record.open,
+                f64::from(record.height),
+                record.tab,
+                record.seen_errors
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The drawer state saved for a worktree, if any.
+    pub fn editor_drawer(
+        &self,
+        worktree_path: &str,
+    ) -> Result<Option<EditorDrawerRecord>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT worktree_path, open, height, tab, seen_errors
+             FROM editor_drawer WHERE worktree_path = ?1",
+        )?;
+        let mut rows = statement.query_map([worktree_path], |row| {
+            Ok(EditorDrawerRecord {
+                worktree_path: row.get(0)?,
+                open: row.get(1)?,
+                height: row.get::<_, f64>(2)? as f32,
+                tab: row.get(3)?,
+                seen_errors: row.get(4)?,
             })
         })?;
         Ok(rows.next().transpose()?)

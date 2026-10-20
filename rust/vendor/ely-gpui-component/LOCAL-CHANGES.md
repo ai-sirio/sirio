@@ -221,6 +221,41 @@ the ports below change the files they name.
 
 Vendored files:
 
+- `src/editor/{problems,search,filters}.rs` (editor panels, project 2):
+  verbatim from `e17e31a6` (`filters.rs` then takes the `b29d66c` hunk, see
+  that port below), with their inline tests (`files_with_worse_problems_lead_and_filters_hide`,
+  `globs_take_includes_then_drop_excludes` and the three of `search.rs`). They
+  need nothing the crate lacked, so no closure file was added. `src/editor/
+  console.rs` is deliberately not vendored: the programme dropped the Output
+  panel. `mod.rs` re-exports `Problem`, `ProblemsPanel`, `FileHits`, `Hit`,
+  `ReferencesPanel`, `SearchPanel`, `SearchResultItem`, `SearchFilters` and
+  `passes`.
+  Local change (Sirio's worktree search): `find.rs` gains `Finder`
+  (`Finder::new(query, options)` compiles the pattern once, `find_all(text)`
+  runs it) and `filters.rs` gains `GlobFilter` (`GlobFilter::new(include,
+  exclude)`, `passes(path)`), each the old body of `find_all` and `passes`
+  split in two; both functions stay and delegate, so the in-file find and
+  `SearchFilters` behave as before. A search over many files compiles the
+  query and the globs once per run instead of once per file, and a glob too big
+  for a regex logs once. `mod.rs` also re-exports `Finder` and `GlobFilter`.
+  Local change (the drawer's Search tab): `SearchPanel` gains `unsaved(paths)`
+  (a file whose open tab holds unsaved text shows `unsaved` beside its count,
+  and its hits draw no replacement preview, since Replace all skips it),
+  `selected(path, line)` (that result's row is drawn with the `active` wash, the
+  one a chosen conversation row takes, via a `selected` builder on
+  `SearchResultItem`), `full_counts(..)` (a file given fewer lines than it matched on
+  shows `3 of 412`, a folded one its whole count) and `without_summary()` (the owner
+  draws a totals line of its own, with the skips and the cap, so the built-in
+  one is left out). `results()` takes its per-list inputs in a `Drawing` struct
+  instead of seven arguments; `ReferencesPanel` passes the empty values, so it
+  draws as before. `SearchFilters` is not used by Sirio: its stacked labels and
+  always-drawn ignore toggle cost more drawer height than the three-row mockup
+  allows, so the drawer places two `Input`s itself.
+  Local change (the drawer's Problems tab): `ProblemsPanel` gains `counts([errors,
+  warnings, notes])`, the numbers its three toggles show. The panel builds a row
+  for every problem it is given (no `uniform_list`), so the drawer hands it at
+  most 1 500 and the toggles would otherwise count only those; without the call
+  each toggle counts the problems given, as before.
 - `src/editor/{buffer,cursor,edit,keys,moves,line,row,view,layout,gutter,decor,syntax,ime,find,status,state}.rs`:
   verbatim, except the local changes listed below, the ports in "Ports from
   upstream `main`" (which change `buffer`, `edit`, `ime`, `line`, `moves`,
@@ -231,9 +266,10 @@ Vendored files:
   as upstream. Nothing was removed: none of its 15 tests names a module this
   crate does not declare.
 - `src/editor/mod.rs`: local. It declares only the files above. Upstream's
-  `mod.rs` also declares `chat`, `console`, `extensions`, `filters`, `hints`,
-  `hover`, `keybindings`, `preview`, `problems`, `refactor`, `search`,
-  `settings`, `symbols`, `tasks` and `welcome`, all excluded, and their
+  `mod.rs` also declares `chat`, `console`, `extensions`, `hints`,
+  `hover`, `keybindings`, `preview`, `refactor`,
+  `settings`, `symbols`, `tasks` and `welcome`, all excluded (`problems`,
+  `search` and `filters` now come in, see the first entry above), and their
   re-exports with them. `anchors` and `measure` arrive from `main` in Task 1b.
   Task 1c adds `pub use keys::SingleCursor;` and deletes two dead re-exports;
   see "Keys and hosting hooks".
@@ -303,15 +339,18 @@ applied as upstream wrote it or was rewritten against the vendored code.
   returns `None` for a line the text has lost. `tests.rs` moved to
   `tests/mod.rs` (`mod stale;`, and `editor` made `pub(super)`).
   `src/editor/mod.rs` is local, so the port adds only `mod anchors;`.
-  `tests/stale.rs` is verbatim except two tests, dropped because they name
-  code in modules this crate does not vendor:
-  `an_output_channel_gone_from_its_list_draws` (`console::OutputPanel`) and
-  `a_glob_too_big_for_a_regex_matches_nothing` (`filters::passes`). The seven
-  stale-state tests that remain pass.
+  `tests/stale.rs` is verbatim except one test, dropped because it names
+  code in a module this crate does not vendor:
+  `an_output_channel_gone_from_its_list_draws` (`console::OutputPanel`).
   Skipped, not vendored: `src/editor/console.rs` (the output panel's shown
-  channel), `src/editor/filters.rs` (the glob size limit) and
-  `tasks/panics.md`. Their panics are not ported: the output panel and globs
-  are outside the closure.
+  channel) and `tasks/panics.md`; the output panel's panic is not ported.
+  `src/editor/filters.rs` came in with the editor panels (project 2) and takes
+  this commit's one hunk, applied with `patch -p1` from
+  `git diff e17e31a6 b29d66c -- src/editor/filters.rs`: a glob whose generated
+  regex fails to compile (a 500 000-byte one) logs through `inspect_err` and
+  matches nothing, instead of `expect` panicking. Its test
+  `a_glob_too_big_for_a_regex_matches_nothing` is restored in `tests/stale.rs`.
+  Nothing else of the commit is new here. The eight stale-state tests pass.
 - `9fb607b` "Code editor: columns sit where gpui lays them out": `ime.rs`,
   `measure.rs` (new) and `tests/wide.rs` (new) are verbatim. `state.rs`,
   `line.rs`, `view.rs`, `mod.rs` and `tests/mod.rs` did not apply:

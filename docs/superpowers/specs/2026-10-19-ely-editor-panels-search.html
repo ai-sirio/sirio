@@ -1,0 +1,80 @@
+<style>
+.ed{--bg:#16181d;--panel:#1d2027;--line:#2c3039;--fg:#d6d9e0;--dim:#8a909c;--acc:#6aa2ff;--hit:#3d4f2a;--hitfg:#cfe8a6;--warn:#e0b04f;--err:#e46a6a;
+ background:var(--bg);color:var(--fg);font:13px/1.45 system-ui,sans-serif;border:1px solid var(--line);border-radius:8px;overflow:hidden;display:flex;flex-direction:column;height:640px}
+.ed .tabs{display:flex;background:var(--panel);border-bottom:1px solid var(--line)}
+.ed .tabs span{padding:6px 14px;font-size:12px;color:var(--dim);border-right:1px solid var(--line)}
+.ed .tabs span.on{color:var(--fg);background:var(--bg);box-shadow:inset 0 2px 0 var(--acc)}
+.ed .crumb{padding:4px 12px;font-size:11.5px;color:var(--dim);border-bottom:1px solid var(--line)}
+.ed .body{flex:1;display:flex;min-height:0}
+.ed .code{flex:1;font:12px/1.65 ui-monospace,monospace;padding:6px 0;overflow:hidden}
+.ed .code div{white-space:pre;padding-left:8px}
+.ed .code i{font-style:normal;color:#5c626e;display:inline-block;width:34px;text-align:right;margin-right:14px}
+.ed .code .cur{background:#232733}
+.ed .k{color:#c792ea}.ed .f{color:#82aaff}.ed .s{color:#c3e88d}.ed .c{color:#5c6370}
+.ed .mm{width:64px;border-left:1px solid var(--line);background:repeating-linear-gradient(#262a33 0 2px,transparent 2px 4px);position:relative}
+.ed .mm .vp{position:absolute;left:0;right:0;top:30px;height:70px;background:rgba(120,140,180,.18)}
+.ed .drawer{height:250px;border-top:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column}
+.ed .dh{display:flex;gap:16px;align-items:center;padding:5px 12px;font-size:12px;color:var(--dim);border-bottom:1px solid var(--line)}
+.ed .dh .on{color:var(--fg);border-bottom:2px solid var(--acc);padding-bottom:2px}
+.ed .dh .r{margin-left:auto;display:flex;gap:10px}
+.ed .q{display:flex;gap:8px;padding:6px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.ed .in{display:flex;align-items:center;background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:3px 6px;gap:6px}
+.ed .in input{background:none;border:0;color:var(--fg);font:12px ui-monospace,monospace;outline:none;width:150px}
+.ed .tg{font:11px ui-monospace,monospace;color:var(--dim);padding:1px 4px;border-radius:3px}
+.ed .tg.on{background:#2f3d57;color:var(--fg)}
+.ed .btn{font-size:11px;padding:2px 8px;border:1px solid var(--line);border-radius:4px;background:#262a33}
+.ed .res{flex:1;overflow:hidden;padding:2px 0}
+.ed .file{padding:3px 12px;display:flex;gap:6px;font-size:12.5px}
+.ed .file .p{color:var(--dim);font-size:11.5px}
+.ed .file .n{background:#2a2f3a;border-radius:8px;padding:0 6px;font-size:11px;color:var(--dim)}
+.ed .ln{padding:1px 12px 1px 30px;font:12px ui-monospace,monospace;color:var(--dim);white-space:nowrap}
+.ed .ln b{font-weight:normal;display:inline-block;width:38px}
+.ed .ln .m{background:var(--hit);color:var(--hitfg);border-radius:2px}
+.ed .ln.sel{background:#252a33;color:var(--fg)}
+.ed .status{display:flex;gap:14px;padding:3px 12px;font-size:11.5px;color:var(--dim);border-top:1px solid var(--line);background:var(--panel)}
+.ed .status .r{margin-left:auto;display:flex;gap:14px}
+</style>
+
+<h2>Ricerca nel cassetto, accanto a Problems</h2>
+<p class="subtitle">Il tab del file, dall'alto: breadcrumb, codice con minimap, cassetto (scheda Search aperta), riga di stato. Ctrl/Cmd+Shift+F apre il cassetto su Search con il cursore nel campo.</p>
+
+<div class="ed">
+  <div class="tabs"><span>main.rs</span><span class="on">session.rs</span><span>Terminal</span></div>
+  <div class="crumb">crates › sirio › src › session.rs › fn host_root</div>
+  <div class="body">
+    <div class="code">
+<div><i>10</i><span class="c">/// The host's data root for a database.</span></div>
+<div><i>11</i><span class="c">/// Never reads SIRIO_PANE_HOST_HOME.</span></div>
+<div class="cur"><i>12</i><span class="k">pub fn</span> <span class="f">host_root</span>(db: &amp;Path) -&gt; PathBuf {</div>
+<div><i>13</i>    <span class="k">if let</span> Some(home) = env_absolute(<span class="s">"SIRIO_HOST_HOME"</span>) {</div>
+<div><i>14</i>        <span class="k">return</span> home;</div>
+<div><i>15</i>    }</div>
+<div><i>16</i>    root_for_database(db)</div>
+<div><i>17</i>}</div>
+    </div>
+    <div class="mm"><div class="vp"></div></div>
+  </div>
+  <div class="drawer">
+    <div class="dh">
+      <span>Problems <span style="color:var(--err)">⊘ 1</span> <span style="color:var(--warn)">⚠ 2</span></span>
+      <span class="on">Search</span>
+      <div class="r"><span>⌃J</span><span>✕</span></div>
+    </div>
+    <div class="q">
+      <div class="in"><input value="host_root"><span class="tg on">Aa</span><span class="tg">ab</span><span class="tg">.*</span></div>
+      <div class="in"><input placeholder="sostituisci con…"><span class="btn">Sostituisci tutto</span></div>
+      <div class="in"><input placeholder="includi: *.rs"></div>
+      <div class="in"><input placeholder="escludi: tests/**"></div>
+      <span style="color:var(--dim);font-size:11.5px;align-self:center">11 risultati in 5 file</span>
+    </div>
+    <div class="res">
+      <div class="file">▾ session.rs <span class="p">crates/sirio/src</span><span class="n">4</span></div>
+      <div class="ln sel"><b>12</b>pub fn <span class="m">host_root</span>(db: &amp;Path) -&gt; PathBuf {</div>
+      <div class="ln"><b>40</b>let root = <span class="m">host_root</span>(&amp;db);</div>
+      <div class="file">▾ main.rs <span class="p">crates/sirio/src</span><span class="n">3</span> <span style="color:var(--warn);font-size:11px">non salvato</span></div>
+      <div class="ln"><b>412</b>session::<span class="m">host_root</span>(&amp;db_path)</div>
+      <div class="file">▸ paths.rs <span class="p">crates/sirio_host_client/src</span><span class="n">2</span></div>
+    </div>
+  </div>
+  <div class="status"><span>⎇ main</span><span>rust-analyzer</span><div class="r"><span>Ln 12, Col 8</span><span>Spaces: 4</span><span>LF</span><span>Rust</span><span>🔔</span></div></div>
+</div>

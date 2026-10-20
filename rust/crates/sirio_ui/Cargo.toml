@@ -17,6 +17,7 @@ bezel-syntax.workspace = true
 # The grammars bezel-syntax does not carry: Java, C, C++, Swift, Ruby, …
 sirio_syntax.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true
 sirio_theme.workspace = true
 sirio_git.workspace = true
 sirio_acp.workspace = true
@@ -110,8 +111,6 @@ gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
-# Examples are dev targets; keep registry parsing out of the shipped binary.
-serde_json = "1"
 
 [[bin]]
 name = "changes_preview"

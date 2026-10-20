@@ -392,7 +392,7 @@ fn read_disk(path: &Path) -> Result<Vec<u8>, ReadError> {
     })
 }
 
-fn is_binary(bytes: &[u8]) -> bool {
+pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.contains(&0) || String::from_utf8(bytes.to_vec()).is_err()
 }
 
