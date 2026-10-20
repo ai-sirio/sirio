@@ -4973,7 +4973,8 @@ enum LauncherAction {
 
 /// Hands the chat the worktrees the catalog knows, so a chat tab can name the
 /// project its working directory belongs to. A worktree the catalog marks
-/// missing is left out: its folder is gone, so no live chat runs in it.
+/// missing stays in: it is kept precisely because a pane still runs there, and
+/// dropping it would hand that chat to the worktree enclosing it.
 fn publish_worktree_lookup(catalog: &ProjectCatalog, cx: &mut App) {
     let worktrees = catalog
         .projects()
@@ -4986,7 +4987,6 @@ fn publish_worktree_lookup(catalog: &ProjectCatalog, cx: &mut App) {
             project
                 .worktrees
                 .iter()
-                .filter(|worktree| !catalog.is_worktree_missing(&worktree.path))
                 .map(move |worktree| sirio_ui::worktree_lookup::WorktreeInfo {
                     project_name: project_name.clone(),
                     root: worktree.path.clone(),

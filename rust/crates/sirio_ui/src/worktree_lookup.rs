@@ -16,36 +16,42 @@ pub struct WorktreeInfo {
     pub is_primary: bool,
 }
 
-struct Worktrees(Vec<WorktreeInfo>);
+/// Each worktree beside its root as resolved when it was published.
+struct Worktrees(Vec<(PathBuf, WorktreeInfo)>);
 
 impl Global for Worktrees {}
 
-/// Replaces the list `lookup` reads.
+/// Replaces the list `lookup` reads. The roots are resolved here, once, rather
+/// than on every lookup: the list changes far less often than it is read, and
+/// `canonicalize` on a stale mount can stall.
 pub fn set_worktrees(worktrees: Vec<WorktreeInfo>, cx: &mut App) {
+    let worktrees = worktrees
+        .into_iter()
+        .map(|worktree| (resolved(&worktree.root), worktree))
+        .collect();
     cx.set_global(Worktrees(worktrees));
 }
 
 /// The worktree whose root holds `cwd`, the deepest one when roots nest, or
-/// `None` when nothing was published or `cwd` is outside every root.
+/// `None` when nothing was published or `cwd` is outside every root. It
+/// resolves `cwd` on disk, so ask when the cwd changes, never from a render.
 pub fn lookup(cwd: &Path, cx: &App) -> Option<WorktreeInfo> {
     let worktrees = cx.try_global::<Worktrees>()?;
-    deepest_containing(cwd, &worktrees.0).cloned()
+    deepest_containing(&resolved(cwd), &worktrees.0).cloned()
 }
 
 fn resolved(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Component-wise (`/p/a` does not hold `/p/ab`), after canonicalising both
-/// sides when the path exists, so a symlinked cwd still finds its root.
-pub(crate) fn deepest_containing<'a>(
+/// Component-wise (`/p/a` does not hold `/p/ab`), on paths already resolved,
+/// so a symlinked cwd still finds its root.
+fn deepest_containing<'a>(
     cwd: &Path,
-    worktrees: &'a [WorktreeInfo],
+    worktrees: &'a [(PathBuf, WorktreeInfo)],
 ) -> Option<&'a WorktreeInfo> {
-    let cwd = resolved(cwd);
     worktrees
         .iter()
-        .map(|worktree| (resolved(&worktree.root), worktree))
         .filter(|(root, _)| cwd.starts_with(root))
         .max_by_key(|(root, _)| root.components().count())
         .map(|(_, worktree)| worktree)
@@ -54,6 +60,7 @@ pub(crate) fn deepest_containing<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
 
     fn info(root: &str) -> WorktreeInfo {
         WorktreeInfo {
@@ -63,29 +70,54 @@ mod tests {
         }
     }
 
-    #[test]
-    fn deepest_containing_prefers_the_deepest_root() {
-        let worktrees = [info("/p"), info("/p/.wt/a")];
-        let found = deepest_containing(Path::new("/p/.wt/a/src"), &worktrees).unwrap();
-        assert_eq!(found.root, PathBuf::from("/p/.wt/a"));
+    fn found(cx: &mut TestAppContext, roots: &[&str], cwd: &str) -> Option<PathBuf> {
+        cx.update(|cx| {
+            set_worktrees(roots.iter().map(|root| info(root)).collect(), cx);
+            lookup(Path::new(cwd), cx).map(|worktree| worktree.root)
+        })
     }
 
-    #[test]
-    fn deepest_containing_is_component_wise() {
-        let worktrees = [info("/p/a")];
-        assert!(deepest_containing(Path::new("/p/ab"), &worktrees).is_none());
+    #[gpui::test]
+    fn deepest_containing_prefers_the_deepest_root(cx: &mut TestAppContext) {
+        let root = found(cx, &["/p", "/p/.wt/a"], "/p/.wt/a/src");
+        assert_eq!(root, Some(PathBuf::from("/p/.wt/a")));
     }
 
-    #[test]
-    fn deepest_containing_outside_every_root_is_none() {
-        let worktrees = [info("/p"), info("/q")];
-        assert!(deepest_containing(Path::new("/elsewhere/x"), &worktrees).is_none());
+    #[gpui::test]
+    fn deepest_containing_is_component_wise(cx: &mut TestAppContext) {
+        assert_eq!(found(cx, &["/p/a"], "/p/ab"), None);
     }
 
-    #[test]
-    fn deepest_containing_the_root_itself_matches() {
-        let worktrees = [info("/p")];
-        let found = deepest_containing(Path::new("/p"), &worktrees).unwrap();
-        assert_eq!(found.root, PathBuf::from("/p"));
+    #[gpui::test]
+    fn deepest_containing_outside_every_root_is_none(cx: &mut TestAppContext) {
+        assert_eq!(found(cx, &["/p", "/q"], "/elsewhere/x"), None);
+    }
+
+    #[gpui::test]
+    fn deepest_containing_the_root_itself_matches(cx: &mut TestAppContext) {
+        assert_eq!(found(cx, &["/p"], "/p"), Some(PathBuf::from("/p")));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_symlinked_cwd_finds_the_root_it_points_into(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("sirio-worktree-lookup-{}", std::process::id()));
+        let root = dir.join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let link = dir.join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let found = found(
+            cx,
+            &[root.to_str().unwrap()],
+            link.join("src").to_str().unwrap(),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found, Some(root));
+    }
+
+    #[gpui::test]
+    fn lookup_before_anything_is_published_is_none(cx: &mut TestAppContext) {
+        cx.update(|cx| assert_eq!(lookup(Path::new("/p"), cx), None));
     }
 }
