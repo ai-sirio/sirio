@@ -49,6 +49,15 @@ pub(super) struct ChangeRequest {
     timer_task: Option<Task<()>>,
 }
 
+impl ChangeRequest {
+    /// Makes the last answer `seconds` older: GPUI's simulated clock does
+    /// not move the wall clock an answer's age is read against.
+    #[cfg(test)]
+    pub(super) fn age_by(&mut self, seconds: i64) {
+        self.last_read = self.last_read.map(|at| at - seconds);
+    }
+}
+
 fn noun(forge: Forge) -> &'static str {
     match forge {
         Forge::GitHub => "pull request",
@@ -178,6 +187,7 @@ impl Chat {
             .worktree
             .as_ref()
             .map_or_else(|| self.agent_cwd.clone(), |worktree| worktree.root.clone());
+        let branch_seq = self.session_panel.environment.read_seq;
         let state = &mut self.session_panel.change_request;
         state.generation += 1;
         let generation = state.generation;
@@ -190,7 +200,7 @@ impl Chat {
             let Connection::Ready(ready) = connection else {
                 // No forge here: nothing to show, and nothing to read.
                 let _ = this.update(cx, |chat, cx| {
-                    chat.land_session_change_request(generation, None, cx);
+                    chat.land_session_change_request(generation, branch_seq, None, cx);
                 });
                 return;
             };
@@ -206,7 +216,7 @@ impl Chat {
                 state.host = Some(host.clone());
                 match forge_pause::paused_until(&host, style::now(), cx) {
                     Some(until) => {
-                        chat.hold_session_change_request(host, until, cx);
+                        chat.hold_session_change_request(host.clone(), until, cx);
                         false
                     }
                     None => true,
@@ -219,7 +229,12 @@ impl Chat {
                 .background_spawn(async move { read_branch_card(&*source, &root, &ready) })
                 .await;
             let _ = this.update(cx, |chat, cx| {
-                chat.land_session_change_request(generation, Some((forge, read)), cx);
+                chat.land_session_change_request(
+                    generation,
+                    branch_seq,
+                    Some((forge, host, read)),
+                    cx,
+                );
             });
         }));
     }
@@ -234,11 +249,23 @@ impl Chat {
         cx.notify();
     }
 
+    /// The Environment line read another branch than the one it showed: the
+    /// card is read at once rather than at the next minute, and an answer
+    /// still in flight for the old branch is dropped by the new generation.
+    pub(in crate::chat) fn session_branch_moved(&mut self, cx: &mut GpuiContext<Self>) {
+        if self.session_panel.open && !self.session_panel.collapsed.contains("change_request") {
+            self.read_session_change_request(cx);
+        }
+    }
+
     /// Takes a read's answer, or `None` when the worktree has no forge.
+    /// `branch_seq` is how many Environment reads had started when this one
+    /// did.
     fn land_session_change_request(
         &mut self,
         generation: u64,
-        answer: Option<(Forge, BranchCardRead)>,
+        branch_seq: u64,
+        answer: Option<(Forge, String, BranchCardRead)>,
         cx: &mut GpuiContext<Self>,
     ) {
         let state = &mut self.session_panel.change_request;
@@ -246,7 +273,10 @@ impl Chat {
             return;
         }
         state.last_read = Some(style::now());
-        let Some((forge, read)) = answer else {
+        let Some((forge, host, read)) = answer else {
+            // No forge here: a host cached from before must not block a
+            // different remote.
+            state.host = None;
             state.shown = None;
             state.error = None;
             cx.notify();
@@ -263,14 +293,23 @@ impl Chat {
         }
         // The Environment line reads the same branch, so the two never
         // disagree; a detached HEAD leaves it to its own read, which knows
-        // the short hash.
-        if let Some(branch) = branch {
+        // the short hash. A read that began before the line's latest one is
+        // the older of the two and leaves it be.
+        if let Some(branch) = branch
+            && self.session_panel.environment.read_seq == branch_seq
+        {
             self.session_panel.environment.branch = environment::Branch::Named(branch);
         }
         let state = &mut self.session_panel.change_request;
         match result {
             Ok(card) => {
-                state.error = None;
+                // A pause noted after this read began still holds.
+                state.error = forge_pause::paused_until(&host, style::now(), cx).map(|until| {
+                    ForgeError::RateLimited {
+                        host: host.clone(),
+                        reset_at: Some(until),
+                    }
+                });
                 state.shown = match card {
                     BranchCard::Hidden => None,
                     BranchCard::Found(summary) => Some(Shown::Found(Box::new(summary))),
@@ -306,13 +345,15 @@ impl Chat {
 mod tests {
     use super::super::{RowSnapshot, SectionSnapshot, SessionPanelAction};
     use crate::change_request_style as style;
-    use crate::chat::tests::{offline_chat_view, pump_chat_until, refresh_frame};
+    use crate::chat::tests::{TempDir, offline_chat_view, pump_chat_until, refresh_frame};
     use crate::chat::{Chat, ChatEvent};
     use crate::forge_pause;
     use crate::forge_source::testing::{self, CannedForge, FakeSource};
     use crate::forge_source::{self, Connection};
     use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
-    use sirio_forge::ForgeError;
+    use crate::forge_source::ReadyConnection;
+    use super::{BranchCard, BranchCardRead};
+    use sirio_forge::{Forge, ForgeError, Means};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -487,17 +528,164 @@ mod tests {
         wait(cx, 200);
         assert_eq!(forge.count("ChangeRequestForBranch"), 2, "a folded card is not read");
 
-        // GPUI's simulated clock does not move the wall clock the age of an
-        // answer is read against, so the answer is made old by hand.
-        chat.update(cx, |chat, _| {
-            let read = &mut chat.session_panel.change_request.last_read;
-            *read = read.map(|at| at - 120);
-        });
+        chat.update(cx, |chat, _| chat.session_panel.change_request.age_by(120));
         fold(&chat, cx);
         wait(cx, 2);
         assert_eq!(forge.count("ChangeRequestForBranch"), 3, "unfolding reads the stale answer again");
         chat.update(cx, |chat, cx| chat.set_session_panel_open(false, cx));
         wait(cx, 200);
         assert_eq!(forge.count("ChangeRequestForBranch"), 3, "a closed column is not read");
+    }
+
+    #[gpui::test]
+    async fn a_gitlab_branch_without_one_says_merge_request(cx: &mut TestAppContext) {
+        let forge = Arc::new(CannedForge::default());
+        forge.answer(
+            "CurrentUser",
+            serde_json::json!({"data": {"currentUser": {"username": "me"}}}).to_string(),
+        );
+        forge.answer(
+            "MergeRequestForBranch",
+            serde_json::json!({"data": {"project": {"mergeRequests": {"nodes": []}}}}).to_string(),
+        );
+        let source = FakeSource::ready(testing::gitlab_client(forge), Some("feat/none"));
+        let (chat, cx) = open_with(cx, source);
+        let section = settle(&chat, cx);
+        assert_eq!(only_row(&section).label, "No merge request for this branch");
+    }
+
+    #[gpui::test]
+    async fn a_linked_read_that_is_rate_limited_pauses_the_host(cx: &mut TestAppContext) {
+        let forge = forge_with(vec![testing::summary(112, "Fix login")]);
+        forge.rate_limited("ChangeRequestByNumber", style::now() + 600);
+        let source = FakeSource::with(Connection::Ready(ReadyConnection {
+            client: testing::github_client(forge.clone()),
+            means: Means::Token,
+            branch: Some("feat/login".to_string()),
+            source_owner: None,
+            linked: Some(testing::reference(7)),
+        }));
+        let (chat, cx) = open_with(cx, source.clone());
+        let section = settle(&chat, cx);
+        assert_eq!(section.rows[0].label, "#112 Fix login", "the branch lookup decided");
+        assert!(
+            cx.update(|_, cx| forge_pause::paused_until("ghe.test", style::now(), cx)).is_some(),
+            "the linked read's rate limit reached the shared pause"
+        );
+        // The pause was noted after the read began; its answer must not
+        // wipe the label while the pause holds.
+        assert!(
+            section.rows.iter().any(|row| row.label.starts_with("Rate limited")),
+            "{:?}",
+            section.rows
+        );
+
+        chat.update(cx, |chat, cx| chat.set_session_panel_open(false, cx));
+        chat.update(cx, |chat, _| chat.session_panel.change_request.age_by(120));
+        chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
+        for _ in 0..5 {
+            refresh_frame(cx);
+        }
+        assert_eq!(*source.connects.lock().unwrap(), 1, "a paused host is not even connected to");
+        assert_eq!(forge.count("ChangeRequestForBranch"), 1);
+        assert_eq!(forge.count("ChangeRequestByNumber"), 1);
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[gpui::test]
+    async fn a_turn_that_switches_branch_moves_the_card_with_the_line(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let repo = dir.0.join("p");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
+
+        let forge = forge_with(vec![testing::summary(112, "Fix login")]);
+        let source = FakeSource::ready(testing::github_client(forge.clone()), Some("main"));
+        cx.update(sirio_theme::Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(crate::chat::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::new(
+                Some(crate::chat::LaunchSpec::Acp(sirio_acp::AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
+                repo.clone(),
+                cx,
+            )
+        });
+        cx.update(|_, cx| forge_source::set_source(source.clone(), cx));
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
+        settle(&chat, cx);
+        assert_eq!(forge.count("ChangeRequestForBranch"), 1);
+
+        // The turn switches the branch, in git and for the forge's source.
+        git(&repo, &["switch", "-q", "-c", "feat/new"]);
+        source.switch_to("feat/new");
+        forge.answer(
+            "ChangeRequestForBranch",
+            testing::branch(vec![testing::summary(200, "Another")]),
+        );
+        chat.update(cx, |chat, cx| chat.reread_session_branch(cx));
+        // Well inside the minute: only the move can have asked.
+        cx.cx.executor().allow_parking();
+        for _ in 0..200 {
+            if forge.count("ChangeRequestForBranch") >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.cx.run_until_parked();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cx.cx.run_until_parked();
+        for _ in 0..3 {
+            refresh_frame(cx);
+        }
+        assert_eq!(forge.count("ChangeRequestForBranch"), 2, "the move read the card at once");
+        let environment = section_of(&chat, cx, "environment").expect("environment");
+        assert!(
+            environment.rows.iter().any(|row| row.label == "feat/new"),
+            "{:?}",
+            environment.rows
+        );
+    }
+
+    #[gpui::test]
+    async fn an_older_card_read_does_not_overwrite_a_newer_branch_line(cx: &mut TestAppContext) {
+        let source = FakeSource::with(Connection::NoForgeRemote);
+        let (chat, cx) = open_with(cx, source);
+        let landed = |chat: &Entity<Chat>, cx: &mut VisualTestContext, started_at: u64| {
+            chat.update(cx, |chat, cx| {
+                chat.session_panel.environment.branch =
+                    crate::chat::session_panel::environment::Branch::Named("new".to_string());
+                chat.session_panel.environment.read_seq = 5;
+                let generation = chat.session_panel.change_request.generation;
+                let read = BranchCardRead {
+                    card: Ok(BranchCard::Hidden),
+                    linked_error: None,
+                    branch: Some("old".to_string()),
+                };
+                chat.land_session_change_request(
+                    generation,
+                    started_at,
+                    Some((Forge::GitHub, "ghe.test".to_string(), read)),
+                    cx,
+                );
+                chat.session_panel.environment.branch.clone()
+            })
+        };
+        use crate::chat::session_panel::environment::Branch;
+        assert_eq!(landed(&chat, cx, 4), Branch::Named("new".to_string()), "older read");
+        assert_eq!(landed(&chat, cx, 5), Branch::Named("old".to_string()), "no newer read");
     }
 }

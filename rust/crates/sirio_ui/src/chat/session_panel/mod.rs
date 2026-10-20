@@ -373,13 +373,21 @@ impl Chat {
             .worktree
             .as_ref()
             .map_or_else(|| self.agent_cwd.clone(), |worktree| worktree.root.clone());
+        self.session_panel.environment.read_seq += 1;
         self.session_panel.environment_task = Some(cx.spawn(async move |this, cx| {
             let branch = cx
                 .background_spawn(async move { environment::read_branch(&root) })
                 .await;
             let _ = this.update(cx, |chat, cx| {
-                chat.session_panel.environment.branch = branch;
+                let environment = &mut chat.session_panel.environment;
+                let moved = environment.branch != environment::Branch::Unread
+                    && environment.branch != branch;
+                environment.branch = branch;
                 cx.notify();
+                // The card follows the branch the line now shows.
+                if moved {
+                    chat.session_branch_moved(cx);
+                }
             });
         }));
     }

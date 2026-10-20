@@ -31,6 +31,9 @@ pub(super) struct Environment {
     /// The user's home directory, read once when the column opens, so the
     /// every-frame `section` does no environment work.
     pub(super) home: Option<PathBuf>,
+    /// Counts the branch reads started. A card read that began before the
+    /// latest one is older than the line it would overwrite.
+    pub(super) read_seq: u64,
 }
 
 /// Reads the checkout's branch. It spawns `git`, so it runs off the GPUI
@@ -159,6 +162,7 @@ mod tests {
             worktree: worktree("p", "/p", true),
             branch: Branch::Detached("abc1234".into()),
             home: None,
+            read_seq: 0,
         };
         let section = section(&environment, Path::new("/p"));
         let rows = labels(&section);
@@ -171,6 +175,7 @@ mod tests {
             worktree: None,
             branch: Branch::Named("main".into()),
             home: None,
+            read_seq: 0,
         };
         let section = section(&environment, Path::new("/srv/scratch"));
         let rows = labels(&section);
@@ -186,6 +191,7 @@ mod tests {
                 worktree: None,
                 branch,
                 home: None,
+                read_seq: 0,
             };
             let section = section(&environment, Path::new("/srv/scratch"));
             assert_eq!(section.rows.len(), 2, "project and directory only");
@@ -198,6 +204,7 @@ mod tests {
             worktree: worktree("p", "/p/.wt/a", false),
             branch: Branch::Named("feat/x".into()),
             home: None,
+            read_seq: 0,
         };
         let section = section(&environment, Path::new("/p/.wt/a/src"));
         let rows = labels(&section);
