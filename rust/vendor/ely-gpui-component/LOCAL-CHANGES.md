@@ -251,6 +251,11 @@ Vendored files:
   draws as before. `SearchFilters` is not used by Sirio: its stacked labels and
   always-drawn ignore toggle cost more drawer height than the three-row mockup
   allows, so the drawer places two `Input`s itself.
+  Local change (the drawer's Problems tab): `ProblemsPanel` gains `counts([errors,
+  warnings, notes])`, the numbers its three toggles show. The panel builds a row
+  for every problem it is given (no `uniform_list`), so the drawer hands it at
+  most 1 500 and the toggles would otherwise count only those; without the call
+  each toggle counts the problems given, as before.
 - `src/editor/{buffer,cursor,edit,keys,moves,line,row,view,layout,gutter,decor,syntax,ime,find,status,state}.rs`:
   verbatim, except the local changes listed below, the ports in "Ports from
   upstream `main`" (which change `buffer`, `edit`, `ime`, `line`, `moves`,

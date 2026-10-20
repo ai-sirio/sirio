@@ -73,7 +73,7 @@ use sirio_theme::Theme;
 
 use super::problems_view::display_path;
 use super::search_engine::{
-    FileResult, MATCH_CAP, ReplaceReport, SearchOutcome, SearchQuery, Skip,
+    DirtyHandle, FileResult, MATCH_CAP, ReplaceReport, SearchOutcome, SearchQuery, Skip,
 };
 use super::{WorktreeDrawer, WorktreeDrawerEvent, search_engine};
 
@@ -124,6 +124,9 @@ pub(super) struct WorktreeSearch {
     replace_report: Option<String>,
     /// Replace all, from the click to the search that follows it.
     replace_task: Option<Task<()>>,
+    /// The unsaved tabs' paths, which the app keeps current while a run is
+    /// under way: seeded from the press's snapshot, asked before each write.
+    dirty_now: DirtyHandle,
 }
 
 /// The files and lines the panel is given: which results are drawn, in order.
@@ -177,13 +180,13 @@ pub struct SearchRequest {
 }
 
 /// `1 file`, `3 files`, `1 200 results`: the count grouped, the noun agreeing.
-fn plural(count: usize, noun: &str) -> String {
+pub(super) fn plural(count: usize, noun: &str) -> String {
     format!("{} {noun}{}", thousands(count), if count == 1 { "" } else { "s" })
 }
 
 /// `12345` as `12 345`: groups of three, a space between. Every count the
 /// drawer prints goes through here.
-fn thousands(count: usize) -> String {
+pub(super) fn thousands(count: usize) -> String {
     let digits = count.to_string();
     let mut out = String::new();
     for (at, digit) in digits.chars().enumerate() {
@@ -567,6 +570,12 @@ impl WorktreeDrawer {
         self.search.buffer_source = Some(source);
     }
 
+    /// The handle of the unsaved tabs' paths a Replace all asks before each
+    /// write. The app keeps it current when a tab's dirty state changes.
+    pub fn dirty_handle(&self) -> DirtyHandle {
+        self.search.dirty_now.clone()
+    }
+
     /// Makes the four fields when there is a window to make them in, and listens
     /// to each: an edit runs the search after a pause, Enter runs it at once.
     pub(super) fn ensure_search_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -809,8 +818,11 @@ impl WorktreeDrawer {
     /// off the GPUI thread, except those. The error is why nothing started.
     ///
     /// The files are read by `replace_files` when the task runs, never from the
-    /// stored positions. A tab that becomes dirty after the press is not in the
-    /// set: its `check_external` meets the changed file as a conflict, and asks.
+    /// stored positions. The set is the press's snapshot; a tab that turns dirty
+    /// while the task runs is caught by the app-kept handle (`dirty_handle`),
+    /// asked immediately before each file is written. What remains is the
+    /// check-then-write of one file, and a tab that edits in that instant meets
+    /// the changed file as a conflict through `check_external`, and asks.
     pub fn replace_all_with(
         &mut self,
         dirty: Result<HashSet<PathBuf>, String>,
@@ -835,12 +847,14 @@ impl WorktreeDrawer {
         let files: Vec<PathBuf> = self.search.files.iter().map(|file| file.path.clone()).collect();
         let searched = self.search.skipped.clone();
         let worktree = self.worktree().to_path_buf();
+        let live = self.search.dirty_now.clone();
+        live.set(dirty.clone());
         self.search.replace_report = None;
         self.search.replace_task = Some(cx.spawn(async move |drawer, cx| {
             let root = worktree.clone();
             let report = cx
                 .background_spawn(async move {
-                    search_engine::replace_files(&root, &files, &query, &with, &dirty)
+                    search_engine::replace_files(&root, &files, &query, &with, &dirty, &live)
                 })
                 .await;
             let _ = drawer.update(cx, |drawer, cx| {

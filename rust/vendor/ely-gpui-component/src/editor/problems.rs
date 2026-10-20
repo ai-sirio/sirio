@@ -70,6 +70,9 @@ pub struct ProblemsPanel {
     id: ElementId,
     problems: Vec<Problem>,
     shown: Vec<Severity>,
+    /// Local change: the toggles' counts when the host gives fewer problems
+    /// than there are (errors, warnings, notes).
+    counts: Option<[usize; 3]>,
     on_open: Option<OnOpen>,
     on_shown: Option<OnShown>,
 }
@@ -80,6 +83,7 @@ impl ProblemsPanel {
             id: id.into(),
             problems: problems.into_iter().collect(),
             shown: vec![Severity::Danger, Severity::Warning, Severity::Info],
+            counts: None,
             on_open: None,
             on_shown: None,
         }
@@ -88,6 +92,14 @@ impl ProblemsPanel {
     /// The severities listed; the rest are counted but hidden.
     pub fn shown(mut self, severities: impl IntoIterator<Item = Severity>) -> Self {
         self.shown = severities.into_iter().collect();
+        self
+    }
+
+    /// The counts the toggles show, as (errors, warnings, notes), for a host that
+    /// hands the panel only the problems it draws. Without it each toggle counts
+    /// the problems given.
+    pub fn counts(mut self, counts: [usize; 3]) -> Self {
+        self.counts = Some(counts);
         self
     }
 
@@ -110,6 +122,13 @@ impl RenderOnce for ProblemsPanel {
         let theme = cx.theme();
         let colors = theme.colors.clone();
         let count = |severity: Severity| {
+            if let Some(counts) = self.counts {
+                return match severity {
+                    Severity::Danger => counts[0],
+                    Severity::Warning => counts[1],
+                    _ => counts[2],
+                };
+            }
             self.problems
                 .iter()
                 .filter(|problem| problem.severity == severity)

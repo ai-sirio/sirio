@@ -5326,6 +5326,9 @@ struct SirioWorkspace {
     /// first file tab and saved whenever it changes. Parked worktrees keep
     /// theirs: the map outlives `tabs`.
     drawers: HashMap<PathBuf, Entity<WorktreeDrawer>>,
+    /// The file views whose dirty flag was last seen set: what tells a change of
+    /// that flag from the many notifies that leave it alone.
+    dirty_views: HashSet<gpui::EntityId>,
     next_tab_id: usize,
     next_retained_chat_id: usize,
     retained_chats: Vec<RetainedChat>,
@@ -6558,6 +6561,7 @@ impl SirioWorkspace {
             pane_drop_target: None,
             tab_worktree_paths,
             drawers: HashMap::new(),
+            dirty_views: HashSet::new(),
             next_tab_id: tabs_len,
             next_retained_chat_id: 0,
             retained_chats: Vec::new(),
@@ -8072,6 +8076,7 @@ impl SirioWorkspace {
                 return;
             }
             let path = view.read(cx).path().to_path_buf();
+            workspace.note_dirty_state(&view, cx);
             workspace.sync_document_with_server(&path, &view, cx);
         })
         .detach();
@@ -15242,7 +15247,7 @@ impl SirioWorkspace {
             drawer.read(cx).problems_for(&relative)
         });
         for (open_path, view) in Self::open_file_views(&self.tabs, cx) {
-            if !paths_name_the_same_document(&open_path, &path) {
+            if !paths_name_the_same_document(&open_path, &path) || view.read(cx).is_snapshot() {
                 continue;
             }
             // A publish can land while this view is still reading its file.
@@ -15277,6 +15282,11 @@ impl SirioWorkspace {
         view: &Entity<FileView>,
         cx: &mut Context<Self>,
     ) {
+        // A read-only revision's text is not the working tree's: the store's
+        // positions would mark the wrong lines in it.
+        if view.read(cx).is_snapshot() {
+            return;
+        }
         let Some((root, relative)) = self.worktree_and_relative(path) else {
             return;
         };
@@ -19131,10 +19141,11 @@ impl SirioWorkspace {
     /// `drawer_height`, the kept height in pixels, `problems` (errors, warnings
     /// and notes, `e/w/n`), `problem_files` (the files Problems draws, `;`
     /// between them, in the order drawn, relative to the worktree) and
-    /// `problems_note`, the line Problems says when it has nothing to list.
+    /// `problems_note`, the line Problems says when it has nothing to list, and
+    /// `problems_not_drawn`, how many problems lie past its budget of drawn rows.
     fn drawer_fields(drawer: Option<&Entity<WorktreeDrawer>>, cx: &App) -> Vec<(String, String)> {
         let read = drawer.map(|drawer| drawer.read(cx));
-        let (open, tab, height, problems, files, note) = match read {
+        let (open, tab, height, problems, files, note, not_drawn) = match read {
             Some(drawer) => {
                 let counts = drawer.problem_counts();
                 (
@@ -19144,10 +19155,12 @@ impl SirioWorkspace {
                     format!("{}/{}/{}", counts.errors, counts.warnings, counts.notes),
                     Self::escaped_field(&drawer.problem_files().join(";")),
                     Self::escaped_field(&drawer.problems_note()),
+                    drawer.problems_not_drawn().to_string(),
                 )
             }
             None => (
                 "0".to_string(),
+                String::new(),
                 String::new(),
                 String::new(),
                 String::new(),
@@ -19162,6 +19175,7 @@ impl SirioWorkspace {
             ("problems".to_string(), problems),
             ("problem_files".to_string(), files),
             ("problems_note".to_string(), note),
+            ("problems_not_drawn".to_string(), not_drawn),
         ];
         fields.extend(Self::search_fields(read, cx));
         fields
@@ -19261,10 +19275,22 @@ impl SirioWorkspace {
     /// it, as the tab holds it: what a search reads in place of the file on disk.
     fn dirty_buffers(&self, worktree: &Path, cx: &App) -> HashMap<PathBuf, String> {
         let mut buffers = HashMap::new();
+        for (relative, view) in self.dirty_tabs(worktree, cx) {
+            if let Some(text) = view.read(cx).buffer_text(cx) {
+                buffers.insert(relative, text);
+            }
+        }
+        buffers
+    }
+
+    /// The open file tabs of `worktree` that hold unsaved text, with their path
+    /// relative to it.
+    fn dirty_tabs(&self, worktree: &Path, cx: &App) -> Vec<(PathBuf, Entity<FileView>)> {
+        let mut tabs = Vec::new();
         for tab in &self.tabs {
             for (path, view) in Self::open_file_views(std::slice::from_ref(tab), cx) {
-                let view = view.read(cx);
-                if view.is_snapshot() || !view.is_dirty() {
+                let state = view.read(cx);
+                if state.is_snapshot() || !state.is_dirty() {
                     continue;
                 }
                 // The same matcher the server findings use: a tab reached through
@@ -19272,15 +19298,37 @@ impl SirioWorkspace {
                 let Some((root, relative)) = self.worktree_and_relative(&path) else {
                     continue;
                 };
-                if !paths_name_the_same_document(&root, worktree) {
-                    continue;
-                }
-                if let Some(text) = view.buffer_text(cx) {
-                    buffers.insert(relative, text);
+                if paths_name_the_same_document(&root, worktree) {
+                    tabs.push((relative, view));
                 }
             }
         }
-        buffers
+        tabs
+    }
+
+    /// A file view notified: when its dirty flag turned or cleared, every drawer's
+    /// live set of unsaved paths is read again, so a Replace all that is running
+    /// in the background hears of an edit made after the press.
+    fn note_dirty_state(&mut self, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        let dirty = view.read(cx).is_dirty();
+        let id = view.entity_id();
+        let moved = if dirty {
+            self.dirty_views.insert(id)
+        } else {
+            self.dirty_views.remove(&id)
+        };
+        if !moved {
+            return;
+        }
+        let drawers: Vec<_> = self
+            .drawers
+            .iter()
+            .map(|(root, drawer)| (root.clone(), drawer.read(cx).dirty_handle()))
+            .collect();
+        for (root, handle) in drawers {
+            let paths = self.dirty_tabs(&root, cx).into_iter().map(|(path, _)| path).collect();
+            handle.set(paths);
+        }
     }
 
     /// Replace all wrote `paths`: every open tab on one of them reads the file

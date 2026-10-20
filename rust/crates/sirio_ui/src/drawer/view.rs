@@ -25,20 +25,37 @@
 //!   wrong time (a server that exits), so the seen set is stale, or the one
 //!   the user saw is forgotten;
 //! - a change of the seen set is not saved, so a relaunch announces what the
-//!   user had seen.
+//!   user had seen;
+//! - a burst of publishes (a server answers a check with hundreds of files)
+//!   looks and saves the seen set once per publish, a database commit each,
+//!   instead of once after the burst (`LOOK_DELAY`);
+//! - every publish of a burst redraws the whole window (one frame each, which
+//!   under software rendering is ~100 ms: fifty publishes starve the control
+//!   socket for five seconds), instead of one redraw per `REDRAW_EVERY`;
+//! - the pause outlives the user's leaving Problems or closing the drawer, so a
+//!   look is lost or made late (a close, and showing Problems, look at once; a
+//!   move to Search takes the pending look first);
+//! - the problem list is rebuilt, and every stored problem cloned, on every
+//!   frame (`drawn_problems` keeps it until the store, the current file or the
+//!   severities change).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::Duration;
 
 use ely_gpui_component::forms::Choice;
 use ely_gpui_component::navigation::Tabs;
 use ely_gpui_component::primitives::{IconName, Severity};
-use gpui::{Context, DragMoveEvent, EventEmitter, MouseButton, Pixels, Render, Window, div, prelude::*, px};
+use gpui::{
+    Context, DragMoveEvent, EventEmitter, MouseButton, Pixels, Render, Task, Window, div,
+    prelude::*, px,
+};
 use sirio_persistence::EditorDrawerRecord;
 use sirio_theme::Theme;
 
-use super::problems_view::{self, ALL_SEVERITIES};
+use super::problems_view::{self, ALL_SEVERITIES, DrawnProblems};
 use super::search_view::{self, WorktreeSearch};
 use super::{ErrorAlarm, ProblemCounts, ProblemStore, SearchQuery, ServerKey, StoredProblem};
 use crate::ely_ui;
@@ -51,6 +68,10 @@ const MIN_HEIGHT: f32 = 96.0;
 const CODE_KEEPS: f32 = 160.0;
 /// A closed drawer is its header row only.
 const HEADER_HEIGHT: f32 = 30.0;
+/// How long after the last publish the drawer looks (and saves what it saw).
+const LOOK_DELAY: Duration = Duration::from_millis(250);
+/// The most often a publish redraws the drawer: a burst is one frame, not one each.
+const REDRAW_EVERY: Duration = Duration::from_millis(100);
 /// The strip at the drawer's top edge that takes the resize drag.
 const EDGE_HEIGHT: f32 = 6.0;
 
@@ -130,6 +151,14 @@ pub struct WorktreeDrawer {
     drag_moved: bool,
     /// What Search holds. Not saved: results are never persisted.
     pub(super) search: WorktreeSearch,
+    /// What Problems draws, kept until the store, the current file or the shown
+    /// severities change.
+    drawn: RefCell<Option<Rc<DrawnProblems>>>,
+    /// The look a publish asked for, `LOOK_DELAY` after the last one. Dropping
+    /// the task ends the pause, so each publish replaces it.
+    look_task: Option<Task<()>>,
+    /// The redraw a publish asked for, `REDRAW_EVERY` from the first of a burst.
+    redraw_task: Option<Task<()>>,
 }
 
 /// `height` held between the floor and the ceiling for a tab `tab_height`
@@ -176,6 +205,9 @@ impl WorktreeDrawer {
             drag: None,
             drag_moved: false,
             search: WorktreeSearch::default(),
+            drawn: RefCell::new(None),
+            look_task: None,
+            redraw_task: None,
         }
     }
 
@@ -229,6 +261,10 @@ impl WorktreeDrawer {
         if self.open && self.tab == tab {
             return;
         }
+        // Leaving Problems while a publish's look is pending: the user saw it.
+        if self.open && self.tab == DrawerTab::Problems && self.look_task.take().is_some() {
+            self.look();
+        }
         self.open = true;
         self.tab = tab;
         if tab == DrawerTab::Problems {
@@ -241,6 +277,7 @@ impl WorktreeDrawer {
         if !self.open {
             return;
         }
+        self.look_task = None;
         self.look();
         self.open = false;
         self.changed(cx);
@@ -272,10 +309,11 @@ impl WorktreeDrawer {
         cx: &mut Context<Self>,
     ) {
         self.problems.publish(server, path, problems);
+        self.drawn.replace(None);
         if self.open && self.tab == DrawerTab::Problems {
-            if self.look() {
-                cx.emit(WorktreeDrawerEvent::Changed);
-            }
+            // The user is looking: that is a look, once, after the burst. Doing
+            // it per publish clones the store and commits the seen set each time.
+            self.schedule_look(cx);
         } else if !self.open && self.alarm.calls_for_drawer(&self.problems.error_counts()) {
             self.open = true;
             self.tab = DrawerTab::Problems;
@@ -283,13 +321,42 @@ impl WorktreeDrawer {
             self.changed(cx);
             return;
         }
-        cx.notify();
+        self.schedule_redraw(cx);
+    }
+
+    /// Redraws once `REDRAW_EVERY` from now, however many publishes ask meanwhile.
+    fn schedule_redraw(&mut self, cx: &mut Context<Self>) {
+        if self.redraw_task.is_some() {
+            return;
+        }
+        self.redraw_task = Some(cx.spawn(async move |drawer, cx| {
+            cx.background_executor().timer(REDRAW_EVERY).await;
+            let _ = drawer.update(cx, |drawer, cx| {
+                drawer.redraw_task = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    /// A look `LOOK_DELAY` from now, replacing one already waiting; it is made
+    /// only if the drawer is still open on Problems then.
+    fn schedule_look(&mut self, cx: &mut Context<Self>) {
+        self.look_task = Some(cx.spawn(async move |drawer, cx| {
+            cx.background_executor().timer(LOOK_DELAY).await;
+            let _ = drawer.update(cx, |drawer, cx| {
+                drawer.look_task = None;
+                if drawer.open && drawer.tab == DrawerTab::Problems && drawer.look() {
+                    cx.emit(WorktreeDrawerEvent::Changed);
+                }
+            });
+        }));
     }
 
     /// `server` ended: everything it reported goes. It is never a look, and
     /// nothing it leaves can call for the drawer.
     pub fn server_gone(&mut self, server: &ServerKey, cx: &mut Context<Self>) {
         self.problems.server_gone(server);
+        self.drawn.replace(None);
         cx.notify();
     }
 
@@ -305,14 +372,19 @@ impl WorktreeDrawer {
     /// The file of the tab that draws the drawer now (`None`: a tab with no
     /// file of this worktree). Drawn on the way, so it does not ask for a frame.
     pub fn set_current_file(&mut self, file: Option<&Path>) {
-        self.current_file = file
+        let current = file
             .and_then(|file| file.strip_prefix(&self.worktree).ok())
             .map(Path::to_path_buf);
+        if current != self.current_file {
+            self.current_file = current;
+            self.drawn.replace(None);
+        }
     }
 
     /// The severities Problems lists.
     pub(super) fn set_shown(&mut self, shown: Vec<Severity>, cx: &mut Context<Self>) {
         self.shown = shown;
+        self.drawn.replace(None);
         cx.notify();
     }
 
@@ -332,15 +404,28 @@ impl WorktreeDrawer {
         problems_view::empty_note(&self.running_servers)
     }
 
-    fn listed_files(&self) -> Vec<(PathBuf, Vec<StoredProblem>)> {
-        self.problems.files(self.current_file.as_deref())
+    /// What Problems draws, built from the store when it last changed.
+    fn drawn_problems(&self) -> Rc<DrawnProblems> {
+        if let Some(drawn) = &*self.drawn.borrow() {
+            return drawn.clone();
+        }
+        let files = self.problems.files(self.current_file.as_deref());
+        let drawn = DrawnProblems::build(&files, &self.shown, self.problems.counts());
+        *self.drawn.borrow_mut() = Some(drawn.clone());
+        drawn
+    }
+
+    /// How many problems the store holds that Problems does not draw (past its
+    /// budget); the rows it draws are all it lists to the debug verbs.
+    pub fn problems_not_drawn(&self) -> usize {
+        self.drawn_problems().omitted
     }
 
     /// The files Problems draws, in the order it draws them, relative to the
     /// worktree with `/` between the parts.
     pub fn problem_files(&self) -> Vec<String> {
         let mut files: Vec<String> = Vec::new();
-        for row in problems_view::drawn_rows(&self.listed_files(), &self.shown) {
+        for row in &self.drawn_problems().rows {
             let path = problems_view::display_path(&row.path);
             if !files.contains(&path) {
                 files.push(path);
@@ -368,8 +453,8 @@ impl WorktreeDrawer {
     /// Chooses the `index`-th row Problems draws, as a press on it does. False
     /// when there is no such row.
     pub fn open_drawn_problem(&mut self, index: usize, cx: &mut Context<Self>) -> bool {
-        let rows = problems_view::drawn_rows(&self.listed_files(), &self.shown);
-        let Some(row) = rows.get(index) else {
+        let drawn = self.drawn_problems();
+        let Some(row) = drawn.rows.get(index) else {
             return false;
         };
         let path = problems_view::display_path(&row.path);
@@ -520,7 +605,7 @@ impl Render for WorktreeDrawer {
             .bg(theme.ely.bg);
         let panel = match self.tab {
             DrawerTab::Problems if open => panel.overflow_y_scroll().child(problems_view::render(
-                &self.listed_files(),
+                &self.drawn_problems(),
                 &self.shown,
                 &self.problems_note(),
                 entity.clone(),
@@ -592,6 +677,103 @@ impl Render for WorktreeDrawer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Debounce: a burst of publishes while Problems is open saves the seen set
+    // once, after the burst (`a_burst_of_publishes_looks_and_saves_once_after_it`),
+    // and a close inside the pause still looks at once
+    // (`a_close_inside_the_pause_looks_at_once_and_the_pause_adds_nothing`).
+
+    use sirio_lsp::Severity as Level;
+
+    fn error(line: u32, message: &str) -> StoredProblem {
+        StoredProblem {
+            line,
+            column: 0,
+            end_line: line,
+            end_column: 0,
+            severity: Level::Error,
+            message: message.to_owned(),
+            source: None,
+        }
+    }
+
+    /// A drawer open on Problems, and how many `Changed` it has told.
+    fn open_drawer(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<WorktreeDrawer>, Rc<Cell<usize>>) {
+        let drawer = cx.new(|_| WorktreeDrawer::new(PathBuf::from("/wt"), None));
+        let changed = Rc::new(Cell::new(0));
+        let count = changed.clone();
+        cx.update(|cx| {
+            cx.subscribe(&drawer, move |_, event: &WorktreeDrawerEvent, _| {
+                if *event == WorktreeDrawerEvent::Changed {
+                    count.set(count.get() + 1);
+                }
+            })
+            .detach();
+        });
+        drawer.update(cx, |drawer, cx| drawer.show(DrawerTab::Problems, cx));
+        changed.set(0);
+        (drawer, changed)
+    }
+
+    /// How many times the drawer asks for a frame.
+    fn count_redraws(
+        cx: &mut gpui::TestAppContext,
+        drawer: &gpui::Entity<WorktreeDrawer>,
+    ) -> Rc<Cell<usize>> {
+        let redraws = Rc::new(Cell::new(0));
+        let count = redraws.clone();
+        cx.update(|cx| {
+            cx.observe(drawer, move |_, _| count.set(count.get() + 1)).detach();
+        });
+        redraws
+    }
+
+    fn publish_burst(cx: &mut gpui::TestAppContext, drawer: &gpui::Entity<WorktreeDrawer>) {
+        let server: ServerKey = (PathBuf::from("/p"), "rust".to_owned());
+        for file in 0..40 {
+            let path = PathBuf::from(format!("src/f{file}.rs"));
+            let problems = vec![error(file, &format!("burst {file}"))];
+            drawer.update(cx, |drawer, cx| drawer.publish(&server, &path, problems, cx));
+        }
+    }
+
+    #[gpui::test]
+    async fn a_burst_of_publishes_looks_and_saves_once_after_it(cx: &mut gpui::TestAppContext) {
+        let (drawer, changed) = open_drawer(cx);
+        let redraws = count_redraws(cx, &drawer);
+
+        publish_burst(cx, &drawer);
+        assert_eq!(changed.get(), 0, "a publish saved the seen set by itself");
+        assert_eq!(redraws.get(), 0, "a publish asked for a frame by itself");
+        assert_eq!(drawer.read_with(cx, |drawer, _| drawer.record().seen_errors), "[]");
+
+        cx.executor().advance_clock(LOOK_DELAY + Duration::from_millis(10));
+        cx.run_until_parked();
+
+        assert_eq!(changed.get(), 1, "the burst was saved once, after it");
+        assert_eq!(redraws.get(), 1, "the burst was drawn once, after it");
+        let seen = drawer.read_with(cx, |drawer, _| drawer.record().seen_errors);
+        assert!(seen.contains("burst 0") && seen.contains("burst 39"), "{seen}");
+    }
+
+    #[gpui::test]
+    async fn a_close_inside_the_pause_looks_at_once_and_the_pause_adds_nothing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (drawer, changed) = open_drawer(cx);
+        publish_burst(cx, &drawer);
+
+        drawer.update(cx, |drawer, cx| drawer.close(cx));
+        let seen = drawer.read_with(cx, |drawer, _| drawer.record().seen_errors);
+        assert!(seen.contains("burst 39"), "a close is a look: {seen}");
+        assert_eq!(changed.get(), 1);
+
+        cx.executor().advance_clock(LOOK_DELAY + Duration::from_millis(10));
+        cx.run_until_parked();
+        assert_eq!(changed.get(), 1, "the pause looked again after a close");
+    }
 
     #[test]
     fn the_floor_wins_in_a_window_too_short_for_both_bounds() {

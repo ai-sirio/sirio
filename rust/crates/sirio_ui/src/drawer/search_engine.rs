@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ely_gpui_component::editor::{FindOptions, Finder, GlobFilter, Hit};
 
@@ -19,6 +20,32 @@ use crate::editor::{LineEnding, MAX_FILE_BYTES, is_binary};
 
 /// How many matches a run keeps before it stops and says so.
 pub const MATCH_CAP: usize = 20_000;
+
+/// The worktree-relative paths of the tabs that hold unsaved text, kept current
+/// by the app while a Replace all runs. `replace_files` asks it immediately
+/// before each file's write; a handle it cannot read counts as dirty.
+#[derive(Clone, Debug, Default)]
+pub struct DirtyHandle(Arc<Mutex<HashSet<PathBuf>>>);
+
+impl DirtyHandle {
+    /// Replaces the set with `paths`.
+    pub fn set(&self, paths: HashSet<PathBuf>) {
+        if let Ok(mut held) = self.0.lock() {
+            *held = paths;
+        }
+    }
+
+    pub fn insert(&self, path: PathBuf) {
+        if let Ok(mut held) = self.0.lock() {
+            held.insert(path);
+        }
+    }
+
+    /// Whether `path` is dirty now; a poisoned lock says yes.
+    pub fn contains(&self, path: &Path) -> bool {
+        self.0.lock().map_or(true, |held| held.contains(path))
+    }
+}
 
 /// What to look for and in which files: the text with its options, and the
 /// comma-separated globs the path must pass.
@@ -204,7 +231,9 @@ pub struct ReplaceReport {
 /// are never used, so a file that changed since the search is matched afresh and
 /// one with no match left is not written.
 ///
-/// A file is skipped, and reported, when its tab is in `dirty`, when it or a
+/// A file is skipped, and reported, when its tab is in `dirty` (the unsaved tabs
+/// at the press) or in `live` (asked again immediately before the write, since a
+/// run can outlast an edit), when it or a
 /// directory above it is a symbolic link (the file's own canonical path must lie
 /// inside the worktree's), when it is gone or when it cannot be read. Every byte
 /// outside a replaced span stays as it was: the matches are found in the LF
@@ -216,8 +245,9 @@ pub fn replace_files(
     query: &SearchQuery,
     with: &str,
     dirty: &HashSet<PathBuf>,
+    live: &DirtyHandle,
 ) -> ReplaceReport {
-    replace_files_with(worktree, files, query, with, dirty, &write_atomically)
+    replace_files_with(worktree, files, query, with, dirty, live, &write_atomically)
 }
 
 /// `replace_files` with the write given, so a test can make one fail.
@@ -227,6 +257,7 @@ fn replace_files_with(
     query: &SearchQuery,
     with: &str,
     dirty: &HashSet<PathBuf>,
+    live: &DirtyHandle,
     write: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) -> ReplaceReport {
     let mut report = ReplaceReport::default();
@@ -238,7 +269,7 @@ fn replace_files_with(
     for relative in files {
         let outcome = match (&finder, &root) {
             (Ok(finder), Ok(root)) => {
-                replace_one(worktree, root, relative, finder, &with_lf, dirty, write)
+                replace_one(worktree, root, relative, finder, &with_lf, (dirty, live), write)
             }
             _ => Err(ReplaceSkip::Unreadable),
         };
@@ -265,7 +296,7 @@ fn replace_one(
     relative: &Path,
     finder: &Finder,
     with_lf: &str,
-    dirty: &HashSet<PathBuf>,
+    (dirty, live): (&HashSet<PathBuf>, &DirtyHandle),
     write: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) -> Result<Option<(usize, bool)>, ReplaceSkip> {
     use std::io::ErrorKind::NotFound;
@@ -329,6 +360,10 @@ fn replace_one(
     if out == raw {
         return Ok(Some((matches.len(), false)));
     }
+    // The press snapshot is old by now; the handle is the tabs as they are.
+    if live.contains(relative) {
+        return Err(ReplaceSkip::Unsaved);
+    }
     write(&path, out.as_bytes()).map_err(|error| {
         eprintln!("[search] replace: writing a file failed: {error}");
         ReplaceSkip::WriteFailed(error.to_string())
@@ -380,7 +415,10 @@ pub fn search_worktree(
         Err(error) => return failed(error),
     };
     match sirio_git::listed_files(worktree) {
-        Ok(files) => walk(worktree, files, query, &finder, buffers, cancel, on_file),
+        Ok(listed) => {
+            let files = listed.files;
+            walk(worktree, (files, listed.not_utf8), query, &finder, buffers, cancel, on_file)
+        }
         Err(error) => failed(error.to_string()),
     }
 }
@@ -461,23 +499,29 @@ pub(crate) fn search_files(
     on_file: impl FnMut(FileResult),
 ) -> SearchOutcome {
     match compile(query) {
-        Ok(finder) => walk(worktree, files, query, &finder, buffers, cancel, on_file),
+        Ok(finder) => walk(worktree, (files, 0), query, &finder, buffers, cancel, on_file),
         Err(error) => failed(error),
     }
 }
 
+/// `listed` is the files and how many more have a name that is not UTF-8,
+/// which no path here can name: they are counted among the skipped.
 fn walk(
     worktree: &Path,
-    files: Vec<PathBuf>,
+    listed: (Vec<PathBuf>, usize),
     query: &SearchQuery,
     finder: &Finder,
     buffers: &HashMap<PathBuf, String>,
     cancel: &AtomicBool,
     mut on_file: impl FnMut(FileResult),
 ) -> SearchOutcome {
+    let (files, not_utf8) = listed;
     let mut outcome = SearchOutcome::default();
     if query.text.is_empty() {
         return outcome;
+    }
+    if not_utf8 > 0 {
+        outcome.skipped.insert(Skip::NotUtf8, not_utf8);
     }
     // Compiled once for the run; a glob that cannot be compiled logs here once.
     let globs = GlobFilter::new(&query.include, &query.exclude);
@@ -595,7 +639,14 @@ mod tests {
     //!   file (`replacing_multibyte_text_never_splits_a_character`,
     //!   `replacing_in_text_from_a_crlf_file_gives_lf_text`);
     //!
+    //! - a file git lists under a name that is not UTF-8 is dropped without a
+    //!   word (`a_listed_name_that_is_not_utf8_is_counted_as_skipped`);
+    //!
     //! `replace_files`, each a way Replace all could damage a worktree:
+    //! - a tab that turns dirty after the press, while the run is under way, is
+    //!   overwritten (`a_file_that_turns_dirty_during_the_run_is_skipped`);
+    //! - the live handle is read once, before the run, so it is the press
+    //!   snapshot again (the same test: file 2 is dirty only after file 1's write);
     //! - a file with unsaved changes in its tab is overwritten
     //!   (`an_unsaved_file_is_skipped_and_untouched`);
     //! - a symbolic link is written through, or replaced by a regular file while
@@ -1076,7 +1127,7 @@ mod tests {
 
     fn replace(dir: &Path, files: &[&str], find: &SearchQuery, with: &str) -> ReplaceReport {
         let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
-        replace_files(dir, &files, find, with, &HashSet::new())
+        replace_files(dir, &files, find, with, &HashSet::new(), &DirtyHandle::default())
     }
 
     #[test]
@@ -1086,12 +1137,90 @@ mod tests {
         std::fs::write(dir.join("b.txt"), "needle\n").unwrap();
 
         let files = [PathBuf::from("a.txt"), PathBuf::from("b.txt")];
-        let report = replace_files(&dir, &files, &query("needle"), "x", &dirty_of(&["a.txt"]));
+        let report = replace_files(
+            &dir,
+            &files,
+            &query("needle"),
+            "x",
+            &dirty_of(&["a.txt"]),
+            &DirtyHandle::default(),
+        );
 
         assert_eq!(report.skipped, vec![(PathBuf::from("a.txt"), ReplaceSkip::Unsaved)]);
         assert_eq!((report.replaced, report.files), (1, 1));
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "needle\n");
         assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "x\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_that_turns_dirty_during_the_run_is_skipped() {
+        let dir = scratch("dirty-mid-run");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(name), "needle\n").unwrap();
+        }
+        let files: Vec<PathBuf> = ["a.txt", "b.txt", "c.txt"].iter().map(PathBuf::from).collect();
+        let live = DirtyHandle::default();
+        // The user types into b.txt's tab while a.txt is being written.
+        let typing = live.clone();
+        let writer = |path: &Path, bytes: &[u8]| -> std::io::Result<()> {
+            if path.ends_with("a.txt") {
+                typing.insert(PathBuf::from("b.txt"));
+            }
+            write_atomically(path, bytes)
+        };
+
+        let report = replace_files_with(
+            &dir,
+            &files,
+            &query("needle"),
+            "x",
+            &HashSet::new(),
+            &live,
+            &writer,
+        );
+
+        assert_eq!(report.skipped, vec![(PathBuf::from("b.txt"), ReplaceSkip::Unsaved)]);
+        assert_eq!(report.written, vec![PathBuf::from("a.txt"), PathBuf::from("c.txt")]);
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "needle\n");
+        assert_eq!(std::fs::read_to_string(dir.join("c.txt")).unwrap(), "x\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_listed_name_that_is_not_utf8_is_counted_as_skipped() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = scratch("not-utf8-name");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("good.txt"), "needle\n").unwrap();
+        let bad = dir.join(std::ffi::OsStr::from_bytes(b"bad\xff.txt"));
+        if std::fs::write(&bad, "needle\n").is_err() {
+            // A file system that refuses such a name has nothing to count.
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+
+        let outcome = search_worktree(
+            &dir,
+            &query("needle"),
+            &HashMap::new(),
+            &AtomicBool::new(false),
+            |_| {},
+        );
+
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.files.len(), 1);
+        assert_eq!(outcome.skipped.get(&Skip::NotUtf8), Some(&1));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1180,7 +1309,15 @@ mod tests {
         };
 
         let none = HashSet::new();
-        let report = replace_files_with(&dir, &files, &query("needle"), "x", &none, &writer);
+        let report = replace_files_with(
+            &dir,
+            &files,
+            &query("needle"),
+            "x",
+            &none,
+            &DirtyHandle::default(),
+            &writer,
+        );
 
         assert_eq!((report.replaced, report.files), (2, 2));
         assert_eq!(report.written, vec![PathBuf::from("a.txt"), PathBuf::from("c.txt")]);
@@ -1198,13 +1335,27 @@ mod tests {
         let dir = scratch("up-inside");
         let up = PathBuf::from("..").join(outside.file_name().unwrap()).join("secret.txt");
 
-        let report = replace_files(&dir, &[up.clone()], &query("needle"), "x", &HashSet::new());
+        let report = replace_files(
+            &dir,
+            &[up.clone()],
+            &query("needle"),
+            "x",
+            &HashSet::new(),
+            &DirtyHandle::default(),
+        );
 
         assert_eq!(report.skipped, vec![(up, ReplaceSkip::OutsideWorktree)]);
         assert_eq!(std::fs::read_to_string(outside.join("secret.txt")).unwrap(), "needle\n");
         let absolute = outside.join("secret.txt");
         let by_path = [absolute.clone()];
-        let report = replace_files(&dir, &by_path, &query("needle"), "x", &HashSet::new());
+        let report = replace_files(
+            &dir,
+            &by_path,
+            &query("needle"),
+            "x",
+            &HashSet::new(),
+            &DirtyHandle::default(),
+        );
         assert_eq!(report.skipped, vec![(absolute, ReplaceSkip::OutsideWorktree)]);
         assert_eq!(std::fs::read_to_string(outside.join("secret.txt")).unwrap(), "needle\n");
         let _ = std::fs::remove_dir_all(dir);

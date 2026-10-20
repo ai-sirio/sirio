@@ -20,8 +20,8 @@ use std::path::PathBuf;
 pub use alarm::ErrorAlarm;
 pub use problems::{ProblemCounts, ProblemStore, StoredProblem};
 pub use search_engine::{
-    FileResult, FoundHit, ReplaceReport, ReplaceSkip, SearchOutcome, SearchQuery, Skip, hits_in,
-    rematch, replace_files, replace_in, search_worktree,
+    DirtyHandle, FileResult, FoundHit, ReplaceReport, ReplaceSkip, SearchOutcome, SearchQuery,
+    Skip, hits_in, rematch, replace_files, replace_in, search_worktree,
 };
 pub use search_view::{BufferSource, SearchFields, SearchRequest};
 pub use view::{DrawerTab, WorktreeDrawer, WorktreeDrawerEvent};

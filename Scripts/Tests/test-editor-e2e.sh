@@ -140,6 +140,9 @@ set -eEuo pipefail
 #                     say is named
 #   problems_park     a second worktree has a drawer of its own; the first, switched away and back,
 #                     keeps its drawer, height and problems, one that arrived while parked included
+#   problems_volume   5 000 problems from one burst (50 files): the counts are the store's, the panel
+#                     draws at most 1 500 rows and says how many are not drawn, the window still
+#                     answers a verb; captured
 #   search_keys       Ctrl+Shift+F (a real X key) opens the drawer on Search with the selection as the query;
 #                     the keyboard is in the query field (a typed key lands there), and Escape in it
 #                     hands the keyboard to the code of the tab
@@ -3407,6 +3410,9 @@ path, base, publish = sys.argv[1:4]
 with open(base, encoding="utf-8") as handle:
     answers = json.load(handle)
 answers["diagnostics_file"] = ""
+if publish.startswith("@"):  # a map too long for an argument, in a file
+    with open(publish[1:], encoding="utf-8") as handle:
+        publish = handle.read()
 answers["publish"] = json.loads(publish)
 answers["nonce"] = time.time_ns()
 with open(path + ".tmp", "w", encoding="utf-8") as handle:
@@ -3690,6 +3696,50 @@ scenario_problems_park() {
   ctl close-workspace --workspace "$park" >/dev/null 2>&1 || true
   git -C "$WT" worktree remove --force "$park" >/dev/null 2>&1 || true
   ctl select-workspace --workspace "$WT" >/dev/null
+}
+
+# Volume (final review I2/I3): a server that reports a whole project at once. 50 files
+# with 100 findings each (1 250 errors, 2 500 warnings, 1 250 notes) are published in
+# one burst: the counts are the store's, exact; the panel draws its budget of 1 500 rows
+# and the rest is counted (`problems_not_drawn`); and the window still answers verbs
+# while the burst's look and save are pending (they are made
+# once, after it).
+scenario_problems_volume() {
+  problems_reset
+  local file="$RUN_DIR/volume-publish.json"
+  mkdir -p "$WT/vol"
+  python3 - "$WT" "$file" <<'PY'
+import json, os, sys
+root, out = sys.argv[1:3]
+publish = {}
+for i in range(50):
+    name = f"vol/f{i}.rs"
+    with open(os.path.join(root, name), "w", encoding="utf-8") as handle:
+        handle.write("fn volume_marker() {}\n")
+    publish[name] = [
+        {"needle": "volume_marker", "severity": (1, 2, 2, 3)[j % 4],
+         "message": f"volume {i}-{j}", "source": "fake-lsp"}
+        for j in range(100)
+    ]
+with open(out, "w", encoding="utf-8") as handle:
+    json.dump(publish, handle)
+PY
+  problems_publish "@$file"
+  expect_state drawer_open 1
+  expect_state problems 1250/2500/1250
+  expect_state problems_not_drawn 3500
+  echo "OK: 5 000 problems: the counts are exact and 3 500 lie past the drawn budget"
+  # The window answers while the drawer holds the list.
+  ctl surface editor drawer --height=300 >/dev/null
+  expect_state drawer_height 300
+  expect_state state loaded
+  expect_state problems 1250/2500/1250
+  echo "OK: the window answered a verb and the drawer kept its list while the list was drawn"
+  capture problems-volume
+  # The files stay until the server has cleared them (it cannot read a deleted one).
+  problems_done
+  expect_state problems_not_drawn 0
+  rm -rf "$WT/vol" "$file"
 }
 
 # ---------------------------------------------------------------- search
@@ -4310,6 +4360,7 @@ scenario problems_relaunch scenario_problems_relaunch
 scenario problems_open scenario_problems_open
 scenario problems_server_exit scenario_problems_server_exit
 scenario problems_park scenario_problems_park
+scenario problems_volume scenario_problems_volume
 scenario search_keys scenario_search_keys
 scenario search_scope scenario_search_scope
 scenario search_options scenario_search_options
