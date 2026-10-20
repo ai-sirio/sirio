@@ -730,7 +730,7 @@ impl ChangeRequestList {
 }
 
 /// What a failure means to the reader, and what to do about it.
-fn error_text(error: &ForgeError) -> String {
+pub(crate) fn error_text(error: &ForgeError) -> String {
     match error {
         ForgeError::RateLimited {
             reset_at: Some(reset),

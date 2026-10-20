@@ -8,6 +8,7 @@
 //! closed is the chat's own and survives a relaunch (`SessionTabState`); which
 //! cards are folded does not.
 
+mod change_request;
 mod connectors;
 mod context;
 mod environment;
@@ -160,6 +161,7 @@ pub(super) struct SessionPanel {
     flipped: HashSet<String>,
     context: context::Context,
     connectors: connectors::Connectors,
+    change_request: change_request::ChangeRequest,
     /// Whether the chat is wide enough for the column, as last measured;
     /// `None` until the first frame has been laid out.
     wide: Rc<Cell<Option<bool>>>,
@@ -182,6 +184,7 @@ impl SessionPanel {
             flipped: HashSet::new(),
             context: context::Context::default(),
             connectors: connectors::Connectors::default(),
+            change_request: change_request::ChangeRequest::default(),
             wide: Rc::new(Cell::new(None)),
             environment: environment::Environment::default(),
             environment_task: None,
@@ -206,6 +209,9 @@ impl Chat {
             self.refresh_session_environment(cx);
             self.ensure_session_context();
             self.reopen_session_connectors(cx);
+            self.start_session_change_request(cx);
+        } else {
+            self.stop_session_change_request();
         }
         cx.emit(ChatEvent::SessionPanelToggled);
         cx.notify();
@@ -219,6 +225,9 @@ impl Chat {
             self.refresh_session_environment(cx);
             self.ensure_session_context();
             self.reopen_session_connectors(cx);
+            self.start_session_change_request(cx);
+        } else {
+            self.stop_session_change_request();
         }
         cx.notify();
     }
@@ -283,6 +292,7 @@ impl Chat {
             self.client.as_ref().is_some_and(ChatClient::supports_connectors),
             &panel.flipped,
         ));
+        sections.extend(change_request::section(&panel.change_request));
         sections
     }
 
@@ -301,6 +311,14 @@ impl Chat {
         if !set.remove(key) {
             set.insert(key.to_string());
         }
+        // The change request is read only while its card is open.
+        if key == "change_request" {
+            if self.session_panel.collapsed.contains(key) {
+                self.stop_session_change_request();
+            } else {
+                self.start_session_change_request(cx);
+            }
+        }
         cx.notify();
     }
 
@@ -309,6 +327,9 @@ impl Chat {
     fn activate_session_row(&mut self, key: &str, cx: &mut Context<Self>) -> Result<(), String> {
         if key.starts_with("connectors/") {
             return self.activate_connector(key, cx);
+        }
+        if key.starts_with("change_request/") {
+            return self.activate_change_request(key, cx);
         }
         let sections = self.session_panel_sections();
         let Some(row) = sections

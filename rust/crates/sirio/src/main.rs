@@ -8837,6 +8837,9 @@ impl SirioWorkspace {
                 }
                 // Whether the column is open is part of the saved layout.
                 ChatEvent::SessionPanelToggled => workspace.schedule_save(cx),
+                ChatEvent::OpenChangeRequest { reference, title } => {
+                    workspace.add_change_request_tab(reference.clone(), title.clone(), cx)
+                }
                 ChatEvent::SessionIdentified(session_id) => {
                     // A hook write, like `save_session_ref`: the id must
                     // survive a restart that comes before any other save.

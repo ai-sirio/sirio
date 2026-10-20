@@ -1577,6 +1577,12 @@ pub enum ChatEvent {
     /// The session panel's column opened or closed: the workspace saves the
     /// layout, which records it.
     SessionPanelToggled,
+    /// The session panel's change request card was clicked: the workspace
+    /// opens (or focuses) that change request's tab.
+    OpenChangeRequest {
+        reference: sirio_forge::ChangeRef,
+        title: String,
+    },
 }
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
