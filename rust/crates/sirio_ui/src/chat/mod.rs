@@ -6219,9 +6219,15 @@ impl Render for Chat {
             .get()
             .map(|_| self.render_transcript_context_menu(&bezel_theme, cx));
         let bypass_dialog = self.render_bypass_dialog(cx);
-        let session_panel = self
-            .session_panel_drawn()
-            .then(|| self.render_session_panel(&theme, cx));
+        let session_placement = self.session_panel_placement();
+        let docked_panel = matches!(session_placement, Some(session_panel::Placement::Docked))
+            .then(|| self.render_session_panel(&session_panel::Placement::Docked, &theme, cx));
+        let overlaid_panel = match &session_placement {
+            Some(placement @ session_panel::Placement::Overlay(_)) => {
+                Some(self.render_session_panel(placement, &theme, cx))
+            }
+            _ => None,
+        };
 
         div()
             .id("chat-root")
@@ -6515,6 +6521,9 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
             // The turn rail, over the root's left margin; last, so it sits
             // above everything it is laid over.
             .child(self.render_turn_rail(&bezel_theme, cx))
+            // A narrow chat's session column, over the transcript's right
+            // edge and above the composer, which this area ends above.
+            .children(overlaid_panel)
 
                 ).composer(
                 div()
@@ -6544,7 +6553,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                     .child(self.render_composer(&theme, window, cx)),
             )
             ))
-            .children(session_panel))
+            .children(docked_panel))
             // Measures the chat's width; paints nothing.
             .child(self.render_session_panel_probe(cx))
             .child({

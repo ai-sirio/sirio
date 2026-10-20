@@ -22,9 +22,11 @@ use crate::text_selection::selectable_text;
 
 /// The column's width, fixed in this version.
 const COLUMN_WIDTH: f32 = 300.0;
-/// Below this chat width the column is not drawn: the transcript and the
-/// composer keep the whole width and the open state is kept for later.
+/// Below this chat width the column is laid over the transcript instead of
+/// docked beside it, so the transcript and the composer keep a readable width.
 const MIN_CHAT_WIDTH: f32 = 640.0;
+/// What an overlaid column leaves of the chat to its left, at the most.
+const OVERLAY_MARGIN: f32 = 16.0;
 
 /// What the debug control verb and the tests can do to the column.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,8 +42,11 @@ pub enum SessionPanelAction {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct SessionPanelSnapshot {
     pub open: bool,
-    /// Whether the column is on screen: open and the chat wide enough.
+    /// Whether the column is on screen: open and the chat laid out.
     pub drawn: bool,
+    /// Drawn over the transcript rather than docked beside it, because the
+    /// chat is narrower than `MIN_CHAT_WIDTH`.
+    pub overlay: bool,
     pub sections: Vec<SectionSnapshot>,
 }
 
@@ -155,14 +160,22 @@ pub(super) struct BarSegment {
 /// what only a painted column should do reads it.
 #[derive(Default)]
 pub(super) struct Frame {
-    /// Whether the chat is wide enough for the column, as last measured;
-    /// `None` until the first frame has been laid out.
-    wide: Cell<Option<bool>>,
+    /// The chat's width as last measured; `None` until the first frame has
+    /// been laid out.
+    width: Cell<Option<Pixels>>,
     /// Set by every paint; whoever acts on it takes it (`replace(false)`),
     /// so it says whether a frame came since.
     painted: Cell<bool>,
     /// A read the change request owes to the next frame that paints.
     read_on_paint: Cell<bool>,
+}
+
+/// Where the column is drawn, which the chat's width decides.
+pub(super) enum Placement {
+    /// Beside the transcript and composer, which narrow to make room.
+    Docked,
+    /// Over the transcript's right edge, this wide; the composer stays free.
+    Overlay(Pixels),
 }
 
 /// The column's state on a `Chat`.
@@ -408,9 +421,23 @@ impl Chat {
         }));
     }
 
-    /// Whether the column is on screen: open, and the chat wide enough.
+    /// Where the column is drawn, or `None` while it is closed or the chat has
+    /// not been laid out yet.
+    pub(super) fn session_panel_placement(&self) -> Option<Placement> {
+        let width = self.session_panel.frame.width.get()?;
+        if !self.session_panel.open {
+            return None;
+        }
+        Some(if width >= px(MIN_CHAT_WIDTH) {
+            Placement::Docked
+        } else {
+            Placement::Overlay(px(COLUMN_WIDTH).min((width - px(OVERLAY_MARGIN)).max(px(0.0))))
+        })
+    }
+
+    /// Whether the column is on screen: open, and the chat laid out.
     pub(super) fn session_panel_drawn(&self) -> bool {
-        self.session_panel.open && self.session_panel.frame.wide.get() == Some(true)
+        self.session_panel_placement().is_some()
     }
 
     pub(super) fn session_panel_snapshot(&self) -> SessionPanelSnapshot {
@@ -445,20 +472,27 @@ impl Chat {
         SessionPanelSnapshot {
             open: panel.open,
             drawn: self.session_panel_drawn(),
+            overlay: matches!(self.session_panel_placement(), Some(Placement::Overlay(_))),
             sections,
         }
     }
 
     /// An invisible probe that tells the chat how wide it is: the column
-    /// steps aside under `MIN_CHAT_WIDTH`, and a change across it draws again.
+    /// docks from `MIN_CHAT_WIDTH` up and is laid over the transcript below
+    /// it, and a change across that, or of an overlay's width, draws again.
     pub(super) fn render_session_panel_probe(&self, cx: &mut Context<Self>) -> AnyElement {
         let frame = self.session_panel.frame.clone();
         let entity = cx.entity();
         canvas(
             move |bounds, _, cx| {
                 frame.painted.set(true);
-                let now = bounds.size.width >= px(MIN_CHAT_WIDTH);
-                if frame.wide.replace(Some(now)) != Some(now) {
+                let width = bounds.size.width;
+                let before = frame.width.replace(Some(width));
+                let docked = |width: Option<Pixels>| width.map(|w| w >= px(MIN_CHAT_WIDTH));
+                // An overlay is as wide as the chat allows, so it follows it.
+                let moved = docked(before) != docked(Some(width))
+                    || (width < px(MIN_CHAT_WIDTH) && before != Some(width));
+                if moved {
                     let entity = entity.clone();
                     cx.defer(move |cx| entity.update(cx, |_, cx| cx.notify()));
                 }
@@ -474,22 +508,27 @@ impl Chat {
         .into_any_element()
     }
 
-    /// The column: every section's card, scrolling as a whole.
-    pub(super) fn render_session_panel(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// The column: every section's card, scrolling as a whole. Docked it is
+    /// a flex child of the row beside the transcript; as an overlay it is
+    /// absolute over the transcript's right edge, on the elevated surface
+    /// with a shadow, and takes the pointer so nothing under it is hit.
+    pub(super) fn render_session_panel(
+        &self,
+        placement: &Placement,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let cards: Vec<AnyElement> = self
             .session_panel_sections()
             .iter()
             .map(|section| self.render_session_card(section, theme, cx))
             .collect();
-        div()
+        let column = div()
             .id("session-panel")
             .debug_selector(|| "session-panel".into())
-            .flex_none()
-            .w(px(COLUMN_WIDTH))
             .h_full()
             .border_l_1()
             .border_color(theme.ely.border)
-            .bg(theme.ely.bg)
             .child(
                 div()
                     .id("session-panel-scroll")
@@ -500,8 +539,24 @@ impl Chat {
                     .flex_col()
                     .gap_2()
                     .children(cards),
-            )
-            .into_any_element()
+            );
+        match placement {
+            Placement::Docked => column
+                .flex_none()
+                .w(px(COLUMN_WIDTH))
+                .bg(theme.ely.bg)
+                .into_any_element(),
+            Placement::Overlay(width) => column
+                .occlude()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .w(*width)
+                .bg(theme.sirio.floating_surface)
+                .shadow_lg()
+                .into_any_element(),
+        }
     }
 
     /// One card: a title row that folds it, then its rows.
@@ -818,26 +873,60 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn the_column_steps_aside_in_a_narrow_chat(cx: &mut TestAppContext) {
+    async fn a_narrow_chat_gets_the_column_over_its_transcript_not_its_composer(
+        cx: &mut TestAppContext,
+    ) {
         let (chat, cx) = offline_chat_view(cx);
         cx.simulate_resize(size(px(600.0), px(700.0)));
         chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
         for _ in 0..3 {
             refresh_frame(cx);
         }
-        assert!(chat.read_with(&cx.cx, |chat, _| chat.session_panel_open()));
         let snapshot = chat.read_with(&cx.cx, |chat, _| chat.control_snapshot());
         assert!(snapshot.session_panel.open);
-        assert!(!snapshot.session_panel.drawn);
+        assert!(snapshot.session_panel.drawn, "open and painted is drawn, wide or not");
+        assert!(snapshot.session_panel.overlay, "narrow: over the transcript");
+        let root = cx.debug_bounds("chat-root").expect("the chat is drawn");
+        let panel = cx.debug_bounds("session-panel").expect("the column is drawn");
+        assert_eq!(panel.size.width, px(300.0));
+        assert_eq!(panel.right(), root.right(), "pinned to the chat's right edge");
+        assert!(
+            panel.top() >= root.top() && panel.bottom() <= root.bottom(),
+            "{panel:?} within {root:?}"
+        );
+        // The composer and its toggle stay reachable: the column ends above them.
+        let composer = cx.debug_bounds("composer-input").expect("the composer is drawn");
+        assert!(panel.bottom() <= composer.top(), "{panel:?} over the composer {composer:?}");
+        let toggle = cx.debug_bounds("session-panel-toggle").expect("the toggle is drawn");
+        assert!(!panel.intersects(&toggle), "{panel:?} over the toggle {toggle:?}");
+
+        // A chat narrower than the column leaves a margin on the left.
+        cx.simulate_resize(size(px(280.0), px(700.0)));
+        for _ in 0..3 {
+            refresh_frame(cx);
+        }
+        let panel = cx.debug_bounds("session-panel").expect("still drawn");
+        assert_eq!(panel.size.width, px(264.0), "the chat's width less 16");
+
+        // The toggle still closes it.
+        click(cx, "session-panel-toggle");
         assert!(cx.debug_bounds("session-panel").is_none());
 
+        // Wide again, it docks and the transcript gives it room.
+        chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
         cx.simulate_resize(size(px(700.0), px(700.0)));
         for _ in 0..3 {
             refresh_frame(cx);
         }
         let snapshot = chat.read_with(&cx.cx, |chat, _| chat.control_snapshot());
-        assert!(snapshot.session_panel.drawn, "wide again, the column returns");
-        assert!(cx.debug_bounds("session-panel").is_some());
+        assert!(snapshot.session_panel.drawn);
+        assert!(!snapshot.session_panel.overlay, "wide enough to dock");
+        let docked = cx.debug_bounds("session-panel").expect("docked");
+        let composer = cx.debug_bounds("composer-input").expect("the composer is drawn");
+        assert!(
+            composer.right() <= docked.left(),
+            "docked, the composer gives up the column's width"
+        );
     }
 
     #[gpui::test]

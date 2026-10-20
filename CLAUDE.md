@@ -685,16 +685,18 @@ stops holding; like its two siblings it SKIPs without the binary and is on
 the release gate's skip list. The terminal pane is unaffected — it has
 always run `claude` interactively.
 
-**The session panel** is a column docked beside a chat's transcript and composer
-(`sirio_ui::chat::session_panel`, about 300 px, drawn only while the chat is at least
-640 px wide; open or closed is the chat's own and survives a relaunch, which cards are
+**The session panel** is a column beside a chat's transcript and composer
+(`sirio_ui::chat::session_panel`, about 300 px, docked while the chat is at least
+640 px wide and laid over the transcript's right edge, above the composer, below that;
+open or closed is the chat's own and survives a relaunch, which cards are
 folded does not). Its cards: Environment (project, the chat's own directory, the branch
 read live), Context (what fills the window, folded by origin, from `get_context_usage`
 through `sirio_claude::context`; asked once on open when no report exists yet),
 Connectors (the session's MCP servers by origin, with Sign in and Reconnect, from
 `sirio_claude::mcp` and `sirio_acp::McpControl`, whose calls wait for the CLI and so run
 off the GPUI thread) and Change request (the branch's pull or merge request through the
-forge source, sharing the right panel's per-host rate-limit pause). Connectors is
+forge source, sharing the right panel's per-host rate-limit pause, and read only
+while a frame paints the column, so a chat in a background tab asks the forge nothing). Connectors is
 Claude-native only and other agents get a total-only Context. The debug-only `surface.chat.panel`
 (`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>`) drives
 it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
