@@ -21668,7 +21668,6 @@ impl SirioWorkspace {
                     "Close Others",
                     "close-others",
                     TabContextAction::CloseOthers,
-                    "no other tab is available",
                 )
             },
             if position + 1 < group_len {
@@ -21682,7 +21681,6 @@ impl SirioWorkspace {
                     "Close Tabs to the Right",
                     "close-right",
                     TabContextAction::CloseTabsToRight,
-                    "already the last tab",
                 )
             },
             TabContextItem::separator(),
@@ -21697,7 +21695,6 @@ impl SirioWorkspace {
                     "Move Earlier",
                     "move-earlier",
                     TabContextAction::MoveEarlier,
-                    "already the first tab",
                 )
             },
             if position + 1 < group_len {
@@ -21707,7 +21704,6 @@ impl SirioWorkspace {
                     "Move Later",
                     "move-later",
                     TabContextAction::MoveLater,
-                    "already the last tab",
                 )
             },
         ];
@@ -21738,7 +21734,6 @@ impl SirioWorkspace {
                 "Attach to Current Terminal",
                 "attach-to-current-terminal",
                 TabContextAction::AttachToCurrentTerminal,
-                "select another terminal tab",
             ));
         }
 
@@ -21748,7 +21743,6 @@ impl SirioWorkspace {
                 "Resume Chat",
                 "resume-chat",
                 TabContextAction::ResumeChat,
-                "no retained chat is available",
             ));
         } else {
             items.push(TabContextItem::enabled(
@@ -45581,10 +45575,21 @@ done
         });
         workspace.update(&mut cx, |workspace, cx| workspace.open_tab_menu(0, cx));
         cx.run_until_parked();
+        let (tab_count, leaf_ids) = workspace.read_with(&cx.cx, |workspace, _| {
+            (workspace.tabs.len(), workspace.tabs[0].panes.leaf_ids())
+        });
 
-        assert!(
-            cx.debug_bounds("tab-command-disabled-attach-to-current-terminal")
-                .is_some(),
+        let attach = cx
+            .debug_bounds("tab-command-attach-to-current-terminal")
+            .expect("Attach to Current Terminal is drawn, as a disabled row");
+        cx.simulate_click(attach.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        assert_eq!(
+            workspace.read_with(&cx.cx, |workspace, _| {
+                (workspace.tabs.len(), workspace.tabs[0].panes.leaf_ids())
+            }),
+            (tab_count, leaf_ids),
             "a terminal cannot attach itself to the current terminal"
         );
     }

@@ -56,7 +56,6 @@ pub struct TabContextItem {
     selector: String,
     action: TabContextAction,
     enabled: bool,
-    disabled_reason: Option<String>,
     separator_before: bool,
 }
 
@@ -71,7 +70,6 @@ impl TabContextItem {
             selector: selector.into(),
             action,
             enabled: true,
-            disabled_reason: None,
             separator_before: false,
         }
     }
@@ -80,14 +78,12 @@ impl TabContextItem {
         label: impl Into<String>,
         selector: impl Into<String>,
         action: TabContextAction,
-        reason: impl Into<String>,
     ) -> Self {
         Self {
             label: label.into(),
             selector: selector.into(),
             action,
             enabled: false,
-            disabled_reason: Some(reason.into()),
             separator_before: false,
         }
     }
@@ -104,7 +100,6 @@ impl TabContextItem {
             selector: String::new(),
             action: TabContextAction::Dismiss,
             enabled: false,
-            disabled_reason: None,
             separator_before: true,
         }
     }
@@ -143,8 +138,6 @@ pub fn render_tab_context_menu<T: 'static>(
             .debug_selector(move || format!("tab-command-{selector_for_debug}"))
             .w_full()
             .min_h(theme.typography.ui_line_height)
-            .justify_between()
-            .gap(theme.spacing.titlebar_control_spacing)
             .text_color(if enabled {
                 bezel_theme.text
             } else {
@@ -155,16 +148,6 @@ pub fn render_tab_context_menu<T: 'static>(
             })
             .child(item.label);
 
-        if let Some(reason) = item.disabled_reason {
-            row = row.child(
-                div()
-                    .id(format!("tab-command-disabled-{selector}"))
-                    .debug_selector(move || format!("tab-command-disabled-{selector}"))
-                    .text_size(theme.typography.caption2)
-                    .text_color(bezel_theme.text_faint)
-                    .child(reason),
-            );
-        }
         if enabled {
             let callback = on_action.clone();
             row = row.on_click(move |_, window, cx| callback(action, window, cx));
@@ -1299,7 +1282,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn drawn_tab_context_menu_dispatches_enabled_actions_and_explains_disabled_ones(
+    async fn drawn_tab_context_menu_dispatches_enabled_actions_and_ignores_disabled_ones(
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
@@ -1313,7 +1296,6 @@ mod tests {
                     "Close Tabs to the Right",
                     "close-right",
                     TabContextAction::CloseTabsToRight,
-                    "already the last tab",
                 ),
                 TabContextItem::enabled("Close", "close", TabContextAction::Close),
             ],
@@ -1323,9 +1305,15 @@ mod tests {
 
         assert!(cx.debug_bounds("tab-context-menu").is_some());
         assert!(cx.debug_bounds("tab-command-close-right").is_some());
+
+        let disabled = cx
+            .debug_bounds("tab-command-close-right")
+            .expect("the disabled tab command is drawn");
+        cx.simulate_click(disabled.center(), Modifiers::none());
+        cx.run_until_parked();
         assert!(
-            cx.debug_bounds("tab-command-disabled-close-right")
-                .is_some()
+            actions.borrow().is_empty(),
+            "a disabled tab command emits no action"
         );
 
         for (selector, expected) in [
