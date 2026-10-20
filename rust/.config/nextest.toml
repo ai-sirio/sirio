@@ -44,7 +44,8 @@ retries = 2
 # a gate that decides whether a release exists, where it would let a `brew
 # install` on one Mac stop one.
 #
-# `claude_answers_the_native_handshake_it_claims` joins them for the same
+# `claude_answers_the_native_handshake_it_claims` and
+# `claude_answers_the_session_panel_requests` join them for the same
 # reason and one more: it drives whatever `claude` the machine happens to
 # carry, and that binary self-updates. A release must not be decided by a
 # version that landed on a runner overnight.
@@ -60,7 +61,7 @@ retries = 2
 # installed CLI's `--help`.
 # The three hooks_live tests each run one live turn of an installed CLI through its
 # hook config: they cost money and need a login or credit, which a runner does not have.
-default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with) and not test(=claude_takes_an_initial_prompt_argument) and not test(=codex_takes_an_initial_prompt_argument) and not test(=opencode_takes_an_initial_prompt_flag) and not test(=pi_takes_initial_messages) and not test(=omp_takes_an_initial_prompt_argument) and not test(=claude_fires_its_hooks_for_one_turn) and not test(=codex_fires_its_notify_hook_for_one_turn) and not test(=opencode_reports_its_session_for_one_turn)'
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=claude_answers_the_session_panel_requests) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with) and not test(=claude_takes_an_initial_prompt_argument) and not test(=codex_takes_an_initial_prompt_argument) and not test(=opencode_takes_an_initial_prompt_flag) and not test(=pi_takes_initial_messages) and not test(=omp_takes_an_initial_prompt_argument) and not test(=claude_fires_its_hooks_for_one_turn) and not test(=codex_fires_its_notify_hook_for_one_turn) and not test(=opencode_reports_its_session_for_one_turn)'
 
 [profile.pr]
 # .github/workflows/pr.yml selects this profile, by way of Scripts/ci.sh mapping
@@ -78,7 +79,8 @@ default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and no
 # on every run after it. A pull request must no more be stopped by which
 # binaries a runner happens to carry than a release must.
 #
-# `claude_answers_the_native_handshake_it_claims` joins them for the same
+# `claude_answers_the_native_handshake_it_claims` and
+# `claude_answers_the_session_panel_requests` join them for the same
 # reason and one more: it drives whatever `claude` the machine happens to
 # carry, and that binary self-updates. Which version landed on a runner
 # overnight must not decide a gate.
@@ -97,7 +99,7 @@ default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and no
 # installed CLI's `--help`.
 # The three hooks_live tests each run one live turn of an installed CLI through its
 # hook config: they cost money and need a login or credit, which a runner does not have.
-default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with) and not test(=claude_takes_an_initial_prompt_argument) and not test(=codex_takes_an_initial_prompt_argument) and not test(=opencode_takes_an_initial_prompt_flag) and not test(=pi_takes_initial_messages) and not test(=omp_takes_an_initial_prompt_argument) and not test(=claude_fires_its_hooks_for_one_turn) and not test(=codex_fires_its_notify_hook_for_one_turn) and not test(=opencode_reports_its_session_for_one_turn)'
+default-filter = 'not test(=opencode_answers_the_acp_handshake_it_claims) and not test(=oh_my_pi_is_only_claimed_once_it_answers) and not test(=claude_answers_the_native_handshake_it_claims) and not test(=claude_answers_the_session_panel_requests) and not test(=github_answers_every_query_sirio_sends) and not test(=gitlab_answers_every_query_sirio_sends) and not test(=github_accepts_every_document_sirio_writes_with) and not test(=gitlab_accepts_every_document_sirio_writes_with) and not test(=claude_takes_an_initial_prompt_argument) and not test(=codex_takes_an_initial_prompt_argument) and not test(=opencode_takes_an_initial_prompt_flag) and not test(=pi_takes_initial_messages) and not test(=omp_takes_an_initial_prompt_argument) and not test(=claude_fires_its_hooks_for_one_turn) and not test(=codex_fires_its_notify_hook_for_one_turn) and not test(=opencode_reports_its_session_for_one_turn)'
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 3 }
 

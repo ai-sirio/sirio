@@ -232,6 +232,112 @@ fn claude_answers_the_native_handshake_it_claims() {
     );
 }
 
+/// The session panel's two reads, on the `claude` of this machine.
+///
+/// The context breakdown and the connector list are control requests of an
+/// undocumented protocol on a CLI that self-updates, and everything the panel
+/// draws is read from their answers. A CLI that renamed a field would give a
+/// panel with no rows and no error, so this says so on the day it does.
+#[test]
+fn claude_answers_the_session_panel_requests() {
+    use sirio_agents::ClaudeCodeAdapter;
+
+    let Some(program) = ClaudeCodeAdapter.availability().executable else {
+        eprintln!("SKIP: claude is not on PATH");
+        return;
+    };
+    let program = program.to_string_lossy().into_owned();
+    let version_output = Command::new(&program)
+        .arg("--version")
+        .output()
+        .expect("claude --version runs");
+    let version_text = String::from_utf8_lossy(&version_output.stdout)
+        .trim()
+        .to_string();
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version: {version_text:?}");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude {version} is below the claimed floor");
+        return;
+    }
+
+    // Inert, as the handshake test above: no MCP server started, no hook
+    // run, no session file written.
+    let line = sirio_claude::LaunchLine::usage_probe();
+    let mut child = Command::new(&program)
+        .args(&line.args)
+        .args(["--permission-prompt-tool", "stdio"])
+        .arg("--allow-dangerously-skip-permissions")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("claude launches");
+    let mut stdin = child.stdin.take().expect("a piped stdin");
+    let stdout = child.stdout.take().expect("a piped stdout");
+    let (line_tx, line_rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if line_tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+
+    for request in [
+        sirio_claude::ControlRequest::initialize("panel-init"),
+        sirio_claude::ControlRequest::get_context_usage("panel-context"),
+        sirio_claude::ControlRequest::mcp_status("panel-mcp"),
+    ] {
+        writeln!(stdin, "{request}").expect("the request is written");
+    }
+    stdin.flush().expect("the requests are flushed");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut context = None;
+    let mut mcp = None;
+    while context.is_none() || mcp.is_none() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(line) = line_rx.recv_timeout(remaining) else {
+            break;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(envelope) = sirio_claude::ControlEnvelope::parse(&value) else {
+            continue;
+        };
+        match envelope.request_id.as_str() {
+            "panel-context" => context = Some(envelope),
+            "panel-mcp" => mcp = Some(envelope),
+            _ => {}
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let context = context.expect("claude answered get_context_usage");
+    let payload = context
+        .payload
+        .unwrap_or_else(|| panic!("get_context_usage was refused: {:?}", context.error));
+    let breakdown = sirio_claude::ContextBreakdown::parse(&payload)
+        .unwrap_or_else(|| panic!("the breakdown could not be read from {payload}"));
+    assert!(
+        !breakdown.categories.is_empty(),
+        "the breakdown names no categories: {payload}"
+    );
+
+    let mcp = mcp.expect("claude answered mcp_status");
+    let payload = mcp
+        .payload
+        .unwrap_or_else(|| panic!("mcp_status was refused: {:?}", mcp.error));
+    assert!(
+        sirio_claude::parse_mcp_status(&payload).is_some(),
+        "the connector list could not be read from {payload}"
+    );
+}
+
 /// [`answers_initialize_within`] for the stdio control protocol: same
 /// reader, same timeout, a different first line.
 fn answers_stdio_handshake(program: &str, args: &[&str], handshake: &str) -> Handshake {

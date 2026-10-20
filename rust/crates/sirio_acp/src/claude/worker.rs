@@ -16,8 +16,9 @@ use futures::StreamExt as _;
 use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use sirio_claude::{
-    Catalog, CliMessage, ContextUsageReport, ControlEnvelope, ControlRequest, EFFORT_DEFAULT,
-    ChatSession, FastMode, LaunchLine, RewindOutcome,
+    Catalog, ChatSession, CliMessage, ContextBreakdown, ContextUsageReport, ControlEnvelope,
+    ControlRequest, EFFORT_DEFAULT, FastMode, LaunchLine, McpAuthStart, McpServer,
+    McpServerStatus, RewindOutcome, parse_mcp_status,
 };
 
 use super::ClaudeLaunch;
@@ -61,6 +62,23 @@ pub(super) enum Command {
         user_message_id: String,
         dry_run: bool,
         reply: mpsc::SyncSender<Result<RewindOutcome, String>>,
+    },
+    /// Ask the CLI for its context breakdown outside a turn. The answer is
+    /// stored and signalled, never replied: the surface reads it back.
+    RefreshContext,
+    /// Ask the CLI for its connectors' state.
+    McpStatus {
+        reply: mpsc::SyncSender<Result<Vec<McpServer>, String>>,
+    },
+    /// Ask the CLI to connect a server again.
+    McpReconnect {
+        server: String,
+        reply: mpsc::SyncSender<Result<(), String>>,
+    },
+    /// Ask the CLI to start a server's sign-in.
+    McpAuthenticate {
+        server: String,
+        reply: mpsc::SyncSender<Result<McpAuthStart, String>>,
     },
 }
 
@@ -124,6 +142,15 @@ pub(super) struct Shared {
     background_tasks: AtomicUsize,
     last_user_message_id: Mutex<Option<String>>,
     resumed_session_refused: AtomicBool,
+    /// The CLI's own breakdown of what fills the window, from the latest
+    /// `get_context_usage` answer that carried one.
+    context_breakdown: Mutex<Option<ContextBreakdown>>,
+    /// The connectors: `system/init`'s list until an `mcp_status` answer,
+    /// that answer from then on.
+    mcp_servers: Mutex<Option<Vec<McpServer>>>,
+    /// Whether an `mcp_status` answer is what `mcp_servers` holds. Init's
+    /// list names no origin, so a later init must not replace the answer.
+    mcp_status_answered: AtomicBool,
 }
 
 impl Shared {
@@ -193,6 +220,49 @@ impl Shared {
 
     pub(super) fn resumed_session_refused(&self) -> bool {
         self.resumed_session_refused.load(Ordering::Acquire)
+    }
+
+    pub(super) fn context_breakdown(&self) -> Option<ContextBreakdown> {
+        self.context_breakdown
+            .lock()
+            .ok()
+            .and_then(|held| held.clone())
+    }
+
+    pub(super) fn mcp_servers(&self) -> Option<Vec<McpServer>> {
+        self.mcp_servers.lock().ok().and_then(|held| held.clone())
+    }
+
+    fn store_context_breakdown(&self, breakdown: ContextBreakdown) {
+        if let Ok(mut held) = self.context_breakdown.lock() {
+            *held = Some(breakdown);
+        }
+    }
+
+    /// Keeps `system/init`'s list, unless an `mcp_status` answer is already
+    /// held. A nameless entry is dropped. Whether the stored list changed.
+    fn store_init_mcp_servers(&self, statuses: &[McpServerStatus]) -> bool {
+        if self.mcp_status_answered.load(Ordering::Acquire) {
+            return false;
+        }
+        let list: Vec<McpServer> = statuses
+            .iter()
+            .filter(|status| !status.name.is_empty())
+            .map(McpServer::from)
+            .collect();
+        let Ok(mut held) = self.mcp_servers.lock() else {
+            return false;
+        };
+        let changed = held.as_ref() != Some(&list);
+        *held = Some(list);
+        changed
+    }
+
+    fn store_mcp_status(&self, list: Vec<McpServer>) {
+        self.mcp_status_answered.store(true, Ordering::Release);
+        if let Ok(mut held) = self.mcp_servers.lock() {
+            *held = Some(list);
+        }
     }
 
     fn push_mcp_warnings(&self, warnings: Vec<String>) {
@@ -492,6 +562,15 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let mut pending_permissions: HashMap<u64, PendingPermission> = HashMap::new();
     let mut open_permissions: usize = 0;
     let mut pending_context_usage: Option<PendingContextUsage> = None;
+    // A breakdown asked for outside a turn has its own id: the turn's slot
+    // holds a turn's end back, and a refresh must never hold anything.
+    let mut pending_context_refresh: Option<String> = None;
+    let mut pending_mcp_status: HashMap<String, mpsc::SyncSender<Result<Vec<McpServer>, String>>> =
+        HashMap::new();
+    let mut pending_mcp_reconnects: HashMap<String, mpsc::SyncSender<Result<(), String>>> =
+        HashMap::new();
+    let mut pending_mcp_auths: HashMap<String, mpsc::SyncSender<Result<McpAuthStart, String>>> =
+        HashMap::new();
 
     // The handshake. Its answer is the whole catalogue, so every picker is
     // populated before the user can type into the composer.
@@ -553,6 +632,12 @@ async fn session(context: SessionContext) -> SessionOutcome {
         && let Ok(mut held) = shared.claude_version.lock()
     {
         *held = Some(version.to_string());
+    }
+    // The same goes for the connectors init listed.
+    if let Some(list) = fold.take_init_mcp_servers()
+        && shared.store_init_mcp_servers(&list)
+    {
+        let _ = event_tx.send(other_update("McpServers")).await;
     }
     let _ = startup_tx.send(Startup::Ready);
     // The effort levels are per-model, so the selector has to be republished
@@ -693,10 +778,80 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 .payload
                                 .as_ref()
                                 .and_then(ContextUsageReport::parse);
-                            if let Some(pending) = pending_context_usage
-                                .take_if(|pending| pending.request_id == envelope.request_id)
+                            let answers_turn = pending_context_usage
+                                .as_ref()
+                                .is_some_and(|pending| pending.request_id == envelope.request_id);
+                            let answers_refresh = pending_context_refresh.as_deref()
+                                == Some(envelope.request_id.as_str());
+                            let breakdown = (answers_turn || answers_refresh)
+                                .then(|| {
+                                    envelope
+                                        .payload
+                                        .as_ref()
+                                        .and_then(ContextBreakdown::parse)
+                                })
+                                .flatten();
+                            if answers_turn
+                                && let Some(pending) = pending_context_usage.take()
                             {
-                                resolve_context_usage(&event_tx, pending, report).await;
+                                // Stored and signalled ahead of the turn's own
+                                // end, so a surface re-reading on `TurnEnded`
+                                // never sees the previous turn's numbers.
+                                if let Some(breakdown) = breakdown.clone() {
+                                    shared.store_context_breakdown(breakdown);
+                                    let _ = event_tx.send(other_update("ContextBreakdown")).await;
+                                }
+                                resolve_context_usage(&event_tx, pending, report.clone()).await;
+                            }
+                            if answers_refresh {
+                                pending_context_refresh = None;
+                                if let Some(breakdown) = breakdown {
+                                    shared.store_context_breakdown(breakdown);
+                                    if let Some(event) = refreshed_usage_event(
+                                        report.as_ref(),
+                                        fold.last_result(),
+                                    ) {
+                                        let _ = event_tx.send(event).await;
+                                    }
+                                    let _ = event_tx.send(other_update("ContextBreakdown")).await;
+                                }
+                            }
+                            if let Some(reply) = pending_mcp_status.remove(&envelope.request_id) {
+                                let answer = match (&envelope.payload, &envelope.error) {
+                                    (Some(payload), _) => parse_mcp_status(payload).ok_or_else(|| {
+                                        "the connector list could not be read".to_string()
+                                    }),
+                                    (None, Some(error)) => Err(error.clone()),
+                                    (None, None) => Err(
+                                        "the agent refused the connector status request"
+                                            .to_string(),
+                                    ),
+                                };
+                                if let Ok(list) = &answer {
+                                    shared.store_mcp_status(list.clone());
+                                    let _ = event_tx.send(other_update("McpServers")).await;
+                                }
+                                let _ = reply.send(answer);
+                            }
+                            if let Some(reply) =
+                                pending_mcp_reconnects.remove(&envelope.request_id)
+                            {
+                                let _ = reply.send(match &envelope.error {
+                                    None => Ok(()),
+                                    Some(error) => Err(error.clone()),
+                                });
+                            }
+                            if let Some(reply) = pending_mcp_auths.remove(&envelope.request_id) {
+                                let _ = reply.send(match (&envelope.payload, &envelope.error) {
+                                    (Some(payload), _) => McpAuthStart::parse(payload)
+                                        .ok_or_else(|| {
+                                            "the sign-in answer could not be read".to_string()
+                                        }),
+                                    (None, Some(error)) => Err(error.clone()),
+                                    (None, None) => Err(
+                                        "the agent refused the sign-in request".to_string(),
+                                    ),
+                                });
                             }
                             if let Some(reply) = pending_rewinds.remove(&envelope.request_id) {
                                 // A success carries the outcome; a refusal
@@ -806,6 +961,11 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 .await;
                         }
                         let mut events = fold.apply(message);
+                        if let Some(list) = fold.take_init_mcp_servers()
+                            && shared.store_init_mcp_servers(&list)
+                        {
+                            events.push(other_update("McpServers"));
+                        }
                         shared.push_mcp_warnings(fold.take_mcp_warnings());
                         // Drained before the events are forwarded, so the
                         // `SessionNotice` signal a surface is about to see
@@ -1037,6 +1197,58 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             );
                         }
                     }
+                    Ok(Command::RefreshContext) => {
+                        let id = next_request_id();
+                        pending_context_refresh = Some(id.clone());
+                        if write_line(&mut stdin, &ControlRequest::get_context_usage(&id))
+                            .await
+                            .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the context request".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::McpStatus { reply }) => {
+                        let id = next_request_id();
+                        pending_mcp_status.insert(id.clone(), reply);
+                        if write_line(&mut stdin, &ControlRequest::mcp_status(&id))
+                            .await
+                            .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the connector status request".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::McpReconnect { server, reply }) => {
+                        let id = next_request_id();
+                        pending_mcp_reconnects.insert(id.clone(), reply);
+                        if write_line(&mut stdin, &ControlRequest::mcp_reconnect(&id, &server))
+                            .await
+                            .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the connector reconnect".into(),
+                            );
+                        }
+                    }
+                    Ok(Command::McpAuthenticate { server, reply }) => {
+                        let id = next_request_id();
+                        pending_mcp_auths.insert(id.clone(), reply);
+                        if write_line(&mut stdin, &ControlRequest::mcp_authenticate(&id, &server))
+                            .await
+                            .is_err()
+                        {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not write the connector sign-in".into(),
+                            );
+                        }
+                    }
                     Ok(Command::Shutdown(ack)) => {
                         // Closing stdin is how a stream-json session ends.
                         drop(stdin);
@@ -1142,6 +1354,31 @@ fn context_usage_event(
         output_tokens: Some(summary.output_tokens),
         cached_read_tokens: Some(summary.cached_read_tokens),
     }))
+}
+
+/// A re-read signal: the event vocabulary has no variant for the session
+/// panel's data, so the surface is told *that* something changed and reads it
+/// back through the client, the way it does for a mode change.
+fn other_update(kind: &str) -> AcpEvent {
+    AcpEvent::OtherSessionUpdate { kind: kind.into() }
+}
+
+/// The meter's event for a breakdown asked for outside a turn. The last
+/// turn's cost and token counts ride along when there was one: the surface
+/// replaces its meter wholesale, and a refresh must not blank them.
+fn refreshed_usage_event(
+    report: Option<&ContextUsageReport>,
+    last_result: Option<&ResultSummary>,
+) -> Option<AcpEvent> {
+    let report = report?;
+    match last_result {
+        Some(summary) => context_usage_event(Some(report.clone()), summary),
+        None => Some(AcpEvent::ContextUsage(ContextUsage {
+            used: report.total_tokens,
+            size: report.raw_max_tokens,
+            ..ContextUsage::default()
+        })),
+    }
 }
 
 /// Ends a held turn: the meter first, then the turn's own end. A refusal or

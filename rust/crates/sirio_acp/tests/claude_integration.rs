@@ -911,3 +911,158 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
     // Draining is draining: a second read after the turn returns nothing.
     assert!(client.take_notices().is_empty());
 }
+
+/// Everything the stream carries up to and including the first re-read signal
+/// named `kind`, or `None` when none arrives inside `budget`.
+fn events_through_signal(
+    events: &sirio_acp::EventStream,
+    kind: &str,
+    budget: Duration,
+) -> Option<Vec<AcpEvent>> {
+    let deadline = std::time::Instant::now() + budget;
+    let mut seen = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let receive = events.recv();
+        let timer = async_io::Timer::after(remaining);
+        let event = futures::executor::block_on(async move {
+            futures::pin_mut!(receive, timer);
+            match futures::future::select(receive, timer).await {
+                Either::Left((event, _)) => event.ok(),
+                Either::Right((_, _)) => None,
+            }
+        })?;
+        let hit = matches!(&event, AcpEvent::OtherSessionUpdate { kind: got } if got == kind);
+        seen.push(event);
+        if hit {
+            return Some(seen);
+        }
+    }
+}
+
+#[test]
+fn a_turn_leaves_its_context_breakdown_behind() {
+    let (mut client, events) = launch("session_panel");
+    assert!(client.context_breakdown().is_none(), "nothing before a turn");
+    client.prompt("hello").expect("prompt is accepted");
+    let seen = drain_until_turn_end(&events);
+
+    let breakdown = client
+        .context_breakdown()
+        .expect("the turn's answer is kept");
+    assert_eq!(breakdown.origins().reducible[0].key, "memory");
+
+    // The signal comes before the turn is over, so a panel reading on
+    // `TurnEnded` never sees the previous turn's numbers.
+    let signal = seen
+        .iter()
+        .position(|event| {
+            matches!(event, AcpEvent::OtherSessionUpdate { kind } if kind == "ContextBreakdown")
+        })
+        .expect("a ContextBreakdown signal");
+    let ended = seen
+        .iter()
+        .position(|event| matches!(event, AcpEvent::TurnEnded { .. }))
+        .expect("the turn ended");
+    assert!(signal < ended, "signal at {signal}, turn ended at {ended}");
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn the_breakdown_can_be_asked_for_before_any_turn() {
+    let (mut client, events) = launch("session_panel");
+    client.refresh_context().expect("the request is written");
+    let seen = events_through_signal(&events, "ContextBreakdown", Duration::from_secs(5))
+        .expect("a ContextBreakdown signal inside five seconds");
+    assert!(client.context_breakdown().is_some());
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, AcpEvent::TurnEnded { .. })),
+        "asking is not a turn"
+    );
+    // The meter moves too: the window is named by the same answer.
+    let usage = seen
+        .iter()
+        .find_map(|event| match event {
+            AcpEvent::ContextUsage(usage) => Some(usage.clone()),
+            _ => None,
+        })
+        .expect("the answer's window reaches the meter");
+    assert_eq!((usage.used, usage.size), (64_923, 400_000));
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn init_names_the_servers_until_a_status_answers() {
+    use sirio_claude::{McpOrigin, McpServer, McpState};
+
+    let (mut client, _events) = launch("session_panel");
+    assert_eq!(
+        client.mcp_servers(),
+        Some(vec![McpServer {
+            name: "codegraph".into(),
+            status: McpState::Pending,
+            origin: McpOrigin::Other(String::new()),
+        }])
+    );
+
+    let answered = client.refresh_mcp_status().expect("the CLI answers");
+    assert_eq!(answered.len(), 2);
+    assert_eq!(answered[0].origin, McpOrigin::ClaudeAi);
+    assert_eq!(answered[1].origin, McpOrigin::User);
+    assert_eq!(client.mcp_servers(), Some(answered));
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_status_answer_is_not_overwritten_by_a_later_init() {
+    use sirio_claude::McpOrigin;
+
+    let (mut client, events) = launch("session_panel");
+    client.refresh_mcp_status().expect("the CLI answers");
+    // A turn makes the CLI print init again, with its unsourced list.
+    client.prompt("hello").expect("prompt is accepted");
+    drain_until_turn_end(&events);
+    let servers = client.mcp_servers().expect("a list");
+    assert_eq!(servers.len(), 2, "the status list stands: {servers:?}");
+    assert_eq!(servers[0].origin, McpOrigin::ClaudeAi);
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn reconnect_reaches_the_cli_and_a_refusal_carries_its_reason() {
+    use sirio_claude::McpState;
+
+    let (mut client, _events) = launch("session_panel");
+    client.mcp_reconnect("codegraph").expect("the CLI agrees");
+    let servers = client.refresh_mcp_status().expect("the CLI answers");
+    let codegraph = servers
+        .iter()
+        .find(|server| server.name == "codegraph")
+        .expect("codegraph is listed");
+    assert_eq!(codegraph.status, McpState::Connected);
+
+    let error = client
+        .mcp_reconnect("nope")
+        .expect_err("an unknown server is refused");
+    assert!(
+        format!("{error:#}").contains("Server not found: nope"),
+        "the CLI's own words reach the caller: {error:#}"
+    );
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn sign_in_returns_the_url_to_open() {
+    let (mut client, _events) = launch("session_panel");
+    let start = client
+        .mcp_authenticate("claude.ai Notion")
+        .expect("the CLI starts the sign-in");
+    assert_eq!(start.auth_url.as_deref(), Some("http://127.0.0.1:9/authorize"));
+    assert!(start.requires_user_action);
+    client.shutdown().expect("clean shutdown");
+}
