@@ -35,7 +35,7 @@ mod claude;
 mod mcp_config;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
-pub use claude::{ClaudeClient, ClaudeLaunch};
+pub use claude::{ClaudeClient, ClaudeLaunch, McpControl};
 pub use mcp_config::discover_mcp_servers;
 
 // `npx -y` may have to download and unpack the ACP adapter before the first
@@ -477,6 +477,17 @@ impl ChatClient {
         }
     }
 
+    /// The connector calls as a handle that can leave the GPUI thread, which
+    /// the client cannot: it is not `Clone` and the calls block. ACP agents
+    /// have none.
+    #[must_use]
+    pub fn mcp_control(&self) -> Option<McpControl> {
+        match self {
+            Self::Claude(client) => Some(client.mcp_control()),
+            Self::Acp(_) => None,
+        }
+    }
+
     /// Asks the agent for each connector's state, blocking for up to 10 s.
     pub fn refresh_mcp_status(&self) -> Result<Vec<sirio_claude::McpServer>> {
         match self {
@@ -578,7 +589,10 @@ pub struct ImageAttachment {
 /// What a session says about fast mode, and the context breakdown folded by
 /// origin. Re-exported because `sirio_ui` reads them and does not depend on
 /// `sirio_claude`.
-pub use sirio_claude::{ContextBreakdown, ContextOrigins, FastMode, OriginNode, THINKING_DISPLAYS};
+pub use sirio_claude::{
+    ContextBreakdown, ContextOrigins, FastMode, McpAuthStart, McpOrigin, McpServer, McpState,
+    OriginNode, THINKING_DISPLAYS,
+};
 
 /// How much of the model's reasoning the session sends.
 ///

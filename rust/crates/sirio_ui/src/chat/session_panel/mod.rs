@@ -8,6 +8,7 @@
 //! closed is the chat's own and survives a relaunch (`SessionTabState`); which
 //! cards are folded does not.
 
+mod connectors;
 mod context;
 mod environment;
 
@@ -87,6 +88,20 @@ pub(super) struct Row {
     pub(super) swatch: Option<usize>,
     /// A group title rather than a line of the card.
     pub(super) heading: bool,
+    /// The colour of the status dot before the label.
+    pub(super) tone: Option<Tone>,
+    /// Draws the action's name at the row's end, as a row whose action is
+    /// not obvious from its label needs.
+    pub(super) show_action: bool,
+}
+
+/// How a status dot reads, resolved to a theme colour when it is drawn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tone {
+    Good,
+    Warn,
+    Bad,
+    Quiet,
 }
 
 impl Row {
@@ -104,6 +119,8 @@ impl Row {
             muted: false,
             swatch: None,
             heading: false,
+            tone: None,
+            show_action: false,
         }
     }
 }
@@ -137,6 +154,7 @@ pub(super) struct SessionPanel {
     /// flip and a new report keeps what the reader opened: keys are stable.
     flipped: HashSet<String>,
     context: context::Context,
+    connectors: connectors::Connectors,
     /// Whether the chat is wide enough for the column, as last measured;
     /// `None` until the first frame has been laid out.
     wide: Rc<Cell<Option<bool>>>,
@@ -145,9 +163,11 @@ pub(super) struct SessionPanel {
 }
 
 impl SessionPanel {
-    /// Forgets the reported context: a new client is a new session.
-    pub(super) fn clear_context(&mut self) {
+    /// Forgets the reported context and connectors: a new client is a new
+    /// session.
+    pub(super) fn clear_session(&mut self) {
         self.context.clear();
+        self.connectors.clear();
     }
 
     pub(super) fn new() -> Self {
@@ -156,6 +176,7 @@ impl SessionPanel {
             collapsed: HashSet::new(),
             flipped: HashSet::new(),
             context: context::Context::default(),
+            connectors: connectors::Connectors::default(),
             wide: Rc::new(Cell::new(None)),
             environment: environment::Environment::default(),
             environment_task: None,
@@ -179,6 +200,7 @@ impl Chat {
         if open {
             self.refresh_session_environment(cx);
             self.ensure_session_context();
+            self.reopen_session_connectors(cx);
         }
         cx.emit(ChatEvent::SessionPanelToggled);
         cx.notify();
@@ -191,6 +213,7 @@ impl Chat {
         if open {
             self.refresh_session_environment(cx);
             self.ensure_session_context();
+            self.reopen_session_connectors(cx);
         }
         cx.notify();
     }
@@ -250,6 +273,11 @@ impl Chat {
             self.streaming,
             &panel.flipped,
         ));
+        sections.extend(connectors::section(
+            &panel.connectors,
+            self.client.as_ref().is_some_and(ChatClient::supports_connectors),
+            &panel.flipped,
+        ));
         sections
     }
 
@@ -272,8 +300,11 @@ impl Chat {
     }
 
     /// Runs the action of the row with this key: a row with a file opens it
-    /// in a tab.
+    /// in a tab, a connector's row signs in or reconnects.
     fn activate_session_row(&mut self, key: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        if key.starts_with("connectors/") {
+            return self.activate_connector(key, cx);
+        }
         let sections = self.session_panel_sections();
         let Some(row) = sections
             .iter()
@@ -604,6 +635,15 @@ impl Chat {
                         })),
                 )
             })
+            .children(row.tone.map(|tone| {
+                let color = match tone {
+                    Tone::Good => theme.ely.success,
+                    Tone::Warn => theme.ely.warning,
+                    Tone::Bad => theme.ely.danger,
+                    Tone::Quiet => theme.ely.fg_subtle,
+                };
+                div().flex_none().size(px(8.0)).rounded_full().bg(color)
+            }))
             .children(row.swatch.map(|hue| {
                 div()
                     .flex_none()
@@ -631,10 +671,17 @@ impl Chat {
                 line.child(
                     div()
                         .flex_none()
+                        .when(row.show_action, |detail| detail.max_w(px(130.0)).truncate())
                         .text_color(theme.ely.fg_muted)
                         .child(row.detail.clone()),
                 )
             })
+            .children(row.action.clone().filter(|_| row.show_action).map(|action| {
+                div()
+                    .flex_none()
+                    .text_color(theme.ely.link)
+                    .child(action)
+            }))
             .into_any_element()
     }
 }

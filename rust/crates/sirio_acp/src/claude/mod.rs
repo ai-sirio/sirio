@@ -464,6 +464,50 @@ impl ClaudeClient {
     /// Asks the CLI for each connector's state and origin, and keeps the
     /// answer. Blocking, bounded at 10 s.
     pub fn refresh_mcp_status(&self) -> Result<Vec<McpServer>> {
+        self.mcp_control().refresh_status()
+    }
+
+    /// Asks the CLI to connect a server again. Blocking, bounded at 30 s; a
+    /// refusal carries the CLI's own sentence.
+    pub fn mcp_reconnect(&self, server: &str) -> Result<()> {
+        self.mcp_control().reconnect(server)
+    }
+
+    /// Starts a server's sign-in and returns the page to open. Blocking,
+    /// bounded at 30 s. An empty address is no address.
+    pub fn mcp_authenticate(&self, server: &str) -> Result<McpAuthStart> {
+        self.mcp_control().authenticate(server)
+    }
+
+    /// A handle that makes the three connector calls from another thread.
+    /// The client itself is not `Clone`, and the calls block.
+    #[must_use]
+    pub fn mcp_control(&self) -> McpControl {
+        McpControl {
+            command_tx: self.command_tx.clone(),
+        }
+    }
+}
+
+/// The connector calls of one session, detached from the client so a caller
+/// can make them off its own thread. Every call blocks until the CLI answers
+/// or its bound ends, so none belongs on a UI thread. A handle outliving its
+/// session answers that the worker is not running.
+#[derive(Clone)]
+pub struct McpControl {
+    command_tx: async_channel::Sender<worker::Command>,
+}
+
+impl std::fmt::Debug for McpControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpControl").finish_non_exhaustive()
+    }
+}
+
+impl McpControl {
+    /// Asks the CLI for each connector's state and origin, and keeps the
+    /// answer. Blocking, bounded at 10 s.
+    pub fn refresh_status(&self) -> Result<Vec<McpServer>> {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.command_tx
             .send_blocking(worker::Command::McpStatus { reply: reply_tx })
@@ -473,7 +517,7 @@ impl ClaudeClient {
 
     /// Asks the CLI to connect a server again. Blocking, bounded at 30 s; a
     /// refusal carries the CLI's own sentence.
-    pub fn mcp_reconnect(&self, server: &str) -> Result<()> {
+    pub fn reconnect(&self, server: &str) -> Result<()> {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.command_tx
             .send_blocking(worker::Command::McpReconnect {
@@ -486,7 +530,7 @@ impl ClaudeClient {
 
     /// Starts a server's sign-in and returns the page to open. Blocking,
     /// bounded at 30 s. An empty address is no address.
-    pub fn mcp_authenticate(&self, server: &str) -> Result<McpAuthStart> {
+    pub fn authenticate(&self, server: &str) -> Result<McpAuthStart> {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.command_tx
             .send_blocking(worker::Command::McpAuthenticate {

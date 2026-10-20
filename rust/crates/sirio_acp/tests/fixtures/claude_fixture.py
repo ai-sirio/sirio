@@ -362,6 +362,12 @@ def main():
                         "categories": [],
                     })
             elif subtype == "mcp_status":
+                # A file named by the environment counts the requests, one
+                # line each, so a test can tell a poll that stopped.
+                count_path = os.environ.get("SIRIO_FIXTURE_COUNT")
+                if count_path:
+                    with open(count_path, "a") as count:
+                        count.write("mcp_status\n")
                 control_response(request_id, {"mcpServers": session_panel_servers()})
             elif subtype == "mcp_reconnect":
                 name = request.get("serverName")
