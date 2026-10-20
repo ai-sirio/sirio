@@ -212,6 +212,7 @@ impl Chat {
             self.start_session_change_request(cx);
         } else {
             self.stop_session_change_request();
+            self.session_panel.connectors.stop_backoff();
         }
         cx.emit(ChatEvent::SessionPanelToggled);
         cx.notify();
@@ -228,6 +229,7 @@ impl Chat {
             self.start_session_change_request(cx);
         } else {
             self.stop_session_change_request();
+            self.session_panel.connectors.stop_backoff();
         }
         cx.notify();
     }

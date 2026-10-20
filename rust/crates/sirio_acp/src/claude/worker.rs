@@ -240,22 +240,19 @@ impl Shared {
     }
 
     /// Keeps `system/init`'s list, unless an `mcp_status` answer is already
-    /// held. A nameless entry is dropped. Whether the stored list changed.
-    fn store_init_mcp_servers(&self, statuses: &[McpServerStatus]) -> bool {
+    /// held. A nameless entry is dropped.
+    fn store_init_mcp_servers(&self, statuses: &[McpServerStatus]) {
         if self.mcp_status_answered.load(Ordering::Acquire) {
-            return false;
+            return;
         }
         let list: Vec<McpServer> = statuses
             .iter()
             .filter(|status| !status.name.is_empty())
             .map(McpServer::from)
             .collect();
-        let Ok(mut held) = self.mcp_servers.lock() else {
-            return false;
-        };
-        let changed = held.as_ref() != Some(&list);
-        *held = Some(list);
-        changed
+        if let Ok(mut held) = self.mcp_servers.lock() {
+            *held = Some(list);
+        }
     }
 
     fn store_mcp_status(&self, list: Vec<McpServer>) {
@@ -634,10 +631,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
         *held = Some(version.to_string());
     }
     // The same goes for the connectors init listed.
-    if let Some(list) = fold.take_init_mcp_servers()
-        && shared.store_init_mcp_servers(&list)
-    {
-        let _ = event_tx.send(other_update("McpServers")).await;
+    if let Some(list) = fold.take_init_mcp_servers() {
+        shared.store_init_mcp_servers(&list);
+        let _ = event_tx.send(other_update(MCP_SERVERS_INIT)).await;
     }
     let _ = startup_tx.send(Startup::Ready);
     // The effort levels are per-model, so the selector has to be republished
@@ -829,7 +825,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 };
                                 if let Ok(list) = &answer {
                                     shared.store_mcp_status(list.clone());
-                                    let _ = event_tx.send(other_update("McpServers")).await;
+                                    let _ = event_tx.send(other_update(MCP_SERVERS)).await;
                                 }
                                 let _ = reply.send(answer);
                             }
@@ -961,10 +957,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 .await;
                         }
                         let mut events = fold.apply(message);
-                        if let Some(list) = fold.take_init_mcp_servers()
-                            && shared.store_init_mcp_servers(&list)
-                        {
-                            events.push(other_update("McpServers"));
+                        if let Some(list) = fold.take_init_mcp_servers() {
+                            shared.store_init_mcp_servers(&list);
+                            events.push(other_update(MCP_SERVERS_INIT));
                         }
                         shared.push_mcp_warnings(fold.take_mcp_warnings());
                         // Drained before the events are forwarded, so the
@@ -1355,6 +1350,13 @@ fn context_usage_event(
         cached_read_tokens: Some(summary.cached_read_tokens),
     }))
 }
+
+/// The signals for the connectors, kept apart so a surface can tell what
+/// came from the CLI on its own from what is the answer to its own ask: a
+/// `system/init` (every session start and every turn) is a reason to ask
+/// again, an `mcp_status` answer never is.
+const MCP_SERVERS_INIT: &str = "McpServersInit";
+const MCP_SERVERS: &str = "McpServers";
 
 /// A re-read signal: the event vocabulary has no variant for the session
 /// panel's data, so the surface is told *that* something changed and reads it

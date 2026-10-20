@@ -15,7 +15,11 @@ MODE = sys.argv[1] if len(sys.argv) > 1 else "normal"
 # `session_panel_refuse` is `session_panel` with `mcp_reconnect` refused for
 # `codegraph`: a failed action whose sentence the panel has to show.
 REFUSE_RECONNECT = MODE == "session_panel_refuse"
-if REFUSE_RECONNECT:
+# `session_panel_starting` reports `codegraph` as `pending` until the third
+# `mcp_status` answer, `session_panel_pending` for ever: a server that is
+# still starting, and one that never gets there.
+STARTS_AFTER = {"session_panel_starting": 2, "session_panel_pending": None}.get(MODE, 0)
+if REFUSE_RECONNECT or MODE in ("session_panel_starting", "session_panel_pending"):
     MODE = "session_panel"
 # A launch argument names the file `mcp_status` requests are counted in, so a
 # test needs no environment of its own; the environment names it otherwise.
@@ -153,6 +157,8 @@ PENDING = {}
 # Session-panel fixture state: whether `mcp_reconnect` has brought the
 # `codegraph` server up, which later `mcp_status` answers then report.
 RECONNECTED = set()
+# How many `mcp_status` requests have been answered so far.
+STATUS_ANSWERS = 0
 
 
 def control_error(request_id, error):
@@ -196,11 +202,16 @@ def session_panel_context():
 
 
 def session_panel_servers():
+    if STARTS_AFTER is None:
+        codegraph = "pending"
+    elif STARTS_AFTER:
+        codegraph = "pending" if STATUS_ANSWERS <= STARTS_AFTER else "connected"
+    else:
+        codegraph = "connected" if "codegraph" in RECONNECTED else "failed"
     return [
         {"name": "claude.ai Notion", "status": "needs-auth",
          "source": "claudeai", "scope": "claudeai"},
-        {"name": "codegraph",
-         "status": "connected" if "codegraph" in RECONNECTED else "failed",
+        {"name": "codegraph", "status": codegraph,
          "source": "user", "scope": "user"},
     ]
 
@@ -381,6 +392,8 @@ def main():
                 if COUNT_PATH:
                     with open(COUNT_PATH, "a") as count:
                         count.write("mcp_status\n")
+                global STATUS_ANSWERS
+                STATUS_ANSWERS += 1
                 control_response(request_id, {"mcpServers": session_panel_servers()})
             elif subtype == "mcp_reconnect":
                 name = request.get("serverName")

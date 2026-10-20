@@ -3232,6 +3232,9 @@ impl Chat {
             AcpEvent::OtherSessionUpdate { ref kind } if kind == "McpServers" => {
                 self.refresh_session_connectors(cx);
             }
+            AcpEvent::OtherSessionUpdate { ref kind } if kind == "McpServersInit" => {
+                self.session_connectors_init(cx);
+            }
             AcpEvent::OtherSessionUpdate { .. } => {}
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or

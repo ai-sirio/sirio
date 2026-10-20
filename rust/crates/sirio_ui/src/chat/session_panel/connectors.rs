@@ -20,6 +20,16 @@ use std::time::Duration;
 const POLL_EVERY: Duration = Duration::from_secs(3);
 const POLL_FOR: Duration = Duration::from_secs(120);
 
+/// How long after an ask that left a server starting the next one comes:
+/// about a minute in all, then the card leaves the server as it is.
+const STARTING_BACKOFF: [Duration; 5] = [
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+    Duration::from_secs(30),
+];
+
 /// What a server's row says while a call about it is open: the cached state
 /// is known to be stale, so it is not shown.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,6 +89,10 @@ pub(super) struct Connectors {
     reconnect_offered: HashSet<String>,
     /// The task of each server's open call or poll.
     tasks: HashMap<String, Task<()>>,
+    /// Whether the backoff for servers still starting is running, and its
+    /// task. One at a time: it ends on its own, or with the column.
+    backoff_running: bool,
+    backoff_task: Option<Task<()>>,
 }
 
 impl Connectors {
@@ -90,6 +104,19 @@ impl Connectors {
     fn next_stamp(&mut self) -> u64 {
         self.stamp += 1;
         self.stamp
+    }
+
+    fn has_starting(&self) -> bool {
+        self.servers
+            .iter()
+            .flatten()
+            .any(|server| server.status == McpState::Pending)
+    }
+
+    /// The column closed: nothing is waiting for a server to start.
+    pub(super) fn stop_backoff(&mut self) {
+        self.backoff_running = false;
+        self.backoff_task = None;
     }
 
     fn fail(&mut self, name: String, text: String) {
@@ -285,6 +312,22 @@ impl Chat {
         self.ensure_session_connectors(cx);
     }
 
+    /// The CLI printed `system/init` again (a session start, a turn): its
+    /// list names no origin and may be older than the servers' own state, so
+    /// the card asks for the status again, and a backoff for servers still
+    /// starting begins anew. What the answer itself announces comes through
+    /// `refresh_session_connectors` and asks for nothing.
+    pub(in crate::chat) fn session_connectors_init(&mut self, cx: &mut GpuiContext<Self>) {
+        if let Some(list) = self.client.as_ref().and_then(|client| client.mcp_servers()) {
+            self.session_panel.connectors.set_servers(list);
+            cx.notify();
+        }
+        if self.session_panel.open {
+            self.session_panel.connectors.stop_backoff();
+            self.ask_session_connectors(cx);
+        }
+    }
+
     /// Asks the CLI for each server's state once per client, when the column
     /// is open.
     pub(in crate::chat) fn ensure_session_connectors(&mut self, cx: &mut GpuiContext<Self>) {
@@ -322,7 +365,49 @@ impl Chat {
                     connectors.refreshed(list, since);
                 }
                 cx.notify();
+                chat.watch_starting_connectors(cx);
             });
+        }));
+    }
+
+    /// A server that is still starting changes without anyone asking, so the
+    /// card asks again after 2, 4, 8, 16 and 30 seconds, until none is
+    /// starting or the minute is out. One loop at a time; its own answers
+    /// never begin another.
+    fn watch_starting_connectors(&mut self, cx: &mut GpuiContext<Self>) {
+        let connectors = &mut self.session_panel.connectors;
+        if !self.session_panel.open || connectors.backoff_running || !connectors.has_starting() {
+            return;
+        }
+        let Some(control) = self.client.as_ref().and_then(|client| client.mcp_control()) else {
+            return;
+        };
+        connectors.backoff_running = true;
+        connectors.backoff_task = Some(cx.spawn(async move |this, cx| {
+            for delay in STARTING_BACKOFF {
+                cx.background_executor().timer(delay).await;
+                let Ok(since) = this.update(cx, |chat, _| chat.session_panel.connectors.next_stamp())
+                else {
+                    return;
+                };
+                let asking = control.clone();
+                let Ok(list) = cx
+                    .background_spawn(async move { asking.refresh_status() })
+                    .await
+                else {
+                    break;
+                };
+                let still_starting = this.update(cx, |chat, cx| {
+                    let connectors = &mut chat.session_panel.connectors;
+                    connectors.refreshed(list, since);
+                    cx.notify();
+                    connectors.has_starting()
+                });
+                if !matches!(still_starting, Ok(true)) {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |chat, _| chat.session_panel.connectors.backoff_running = false);
         }));
     }
 
@@ -673,6 +758,94 @@ mod tests {
 
     fn count_lines(path: &Path) -> usize {
         std::fs::read_to_string(path).map_or(0, |text| text.lines().count())
+    }
+
+    /// Moves the virtual clock a second at a time, letting each step's
+    /// real-process answers come back, until `condition` holds.
+    fn advance_until(
+        cx: &mut VisualTestContext,
+        seconds: u64,
+        mut condition: impl FnMut(&VisualTestContext) -> bool,
+    ) -> bool {
+        for _ in 0..seconds {
+            if condition(cx) {
+                return true;
+            }
+            cx.cx.executor().advance_clock(Duration::from_secs(1));
+            cx.cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(5));
+            cx.cx.run_until_parked();
+        }
+        condition(cx)
+    }
+
+    #[gpui::test]
+    async fn a_server_that_is_still_starting_is_asked_about_again(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let counts = dir.0.join("mcp-status-requests");
+        let (chat, cx) = fixture_chat(cx, "session_panel_starting", Some(&counts));
+        settle(cx, |cx| row(&chat, cx, CODEGRAPH).is_some_and(|(d, _)| d == "starting"));
+        // Nobody touches the column: the card asks again on its own.
+        assert!(
+            advance_until(cx, 60, |cx| row(&chat, cx, CODEGRAPH)
+                .is_some_and(|(d, _)| d == "connected")),
+            "the server came up and the card never heard"
+        );
+        // The third answer was the one that said so: one at the start and
+        // two backoff asks.
+        let asked = count_lines(&counts);
+        assert!((3..=4).contains(&asked), "asked {asked} times");
+        advance_until(cx, 200, |_| false);
+        std::thread::sleep(Duration::from_millis(100));
+        cx.cx.run_until_parked();
+        assert_eq!(count_lines(&counts), asked, "nothing is pending, so nothing asks");
+    }
+
+    #[gpui::test]
+    async fn asking_again_about_a_server_that_never_starts_stops(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let counts = dir.0.join("mcp-status-requests");
+        let (chat, cx) = fixture_chat(cx, "session_panel_pending", Some(&counts));
+        settle(cx, |cx| row(&chat, cx, CODEGRAPH).is_some_and(|(d, _)| d == "starting"));
+        advance_until(cx, 90, |_| false);
+        std::thread::sleep(Duration::from_millis(100));
+        cx.cx.run_until_parked();
+        let asked = count_lines(&counts);
+        // The first ask, then 2, 4, 8, 16 and 30 seconds after.
+        assert!((4..=7).contains(&asked), "the backoff's asks: {asked}");
+        advance_until(cx, 200, |_| false);
+        std::thread::sleep(Duration::from_millis(100));
+        cx.cx.run_until_parked();
+        assert_eq!(count_lines(&counts), asked, "the backoff ended after about a minute");
+        assert_eq!(
+            row(&chat, cx, CODEGRAPH).map(|(detail, _)| detail).as_deref(),
+            Some("starting")
+        );
+    }
+
+    #[gpui::test]
+    async fn a_new_init_asks_again_and_an_answers_own_signal_does_not(cx: &mut TestAppContext) {
+        use sirio_acp::AcpEvent;
+        let dir = TempDir::new();
+        let counts = dir.0.join("mcp-status-requests");
+        let (chat, cx) = fixture_chat(cx, "session_panel", Some(&counts));
+        settle(cx, |cx| row(&chat, cx, NOTION).is_some() && count_lines(&counts) == 1);
+        let signal = |chat: &Entity<Chat>, cx: &mut VisualTestContext, kind: &str| {
+            chat.update(cx, |chat, cx| {
+                chat.handle_event(
+                    AcpEvent::OtherSessionUpdate { kind: kind.to_string() },
+                    cx,
+                )
+            });
+        };
+        signal(&chat, cx, "McpServersInit");
+        settle(cx, |_| count_lines(&counts) == 2);
+        // What the CLI announces after answering must not be asked about
+        // again, or each answer would bring the next.
+        signal(&chat, cx, "McpServers");
+        std::thread::sleep(Duration::from_millis(200));
+        cx.cx.run_until_parked();
+        assert_eq!(count_lines(&counts), 2);
     }
 
     /// What the row says under itself, in full.

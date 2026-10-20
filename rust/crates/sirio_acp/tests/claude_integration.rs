@@ -1034,6 +1034,27 @@ fn a_status_answer_is_not_overwritten_by_a_later_init() {
 }
 
 #[test]
+fn every_init_announces_itself_apart_from_a_status_answer() {
+    let (mut client, events) = launch("session_panel");
+    client.refresh_mcp_status().expect("the CLI answers");
+    client.prompt("hello").expect("prompt is accepted");
+    let seen = drain_until_turn_end(&events);
+    let names: Vec<&str> = seen
+        .iter()
+        .filter_map(|event| match event {
+            AcpEvent::OtherSessionUpdate { kind } if kind.starts_with("McpServers") => {
+                Some(kind.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    // The first init, the answer, and a turn's init that the held answer
+    // does not hide: a panel re-asks on the init and never on its own answer.
+    assert_eq!(names, ["McpServersInit", "McpServers", "McpServersInit"]);
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
 fn reconnect_reaches_the_cli_and_a_refusal_carries_its_reason() {
     use sirio_claude::McpState;
 
