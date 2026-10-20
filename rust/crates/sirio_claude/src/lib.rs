@@ -11,6 +11,7 @@
 //! than reject: see [`message`]'s module docs for the rule.
 
 pub mod catalog;
+pub mod context;
 pub mod control;
 pub mod launch;
 pub mod message;
@@ -21,6 +22,10 @@ pub mod version;
 pub use catalog::{
     AccountInfo, Catalog, CommandInfo, EFFORT_DEFAULT, EFFORT_ULTRACODE, Effort, EffortChoice,
     FastMode, ModeInfo, ModelInfo, Modes,
+};
+pub use context::{
+    CategoryKind, ContextBreakdown, ContextCategory, ContextItem, ContextOrigins, ItemOrigin,
+    MemoryFile, OriginNode,
 };
 pub use control::{
     CanUseTool, ControlEnvelope, ControlRequest, PermissionResult, THINKING_DISPLAYS,
