@@ -90,6 +90,8 @@ pub(super) fn section(environment: &Environment, cwd: &Path) -> Section {
         key: "environment",
         title: "Environment",
         summary: String::new(),
+        note: String::new(),
+        bar: Vec::new(),
         rows,
     }
 }

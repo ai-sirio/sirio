@@ -575,9 +575,10 @@ pub struct ImageAttachment {
     pub base64_data: String,
 }
 
-/// What a session says about fast mode. Re-exported because `sirio_ui`
-/// reads it and does not depend on `sirio_claude`.
-pub use sirio_claude::{FastMode, THINKING_DISPLAYS};
+/// What a session says about fast mode, and the context breakdown folded by
+/// origin. Re-exported because `sirio_ui` reads them and does not depend on
+/// `sirio_claude`.
+pub use sirio_claude::{ContextBreakdown, ContextOrigins, FastMode, OriginNode, THINKING_DISPLAYS};
 
 /// How much of the model's reasoning the session sends.
 ///

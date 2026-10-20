@@ -3220,6 +3220,9 @@ impl Chat {
                     self.apply_notice(notice);
                 }
             }
+            AcpEvent::OtherSessionUpdate { ref kind } if kind == "ContextBreakdown" => {
+                self.refresh_session_context(cx);
+            }
             AcpEvent::OtherSessionUpdate { .. } => {}
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
@@ -5067,6 +5070,7 @@ impl Chat {
         };
 
         self.client.take();
+        self.session_panel.clear_context();
         self.connecting = true;
         let cwd = self.agent_cwd.clone();
         self._event_task = Some(cx.spawn(async move |this, cx| {
@@ -5097,6 +5101,7 @@ impl Chat {
                         if let Some(text) = chat.pending_send.take() {
                             chat.submit_turn(text, Vec::new(), Vec::new(), cx);
                         }
+                        chat.ensure_session_context();
                     });
 
                     while let Ok(event) = events.recv().await {

@@ -8,6 +8,7 @@
 //! closed is the chat's own and survives a relaunch (`SessionTabState`); which
 //! cards are folded does not.
 
+mod context;
 mod environment;
 
 use super::*;
@@ -47,6 +48,10 @@ pub struct SectionSnapshot {
     /// `environment`, `context`, `connectors` or `change_request`.
     pub key: String,
     pub expanded: bool,
+    /// The short line beside the title.
+    pub summary: String,
+    /// A line under the title that qualifies the card's numbers.
+    pub note: String,
     pub rows: Vec<RowSnapshot>,
 }
 
@@ -56,6 +61,7 @@ pub struct RowSnapshot {
     pub depth: u8,
     pub label: String,
     pub detail: String,
+    pub tag: String,
     pub expanded: Option<bool>,
     pub action: Option<String>,
 }
@@ -67,10 +73,20 @@ pub(super) struct Row {
     pub(super) icon: Option<IconName>,
     pub(super) label: String,
     pub(super) detail: String,
+    /// A small word beside the label: a file's type, a plugin's counts.
+    pub(super) tag: String,
     /// `Some` for a node that folds, with whether it is open.
     pub(super) expanded: Option<bool>,
     /// What activating the row does, named for the control verb.
     pub(super) action: Option<String>,
+    /// The file activating the row opens.
+    pub(super) path: Option<PathBuf>,
+    /// Drawn dimmer: it takes no room in the window.
+    pub(super) muted: bool,
+    /// The chart hue of the dot that ties the row to its bar segment.
+    pub(super) swatch: Option<usize>,
+    /// A group title rather than a line of the card.
+    pub(super) heading: bool,
 }
 
 impl Row {
@@ -81,8 +97,13 @@ impl Row {
             icon: None,
             label,
             detail: detail.to_string(),
+            tag: String::new(),
             expanded: None,
             action: None,
+            path: None,
+            muted: false,
+            swatch: None,
+            heading: false,
         }
     }
 }
@@ -93,14 +114,29 @@ pub(super) struct Section {
     pub(super) key: &'static str,
     pub(super) title: &'static str,
     pub(super) summary: String,
+    /// A muted line under the title, drawn with the card's rows.
+    pub(super) note: String,
+    /// The stacked bar under the title: one segment per entry.
+    pub(super) bar: Vec<BarSegment>,
     pub(super) rows: Vec<Row>,
+}
+
+/// One segment of a card's bar: its share of the whole and its chart hue.
+pub(super) struct BarSegment {
+    pub(super) fraction: f32,
+    pub(super) hue: usize,
 }
 
 /// The column's state on a `Chat`.
 pub(super) struct SessionPanel {
     open: bool,
-    /// Keys of the sections and nodes the reader folded.
+    /// Keys of the sections the reader folded.
     collapsed: HashSet<String>,
+    /// Keys of the nodes whose fold state is the opposite of their default
+    /// (a top-level node starts open, a deeper one closed), so a toggle is a
+    /// flip and a new report keeps what the reader opened: keys are stable.
+    flipped: HashSet<String>,
+    context: context::Context,
     /// Whether the chat is wide enough for the column, as last measured;
     /// `None` until the first frame has been laid out.
     wide: Rc<Cell<Option<bool>>>,
@@ -109,10 +145,17 @@ pub(super) struct SessionPanel {
 }
 
 impl SessionPanel {
+    /// Forgets the reported context: a new client is a new session.
+    pub(super) fn clear_context(&mut self) {
+        self.context.clear();
+    }
+
     pub(super) fn new() -> Self {
         Self {
             open: false,
             collapsed: HashSet::new(),
+            flipped: HashSet::new(),
+            context: context::Context::default(),
             wide: Rc::new(Cell::new(None)),
             environment: environment::Environment::default(),
             environment_task: None,
@@ -135,6 +178,7 @@ impl Chat {
         self.session_panel.open = open;
         if open {
             self.refresh_session_environment(cx);
+            self.ensure_session_context();
         }
         cx.emit(ChatEvent::SessionPanelToggled);
         cx.notify();
@@ -146,6 +190,7 @@ impl Chat {
         self.session_panel.open = open;
         if open {
             self.refresh_session_environment(cx);
+            self.ensure_session_context();
         }
         cx.notify();
     }
@@ -178,27 +223,13 @@ impl Chat {
                 if !foldable {
                     return Err(format!("no section or node with key {key}"));
                 }
-                if !self.session_panel.collapsed.remove(&key) {
-                    self.session_panel.collapsed.insert(key);
-                }
-                cx.notify();
+                self.toggle_session_fold(&key, cx);
             }
             SessionPanelAction::Activate(key) => {
                 if !self.session_panel.open {
                     return Err("the session panel is closed".to_string());
                 }
-                let acts = self.session_panel_sections().iter().any(|section| {
-                    section
-                        .rows
-                        .iter()
-                        .any(|row| row.key == key && row.action.is_some())
-                });
-                if !acts {
-                    return Err(format!("no row with an action has key {key}"));
-                }
-                // No row has a handler yet: the sections that add actions
-                // run them here.
-                return Err(format!("no handler for {key}"));
+                return self.activate_session_row(&key, cx);
             }
         }
         Ok(())
@@ -210,10 +241,54 @@ impl Chat {
     /// it reads only what the panel has cached: no disk, git or environment
     /// work belongs in it.
     fn session_panel_sections(&self) -> Vec<Section> {
-        vec![environment::section(
-            &self.session_panel.environment,
-            &self.agent_cwd,
-        )]
+        let panel = &self.session_panel;
+        let mut sections = vec![environment::section(&panel.environment, &self.agent_cwd)];
+        sections.extend(context::section(
+            &panel.context,
+            self.context_usage.as_ref(),
+            self.client.as_ref().is_some_and(ChatClient::supports_connectors),
+            self.streaming,
+            &panel.flipped,
+        ));
+        sections
+    }
+
+    /// Folds or unfolds the section or node with this key. A section is
+    /// folded when it is in `collapsed`; a node is flipped from its default.
+    fn toggle_session_fold(&mut self, key: &str, cx: &mut Context<Self>) {
+        let is_section = self
+            .session_panel_sections()
+            .iter()
+            .any(|section| section.key == key);
+        let set = if is_section {
+            &mut self.session_panel.collapsed
+        } else {
+            &mut self.session_panel.flipped
+        };
+        if !set.remove(key) {
+            set.insert(key.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Runs the action of the row with this key: a row with a file opens it
+    /// in a tab.
+    fn activate_session_row(&mut self, key: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let sections = self.session_panel_sections();
+        let Some(row) = sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .find(|row| row.key == key && row.action.is_some())
+        else {
+            return Err(format!("no row with an action has key {key}"));
+        };
+        match &row.path {
+            Some(path) => {
+                cx.emit(ChatEvent::OpenFile(path.clone()));
+                Ok(())
+            }
+            None => Err(format!("no handler for {key}")),
+        }
     }
 
     /// Resolves the chat's worktree and reads its branch afresh. The lookup
@@ -265,6 +340,8 @@ impl Chat {
                 .map(|section| SectionSnapshot {
                     expanded: !panel.collapsed.contains(section.key),
                     key: section.key.to_string(),
+                    summary: section.summary,
+                    note: section.note,
                     rows: section
                         .rows
                         .into_iter()
@@ -273,6 +350,7 @@ impl Chat {
                             depth: row.depth,
                             label: row.label,
                             detail: row.detail,
+                            tag: row.tag,
                             expanded: row.expanded,
                             action: row.action,
                         })
@@ -365,12 +443,7 @@ impl Chat {
             .text_color(theme.ely.fg)
             .font_weight(FontWeight::SEMIBOLD)
             .on_click(move |_, _, cx| {
-                entity.update(cx, |chat, cx| {
-                    if !chat.session_panel.collapsed.remove(key) {
-                        chat.session_panel.collapsed.insert(key.to_string());
-                    }
-                    cx.notify();
-                });
+                entity.update(cx, |chat, cx| chat.toggle_session_fold(key, cx));
             })
             .child(
                 Icon::new(chevron)
@@ -401,21 +474,98 @@ impl Chat {
             .bg(theme.ely.surface)
             .child(title)
             .when(!collapsed, |card| {
-                card.children(
+                card.when(!section.bar.is_empty(), |card| {
+                    card.child(Self::render_session_bar(&section.bar, theme))
+                })
+                .when(!section.note.is_empty(), |card| {
+                    card.child(
+                        div()
+                            .text_size(caption)
+                            .text_color(theme.ely.fg_subtle)
+                            .child(section.note.clone()),
+                    )
+                })
+                .children(
                     section
                         .rows
                         .iter()
-                        .map(|row| Self::render_session_row(row, theme)),
+                        .map(|row| Self::render_session_row(row, theme, cx)),
                 )
             })
             .into_any_element()
     }
 
+    /// The stacked bar: one segment per entry, in the chart's hues, on a
+    /// track that shows the room left in the window.
+    fn render_session_bar(bar: &[BarSegment], theme: &Theme) -> AnyElement {
+        div()
+            .flex()
+            .h(px(6.0))
+            .w_full()
+            .rounded(px(3.0))
+            .overflow_hidden()
+            .bg(theme.ely.sunken)
+            .children(bar.iter().map(|segment| {
+                div()
+                    .h_full()
+                    .w(relative(segment.fraction))
+                    .bg(theme.ely.chart[segment.hue % theme.ely.chart.len()])
+            }))
+            .into_any_element()
+    }
+
     /// One row. Its text is read, not clicked, so it can be selected; a row
-    /// that folds or acts will be drawn as a clickable one, without it.
-    fn render_session_row(row: &Row, theme: &Theme) -> AnyElement {
+    /// that folds or acts is a clickable one, drawn without selectable text
+    /// because a press on it would fire the click after a drag.
+    fn render_session_row(row: &Row, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let caption = theme.typography.footnote;
         let key = SharedString::from(format!("session-row-{}", row.key));
+        if row.heading {
+            return div()
+                .id(key.clone())
+                .debug_selector({
+                    let selector = key.to_string();
+                    move || selector.clone()
+                })
+                .mt_1()
+                .text_size(caption)
+                .text_color(theme.ely.fg_muted)
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(row.label.clone())
+                .into_any_element();
+        }
+        let clickable = row.expanded.is_some() || row.action.is_some();
+        let text_color = if row.muted {
+            theme.ely.fg_subtle
+        } else {
+            theme.ely.fg
+        };
+        let is_link = row.path.is_some();
+        let label = if clickable {
+            let mut label = div().child(row.label.clone());
+            if is_link {
+                label = label.text_color(theme.ely.link).underline();
+            }
+            label.into_any_element()
+        } else {
+            selectable_text(row.label.clone())
+                .id(SharedString::from(format!(
+                    "session-row-text-{}",
+                    row.key
+                )))
+                .into_any_element()
+        };
+        // The chevron's room is kept on a context row without one, so the
+        // labels of one level line up.
+        let chevron = match row.expanded {
+            Some(true) => Some(IconName::ChevronDown),
+            Some(false) => Some(IconName::ChevronRight),
+            None => None,
+        };
+        let reserves_chevron = row.swatch.is_some() || row.depth > 0;
+        let entity = cx.entity();
+        let row_key = row.key.clone();
+        let folds = row.expanded.is_some();
         div()
             .id(key.clone())
             .debug_selector({
@@ -427,7 +577,40 @@ impl Chat {
             .gap_2()
             .pl(px(f32::from(row.depth) * 12.0))
             .text_size(caption)
-            .text_color(theme.ely.fg)
+            .text_color(text_color)
+            .when(clickable, |line| {
+                line.cursor(CursorStyle::PointingHand)
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |chat, cx| {
+                            if folds {
+                                chat.toggle_session_fold(&row_key, cx);
+                            } else {
+                                // A file that cannot be opened has nothing
+                                // to say here; the workspace reports it.
+                                let _ = chat.activate_session_row(&row_key, cx);
+                            }
+                        });
+                    })
+            })
+            .when(chevron.is_some() || reserves_chevron, |line| {
+                line.child(
+                    div()
+                        .flex_none()
+                        .w(px(12.0))
+                        .children(chevron.map(|icon| {
+                            Icon::new(icon)
+                                .size(ElyIconSize::Sm)
+                                .color(theme.ely.fg_muted)
+                        })),
+                )
+            })
+            .children(row.swatch.map(|hue| {
+                div()
+                    .flex_none()
+                    .size(px(8.0))
+                    .rounded(px(2.0))
+                    .bg(theme.ely.chart[hue % theme.ely.chart.len()])
+            }))
             .children(row.icon.map(|icon| {
                 div().flex_none().child(
                     Icon::new(icon)
@@ -435,15 +618,15 @@ impl Chat {
                         .color(theme.ely.fg_muted),
                 )
             }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(selectable_text(row.label.clone()).id(SharedString::from(
-                        format!("session-row-text-{}", row.key),
-                    ))),
-            )
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .when(!row.tag.is_empty(), |line| {
+                line.child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.ely.fg_subtle)
+                        .child(row.tag.clone()),
+                )
+            })
             .when(!row.detail.is_empty(), |line| {
                 line.child(
                     div()
