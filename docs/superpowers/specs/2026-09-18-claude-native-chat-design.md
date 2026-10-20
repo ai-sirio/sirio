@@ -220,9 +220,11 @@ plugins and skills a chat sees are the ones the pane sees.
   `clear`, `cost`, `keybindings-help`, `login`, `logout`, `output-style:new`,
   `release-notes`, `todos`;
 - `AcpEvent::Effort { option_id: "effort", choices: low, medium, high, default }`;
-- the mode catalogue: `default`, `acceptEdits`, `plan`, `auto`, current from
-  `current_permission_mode`. `bypassPermissions` is not offered: it needs
-  `--allow-dangerously-skip-permissions`, which Sirio does not pass.
+- the mode catalogue: `default`, `acceptEdits`, `plan`, `auto`,
+  `bypassPermissions`, current from `current_permission_mode`. The chat
+  launch passes `--allow-dangerously-skip-permissions` so that the CLI
+  accepts a switch to `bypassPermissions` (it refuses with
+  `bypass_not_launched` otherwise); the session still starts in `default`.
 
 The startup wait is 30 s, not 120: nothing has to be downloaded first.
 

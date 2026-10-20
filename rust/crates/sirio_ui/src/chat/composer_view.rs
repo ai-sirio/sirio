@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn an_unlisted_current_mode_falls_back_to_ask() {
-        let catalog = catalog("bypassPermissions");
+        let catalog = catalog("someFutureMode");
         assert_eq!(
             status_pill_content(false, false, true, Some(&catalog)),
             (PillDot::Ready, "Ask".to_string())

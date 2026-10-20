@@ -42,6 +42,7 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 #[cfg(test)]
 mod ely_tests;
 pub(crate) mod identity;
+mod bypass;
 mod composer_view;
 mod controls;
 mod history;
@@ -1987,6 +1988,8 @@ pub struct Chat {
     /// status readout exactly as before this row.
     mode_catalog: Option<ModeCatalog>,
     mode_picker_open: bool,
+    /// Bypass permissions, picked and not yet confirmed (`bypass.rs`).
+    bypass_ask: Option<AgentMode>,
     context_popover_open: bool,
     /// The effort selector, anchored to the effort chip. Its own popover
     /// rather than a section of the model picker: effort is a scale, and a
@@ -2338,6 +2341,7 @@ impl Chat {
             picker_query: String::new(),
             mode_catalog: None,
             mode_picker_open: false,
+            bypass_ask: None,
             context_popover_open: false,
             effort_picker_open: false,
             agent_session_id: None,
@@ -3940,8 +3944,21 @@ impl Chat {
     /// F-CHAT-15: asks the live agent to switch session mode, then
     /// optimistically reflects the choice as `current_id` so the pill label
     /// updates immediately rather than waiting on the round-trip
-    /// `CurrentModeUpdate`/`set_mode` confirmation.
+    /// `CurrentModeUpdate`/`set_mode` confirmation. Bypass permissions is
+    /// asked about first, unless it is already the mode.
     fn select_mode(&mut self, mode: AgentMode, cx: &mut Context<Self>) {
+        let current = self
+            .mode_catalog
+            .as_ref()
+            .map(|catalog| catalog.current_id.as_str());
+        if mode.id == BYPASS_PERMISSIONS_MODE && current != Some(BYPASS_PERMISSIONS_MODE) {
+            self.ask_before_bypass(mode, cx);
+            return;
+        }
+        self.apply_mode(mode, cx);
+    }
+
+    fn apply_mode(&mut self, mode: AgentMode, cx: &mut Context<Self>) {
         if let Some(client) = &self.client {
             // #136: a mode can reach us by either of two wires, and they are
             // not interchangeable. ACP's own session-modes API answers
@@ -5327,6 +5344,11 @@ impl Chat {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The bypass dialog holds the keyboard: a key bubbling out of it is
+        // not the composer's, nor an open question's.
+        if self.bypass_ask.is_some() {
+            return;
+        }
         // F-CHAT-25: while a question answer field holds focus, every key
         // belongs to the draft — Enter sends the answer, Escape cancels the
         // question, printable characters type. This mirrors the composer's
@@ -6101,6 +6123,10 @@ fn slash_option_tooltip(description: &str) -> Option<SharedString> {
     (!description.is_empty()).then(|| SharedString::from(description.to_owned()))
 }
 
+/// The mode that runs every tool without asking — Claude Code's spelling,
+/// on both of its transports. The one mode confirmed before it applies.
+const BYPASS_PERMISSIONS_MODE: &str = "bypassPermissions";
+
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ely::sync_theme_if_changed(cx);
@@ -6156,6 +6182,7 @@ impl Render for Chat {
             .transcript_context_menu
             .get()
             .map(|_| self.render_transcript_context_menu(&bezel_theme, cx));
+        let bypass_dialog = self.render_bypass_dialog(cx);
 
         div()
             .id("chat-root")
@@ -6513,6 +6540,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                 }
             })
             .children(transcript_context_menu)
+            .children(bypass_dialog)
     }
 }
 
@@ -11801,6 +11829,116 @@ two"
                 "selecting a mode updates the live catalog's current id"
             );
         });
+    }
+
+    /// Bypass permissions is the one mode confirmed before it applies. The
+    /// ways that can fail: picking it switches at once; Cancel or Escape
+    /// switches anyway or leaves the dialog up; Confirm does not switch, or
+    /// the close it triggers swallows the confirm; the picker stays open
+    /// behind the dialog; Escape also reaches the chat and stops the turn;
+    /// a key pressed in the dialog types into an open question's answer;
+    /// the keyboard is left on the picker the dialog replaced instead of
+    /// the composer. Any other mode switching without a dialog is
+    /// `mode_picker_selects_an_agent_advertised_mode_and_updates_the_pill`.
+    #[gpui::test]
+    async fn bypass_permissions_applies_only_after_its_confirmation(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::from_test_command(
+                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
+                std::env::temp_dir(),
+                cx,
+            );
+            configure_test_chat(&mut chat);
+            chat.mode_catalog = Some(ModeCatalog {
+                current_id: "default".into(),
+                options: vec![
+                    AgentMode {
+                        id: "default".into(),
+                        name: "Ask".into(),
+                        description: None,
+                    },
+                    AgentMode {
+                        id: BYPASS_PERMISSIONS_MODE.into(),
+                        name: "Bypass permissions".into(),
+                        description: None,
+                    },
+                ],
+                config_option_id: None,
+            });
+            chat
+        });
+        cx.update(|window, _| window.refresh());
+        // A turn in flight: the moment a user reaches for the mode. Set once
+        // the failed launch has settled, which clears it.
+        cx.run_until_parked();
+        chat.update(cx, |chat, _| chat.streaming = true);
+        let current = |cx: &mut VisualTestContext| {
+            chat.read_with(cx, |chat, _| {
+                chat.mode_catalog
+                    .as_ref()
+                    .map(|catalog| catalog.current_id.clone())
+            })
+        };
+        let pick_bypass = |cx: &mut VisualTestContext| {
+            let pill = cx.debug_bounds("chat-status").expect("status pill is rendered");
+            cx.simulate_click(pill.center(), Modifiers::none());
+            cx.run_until_parked();
+            let option = cx
+                .debug_bounds("mode-option-bypassPermissions")
+                .expect("the bypass option is rendered");
+            cx.simulate_click(option.center(), Modifiers::none());
+            cx.run_until_parked();
+        };
+
+        pick_bypass(cx);
+        assert!(cx.debug_bounds("mode-picker").is_none(), "the picker closes");
+        assert!(
+            cx.debug_bounds("chat-bypass-dialog").is_some(),
+            "picking bypass asks first"
+        );
+        assert_eq!(current(cx).as_deref(), Some("default"), "nothing switched yet");
+
+        let cancel = cx.debug_bounds("chat-bypass-cancel").expect("Cancel is drawn");
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-bypass-dialog").is_none(), "Cancel closes it");
+        assert_eq!(current(cx).as_deref(), Some("default"), "Cancel keeps the mode");
+        assert!(composer_is_focused(&chat, cx), "Cancel hands the keyboard back");
+
+        pick_bypass(cx);
+        // An open question whose answer field had the keyboard last.
+        chat.update(cx, |chat, _| chat.question_answer.for_request = Some(7));
+        cx.simulate_keystrokes("a");
+        cx.run_until_parked();
+        assert_eq!(
+            chat.read_with(cx, |chat, _| chat.question_answer.draft.clone()),
+            "",
+            "a key pressed in the dialog stays in the dialog"
+        );
+        chat.update(cx, |chat, _| chat.question_answer.for_request = None);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-bypass-dialog").is_none(), "Escape closes it");
+        assert_eq!(current(cx).as_deref(), Some("default"), "Escape keeps the mode");
+        assert!(
+            chat.read_with(cx, |chat, _| chat.streaming),
+            "Escape answers the dialog, not the turn"
+        );
+        assert!(composer_is_focused(&chat, cx), "Escape hands the keyboard back");
+
+        pick_bypass(cx);
+        let confirm = cx.debug_bounds("chat-bypass-confirm").expect("Confirm is drawn");
+        cx.simulate_click(confirm.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-bypass-dialog").is_none(), "Confirm closes it");
+        assert_eq!(
+            current(cx).as_deref(),
+            Some(BYPASS_PERMISSIONS_MODE),
+            "Confirm switches"
+        );
+        assert!(composer_is_focused(&chat, cx), "Confirm hands the keyboard back");
     }
 
     /// F-CHAT-16: the model picker's search field filters the driver's own

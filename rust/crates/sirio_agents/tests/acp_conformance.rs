@@ -209,6 +209,9 @@ fn claude_answers_the_native_handshake_it_claims() {
     let mut args: Vec<&str> = line.args.iter().map(String::as_str).collect();
     args.push("--permission-prompt-tool");
     args.push("stdio");
+    // Every chat launch passes it; a CLI that stopped knowing it would
+    // refuse to start any chat at all.
+    args.push("--allow-dangerously-skip-permissions");
     let handshake = sirio_claude::ControlRequest::initialize("conformance-1").to_string();
 
     let response = match answers_stdio_handshake(&program, &args, &handshake) {

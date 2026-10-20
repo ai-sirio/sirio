@@ -52,6 +52,10 @@ impl LaunchLine {
         // Token-level deltas: without this the reply arrives in one lump at
         // the end of the turn.
         args.push("--include-partial-messages".into());
+        // Makes `bypassPermissions` a mode the session may switch to; it does
+        // not start there. Without it the CLI refuses the switch with
+        // `bypass_not_launched`.
+        args.push("--allow-dangerously-skip-permissions".into());
         match session {
             ChatSession::Resume(session_id) => {
                 args.push("--resume".into());
@@ -116,6 +120,7 @@ mod tests {
                 "--permission-prompt-tool",
                 "stdio",
                 "--include-partial-messages",
+                "--allow-dangerously-skip-permissions",
                 "--session-id",
                 SESSION,
             ]
