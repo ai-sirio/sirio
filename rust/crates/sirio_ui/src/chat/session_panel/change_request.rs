@@ -154,10 +154,18 @@ impl Chat {
             loop {
                 cx.background_executor().timer(READ_EVERY).await;
                 let alive = this.update(cx, |chat, cx| {
-                    // Not painted since the last tick: nobody has seen the
-                    // card, so there is nothing to keep fresh.
                     if chat.session_panel.frame.painted.replace(false) {
                         chat.read_session_change_request(cx);
+                    } else {
+                        // Not painted since the last tick: either nobody can
+                        // see the card, or an idle window drew nothing. Owe
+                        // the read to the next paint and ask for one; a chat
+                        // that is not on screen is never painted, so it
+                        // still reads nothing.
+                        let frame = &chat.session_panel.frame;
+                        frame.read_on_paint.set(true);
+                        chat.session_panel.change_request.read_even_if_fresh = true;
+                        cx.notify();
                     }
                 });
                 if alive.is_err() {
