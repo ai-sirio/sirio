@@ -1,0 +1,224 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chat session panel mockups</title>
+<style>body{background:#0e0e0e;color:#ddd;font:14px/1.5 system-ui,sans-serif;margin:0;padding:24px}section{max-width:960px;margin:0 auto 48px}
+.subtitle{color:#999}.option,.card{list-style:none}.letter{display:none}h2{color:#eee}h3{color:#ddd}code{color:#f3c37a}</style></head><body>
+<p class="subtitle">Mockups agreed in the brainstorm of 2026-10-20 for docs/superpowers/specs/2026-10-20-chat-session-panel-design.md. Numbers are from a live Claude Code 2.1.304 session; texts are Italian as shown to the user; the shipped UI is English.</p>
+<section><style>
+  .win{background:#161616;border:1px solid #2a2a2a;border-radius:8px;font:12px/1.4 -apple-system,system-ui,sans-serif;color:#ddd;overflow:hidden;position:relative;height:340px;display:flex}
+  .chatcol{flex:1;display:flex;flex-direction:column;min-width:0}
+  .tr{flex:1;padding:12px 14px;color:#aaa}
+  .tr .u{background:#262626;border-radius:6px;padding:6px 8px;margin:0 0 8px auto;width:60%;color:#ddd}
+  .tr .a{margin-bottom:8px}
+  .tr .l{height:6px;background:#2a2a2a;border-radius:3px;margin:6px 0}
+  .comp{margin:0 12px 6px;border:1px solid #333;border-radius:8px;padding:8px 10px;display:flex;align-items:center;gap:8px;background:#1c1c1c}
+  .comp .ph{flex:1;color:#666}
+  .ib{width:22px;height:22px;border-radius:5px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:14px}
+  .hl{outline:2px solid #e8a33d;outline-offset:1px;background:#3a2c14;color:#f3c37a}
+  .foot{display:flex;gap:10px;align-items:center;padding:0 16px 8px;color:#888;font-size:11px}
+  .foot .sp{flex:1}
+  .ring{width:14px;height:14px;border-radius:50%;border:2px solid #333;border-top-color:#4a8cf0;border-right-color:#4a8cf0;box-sizing:border-box}
+  .chip{display:flex;align-items:center;gap:5px;padding:2px 7px;border-radius:10px;border:1px solid #333}
+  .panel{width:200px;border-left:1px solid #2a2a2a;background:#191919;padding:10px;font-size:11px}
+  .panel h5{margin:0 0 6px;font-size:11px;color:#ccc;font-weight:600}
+  .bar{display:flex;height:5px;border-radius:3px;overflow:hidden;background:#2a2a2a;margin:4px 0 8px}
+  .row{display:flex;gap:6px;align-items:center;margin:3px 0;color:#bbb}
+  .row .d{width:7px;height:7px;border-radius:2px}
+  .row .n{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .t{color:#888}
+  .pop{position:absolute;left:14px;bottom:62px;width:230px;background:#1e1e1e;border:1px solid #3a3a3a;border-radius:8px;padding:10px;box-shadow:0 8px 24px #0008;font-size:11px}
+  .appwin{display:flex;height:340px;background:#121212;border:1px solid #2a2a2a;border-radius:8px;overflow:hidden;font:12px/1.4 system-ui;color:#ddd}
+  .side{width:70px;border-right:1px solid #2a2a2a;padding:8px;color:#666;font-size:10px}
+  .rp{width:190px;border-left:1px solid #2a2a2a;background:#191919;display:flex;flex-direction:column}
+  .rptabs{display:flex;gap:2px;padding:6px;border-bottom:1px solid #2a2a2a}
+  .rptabs span{padding:2px 5px;border-radius:4px;color:#777;font-size:10px}
+  .rptabs .on{background:#2c2c2c;color:#eee}
+</style><h2>Placement — option A (chosen)</h2><div class="options"><div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Pulsante accanto al +, pannello agganciato a destra della chat</h3>
+      <p>Come Claude Code nello screenshot. Il pannello vive dentro la scheda della chat: si apre, si chiude e resta aperto o chiuso per quella chat.</p>
+      <div class="win">
+        <div class="chatcol">
+          <div class="tr"><div class="u">Sistema il test di login</div><div class="a">Ho letto i file…</div><div class="l" style="width:80%"></div><div class="l" style="width:55%"></div></div>
+          <div class="comp"><div class="ib">+</div><div class="ib hl">▤</div><div class="ph">Scrivi un messaggio…</div><div class="ring"></div><div class="ib">↑</div></div>
+          <div class="foot"><span>Ignora autorizzazioni</span><span class="sp"></span><span>Opus 5.5 · Alto</span></div>
+        </div>
+        <div class="panel">
+          <h5>Contesto · 16%</h5>
+          <div class="bar"><i style="width:9%;background:#d9a03c"></i><i style="width:2.4%;background:#888"></i><i style="width:1.8%;background:#c46a3b"></i><i style="width:1.6%;background:#4a8cf0"></i><i style="width:1.2%;background:#a07ad6"></i></div>
+          <div class="row"><i class="d" style="background:#d9a03c"></i><span class="n">File di memoria</span><span class="t">34,2k</span></div>
+          <div class="row"><i class="d" style="background:#888"></i><span class="n">Strumenti di sistema</span><span class="t">9,7k</span></div>
+          <div class="row"><i class="d" style="background:#c46a3b"></i><span class="n">Skill</span><span class="t">7,1k</span></div>
+          <div class="row"><i class="d" style="background:#4a8cf0"></i><span class="n">Messaggi</span><span class="t">6,6k</span></div>
+          <div class="row"><i class="d" style="background:#a07ad6"></i><span class="n">Agenti</span><span class="t">4,9k</span></div>
+          <div class="row"><i class="d" style="background:#333"></i><span class="n">Libero</span><span class="t">302k</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  </div></section><section><style>
+  .pn{width:320px;background:#191919;border:1px solid #2a2a2a;border-radius:8px;padding:12px;font:12px/1.45 -apple-system,system-ui,sans-serif;color:#ccc}
+  .pn .hd{display:flex;align-items:baseline;gap:6px;margin-bottom:4px}
+  .pn .hd b{color:#eee;font-size:13px}
+  .pn .hd .sp{flex:1}
+  .mut{color:#777;font-size:11px}
+  .bar{display:flex;height:6px;border-radius:3px;overflow:hidden;background:#2a2a2a;margin:6px 0 10px}
+  .row{display:flex;gap:7px;align-items:center;padding:2px 0}
+  .row .d{width:8px;height:8px;border-radius:2px;flex:none}
+  .row .c{width:10px;color:#777;flex:none;font-size:10px}
+  .row .n{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .t{color:#999;font-variant-numeric:tabular-nums;width:42px;text-align:right}
+  .s1{padding-left:15px}.s2{padding-left:30px}
+  .s1 .row,.s2 .row{font-size:11px;color:#aaa}
+  .link{color:#8ab4f8;text-decoration:underline;text-decoration-color:#8ab4f855}
+  .big{color:#f3c37a}
+  .tag{font-size:10px;color:#777;border:1px solid #333;border-radius:4px;padding:0 4px}
+  .grp{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#777;margin:10px 0 3px}
+  .wrap{display:flex;gap:24px;align-items:flex-start;justify-content:center;flex-wrap:wrap}
+  .notes{max-width:340px;font-size:13px;color:#bbb}
+  .notes li{margin-bottom:8px}
+</style>
+
+<h2>Per origine, con ogni origine apribile e chiudibile</h2>
+<p class="subtitle">Ogni riga con ▸/▾ si apre e si chiude da sola: i gruppi, ogni plugin, la conversazione. Qui è aperto <b>plugin-dev</b>, per mostrare cosa c'è dentro un plugin.</p>
+
+<div class="wrap">
+<div class="pn">
+  <div class="hd"><b>Contesto</b><span class="mut">16%</span><span class="sp"></span><span class="mut">64,9k / 400k</span></div>
+  <div class="bar"><i style="width:8.6%;background:#d9a03c"></i><i style="width:3%;background:#c46a3b"></i><i style="width:1.6%;background:#4a8cf0"></i><i style="width:3%;background:#555"></i><i style="width:8.3%;background:#3a3a3a"></i></div>
+
+  <div class="grp">Puoi ridurlo tu</div>
+  <div class="row"><span class="c">▾</span><i class="d" style="background:#d9a03c"></i><span class="n">File di memoria</span><span class="t">34,2k</span></div>
+  <div class="s1">
+    <div class="row"><span class="c"></span><span class="n link big">CLAUDE.md <span class="tag">progetto</span></span><span class="t big">28,9k</span></div>
+    <div class="row"><span class="c"></span><span class="n link">MEMORY.md <span class="tag">auto</span></span><span class="t">4,5k</span></div>
+    <div class="row"><span class="c"></span><span class="n link">~/.claude/CLAUDE.md</span><span class="t">0,8k</span></div>
+  </div>
+  <div class="row"><span class="c">▾</span><i class="d" style="background:#c46a3b"></i><span class="n">Plugin e skill</span><span class="t">12,0k</span></div>
+  <div class="s1">
+    <div class="row"><span class="c">▾</span><span class="n">plugin-dev <span class="mut">8 skill · 3 agenti</span></span><span class="t">2,3k</span></div>
+    <div class="s2">
+      <div class="row"><span class="n link">plugin-validator <span class="tag">agente</span></span><span class="t">0,4k</span></div>
+      <div class="row"><span class="n link">skill-reviewer <span class="tag">agente</span></span><span class="t">0,4k</span></div>
+      <div class="row"><span class="n link">agent-creator <span class="tag">agente</span></span><span class="t">0,4k</span></div>
+      <div class="row"><span class="n link">hook-development</span><span class="t">0,2k</span></div>
+      <div class="row"><span class="n link">command-development</span><span class="t">0,2k</span></div>
+      <div class="row"><span class="n link">mcp-integration</span><span class="t">0,2k</span></div>
+      <div class="row mut"><span class="n">▸ altre 5 skill</span><span class="t">0,6k</span></div>
+    </div>
+    <div class="row"><span class="c">▸</span><span class="n">pr-review-toolkit <span class="mut">1 · 6</span></span><span class="t">2,1k</span></div>
+    <div class="row"><span class="c">▸</span><span class="n">skill sincronizzate <span class="mut">5</span></span><span class="t">1,4k</span></div>
+    <div class="row"><span class="c">▸</span><span class="n">cloudflare <span class="mut">18 skill</span></span><span class="t">1,3k</span></div>
+    <div class="row"><span class="c">▸</span><span class="n">claude-security <span class="mut">2 · 9</span></span><span class="t">1,1k</span></div>
+    <div class="row"><span class="c">▸</span><span class="n mut">altri 9</span><span class="t">3,8k</span></div>
+  </div>
+  <div class="row"><span class="c">▸</span><i class="d" style="background:#4a8cf0"></i><span class="n">Conversazione</span><span class="t">6,6k</span></div>
+
+  <div class="grp">Fisso</div>
+  <div class="row"><span class="c"></span><i class="d" style="background:#555"></i><span class="n">Claude Code (prompt + strumenti)</span><span class="t">12,1k</span></div>
+  <div class="row"><span class="c"></span><i class="d" style="background:#3a3a3a"></i><span class="n">Riserva autocompattazione</span><span class="t">33k</span></div>
+  <div class="row mut"><span class="c"></span><i class="d" style="background:#222;border:1px solid #333"></i><span class="n">Libero</span><span class="t">302k</span></div>
+</div>
+
+<div class="notes">
+  <h3>Come si comporta (mie proposte)</h3>
+  <ul>
+    <li>Ogni livello è ordinato per peso, il più pesante in alto.</li>
+    <li>All'apertura sono aperti i gruppi di primo livello e chiusi i singoli plugin. Quello che apri o chiudi resta così ai turni successivi.</li>
+    <li>Ogni riga per cui Claude indica un file è un link (in blu) che apre quel file in un tab: file di memoria, agenti, skill (anche quelle dei plugin). Sono numeri veri di questa sessione: in plugin-dev pesano più i 3 agenti (~0,4k ciascuno) delle skill (0,04–0,2k).</li>
+    <li>Oltre una decina di voci, il resto finisce in «altri N» con il totale, ed è apribile anche quello.</li>
+  </ul>
+</div>
+</div>
+</section><section><style>
+  .win{display:flex;background:#161616;border:1px solid #2a2a2a;border-radius:8px;overflow:hidden;font:12px/1.45 -apple-system,system-ui,sans-serif;color:#ccc;max-width:860px;margin:0 auto}
+  .chatcol{flex:1;display:flex;flex-direction:column;min-width:0}
+  .tr{flex:1;padding:14px;color:#aaa}
+  .tr .u{background:#262626;border-radius:6px;padding:6px 8px;margin:0 0 8px auto;width:60%;color:#ddd}
+  .tr .l{height:6px;background:#2a2a2a;border-radius:3px;margin:7px 0}
+  .comp{margin:0 12px 6px;border:1px solid #333;border-radius:8px;padding:8px 10px;display:flex;align-items:center;gap:8px;background:#1c1c1c}
+  .comp .ph{flex:1;color:#666}
+  .ib{width:22px;height:22px;border-radius:5px;display:flex;align-items:center;justify-content:center;color:#bbb;font-size:14px}
+  .on{background:#2f2f2f;color:#fff}
+  .foot{display:flex;gap:10px;padding:0 16px 8px;color:#888;font-size:11px}
+  .ring{width:14px;height:14px;border-radius:50%;border:2px solid #333;border-top-color:#4a8cf0;box-sizing:border-box}
+  .side{width:300px;border-left:1px solid #2a2a2a;background:#121212;padding:8px;display:flex;flex-direction:column;gap:8px}
+  .card{background:#191919;border:1px solid #2a2a2a;border-radius:8px;padding:8px 10px}
+  .card .h{display:flex;align-items:center;gap:5px;color:#ddd;font-weight:600;font-size:12px;margin-bottom:4px}
+  .card .h .sp{flex:1}
+  .mut{color:#777;font-size:11px;font-weight:400}
+  .row{display:flex;gap:7px;align-items:center;padding:2px 0;font-size:11.5px}
+  .row .n{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .t{color:#999;font-variant-numeric:tabular-nums}
+  .ic{width:14px;color:#888;text-align:center;flex:none}
+  .bar{display:flex;height:5px;border-radius:3px;overflow:hidden;background:#2a2a2a;margin:4px 0 6px}
+  .ok{color:#6cc28a}.warn{color:#e8a33d}.err{color:#e06c6c}
+  .act{color:#e8a33d;font-size:11px}
+  .cr{padding:4px 0;border-top:1px solid #222}
+  .cr:first-of-type{border-top:0}
+  .cr .t1{display:flex;gap:6px;align-items:center;color:#ddd;font-size:11.5px}
+  .cr .t2{color:#777;font-size:10.5px;padding-left:20px}
+  .pill{font-size:9.5px;border-radius:8px;padding:0 6px;border:1px solid #444;color:#aaa}
+  .here{border-color:#4a8cf0;color:#8ab4f8}
+  .notes{max-width:860px;margin:16px auto 0;font-size:13px;color:#bbb}
+  .notes li{margin-bottom:6px}
+</style>
+
+<h2>Il pannello completo, v2</h2>
+<p class="subtitle">L'ordine è quello di Claude Code. Ogni sezione si apre e si chiude dal suo titolo. Il Contesto è chiuso qui solo per fare spazio: l'interno è quello già approvato.</p>
+
+<div class="win">
+  <div class="chatcol">
+    <div class="tr"><div class="u">Sistema il test di login</div><div>Ho letto i file e trovato il problema…</div><div class="l" style="width:85%"></div><div class="l" style="width:60%"></div><div class="l" style="width:70%"></div></div>
+    <div class="comp"><div class="ib">+</div><div class="ib on">▤</div><div class="ph">Scrivi un messaggio…</div><div class="ring"></div><div class="ib">↑</div></div>
+    <div class="foot"><span>Ignora autorizzazioni</span><span style="flex:1"></span><span>Opus 5.5 · Alto</span></div>
+  </div>
+  <div class="side">
+    <div class="card">
+      <div class="h">▾ Ambiente</div>
+      <div class="row"><span class="ic">▣</span><span class="n">sirio</span><span class="mut">progetto</span></div>
+      <div class="row"><span class="ic">⌂</span><span class="n">~/…/worktree-clear-river-0342</span></div>
+      <div class="row"><span class="ic">⑂</span><span class="n">worktree/clear-river-0342</span><span class="mut">worktree</span></div>
+    </div>
+
+    <div class="card">
+      <div class="h">▸ Contesto <span class="sp"></span><span class="mut">16% · 64,9k / 400k</span></div>
+      <div class="bar"><i style="width:8.6%;background:#d9a03c"></i><i style="width:3%;background:#c46a3b"></i><i style="width:1.6%;background:#4a8cf0"></i><i style="width:3%;background:#555"></i><i style="width:8.3%;background:#3a3a3a"></i></div>
+    </div>
+
+    <div class="card">
+      <div class="h">▾ Connettori <span class="sp"></span><span class="mut">23 · 18 da autorizzare</span></div>
+      <div class="row"><span class="ic">▾</span><span class="n">claude.ai</span><span class="mut">17</span></div>
+      <div style="padding-left:14px">
+        <div class="row"><span class="ic warn">●</span><span class="n">Notion</span><span class="act">Accedi</span></div>
+        <div class="row"><span class="ic warn">●</span><span class="n">Slack</span><span class="act">Accedi</span></div>
+        <div class="row"><span class="ic" style="color:#888">◌</span><span class="n">Claude Docs</span><span class="mut">in avvio</span></div>
+        <div class="row mut"><span class="ic">▸</span><span class="n">altri 14</span></div>
+      </div>
+      <div class="row"><span class="ic">▸</span><span class="n">plugin</span><span class="mut">4 · 2 da autorizzare</span></div>
+      <div class="row"><span class="ic">▾</span><span class="n">utente</span><span class="mut">1</span></div>
+      <div style="padding-left:14px">
+        <div class="row"><span class="ic ok">●</span><span class="n">codegraph</span><span class="mut">connesso</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="h">▾ Modifiche <span class="sp"></span><span class="mut">questo branch</span></div>
+      <div class="cr"><div class="t1"><span class="ic">⑂</span><span class="n">feat: pannello del contesto nella chat</span></div><div class="t2">#647 · aperta · ✓ check verdi · 1 approvazione</div></div>
+    </div>
+    <div class="card" style="opacity:.75">
+      <div class="h">▾ Modifiche <span class="sp"></span><span class="mut">(un altro branch)</span></div>
+      <div class="row mut">Nessuna PR per questo branch</div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <ul>
+    <li><b>Ambiente</b>: progetto, cartella e branch in cui gira <em>questa</em> chat (non il worktree selezionato nella sidebar). Vale per tutti gli agenti.</li>
+    <li><b>Connettori</b>: i server MCP che la sessione Claude dichiara, raggruppati per origine (claude.ai, plugin, utente/progetto) e apribili. Sono i server veri di questa macchina: 23, di cui 18 da autorizzare.</li>
+    <li><b>Modifiche</b>: solo la PR/MR del branch di questa chat, con stato, check e revisione; cliccandola si apre il suo tab. Senza PR/MR compare una riga che lo dice. Il secondo riquadro, più sbiadito, mostra quel caso.</li>
+  </ul>
+</div>
+</section></body></html>
