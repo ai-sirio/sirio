@@ -18009,11 +18009,17 @@ impl SirioWorkspace {
 
     /// The agents a chat can open with today: only adapters with a concrete
     /// command (Builtin or Installed), the gate the tab bar's New Chat picker
-    /// applies. Shared by the empty-pane picker and the Open list.
+    /// applies, plus Claude whenever its native transport resolved (a `claude`
+    /// on PATH needs no wrapper to launch, which `agent_launch_for` already
+    /// knows). Shared by the empty-pane picker and the Open list.
     fn chat_agents(&self) -> Vec<(&'static str, &'static str)> {
         AGENT_CATALOG
             .iter()
-            .filter(|adapter| has_agent_command(&self.launch_source_for(adapter.id())))
+            .filter(|adapter| {
+                has_agent_command(&self.launch_source_for(adapter.id()))
+                    || (adapter.id() == sirio_agents::ClaudeCodeAdapter.id()
+                        && self.launch.claude.native_program().is_some())
+            })
             .map(|adapter| (adapter.id(), adapter.display_name()))
             .collect()
     }
