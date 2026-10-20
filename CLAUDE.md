@@ -68,6 +68,17 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # "SIRIOCTL E2E PARTIAL"; --mutate claude-prompt-hook is case 6's mutation check.
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 
+# The chat's session panel column in a real, isolated Sirio: a stub `claude`
+# (Scripts/Tests/stubs/session-panel/claude over claude_fixture.py's session_panel
+# mode) and the fake forge, asserted on `surface.chat.read`'s `sessionPanel`:
+# Environment, the Context fold (asked on open, a plugin node, the CLAUDE.md row
+# opening a file tab), Connectors (reconnect, sign in), the Change request card, the
+# shared rate-limit pause and the open state across a relaunch. Each scenario is a
+# fresh Sirio; --state-only skips the captures, otherwise --display :N is a private
+# Xvfb (at least --window-size, default 2200x1000) with Mesa's lavapipe; --appearance
+# light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL".
+Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
+
 # Live end-to-end test of the forge layer (sirio_forge): the token transport
 # and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
 # transcript and the fake forges' request logs; SIRIO_FORGE_E2E_VERBOSE=1
@@ -674,6 +685,22 @@ stops holding; like its two siblings it SKIPs without the binary and is on
 the release gate's skip list. The terminal pane is unaffected — it has
 always run `claude` interactively.
 
+**The session panel** is a column docked beside a chat's transcript and composer
+(`sirio_ui::chat::session_panel`, about 300 px, drawn only while the chat is at least
+640 px wide; open or closed is the chat's own and survives a relaunch, which cards are
+folded does not). Its cards: Environment (project, the chat's own directory, the branch
+read live), Context (what fills the window, folded by origin, from `get_context_usage`
+through `sirio_claude::context`; asked once on open when no report exists yet),
+Connectors (the session's MCP servers by origin, with Sign in and Reconnect, from
+`sirio_claude::mcp` and `sirio_acp::McpControl`, whose calls wait for the CLI and so run
+off the GPUI thread) and Change request (the branch's pull or merge request through the
+forge source, sharing the right panel's per-host rate-limit pause). Connectors is
+Claude-native only and other agents get a total-only Context. The debug-only `surface.chat.panel`
+(`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>`) drives
+it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
+JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` asserts on.
+`docs/superpowers/specs/2026-10-20-chat-session-panel-design.md` has the design.
+
 ### Agent activity detection — layered evidence, not one signal (`sirio_activity`)
 
 Whether a pane shows as running/idle/needs-input is resolved from four independent evidence layers, weakest overridden by strongest as it arrives — ported byte-for-byte in intent from the original Swift `AgentActivityModel`, and `sirio_activity` carries no GPUI dependency, so this stays pure state-machine logic testable without a window:
@@ -687,7 +714,7 @@ Pane ownership determines who is allowed to clear a pane's status, and matters w
 
 ### Control socket (`sirio_control`)
 
-`ControlServer` listens on a unix socket (`$SIRIO_SOCKET` if set, otherwise `$XDG_RUNTIME_DIR/Sirio/control.sock`, falling back to the XDG state directory when no runtime directory exists) and dispatches line-delimited JSON `ControlRequest`s to a `ControlHandler` the app (`sirio`) implements. This is both the `sirioctl` CLI's transport and how agent lifecycle hooks talk back to Sirio (Layer A above). `PaneRegistry` (in `sirio_control`, not the terminal crate) is the shared source of truth for live panes that both the control handler and the foreground-process walk (Layer D) read from. Its method groups — panel.*, workspace.* (worktrees), project.*, pane.* and tab.*, surface.*, browser.*, notification.*, system.* (ping/capabilities/identify), session.* and a few singletons — are all dispatched from `rust/crates/sirio/src/main.rs`, and `sirioctl capabilities` lists the full set a running instance serves; the flat kebab sirioctl commands (`list-workspaces`, `new-workspace`, `select-workspace`, …) mirror cmux's CLI names. `panel.*` is also answered by the host (SP2): the app forwards every `panel.*` to the host, `sirio_control::host_panels` is the translation both sides share, and the app adds only the layout fields it alone knows. `sirioctl` asks the app first and goes to the host only when the app's socket is missing or refuses (`sirio_control::route`); a socket that accepts and stays silent is waited for, never bypassed to the host, because loss of contact is not evidence of death. With no app and no host it prints "Sirio is not running and no host is up" and never starts one; `--worktree` needs the app. Debug builds also serve `surface.host.end_all`, `surface.terminal.open`, `surface.open_list.open`, `surface.settings.act` and `surface.terminal.state` (whose `agentStatus` names the pane's status word), which release `capabilities` omits; `surface.layout.read` (whether the Secondary pane is drawn, each half's tabs, the right panel's view) serves every build. `sirio_control::served::served_methods(debug)` is the one list a build serves, and `system.capabilities` passes it `cfg!(debug_assertions)`. `sirioctl --dry-run` prints the one JSON request it would send and contacts nothing; `panel wait` exits with the waited child's code. The stable copy is `<data>/Sirio/bin/sirioctl` (`bin-debug` for a debug build; `cli_install`), a copy and never a symlink, kept current by content. The PATH link (`cli_path`) is `~/.local/bin/sirioctl` on Linux; on macOS it is `/usr/local/bin/sirioctl` when the user can write there, else `~/.local/bin` when the login PATH searches it, and the administrator's password is asked only by the Settings button, never at startup; on Windows the stable directory joins the user's HKCU `Path`, which the Inno uninstaller removes. A file Sirio did not make at a link's place is never replaced, and the card names it. The socket can be disabled in Settings (`controlSocket.enabled` / `SIRIO_SOCKET_ENABLE`), which also disables Layer-A hooks.
+`ControlServer` listens on a unix socket (`$SIRIO_SOCKET` if set, otherwise `$XDG_RUNTIME_DIR/Sirio/control.sock`, falling back to the XDG state directory when no runtime directory exists) and dispatches line-delimited JSON `ControlRequest`s to a `ControlHandler` the app (`sirio`) implements. This is both the `sirioctl` CLI's transport and how agent lifecycle hooks talk back to Sirio (Layer A above). `PaneRegistry` (in `sirio_control`, not the terminal crate) is the shared source of truth for live panes that both the control handler and the foreground-process walk (Layer D) read from. Its method groups — panel.*, workspace.* (worktrees), project.*, pane.* and tab.*, surface.*, browser.*, notification.*, system.* (ping/capabilities/identify), session.* and a few singletons — are all dispatched from `rust/crates/sirio/src/main.rs`, and `sirioctl capabilities` lists the full set a running instance serves; the flat kebab sirioctl commands (`list-workspaces`, `new-workspace`, `select-workspace`, …) mirror cmux's CLI names. `panel.*` is also answered by the host (SP2): the app forwards every `panel.*` to the host, `sirio_control::host_panels` is the translation both sides share, and the app adds only the layout fields it alone knows. `sirioctl` asks the app first and goes to the host only when the app's socket is missing or refuses (`sirio_control::route`); a socket that accepts and stays silent is waited for, never bypassed to the host, because loss of contact is not evidence of death. With no app and no host it prints "Sirio is not running and no host is up" and never starts one; `--worktree` needs the app. Debug builds also serve `surface.host.end_all`, `surface.terminal.open`, `surface.open_list.open`, `surface.chat.panel`, `surface.settings.act` and `surface.terminal.state` (whose `agentStatus` names the pane's status word), which release `capabilities` omits; `surface.layout.read` (whether the Secondary pane is drawn, each half's tabs, the right panel's view) serves every build. `sirio_control::served::served_methods(debug)` is the one list a build serves, and `system.capabilities` passes it `cfg!(debug_assertions)`. `sirioctl --dry-run` prints the one JSON request it would send and contacts nothing; `panel wait` exits with the waited child's code. The stable copy is `<data>/Sirio/bin/sirioctl` (`bin-debug` for a debug build; `cli_install`), a copy and never a symlink, kept current by content. The PATH link (`cli_path`) is `~/.local/bin/sirioctl` on Linux; on macOS it is `/usr/local/bin/sirioctl` when the user can write there, else `~/.local/bin` when the login PATH searches it, and the administrator's password is asked only by the Settings button, never at startup; on Windows the stable directory joins the user's HKCU `Path`, which the Inno uninstaller removes. A file Sirio did not make at a link's place is never replaced, and the card names it. The socket can be disabled in Settings (`controlSocket.enabled` / `SIRIO_SOCKET_ENABLE`), which also disables Layer-A hooks.
 
 ### Pane hierarchy
 
