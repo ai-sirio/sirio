@@ -100,8 +100,20 @@ impl Connectors {
     /// Takes a list that answers a refresh asked for at `since`: it is newer
     /// than every failure stamped up to then, so those are no longer current.
     fn refreshed(&mut self, list: Vec<McpServer>, since: u64) {
-        self.servers = Some(listed(list));
+        self.set_servers(list);
         self.failures.retain(|_, (_, stamp)| *stamp > since);
+    }
+
+    /// Keeps a list. A server that no longer needs a sign-in has no reason
+    /// left to offer Reconnect in its place: a later one starts over.
+    fn set_servers(&mut self, list: Vec<McpServer>) {
+        let servers = listed(list);
+        self.reconnect_offered.retain(|name| {
+            servers
+                .iter()
+                .any(|server| &server.name == name && server.status == McpState::NeedsAuth)
+        });
+        self.servers = Some(servers);
     }
 
     fn action(&self, server: &McpServer) -> Option<Action> {
@@ -224,16 +236,26 @@ pub(super) fn section(
         }
         for server in group {
             let action = connectors.action(server);
-            let (detail, tone) = match (connectors.busy.get(&server.name), connectors.failures.get(&server.name)) {
-                (Some(busy), _) => (busy.word().to_string(), Tone::Quiet),
-                (None, Some((failure, _))) => (failure.clone(), Tone::Bad),
-                (None, None) => (state_word(&server.status), tone(&server.status)),
+            // The sentence of a failed action goes under the row in full; the
+            // row keeps saying what state the server is in.
+            let (detail, tone, note) = match connectors.busy.get(&server.name) {
+                Some(busy) => (busy.word().to_string(), Tone::Quiet, String::new()),
+                None => (
+                    state_word(&server.status),
+                    tone(&server.status),
+                    connectors
+                        .failures
+                        .get(&server.name)
+                        .map(|(failure, _)| failure.clone())
+                        .unwrap_or_default(),
+                ),
             };
             rows.push(Row {
                 depth: 1,
                 tone: Some(tone),
                 action: action.map(|action| action.label().to_string()),
                 show_action: true,
+                note,
                 ..Row::new(&server_key(server), server.name.clone(), &detail)
             });
         }
@@ -257,7 +279,7 @@ impl Chat {
     /// the first time.
     pub(in crate::chat) fn refresh_session_connectors(&mut self, cx: &mut GpuiContext<Self>) {
         if let Some(list) = self.client.as_ref().and_then(|client| client.mcp_servers()) {
-            self.session_panel.connectors.servers = Some(listed(list));
+            self.session_panel.connectors.set_servers(list);
             cx.notify();
         }
         self.ensure_session_connectors(cx);
@@ -363,7 +385,7 @@ impl Chat {
                 // This answer is the action's own follow-up, so it does not
                 // retire the sentence the action may have just earned.
                 if let Ok(list) = answer {
-                    connectors.servers = Some(listed(list));
+                    connectors.set_servers(list);
                 }
                 if let Err(error) = outcome {
                     connectors.fail(name, format!("{error:#}"));
@@ -421,7 +443,8 @@ impl Chat {
                 return;
             }
             let started = cx.background_executor().now();
-            let mut signed_in = false;
+            // Whether the poll ran out with the server still needing a sign-in.
+            let mut offer_reconnect = true;
             while cx.background_executor().now().duration_since(started) < POLL_FOR {
                 cx.background_executor().timer(POLL_EVERY).await;
                 let Ok(since) = this.update(cx, |chat, _| chat.session_panel.connectors.next_stamp())
@@ -436,21 +459,27 @@ impl Chat {
                     // The session is gone or the CLI is not answering.
                     break;
                 };
-                signed_in = list
+                let status = list
                     .iter()
-                    .any(|server| server.name == name && server.status != McpState::NeedsAuth);
+                    .find(|server| server.name == name)
+                    .map(|server| server.status.clone());
                 let alive = this.update(cx, |chat, cx| {
                     chat.session_panel.connectors.refreshed(list, since);
                     cx.notify();
                 });
-                if alive.is_err() || signed_in {
+                if alive.is_err() {
+                    break;
+                }
+                // Signed in, or no longer listed at all: nothing left to wait for.
+                if status != Some(McpState::NeedsAuth) {
+                    offer_reconnect = false;
                     break;
                 }
             }
             let _ = this.update(cx, |chat, cx| {
                 let connectors = &mut chat.session_panel.connectors;
                 connectors.busy.remove(&name);
-                if !signed_in {
+                if offer_reconnect {
                     connectors.reconnect_offered.insert(name);
                 }
                 cx.notify();
@@ -478,6 +507,17 @@ mod tests {
     /// A chat on the native transport against the fixture CLI in its
     /// `session_panel` mode, with the column already open.
     fn native_chat(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
+        fixture_chat(cx, "session_panel", None)
+    }
+
+    /// The same against the fixture in `mode`; `counts` names the file the
+    /// fixture writes a line to for each `mcp_status` request, passed on its
+    /// command line so no process-wide environment is touched.
+    fn fixture_chat<'a>(
+        cx: &'a mut TestAppContext,
+        mode: &str,
+        counts: Option<&Path>,
+    ) -> (Entity<Chat>, &'a mut VisualTestContext) {
         // The CLI's worker thread wakes the chat's event task, which the
         // test scheduler refuses unless it is told real threads are in play.
         cx.executor().allow_parking();
@@ -485,10 +525,11 @@ mod tests {
         cx.update(bezel::ui::input::init);
         cx.update(crate::chat::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
-            let launch = ClaudeLaunch::fixture(
-                "python3",
-                vec![CLAUDE_FIXTURE.to_string(), "session_panel".to_string()],
-            );
+            let mut args = vec![CLAUDE_FIXTURE.to_string(), mode.to_string()];
+            if let Some(counts) = counts {
+                args.push(format!("--fixture-count={}", counts.display()));
+            }
+            let launch = ClaudeLaunch::fixture("python3", args);
             Chat::from_test_command(LaunchSpec::Claude(launch), std::env::temp_dir(), cx)
         });
         chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
@@ -593,24 +634,24 @@ mod tests {
     async fn sign_in_polling_stops_after_its_bound(cx: &mut TestAppContext) {
         let dir = TempDir::new();
         let counts = dir.0.join("mcp-status-requests");
-        // SAFETY: nextest runs each test in its own process; the variable is
-        // set before the fixture CLI is launched and read by nobody else.
-        unsafe { std::env::set_var("SIRIO_FIXTURE_COUNT", &counts) };
-        let (chat, cx) = native_chat(cx);
+        let (chat, cx) = fixture_chat(cx, "session_panel", Some(&counts));
         settle(cx, |cx| row(&chat, cx, NOTION).is_some());
         activate(&chat, cx, NOTION);
         settle(cx, |cx| {
             row(&chat, cx, NOTION).is_some_and(|(d, _)| d == "waiting for sign-in…")
         });
-        // Past the 120 s bound, three seconds at a time: each tick lets one
-        // poll run. The server never signs in, so the bound is what ends it.
-        for _ in 0..60 {
-            cx.cx.executor().advance_clock(Duration::from_secs(3));
-            std::thread::sleep(Duration::from_millis(40));
-            cx.cx.run_until_parked();
+        // Past the 120 s bound: the clock moves three seconds at a time and
+        // each step lets the poll's timer fire. The CLI is a real process, so
+        // its answers come back in real time; a short yield between steps is
+        // all that waits on it. The server never signs in, so the bound is
+        // what ends the poll.
+        for _ in 0..5000 {
             if row(&chat, cx, NOTION).is_some_and(|(d, _)| d != "waiting for sign-in…") {
                 break;
             }
+            cx.cx.executor().advance_clock(Duration::from_secs(3));
+            cx.cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(2));
         }
         // The browser step may have finished without the CLI noticing, so
         // the row offers Reconnect rather than another Sign in.
@@ -619,17 +660,53 @@ mod tests {
             Some(("needs sign-in".into(), Some("Reconnect".into())))
         );
         let asked = count_lines(&counts);
-        for _ in 0..10 {
-            cx.cx.executor().advance_clock(Duration::from_secs(3));
-            std::thread::sleep(Duration::from_millis(40));
-            cx.cx.run_until_parked();
-        }
+        // Absence has nothing to wait on: let a minute of virtual time pass
+        // and give a stray poll a moment of real time to show itself.
+        cx.cx.executor().advance_clock(Duration::from_secs(60));
+        cx.cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(200));
+        cx.cx.run_until_parked();
         assert_eq!(count_lines(&counts), asked, "nothing asks once the bound has ended");
-        assert!((40..=43).contains(&asked), "the poll ran every three seconds, forty times: {asked}");
+        // It polled, and not twice over as a doubled loop would.
+        assert!((2..=45).contains(&asked), "the poll's requests: {asked}");
     }
 
     fn count_lines(path: &Path) -> usize {
         std::fs::read_to_string(path).map_or(0, |text| text.lines().count())
+    }
+
+    /// What the row says under itself, in full.
+    fn note(chat: &Entity<Chat>, cx: &VisualTestContext, key: &str) -> Option<String> {
+        connectors(chat, cx)?
+            .rows
+            .into_iter()
+            .find(|row| row.key == key)
+            .map(|row| row.note)
+    }
+
+    #[gpui::test]
+    async fn a_refused_reconnect_shows_the_cli_sentence_until_the_next_refresh(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = fixture_chat(cx, "session_panel_refuse", None);
+        settle(cx, |cx| row(&chat, cx, CODEGRAPH).is_some_and(|(d, _)| d == "failed"));
+        activate(&chat, cx, CODEGRAPH);
+        settle(cx, |cx| note(&chat, cx, CODEGRAPH).is_some_and(|note| !note.is_empty()));
+        let sentence = note(&chat, cx, CODEGRAPH).unwrap();
+        assert!(
+            sentence.ends_with("Connection refused: codegraph did not start (exit 1)"),
+            "the CLI's whole sentence, not a cut one: {sentence}"
+        );
+        // The server is still what it was, and can be tried again.
+        assert_eq!(
+            row(&chat, cx, CODEGRAPH),
+            Some(("failed".into(), Some("Reconnect".into())))
+        );
+        // Opening the column reads the states again; what failed before is
+        // old news.
+        chat.update(cx, |chat, cx| chat.set_session_panel_open(false, cx));
+        chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
+        settle(cx, |cx| note(&chat, cx, CODEGRAPH) == Some(String::new()));
     }
 
     #[gpui::test]

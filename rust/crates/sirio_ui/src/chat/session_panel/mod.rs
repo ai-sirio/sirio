@@ -65,6 +65,8 @@ pub struct RowSnapshot {
     pub tag: String,
     pub expanded: Option<bool>,
     pub action: Option<String>,
+    /// A line under the row that wraps in full: what a failed action said.
+    pub note: String,
 }
 
 /// One line of a card, as it is drawn and as the snapshot reports it.
@@ -93,6 +95,8 @@ pub(super) struct Row {
     /// Draws the action's name at the row's end, as a row whose action is
     /// not obvious from its label needs.
     pub(super) show_action: bool,
+    /// A muted line under the row, wrapping rather than truncated.
+    pub(super) note: String,
 }
 
 /// How a status dot reads, resolved to a theme colour when it is drawn.
@@ -121,6 +125,7 @@ impl Row {
             heading: false,
             tone: None,
             show_action: false,
+            note: String::new(),
         }
     }
 }
@@ -384,6 +389,7 @@ impl Chat {
                             tag: row.tag,
                             expanded: row.expanded,
                             action: row.action,
+                            note: row.note,
                         })
                         .collect(),
                 })
@@ -597,7 +603,8 @@ impl Chat {
         let entity = cx.entity();
         let row_key = row.key.clone();
         let folds = row.expanded.is_some();
-        div()
+        let indent = f32::from(row.depth) * 12.0;
+        let line = div()
             .id(key.clone())
             .debug_selector({
                 let selector = key.to_string();
@@ -681,7 +688,29 @@ impl Chat {
                     .flex_none()
                     .text_color(theme.ely.link)
                     .child(action)
-            }))
+            }));
+        if row.note.is_empty() {
+            return line.into_any_element();
+        }
+        // The line's own chevron, dot and gaps are not repeated: the note
+        // starts under the label's depth and wraps across the card.
+        div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .child(line)
+            .child(
+                div()
+                    .pl(px(indent + 20.0))
+                    .text_size(caption)
+                    .text_color(theme.ely.fg_muted)
+                    .child(
+                        selectable_text(row.note.clone()).id(SharedString::from(format!(
+                            "session-row-note-{}",
+                            row.key
+                        ))),
+                    ),
+            )
             .into_any_element()
     }
 }

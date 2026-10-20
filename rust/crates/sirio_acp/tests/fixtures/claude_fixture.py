@@ -12,6 +12,17 @@ import sys
 import time
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "normal"
+# `session_panel_refuse` is `session_panel` with `mcp_reconnect` refused for
+# `codegraph`: a failed action whose sentence the panel has to show.
+REFUSE_RECONNECT = MODE == "session_panel_refuse"
+if REFUSE_RECONNECT:
+    MODE = "session_panel"
+# A launch argument names the file `mcp_status` requests are counted in, so a
+# test needs no environment of its own; the environment names it otherwise.
+COUNT_PATH = next(
+    (arg[len("--fixture-count="):] for arg in sys.argv if arg.startswith("--fixture-count=")),
+    os.environ.get("SIRIO_FIXTURE_COUNT"),
+)
 # The worker appends its protocol flags after our own argv, so a second
 # positional starting with "-" is one of those, not a pid file.
 PID_PATH = (
@@ -364,14 +375,18 @@ def main():
             elif subtype == "mcp_status":
                 # A file named by the environment counts the requests, one
                 # line each, so a test can tell a poll that stopped.
-                count_path = os.environ.get("SIRIO_FIXTURE_COUNT")
-                if count_path:
-                    with open(count_path, "a") as count:
+                if COUNT_PATH:
+                    with open(COUNT_PATH, "a") as count:
                         count.write("mcp_status\n")
                 control_response(request_id, {"mcpServers": session_panel_servers()})
             elif subtype == "mcp_reconnect":
                 name = request.get("serverName")
-                if name == "codegraph":
+                if REFUSE_RECONNECT and name == "codegraph":
+                    control_error(
+                        request_id,
+                        "Connection refused: codegraph did not start (exit 1)",
+                    )
+                elif name == "codegraph":
                     RECONNECTED.add(name)
                     control_response(request_id, {})
                 else:
