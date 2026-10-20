@@ -11,6 +11,11 @@ set -euo pipefail
 # and driven through the debug-only `surface chat panel` verb, so no pixel is read.
 # Framed runs add PID-matched window captures to look at.
 #
+# The change request card is read only while a frame paints the column, so a run
+# with no display (--state-only alone) has nothing that paints and skips the two
+# scenarios that read the forge (change_request, rate_limit_shared); --state-only
+# with --display :N paints on that display without taking captures and runs all six.
+#
 # Scenarios (each starts a fresh Sirio with its own database, host and HOME):
 #   environment        the project, the chat's directory (the worktree's root) and the branch, tagged worktree
 #   context            asked once on open with no prompt yet, then after a prompt: the first
@@ -37,10 +42,12 @@ set -euo pipefail
 #
 # Usage: Scripts/Tests/test-chat-session-panel-e2e.sh [--state-only] [--out-dir DIR]
 #          [--display :N] [--appearance light|dark] [--window-size WxH] [--only NAME[,NAME...]]
-#   --window-size (default 2200x1000, framed runs only) is what the app's window is
-#     resized to: the column steps aside under 640 px of chat, and the default window
-#     leaves the Secondary pane that holds the chat about 430 px.
-#   --only runs some scenarios and prints CHAT SESSION PANEL E2E PARTIAL instead.
+#   --window-size WxH (framed runs only; default none) resizes the app's window. Without
+#     it the window keeps Sirio's own default size, which leaves the chat about 430 px
+#     wide, so the column is laid over the transcript (the snapshot says `overlay`);
+#     a window of 2200x1000 leaves the chat wide enough for the column to dock.
+#   --only runs some scenarios and prints CHAT SESSION PANEL E2E PARTIAL instead; the
+#     scenarios that read the forge are refused without a display.
 #   A framed run needs a private display, for example:
 #     Xvfb :97 -screen 0 2400x1200x24 &
 #   and Mesa's lavapipe (software Vulkan) for the window to draw on it.
@@ -53,7 +60,7 @@ STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
 APPEARANCE=""
-WINDOW_SIZE="2200x1000"
+WINDOW_SIZE=""
 ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -69,12 +76,24 @@ done
 
 refuse() { echo "refused: $*" >&2; exit 2; }
 case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark, not $APPEARANCE" ;; esac
-[[ "$WINDOW_SIZE" =~ ^[0-9]+x[0-9]+$ ]] || refuse "--window-size is WxH, not $WINDOW_SIZE"
-SCENARIOS=("${ALL_SCENARIOS[@]}")
+[ -z "$WINDOW_SIZE" ] || [[ "$WINDOW_SIZE" =~ ^[0-9]+x[0-9]+$ ]] || refuse "--window-size is WxH, not $WINDOW_SIZE"
+# The scenarios that read the forge through the change request card, which reads only
+# while a frame paints the column.
+PAINTED_SCENARIOS=" change_request rate_limit_shared "
+SCENARIOS=()
+SKIPPED=()
+for name in "${ALL_SCENARIOS[@]}"; do
+  if [ -z "$DISPLAY_TARGET" ] && [[ "$PAINTED_SCENARIOS" == *" $name "* ]]; then
+    SKIPPED+=("$name")
+  else
+    SCENARIOS+=("$name")
+  fi
+done
 if [ -n "$ONLY" ]; then
   IFS=',' read -r -a SCENARIOS <<<"$ONLY"
   for name in "${SCENARIOS[@]}"; do
     case " ${ALL_SCENARIOS[*]} " in *" $name "*) ;; *) refuse "unknown scenario $name (${ALL_SCENARIOS[*]})" ;; esac
+    [ -n "$DISPLAY_TARGET" ] || [[ "$PAINTED_SCENARIOS" != *" $name "* ]] || refuse "scenario $name needs a painted column: pass --display :N"
   done
 fi
 # The display number of a local X display: ":97", ":0097" and ":97.0" are all 97.
@@ -98,10 +117,11 @@ if [ -n "$DISPLAY_TARGET" ]; then
   ps -u "$(id -u)" -o args= | python3 -c 'import re, sys; n = sys.argv[1]; sys.exit(0 if any(re.search(r"(^|/)Xvfb :" + n + r"( |$)", line) for line in sys.stdin) else 1)' "$target_number" \
     || refuse "no Xvfb :$target_number is running as $(id -un): start a private one (Xvfb :$target_number -screen 0 1600x1000x24 &)"
   DISPLAY_TARGET=":$target_number"
-  if [ "$STATE_ONLY" -eq 0 ]; then
+  if [ "$STATE_ONLY" -eq 0 ] || [ -n "$WINDOW_SIZE" ]; then
+    command -v xdotool >/dev/null || refuse "xdotool is required to resize the window"
     geometry=$(DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool getdisplaygeometry 2>/dev/null || true)
     [ -n "$geometry" ] || refuse "no X server answers on $DISPLAY_TARGET"
-    [ "${geometry% *}" -ge "${WINDOW_SIZE%x*}" ] && [ "${geometry#* }" -ge "${WINDOW_SIZE#*x}" ] \
+    [ -z "$WINDOW_SIZE" ] || { [ "${geometry% *}" -ge "${WINDOW_SIZE%x*}" ] && [ "${geometry#* }" -ge "${WINDOW_SIZE#*x}" ]; } \
       || refuse "the display is ${geometry% *}x${geometry#* }, smaller than --window-size $WINDOW_SIZE: start a larger Xvfb (Xvfb $DISPLAY_TARGET -screen 0 2400x1200x24 &)"
   fi
 fi
@@ -119,6 +139,9 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 command -v python3 >/dev/null || fail "python3 is required"
 command -v curl >/dev/null || fail "curl is required"
 echo "display: ${DISPLAY_TARGET:-none (--state-only)}; scenarios: ${SCENARIOS[*]}; appearance: ${APPEARANCE:-default}"
+for name in "${SKIPPED[@]:-}"; do
+  [ -z "$name" ] || [ -n "$ONLY" ] || echo "SKIP: scenario $name reads a column that only a frame paints, and there is no --display"
+done
 
 # ---- the user's mise config must not move ---------------------------------
 MISE_CONFIG="$HOME/.config/mise/config.toml"
@@ -257,9 +280,9 @@ resolved=$(PATH="$APP_PATH" command -v claude || true)
 echo "OK: claude resolves to the shim"
 
 VULKAN_ENV=()
-if [ "$STATE_ONLY" -eq 0 ]; then
+if [ -n "$DISPLAY_TARGET" ]; then
   LVP=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true)
-  [ -n "$LVP" ] || fail "software Vulkan (lvp_icd*.json in /usr/share/vulkan/icd.d) is required for a framed run on Xvfb; install vulkan-swrast or pass --state-only"
+  [ -n "$LVP" ] || fail "software Vulkan (lvp_icd*.json in /usr/share/vulkan/icd.d) is required for a framed run on Xvfb; install vulkan-swrast or drop --display"
   VULKAN_ENV=("VK_DRIVER_FILES=$LVP" "VK_ICD_FILENAMES=$LVP")
   echo "vulkan: lavapipe"
 fi
@@ -371,13 +394,26 @@ wait_panel() { E2E wait "$SURFACE" "$1" "${3:-30}" "$2" || fail "$1"; }
 find_panel() { E2E find "$SURFACE" "$1" "${3:-30}" "$2" || fail "$1"; }
 check_panel() { E2E check "$SURFACE" "$1" "$2" || fail "$1"; }
 panel_ctl() { ctl surface chat panel "$SURFACE" "$@"; }
-# The column opens; on a display it is also drawn (the chat is wide enough for it).
+# The column opens; on a display it is also drawn: over the transcript of a chat narrower
+# than 640 px (Sirio's default window), beside it in a window resized wide (--window-size).
 open_column() {
   panel_ctl open >/dev/null
   wait_panel "the column is open" 'p["open"]'
-  if [ "$STATE_ONLY" -eq 0 ]; then
-    wait_panel "the column is drawn beside the transcript" 'p["drawn"]'
+  if [ -n "$DISPLAY_TARGET" ]; then
+    if [ -n "$WINDOW_SIZE" ]; then
+      wait_panel "the column is drawn beside the transcript" 'p["drawn"] and not p["overlay"]'
+    else
+      wait_panel "the column is laid over the narrow chat's transcript" 'p["drawn"] and p["overlay"]'
+    fi
   fi
+}
+# Folds the cards above the one a capture is of, so a narrow chat's column shows it whole.
+fold_cards() { # key...
+  local key
+  for key in "$@"; do
+    panel_ctl toggle "$key" >/dev/null
+    wait_panel "the $key card is folded" "S('$key')['expanded'] is False"
+  done
 }
 # Polls a sirioctl read until one of its fields is `want`; the reads are logged.
 wait_field() { # desc key want seconds sirioctl-args...
@@ -469,7 +505,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_CSP_E2E_RUN=$RUN_DIR"
   )
   [ -z "${LC_ALL:-}" ] || pairs+=("LC_ALL=$LC_ALL")
-  if [ "$STATE_ONLY" -eq 0 ]; then
+  if [ -n "$DISPLAY_TARGET" ]; then
     pairs+=("DISPLAY=$DISPLAY_TARGET" "GPUI_X11_SCALE_FACTOR=1" "${VULKAN_ENV[@]}")
   fi
   export SIRIO_SOCKET="$RUN_DIR/$name.sock"
@@ -490,7 +526,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
   [ "$(probe_count)" -gt "$before" ] \
     || fail "$name: the app's claude --version probe never reached the shim"
   echo "OK: $name: pid $APP_PID answers; its claude --version probe reached the shim"
-  if [ "$STATE_ONLY" -eq 0 ]; then
+  if [ -n "$DISPLAY_TARGET" ] && [ -n "$WINDOW_SIZE" ]; then
     local window="" _
     for _ in $(seq 1 100); do
       window=$(find_window)
@@ -542,7 +578,7 @@ chat_app() { # name
   done
   # `surface.chat.open` answers the first chat tab, and a fresh Sirio starts with a
   # default one that belongs to no agent, beside a terminal that would share the
-  # width with the chat (the column steps aside under 640 px): close both, so the
+  # width with the chat (the column goes over the transcript under 640 px): close both, so the
   # chat opened here is the first and the only tab.
   local old_tabs
   old_tabs=$(tab_positions chat terminal)
@@ -595,12 +631,26 @@ scenario_context() {
   wait_panel "the context total is the stub's" "'16%' in S('context')['summary'] and '64.9k' in S('context')['summary']"
   wait_panel "Memory files is still the first reducible group" \
     "rows('context')[1]['label'] == 'Memory files' and rows('context')[1]['detail'] == '34.2k'"
+  check_panel "free space closes the card, after Claude Code" \
+    "rows('context')[-1]['key'] == 'context/free_space' and any(r['key'] == 'context/claude_code' for r in rows('context')[:-1])"
+  check_panel "the memory group's remainder sits after its files" \
+    "[r['label'] for r in rows('context') if r['key'].startswith('context/memory/')][-1] == 'Other'"
   echo "step: a plugin node unfolds to its agents"
   local plugin="context/plugins/plugin-dev"
   check_panel "the plugin node is folded" "R('context', '$plugin') is not None and R('context', '$plugin')['expanded'] is False"
   panel_ctl toggle "$plugin" >/dev/null
   wait_panel "the plugin's agent appears" "R('context', '$plugin/agent:agent-creator') is not None"
   capture context
+  echo "step: the groups fold, so the Fixed group shows in the capture"
+  fold_cards environment
+  local node
+  for node in context/memory context/plugins context/conversation; do
+    panel_ctl toggle "$node" >/dev/null
+    wait_panel "$node is folded" "R('context', '$node')['expanded'] is False"
+  done
+  capture context-fixed
+  panel_ctl toggle context/memory >/dev/null
+  wait_panel "Memory files is open again" "R('context', 'context/memory')['expanded'] is True"
   echo "step: the project CLAUDE.md opens as a file tab"
   local memory
   memory=$(find_panel "the project memory row" "next(r['key'] for r in rows('context') if r['key'].endswith('/CLAUDE.md') and r['tag'] == 'Project')")
@@ -618,6 +668,7 @@ scenario_connectors() {
     "R('connectors', '$codegraph') and R('connectors', '$codegraph')['detail'] == 'failed' and R('connectors', '$codegraph')['action'] == 'Reconnect'"
   wait_panel "Notion needs sign-in, offering Sign in" \
     "R('connectors', '$notion') and R('connectors', '$notion')['detail'] == 'needs sign-in' and R('connectors', '$notion')['action'] == 'Sign in'"
+  fold_cards environment context
   capture connectors-before
   panel_ctl activate "$codegraph" >/dev/null
   wait_panel "codegraph reconnected" "R('connectors', '$codegraph')['detail'] == 'connected'"
@@ -637,6 +688,7 @@ scenario_change_request() {
   chat_app change_request
   open_column
   wait_panel "the card is #112" "R('change_request', 'change_request/card') and R('change_request', 'change_request/card')['label'].startswith('#112')"
+  fold_cards environment context
   capture change_request
   panel_ctl activate change_request/card >/dev/null
   wait_field "a change request tab for #112 is open" label '#112' 20 surface change-request read
@@ -692,7 +744,7 @@ scenario_restore() {
   [ -n "$SURFACE" ] || fail "the chat was not restored"
   echo "OK: the restored chat is $SURFACE (was $first_surface)"
   wait_panel "the restored chat's column is open" 'p["open"]'
-  if [ "$STATE_ONLY" -eq 0 ]; then
+  if [ -n "$DISPLAY_TARGET" ]; then
     wait_panel "and drawn" 'p["drawn"]'
   fi
   wait_panel "and its Environment is drawn again" "R('environment', 'environment.project') is not None"
@@ -714,5 +766,6 @@ echo "artifact: $OUT_DIR"
 if [ -n "$ONLY" ]; then
   echo "CHAT SESSION PANEL E2E PARTIAL ($ran of ${#ALL_SCENARIOS[@]} scenarios: ${SCENARIOS[*]})"
 else
-  echo "CHAT SESSION PANEL E2E OK ($ran scenarios, appearance ${APPEARANCE:-default}, state-only $STATE_ONLY)"
+  skipped=$(( ${#ALL_SCENARIOS[@]} - ran ))
+  echo "CHAT SESSION PANEL E2E OK ($ran scenarios, $skipped skipped without a display, appearance ${APPEARANCE:-default}, state-only $STATE_ONLY, window ${WINDOW_SIZE:-default})"
 fi
