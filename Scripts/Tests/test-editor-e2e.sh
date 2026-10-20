@@ -120,6 +120,11 @@ set -eEuo pipefail
 #   hover_leave       with the card of an Error drawn for a real resting pointer, a pointer
 #                     that jumps onto the find bar, and onto the conflict banner, leaves no
 #                     card (`hover=` empty) -- Ely says when the pointer leaves the code
+#   drawer            the worktree's drawer under the code: Ctrl+J (a real X key) opens and closes it,
+#                     a tab and a height are chosen through the debug verb, a second file draws the
+#                     same drawer, tab and height survive a quit and relaunch, a real drag of its top
+#                     edge sets the height, the corner card sits above it and follows it, a right
+#                     press in it opens no editor menu; captured
 #   problems_unopened  the fake server (fake_lsp.py `publish`) reports an error for a file nobody
 #                     opened: the drawer opens itself on Problems, lists it, and the caret does not move
 #   problems_alarm    the seen set (spec 4.4) end to end: the same error rewritten, or cleared and

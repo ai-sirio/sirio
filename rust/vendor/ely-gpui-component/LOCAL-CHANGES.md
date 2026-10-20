@@ -340,7 +340,7 @@ applied as upstream wrote it or was rewritten against the vendored code.
   Skipped, not vendored: `src/editor/console.rs` (the output panel's shown
   channel) and `tasks/panics.md`; the output panel's panic is not ported.
   `src/editor/filters.rs` came in with the editor panels (project 2) and takes
-  this commit's one hunk to it, applied with `patch -p1` from
+  this commit's one hunk, applied with `patch -p1` from
   `git diff e17e31a6 b29d66c -- src/editor/filters.rs`: a glob whose generated
   regex fails to compile (a 500 000-byte one) logs through `inspect_err` and
   matches nothing, instead of `expect` panicking. Its test
