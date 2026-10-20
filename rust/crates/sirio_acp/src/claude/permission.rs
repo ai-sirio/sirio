@@ -31,11 +31,27 @@ pub(super) fn options_for(request: &CanUseTool) -> Vec<PermissionOption> {
         ];
     }
     let mut options = vec![option("allow_once", "Allow", "AllowOnce")];
-    if !request.permission_suggestions.is_empty() {
+    if !remembered(request).is_empty() {
         options.push(option("allow_always", "Always allow", "AllowAlways"));
     }
     options.push(option("reject_once", "Reject", "RejectOnce"));
     options
+}
+
+/// What "Always allow" hands back: the CLI's suggestions, less a switch to
+/// `bypassPermissions`. That mode is reached only through the chat's own
+/// confirmation, and the launch flag that lets the CLI accept it would
+/// otherwise let this answer apply it too.
+fn remembered(request: &CanUseTool) -> Vec<Value> {
+    request
+        .permission_suggestions
+        .iter()
+        .filter(|suggestion| {
+            !(suggestion.get("type").and_then(Value::as_str) == Some("setMode")
+                && suggestion.get("mode").and_then(Value::as_str) == Some("bypassPermissions"))
+        })
+        .cloned()
+        .collect()
 }
 
 fn option(id: &str, name: &str, kind: &str) -> PermissionOption {
@@ -71,7 +87,7 @@ pub(super) fn answer_for(request: &CanUseTool, option_id: &str) -> Answer {
         "allow_always" => Answer {
             result: PermissionResult::allow_with_permissions(
                 request.input.clone(),
-                request.permission_suggestions.clone(),
+                remembered(request),
             ),
             then_mode: None,
         },
@@ -184,6 +200,37 @@ mod tests {
             permission_suggestions: suggestions,
             decision_reason: None,
         }
+    }
+
+    /// Bypass permissions is reached only through the chat's confirmation
+    /// dialog. The ways "Always allow" could open a second door: it echoes
+    /// a `setMode` to bypass the CLI suggested; filtering it drops the
+    /// suggestions beside it, or a `setMode` to another mode; and with only
+    /// the bypass suggestion left it still offers to remember something.
+    #[test]
+    fn always_allow_never_carries_a_switch_to_bypass_permissions() {
+        let rule = json!({"type": "addRules", "rules": [{"toolName": "Bash"}],
+                          "behavior": "allow", "destination": "session"});
+        let edits = json!({"type": "setMode", "mode": "acceptEdits", "destination": "session"});
+        let bypass =
+            json!({"type": "setMode", "mode": "bypassPermissions", "destination": "session"});
+        let mixed = request(
+            "Bash",
+            json!({"command": "ls"}),
+            vec![rule.clone(), bypass.clone(), edits.clone()],
+        );
+        assert_eq!(
+            answer_for(&mixed, "allow_always").result,
+            PermissionResult::allow_with_permissions(json!({"command": "ls"}), vec![rule, edits])
+        );
+
+        let only_bypass = request("Bash", json!({"command": "ls"}), vec![bypass]);
+        assert!(
+            !options_for(&only_bypass)
+                .iter()
+                .any(|option| option.id == "allow_always"),
+            "nothing left to remember, so nothing to offer"
+        );
     }
 
     #[test]
