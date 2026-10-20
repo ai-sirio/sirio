@@ -169,6 +169,9 @@ Problems when the worktree holds an **error the user has not seen**.
   Problems' title all the same. And the converse, rarer one: a close that
   lands between a server clearing a file and republishing it records the
   file as fixed, so the identical republish reopens the drawer once.
+  Publishes move the seen set at most once per 250 ms (closing the drawer
+  or showing Problems moves it at once), so a quit inside that pause after
+  a burst seen in Problems can reopen the drawer once at the next launch.
 - The seen set is persisted with the drawer state (§4.2), so a relaunch
   does not reopen a drawer the user closed.
 - Warnings and notes never open it, and are not in the seen set.
