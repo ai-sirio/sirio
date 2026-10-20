@@ -28,6 +28,8 @@ pub mod editor_prefs;
 pub mod ely;
 pub mod file_context_menu;
 pub mod file_view;
+pub mod branch_card;
+pub mod forge_pause;
 pub mod forge_source;
 pub mod handoff;
 mod horizontal_scroll;
