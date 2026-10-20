@@ -171,6 +171,7 @@ fn usage() {
          \x20 panel show <id>                   show a session in a tab (app only)\n\
          \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
          \x20 surface layout read               whether the right pane is drawn, each half's tabs, the right panel's view\n\
+         \x20 surface chat panel <surfaceId> open|close|toggle <key>|activate <key>  (debug builds) drive a chat's session panel\n\
          \x20 surface open-list open --entry show|chat|terminal|browser|changes|open-file|project-settings|other-agents|agent:<id>  (debug builds) click that row of the Open list\n\
          \x20 surface terminal open [--cmd c | --agent a]  (debug builds) open an app terminal tab running c, or agent a\n\
          \x20 surface host end-all             (debug builds) End All sessions without its dialog\n\
@@ -1099,6 +1100,24 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ),
         ("tabs", "read") => require_ok(socket, &sirio_control::protocol::request::tabs_read()),
         ("layout", "read") => require_ok(socket, &sirio_control::protocol::request::layout_read()),
+        ("chat", "panel") => {
+            let surface_id = parsed
+                .positional
+                .get(2)
+                .ok_or_else(|| "Missing chat surface id".to_string())?;
+            let verb = parsed
+                .positional
+                .get(3)
+                .ok_or_else(|| "Missing open|close|toggle <key>|activate <key>".to_string())?;
+            let key = parsed.positional.get(4).map(String::as_str);
+            if matches!(verb.as_str(), "toggle" | "activate") && key.is_none() {
+                return Err(format!("Missing key for {verb}"));
+            }
+            require_ok(
+                socket,
+                &sirio_control::protocol::request::chat_panel(surface_id, verb, key),
+            )
+        }
         ("open-list", "open") => {
             let entry = parsed
                 .value("entry")

@@ -49,6 +49,7 @@ mod history;
 mod list_scroll;
 mod menus;
 mod question_dock;
+mod session_panel;
 mod thought;
 mod tool_calls;
 mod transcript;
@@ -56,6 +57,9 @@ mod turn_rail;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
 use bezel::ui::widgets::{Controls, SliderDrag, slider_fraction};
+pub use session_panel::{
+    RowSnapshot, SectionSnapshot, SessionPanelAction, SessionPanelSnapshot,
+};
 use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
 use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 
@@ -894,7 +898,7 @@ enum Entry {
 ///
 /// The shell owns protocol encoding; this type keeps the UI independent of
 /// the control transport while making the rendered state observable there.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChatControlSnapshot {
     pub status: String,
     pub composer_text: String,
@@ -905,6 +909,9 @@ pub struct ChatControlSnapshot {
     /// The whole queue, front first.
     pub queued: Vec<String>,
     pub transcript: Vec<BTreeMap<String, String>>,
+    /// The session panel's column: whether it is open, whether it is drawn
+    /// at this width, and each section's rows.
+    pub session_panel: SessionPanelSnapshot,
 }
 
 impl Entry {
@@ -1567,6 +1574,9 @@ pub enum ChatEvent {
     /// surface, so the chat states the problem and asks; it does not reach
     /// across and open a window itself.
     OpenSettings,
+    /// The session panel's column opened or closed: the workspace saves the
+    /// layout, which records it.
+    SessionPanelToggled,
 }
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
@@ -1893,6 +1903,8 @@ pub struct Chat {
     agent_id: Option<String>,
     agent_name: Option<String>,
     agent_cwd: PathBuf,
+    /// The column docked beside the transcript.
+    session_panel: session_panel::SessionPanel,
     entries: Vec<Entry>,
     /// One slot per entry in `entries`: the checkpoint id of a user turn
     /// sent on this connection, `None` everywhere else — restored turns,
@@ -2295,6 +2307,7 @@ impl Chat {
             agent_id: None,
             agent_name: None,
             agent_cwd: cwd,
+            session_panel: session_panel::SessionPanel::new(),
             entries: Vec::new(),
             turn_message_ids: Vec::new(),
             pending_rewind: None,
@@ -3503,6 +3516,7 @@ impl Chat {
             queued_text: self.queue.front().cloned().unwrap_or_default(),
             queued: self.queue.iter().cloned().collect(),
             transcript: self.entries.iter().map(control_entry_row).collect(),
+            session_panel: self.session_panel_snapshot(),
         }
     }
 
@@ -6183,6 +6197,9 @@ impl Render for Chat {
             .get()
             .map(|_| self.render_transcript_context_menu(&bezel_theme, cx));
         let bypass_dialog = self.render_bypass_dialog(cx);
+        let session_panel = self
+            .session_panel_drawn()
+            .then(|| self.render_session_panel(&theme, cx));
 
         div()
             .id("chat-root")
@@ -6207,7 +6224,7 @@ impl Render for Chat {
             .when(can_accept_drop, |this| {
                 this.on_drop(cx.listener(Self::drop_external_paths))
             })
-            .child(div().w_full().flex_1().min_h_0().child(
+            .child(div().w_full().flex_1().min_h_0().flex().flex_row().child(div().flex_1().min_w_0().h_full().child(
                 ely_gpui_component::chat::ChatContainer::new(
 div().size_full().min_h_0().relative().flex().flex_col().items_center()
                 .child(
@@ -6505,6 +6522,9 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                     .child(self.render_composer(&theme, window, cx)),
             )
             ))
+            .children(session_panel))
+            // Measures the chat's width; paints nothing.
+            .child(self.render_session_panel_probe(cx))
             .child({
                 // F-CHAT-13: the "Drop files to attach" overlay, matching
                 // Swift's `ChatPaneView` — invisible by default, revealed by

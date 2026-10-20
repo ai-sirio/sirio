@@ -832,6 +832,7 @@ impl Chat {
         let send_entity = entity.clone();
         let stop_entity = entity.clone();
         let attach_entity = entity.clone();
+        let panel_entity = entity.clone();
         let overflow_entity = entity.clone();
 
         // Slash-command popup (F-CHAT-09): a filtered list over the input,
@@ -1037,6 +1038,23 @@ impl Chat {
                     }),
             );
 
+        // Opens and closes the session panel's column; drawn "on" while open.
+        let panel_open = self.session_panel_open();
+        let panel_button = div()
+            .flex_none()
+            .debug_selector(|| "session-panel-toggle".into())
+            .rounded(theme.radii.control)
+            .when(panel_open, |button| button.bg(theme.ely.active))
+            .child(
+                IconButton::new("session-panel-button", IconName::PanelRight)
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .tooltip("Session panel")
+                    .on_click(move |_, _, cx| {
+                        panel_entity.update(cx, |chat, cx| chat.toggle_session_panel(cx));
+                    }),
+            );
+
         let overflow_button = div()
             .flex_none()
             .debug_selector(|| "composer-overflow".into())
@@ -1162,6 +1180,7 @@ impl Chat {
             prompt = prompt
                 .tool(self.render_agent_controls(theme, window, cx))
                 .trailing(attach_button)
+                .trailing(panel_button)
                 .trailing(
                     div()
                         .relative()

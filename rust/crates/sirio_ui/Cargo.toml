@@ -17,6 +17,7 @@ bezel-syntax.workspace = true
 # The grammars bezel-syntax does not carry: Java, C, C++, Swift, Ruby, …
 sirio_syntax.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sirio_theme.workspace = true
 sirio_git.workspace = true

@@ -89,6 +89,11 @@ pub struct SessionTabState {
     /// at restore, so a draft the user never hit Enter on survives a restart.
     #[serde(default)]
     pub chat_draft: String,
+    /// Whether a chat tab's session panel column was open: captured live
+    /// from the `Chat` at save time like `chat_draft`, and applied again at
+    /// restore. Which sections inside it were folded is not kept.
+    #[serde(default)]
+    pub chat_session_panel_open: bool,
     /// #125 (spec R6.5): a browser tab's live address, captured at save time
     /// exactly the way `chat_draft` and `scrollback` above are, so a restored
     /// Browser tab comes back where the user left it rather than at the
@@ -215,6 +220,7 @@ impl SessionTabState {
                 .map(|(pane_id, bytes)| (*pane_id, Self::bounded_scrollback(bytes)))
                 .collect(),
             chat_draft: self.chat_draft.clone(),
+            chat_session_panel_open: self.chat_session_panel_open,
             browser_url: self.browser_url.clone(),
             editor_path: self.editor_path.clone(),
             shown_in_pane: self.shown_in_pane,
@@ -3556,6 +3562,21 @@ mod tests {
             decoded.chat_draft, "",
             "missing chat_draft must default rather than fail decode"
         );
+    }
+
+    #[test]
+    fn a_restored_tab_reopens_its_column() {
+        // A blob written before the session panel existed has no field: the
+        // column stays shut. One written with it open keeps it open.
+        let old_blob = r#"{"root_id":1,"pane_events":[],"scrollback":{}}"#;
+        let decoded = SessionTabState::decode(old_blob).expect("old blob must still decode");
+        assert!(!decoded.chat_session_panel_open);
+        let open = SessionTabState {
+            chat_session_panel_open: true,
+            ..SessionTabState::default()
+        };
+        let reread = SessionTabState::decode(&open.encode()).expect("own output decodes");
+        assert!(reread.chat_session_panel_open);
     }
 
     #[test]

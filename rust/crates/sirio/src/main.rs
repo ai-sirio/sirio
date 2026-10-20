@@ -44,7 +44,7 @@ use sirio_theme::{AgentBrandColor, Theme, ThemeMode};
 use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
-    chat::{Chat, ChatControlSnapshot, ChatEvent},
+    chat::{Chat, ChatControlSnapshot, ChatEvent, SessionPanelAction},
     drawer::{DrawerTab, SearchQuery, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent, rematch},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
     editor::{Conflict, LineEnding},
@@ -1468,6 +1468,11 @@ enum ChatControlAction {
     },
     Read {
         surface_id: String,
+    },
+    /// Debug-only: what the session panel's button and card titles do.
+    Panel {
+        surface_id: String,
+        action: SessionPanelAction,
     },
 }
 /// Cloning shares every entity handle (`PaneContent`'s `Clone`): a cloned
@@ -3439,6 +3444,42 @@ impl ControlHandler for AppControlHandler {
                     ChatControlAction::Read { surface_id }
                 };
                 self.queue_action(request, move |reply| ControlAction::Chat { action, reply })
+            }
+            "surface.chat.panel" if cfg!(debug_assertions) => {
+                let Some(surface_id) = request.params.get("surfaceId").cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.chat.panel requires surfaceId",
+                    );
+                };
+                let key = request.params.get("key").cloned();
+                let action = match request.params.get("action").map(String::as_str) {
+                    Some("open") => SessionPanelAction::Open,
+                    Some("close") => SessionPanelAction::Close,
+                    Some(verb @ ("toggle" | "activate")) => {
+                        let Some(key) = key else {
+                            return ControlResponse::failure(
+                                &request.id,
+                                format!("surface.chat.panel {verb} requires key"),
+                            );
+                        };
+                        if verb == "toggle" {
+                            SessionPanelAction::Toggle(key)
+                        } else {
+                            SessionPanelAction::Activate(key)
+                        }
+                    }
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.chat.panel requires action open, close, toggle or activate",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::Chat {
+                    action: ChatControlAction::Panel { surface_id, action },
+                    reply,
+                })
             }
             "panel.create" | "panel.split" | "panel.list" | "panel.write" | "panel.key"
             | "panel.read" | "panel.state" | "panel.scrollback" | "panel.wait"
@@ -7367,6 +7408,7 @@ impl SirioWorkspace {
                             // survives a restart.
                             TabContent::Chat(chat) => {
                                 state.chat_draft = chat.read(cx).draft_text();
+                                state.chat_session_panel_open = chat.read(cx).session_panel_open();
                             }
                             // #125 (spec R6.5): read live at save time, the
                             // same pattern as the scrollback and draft arms
@@ -8793,6 +8835,8 @@ impl SirioWorkspace {
                         actions.push(WorkspaceAction::OpenAgentSettings);
                     }
                 }
+                // Whether the column is open is part of the saved layout.
+                ChatEvent::SessionPanelToggled => workspace.schedule_save(cx),
                 ChatEvent::SessionIdentified(session_id) => {
                     // A hook write, like `save_session_ref`: the id must
                     // survive a restart that comes before any other save.
@@ -20096,6 +20140,11 @@ impl SirioWorkspace {
                 "transcript".to_string(),
                 sirio_control::protocol::rows::encode(&snapshot.transcript),
             ),
+            (
+                "sessionPanel".to_string(),
+                serde_json::to_string(&snapshot.session_panel)
+                    .expect("the session panel snapshot is serializable"),
+            ),
         ]
     }
 
@@ -20191,6 +20240,15 @@ impl SirioWorkspace {
                 Ok(Self::control_chat_result(&surface_id, snapshot))
             }
             ChatControlAction::Read { surface_id } => self.control_chat_read(&surface_id, cx),
+            ChatControlAction::Panel { surface_id, action } => {
+                let chat = self.control_chat_surface(&surface_id)?;
+                let window = window.ok_or("the session panel needs a window")?;
+                let snapshot = chat.update(cx, |chat, cx| {
+                    chat.session_panel_act(action, window, cx)?;
+                    Ok::<_, String>(chat.control_snapshot())
+                })?;
+                Ok(Self::control_chat_result(&surface_id, snapshot))
+            }
         }
     }
 
@@ -25512,6 +25570,9 @@ fn restore_tabs_with_terminal_cache(
                     if !tab_state.chat_draft.is_empty() {
                         chat.control_compose(&tab_state.chat_draft, cx);
                     }
+                    if tab_state.chat_session_panel_open {
+                        chat.set_session_panel_open(true, cx);
+                    }
                     chat
                 });
                 chat.update(cx, |chat, _| {
@@ -26100,6 +26161,9 @@ fn restore_tabs_in_workspace(
                     // F-CORE-WSP-08: an unsent draft survives a restart.
                     if !tab_state.chat_draft.is_empty() {
                         chat.control_compose(&tab_state.chat_draft, cx);
+                    }
+                    if tab_state.chat_session_panel_open {
+                        chat.set_session_panel_open(true, cx);
                     }
                     chat
                 });
@@ -43259,6 +43323,7 @@ done
             "surface.chat.permission" => request_with_params(method, &[]),
             "surface.chat.stop" => request_with_params(method, &[]),
             "surface.chat.read" => request_with_params(method, &[]),
+            "surface.chat.panel" => request::chat_panel("chat-1", "open", None),
             "browser.open" | "browser.navigate" | "browser.act" | "browser.get"
             | "browser.wait" | "browser.eval" | "browser.console" | "browser.snapshot"
             | "browser.permission" => request_with_params(method, &[]),
