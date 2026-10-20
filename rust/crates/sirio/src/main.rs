@@ -8041,9 +8041,9 @@ impl SirioWorkspace {
         let root = worktree.to_path_buf();
         drawer.update(cx, |drawer, _| {
             drawer.set_buffer_source(std::rc::Rc::new(move |cx: &App| {
-                workspace
-                    .read_with(cx, |workspace, cx| workspace.dirty_buffers(&root, cx))
-                    .unwrap_or_default()
+                // `None` while the workspace is being updated: the tabs cannot be
+                // read then, and the caller must not take that for "none are dirty".
+                workspace.read_with(cx, |workspace, cx| workspace.dirty_buffers(&root, cx)).ok()
             }));
         });
         self.drawers.insert(worktree.to_path_buf(), drawer.clone());
@@ -19321,7 +19321,11 @@ impl SirioWorkspace {
             .drawer()
             .cloned()
             .ok_or_else(|| "the file tab has no drawer".to_string())?;
-        drawer.update(cx, |drawer, cx| drawer.search_control(request, window, cx))?;
+        // The unsaved tabs, read now: the drawer cannot ask for them from inside
+        // this update, which holds the workspace.
+        let worktree = drawer.read(cx).worktree().to_path_buf();
+        let dirty = self.dirty_buffers(&worktree, cx).into_keys().collect();
+        drawer.update(cx, |drawer, cx| drawer.search_control(request, Ok(dirty), window, cx))?;
         self.control_editor_state(cx)
     }
 

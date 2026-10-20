@@ -535,7 +535,12 @@ impl FileView {
                 cx.notify();
             });
         });
-        let file_monitor = FileSystemEventMonitor::new(&path).ok();
+        // The debug switch the E2E uses to stand where macOS stands: no file
+        // watcher, so a tab learns of a write only when something tells it to
+        // look (compiled out of release builds).
+        let switched_off = std::env::var_os("SIRIO_NO_FILE_WATCH").is_some();
+        let watched = !(cfg!(debug_assertions) && switched_off);
+        let file_monitor = if watched { FileSystemEventMonitor::new(&path).ok() } else { None };
         let file_monitor_task = file_monitor.as_ref().map(|_| {
             cx.spawn(async move |this, cx| {
                 loop {

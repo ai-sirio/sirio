@@ -155,9 +155,12 @@ set -eEuo pipefail
 #                     file turned into a symlink after the search and its target. The dirty file is
 #                     left alone and named, the symlink named and kept, every other file replaced at
 #                     its current place, the open clean tab shows the new text at once and the search
-#                     runs again; captured
+#                     runs again; also a read-only file and a file over the size bound (neither
+#                     written, both named), the report's skip line, the preview on each result, and
+#                     the verb's refusal while the button is off; captured. With --no-file-watch
+#                     the open tab can only have been told by Replace all itself (the macOS path)
 #   replace_crlf      a CRLF file and a file of mixed line endings keep every ending outside the
-#                     replaced span, a multi-line regex span included
+#                     replaced span, a multi-line regex span included; pressed with a real click
 #   replace_capped    over 20 000 matches the button is disabled and says why
 #   prefs             the Editor switches on nested.rs. Each switch with a visible
 #                     effect (minimap, whitespace, rainbowBrackets, indentGuides,
@@ -175,7 +178,7 @@ set -eEuo pipefail
 # in frames/. Rerunning the script reproduces it.
 #
 # Usage: Scripts/Tests/test-editor-e2e.sh [--xvfb | --display :N] [--state-only]
-#          [--out-dir DIR] [--appearance light|dark] [--only NAME[,NAME...]]
+#          [--out-dir DIR] [--appearance light|dark] [--only NAME[,NAME...]] [--no-file-watch]
 #
 #   --xvfb        start a private Xvfb on a free display between :90 and :99
 #   --display :N  use an Xvfb this user started (never your own $DISPLAY)
@@ -184,6 +187,9 @@ set -eEuo pipefail
 #   --appearance  seed light or dark (default dark)
 #   --only        run the named scenarios alone and print "EDITOR E2E PARTIAL"
 #                 instead of "EDITOR E2E OK"; only the whole run is the artifact
+#   --no-file-watch  the app starts with SIRIO_NO_FILE_WATCH=1 (debug builds): no file view
+#                 watches its file, as on macOS. Meant for `--only replace_mixed`, where it
+#                 proves Replace all itself tells the open tabs; other scenarios rely on the watcher
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/rust/target}"
@@ -198,6 +204,7 @@ DISPLAY_TARGET=""
 OUT_DIR=""
 APPEARANCE="dark"
 ONLY=""
+NO_FILE_WATCH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --xvfb) START_XVFB=1; shift ;;
@@ -206,6 +213,7 @@ while [ $# -gt 0 ]; do
     --out-dir) OUT_DIR="${2:?--out-dir needs a directory}"; shift 2 ;;
     --appearance) APPEARANCE="${2:?--appearance needs light or dark}"; shift 2 ;;
     --only) ONLY=",${2:?--only needs scenario names},"; shift 2 ;;
+    --no-file-watch) NO_FILE_WATCH=1; export SIRIO_NO_FILE_WATCH=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -867,6 +875,7 @@ focus_window() {
 # The Ruler column field and the Tab size field of Settings → Editor, in the
 # window's own coordinates (the Ruler column field is enabled with Ruler on).
 CLICK_WINDOW=1470x833
+REPLACE_ALL_BUTTON=(1100 596)
 RULER_FIELD=(1139 660)
 TABSIZE_FIELD=(1139 705)
 
@@ -3717,8 +3726,8 @@ search_reset() {
   expect_state state loaded
   ctl surface editor drawer --show=search >/dev/null
   expect_state drawer_tab search
-  ctl surface editor search --query= --include= --exclude= --case=false --word=false \
-    --regex=false >/dev/null
+  ctl surface editor search --query= --replace= --include= --exclude= --case=false \
+    --word=false --regex=false >/dev/null
   ctl surface editor search --wait >/dev/null
   expect_state search_query ""
   expect_state search_results 0
@@ -3727,8 +3736,8 @@ search_wait() {
   ctl surface editor search --wait >/dev/null
 }
 search_done() {
-  ctl surface editor search --query= --include= --exclude= --case=false --word=false \
-    --regex=false >/dev/null
+  ctl surface editor search --query= --replace= --include= --exclude= --case=false \
+    --word=false --regex=false >/dev/null
   ctl surface editor search --wait >/dev/null
   ctl surface editor drawer --close >/dev/null
   expect_state drawer_open 0
@@ -3804,7 +3813,7 @@ scenario_search_scope() {
   expect_state search_files 1
   # The summary: the count, then what the run left unread. big.txt is above the
   # size bound, binary.bin is not UTF-8 and unreadable.txt is mode 000.
-  expect_state search_summary "1 results in 1 files · 3 skipped (too large/not UTF-8/unreadable)"
+  expect_state search_summary "1 result in 1 file · 3 skipped (too large/not UTF-8/unreadable)"
   expect_state search_capped 0
   echo "OK: an untracked file is searched, an ignored one is not, and the skips are named"
   ctl surface editor search --query=scope_needle_41 --include='target/**' >/dev/null
@@ -3910,6 +3919,10 @@ scenario_search_open() {
   expect_state search_selected search/other.rs:2
   expect_state drawer_tab search
   echo "OK: a result opened its file with the match selected, and that tab's drawer shows the same search with it chosen"
+  # With a replacement typed, each result previews it: the old text struck out
+  # beside the new.
+  ctl surface editor search --replace=session_root >/dev/null
+  expect_state replace_label "Replace 5 in 2 files"
   capture search-results
   ctl surface editor search --open=2 >/dev/null
   expect_active_tab session.rs
@@ -4043,8 +4056,7 @@ PY
 # other scenario uses.
 
 scenario_replace_mixed() {
-  local dir="$WT/replace-mixed" needle=repl_needle_62 done=repl_done_62 caret=14
-  local expected
+  local dir="$WT/replace-mixed" needle=repl_needle_62 done=repl_done_62 caret=14 refused
   search_reset
   rm -rf "$dir"
   mkdir -p "$dir"
@@ -4064,8 +4076,26 @@ write("d.rs", "fn d() { repl_needle_62(); }\n")
 write("run.sh", "#!/bin/sh\necho repl_needle_62\n", 0o755)
 write("target.rs", "fn t() { repl_needle_62(); }\n")
 write("link.rs", "fn l() { repl_needle_62(); }\n")
+write("ro.rs", "fn r() { repl_needle_62(); }\n", 0o444)
+write("watch.rs", "fn w() {}\n")
+# Over the size bound: Search leaves it unread, so Replace all does not touch it.
+write("huge.txt", "repl_needle_62\n" + "x" * 1200000 + "\n")
 PY
   cp "$dir/a.rs" "$RUN_DIR/replace-a-0.rs"
+  cp "$dir/ro.rs" "$RUN_DIR/replace-ro-0.rs"
+  cp "$dir/huge.txt" "$RUN_DIR/replace-huge-0.txt"
+  if [ "$NO_FILE_WATCH" -eq 1 ]; then
+    # The switch works: a clean open tab does not see a write from outside, as on
+    # macOS, so what b.rs shows below is what Replace all told it.
+    open_file "$dir/watch.rs"
+    expect_state state loaded
+    printf 'fn w() { watched(); }\n' >"$dir/watch.rs"
+    sleep 1.5
+    read_state
+    [ "$(sfield dirty)" = false ] && [ "$(sfield text)" = 'fn w() {}\n' ] \
+      || fail "$SCENARIO: the tab saw a write from outside although file watching is off: $(sfield text)"
+    echo "OK: with file watching off a clean tab does not follow the disk by itself"
+  fi
   # a.rs is open with an unsaved edit; b.rs is open and clean, its caret at line 2.
   open_file "$dir/a.rs"
   expect_state state loaded
@@ -4079,12 +4109,17 @@ PY
   ctl surface editor drawer --show=search >/dev/null
   ctl surface editor search --query=$needle --include='replace-mixed/**' >/dev/null
   search_wait
-  expect_state search_results 8
-  expect_state search_files 7
+  expect_state search_results 9
+  expect_state search_files 8
   expect_state search_unsaved replace-mixed/a.rs
-  # Nothing to replace with yet: the button says what it will do and is off.
-  expect_state replace_label "Replace 8 in 7 files"
+  # Nothing to replace with yet: the button says what it will do and is off, and
+  # the debug verb says why it did nothing.
+  expect_state replace_label "Replace 9 in 8 files"
   expect_state replace_enabled 0
+  refused="$("$CTL" surface editor search --replace-all 2>&1)" \
+    && fail "$SCENARIO: Replace all with an empty replace field answered ok: $refused"
+  case "$refused" in *"replace field is empty"*) ;; *) fail "$SCENARIO: the refusal does not say why: $refused" ;; esac
+  echo "OK: Replace all off: the verb says the replace field is empty"
   ctl surface editor search --replace=$done >/dev/null
   expect_state replace_enabled 1
   # After the search: d.rs moves its needle on disk; link.rs becomes a symlink to
@@ -4094,14 +4129,21 @@ PY
   ln -s target.rs "$dir/link.rs"
   cp "$dir/b.rs" "$RUN_DIR/replace-b-0.rs"
   python3 "$TOOLS" sub "$RUN_DIR/replace-b-0.rs" "$RUN_DIR/replace-b-1.rs" $needle $done 0 0
+  capture replace-preview
   ctl surface editor search --replace-all >/dev/null
   search_wait
   expect_state_has replace_report "Replaced 6 in 5 files."
   expect_state_has replace_report "replace-mixed/a.rs (unsaved changes)"
   expect_state_has replace_report "replace-mixed/link.rs (symbolic link)"
+  expect_state_has replace_report "replace-mixed/ro.rs (read-only)"
+  expect_state_has replace_report "Not searched, so not replaced: 1 file (too large)."
   # The disk: the unsaved file untouched, the rest replaced where they are now.
   python3 "$TOOLS" same-bytes "$dir/a.rs" "$RUN_DIR/replace-a-0.rs" \
     || fail "$SCENARIO: a.rs, which had unsaved changes, was written"
+  python3 "$TOOLS" same-bytes "$dir/ro.rs" "$RUN_DIR/replace-ro-0.rs" \
+    || fail "$SCENARIO: ro.rs, which is read-only, was written"
+  python3 "$TOOLS" same-bytes "$dir/huge.txt" "$RUN_DIR/replace-huge-0.txt" \
+    || fail "$SCENARIO: huge.txt, which Search did not read, was written"
   python3 - "$dir" <<'PY' || fail "$SCENARIO: a replaced file is not what it should be"
 import os, stat, sys
 root = sys.argv[1]
@@ -4122,22 +4164,26 @@ for name, text in expect.items():
 mode = stat.S_IMODE(os.stat(os.path.join(root, "run.sh")).st_mode)
 if mode != 0o755:
     sys.exit(f"run.sh lost its mode: {mode:o}")
+mode = stat.S_IMODE(os.stat(os.path.join(root, "ro.rs")).st_mode)
+if mode != 0o444:
+    sys.exit(f"ro.rs changed its mode: {mode:o}")
 if not os.path.islink(os.path.join(root, "link.rs")):
     sys.exit("link.rs is no longer a symlink")
 if os.readlink(os.path.join(root, "link.rs")) != "target.rs":
     sys.exit("link.rs points elsewhere")
 PY
-  echo "OK: the files were replaced where they are now, run.sh kept 0755, link.rs stayed a symlink, a.rs was not written"
+  echo "OK: the files were replaced where they are now, run.sh kept 0755, link.rs stayed a symlink, a.rs, ro.rs and huge.txt were not written"
   # b.rs is the active tab and clean: it shows the new text with no focus change,
-  # and its caret stays where it was.
+  # and its caret stays where it was. With --no-file-watch only Replace all can
+  # have told it.
   expect_state path "$dir/b.rs"
   expect_state text "$(escaped "$RUN_DIR/replace-b-1.rs")"
   expect_state dirty false
   expect_state selections "$caret..$caret"
-  echo "OK: the open clean tab adopted the replacement at once, its caret kept"
-  # The search ran again: only a.rs's buffer still holds the needle.
-  expect_state search_results 1
-  expect_state search_paths replace-mixed/a.rs
+  echo "OK: the open clean tab adopted the replacement at once, its caret kept (file watching off: $NO_FILE_WATCH)"
+  # The search ran again: a.rs's buffer and the read-only file still hold the needle.
+  expect_state search_results 2
+  expect_state search_paths "replace-mixed/a.rs;replace-mixed/ro.rs"
   capture replace-report
   # And a.rs's tab still holds its unsaved edit.
   open_file "$dir/a.rs"
@@ -4147,6 +4193,7 @@ PY
   echo "OK: the unsaved tab kept its text and its dirty mark"
   ctl surface editor keys --keys=ctrl-z >/dev/null
   expect_state dirty false
+  chmod 644 "$dir/ro.rs"
   search_done
 }
 
@@ -4170,8 +4217,12 @@ PY
   search_wait
   expect_state search_results 3
   expect_state search_files 2
-  ctl surface editor search --replace-all >/dev/null
-  search_wait
+  expect_state replace_label "Replace 3 in 2 files"
+  # A real click on the button, not the verb: the app reads which tabs are unsaved
+  # from the press itself. The button's place depends on the drawer's height.
+  ctl surface editor drawer --height=240 >/dev/null
+  expect_state drawer_height 240
+  click_at "${REPLACE_ALL_BUTTON[@]}"
   expect_state_has replace_report "Replaced 3 in 2 files."
   python3 - "$dir" <<'PY' || fail "$SCENARIO: a CRLF or mixed file did not round-trip"
 import os, sys
@@ -4194,6 +4245,7 @@ PY
 }
 
 scenario_replace_capped() {
+  local refused
   search_reset
   mkdir -p "$WT/replace-cap"
   python3 - "$WT/replace-cap/many.txt" <<'PY'
@@ -4207,8 +4259,9 @@ PY
   expect_state search_capped 1
   expect_state replace_enabled 0
   expect_state replace_label "Too many results — narrow the search"
-  ctl surface editor search --replace-all >/dev/null
-  search_wait
+  refused="$("$CTL" surface editor search --replace-all 2>&1)" \
+    && fail "$SCENARIO: Replace all on a capped search answered ok: $refused"
+  case "$refused" in *"capped"*) ;; *) fail "$SCENARIO: the refusal does not say why: $refused" ;; esac
   expect_state replace_report ""
   grep -q rcap_needle_91 "$WT/replace-cap/many.txt" || fail "$SCENARIO: a capped Replace all wrote the file"
   echo "OK: a capped search disables Replace all, says why, and a request for it writes nothing"

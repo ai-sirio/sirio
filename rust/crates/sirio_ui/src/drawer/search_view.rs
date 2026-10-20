@@ -37,7 +37,20 @@
 //!   every file was skipped (`the_report_names_every_skipped_file`);
 //! - the report is wiped by the run that follows the replace, so it is never
 //!   seen: only a query the user changes clears it;
-//! - a long totals line or report is cut off in a narrow drawer: both wrap.
+//! - a long totals line or report is cut off in a narrow drawer: both wrap;
+//!
+//! Fix round 1, each written before its code:
+//! - "1 results in 1 files", "Replace 1 in 1 files", "Replaced 1 in 1 files."
+//!   (`one_is_not_plural`);
+//! - the report leaves out the files Search did not read, which the summary
+//!   names and Replace all therefore did not touch
+//!   (`the_report_names_every_skipped_file`);
+//! - a disabled Replace all answers the debug verb with an ok and does nothing:
+//!   the refusal has a reason a caller can read
+//!   (`replace_is_offered_only_for_a_settled_answer`);
+//! - the dirty tabs cannot be read and an empty set stands in for them, so a
+//!   file with unsaved text is overwritten: no snapshot, no Replace all
+//!   (`no_snapshot_no_replace`, the E2E's `search_scope` and `replace_mixed`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
@@ -72,7 +85,8 @@ const PROGRESS: Duration = Duration::from_millis(120);
 const DRAW_ROWS: usize = 1500;
 
 /// The dirty open tabs' LF text by worktree-relative path, as the app has it.
-pub type BufferSource = Rc<dyn Fn(&App) -> HashMap<PathBuf, String>>;
+/// `None` when the tabs cannot be read just now (their owner is being updated).
+pub type BufferSource = Rc<dyn Fn(&App) -> Option<HashMap<PathBuf, String>>>;
 
 /// The four fields, made when the first frame that needs them has a window.
 struct Fields {
@@ -162,6 +176,11 @@ pub struct SearchRequest {
     pub replace_all: bool,
 }
 
+/// `1 file`, `3 files`, `1 200 results`: the count grouped, the noun agreeing.
+fn plural(count: usize, noun: &str) -> String {
+    format!("{} {noun}{}", thousands(count), if count == 1 { "" } else { "s" })
+}
+
 /// `12345` as `12 345`: groups of three, a space between. Every count the
 /// drawer prints goes through here.
 fn thousands(count: usize) -> String {
@@ -205,23 +224,12 @@ fn summary_line(totals: &Totals) -> String {
         line.push_str("Searching… ");
     }
     line.push_str(&format!(
-        "{} results in {} files",
-        thousands(totals.matches),
-        thousands(totals.files)
+        "{} in {}",
+        plural(totals.matches, "result"),
+        plural(totals.files, "file")
     ));
-    let left_out: usize = totals.skipped.values().sum();
-    if left_out > 0 {
-        let reasons: Vec<&str> = totals
-            .skipped
-            .keys()
-            .map(|skip| match skip {
-                Skip::TooLarge => "too large",
-                Skip::Binary => "binary",
-                Skip::NotUtf8 => "not UTF-8",
-                Skip::Unreadable => "unreadable",
-            })
-            .collect();
-        line.push_str(&format!(" · {} skipped ({})", thousands(left_out), reasons.join("/")));
+    if let Some((count, reasons)) = left_out(totals.skipped) {
+        line.push_str(&format!(" · {} skipped ({reasons})", thousands(count)));
     }
     if totals.capped {
         line.push_str(&format!(" · stopped at {} matches", thousands(MATCH_CAP)));
@@ -230,6 +238,16 @@ fn summary_line(totals: &Totals) -> String {
         line.push_str(" · cancelled");
     }
     line
+}
+
+/// How many files a run left unread and why (`too large/not UTF-8`), when it did.
+fn left_out(skipped: &BTreeMap<Skip, usize>) -> Option<(usize, String)> {
+    let count: usize = skipped.values().sum();
+    if count == 0 {
+        return None;
+    }
+    let reasons: Vec<&str> = skipped.keys().map(|skip| skip.reason()).collect();
+    Some((count, reasons.join("/")))
 }
 
 /// What the Replace all button says: what it will do, or why it will not.
@@ -248,7 +266,7 @@ fn replace_label(
         // Before a search has said anything the button has no zero to report.
         if settled { "No matches to replace" } else { "Replace all" }.to_owned()
     } else {
-        format!("Replace {} in {} files", thousands(matches), thousands(files))
+        format!("Replace {} in {}", thousands(matches), plural(files, "file"))
     }
 }
 
@@ -267,24 +285,51 @@ struct ReplaceInputs {
 }
 
 impl ReplaceInputs {
-    /// Only a settled, whole answer with something to put in its place.
-    fn offered(&self) -> bool {
-        !self.query_empty
-            && !self.with_empty
-            && !self.busy
-            && !self.capped
-            && !self.cancelled
-            && !self.errored
-            && self.ran
-            && self.matches > 0
+    /// Why Replace all cannot be pressed, or `None`: it needs a settled, whole
+    /// answer with something to put in its place.
+    fn refusal(&self) -> Option<&'static str> {
+        Some(if self.query_empty {
+            "the query is empty"
+        } else if self.with_empty {
+            "the replace field is empty"
+        } else if self.busy {
+            "a search or a replace is running"
+        } else if self.capped {
+            "the results are capped: narrow the search"
+        } else if self.cancelled {
+            "the search was cancelled"
+        } else if self.errored {
+            "the query does not compile"
+        } else if !self.ran {
+            "there are no results yet"
+        } else if self.matches == 0 {
+            "there are no matches"
+        } else {
+            return None;
+        })
     }
 }
 
+/// What a Replace all that cannot tell which tabs hold unsaved text says: it
+/// writes nothing, since that set is all that keeps unsaved work from being
+/// overwritten.
+const NO_SNAPSHOT: &str =
+    "Could not tell which files have unsaved changes, so nothing was replaced.";
+
+/// The unsaved tabs' paths from the app's snapshot of them; no snapshot, no set.
+fn dirty_set(snapshot: Option<HashMap<PathBuf, String>>) -> Result<HashSet<PathBuf>, String> {
+    snapshot.map(|buffers| buffers.into_keys().collect()).ok_or_else(|| NO_SNAPSHOT.to_owned())
+}
+
 /// What Replace all answers with: `Replaced X in Y files.`, then each file it
-/// left alone with the reason.
-fn report_line(report: &ReplaceReport) -> String {
-    let mut line =
-        format!("Replaced {} in {} files.", thousands(report.replaced), thousands(report.files));
+/// left alone with the reason, then the files Search itself did not read (the
+/// summary's skip line), which it therefore did not replace in either.
+fn report_line(report: &ReplaceReport, searched: &BTreeMap<Skip, usize>) -> String {
+    let mut line = format!(
+        "Replaced {} in {}.",
+        thousands(report.replaced),
+        plural(report.files, "file")
+    );
     if !report.skipped.is_empty() {
         let skipped: Vec<String> = report
             .skipped
@@ -292,6 +337,16 @@ fn report_line(report: &ReplaceReport) -> String {
             .map(|(path, why)| format!("{} ({})", display_path(path), why.reason()))
             .collect();
         line.push_str(&format!(" Skipped: {}", skipped.join(", ")));
+        // The list ends the sentence, with or without what Search left out.
+        if left_out(searched).is_some() {
+            line.push('.');
+        }
+    }
+    if let Some((count, reasons)) = left_out(searched) {
+        line.push_str(&format!(
+            " Not searched, so not replaced: {} ({reasons}).",
+            plural(count, "file")
+        ));
     }
     line
 }
@@ -352,10 +407,8 @@ impl WorktreeSearch {
         self.running() || self.replace_task.is_some()
     }
 
-    /// Whether Replace all can be pressed, and what the button says: the results
-    /// are a settled, whole answer to the query that found them, and there is
-    /// something to put in their place.
-    fn replace_state(&self, cx: &App) -> (bool, String) {
+    /// What decides whether Replace all can be pressed.
+    fn replace_inputs(&self, cx: &App) -> ReplaceInputs {
         let (query_empty, with_empty) = match &self.fields {
             Some(fields) => (
                 fields.query.read(cx).text().is_empty(),
@@ -363,14 +416,7 @@ impl WorktreeSearch {
             ),
             None => (true, true),
         };
-        let label = replace_label(
-            self.matches(),
-            self.files.len(),
-            self.capped,
-            self.replace_task.is_some(),
-            !query_empty && !self.running(),
-        );
-        let offered = ReplaceInputs {
+        ReplaceInputs {
             query_empty,
             with_empty,
             busy: self.busy(),
@@ -380,8 +426,21 @@ impl WorktreeSearch {
             ran: self.ran.is_some(),
             matches: self.matches(),
         }
-        .offered();
-        (offered, label)
+    }
+
+    /// Whether Replace all can be pressed, and what the button says: the results
+    /// are a settled, whole answer to the query that found them, and there is
+    /// something to put in their place.
+    fn replace_state(&self, cx: &App) -> (bool, String) {
+        let inputs = self.replace_inputs(cx);
+        let label = replace_label(
+            self.matches(),
+            self.files.len(),
+            self.capped,
+            self.replace_task.is_some(),
+            !inputs.query_empty && !self.running(),
+        );
+        (inputs.refusal().is_none(), label)
     }
 
     fn summary(&self, empty_query: bool) -> String {
@@ -530,6 +589,16 @@ impl WorktreeDrawer {
                 },
             ));
         }
+        // The replacement previews on each result: typing it redraws them.
+        subscriptions.push(cx.subscribe_in(
+            &replace,
+            window,
+            |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Changed) {
+                    cx.notify();
+                }
+            },
+        ));
         self.search.fields = Some(Fields {
             query,
             replace,
@@ -578,7 +647,9 @@ impl WorktreeDrawer {
                     return None;
                 }
                 let source = drawer.search.buffer_source.clone();
-                let buffers = source.map(|source| source(cx)).unwrap_or_default();
+                // A search that cannot read the tabs reads the disk: its results
+                // are then the disk's, which is all it claims.
+                let buffers = source.and_then(|source| source(cx)).unwrap_or_default();
                 drawer.search.begin(buffers.keys().cloned().collect());
                 drawer.search.ran = Some(ran);
                 cx.notify();
@@ -659,10 +730,13 @@ impl WorktreeDrawer {
     /// The debug verb: sets what it names, runs when anything that decides the
     /// results changed or a refresh was asked, and chooses a drawn line.
     /// Opens the drawer on Search, as the key does, without taking the keyboard.
-    /// The error is the choice that has no line.
+    /// The error is the choice that has no line, or a Replace all that cannot
+    /// start (`dirty` is the unsaved tabs the caller read at the moment of the
+    /// call, or why it could not).
     pub fn search_control(
         &mut self,
         request: SearchRequest,
+        dirty: Result<HashSet<PathBuf>, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
@@ -704,7 +778,9 @@ impl WorktreeDrawer {
             self.search_run(if request.refresh { Duration::ZERO } else { DEBOUNCE }, cx);
         }
         if request.replace_all {
-            self.replace_all(cx);
+            // Asked after the query and the replacement it came with are applied,
+            // and answered: a button that is off says why.
+            self.replace_all_with(dirty, cx)?;
         }
         if let Some(index) = request.open {
             if !self.open_drawn_hit(index, cx) {
@@ -720,38 +796,47 @@ impl WorktreeDrawer {
         self.search.fields(cx)
     }
 
-    /// Replace all, as the button does: every file of the results, off the GPUI
-    /// thread, except the ones whose tab holds unsaved text. A press that finds
-    /// the button disabled does nothing.
-    ///
-    /// The files are read when the task runs, on a turn of its own (the tabs are
-    /// asked for then, never while another entity is being updated), and again
-    /// by `replace_files`; the stored positions are never used. A tab that becomes
-    /// dirty after that turn is not protected from the write: its `check_external`
-    /// meets the changed file as a conflict, and asks.
+    /// Replace all, as the button's press does: the app is asked now which tabs
+    /// hold unsaved text. If it cannot say, nothing is replaced and the report
+    /// says so; the dirty set is all that keeps unsaved work from being written.
     pub fn replace_all(&mut self, cx: &mut Context<Self>) {
-        if !self.search.replace_state(cx).0 {
-            return;
+        let snapshot = self.search.buffer_source.clone().and_then(|source| source(cx));
+        let _ = self.replace_all_with(dirty_set(snapshot), cx);
+    }
+
+    /// Replace all with the unsaved tabs' paths taken by the caller at the moment
+    /// of the press (or the reason they could not be): every file of the results,
+    /// off the GPUI thread, except those. The error is why nothing started.
+    ///
+    /// The files are read by `replace_files` when the task runs, never from the
+    /// stored positions. A tab that becomes dirty after the press is not in the
+    /// set: its `check_external` meets the changed file as a conflict, and asks.
+    pub fn replace_all_with(
+        &mut self,
+        dirty: Result<HashSet<PathBuf>, String>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if let Some(why) = self.search.replace_inputs(cx).refusal() {
+            return Err(format!("Replace all is not available: {why}"));
         }
-        let Some(query) = self.search.ran.clone() else {
-            return;
+        let dirty = match dirty {
+            Ok(dirty) => dirty,
+            Err(message) => {
+                self.search.replace_report = Some(message.clone());
+                cx.notify();
+                return Err(message);
+            }
         };
-        let Some(with) = self.search.fields.as_ref().map(|fields| fields.replace.read(cx).text())
+        let (Some(query), Some(fields)) = (self.search.ran.clone(), self.search.fields.as_ref())
         else {
-            return;
+            return Err("Search has no fields yet".to_owned());
         };
-        let with = with.to_string();
+        let with = fields.replace.read(cx).text().to_string();
         let files: Vec<PathBuf> = self.search.files.iter().map(|file| file.path.clone()).collect();
+        let searched = self.search.skipped.clone();
         let worktree = self.worktree().to_path_buf();
         self.search.replace_report = None;
         self.search.replace_task = Some(cx.spawn(async move |drawer, cx| {
-            let Ok(dirty) = drawer.update(cx, |drawer, cx| {
-                let source = drawer.search.buffer_source.clone();
-                let buffers = source.map(|source| source(cx)).unwrap_or_default();
-                buffers.into_keys().collect::<HashSet<PathBuf>>()
-            }) else {
-                return;
-            };
             let root = worktree.clone();
             let report = cx
                 .background_spawn(async move {
@@ -760,7 +845,7 @@ impl WorktreeDrawer {
                 .await;
             let _ = drawer.update(cx, |drawer, cx| {
                 drawer.search.replace_task = None;
-                drawer.search.replace_report = Some(report_line(&report));
+                drawer.search.replace_report = Some(report_line(&report, &searched));
                 // Open clean tabs adopt what was written now: macOS has no watcher.
                 let paths = report.written.iter().map(|path| worktree.join(path)).collect();
                 cx.emit(WorktreeDrawerEvent::Replaced { paths });
@@ -770,6 +855,7 @@ impl WorktreeDrawer {
             });
         }));
         cx.notify();
+        Ok(())
     }
 
     /// Chooses the `index`-th line Search draws, as a press on it does. False
@@ -1001,6 +1087,9 @@ pub(super) fn render(
         .iter()
         .map(|file| (SharedString::from(display_path(&file.path)), file.hits.len()))
         .collect();
+    // Each hit previews its replacement, literally (`$1` is text), while the
+    // replace field holds something.
+    let replacement = fields.replace.read(cx).text().to_string();
     let mut panel = SearchPanel::new("drawer-search", hits)
         .without_summary()
         .full_counts(counts)
@@ -1020,6 +1109,9 @@ pub(super) fn render(
                 entity.update(cx, |drawer, cx| drawer.toggle_fold(&path, cx));
             }
         });
+    if !replacement.is_empty() {
+        panel = panel.replacement(replacement);
+    }
     if let Some((path, line)) = &search.selected {
         panel = panel.selected(display_path(path), *line);
     }
@@ -1093,6 +1185,10 @@ mod tests {
     fn the_summary_names_skips_and_the_cap() {
         let none = BTreeMap::new();
         assert_eq!(summary_line(&totals(&none)), "11 results in 5 files");
+        assert_eq!(
+            summary_line(&Totals { matches: 1, files: 1, ..totals(&none) }),
+            "1 result in 1 file"
+        );
         let skipped = BTreeMap::from([(Skip::TooLarge, 1), (Skip::NotUtf8, 2)]);
         let capped = Totals { capped: true, ..totals(&skipped) };
         assert_eq!(
@@ -1132,15 +1228,39 @@ mod tests {
             ran: true,
             matches: 3,
         };
-        assert!(ready().offered());
-        assert!(!ReplaceInputs { with_empty: true, ..ready() }.offered());
-        assert!(!ReplaceInputs { query_empty: true, ..ready() }.offered());
-        assert!(!ReplaceInputs { busy: true, ..ready() }.offered());
-        assert!(!ReplaceInputs { capped: true, ..ready() }.offered());
-        assert!(!ReplaceInputs { cancelled: true, ..ready() }.offered());
-        assert!(!ReplaceInputs { errored: true, ..ready() }.offered());
-        assert!(!ReplaceInputs { ran: false, ..ready() }.offered());
-        assert!(!ReplaceInputs { matches: 0, ..ready() }.offered());
+        assert_eq!(ready().refusal(), None);
+        let refused = |inputs: ReplaceInputs, words: &str| {
+            let why = inputs.refusal().expect("the button must be off");
+            assert!(why.contains(words), "{why:?} should say {words:?}");
+        };
+        refused(ReplaceInputs { with_empty: true, ..ready() }, "replace field is empty");
+        refused(ReplaceInputs { query_empty: true, ..ready() }, "query is empty");
+        refused(ReplaceInputs { busy: true, ..ready() }, "running");
+        refused(ReplaceInputs { capped: true, ..ready() }, "capped");
+        refused(ReplaceInputs { cancelled: true, ..ready() }, "cancelled");
+        refused(ReplaceInputs { errored: true, ..ready() }, "does not compile");
+        refused(ReplaceInputs { ran: false, ..ready() }, "no results");
+        refused(ReplaceInputs { matches: 0, ..ready() }, "no matches");
+    }
+
+    #[test]
+    fn no_snapshot_no_replace() {
+        // The unsaved tabs could not be read: no empty set stands in for them.
+        let refused = dirty_set(None).unwrap_err();
+        assert!(refused.contains("nothing was replaced"), "{refused}");
+        let taken = HashMap::from([(PathBuf::from("a.rs"), "text".to_owned())]);
+        assert_eq!(dirty_set(Some(taken)).unwrap(), HashSet::from([PathBuf::from("a.rs")]));
+        assert_eq!(dirty_set(Some(HashMap::new())).unwrap(), HashSet::new());
+    }
+
+    #[test]
+    fn one_is_not_plural() {
+        assert_eq!(plural(1, "file"), "1 file");
+        assert_eq!(plural(0, "file"), "0 files");
+        assert_eq!(plural(1_200, "result"), "1 200 results");
+        assert_eq!(replace_label(1, 1, false, false, true), "Replace 1 in 1 file");
+        let one = ReplaceReport { replaced: 1, files: 1, ..Default::default() };
+        assert_eq!(report_line(&one, &BTreeMap::new()), "Replaced 1 in 1 file.");
     }
 
     #[test]
@@ -1164,24 +1284,35 @@ mod tests {
         use super::super::search_engine::ReplaceSkip;
 
         let mut report = ReplaceReport { replaced: 1_234, files: 5, ..Default::default() };
-        assert_eq!(report_line(&report), "Replaced 1 234 in 5 files.");
+        let none = BTreeMap::new();
+        assert_eq!(report_line(&report, &none), "Replaced 1 234 in 5 files.");
         report.skipped = vec![
             (PathBuf::from("src/a.rs"), ReplaceSkip::Unsaved),
             (PathBuf::from("b.rs"), ReplaceSkip::Symlink),
             (PathBuf::from("c.rs"), ReplaceSkip::Missing),
             (PathBuf::from("d.rs"), ReplaceSkip::Unreadable),
         ];
+        report.skipped.push((PathBuf::from("e.rs"), ReplaceSkip::OutsideWorktree));
+        report.skipped.push((PathBuf::from("f.rs"), ReplaceSkip::ReadOnly));
+        report.skipped.push((PathBuf::from("g.rs"), ReplaceSkip::WriteFailed("disk full".into())));
         assert_eq!(
-            report_line(&report),
+            report_line(&report, &none),
             "Replaced 1 234 in 5 files. Skipped: src/a.rs (unsaved changes), b.rs (symbolic \
-             link), c.rs (missing), d.rs (unreadable)"
+             link), c.rs (missing), d.rs (unreadable), e.rs (outside the worktree), f.rs \
+             (read-only), g.rs (could not write: disk full)"
         );
         // Everything skipped is not dressed as a success with a zero.
-        let none = ReplaceReport {
+        let only = ReplaceReport {
             skipped: vec![(PathBuf::from("a.rs"), ReplaceSkip::Unsaved)],
             ..Default::default()
         };
-        assert!(report_line(&none).ends_with("Skipped: a.rs (unsaved changes)"));
+        assert!(report_line(&only, &none).ends_with("Skipped: a.rs (unsaved changes)"));
+        // The files Search itself did not read are the summary's words.
+        let left_out = BTreeMap::from([(Skip::TooLarge, 1), (Skip::NotUtf8, 2)]);
+        assert_eq!(
+            report_line(&ReplaceReport { replaced: 2, files: 1, ..Default::default() }, &left_out),
+            "Replaced 2 in 1 file. Not searched, so not replaced: 3 files (too large/not UTF-8)."
+        );
     }
 
     #[test]

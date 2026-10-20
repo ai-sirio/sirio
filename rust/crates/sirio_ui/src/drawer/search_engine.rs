@@ -48,6 +48,18 @@ pub enum Skip {
     Unreadable,
 }
 
+impl Skip {
+    /// The words the totals line and the report give for it.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Skip::TooLarge => "too large",
+            Skip::Binary => "binary",
+            Skip::NotUtf8 => "not UTF-8",
+            Skip::Unreadable => "unreadable",
+        }
+    }
+}
+
 /// A file with at least one match.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileResult {
@@ -136,24 +148,42 @@ pub fn replace_in(
 }
 
 /// Why Replace all left a file as it was.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplaceSkip {
     /// Its tab holds text that is not on disk.
     Unsaved,
-    /// The file is a symbolic link, or a link in its path leads out of the worktree.
+    /// The file itself is a symbolic link.
     Symlink,
+    /// The path leaves the worktree: it has `..`, is absolute, or goes through a
+    /// linked directory to a file that lies outside.
+    OutsideWorktree,
+    /// A directory (a submodule's) or another thing that is no file.
+    NotAFile,
     Missing,
+    /// It could not be read.
     Unreadable,
+    /// It reads now as something Search would not search: too large, binary or
+    /// not UTF-8.
+    Unsuitable(Skip),
+    /// Its mode says it is not to be changed.
+    ReadOnly,
+    /// The write failed; the io error says why.
+    WriteFailed(String),
 }
 
 impl ReplaceSkip {
     /// The words the report puts after the file's name.
-    pub fn reason(self) -> &'static str {
+    pub fn reason(&self) -> String {
         match self {
-            Self::Unsaved => "unsaved changes",
-            Self::Symlink => "symbolic link",
-            Self::Missing => "missing",
-            Self::Unreadable => "unreadable",
+            Self::Unsaved => "unsaved changes".to_owned(),
+            Self::Symlink => "symbolic link".to_owned(),
+            Self::OutsideWorktree => "outside the worktree".to_owned(),
+            Self::NotAFile => "not a file".to_owned(),
+            Self::Missing => "missing".to_owned(),
+            Self::Unreadable => "unreadable".to_owned(),
+            Self::Unsuitable(skip) => skip.reason().to_owned(),
+            Self::ReadOnly => "read-only".to_owned(),
+            Self::WriteFailed(cause) => format!("could not write: {cause}"),
         }
     }
 }
@@ -187,6 +217,18 @@ pub fn replace_files(
     with: &str,
     dirty: &HashSet<PathBuf>,
 ) -> ReplaceReport {
+    replace_files_with(worktree, files, query, with, dirty, &write_atomically)
+}
+
+/// `replace_files` with the write given, so a test can make one fail.
+fn replace_files_with(
+    worktree: &Path,
+    files: &[PathBuf],
+    query: &SearchQuery,
+    with: &str,
+    dirty: &HashSet<PathBuf>,
+    write: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
+) -> ReplaceReport {
     let mut report = ReplaceReport::default();
     let finder = compile(query);
     let root = worktree.canonicalize();
@@ -196,7 +238,7 @@ pub fn replace_files(
     for relative in files {
         let outcome = match (&finder, &root) {
             (Ok(finder), Ok(root)) => {
-                replace_one(worktree, root, relative, finder, &with_lf, dirty)
+                replace_one(worktree, root, relative, finder, &with_lf, dirty, write)
             }
             _ => Err(ReplaceSkip::Unreadable),
         };
@@ -224,33 +266,47 @@ fn replace_one(
     finder: &Finder,
     with_lf: &str,
     dirty: &HashSet<PathBuf>,
+    write: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) -> Result<Option<(usize, bool)>, ReplaceSkip> {
     use std::io::ErrorKind::NotFound;
+    use std::path::Component;
 
     if dirty.contains(relative) {
         return Err(ReplaceSkip::Unsaved);
     }
+    // Results name files inside the worktree; a path that says otherwise is
+    // refused before the filesystem is asked.
+    if relative.components().any(|part| {
+        matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+    }) {
+        return Err(ReplaceSkip::OutsideWorktree);
+    }
     let path = worktree.join(relative);
-    match std::fs::symlink_metadata(&path) {
+    let metadata = match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == NotFound => return Err(ReplaceSkip::Missing),
         Err(_) => return Err(ReplaceSkip::Unreadable),
         Ok(metadata) if metadata.file_type().is_symlink() => return Err(ReplaceSkip::Symlink),
-        // A directory (a submodule) is no file to replace in.
-        Ok(metadata) if !metadata.is_file() => return Err(ReplaceSkip::Missing),
-        Ok(_) => {}
-    }
+        Ok(metadata) if !metadata.is_file() => return Err(ReplaceSkip::NotAFile),
+        Ok(metadata) => metadata,
+    };
     // The file is no link, so its canonical path is its directory's canonical
     // path and its name: a link among the directories above it shows there.
     match path.canonicalize() {
         Ok(canonical) if canonical.starts_with(root) => {}
-        Ok(_) => return Err(ReplaceSkip::Symlink),
+        Ok(_) => return Err(ReplaceSkip::OutsideWorktree),
         Err(error) if error.kind() == NotFound => return Err(ReplaceSkip::Missing),
         Err(_) => return Err(ReplaceSkip::Unreadable),
+    }
+    // A read-only mode is the user saying "do not change this"; the rename
+    // below would not notice it.
+    if metadata.permissions().readonly() {
+        return Err(ReplaceSkip::ReadOnly);
     }
     let raw = match read_raw(&path) {
         Read::Text(raw) => raw,
         Read::Gone => return Err(ReplaceSkip::Missing),
-        Read::Skipped(_) => return Err(ReplaceSkip::Unreadable),
+        Read::Skipped(Skip::Unreadable) => return Err(ReplaceSkip::Unreadable),
+        Read::Skipped(skip) => return Err(ReplaceSkip::Unsuitable(skip)),
     };
     let lf = LineEnding::normalize(&raw);
     let matches = finder.find_all(&lf);
@@ -273,7 +329,10 @@ fn replace_one(
     if out == raw {
         return Ok(Some((matches.len(), false)));
     }
-    write_atomically(&path, out.as_bytes()).map_err(|_| ReplaceSkip::Unreadable)?;
+    write(&path, out.as_bytes()).map_err(|error| {
+        eprintln!("[search] replace: writing a file failed: {error}");
+        ReplaceSkip::WriteFailed(error.to_string())
+    })?;
     Ok(Some((matches.len(), true)))
 }
 
@@ -557,7 +616,27 @@ mod tests {
     //!   read as a group (`the_replacements_breaks_take_the_files_ending`);
     //! - the file's mode is lost to the temporary file's (`an_executable_stays_executable`);
     //! - `è😀漢` is split by the mapping back to raw bytes
-    //!   (`multibyte_text_in_a_crlf_file_is_replaced_whole`).
+    //!   (`multibyte_text_in_a_crlf_file_is_replaced_whole`);
+    //!
+    //! Fix round 1, each written before its code:
+    //! - a write that fails is reported as unreadable with its cause lost, or
+    //!   stops the run, or un-counts the files written before it
+    //!   (`a_failed_write_is_named_with_its_cause_and_the_others_stay_counted`);
+    //! - a path with `..`, an absolute one or one through a linked directory is
+    //!   reported as a symbolic link, and a directory as missing
+    //!   (`a_path_that_leaves_the_worktree_is_named_so`,
+    //!   `a_file_behind_a_linked_directory_is_skipped`, `a_directory_is_not_a_file`);
+    //! - a read-only file is replaced by rename, defeating its mode
+    //!   (`a_read_only_file_is_skipped_and_untouched`);
+    //! - a file that turned binary or too large reads as "unreadable"
+    //!   (`a_file_that_turned_binary_is_named_as_such`);
+    //! - a lone `\r`, a `\r` before a CRLF, no trailing newline or a match at the end
+    //!   of the file shifts the raw offsets by a byte
+    //!   (`a_lone_cr_and_a_cr_before_a_crlf_keep_their_bytes`,
+    //!   `a_match_that_is_a_lone_cr_before_a_crlf_is_replaced_alone`,
+    //!   `no_trailing_newline_and_a_match_at_the_end_of_the_file`);
+    //! - the permission test depends on who runs it: it is a read-only file now,
+    //!   which no user can write through the rename's mode check.
 
     use super::*;
 
@@ -1046,41 +1125,163 @@ mod tests {
 
         let report = replace(&dir, &["sub/secret.txt"], &query("needle"), "x");
 
-        assert_eq!(report.skipped, vec![(PathBuf::from("sub/secret.txt"), ReplaceSkip::Symlink)]);
+        let want = vec![(PathBuf::from("sub/secret.txt"), ReplaceSkip::OutsideWorktree)];
+        assert_eq!(report.skipped, want);
         assert_eq!(std::fs::read_to_string(outside.join("secret.txt")).unwrap(), "needle\n");
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(outside);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn a_missing_and_an_unreadable_file_are_skipped_and_named() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn a_missing_file_and_one_that_turned_binary_are_skipped_and_named() {
         let dir = scratch("gone");
-        std::fs::write(dir.join("shut.txt"), "needle\n").unwrap();
-        std::fs::set_permissions(dir.join("shut.txt"), std::fs::Permissions::from_mode(0o000))
-            .unwrap();
         std::fs::write(dir.join("fine.txt"), "needle\n").unwrap();
-        let binary = dir.join("blob.bin");
-        std::fs::write(&binary, b"needle\0\xff").unwrap();
+        std::fs::write(dir.join("blob.bin"), b"needle\0\xff").unwrap();
 
-        let files = ["gone.txt", "shut.txt", "blob.bin", "fine.txt"];
+        let files = ["gone.txt", "blob.bin", "fine.txt"];
         let report = replace(&dir, &files, &query("needle"), "x");
 
-        // A process that ignores permissions (root) reads shut.txt: nothing to say
-        // about it then.
-        let shut_read = std::fs::read(dir.join("shut.txt")).is_ok_and(|bytes| bytes == b"x\n");
-        let mut want = vec![(PathBuf::from("gone.txt"), ReplaceSkip::Missing)];
-        if !shut_read {
-            want.push((PathBuf::from("shut.txt"), ReplaceSkip::Unreadable));
-        }
-        want.push((PathBuf::from("blob.bin"), ReplaceSkip::Unreadable));
+        let want = vec![
+            (PathBuf::from("gone.txt"), ReplaceSkip::Missing),
+            (PathBuf::from("blob.bin"), ReplaceSkip::Unsuitable(Skip::NotUtf8)),
+        ];
         assert_eq!(report.skipped, want);
         assert_eq!(std::fs::read_to_string(dir.join("fine.txt")).unwrap(), "x\n");
-        assert_eq!(std::fs::read(&binary).unwrap(), b"needle\0\xff");
-        let open = std::fs::Permissions::from_mode(0o644);
-        let _ = std::fs::set_permissions(dir.join("shut.txt"), open);
+        assert_eq!(std::fs::read(dir.join("blob.bin")).unwrap(), b"needle\0\xff");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_that_turned_binary_is_named_as_such() {
+        let dir = scratch("turned");
+        std::fs::write(dir.join("a.txt"), "needle\0 text\n").unwrap();
+
+        let report = replace(&dir, &["a.txt"], &query("needle"), "x");
+
+        let want = vec![(PathBuf::from("a.txt"), ReplaceSkip::Unsuitable(Skip::Binary))];
+        assert_eq!(report.skipped, want);
+        assert_eq!(ReplaceSkip::Unsuitable(Skip::Binary).reason(), "binary");
+        assert_eq!(ReplaceSkip::Unsuitable(Skip::TooLarge).reason(), "too large");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_write_is_named_with_its_cause_and_the_others_stay_counted() {
+        let dir = scratch("write-fails");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(name), "needle\n").unwrap();
+        }
+        let files: Vec<PathBuf> = ["a.txt", "b.txt", "c.txt"].iter().map(PathBuf::from).collect();
+        let writer = |path: &Path, bytes: &[u8]| -> std::io::Result<()> {
+            if path.ends_with("b.txt") {
+                return Err(std::io::Error::other("disk is full"));
+            }
+            write_atomically(path, bytes)
+        };
+
+        let none = HashSet::new();
+        let report = replace_files_with(&dir, &files, &query("needle"), "x", &none, &writer);
+
+        assert_eq!((report.replaced, report.files), (2, 2));
+        assert_eq!(report.written, vec![PathBuf::from("a.txt"), PathBuf::from("c.txt")]);
+        let want = vec![(PathBuf::from("b.txt"), ReplaceSkip::WriteFailed("disk is full".into()))];
+        assert_eq!(report.skipped, want);
+        assert_eq!(report.skipped[0].1.reason(), "could not write: disk is full");
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "needle\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_path_that_leaves_the_worktree_is_named_so() {
+        let outside = scratch("up-outside");
+        std::fs::write(outside.join("secret.txt"), "needle\n").unwrap();
+        let dir = scratch("up-inside");
+        let up = PathBuf::from("..").join(outside.file_name().unwrap()).join("secret.txt");
+
+        let report = replace_files(&dir, &[up.clone()], &query("needle"), "x", &HashSet::new());
+
+        assert_eq!(report.skipped, vec![(up, ReplaceSkip::OutsideWorktree)]);
+        assert_eq!(std::fs::read_to_string(outside.join("secret.txt")).unwrap(), "needle\n");
+        let absolute = outside.join("secret.txt");
+        let by_path = [absolute.clone()];
+        let report = replace_files(&dir, &by_path, &query("needle"), "x", &HashSet::new());
+        assert_eq!(report.skipped, vec![(absolute, ReplaceSkip::OutsideWorktree)]);
+        assert_eq!(std::fs::read_to_string(outside.join("secret.txt")).unwrap(), "needle\n");
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn a_directory_is_not_a_file() {
+        let dir = scratch("dir");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+
+        let report = replace(&dir, &["sub"], &query("needle"), "x");
+
+        assert_eq!(report.skipped, vec![(PathBuf::from("sub"), ReplaceSkip::NotAFile)]);
+        assert_eq!(ReplaceSkip::NotAFile.reason(), "not a file");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_file_is_skipped_and_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("read-only");
+        std::fs::write(dir.join("ro.txt"), "needle\n").unwrap();
+        std::fs::set_permissions(dir.join("ro.txt"), std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+        std::fs::write(dir.join("rw.txt"), "needle\n").unwrap();
+
+        let report = replace(&dir, &["ro.txt", "rw.txt"], &query("needle"), "x");
+
+        assert_eq!(report.skipped, vec![(PathBuf::from("ro.txt"), ReplaceSkip::ReadOnly)]);
+        assert_eq!(ReplaceSkip::ReadOnly.reason(), "read-only");
+        assert_eq!(std::fs::read_to_string(dir.join("ro.txt")).unwrap(), "needle\n");
+        let mode = std::fs::metadata(dir.join("ro.txt")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o444);
+        assert_eq!(std::fs::read_to_string(dir.join("rw.txt")).unwrap(), "x\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_lone_cr_and_a_cr_before_a_crlf_keep_their_bytes() {
+        let dir = scratch("cr");
+        std::fs::write(dir.join("a.txt"), b"a\rneedle\r\nb\r\n").unwrap();
+        std::fs::write(dir.join("b.txt"), b"a\r\r\nneedle\r\n").unwrap();
+
+        replace(&dir, &["a.txt", "b.txt"], &query("needle"), "X");
+
+        assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"a\rX\r\nb\r\n");
+        assert_eq!(std::fs::read(dir.join("b.txt")).unwrap(), b"a\r\r\nX\r\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_match_that_is_a_lone_cr_before_a_crlf_is_replaced_alone() {
+        let dir = scratch("cr-match");
+        let regex = FindOptions { regex: true, ..Default::default() };
+        std::fs::write(dir.join("a.txt"), b"a\r\r\nb\r\n").unwrap();
+
+        replace(&dir, &["a.txt"], &with(r"\r", regex), "X");
+
+        assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"aX\r\nb\r\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn no_trailing_newline_and_a_match_at_the_end_of_the_file() {
+        let dir = scratch("eof");
+        let regex = FindOptions { regex: true, ..Default::default() };
+        std::fs::write(dir.join("a.txt"), b"k\r\nx\r\nneedle").unwrap();
+        std::fs::write(dir.join("b.txt"), b"k\r\nneedle\r\n").unwrap();
+
+        replace(&dir, &["a.txt"], &query("needle"), "Z");
+        replace(&dir, &["b.txt"], &with(r"needle\n", regex), "Z");
+
+        assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"k\r\nx\r\nZ");
+        assert_eq!(std::fs::read(dir.join("b.txt")).unwrap(), b"k\r\nZ");
         let _ = std::fs::remove_dir_all(dir);
     }
 
