@@ -105,7 +105,7 @@ fn the_handshake_yields_the_catalogues_before_anything_is_typed() {
     assert_eq!(modes.current_id, "default");
     assert!(modes.options.iter().any(|mode| mode.id == "plan"));
     assert!(
-        !modes
+        modes
             .options
             .iter()
             .any(|mode| mode.id == "bypassPermissions")

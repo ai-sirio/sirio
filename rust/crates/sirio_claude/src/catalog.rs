@@ -20,10 +20,10 @@ const HIDDEN_COMMANDS: [&str; 8] = [
     "todos",
 ];
 
-/// The permission modes Sirio offers. `bypassPermissions` is deliberately
-/// absent: the CLI refuses it without `--allow-dangerously-skip-permissions`,
-/// which Sirio never passes, so offering it would offer a button that fails.
-const OFFERED_MODES: [(&str, &str, &str); 4] = [
+/// The permission modes Sirio offers. `bypassPermissions` is accepted only
+/// because the chat launch passes `--allow-dangerously-skip-permissions`
+/// (`LaunchLine::chat`); the handshake says nothing either way.
+const OFFERED_MODES: [(&str, &str, &str); 5] = [
     ("default", "Ask", "Ask before anything irreversible"),
     (
         "acceptEdits",
@@ -32,6 +32,11 @@ const OFFERED_MODES: [(&str, &str, &str); 4] = [
     ),
     ("plan", "Plan", "Explore and plan without making changes"),
     ("auto", "Auto", "Let the model decide what needs asking"),
+    (
+        "bypassPermissions",
+        "Bypass permissions",
+        "Run every tool without asking",
+    ),
 ];
 
 /// The value that leaves the model on its own default effort. Not a level
