@@ -94,6 +94,8 @@ pub(super) fn section(state: &ChangeRequest) -> Option<Section> {
         Some(Shown::Found(summary)) => rows.push(Row {
             icon: Some(style::state_icon(summary.state)),
             action: Some("open".to_string()),
+            // The title takes the line; the facts go under it.
+            detail_below: true,
             ..Row::new(
                 "change_request/card",
                 format!("{} {}", summary.reference.label(), summary.title),
@@ -458,6 +460,35 @@ mod tests {
         })
         .expect("the card opens");
         assert_eq!(*opened.borrow(), [(112, "Fix login".to_string())]);
+    }
+
+    #[gpui::test]
+    async fn the_title_has_the_whole_line_and_the_detail_its_own(cx: &mut TestAppContext) {
+        let forge = forge_with(vec![testing::summary(
+            112,
+            "Login from a deleted fork that has a long title",
+        )]);
+        let source = FakeSource::ready(testing::github_client(forge), Some("feat/login"));
+        let (chat, cx) = open_with(cx, source);
+        let section = settle(&chat, cx);
+        let key = &section.rows[0].key;
+        let row = cx
+            .debug_bounds(Box::leak(format!("session-row-{key}").into_boxed_str()))
+            .expect("the row is drawn");
+        let title = cx
+            .debug_bounds(Box::leak(format!("session-row-label-{key}").into_boxed_str()))
+            .expect("the title is drawn");
+        // Nothing shares the title's line: it runs to the card's edge, where
+        // it truncates.
+        assert!(
+            title.right() >= row.right() - px(2.0),
+            "the title {title:?} is squeezed inside the row {row:?}"
+        );
+        let detail = cx
+            .debug_bounds(Box::leak(format!("session-row-detail-{key}").into_boxed_str()))
+            .expect("the detail is drawn");
+        assert!(detail.top() >= title.bottom(), "{detail:?} is under {title:?}");
+        assert_eq!(detail.left(), row.left() + px(20.0), "indented past the icon");
     }
 
     #[gpui::test]

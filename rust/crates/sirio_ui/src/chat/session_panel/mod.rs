@@ -99,8 +99,16 @@ pub(super) struct Row {
     /// The colour of the status dot before the label.
     pub(super) tone: Option<Tone>,
     /// Draws the action's name at the row's end, as a row whose action is
-    /// not obvious from its label needs.
+    /// not obvious from its label needs. The dot already says the state, so
+    /// the action takes the place of the state's word.
     pub(super) show_action: bool,
+    /// The word drawn at the row's end in place of the action and of
+    /// `detail`, which the snapshot keeps in full: a busy connector's
+    /// `waiting…`.
+    pub(super) short: Option<String>,
+    /// Draws `detail` as a muted second line under the label, indented past
+    /// the icon, instead of at the row's end.
+    pub(super) detail_below: bool,
     /// A muted line under the row, wrapping rather than truncated.
     pub(super) note: String,
 }
@@ -131,8 +139,29 @@ impl Row {
             heading: false,
             tone: None,
             show_action: false,
+            short: None,
+            detail_below: false,
             note: String::new(),
         }
+    }
+
+    /// What the line draws at its end, and whether that is the action to
+    /// take: the short word of a call in flight, else the action's name when
+    /// the row shows it and has one, else the detail. Nothing for a row with
+    /// none of them or whose detail has its own line.
+    pub(super) fn end(&self) -> Option<(&str, bool)> {
+        if let Some(word) = &self.short {
+            return Some((word, false));
+        }
+        if self.show_action
+            && let Some(action) = &self.action
+        {
+            return Some((action, true));
+        }
+        if self.detail_below {
+            return None;
+        }
+        (!self.detail.is_empty()).then_some((self.detail.as_str(), false))
     }
 }
 
@@ -710,32 +739,12 @@ impl Chat {
         let row_key = row.key.clone();
         let folds = row.expanded.is_some();
         let indent = f32::from(row.depth) * 12.0;
-        let line = div()
-            .id(key.clone())
-            .debug_selector({
-                let selector = key.to_string();
-                move || selector.clone()
-            })
+        let end = row.end().map(|(word, is_action)| (word.to_string(), is_action));
+        let main = div()
             .flex()
             .items_center()
             .gap_2()
             .pl(px(f32::from(row.depth) * 12.0))
-            .text_size(caption)
-            .text_color(text_color)
-            .when(clickable, |line| {
-                line.cursor(CursorStyle::PointingHand)
-                    .on_click(move |_, _, cx| {
-                        entity.update(cx, |chat, cx| {
-                            if folds {
-                                chat.toggle_session_fold(&row_key, cx);
-                            } else {
-                                // A file that cannot be opened has nothing
-                                // to say here; the workspace reports it.
-                                let _ = chat.activate_session_row(&row_key, cx);
-                            }
-                        });
-                    })
-            })
             .when(chevron.is_some() || reserves_chevron, |line| {
                 line.child(
                     div()
@@ -771,7 +780,17 @@ impl Chat {
                         .color(theme.ely.fg_muted),
                 )
             }))
-            .child(div().flex_1().min_w_0().truncate().child(label))
+            .child(
+                div()
+                    .debug_selector({
+                        let selector = format!("session-row-label-{}", row.key);
+                        move || selector.clone()
+                    })
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(label),
+            )
             .when(!row.tag.is_empty(), |line| {
                 line.child(
                     div()
@@ -780,21 +799,56 @@ impl Chat {
                         .child(row.tag.clone()),
                 )
             })
-            .when(!row.detail.is_empty(), |line| {
+            .children(end.map(|(word, is_action)| {
+                div()
+                    .flex_none()
+                    .text_color(if is_action {
+                        theme.ely.link
+                    } else {
+                        theme.ely.fg_muted
+                    })
+                    .child(word)
+            }));
+        let line = div()
+            .id(key.clone())
+            .debug_selector({
+                let selector = key.to_string();
+                move || selector.clone()
+            })
+            .flex()
+            .flex_col()
+            .text_size(caption)
+            .text_color(text_color)
+            .when(clickable, |line| {
+                line.cursor(CursorStyle::PointingHand)
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |chat, cx| {
+                            if folds {
+                                chat.toggle_session_fold(&row_key, cx);
+                            } else {
+                                // A file that cannot be opened has nothing
+                                // to say here; the workspace reports it.
+                                let _ = chat.activate_session_row(&row_key, cx);
+                            }
+                        });
+                    })
+            })
+            .child(main)
+            // The detail of a card that wants its own line: under the
+            // title, past the icon, as muted as a note.
+            .when(row.detail_below && !row.detail.is_empty(), |line| {
                 line.child(
                     div()
-                        .flex_none()
-                        .when(row.show_action, |detail| detail.max_w(px(130.0)).truncate())
+                        .debug_selector({
+                            let selector = format!("session-row-detail-{}", row.key);
+                            move || selector.clone()
+                        })
+                        .ml(px(indent + 20.0))
+                        .truncate()
                         .text_color(theme.ely.fg_muted)
                         .child(row.detail.clone()),
                 )
-            })
-            .children(row.action.clone().filter(|_| row.show_action).map(|action| {
-                div()
-                    .flex_none()
-                    .text_color(theme.ely.link)
-                    .child(action)
-            }));
+            });
         if row.note.is_empty() {
             return line.into_any_element();
         }

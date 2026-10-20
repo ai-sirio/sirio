@@ -49,6 +49,15 @@ impl Busy {
             Self::Waiting => "waiting for sign-in…",
         }
     }
+
+    /// The same, as short as the line beside a name can hold.
+    fn short(self) -> &'static str {
+        match self {
+            Self::Reconnecting => "reconnecting…",
+            Self::SigningIn => "signing in…",
+            Self::Waiting => "waiting…",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -281,7 +290,11 @@ pub(super) fn section(
                 depth: 1,
                 tone: Some(tone),
                 action: action.map(|action| action.label().to_string()),
+                // The dot says the state, so the line holds the name and one
+                // word at its end: the action, or the state when there is
+                // none, or what is in flight.
                 show_action: true,
+                short: connectors.busy.get(&server.name).map(|busy| busy.short().to_string()),
                 note,
                 ..Row::new(&server_key(server), server.name.clone(), &detail)
             });
@@ -576,6 +589,8 @@ impl Chat {
 #[cfg(test)]
 mod tests {
     use super::super::{SectionSnapshot, SessionPanelAction};
+    use super::{Busy, Connectors, McpOrigin, McpServer, McpState, section};
+    use std::collections::HashSet;
     use crate::chat::tests::{TempDir, chat_view, pump_chat_until, refresh_frame};
     use crate::chat::{Chat, LaunchSpec};
     use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -846,6 +861,76 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         cx.cx.run_until_parked();
         assert_eq!(count_lines(&counts), 2);
+    }
+
+    #[gpui::test]
+    async fn a_connectors_name_has_the_line_beside_its_action(cx: &mut TestAppContext) {
+        let (chat, cx) = native_chat(cx);
+        cx.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(900.0)));
+        settle(cx, |cx| row(&chat, cx, NOTION).is_some_and(|(d, _)| d == "needs sign-in"));
+        for _ in 0..3 {
+            refresh_frame(cx);
+        }
+        let bounds = |cx: &mut VisualTestContext, selector: String| {
+            cx.debug_bounds(Box::leak(selector.into_boxed_str()))
+                .expect("drawn")
+        };
+        let line = bounds(cx, format!("session-row-{NOTION}"));
+        let name = bounds(cx, format!("session-row-label-{NOTION}"));
+        // The dot says the state; the line holds the name and the action,
+        // so the name keeps most of it.
+        assert!(
+            name.size.width >= line.size.width * 0.5,
+            "the name {name:?} is squeezed in the line {line:?}"
+        );
+        // What each line draws at its end: the action when there is one,
+        // the state's word when there is none.
+        let ends = chat.read_with(&cx.cx, |chat, _| {
+            chat.session_panel_sections()
+                .into_iter()
+                .find(|section| section.key == "connectors")
+                .expect("connectors")
+                .rows
+                .iter()
+                .map(|row| (row.key.clone(), row.end().map(|(word, act)| (word.to_string(), act))))
+                .collect::<Vec<_>>()
+        });
+        let end = |key: &str| ends.iter().find(|(k, _)| k == key).unwrap().1.clone();
+        assert_eq!(end(NOTION), Some(("Sign in".to_string(), true)));
+        assert_eq!(end(CODEGRAPH), Some(("Reconnect".to_string(), true)));
+    }
+
+    #[test]
+    fn a_connector_without_an_action_says_its_state_and_a_busy_one_its_short_word() {
+        let server = |status| McpServer {
+            name: "gh".to_string(),
+            status,
+            origin: McpOrigin::User,
+        };
+        let rows = |connectors: &Connectors| {
+            section(connectors, true, &HashSet::new())
+                .expect("a section")
+                .rows
+                .into_iter()
+                .find(|row| row.key == "connectors/user/gh")
+                .expect("the server's row")
+        };
+        let mut connectors = Connectors::default();
+        connectors.set_servers(vec![server(McpState::Connected)]);
+        let row = rows(&connectors);
+        assert_eq!(row.end(), Some(("connected", false)));
+
+        // While a call is open the full word stays in the snapshot and the
+        // line draws the short one.
+        connectors.set_servers(vec![server(McpState::NeedsAuth)]);
+        connectors.busy.insert("gh".to_string(), Busy::Waiting);
+        let row = rows(&connectors);
+        assert_eq!(row.detail, "waiting for sign-in…");
+        assert_eq!(row.end(), Some(("waiting…", false)));
+        connectors.busy.insert("gh".to_string(), Busy::Reconnecting);
+        assert_eq!(rows(&connectors).end(), Some(("reconnecting…", false)));
+        connectors.busy.insert("gh".to_string(), Busy::SigningIn);
+        assert_eq!(rows(&connectors).end(), Some(("signing in…", false)));
     }
 
     /// What the row says under itself, in full.
