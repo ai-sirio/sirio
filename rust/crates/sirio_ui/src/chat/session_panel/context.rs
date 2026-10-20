@@ -6,7 +6,7 @@
 use super::{BarSegment, Row, Section};
 use crate::chat::Chat;
 use gpui::Context as GpuiContext;
-use sirio_acp::{ContextBreakdown, ContextOrigins, ContextUsage, OriginNode};
+use sirio_acp::{ContextBreakdown, ContextOrigins, ContextUsage, OriginNode, Standing};
 use std::collections::HashSet;
 
 /// A level with more children than this shows the heaviest and folds the
@@ -197,11 +197,17 @@ impl Build<'_> {
         }
     }
 
-    /// The heaviest ten, then one row that holds the rest. Children arrive
-    /// sorted heaviest first.
+    /// The heaviest ten, then one row that holds the rest, then the
+    /// remainder row: it is not an item to fold away whatever it weighs.
+    /// Children arrive sorted heaviest first, the remainder after them.
     fn children(&mut self, parent: &str, children: &[OriginNode], depth: u8, muted: bool) {
         let start = self.rows.len();
-        let (shown, rest) = children.split_at(children.len().min(MAX_CHILDREN));
+        let items = children
+            .iter()
+            .take_while(|child| child.standing != Standing::Remainder)
+            .count();
+        let (items, remainders) = children.split_at(items);
+        let (shown, rest) = items.split_at(items.len().min(MAX_CHILDREN));
         for child in shown {
             self.node(child, depth, None);
         }
@@ -222,6 +228,9 @@ impl Build<'_> {
                     self.node(child, depth + 1, None);
                 }
             }
+        }
+        for child in remainders {
+            self.node(child, depth, None);
         }
         if muted {
             for row in &mut self.rows[start..] {
@@ -365,6 +374,23 @@ mod tests {
             reducible,
             ["Memory files", "Conversation", "Plugins and skills"]
         );
+        // Fixed keeps the remainder after Claude Code and free space last,
+        // whatever they weigh.
+        let fixed: Vec<&str> = rows[heading + 1..]
+            .iter()
+            .filter(|row| row.0 == 0)
+            .map(|row| row.1)
+            .collect();
+        assert_eq!(
+            fixed,
+            [
+                "Claude Code",
+                "Other",
+                "System tools (deferred)",
+                "Autocompact buffer",
+                "Free space"
+            ]
+        );
         // What takes no room is drawn muted and stays out of the bar.
         let muted = chat.read_with(&cx.cx, |chat, _| {
             chat.session_panel_sections()
@@ -493,6 +519,37 @@ mod tests {
             .map(|row| row.label.as_str())
             .collect();
         assert_eq!(deeper, ["skill-04", "skill-03", "skill-02", "skill-01", "skill-00"]);
+    }
+
+    #[gpui::test]
+    async fn the_remainder_is_drawn_after_n_more_not_inside_it(cx: &mut TestAppContext) {
+        let files: Vec<_> = (0..12)
+            .map(|i| json!({"path": format!("/r/f{i:02}.md"), "type": "Project", "tokens": 100 + i}))
+            .collect();
+        let breakdown = ContextBreakdown::parse(&json!({
+            "totalTokens": 40000, "rawMaxTokens": 400000,
+            "categories": [category("memory_files", "Memory files", 40000, "used")],
+            "memoryFiles": files,
+        }))
+        .expect("a breakdown");
+        let (chat, cx) = open_with(cx, Some(breakdown));
+        let section = context_section(&chat, cx);
+        let inside: Vec<&str> = section
+            .rows
+            .iter()
+            .filter(|row| row.depth == 1)
+            .map(|row| row.label.as_str())
+            .collect();
+        // The remainder weighs far more than any file and is not one of the
+        // ten shown, nor of what "2 more" holds.
+        assert_eq!(inside.len(), 12, "{inside:?}");
+        assert_eq!(&inside[10..], ["2 more", "Other"]);
+        let more = section
+            .rows
+            .iter()
+            .find(|row| row.label == "2 more")
+            .expect("the fold");
+        assert_eq!(more.detail, "201", "100 + 101, the two lightest files");
     }
 
     #[gpui::test]

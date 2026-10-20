@@ -591,7 +591,7 @@ pub struct ImageAttachment {
 /// `sirio_claude`.
 pub use sirio_claude::{
     ContextBreakdown, ContextOrigins, FastMode, McpAuthStart, McpOrigin, McpServer, McpState,
-    OriginNode, THINKING_DISPLAYS,
+    OriginNode, Standing, THINKING_DISPLAYS,
 };
 
 /// How much of the model's reasoning the session sends.

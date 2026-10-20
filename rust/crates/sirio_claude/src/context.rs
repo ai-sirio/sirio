@@ -90,7 +90,24 @@ pub struct OriginNode {
     /// False for what does not take room in the window: deferred tools and
     /// free space.
     pub counted: bool,
+    /// Where the node sits among its siblings before its weight is looked at.
+    pub standing: Standing,
     pub children: Vec<OriginNode>,
+}
+
+/// The order siblings keep, before weight: what the CLI itemised, then the
+/// remainder it did not, then what takes no room (deferred tools, the
+/// autocompact reserve, free space last).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Standing {
+    Item,
+    /// The explicit `Other` row that makes the numbers add up.
+    Remainder,
+    Deferred,
+    Buffer,
+    /// Any other kind the CLI sent that is not part of the total.
+    Uncounted,
+    Free,
 }
 
 impl ContextBreakdown {
@@ -175,7 +192,16 @@ impl ContextBreakdown {
             } else {
                 category.id.clone()
             };
-            fixed.push(leaf(&key, &category.name, category.tokens, counted));
+            fixed.push(OriginNode {
+                standing: match &category.kind {
+                    CategoryKind::Used => Standing::Item,
+                    CategoryKind::Deferred => Standing::Deferred,
+                    CategoryKind::Buffer => Standing::Buffer,
+                    CategoryKind::Free => Standing::Free,
+                    CategoryKind::Other(_) => Standing::Uncounted,
+                },
+                ..leaf(&key, &category.name, category.tokens, counted)
+            });
         }
 
         if self.categories.is_empty() {
@@ -187,7 +213,7 @@ impl ContextBreakdown {
             .filter(|node| node.counted)
             .fold(0u64, |sum, node| sum.saturating_add(node.tokens));
         if self.total_tokens > explained {
-            fixed.push(leaf("other", "Other", self.total_tokens - explained, true));
+            fixed.push(remainder("other", self.total_tokens - explained));
         }
         unique_keys(&mut fixed);
         sort_nodes(&mut reducible);
@@ -215,6 +241,7 @@ impl ContextBreakdown {
                 path: Some(file.path.clone()),
                 tag: (!file.kind.is_empty()).then(|| file.kind.clone()),
                 counted: true,
+                standing: Standing::Item,
                 children: Vec::new(),
             })
             .collect();
@@ -251,6 +278,7 @@ impl ContextBreakdown {
                         path: None,
                         tag: None,
                         counted: true,
+                        standing: Standing::Item,
                         children: Vec::new(),
                     });
                     counts.push((0, 0));
@@ -278,6 +306,7 @@ impl ContextBreakdown {
                 path: item.path.clone(),
                 tag: Some(kind.to_string()),
                 counted: true,
+                standing: Standing::Item,
                 children: Vec::new(),
             });
         }
@@ -323,6 +352,7 @@ impl ContextBreakdown {
                         n => format!("{n} tools"),
                     }),
                     counted: true,
+                    standing: Standing::Item,
                     children: tools,
                 }
             })
@@ -503,7 +533,16 @@ fn leaf(key: &str, label: &str, tokens: u64, counted: bool) -> OriginNode {
         path: None,
         tag: None,
         counted,
+        standing: Standing::Item,
         children: Vec::new(),
+    }
+}
+
+/// The row that holds what a total leaves unexplained.
+fn remainder(key: &str, tokens: u64) -> OriginNode {
+    OriginNode {
+        standing: Standing::Remainder,
+        ..leaf(key, "Other", tokens, true)
     }
 }
 
@@ -519,12 +558,7 @@ fn group(
     unique_keys(&mut children);
     let explained = sum_tokens(&children);
     if category_tokens > explained {
-        children.push(leaf(
-            &format!("{key}/other"),
-            "Other",
-            category_tokens - explained,
-            true,
-        ));
+        children.push(remainder(&format!("{key}/other"), category_tokens - explained));
         unique_keys(&mut children);
     }
     OriginNode {
@@ -534,6 +568,7 @@ fn group(
         path: None,
         tag: None,
         counted: true,
+        standing: Standing::Item,
         children,
     }
 }
@@ -565,9 +600,14 @@ fn unique_keys(nodes: &mut [OriginNode]) {
     }
 }
 
-/// Heaviest first, ties by label, at every level.
+/// By standing, then heaviest first, ties by label, at every level.
 fn sort_nodes(nodes: &mut [OriginNode]) {
-    nodes.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.label.cmp(&b.label)));
+    nodes.sort_by(|a, b| {
+        a.standing
+            .cmp(&b.standing)
+            .then_with(|| b.tokens.cmp(&a.tokens))
+            .then_with(|| a.label.cmp(&b.label))
+    });
     for node in nodes {
         sort_nodes(&mut node.children);
     }
@@ -830,6 +870,50 @@ mod tests {
         assert_eq!(
             (other.label.as_str(), other.tokens, other.counted),
             ("Other", 100, true)
+        );
+    }
+
+    #[test]
+    fn a_remainder_row_sorts_after_the_real_items_of_its_group() {
+        // The remainder (900) outweighs the one file it sits beside.
+        let breakdown = ContextBreakdown::parse(&json!({
+            "totalTokens": 1000, "rawMaxTokens": 10_000,
+            "categories": [category("memory_files", "Memory files", 1000, "used")],
+            "memoryFiles": [{"path": "/r/CLAUDE.md", "type": "Project", "tokens": 100}],
+        }))
+        .expect("a breakdown");
+        let origins = breakdown.origins();
+        let memory = node(&origins.reducible, "memory");
+        assert_eq!(keys(&memory.children), ["memory//r/CLAUDE.md", "memory/other"]);
+    }
+
+    #[test]
+    fn what_takes_no_room_and_the_remainder_come_last_in_a_fixed_order() {
+        // 54750 of 64923 are explained, so a top-level remainder exists too.
+        let origins = ContextBreakdown::parse(&json!({
+            "totalTokens": 64923, "rawMaxTokens": 400000,
+            "categories": [
+                category("system_prompt", "System prompt", 2315, "used"),
+                category("memory_files", "Memory files", 34233, "used"),
+                {"id": "system_tools_deferred", "name": "System tools (deferred)",
+                 "tokens": 16426, "isDeferred": true, "kind": "deferred"},
+                category("autocompact_buffer", "Autocompact buffer", 33000, "buffer"),
+                category("free_space", "Free space", 302077, "free"),
+            ],
+        }))
+        .expect("a breakdown")
+        .origins();
+        // The remainder (28375) outweighs Claude Code (2315) and is still
+        // after it; free space outweighs everything and is last.
+        assert_eq!(
+            keys(&origins.fixed),
+            [
+                "claude_code",
+                "other",
+                "system_tools_deferred",
+                "autocompact_buffer",
+                "free_space"
+            ]
         );
     }
 

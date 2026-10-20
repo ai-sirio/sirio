@@ -26,7 +26,7 @@ pub use catalog::{
 };
 pub use context::{
     CategoryKind, ContextBreakdown, ContextCategory, ContextItem, ContextOrigins, ItemOrigin,
-    MemoryFile, OriginNode,
+    MemoryFile, OriginNode, Standing,
 };
 pub use control::{
     CanUseTool, ControlEnvelope, ControlRequest, PermissionResult, THINKING_DISPLAYS,
