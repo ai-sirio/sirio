@@ -4971,6 +4971,32 @@ enum LauncherAction {
     ProjectSettings,
 }
 
+/// Hands the chat the worktrees the catalog knows, so a chat tab can name the
+/// project its working directory belongs to. A worktree the catalog marks
+/// missing is left out: its folder is gone, so no live chat runs in it.
+fn publish_worktree_lookup(catalog: &ProjectCatalog, cx: &mut App) {
+    let worktrees = catalog
+        .projects()
+        .iter()
+        .flat_map(|project| {
+            let display_name = catalog.project_settings(&project.id).display_name;
+            let project_name = display_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| project.name.clone());
+            project
+                .worktrees
+                .iter()
+                .filter(|worktree| !catalog.is_worktree_missing(&worktree.path))
+                .map(move |worktree| sirio_ui::worktree_lookup::WorktreeInfo {
+                    project_name: project_name.clone(),
+                    root: worktree.path.clone(),
+                    is_primary: worktree.is_primary,
+                })
+        })
+        .collect();
+    sirio_ui::worktree_lookup::set_worktrees(worktrees, cx);
+}
+
 /// Resolves the labels shown by the running shell from its selected checkout,
 /// not from the fixture values used by the standalone UI demos.
 fn worktree_context(catalog: &ProjectCatalog, working_directory: &Path) -> WorktreeContext {
@@ -7492,7 +7518,7 @@ impl SirioWorkspace {
         self.mark_activity_dirty();
     }
 
-    fn sync_control_state(&self) {
+    fn sync_control_state(&self, cx: &mut App) {
         let previous = self
             .control_state
             .lock()
@@ -7508,6 +7534,7 @@ impl SirioWorkspace {
             .control_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+        publish_worktree_lookup(&self.project_catalog, cx);
     }
 
     fn mounted_worktree_paths(&self, excluded_path: Option<&Path>) -> Vec<PathBuf> {
@@ -7775,7 +7802,7 @@ impl SirioWorkspace {
         // this discovery completes, while control state can also be stale
         // after another owner changed the catalog. Keep both projections in
         // lockstep even when git reports no catalog delta.
-        self.sync_control_state();
+        self.sync_control_state(cx);
         self.refresh_sidebar(cx);
         if let Some(selected_path) = selected_path {
             self.sidebar.update(cx, |sidebar, cx| {
@@ -10039,7 +10066,7 @@ impl SirioWorkspace {
         match self.project_catalog.add(&path) {
             Ok(true) => {
                 self.session.schedule_catalog(&self.project_catalog);
-                self.sync_control_state();
+                self.sync_control_state(cx);
                 self.refresh_sidebar(cx);
             }
             Ok(false) => {
@@ -10083,6 +10110,7 @@ impl SirioWorkspace {
         {
             Ok(()) => {
                 self.session.schedule_catalog(&self.project_catalog);
+                publish_worktree_lookup(&self.project_catalog, cx);
                 self.refresh_sidebar(cx);
             }
             Err(error) => self
@@ -10111,7 +10139,7 @@ impl SirioWorkspace {
         let layout_ids = self.layout_session_ids(&removed_paths);
         if self.project_catalog.remove(id) {
             self.session.schedule_catalog(&self.project_catalog);
-            self.sync_control_state();
+            self.sync_control_state(cx);
             self.refresh_sidebar(cx);
             // Closing a project ends its sessions (SP2 spec §4.2).
             self.end_app_sessions(removed_paths.clone(), known_before, layout_ids, cx);
@@ -10220,7 +10248,7 @@ impl SirioWorkspace {
         match drag.scope {
             ReorderScope::Projects | ReorderScope::Worktrees => {
                 self.session.schedule_catalog(&self.project_catalog);
-                self.sync_control_state();
+                self.sync_control_state(cx);
                 self.refresh_sidebar(cx);
             }
             ReorderScope::Tabs => {
@@ -10636,7 +10664,7 @@ impl SirioWorkspace {
         let added = self.project_catalog.add(path)?;
         if added {
             self.session.schedule_catalog(&self.project_catalog);
-            self.sync_control_state();
+            self.sync_control_state(cx);
             self.refresh_sidebar(cx);
         }
         let state = self
@@ -10790,7 +10818,7 @@ impl SirioWorkspace {
         match self.project_catalog.set_primary(path, primary) {
             Ok(()) => {
                 self.session.schedule_catalog(&self.project_catalog);
-                self.sync_control_state();
+                self.sync_control_state(cx);
                 self.refresh_sidebar(cx);
             }
             Err(error) => self
@@ -11971,7 +11999,7 @@ impl SirioWorkspace {
         }
         if changed {
             self.project_catalog.replace_projects(projects);
-            self.sync_control_state();
+            self.sync_control_state(cx);
             self.refresh_sidebar(cx);
             cx.notify();
         }
@@ -12105,7 +12133,7 @@ impl SirioWorkspace {
         self.project_catalog.replace_projects(projects);
         self.session.schedule_catalog(&self.project_catalog);
 
-        self.sync_control_state();
+        self.sync_control_state(cx);
         self.refresh_sidebar(cx);
         cx.notify();
 
@@ -27791,6 +27819,7 @@ fn main() {
         }
         let project_catalog =
             ProjectCatalog::from_restored(restored_catalog.projects, restored_catalog.settings);
+        publish_worktree_lookup(&project_catalog, cx);
         // F-AGENT-SAFE-02: repair a stale leading `sirioctl` path in every
         // known worktree's Claude hook config at launch — before any pane is
         // opened, so a worktree with no pane reopened this run still gets
@@ -41763,7 +41792,7 @@ done
             // `current_workspace().branch` we read afterwards is not a stale
             // `palette_test_workspace` leftover. `refresh_worktree_branches`
             // must itself republish to both surfaces.
-            workspace.sync_control_state();
+            workspace.sync_control_state(cx);
             workspace
         });
 
