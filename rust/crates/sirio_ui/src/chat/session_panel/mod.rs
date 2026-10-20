@@ -150,6 +150,21 @@ pub(super) struct BarSegment {
     pub(super) hue: usize,
 }
 
+/// What the probe, which paints with the chat and only then, leaves behind.
+/// A chat in a background tab or on another worktree is not painted, so
+/// what only a painted column should do reads it.
+#[derive(Default)]
+pub(super) struct Frame {
+    /// Whether the chat is wide enough for the column, as last measured;
+    /// `None` until the first frame has been laid out.
+    wide: Cell<Option<bool>>,
+    /// Set by every paint; whoever acts on it takes it (`replace(false)`),
+    /// so it says whether a frame came since.
+    painted: Cell<bool>,
+    /// A read the change request owes to the next frame that paints.
+    read_on_paint: Cell<bool>,
+}
+
 /// The column's state on a `Chat`.
 pub(super) struct SessionPanel {
     open: bool,
@@ -162,9 +177,8 @@ pub(super) struct SessionPanel {
     context: context::Context,
     connectors: connectors::Connectors,
     change_request: change_request::ChangeRequest,
-    /// Whether the chat is wide enough for the column, as last measured;
-    /// `None` until the first frame has been laid out.
-    wide: Rc<Cell<Option<bool>>>,
+    /// What the frames the chat is painted in have told it.
+    frame: Rc<Frame>,
     environment: environment::Environment,
     environment_task: Option<gpui::Task<()>>,
 }
@@ -185,7 +199,7 @@ impl SessionPanel {
             context: context::Context::default(),
             connectors: connectors::Connectors::default(),
             change_request: change_request::ChangeRequest::default(),
-            wide: Rc::new(Cell::new(None)),
+            frame: Rc::new(Frame::default()),
             environment: environment::Environment::default(),
             environment_task: None,
         }
@@ -396,7 +410,7 @@ impl Chat {
 
     /// Whether the column is on screen: open, and the chat wide enough.
     pub(super) fn session_panel_drawn(&self) -> bool {
-        self.session_panel.open && self.session_panel.wide.get() == Some(true)
+        self.session_panel.open && self.session_panel.frame.wide.get() == Some(true)
     }
 
     pub(super) fn session_panel_snapshot(&self) -> SessionPanelSnapshot {
@@ -438,13 +452,19 @@ impl Chat {
     /// An invisible probe that tells the chat how wide it is: the column
     /// steps aside under `MIN_CHAT_WIDTH`, and a change across it draws again.
     pub(super) fn render_session_panel_probe(&self, cx: &mut Context<Self>) -> AnyElement {
-        let wide = self.session_panel.wide.clone();
+        let frame = self.session_panel.frame.clone();
         let entity = cx.entity();
         canvas(
             move |bounds, _, cx| {
+                frame.painted.set(true);
                 let now = bounds.size.width >= px(MIN_CHAT_WIDTH);
-                if wide.replace(Some(now)) != Some(now) {
+                if frame.wide.replace(Some(now)) != Some(now) {
+                    let entity = entity.clone();
                     cx.defer(move |cx| entity.update(cx, |_, cx| cx.notify()));
+                }
+                if frame.read_on_paint.get() {
+                    let entity = entity.clone();
+                    cx.defer(move |cx| entity.update(cx, Chat::session_panel_painted));
                 }
             },
             |_, _, _, _| {},

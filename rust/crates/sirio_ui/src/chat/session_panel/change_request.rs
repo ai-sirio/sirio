@@ -6,9 +6,12 @@
 //! The card reads a cached answer; nothing here blocks. A read is one task:
 //! `connect` (it runs git), a look at the host's shared pause on the GPUI
 //! thread, then `read_branch_card`, each hop off the GPUI thread. It runs
-//! when the column opens or the card unfolds (if the last answer is a
-//! minute old) and then every minute while the card is open; closing the
-//! column or folding the card drops the timer and any read in flight.
+//! on the first frame that paints the column after it opens or the card
+//! unfolds (if the last answer is a minute old) and then every minute while
+//! the card is open and a frame painted it since the last tick: a chat in a
+//! background tab, or restored and never shown, asks the forge for nothing.
+//! Closing the column or folding the card drops the timer and any read in
+//! flight.
 
 use super::{Row, Section, environment};
 use crate::branch_card::{BranchCard, BranchCardRead, read_branch_card};
@@ -45,6 +48,9 @@ pub(super) struct ChangeRequest {
     last_read: Option<i64>,
     /// Counts the reads started, so an answer to an older one is dropped.
     generation: u64,
+    /// Whether the read owed to the next paint must happen even when the
+    /// last answer is fresh: the branch moved.
+    read_even_if_fresh: bool,
     read_task: Option<Task<()>>,
     timer_task: Option<Task<()>>,
 }
@@ -132,26 +138,23 @@ pub(super) fn section(state: &ChangeRequest) -> Option<Section> {
 }
 
 impl Chat {
-    /// The column opened or the card unfolded: reads when the last answer is
-    /// old, and keeps reading every minute until stopped.
+    /// The column opened or the card unfolded: reads on the first frame that
+    /// paints it, when the last answer is old, and keeps reading every
+    /// minute it was painted in until stopped.
     pub(in crate::chat) fn start_session_change_request(&mut self, cx: &mut GpuiContext<Self>) {
         if !self.session_panel.open || self.session_panel.collapsed.contains("change_request") {
             return;
         }
-        let stale = self
-            .session_panel
-            .change_request
-            .last_read
-            .is_none_or(|at| style::now() - at >= STALE_SECS);
-        if stale {
-            self.read_session_change_request(cx);
-        }
+        let frame = &self.session_panel.frame;
+        frame.painted.set(false);
+        frame.read_on_paint.set(true);
         self.session_panel.change_request.timer_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(READ_EVERY).await;
                 let alive = this.update(cx, |chat, cx| {
-                    // A narrow chat keeps the column undrawn: nothing to feed.
-                    if chat.session_panel_drawn() {
+                    // Not painted since the last tick: nobody has seen the
+                    // card, so there is nothing to keep fresh.
+                    if chat.session_panel.frame.painted.replace(false) {
                         chat.read_session_change_request(cx);
                     }
                 });
@@ -160,6 +163,25 @@ impl Chat {
                 }
             }
         }));
+        cx.notify();
+    }
+
+    /// A frame painted the chat while a read was owed to the next one.
+    pub(in crate::chat) fn session_panel_painted(&mut self, cx: &mut GpuiContext<Self>) {
+        if !self.session_panel.frame.read_on_paint.replace(false) {
+            return;
+        }
+        let state = &mut self.session_panel.change_request;
+        let forced = std::mem::take(&mut state.read_even_if_fresh);
+        if !self.session_panel.open || self.session_panel.collapsed.contains("change_request") {
+            return;
+        }
+        let stale = state
+            .last_read
+            .is_none_or(|at| style::now() - at >= STALE_SECS);
+        if forced || stale {
+            self.read_session_change_request(cx);
+        }
     }
 
     /// The column closed or the card folded: no timer, no read in flight, and
@@ -250,11 +272,14 @@ impl Chat {
     }
 
     /// The Environment line read another branch than the one it showed: the
-    /// card is read at once rather than at the next minute, and an answer
-    /// still in flight for the old branch is dropped by the new generation.
+    /// card is read at the next frame that paints it rather than at the next
+    /// minute, and an answer still in flight for the old branch is dropped
+    /// by the new generation.
     pub(in crate::chat) fn session_branch_moved(&mut self, cx: &mut GpuiContext<Self>) {
         if self.session_panel.open && !self.session_panel.collapsed.contains("change_request") {
-            self.read_session_change_request(cx);
+            self.session_panel.change_request.read_even_if_fresh = true;
+            self.session_panel.frame.read_on_paint.set(true);
+            cx.notify();
         }
     }
 
@@ -537,6 +562,61 @@ mod tests {
         assert_eq!(forge.count("ChangeRequestForBranch"), 3, "a closed column is not read");
     }
 
+    /// A window that shows a chat that lives apart from it.
+    struct Host(Entity<Chat>);
+
+    impl gpui::Render for Host {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{ParentElement as _, Styled as _};
+            gpui::div().size_full().child(self.0.clone())
+        }
+    }
+
+    #[gpui::test]
+    async fn a_column_nobody_sees_does_not_read_the_forge(cx: &mut TestAppContext) {
+        use gpui::AppContext as _;
+        let forge = forge_with(vec![testing::summary(112, "Fix login")]);
+        let source = FakeSource::ready(testing::github_client(forge.clone()), Some("feat/login"));
+        cx.update(sirio_theme::Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(crate::chat::init);
+        cx.update(|cx| forge_source::set_source(source.clone(), cx));
+        // A restored chat, or one in a background tab: open, in no window.
+        let chat = cx.new(|cx| {
+            Chat::new(
+                Some(crate::chat::LaunchSpec::Acp(sirio_acp::AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
+                std::env::temp_dir(),
+                cx,
+            )
+        });
+        chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
+        let wait = |cx: &mut TestAppContext, seconds: u64| {
+            for _ in 0..seconds {
+                cx.executor().advance_clock(std::time::Duration::from_secs(1));
+                cx.run_until_parked();
+            }
+        };
+        wait(cx, 130);
+        assert_eq!(forge.count("ChangeRequestForBranch"), 0, "two ticks, no paint, no read");
+        assert_eq!(*source.connects.lock().unwrap(), 0, "not even a connection");
+
+        // The first frame that paints it reads once.
+        let host = chat.clone();
+        let (_, cx) = cx.add_window_view(|_, _| Host(host));
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        for _ in 0..3 {
+            refresh_frame(cx);
+        }
+        settle(&chat, cx);
+        assert_eq!(forge.count("ChangeRequestForBranch"), 1);
+    }
+
     #[gpui::test]
     async fn a_gitlab_branch_without_one_says_merge_request(cx: &mut TestAppContext) {
         let forge = Arc::new(CannedForge::default());
@@ -637,7 +717,8 @@ mod tests {
             testing::branch(vec![testing::summary(200, "Another")]),
         );
         chat.update(cx, |chat, cx| chat.reread_session_branch(cx));
-        // Well inside the minute: only the move can have asked.
+        // Well inside the minute: only the move can have asked, and only
+        // once a frame has painted the column.
         cx.cx.executor().allow_parking();
         for _ in 0..200 {
             if forge.count("ChangeRequestForBranch") >= 2 {
@@ -645,6 +726,7 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
             cx.cx.run_until_parked();
+            refresh_frame(cx);
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
         cx.cx.run_until_parked();
