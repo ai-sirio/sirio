@@ -314,7 +314,8 @@ fn results(id: &ElementId, files: &[FileHits], drawing: Drawing, cx: &App) -> Ve
             let item = item.selected(
                 selected.is_some_and(|(path, line)| *path == file.path && *line == hit.line),
             );
-            let item = match replacement {
+            // A file with unsaved text is skipped by Replace all: no preview there.
+            let item = match replacement.filter(|_| !unsaved.contains(&file.path)) {
                 Some(text) => item.replacement(text.clone()),
                 None => item,
             };

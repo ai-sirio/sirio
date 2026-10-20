@@ -8041,8 +8041,8 @@ impl SirioWorkspace {
         let root = worktree.to_path_buf();
         drawer.update(cx, |drawer, _| {
             drawer.set_buffer_source(std::rc::Rc::new(move |cx: &App| {
-                // `None` while the workspace is being updated: the tabs cannot be
-                // read then, and the caller must not take that for "none are dirty".
+                // `None` once the workspace is gone: the tabs cannot be read then,
+                // and the caller must not take that for "none are dirty".
                 workspace.read_with(cx, |workspace, cx| workspace.dirty_buffers(&root, cx)).ok()
             }));
         });

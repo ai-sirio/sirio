@@ -1117,8 +1117,9 @@ pub(super) fn render(
     }
     let note = if layout.omitted > 0 {
         Some(format!(
-            "{} more lines are not drawn. Narrow the search to see them.",
-            layout.omitted
+            "{} {} not drawn. Narrow the search to see them.",
+            plural(layout.omitted, "more line"),
+            if layout.omitted == 1 { "is" } else { "are" }
         ))
     } else if query_empty {
         Some("Type to search every file git lists in this worktree.".to_owned())

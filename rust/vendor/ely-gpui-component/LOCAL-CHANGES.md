@@ -239,7 +239,8 @@ Vendored files:
   query and the globs once per run instead of once per file, and a glob too big
   for a regex logs once. `mod.rs` also re-exports `Finder` and `GlobFilter`.
   Local change (the drawer's Search tab): `SearchPanel` gains `unsaved(paths)`
-  (a file whose open tab holds unsaved text shows `unsaved` beside its count),
+  (a file whose open tab holds unsaved text shows `unsaved` beside its count,
+  and its hits draw no replacement preview, since Replace all skips it),
   `selected(path, line)` (that result's row is drawn with the `active` wash, the
   one a chosen conversation row takes, via a `selected` builder on
   `SearchResultItem`), `full_counts(..)` (a file given fewer lines than it matched on
