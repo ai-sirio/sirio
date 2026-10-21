@@ -59,6 +59,8 @@ pub(crate) struct Fold {
     current_mode: Option<String>,
     model: Option<String>,
     mcp_warnings: Vec<String>,
+    /// The server list a `system/init` carried, until the worker takes it.
+    init_mcp_servers: Option<Vec<sirio_claude::McpServerStatus>>,
     last_result: Option<ResultSummary>,
     notices: Vec<SessionNotice>,
     /// Ids of tasks whose `task_started` said they were backgrounded.
@@ -106,6 +108,13 @@ impl Fold {
     /// ACP side's `mcp_warnings_shown` cursor exists to prevent.
     pub(crate) fn take_mcp_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.mcp_warnings)
+    }
+
+    /// The server list of the latest `system/init`, draining it. The worker
+    /// keeps it for the connectors column until an `mcp_status` answer, which
+    /// also names each server's origin, replaces it.
+    pub(crate) fn take_init_mcp_servers(&mut self) -> Option<Vec<sirio_claude::McpServerStatus>> {
+        self.init_mcp_servers.take()
     }
 
     /// Notices seen so far, draining them. The surface posts each one
@@ -338,9 +347,12 @@ impl Fold {
                         });
                     }
                 }
-                // MCP connection failures are intentionally not surfaced: the
-                // native session loads the user's own `.mcp.json`/plugins and
-                // a broken server would otherwise banner every chat.
+                // MCP connection failures are still not announced: the native
+                // session loads the user's own `.mcp.json`/plugins and a
+                // broken server would otherwise banner every chat. The list
+                // is kept for the session panel's connectors column, which
+                // is where a failed server is shown, quietly.
+                self.init_mcp_servers = Some(system.mcp_servers.clone());
             }
             "status" => {}
             "compact_boundary" => {

@@ -67,7 +67,8 @@ pub const BROWSER_NOT_SUPPORTED: &[&str] = &[
 
 /// Served by debug builds only. A release build leaves these out of
 /// `system.capabilities`, and answers them with "unknown method".
-const DEBUG_METHODS: [&str; 34] = [
+const DEBUG_METHODS: [&str; 35] = [
+    "surface.chat.panel",
     "surface.change_request.act",
     "surface.open_list.open",
     "surface.changes.confirm",
@@ -207,5 +208,14 @@ mod tests {
     fn settings_act_is_served_by_debug_builds_only() {
         assert!(served_methods(true).contains(&"surface.settings.act"));
         assert!(!served_methods(false).contains(&"surface.settings.act"));
+    }
+
+    /// `surface.chat.panel` drives a chat's session panel from the socket.
+    /// Only a debug build serves it; a release build neither lists nor
+    /// answers it.
+    #[test]
+    fn chat_panel_is_served_by_debug_builds_only() {
+        assert!(served_methods(true).contains(&"surface.chat.panel"));
+        assert!(!served_methods(false).contains(&"surface.chat.panel"));
     }
 }

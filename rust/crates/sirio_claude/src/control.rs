@@ -128,6 +128,30 @@ impl ControlRequest {
         )
     }
 
+    /// Every MCP server the session knows, with its connection state.
+    #[must_use]
+    pub fn mcp_status(request_id: &str) -> Value {
+        Self::envelope(request_id, json!({"subtype": "mcp_status"}))
+    }
+
+    /// Asks the CLI to connect a server again.
+    #[must_use]
+    pub fn mcp_reconnect(request_id: &str, server: &str) -> Value {
+        Self::envelope(
+            request_id,
+            json!({"subtype": "mcp_reconnect", "serverName": server}),
+        )
+    }
+
+    /// Starts a server's sign-in; the answer names the page to open.
+    #[must_use]
+    pub fn mcp_authenticate(request_id: &str, server: &str) -> Value {
+        Self::envelope(
+            request_id,
+            json!({"subtype": "mcp_authenticate", "serverName": server}),
+        )
+    }
+
     /// Session cost plus plan rate-limit windows — the structured form of
     /// what `/usage` renders.
     #[must_use]
@@ -468,6 +492,22 @@ mod tests {
         assert_eq!(
             deny["response"]["response"]["message"],
             "The user rejected this action."
+        );
+    }
+
+    #[test]
+    fn the_mcp_builders_name_the_server() {
+        assert_eq!(
+            ControlRequest::mcp_status("r0")["request"],
+            serde_json::json!({"subtype": "mcp_status"})
+        );
+        assert_eq!(
+            ControlRequest::mcp_reconnect("r1", "codegraph")["request"],
+            serde_json::json!({"subtype": "mcp_reconnect", "serverName": "codegraph"})
+        );
+        assert_eq!(
+            ControlRequest::mcp_authenticate("r2", "claude.ai Notion")["request"],
+            serde_json::json!({"subtype": "mcp_authenticate", "serverName": "claude.ai Notion"})
         );
     }
 }

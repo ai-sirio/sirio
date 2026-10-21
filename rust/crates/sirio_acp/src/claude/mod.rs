@@ -18,7 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use sirio_claude::RewindOutcome;
+use sirio_claude::{ContextBreakdown, McpAuthStart, McpServer, RewindOutcome};
 
 use crate::{
     AcpError, ChildHandle, EventStream, ModeCatalog, ModelCatalog, SHUTDOWN_TIMEOUT,
@@ -436,6 +436,133 @@ impl ClaudeClient {
                 "the Claude worker is not running: rewind went unanswered"
             )),
         }
+    }
+
+    /// The CLI's breakdown of what fills the window, as of the last turn's
+    /// end or the last [`Self::refresh_context`] it answered.
+    #[must_use]
+    pub fn context_breakdown(&self) -> Option<ContextBreakdown> {
+        self.shared.context_breakdown()
+    }
+
+    /// Asks the CLI for its breakdown without a turn. Not blocking: the
+    /// answer is stored and announced with an `OtherSessionUpdate` named
+    /// `ContextBreakdown`, and a CLI that refuses leaves everything as it was.
+    pub fn refresh_context(&self) -> Result<()> {
+        self.command_tx
+            .send_blocking(worker::Command::RefreshContext)
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))
+    }
+
+    /// The connectors: the list `system/init` named until a status answer
+    /// has been read, that answer after.
+    #[must_use]
+    pub fn mcp_servers(&self) -> Option<Vec<McpServer>> {
+        self.shared.mcp_servers()
+    }
+
+    /// Asks the CLI for each connector's state and origin, and keeps the
+    /// answer. Blocking, bounded at 10 s.
+    pub fn refresh_mcp_status(&self) -> Result<Vec<McpServer>> {
+        self.mcp_control().refresh_status()
+    }
+
+    /// Asks the CLI to connect a server again. Blocking, bounded at 30 s; a
+    /// refusal carries the CLI's own sentence.
+    pub fn mcp_reconnect(&self, server: &str) -> Result<()> {
+        self.mcp_control().reconnect(server)
+    }
+
+    /// Starts a server's sign-in and returns the page to open. Blocking,
+    /// bounded at 30 s. An empty address is no address.
+    pub fn mcp_authenticate(&self, server: &str) -> Result<McpAuthStart> {
+        self.mcp_control().authenticate(server)
+    }
+
+    /// A handle that makes the three connector calls from another thread.
+    /// The client itself is not `Clone`, and the calls block.
+    #[must_use]
+    pub fn mcp_control(&self) -> McpControl {
+        McpControl {
+            command_tx: self.command_tx.clone(),
+        }
+    }
+}
+
+/// The connector calls of one session, detached from the client so a caller
+/// can make them off its own thread. Every call blocks until the CLI answers
+/// or its bound ends, so none belongs on a UI thread. A handle outliving its
+/// session answers that the worker is not running.
+#[derive(Clone)]
+pub struct McpControl {
+    command_tx: async_channel::Sender<worker::Command>,
+}
+
+impl std::fmt::Debug for McpControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpControl").finish_non_exhaustive()
+    }
+}
+
+impl McpControl {
+    /// Asks the CLI for each connector's state and origin, and keeps the
+    /// answer. Blocking, bounded at 10 s.
+    pub fn refresh_status(&self) -> Result<Vec<McpServer>> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::McpStatus { reply: reply_tx })
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))?;
+        wait_for_reply(&reply_rx, "mcp_status", Duration::from_secs(10))
+    }
+
+    /// Asks the CLI to connect a server again. Blocking, bounded at 30 s; a
+    /// refusal carries the CLI's own sentence.
+    pub fn reconnect(&self, server: &str) -> Result<()> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::McpReconnect {
+                server: server.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))?;
+        wait_for_reply(&reply_rx, "mcp_reconnect", Duration::from_secs(30))
+    }
+
+    /// Starts a server's sign-in and returns the page to open. Blocking,
+    /// bounded at 30 s. An empty address is no address.
+    pub fn authenticate(&self, server: &str) -> Result<McpAuthStart> {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send_blocking(worker::Command::McpAuthenticate {
+                server: server.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|error| anyhow!("the Claude worker is not running: {error}"))?;
+        let mut start = wait_for_reply(&reply_rx, "mcp_authenticate", Duration::from_secs(30))?;
+        if start.auth_url.as_deref() == Some("") {
+            start.auth_url = None;
+        }
+        Ok(start)
+    }
+}
+
+/// One control request's answer, bounded: the worker's `Err` is the CLI's own
+/// sentence, and silence is a timeout rather than a hang.
+fn wait_for_reply<T>(
+    reply_rx: &mpsc::Receiver<Result<T, String>>,
+    verb: &str,
+    timeout: Duration,
+) -> Result<T> {
+    match reply_rx.recv_timeout(timeout) {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(anyhow!("{verb} failed: {error}")),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+            "{verb} timed out after {}s",
+            timeout.as_secs()
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!(
+            "the Claude worker is not running: {verb} went unanswered"
+        )),
     }
 }
 

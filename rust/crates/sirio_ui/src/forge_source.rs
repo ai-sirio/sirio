@@ -318,6 +318,17 @@ pub(crate) mod testing {
         ))
     }
 
+    pub(crate) fn gitlab_client(forge: Arc<CannedForge>) -> Arc<ForgeClient> {
+        Arc::new(ForgeClient::new(
+            Forge::GitLab,
+            ForgeTarget {
+                host: "git.corp".to_string(),
+                project: "acme/widgets".to_string(),
+            },
+            Box::new(Shared(forge)),
+        ))
+    }
+
     pub(crate) fn reference(number: u64) -> ChangeRef {
         ChangeRef {
             forge: Forge::GitHub,

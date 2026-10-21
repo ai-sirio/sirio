@@ -35,7 +35,7 @@ mod claude;
 mod mcp_config;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
-pub use claude::{ClaudeClient, ClaudeLaunch};
+pub use claude::{ClaudeClient, ClaudeLaunch, McpControl};
 pub use mcp_config::discover_mcp_servers;
 
 // `npx -y` may have to download and unpack the ACP adapter before the first
@@ -441,6 +441,76 @@ impl ChatClient {
             Self::Acp(_) => Err(anyhow!("this agent cannot restore files")),
         }
     }
+
+    /// Whether this transport reports its connectors and the context
+    /// breakdown behind them.
+    #[must_use]
+    pub fn supports_connectors(&self) -> bool {
+        matches!(self, Self::Claude(_))
+    }
+
+    /// The CLI's breakdown of what fills the window. ACP agents have none.
+    #[must_use]
+    pub fn context_breakdown(&self) -> Option<sirio_claude::ContextBreakdown> {
+        match self {
+            Self::Claude(client) => client.context_breakdown(),
+            Self::Acp(_) => None,
+        }
+    }
+
+    /// Asks for the breakdown without a turn; the answer arrives as an
+    /// `OtherSessionUpdate` named `ContextBreakdown`. ACP agents have nothing
+    /// to ask, which is not a failure.
+    pub fn refresh_context(&self) -> Result<()> {
+        match self {
+            Self::Claude(client) => client.refresh_context(),
+            Self::Acp(_) => Ok(()),
+        }
+    }
+
+    /// The connectors the session last reported.
+    #[must_use]
+    pub fn mcp_servers(&self) -> Option<Vec<sirio_claude::McpServer>> {
+        match self {
+            Self::Claude(client) => client.mcp_servers(),
+            Self::Acp(_) => None,
+        }
+    }
+
+    /// The connector calls as a handle that can leave the GPUI thread, which
+    /// the client cannot: it is not `Clone` and the calls block. ACP agents
+    /// have none.
+    #[must_use]
+    pub fn mcp_control(&self) -> Option<McpControl> {
+        match self {
+            Self::Claude(client) => Some(client.mcp_control()),
+            Self::Acp(_) => None,
+        }
+    }
+
+    /// Asks the agent for each connector's state, blocking for up to 10 s.
+    pub fn refresh_mcp_status(&self) -> Result<Vec<sirio_claude::McpServer>> {
+        match self {
+            Self::Claude(client) => client.refresh_mcp_status(),
+            Self::Acp(_) => Err(anyhow!("this agent does not report its connectors")),
+        }
+    }
+
+    /// Asks the agent to connect a server again, blocking for up to 30 s.
+    pub fn mcp_reconnect(&self, server: &str) -> Result<()> {
+        match self {
+            Self::Claude(client) => client.mcp_reconnect(server),
+            Self::Acp(_) => Err(anyhow!("this agent does not report its connectors")),
+        }
+    }
+
+    /// Starts a connector's sign-in, blocking for up to 30 s.
+    pub fn mcp_authenticate(&self, server: &str) -> Result<sirio_claude::McpAuthStart> {
+        match self {
+            Self::Claude(client) => client.mcp_authenticate(server),
+            Self::Acp(_) => Err(anyhow!("this agent does not report its connectors")),
+        }
+    }
 }
 
 /// A permission option exposed to the caller.
@@ -516,9 +586,13 @@ pub struct ImageAttachment {
     pub base64_data: String,
 }
 
-/// What a session says about fast mode. Re-exported because `sirio_ui`
-/// reads it and does not depend on `sirio_claude`.
-pub use sirio_claude::{FastMode, THINKING_DISPLAYS};
+/// What a session says about fast mode, and the context breakdown folded by
+/// origin. Re-exported because `sirio_ui` reads them and does not depend on
+/// `sirio_claude`.
+pub use sirio_claude::{
+    ContextBreakdown, ContextOrigins, FastMode, McpAuthStart, McpOrigin, McpServer, McpState,
+    OriginNode, Standing, THINKING_DISPLAYS,
+};
 
 /// How much of the model's reasoning the session sends.
 ///

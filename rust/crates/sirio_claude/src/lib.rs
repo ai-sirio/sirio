@@ -11,8 +11,10 @@
 //! than reject: see [`message`]'s module docs for the rule.
 
 pub mod catalog;
+pub mod context;
 pub mod control;
 pub mod launch;
+pub mod mcp;
 pub mod message;
 pub mod tools;
 pub mod usage;
@@ -22,10 +24,15 @@ pub use catalog::{
     AccountInfo, Catalog, CommandInfo, EFFORT_DEFAULT, EFFORT_ULTRACODE, Effort, EffortChoice,
     FastMode, ModeInfo, ModelInfo, Modes,
 };
+pub use context::{
+    CategoryKind, ContextBreakdown, ContextCategory, ContextItem, ContextOrigins, ItemOrigin,
+    MemoryFile, OriginNode, Standing,
+};
 pub use control::{
     CanUseTool, ControlEnvelope, ControlRequest, PermissionResult, THINKING_DISPLAYS,
 };
 pub use launch::{ChatSession, LaunchLine};
+pub use mcp::{McpAuthStart, McpOrigin, McpServer, McpState, parse_mcp_status};
 pub use message::{
     AssistantMessage, AssistantPayload, BackgroundTask, CliMessage, CompactMetadata, ContentBlock,
     Delta, McpServerStatus, ModelUsage, RateLimitPush, ResultPayload, StreamEventPayload,

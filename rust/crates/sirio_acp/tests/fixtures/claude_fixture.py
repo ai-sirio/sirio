@@ -12,8 +12,26 @@ import sys
 import time
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "normal"
+# `session_panel_refuse` is `session_panel` with `mcp_reconnect` refused for
+# `codegraph`: a failed action whose sentence the panel has to show.
+REFUSE_RECONNECT = MODE == "session_panel_refuse"
+# `session_panel_starting` reports `codegraph` as `pending` until the third
+# `mcp_status` answer, `session_panel_pending` for ever: a server that is
+# still starting, and one that never gets there.
+STARTS_AFTER = {"session_panel_starting": 2, "session_panel_pending": None}.get(MODE, 0)
+if REFUSE_RECONNECT or MODE in ("session_panel_starting", "session_panel_pending"):
+    MODE = "session_panel"
+# A launch argument names the file `mcp_status` requests are counted in, so a
+# test needs no environment of its own; the environment names it otherwise.
+COUNT_PATH = next(
+    (arg[len("--fixture-count="):] for arg in sys.argv if arg.startswith("--fixture-count=")),
+    os.environ.get("SIRIO_FIXTURE_COUNT"),
+)
 # The worker appends its protocol flags after our own argv, so a second
 # positional starting with "-" is one of those, not a pid file.
+# Where the project's memory file is said to live: a test that wants the row
+# to open a real file names its checkout here.
+REPO_PATH = os.environ.get("SIRIO_FIXTURE_REPO", "/repo")
 PID_PATH = (
     sys.argv[2]
     if len(sys.argv) > 2 and not sys.argv[2].startswith("-")
@@ -66,6 +84,12 @@ def initialize_payload():
 
 
 def init_line(version="2.1.273"):
+    # The init list names a server and its state, never its source: that is
+    # what the real CLI's `system/init` carries, and `mcp_status` is the only
+    # place a connector's origin shows.
+    mcp_servers = (
+        [{"name": "codegraph", "status": "pending"}] if MODE == "session_panel" else []
+    )
     send({
         "type": "system",
         "subtype": "init",
@@ -75,7 +99,7 @@ def init_line(version="2.1.273"):
         "model": "claude-fable-5-1",
         "permissionMode": "default",
         "tools": ["Bash", "Read", "Edit"],
-        "mcp_servers": [],
+        "mcp_servers": mcp_servers,
         "slash_commands": ["usage"],
         "uuid": "init-uuid",
     })
@@ -129,6 +153,67 @@ def send_flush_and_exit():
 
 # Permission-fixture state: CLI request id -> (tool_use_id, tool_name).
 PENDING = {}
+
+# Session-panel fixture state: whether `mcp_reconnect` has brought the
+# `codegraph` server up, which later `mcp_status` answers then report.
+RECONNECTED = set()
+# How many `mcp_status` requests have been answered so far.
+STATUS_ANSWERS = 0
+
+
+def control_error(request_id, error):
+    send({
+        "type": "control_response",
+        "response": {"subtype": "error", "request_id": request_id, "error": error},
+    })
+
+
+def session_panel_context():
+    """The shape Claude Code 2.1.304 answered `get_context_usage` with."""
+    def category(cid, name, tokens, kind):
+        return {"id": cid, "name": name, "tokens": tokens, "kind": kind}
+
+    return {
+        "totalTokens": 64923,
+        "rawMaxTokens": 400000,
+        "categories": [
+            category("system_prompt", "System prompt", 2315, "used"),
+            category("system_tools", "System tools", 9740, "used"),
+            category("custom_agents", "Custom agents", 4947, "used"),
+            category("memory_files", "Memory files", 34233, "used"),
+            category("skills", "Skills", 7102, "used"),
+            category("messages", "Messages", 6586, "used"),
+            category("free_space", "Free space", 302077, "free"),
+        ],
+        "memoryFiles": [
+            {"path": f"{REPO_PATH}/CLAUDE.md", "type": "Project", "tokens": 28941},
+            {"path": "/home/u/.claude/CLAUDE.md", "type": "User", "tokens": 809},
+        ],
+        "skills": {"totalSkills": 1, "tokens": 7102, "skillFrontmatter": [
+            {"name": "prompt-master", "source": "userSettings",
+             "path": "/home/u/.claude/skills/prompt-master/SKILL.md", "tokens": 117},
+        ]},
+        "agents": [
+            {"agentType": "plugin-dev:agent-creator", "source": "plugin",
+             "pluginId": "plugin-dev@claude-plugins-official", "tokens": 431},
+        ],
+        "mcpTools": [],
+    }
+
+
+def session_panel_servers():
+    if STARTS_AFTER is None:
+        codegraph = "pending"
+    elif STARTS_AFTER:
+        codegraph = "pending" if STATUS_ANSWERS <= STARTS_AFTER else "connected"
+    else:
+        codegraph = "connected" if "codegraph" in RECONNECTED else "failed"
+    return [
+        {"name": "claude.ai Notion", "status": "needs-auth",
+         "source": "claudeai", "scope": "claudeai"},
+        {"name": "codegraph", "status": codegraph,
+         "source": "user", "scope": "user"},
+    ]
 
 
 def assistant_tool_use(tool_use_id, tool_name, tool_input):
@@ -205,6 +290,10 @@ def main():
         # answering the handshake; the argv it reports is what the test
         # reads back through the client's version cell.
         init_line(" ".join(sys.argv))
+    if MODE == "session_panel":
+        # The same unprompted init, carrying the server list the panel
+        # shows until an `mcp_status` answer replaces it.
+        init_line()
     if MODE == "silent":
         # Answers nothing, ever: the startup-timeout case.
         time.sleep(600)
@@ -282,7 +371,9 @@ def main():
                 else:
                     control_response(request_id, {})
             elif subtype == "get_context_usage":
-                if MODE == "no_context_usage":
+                if MODE == "session_panel":
+                    control_response(request_id, session_panel_context())
+                elif MODE == "no_context_usage":
                     # Answers nothing: the turn still has to end, on the
                     # numbers the result already carried.
                     pass
@@ -295,6 +386,32 @@ def main():
                         "model": "claude-fable-5-1",
                         "categories": [],
                     })
+            elif subtype == "mcp_status":
+                # A file named by the environment counts the requests, one
+                # line each, so a test can tell a poll that stopped.
+                if COUNT_PATH:
+                    with open(COUNT_PATH, "a") as count:
+                        count.write("mcp_status\n")
+                global STATUS_ANSWERS
+                STATUS_ANSWERS += 1
+                control_response(request_id, {"mcpServers": session_panel_servers()})
+            elif subtype == "mcp_reconnect":
+                name = request.get("serverName")
+                if REFUSE_RECONNECT and name == "codegraph":
+                    control_error(
+                        request_id,
+                        "Connection refused: codegraph did not start (exit 1)",
+                    )
+                elif name == "codegraph":
+                    RECONNECTED.add(name)
+                    control_response(request_id, {})
+                else:
+                    control_error(request_id, f"Server not found: {name}")
+            elif subtype == "mcp_authenticate":
+                control_response(request_id, {
+                    "authUrl": "http://127.0.0.1:9/authorize",
+                    "requiresUserAction": True,
+                })
             elif subtype == "rewind_files":
                 if MODE == "no_rewind":
                     send({
@@ -357,7 +474,7 @@ def main():
                     time.sleep(0.25)
                 result()
                 return
-            if MODE in ("context_usage", "no_context_usage"):
+            if MODE in ("context_usage", "no_context_usage", "session_panel"):
                 init_line()
                 text("Hello")
                 result()

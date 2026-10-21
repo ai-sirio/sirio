@@ -27,6 +27,7 @@ use change_requests::{ChangeRequestList, ChangeRequestListEvent};
 use history::{GitHistory, GitHistoryEvent};
 
 pub use change_requests::{filter_word, parse_filter};
+pub(crate) use change_requests::error_text;
 pub use open_list::{OpenListFacts, OpenSurface};
 pub use references::{GroupedRow, ReferenceRow, ReferencesState, group_by_file, summary};
 use references::{ReferencesEvent, ReferencesList};

@@ -25,7 +25,9 @@ use sirio_forge::{
 };
 use sirio_theme::Theme;
 
+use crate::branch_card::{BranchCard, BranchCardRead, read_branch_card};
 use crate::change_request_style as style;
+use crate::forge_pause;
 use crate::ely_ui::{self, ButtonState};
 use crate::forge_source::{self, Connection, ReadyConnection};
 use crate::sidebar::icons::{IconElement, IconSize};
@@ -33,8 +35,6 @@ use crate::text_selection::selectable_text;
 
 const REFRESH_EVERY: Duration = Duration::from_secs(60);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
-/// How long a rate limit that names no reset pauses the list: one refresh.
-const DEFAULT_PAUSE_SECS: i64 = 60;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ChangeRequestListEvent {
@@ -118,8 +118,6 @@ pub(crate) struct ChangeRequestList {
     /// it first. Set by every card load.
     pub(crate) linked: Option<ChangeRef>,
     to_review: Option<u32>,
-    /// A rate limit's reset: no request before it (spec §9).
-    paused_until: Option<i64>,
     search: Option<Entity<TextInput>>,
     search_open: bool,
     applied_search: String,
@@ -153,7 +151,6 @@ impl ChangeRequestList {
             card_branch: None,
             linked: None,
             to_review: None,
-            paused_until: None,
             search: None,
             search_open: false,
             applied_search: String::new(),
@@ -243,32 +240,28 @@ impl ChangeRequestList {
         }
     }
 
-    /// While a rate limit's reset is in the future, no path asks the forge.
-    fn rate_paused(&mut self) -> bool {
-        if let Some(until) = self.paused_until {
-            if style::now() < until {
-                return true;
-            }
-            self.paused_until = None;
-        }
-        false
+    /// The host this list reads; unknown until a connection is ready.
+    fn host(&self) -> Option<String> {
+        self.ready().map(|ready| ready.client.host().to_string())
     }
 
-    /// Pauses every read until the forge's reset, capped at an hour (a
-    /// minute for an absent or expired reset), then looks again by itself:
-    /// "retrying at HH:MM" is a promise.
+    /// While a rate limit's reset is in the future, no path asks the forge.
+    /// The pause is the host's, shared with every other reader of it.
+    fn rate_paused(&self, cx: &App) -> bool {
+        self.paused_until(cx).is_some()
+    }
+
+    fn paused_until(&self, cx: &App) -> Option<i64> {
+        forge_pause::paused_until(&self.host()?, style::now(), cx)
+    }
+
+    /// Pauses every read of the error's host until the forge's reset, capped
+    /// at an hour (a minute for an absent or expired reset), then looks again
+    /// by itself: "retrying at HH:MM" is a promise.
     fn note_rate_limited(&mut self, error: &mut ForgeError, cx: &mut Context<Self>) {
-        let ForgeError::RateLimited { reset_at, .. } = error else {
-            return;
-        };
-        let now = style::now();
-        let until = reset_at.filter(|at| *at > now)
-            .unwrap_or(now + DEFAULT_PAUSE_SECS).min(now + 3600);
-        if reset_at.is_some() {
-            *reset_at = Some(until);
+        if let Some(until) = forge_pause::note_rate_limited(error, style::now(), cx) {
+            self.arm_resume(until, cx);
         }
-        self.paused_until = Some(until);
-        self.arm_resume(until, cx);
     }
 
     fn arm_resume(&mut self, until: i64, cx: &mut Context<Self>) {
@@ -277,17 +270,17 @@ impl ChangeRequestList {
             cx.background_executor().timer(wait).await;
             let _ = this.update(cx, |list, cx| {
                 list.resume_task = None;
-                match list.paused_until {
-                    Some(until) if style::now() < until => list.arm_resume(until, cx),
-                    _ if list.visible => list.refresh(cx),
-                    _ => {}
+                match list.paused_until(cx) {
+                    Some(until) => list.arm_resume(until, cx),
+                    None if list.visible => list.refresh(cx),
+                    None => {}
                 }
             });
         }));
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        if self.rate_paused() {
+        if self.rate_paused(cx) {
             return;
         }
         let Some(ready) = self.ready().cloned() else {
@@ -306,7 +299,7 @@ impl ChangeRequestList {
     }
 
     fn load_page(&mut self, ready: ReadyConnection, cx: &mut Context<Self>) {
-        if self.rate_paused() {
+        if self.rate_paused(cx) {
             return;
         }
         self.generation += 1;
@@ -328,7 +321,7 @@ impl ChangeRequestList {
     }
 
     pub(crate) fn load_more(&mut self, cx: &mut Context<Self>) {
-        if self.rate_paused() {
+        if self.rate_paused(cx) {
             return;
         }
         let (Some(ready), Some(cursor)) = (self.ready().cloned(), self.next.clone()) else {
@@ -405,7 +398,7 @@ impl ChangeRequestList {
     }
 
     fn load_card(&mut self, ready: ReadyConnection, cx: &mut Context<Self>) {
-        if self.rate_paused() {
+        if self.rate_paused(cx) {
             return;
         }
         let Some(source) = forge_source::source(cx) else {
@@ -414,49 +407,14 @@ impl ChangeRequestList {
         if !matches!(self.card, Card::Found(_)) {
             self.card = Card::Loading;
         }
-        let client = ready.client;
-        let owner = ready.source_owner;
-        let linked = ready.linked;
-        self.linked = linked.clone();
+        self.linked = ready.linked.clone();
         let worktree = self.worktree.clone();
         let generation = self.generation;
         self.card_task = Some(cx.spawn(async move |this, cx| {
-            // The branch is read here, not taken from `ready`: `connect`
-            // read it once, and the worktree may have switched since.
-            let (mut result, mut linked_error) = cx
-                .background_spawn(async move {
-                    let branch = source.current_branch(&worktree);
-                    // A link is read by number first. If that fails, the
-                    // branch lookup below decides, as it always did; the
-                    // link's error still reaches the rate-limit pause.
-                    let linked_result = linked.as_ref().map(|reference| client.summary(reference.number));
-                    let mut linked_error = None;
-                    match linked_result {
-                        Some(Ok(summary)) => {
-                            let create_url = branch
-                                .as_deref()
-                                .map(|branch| client.creation_url(branch))
-                                .unwrap_or_default();
-                            return (Ok(Some((Some(summary), create_url, branch))), None);
-                        }
-                        Some(Err(error)) => linked_error = Some(error),
-                        None => {}
-                    }
-                    let Some(branch) = branch else {
-                        // A detached HEAD has no branch to look up: only a
-                        // link can have a card, and its failure is reported.
-                        let result = match linked_error {
-                            Some(error) => Err(error),
-                            None => Ok(None),
-                        };
-                        return (result, None);
-                    };
-                    let result = client
-                        .for_branch(&branch, owner.as_deref())
-                        .map(|found| Some((found, client.creation_url(&branch), Some(branch))));
-                    (result, linked_error)
-                })
+            let read = cx
+                .background_spawn(async move { read_branch_card(&*source, &worktree, &ready) })
                 .await;
+            let BranchCardRead { card: mut result, mut linked_error, branch } = read;
             let _ = this.update(cx, |list, cx| {
                 if list.generation != generation {
                     return;
@@ -468,18 +426,14 @@ impl ChangeRequestList {
                     list.note_rate_limited(error, cx);
                 }
                 list.card = match result {
-                    Ok(None) => {
-                        list.card_branch = None;
-                        Card::Hidden
-                    }
-                    Ok(Some((found, create_url, branch))) => {
-                        list.card_branch = branch.clone();
-                        match (found, branch) {
-                            (Some(found), _) => Card::Found(found),
-                            (None, Some(branch)) => Card::Missing { branch, create_url },
-                            // Only a link is found without a branch, so a
-                            // branchless result is always a summary.
-                            (None, None) => Card::Hidden,
+                    Ok(card) => {
+                        list.card_branch = branch;
+                        match card {
+                            BranchCard::Hidden => Card::Hidden,
+                            BranchCard::Found(found) => Card::Found(found),
+                            BranchCard::Missing { branch, create_url } => {
+                                Card::Missing { branch, create_url }
+                            }
                         }
                     }
                     Err(error) => Card::Failed(error),
@@ -490,7 +444,7 @@ impl ChangeRequestList {
     }
 
     fn load_count(&mut self, ready: ReadyConnection, cx: &mut Context<Self>) {
-        if self.rate_paused() {
+        if self.rate_paused(cx) {
             return;
         }
         let client = ready.client;
@@ -524,12 +478,12 @@ impl ChangeRequestList {
     /// The first page again; while the host is paused, the pause itself is
     /// what the view shows, not a load that was never sent.
     fn reload(&mut self, cx: &mut Context<Self>) {
-        if self.rate_paused() {
+        if self.rate_paused(cx) {
             self.generation += 1;
             self.settled = true;
             self.list_error = Some(ForgeError::RateLimited {
                 host: self.ready().map(|ready| ready.client.host().to_string()).unwrap_or_default(),
-                reset_at: self.paused_until,
+                reset_at: self.paused_until(cx),
             });
             cx.notify();
             return;
@@ -776,7 +730,7 @@ impl ChangeRequestList {
 }
 
 /// What a failure means to the reader, and what to do about it.
-fn error_text(error: &ForgeError) -> String {
+pub(crate) fn error_text(error: &ForgeError) -> String {
     match error {
         ForgeError::RateLimited {
             reset_at: Some(reset),
@@ -1828,14 +1782,14 @@ mod tests {
                 // Isolate the resume from the ordinary minute refresh.
                 list.timer_task = None;
                 list.handle_error(ForgeError::RateLimited {
-                    host: "github.com".to_string(),
+                    host: "ghe.test".to_string(),
                     reset_at: Some(reset_at),
                 }, cx);
             });
             cx.run_until_parked();
             let asked = forge.count("ChangeRequestList");
-            let until = list.read_with(cx, |list, _| {
-                let until = list.paused_until.unwrap();
+            let until = list.read_with(cx, |list, cx| {
+                let until = list.paused_until(cx).unwrap();
                 assert!(matches!(list.list_error, Some(ForgeError::RateLimited { reset_at: Some(at), .. }) if at == until),
                     "the displayed retry must use the actual deadline");
                 until
@@ -1851,9 +1805,7 @@ mod tests {
             // GPUI's simulated clock does not advance chrono's wall clock.
             // Move the stored deadline by the elapsed interval to let the
             // real resume callback observe expiry at the simulated deadline.
-            list.update(cx, |list, _| {
-                list.paused_until = list.paused_until.map(|until| until - seconds as i64);
-            });
+            cx.update(|cx| forge_pause::rewind(seconds as i64, cx));
             cx.executor().advance_clock(Duration::from_millis(1));
             cx.run_until_parked();
             for _ in 0..100 {

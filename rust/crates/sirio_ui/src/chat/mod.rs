@@ -49,6 +49,7 @@ mod history;
 mod list_scroll;
 mod menus;
 mod question_dock;
+mod session_panel;
 mod thought;
 mod tool_calls;
 mod transcript;
@@ -56,6 +57,9 @@ mod turn_rail;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
 use bezel::ui::widgets::{Controls, SliderDrag, slider_fraction};
+pub use session_panel::{
+    RowSnapshot, SectionSnapshot, SessionPanelAction, SessionPanelSnapshot,
+};
 use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
 use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 
@@ -894,7 +898,7 @@ enum Entry {
 ///
 /// The shell owns protocol encoding; this type keeps the UI independent of
 /// the control transport while making the rendered state observable there.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChatControlSnapshot {
     pub status: String,
     pub composer_text: String,
@@ -905,6 +909,9 @@ pub struct ChatControlSnapshot {
     /// The whole queue, front first.
     pub queued: Vec<String>,
     pub transcript: Vec<BTreeMap<String, String>>,
+    /// The session panel's column: whether it is open, whether it is drawn
+    /// at this width, and each section's rows.
+    pub session_panel: SessionPanelSnapshot,
 }
 
 impl Entry {
@@ -1567,6 +1574,15 @@ pub enum ChatEvent {
     /// surface, so the chat states the problem and asks; it does not reach
     /// across and open a window itself.
     OpenSettings,
+    /// The session panel's column opened or closed: the workspace saves the
+    /// layout, which records it.
+    SessionPanelToggled,
+    /// The session panel's change request card was clicked: the workspace
+    /// opens (or focuses) that change request's tab.
+    OpenChangeRequest {
+        reference: sirio_forge::ChangeRef,
+        title: String,
+    },
 }
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
@@ -1893,6 +1909,8 @@ pub struct Chat {
     agent_id: Option<String>,
     agent_name: Option<String>,
     agent_cwd: PathBuf,
+    /// The column docked beside the transcript.
+    session_panel: session_panel::SessionPanel,
     entries: Vec<Entry>,
     /// One slot per entry in `entries`: the checkpoint id of a user turn
     /// sent on this connection, `None` everywhere else — restored turns,
@@ -2295,6 +2313,7 @@ impl Chat {
             agent_id: None,
             agent_name: None,
             agent_cwd: cwd,
+            session_panel: session_panel::SessionPanel::new(),
             entries: Vec::new(),
             turn_message_ids: Vec::new(),
             pending_rewind: None,
@@ -3122,6 +3141,10 @@ impl Chat {
                 self.streaming = false;
                 self.has_completed_turn = true;
                 self.persist_settled_transcript();
+                // The turn may have switched the branch.
+                if self.session_panel_open() {
+                    self.reread_session_branch(cx);
+                }
                 // D-CHAT-03: a turn ended — completed or cancelled alike,
                 // one rule — drains the queue's front entry as the next
                 // turn, exactly once; the rest wait for that turn's end.
@@ -3202,6 +3225,15 @@ impl Chat {
                 for notice in notices {
                     self.apply_notice(notice);
                 }
+            }
+            AcpEvent::OtherSessionUpdate { ref kind } if kind == "ContextBreakdown" => {
+                self.refresh_session_context(cx);
+            }
+            AcpEvent::OtherSessionUpdate { ref kind } if kind == "McpServers" => {
+                self.refresh_session_connectors(cx);
+            }
+            AcpEvent::OtherSessionUpdate { ref kind } if kind == "McpServersInit" => {
+                self.session_connectors_init(cx);
             }
             AcpEvent::OtherSessionUpdate { .. } => {}
         }
@@ -3503,6 +3535,7 @@ impl Chat {
             queued_text: self.queue.front().cloned().unwrap_or_default(),
             queued: self.queue.iter().cloned().collect(),
             transcript: self.entries.iter().map(control_entry_row).collect(),
+            session_panel: self.session_panel_snapshot(),
         }
     }
 
@@ -5049,6 +5082,7 @@ impl Chat {
         };
 
         self.client.take();
+        self.session_panel.clear_session();
         self.connecting = true;
         let cwd = self.agent_cwd.clone();
         self._event_task = Some(cx.spawn(async move |this, cx| {
@@ -5079,6 +5113,8 @@ impl Chat {
                         if let Some(text) = chat.pending_send.take() {
                             chat.submit_turn(text, Vec::new(), Vec::new(), cx);
                         }
+                        chat.ensure_session_context();
+                        chat.refresh_session_connectors(cx);
                     });
 
                     while let Ok(event) = events.recv().await {
@@ -6258,6 +6294,15 @@ impl Render for Chat {
             .get()
             .map(|_| self.render_transcript_context_menu(&bezel_theme, cx));
         let bypass_dialog = self.render_bypass_dialog(cx);
+        let session_placement = self.session_panel_placement();
+        let docked_panel = matches!(session_placement, Some(session_panel::Placement::Docked))
+            .then(|| self.render_session_panel(&session_panel::Placement::Docked, &theme, cx));
+        let overlaid_panel = match &session_placement {
+            Some(placement @ session_panel::Placement::Overlay(_)) => {
+                Some(self.render_session_panel(placement, &theme, cx))
+            }
+            _ => None,
+        };
 
         div()
             .id("chat-root")
@@ -6282,7 +6327,7 @@ impl Render for Chat {
             .when(can_accept_drop, |this| {
                 this.on_drop(cx.listener(Self::drop_external_paths))
             })
-            .child(div().w_full().flex_1().min_h_0().child(
+            .child(div().w_full().flex_1().min_h_0().flex().flex_row().child(div().flex_1().min_w_0().h_full().child(
                 ely_gpui_component::chat::ChatContainer::new(
 div().size_full().min_h_0().relative().flex().flex_col().items_center()
                 .child(
@@ -6551,6 +6596,9 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
             // The turn rail, over the root's left margin; last, so it sits
             // above everything it is laid over.
             .child(self.render_turn_rail(&bezel_theme, cx))
+            // A narrow chat's session column, over the transcript's right
+            // edge and above the composer, which this area ends above.
+            .children(overlaid_panel)
 
                 ).composer(
                 div()
@@ -6580,6 +6628,9 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                     .child(self.render_composer(&theme, window, cx)),
             )
             ))
+            .children(docked_panel))
+            // Measures the chat's width; paints nothing.
+            .child(self.render_session_panel_probe(cx))
             .child({
                 // F-CHAT-13: the "Drop files to attach" overlay, matching
                 // Swift's `ChatPaneView` — invisible by default, revealed by

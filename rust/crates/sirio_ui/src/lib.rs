@@ -28,6 +28,8 @@ pub mod editor_prefs;
 pub mod ely;
 pub mod file_context_menu;
 pub mod file_view;
+pub mod branch_card;
+pub mod forge_pause;
 pub mod forge_source;
 pub mod handoff;
 mod horizontal_scroll;
@@ -54,6 +56,7 @@ pub mod tab_bar;
 pub mod text_selection;
 pub mod titlebar;
 pub mod update_card;
+pub mod worktree_lookup;
 pub mod worktree_picker;
 
 // P32: visual-bar conformance suite — test-only module, no rendering code.

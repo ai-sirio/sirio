@@ -44,7 +44,7 @@ use sirio_theme::{AgentBrandColor, Theme, ThemeMode};
 use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
-    chat::{Chat, ChatControlSnapshot, ChatEvent},
+    chat::{Chat, ChatControlSnapshot, ChatEvent, SessionPanelAction},
     drawer::{DrawerTab, SearchQuery, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent, rematch},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
     editor::{Conflict, LineEnding},
@@ -1468,6 +1468,11 @@ enum ChatControlAction {
     },
     Read {
         surface_id: String,
+    },
+    /// Debug-only: what the session panel's button and card titles do.
+    Panel {
+        surface_id: String,
+        action: SessionPanelAction,
     },
 }
 /// Cloning shares every entity handle (`PaneContent`'s `Clone`): a cloned
@@ -3440,6 +3445,42 @@ impl ControlHandler for AppControlHandler {
                 };
                 self.queue_action(request, move |reply| ControlAction::Chat { action, reply })
             }
+            "surface.chat.panel" if cfg!(debug_assertions) => {
+                let Some(surface_id) = request.params.get("surfaceId").cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.chat.panel requires surfaceId",
+                    );
+                };
+                let key = request.params.get("key").cloned();
+                let action = match request.params.get("action").map(String::as_str) {
+                    Some("open") => SessionPanelAction::Open,
+                    Some("close") => SessionPanelAction::Close,
+                    Some(verb @ ("toggle" | "activate")) => {
+                        let Some(key) = key else {
+                            return ControlResponse::failure(
+                                &request.id,
+                                format!("surface.chat.panel {verb} requires key"),
+                            );
+                        };
+                        if verb == "toggle" {
+                            SessionPanelAction::Toggle(key)
+                        } else {
+                            SessionPanelAction::Activate(key)
+                        }
+                    }
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.chat.panel requires action open, close, toggle or activate",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::Chat {
+                    action: ChatControlAction::Panel { surface_id, action },
+                    reply,
+                })
+            }
             "panel.create" | "panel.split" | "panel.list" | "panel.write" | "panel.key"
             | "panel.read" | "panel.state" | "panel.scrollback" | "panel.wait"
             | "panel.close" | "panel.focus" | "panel.show" => self.panel(request),
@@ -4969,6 +5010,32 @@ enum LauncherAction {
     Changes,
     OpenFile,
     ProjectSettings,
+}
+
+/// Hands the chat the worktrees the catalog knows, so a chat tab can name the
+/// project its working directory belongs to. A worktree the catalog marks
+/// missing stays in: it is kept precisely because a pane still runs there, and
+/// dropping it would hand that chat to the worktree enclosing it.
+fn publish_worktree_lookup(catalog: &ProjectCatalog, cx: &mut App) {
+    let worktrees = catalog
+        .projects()
+        .iter()
+        .flat_map(|project| {
+            let display_name = catalog.project_settings(&project.id).display_name;
+            let project_name = display_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| project.name.clone());
+            project
+                .worktrees
+                .iter()
+                .map(move |worktree| sirio_ui::worktree_lookup::WorktreeInfo {
+                    project_name: project_name.clone(),
+                    root: worktree.path.clone(),
+                    is_primary: worktree.is_primary,
+                })
+        })
+        .collect();
+    sirio_ui::worktree_lookup::set_worktrees(worktrees, cx);
 }
 
 /// Resolves the labels shown by the running shell from its selected checkout,
@@ -7341,6 +7408,7 @@ impl SirioWorkspace {
                             // survives a restart.
                             TabContent::Chat(chat) => {
                                 state.chat_draft = chat.read(cx).draft_text();
+                                state.chat_session_panel_open = chat.read(cx).session_panel_open();
                             }
                             // #125 (spec R6.5): read live at save time, the
                             // same pattern as the scrollback and draft arms
@@ -7492,7 +7560,7 @@ impl SirioWorkspace {
         self.mark_activity_dirty();
     }
 
-    fn sync_control_state(&self) {
+    fn sync_control_state(&self, cx: &mut App) {
         let previous = self
             .control_state
             .lock()
@@ -7508,6 +7576,7 @@ impl SirioWorkspace {
             .control_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+        publish_worktree_lookup(&self.project_catalog, cx);
     }
 
     fn mounted_worktree_paths(&self, excluded_path: Option<&Path>) -> Vec<PathBuf> {
@@ -7775,7 +7844,7 @@ impl SirioWorkspace {
         // this discovery completes, while control state can also be stale
         // after another owner changed the catalog. Keep both projections in
         // lockstep even when git reports no catalog delta.
-        self.sync_control_state();
+        self.sync_control_state(cx);
         self.refresh_sidebar(cx);
         if let Some(selected_path) = selected_path {
             self.sidebar.update(cx, |sidebar, cx| {
@@ -8765,6 +8834,11 @@ impl SirioWorkspace {
                     if let Ok(mut actions) = workspace.pending_actions.lock() {
                         actions.push(WorkspaceAction::OpenAgentSettings);
                     }
+                }
+                // Whether the column is open is part of the saved layout.
+                ChatEvent::SessionPanelToggled => workspace.schedule_save(cx),
+                ChatEvent::OpenChangeRequest { reference, title } => {
+                    workspace.add_change_request_tab(reference.clone(), title.clone(), cx)
                 }
                 ChatEvent::SessionIdentified(session_id) => {
                     // A hook write, like `save_session_ref`: the id must
@@ -10039,7 +10113,7 @@ impl SirioWorkspace {
         match self.project_catalog.add(&path) {
             Ok(true) => {
                 self.session.schedule_catalog(&self.project_catalog);
-                self.sync_control_state();
+                self.sync_control_state(cx);
                 self.refresh_sidebar(cx);
             }
             Ok(false) => {
@@ -10083,6 +10157,7 @@ impl SirioWorkspace {
         {
             Ok(()) => {
                 self.session.schedule_catalog(&self.project_catalog);
+                publish_worktree_lookup(&self.project_catalog, cx);
                 self.refresh_sidebar(cx);
             }
             Err(error) => self
@@ -10111,7 +10186,7 @@ impl SirioWorkspace {
         let layout_ids = self.layout_session_ids(&removed_paths);
         if self.project_catalog.remove(id) {
             self.session.schedule_catalog(&self.project_catalog);
-            self.sync_control_state();
+            self.sync_control_state(cx);
             self.refresh_sidebar(cx);
             // Closing a project ends its sessions (SP2 spec §4.2).
             self.end_app_sessions(removed_paths.clone(), known_before, layout_ids, cx);
@@ -10220,7 +10295,7 @@ impl SirioWorkspace {
         match drag.scope {
             ReorderScope::Projects | ReorderScope::Worktrees => {
                 self.session.schedule_catalog(&self.project_catalog);
-                self.sync_control_state();
+                self.sync_control_state(cx);
                 self.refresh_sidebar(cx);
             }
             ReorderScope::Tabs => {
@@ -10636,7 +10711,7 @@ impl SirioWorkspace {
         let added = self.project_catalog.add(path)?;
         if added {
             self.session.schedule_catalog(&self.project_catalog);
-            self.sync_control_state();
+            self.sync_control_state(cx);
             self.refresh_sidebar(cx);
         }
         let state = self
@@ -10790,7 +10865,7 @@ impl SirioWorkspace {
         match self.project_catalog.set_primary(path, primary) {
             Ok(()) => {
                 self.session.schedule_catalog(&self.project_catalog);
-                self.sync_control_state();
+                self.sync_control_state(cx);
                 self.refresh_sidebar(cx);
             }
             Err(error) => self
@@ -11971,7 +12046,7 @@ impl SirioWorkspace {
         }
         if changed {
             self.project_catalog.replace_projects(projects);
-            self.sync_control_state();
+            self.sync_control_state(cx);
             self.refresh_sidebar(cx);
             cx.notify();
         }
@@ -12105,7 +12180,7 @@ impl SirioWorkspace {
         self.project_catalog.replace_projects(projects);
         self.session.schedule_catalog(&self.project_catalog);
 
-        self.sync_control_state();
+        self.sync_control_state(cx);
         self.refresh_sidebar(cx);
         cx.notify();
 
@@ -17934,11 +18009,17 @@ impl SirioWorkspace {
 
     /// The agents a chat can open with today: only adapters with a concrete
     /// command (Builtin or Installed), the gate the tab bar's New Chat picker
-    /// applies. Shared by the empty-pane picker and the Open list.
+    /// applies, plus Claude whenever its native transport resolved (a `claude`
+    /// on PATH needs no wrapper to launch, which `agent_launch_for` already
+    /// knows). Shared by the empty-pane picker and the Open list.
     fn chat_agents(&self) -> Vec<(&'static str, &'static str)> {
         AGENT_CATALOG
             .iter()
-            .filter(|adapter| has_agent_command(&self.launch_source_for(adapter.id())))
+            .filter(|adapter| {
+                has_agent_command(&self.launch_source_for(adapter.id()))
+                    || (adapter.id() == sirio_agents::ClaudeCodeAdapter.id()
+                        && self.launch.claude.native_program().is_some())
+            })
             .map(|adapter| (adapter.id(), adapter.display_name()))
             .collect()
     }
@@ -20068,6 +20149,11 @@ impl SirioWorkspace {
                 "transcript".to_string(),
                 sirio_control::protocol::rows::encode(&snapshot.transcript),
             ),
+            (
+                "sessionPanel".to_string(),
+                serde_json::to_string(&snapshot.session_panel)
+                    .expect("the session panel snapshot is serializable"),
+            ),
         ]
     }
 
@@ -20163,6 +20249,15 @@ impl SirioWorkspace {
                 Ok(Self::control_chat_result(&surface_id, snapshot))
             }
             ChatControlAction::Read { surface_id } => self.control_chat_read(&surface_id, cx),
+            ChatControlAction::Panel { surface_id, action } => {
+                let chat = self.control_chat_surface(&surface_id)?;
+                let window = window.ok_or("the session panel needs a window")?;
+                let snapshot = chat.update(cx, |chat, cx| {
+                    chat.session_panel_act(action, window, cx)?;
+                    Ok::<_, String>(chat.control_snapshot())
+                })?;
+                Ok(Self::control_chat_result(&surface_id, snapshot))
+            }
         }
     }
 
@@ -25484,6 +25579,9 @@ fn restore_tabs_with_terminal_cache(
                     if !tab_state.chat_draft.is_empty() {
                         chat.control_compose(&tab_state.chat_draft, cx);
                     }
+                    if tab_state.chat_session_panel_open {
+                        chat.restore_session_panel_open(true, cx);
+                    }
                     chat
                 });
                 chat.update(cx, |chat, _| {
@@ -26072,6 +26170,9 @@ fn restore_tabs_in_workspace(
                     // F-CORE-WSP-08: an unsent draft survives a restart.
                     if !tab_state.chat_draft.is_empty() {
                         chat.control_compose(&tab_state.chat_draft, cx);
+                    }
+                    if tab_state.chat_session_panel_open {
+                        chat.restore_session_panel_open(true, cx);
                     }
                     chat
                 });
@@ -27791,6 +27892,7 @@ fn main() {
         }
         let project_catalog =
             ProjectCatalog::from_restored(restored_catalog.projects, restored_catalog.settings);
+        publish_worktree_lookup(&project_catalog, cx);
         // F-AGENT-SAFE-02: repair a stale leading `sirioctl` path in every
         // known worktree's Claude hook config at launch — before any pane is
         // opened, so a worktree with no pane reopened this run still gets
@@ -41763,7 +41865,7 @@ done
             // `current_workspace().branch` we read afterwards is not a stale
             // `palette_test_workspace` leftover. `refresh_worktree_branches`
             // must itself republish to both surfaces.
-            workspace.sync_control_state();
+            workspace.sync_control_state(cx);
             workspace
         });
 
@@ -43230,6 +43332,7 @@ done
             "surface.chat.permission" => request_with_params(method, &[]),
             "surface.chat.stop" => request_with_params(method, &[]),
             "surface.chat.read" => request_with_params(method, &[]),
+            "surface.chat.panel" => request::chat_panel("chat-1", "open", None),
             "browser.open" | "browser.navigate" | "browser.act" | "browser.get"
             | "browser.wait" | "browser.eval" | "browser.console" | "browser.snapshot"
             | "browser.permission" => request_with_params(method, &[]),
