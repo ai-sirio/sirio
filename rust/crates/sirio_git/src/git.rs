@@ -83,7 +83,7 @@ impl GitCancellationToken {
 }
 
 /// The git binary to invoke, resolved via `PATH`.
-const GIT_BINARY: &str = "git";
+pub(crate) const GIT_BINARY: &str = "git";
 
 /// How long a single git invocation may run before it is killed.
 ///
@@ -270,128 +270,210 @@ impl GitRunner {
         args: &[&str],
         cwd: &Path,
         cancellation: Option<&GitCancellationToken>,
-        mut on_line: F,
+        on_line: F,
     ) -> Result<GitCommandResult, GitError>
     where
         F: FnMut(String),
     {
-        let mut command = sirio_env::command(binary);
-        command
-            .args(args)
-            .current_dir(cwd)
-            // Every parser in this crate (clone progress, status output,
-            // branch listing) matches git's English output. Without a fixed
-            // locale the progress lines arrive translated — "Ricezione degli
-            // oggetti" instead of "Receiving objects" — and the parsed state
-            // silently stays empty. git's own scripting docs prescribe
-            // LC_ALL=C for exactly this reason.
-            .env("LC_ALL", "C")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        run_streaming_with_deadline(
+            binary,
+            args,
+            cwd,
+            cancellation,
+            Deadline::Total(configured_timeout()),
+            false,
+            on_line,
+        )
+    }
+
+    /// Streaming runner for a command that talks to a remote and may run for
+    /// as long as it keeps making progress, such as a clone.
+    ///
+    /// Two things differ from [`Self::run_streaming_with_binary`]. The
+    /// command is non-interactive (see [`configure_remote`]): a prompt for a
+    /// credential or an ssh host key would otherwise wait for a person who
+    /// cannot answer it, and with no total deadline nothing would ever end
+    /// it. And the budget is an inactivity one: `stall` runs from the start
+    /// and again from every line git writes to stderr, so the command is
+    /// killed with [`GitError::Stalled`] only after `stall` of silence.
+    pub(crate) fn run_streaming_remote_with_binary<F>(
+        binary: &Path,
+        args: &[&str],
+        cwd: &Path,
+        stall: Duration,
+        on_line: F,
+    ) -> Result<GitCommandResult, GitError>
+    where
+        F: FnMut(String),
+    {
+        run_streaming_with_deadline(
+            binary,
+            args,
+            cwd,
+            None,
+            Deadline::Stall(stall),
+            true,
+            on_line,
+        )
+    }
+}
+
+/// How the streaming runner bounds a command.
+#[derive(Clone, Copy)]
+enum Deadline {
+    /// Wall-clock budget for the whole command, from its start.
+    Total(Duration),
+    /// Inactivity budget: restarted each time a stderr line is delivered.
+    Stall(Duration),
+}
+
+/// The body of every streaming entry point; `remote` makes the command
+/// non-interactive (see [`configure_remote`]).
+fn run_streaming_with_deadline<F>(
+    binary: &Path,
+    args: &[&str],
+    cwd: &Path,
+    cancellation: Option<&GitCancellationToken>,
+    policy: Deadline,
+    remote: bool,
+    mut on_line: F,
+) -> Result<GitCommandResult, GitError>
+where
+    F: FnMut(String),
+{
+    let mut command = sirio_env::command(binary);
+    command
+        .args(args)
+        .current_dir(cwd)
+        // Every parser in this crate (clone progress, status output,
+        // branch listing) matches git's English output. Without a fixed
+        // locale the progress lines arrive translated — "Ricezione degli
+        // oggetti" instead of "Receiving objects" — and the parsed state
+        // silently stays empty. git's own scripting docs prescribe
+        // LC_ALL=C for exactly this reason.
+        .env("LC_ALL", "C")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if remote {
+        configure_remote(&mut command);
+    } else {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
-        let mut child = command.spawn().map_err(|error| GitError::Spawn {
-            message: error.to_string(),
-        })?;
+    }
+    let mut child = command.spawn().map_err(|error| GitError::Spawn {
+        message: error.to_string(),
+    })?;
 
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let stderr = child.stderr.take().expect("stderr is piped");
-        let (events_tx, events_rx) = mpsc::channel();
-        let output_limit = configured_output_limit();
-        let stdout_reader = std::thread::spawn({
-            let events_tx = events_tx.clone();
-            move || {
-                let (captured, truncated) = read_capped(stdout, output_limit);
-                let _ = events_tx.send(StreamEvent::StdoutDone(captured, truncated));
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let (events_tx, events_rx) = mpsc::channel();
+    let output_limit = configured_output_limit();
+    let stdout_reader = std::thread::spawn({
+        let events_tx = events_tx.clone();
+        move || {
+            let (captured, truncated) = read_capped(stdout, output_limit);
+            let _ = events_tx.send(StreamEvent::StdoutDone(captured, truncated));
+        }
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        read_stderr_lines(stderr, output_limit, events_tx);
+    });
+
+    let budget = match policy {
+        Deadline::Total(timeout) => timeout,
+        Deadline::Stall(idle) => idle,
+    };
+    let mut deadline = Instant::now() + budget;
+    let mut status = None;
+    let mut stdout = None;
+    let mut stderr = None;
+    while status.is_none() {
+        while let Ok(event) = events_rx.try_recv() {
+            let was_line = handle_stream_event(event, &mut on_line, &mut stdout, &mut stderr);
+            if was_line && matches!(policy, Deadline::Stall(_)) {
+                deadline = Instant::now() + budget;
             }
-        });
-        let stderr_reader = std::thread::spawn(move || {
-            read_stderr_lines(stderr, output_limit, events_tx);
-        });
+        }
 
-        let timeout = configured_timeout();
-        let deadline = Instant::now() + timeout;
-        let mut status = None;
-        let mut stdout = None;
-        let mut stderr = None;
-        while status.is_none() {
-            while let Ok(event) = events_rx.try_recv() {
-                handle_stream_event(event, &mut on_line, &mut stdout, &mut stderr);
-            }
-
-            match child.try_wait() {
-                Ok(Some(exit)) => status = Some(exit),
-                Ok(None) => {
-                    if cancellation.is_some_and(GitCancellationToken::is_cancelled) {
-                        kill_tree(&mut child);
-                        reap_within_grace(&mut child);
-                        drop(events_rx);
-                        return Err(GitError::Cancelled {
-                            command: args.join(" "),
-                        });
-                    }
-                    if Instant::now() >= deadline {
-                        kill_tree(&mut child);
-                        reap_within_grace(&mut child);
-                        drop(events_rx);
-                        return Err(GitError::TimedOut {
-                            command: args.join(" "),
-                            timeout,
-                        });
-                    }
-                    if let Ok(event) = events_rx.recv_timeout(POLL_INTERVAL) {
-                        handle_stream_event(event, &mut on_line, &mut stdout, &mut stderr);
-                    }
-                }
-                Err(error) => {
+        match child.try_wait() {
+            Ok(Some(exit)) => status = Some(exit),
+            Ok(None) => {
+                if cancellation.is_some_and(GitCancellationToken::is_cancelled) {
                     kill_tree(&mut child);
                     reap_within_grace(&mut child);
                     drop(events_rx);
-                    return Err(GitError::Spawn {
-                        message: error.to_string(),
+                    return Err(GitError::Cancelled {
+                        command: args.join(" "),
                     });
                 }
+                if Instant::now() >= deadline {
+                    kill_tree(&mut child);
+                    reap_within_grace(&mut child);
+                    drop(events_rx);
+                    let command = args.join(" ");
+                    return Err(match policy {
+                        Deadline::Total(timeout) => GitError::TimedOut { command, timeout },
+                        Deadline::Stall(idle) => GitError::Stalled { command, idle },
+                    });
+                }
+                if let Ok(event) = events_rx.recv_timeout(POLL_INTERVAL) {
+                    let was_line =
+                        handle_stream_event(event, &mut on_line, &mut stdout, &mut stderr);
+                    if was_line && matches!(policy, Deadline::Stall(_)) {
+                        deadline = Instant::now() + budget;
+                    }
+                }
+            }
+            Err(error) => {
+                kill_tree(&mut child);
+                reap_within_grace(&mut child);
+                drop(events_rx);
+                return Err(GitError::Spawn {
+                    message: error.to_string(),
+                });
             }
         }
+    }
 
-        // The process is gone, but the reader threads may still be delivering
-        // their final buffers. Drain until both completion events arrive —
-        // with [`STREAM_DRAIN_TIMEOUT`]'s bound, which is longer on Windows
-        // because helper subprocesses can hold the pipes open past the
-        // child's exit. This loop only runs on the natural-exit path: the
-        // kill/timeout/cancel paths return above, so the longer bound never
-        // delays a call that killed something.
-        while stdout.is_none() || stderr.is_none() {
-            match events_rx.recv_timeout(STREAM_DRAIN_TIMEOUT) {
-                Ok(event) => handle_stream_event(event, &mut on_line, &mut stdout, &mut stderr),
-                Err(_) => break,
+    // The process is gone, but the reader threads may still be delivering
+    // their final buffers. Drain until both completion events arrive —
+    // with [`STREAM_DRAIN_TIMEOUT`]'s bound, which is longer on Windows
+    // because helper subprocesses can hold the pipes open past the
+    // child's exit. This loop only runs on the natural-exit path: the
+    // kill/timeout/cancel paths return above, so the longer bound never
+    // delays a call that killed something.
+    while stdout.is_none() || stderr.is_none() {
+        match events_rx.recv_timeout(STREAM_DRAIN_TIMEOUT) {
+            Ok(event) => {
+                handle_stream_event(event, &mut on_line, &mut stdout, &mut stderr);
             }
+            Err(_) => break,
         }
-        if stdout.is_some() && stderr.is_some() {
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-        }
+    }
+    if stdout.is_some() && stderr.is_some() {
+        let _ = stdout_reader.join();
+        let _ = stderr_reader.join();
+    }
 
-        let exit_code = status.and_then(|status| status.code()).unwrap_or(-1);
-        let (stdout_bytes, stdout_truncated) = stdout.unwrap_or_default();
-        let (stderr_bytes, stderr_truncated) = stderr.unwrap_or_default();
-        let result = GitCommandResult {
-            stdout: stdout_bytes,
-            stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
-            exit_code,
-            truncated: stdout_truncated || stderr_truncated,
-        };
-        if exit_code == 0 {
-            Ok(result)
-        } else {
-            Err(GitError::CommandFailed {
-                code: exit_code,
-                stderr: result.stderr,
-            })
-        }
+    let exit_code = status.and_then(|status| status.code()).unwrap_or(-1);
+    let (stdout_bytes, stdout_truncated) = stdout.unwrap_or_default();
+    let (stderr_bytes, stderr_truncated) = stderr.unwrap_or_default();
+    let result = GitCommandResult {
+        stdout: stdout_bytes,
+        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        exit_code,
+        truncated: stdout_truncated || stderr_truncated,
+    };
+    if exit_code == 0 {
+        Ok(result)
+    } else {
+        Err(GitError::CommandFailed {
+            code: exit_code,
+            stderr: result.stderr,
+        })
     }
 }
 
@@ -411,19 +493,26 @@ enum StreamEvent {
     StdoutDone(Vec<u8>, bool),
 }
 
+/// Applies one reader event. Returns whether it was a line of stderr, which
+/// is what a [`Deadline::Stall`] counts as progress.
 fn handle_stream_event<F>(
     event: StreamEvent,
     on_line: &mut F,
     stdout: &mut Option<(Vec<u8>, bool)>,
     stderr: &mut Option<(Vec<u8>, bool)>,
-) where
+) -> bool
+where
     F: FnMut(String),
 {
     match event {
-        StreamEvent::StderrLine(line) => on_line(line),
+        StreamEvent::StderrLine(line) => {
+            on_line(line);
+            return true;
+        }
         StreamEvent::StderrDone(output, truncated) => *stderr = Some((output, truncated)),
         StreamEvent::StdoutDone(output, truncated) => *stdout = Some((output, truncated)),
     }
+    false
 }
 
 fn read_stderr_lines(
@@ -564,6 +653,37 @@ pub(crate) fn run_remote(args: &[&str], cwd: &Path, timeout: Duration) -> Result
     run_configured(args, cwd, timeout, true)
 }
 
+/// Makes `command` one that can never wait for a person: no terminal prompt,
+/// no askpass, no ssh passphrase dialog, null stdin — and, on Unix, a session
+/// of its own, so `ssh` has no controlling terminal to open `/dev/tty` on.
+/// `setsid` also makes the child its process group's leader, so the runners'
+/// `killpg` still reaches the whole tree, which is why this takes the place of
+/// `process_group(0)` rather than adding to it.
+fn configure_remote(command: &mut std::process::Command) {
+    command
+        .stdin(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        // Set-but-empty wins over `core.askPass` and `SSH_ASKPASS`, and
+        // git skips an empty askpass: nothing can ask.
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS_REQUIRE", "never");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid` is async-signal-safe and touches no memory.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+}
+
 /// The body of [`run_with_timeout`] and [`run_remote`]; `remote` adds the
 /// no-prompt environment and the new session.
 fn run_configured(
@@ -579,33 +699,14 @@ fn run_configured(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if remote {
-        command
-            .stdin(Stdio::null())
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GCM_INTERACTIVE", "never")
-            // Set-but-empty wins over `core.askPass` and `SSH_ASKPASS`, and
-            // git skips an empty askpass: nothing can ask.
-            .env("GIT_ASKPASS", "")
-            .env("SSH_ASKPASS_REQUIRE", "never")
-            .env("LC_ALL", "C");
-    }
-    // Put the child in its own process group so the whole tree — including
-    // any grandchild holding the output pipes — can be killed at once.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        if remote {
-            // SAFETY: `setsid` is async-signal-safe and touches no memory.
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::setsid() == -1 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
-                });
-            }
-        } else {
+        configure_remote(&mut command);
+        command.env("LC_ALL", "C");
+    } else {
+        // Put the child in its own process group so the whole tree — including
+        // any grandchild holding the output pipes — can be killed at once.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
     }
@@ -1086,6 +1187,71 @@ mod tests {
             locale("LC_ALL").as_deref(),
             Some("LC_ALL=C"),
             "the crate's own LC_ALL must survive the user's environment"
+        );
+    }
+
+    /// Writes `body` as an executable `#!/bin/sh` script in a fresh scratch
+    /// directory and returns the script's path and the directory (which the
+    /// caller removes).
+    #[cfg(unix)]
+    fn fake_git(body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = scratch_dir();
+        std::fs::create_dir_all(&scratch).expect("create scratch dir");
+        let script = scratch.join("fake-git.sh");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("write fake git");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake git executable");
+        (script, scratch)
+    }
+
+    /// A clone that keeps advancing is never killed, however long it runs:
+    /// the fake writes a line every 100 ms for about 1.2 s, three times the
+    /// 400 ms stall window, and is never silent for anywhere near that long.
+    /// A total deadline of the same length would kill it, so this is what
+    /// separates an inactivity timeout from a wall-clock one.
+    #[cfg(unix)]
+    #[test]
+    fn stall_deadline_spares_a_command_that_keeps_writing() {
+        let (script, scratch) = fake_git(
+            "i=0\nwhile [ $i -lt 12 ]; do\n  echo \"tick $i\" 1>&2\n  i=$((i + 1))\n  \
+             sleep 0.1\ndone",
+        );
+        let result = GitRunner::run_streaming_remote_with_binary(
+            &script,
+            &[],
+            &scratch,
+            Duration::from_millis(400),
+            |_| {},
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert!(result.is_ok(), "a command that never idles was killed: {result:?}");
+    }
+
+    /// A command that goes silent is killed once the stall window passes, and
+    /// promptly: the fake would otherwise sleep for thirty seconds.
+    #[cfg(unix)]
+    #[test]
+    fn stall_deadline_kills_a_silent_command() {
+        let (script, scratch) = fake_git("sleep 30");
+        let started = Instant::now();
+        let result = GitRunner::run_streaming_remote_with_binary(
+            &script,
+            &["clone"],
+            &scratch,
+            Duration::from_millis(300),
+            |_| {},
+        );
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert!(
+            matches!(result, Err(GitError::Stalled { .. })),
+            "expected Stalled, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the stall took {elapsed:?} to be enforced"
         );
     }
 

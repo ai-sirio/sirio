@@ -90,6 +90,17 @@ pub enum GitError {
         /// The budget that was exceeded.
         timeout: std::time::Duration,
     },
+    /// The git process wrote nothing for longer than its inactivity budget
+    /// and was killed. Distinct from [`GitError::TimedOut`] (a wall-clock
+    /// budget on the whole command): a command that stalls is one that has
+    /// stopped making progress, however long it has been running, so a long
+    /// clone that keeps reporting progress never raises this.
+    Stalled {
+        /// The command that was killed, args joined for diagnostics.
+        command: String,
+        /// The silence that was tolerated before the kill.
+        idle: std::time::Duration,
+    },
     /// The command produced more output than the runner retains, so the
     /// captured bytes are only a prefix of what git wrote.
     ///
@@ -104,6 +115,14 @@ pub enum GitError {
         command: String,
         /// The per-stream byte cap that was hit.
         limit: usize,
+    },
+    /// A folder the operation needed could not be created, so git was never
+    /// started.
+    Io {
+        /// The folder that could not be created.
+        path: PathBuf,
+        /// The underlying OS error message.
+        message: String,
     },
     /// The caller cancelled the invocation via a
     /// [`crate::GitCancellationToken`] while it was still running, and the
@@ -149,6 +168,15 @@ impl fmt::Display for GitError {
                     f,
                     "git {command} did not finish within {timeout:?} and was killed"
                 )
+            }
+            GitError::Stalled { command, idle } => {
+                write!(
+                    f,
+                    "git {command} made no progress for {idle:?} and was killed"
+                )
+            }
+            GitError::Io { path, message } => {
+                write!(f, "could not create {}: {message}", path.display())
             }
             GitError::OutputTruncated { command, limit } => {
                 write!(

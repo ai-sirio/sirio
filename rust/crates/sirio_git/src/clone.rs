@@ -1,9 +1,19 @@
 //! Git clone with live transfer progress.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::GitError;
-use crate::git::{GitRunner, path_arg};
+use crate::git::{GIT_BINARY, GitRunner, path_arg};
+
+/// How long a clone may go without writing a line of progress before it is
+/// killed.
+///
+/// An inactivity budget rather than a total deadline: `--progress` makes git
+/// write continuously, so a large clone that is advancing is never killed
+/// however long it takes, while one stalled on the network, a lost connection
+/// or a prompt nobody can answer is, after a minute of silence.
+const CLONE_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Namespace for clone operations.
 pub struct GitClone;
@@ -21,7 +31,32 @@ impl GitClone {
     /// that only consumes progress can ignore the flag; one that wants to
     /// tell the user their view of the clone was incomplete should surface
     /// it as a non-fatal notice.
-    pub fn clone<F>(url: &str, destination: &Path, mut on_progress: F) -> Result<bool, GitError>
+    pub fn clone<F>(url: &str, destination: &Path, on_progress: F) -> Result<bool, GitError>
+    where
+        F: FnMut(f64),
+    {
+        Self::clone_with(
+            Path::new(GIT_BINARY),
+            CLONE_STALL_TIMEOUT,
+            url,
+            destination,
+            on_progress,
+        )
+    }
+
+    /// [`Self::clone`] with the git binary and the stall budget chosen by the
+    /// caller, so a test can run a fake git with a short budget.
+    ///
+    /// A clone that fails leaves nothing it created behind: a killed git
+    /// cannot clean up after itself, and a half-made destination would make
+    /// every retry fail with "already exists and is not an empty directory".
+    fn clone_with<F>(
+        binary: &Path,
+        stall: Duration,
+        url: &str,
+        destination: &Path,
+        mut on_progress: F,
+    ) -> Result<bool, GitError>
     where
         F: FnMut(f64),
     {
@@ -59,12 +94,36 @@ impl GitClone {
         arguments.push(path_arg(Path::new(&url)));
         arguments.push(path_arg(destination));
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        let result = GitRunner::run_streaming(&arguments, parent, move |line| {
-            if let Some(progress) = Self::parse_progress(&line) {
-                on_progress(progress);
-            }
+        // Git is spawned inside the parent, so a parent that does not exist
+        // yet (the default `~/Sirio/projects` on a fresh install) would fail
+        // the spawn itself, before git could report anything.
+        std::fs::create_dir_all(parent).map_err(|error| GitError::Io {
+            path: parent.to_path_buf(),
+            message: error.to_string(),
         })?;
-        Ok(result.truncated)
+        // Only a destination this call is about to create is this call's to
+        // remove: an existing (empty) folder the user pointed at stays.
+        let existed = destination.symlink_metadata().is_ok();
+        let result = GitRunner::run_streaming_remote_with_binary(
+            binary,
+            &arguments,
+            parent,
+            stall,
+            move |line| {
+                if let Some(progress) = Self::parse_progress(&line) {
+                    on_progress(progress);
+                }
+            },
+        );
+        match result {
+            Ok(result) => Ok(result.truncated),
+            Err(error) => {
+                if !existed {
+                    let _ = std::fs::remove_dir_all(destination);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Extracts only `Receiving objects: N%` progress. Other clone phases do
@@ -94,9 +153,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::GitClone;
+    use crate::GitError;
     use crate::git::set_output_limit_override_for_test;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     struct TempDir(PathBuf);
 
@@ -196,6 +257,97 @@ mod tests {
         assert!(
             !truncated,
             "the default 10MB cap must not truncate this small fixture's output"
+        );
+    }
+
+    /// "Clone Repository…" offers `~/Sirio/projects` as the destination's
+    /// parent, a folder a fresh install does not have yet. Git is spawned
+    /// *inside* the parent, so a missing one used to fail the spawn itself
+    /// ("No such file or directory") before git ran at all.
+    #[test]
+    fn clone_creates_a_missing_parent_folder() {
+        let source = source_repo("missing-parent-source");
+        let root = TempDir::new("missing-parent-destination");
+        let destination = root.path().join("missing").join("parent").join("clone");
+
+        let result = GitClone::clone(source.path().to_str().unwrap(), &destination, |_| {});
+
+        result.expect("a clone into a parent that does not exist yet succeeds");
+        assert!(destination.join("file-000.txt").exists());
+    }
+
+    /// A fake `git` that creates its last argument (the destination) the way
+    /// a real clone does, writes one progress line and then goes silent for
+    /// thirty seconds, so only the stall deadline can end it.
+    #[cfg(unix)]
+    fn stalling_git(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = dir.join("stalling-git.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nfor last; do :; done\nmkdir -p \"$last/.git\"\n\
+             echo \"Cloning into '$last'...\" 1>&2\nsleep 30\n",
+        )
+        .expect("write fake git");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake git executable");
+        script
+    }
+
+    /// A clone killed for stalling cannot clean up after itself (the kill is
+    /// SIGKILL), and a leftover half-clone makes every retry fail with
+    /// "destination path already exists and is not an empty directory".
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_clone_removes_the_destination_it_created() {
+        let root = TempDir::new("stalled-removes");
+        let git = stalling_git(root.path());
+        let destination = root.path().join("clone");
+
+        let result = GitClone::clone_with(
+            &git,
+            Duration::from_millis(300),
+            "https://example.invalid/repo.git",
+            &destination,
+            |_| {},
+        );
+
+        assert!(
+            matches!(result, Err(GitError::Stalled { .. })),
+            "expected Stalled, got {result:?}"
+        );
+        assert!(
+            !destination.exists(),
+            "the half-made clone was left behind for the retry to trip over"
+        );
+    }
+
+    /// The cleanup must never delete something that was there before the
+    /// clone: the user may have pointed the form at a folder they made.
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_clone_keeps_a_destination_that_existed_before() {
+        let root = TempDir::new("stalled-keeps");
+        let git = stalling_git(root.path());
+        let destination = root.path().join("clone");
+        std::fs::create_dir(&destination).expect("create the empty destination");
+
+        let result = GitClone::clone_with(
+            &git,
+            Duration::from_millis(300),
+            "https://example.invalid/repo.git",
+            &destination,
+            |_| {},
+        );
+
+        assert!(
+            matches!(result, Err(GitError::Stalled { .. })),
+            "expected Stalled, got {result:?}"
+        );
+        assert!(
+            destination.is_dir(),
+            "a destination that existed before the clone was removed"
         );
     }
 }
