@@ -6,7 +6,7 @@
 //! Connectors and Change request as they land), and both the drawing and the
 //! control snapshot read it, so a section appears in each at once. Open or
 //! closed is the chat's own and survives a relaunch (`SessionTabState`); which
-//! cards are folded does not.
+//! cards are folded does not: every card but Environment starts folded.
 
 mod change_request;
 mod connectors;
@@ -236,7 +236,13 @@ impl SessionPanel {
     pub(super) fn new() -> Self {
         Self {
             open: false,
-            collapsed: HashSet::new(),
+            // Every card but Environment starts folded: the column opens as
+            // a list of titles with their summaries, and the reader unfolds
+            // what they want. `trace` is folded ahead of its card.
+            collapsed: ["context", "connectors", "trace", "change_request"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             flipped: HashSet::new(),
             context: context::Context::default(),
             connectors: connectors::Connectors::default(),
@@ -265,6 +271,7 @@ impl Chat {
             self.refresh_session_environment(cx);
             self.ensure_session_context();
             self.reopen_session_connectors(cx);
+            self.probe_session_change_request_forge(cx);
             self.start_session_change_request(cx);
         } else {
             self.stop_session_change_request();
@@ -282,6 +289,7 @@ impl Chat {
             self.refresh_session_environment(cx);
             self.ensure_session_context();
             self.reopen_session_connectors(cx);
+            self.probe_session_change_request_forge(cx);
             self.start_session_change_request(cx);
         } else {
             self.stop_session_change_request();
@@ -981,6 +989,47 @@ mod tests {
             composer.right() <= docked.left(),
             "docked, the composer gives up the column's width"
         );
+    }
+
+    const CLAUDE_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../sirio_acp/tests/fixtures/claude_fixture.py"
+    );
+
+    /// Every card that needs the agent or the forge is drawn, and all of them
+    /// folded but Environment: a new chat's column is a list of titles with
+    /// the summaries beside them.
+    #[gpui::test]
+    async fn cards_start_folded_except_environment(cx: &mut TestAppContext) {
+        use crate::forge_source::testing::{self, CannedForge, FakeSource};
+        // The CLI's worker thread wakes the chat's event task, which the
+        // test scheduler refuses unless it is told real threads are in play.
+        cx.executor().allow_parking();
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        let forge = std::sync::Arc::new(CannedForge::default());
+        let source = FakeSource::ready(testing::github_client(forge), Some("feat/y"));
+        cx.update(|cx| crate::forge_source::set_source(source, cx));
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let launch = sirio_acp::ClaudeLaunch::fixture(
+                "python3",
+                vec![CLAUDE_FIXTURE.to_string(), "session_panel".to_string()],
+            );
+            Chat::from_test_command(LaunchSpec::Claude(launch), std::env::temp_dir(), cx)
+        });
+        chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
+        let keys = ["environment", "context", "connectors", "change_request"];
+        super::super::tests::pump_chat_until(cx, &chat, |chat| {
+            let drawn = chat.control_snapshot().session_panel.sections;
+            keys.iter().all(|key| drawn.iter().any(|section| section.key == *key))
+        });
+        let sections = chat.read_with(&cx.cx, |chat, _| chat.control_snapshot()).session_panel.sections;
+        let expanded = |key: &str| sections.iter().find(|section| section.key == key).map(|section| section.expanded);
+        assert_eq!(expanded("environment"), Some(true));
+        for key in ["context", "connectors", "change_request"] {
+            assert_eq!(expanded(key), Some(false), "{key} starts folded");
+        }
     }
 
     #[gpui::test]

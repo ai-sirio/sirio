@@ -3,15 +3,21 @@
 //! forge, on a detached HEAD with no link, or when nothing installed a
 //! `ChangeRequestSource`.
 //!
+//! The card starts folded and a folded card asks the forge nothing, so it
+//! cannot wait for a read to be drawn. When the column opens, `has_forge`
+//! decides from what the source already holds whether the worktree has a
+//! forge, and if so the card is drawn with its title alone; the read starts
+//! when the reader unfolds it.
+//!
 //! The card reads a cached answer; nothing here blocks. A read is one task:
-//! `connect` (it runs git), a look at the host's shared pause on the GPUI
-//! thread, then `read_branch_card`, each hop off the GPUI thread. It runs
-//! on the first frame that paints the column after it opens or the card
-//! unfolds (if the last answer is a minute old) and then every minute while
-//! the card is open and a frame painted it since the last tick: a chat in a
-//! background tab, or restored and never shown, asks the forge for nothing.
-//! Closing the column or folding the card drops the timer and any read in
-//! flight.
+//! `connect` (it runs git, and `gh` or `glab` on a first look), a look at
+//! the host's shared pause on the GPUI thread, then `read_branch_card`,
+//! each hop off the GPUI thread. It runs on the first frame that paints the
+//! column after the card unfolds or the column opens with it unfolded (if
+//! the last answer is a minute old) and then every minute while the card is
+//! open and a frame painted it since the last tick: a chat in a background
+//! tab, or restored and never shown, asks the forge for nothing. Closing the
+//! column or folding the card drops the timer and any read in flight.
 
 use super::{Row, Section, environment};
 use crate::branch_card::{BranchCard, BranchCardRead, read_branch_card};
@@ -34,8 +40,22 @@ pub(super) enum Shown {
     Missing(Forge),
 }
 
+/// Whether the worktree has a forge, as the probe at the column's opening
+/// and the reads since have found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ForgeKnown {
+    /// Not decided: the probe has not landed since the column opened.
+    #[default]
+    Unknown,
+    /// No remote on a forge, or a host nothing names a forge for: no card.
+    None,
+    /// A forge: the card is drawn, folded until the reader opens it.
+    Present,
+}
+
 #[derive(Default)]
 pub(super) struct ChangeRequest {
+    forge: ForgeKnown,
     /// The last answer, kept while a later read fails or is paused. `None`
     /// is "nothing to show", which with no `error` hides the card.
     shown: Option<Shown>,
@@ -53,6 +73,7 @@ pub(super) struct ChangeRequest {
     read_even_if_fresh: bool,
     read_task: Option<Task<()>>,
     timer_task: Option<Task<()>>,
+    probe_task: Option<Task<()>>,
 }
 
 impl ChangeRequest {
@@ -126,7 +147,9 @@ pub(super) fn section(state: &ChangeRequest) -> Option<Section> {
         };
         rows.push(Row { muted: true, ..row });
     }
-    if rows.is_empty() {
+    // The forge was looked for and there is none: no card, whatever an
+    // earlier read left behind. With nothing read, the card is the probe's.
+    if state.forge == ForgeKnown::None || (rows.is_empty() && state.forge != ForgeKnown::Present) {
         return None;
     }
     Some(Section {
@@ -140,6 +163,40 @@ pub(super) fn section(state: &ChangeRequest) -> Option<Section> {
 }
 
 impl Chat {
+    /// The column opened: decides whether the worktree has a forge, without
+    /// asking one, so the card can be drawn folded. A read that lands first
+    /// knows more and keeps its answer.
+    pub(in crate::chat) fn probe_session_change_request_forge(&mut self, cx: &mut GpuiContext<Self>) {
+        let state = &mut self.session_panel.change_request;
+        state.forge = ForgeKnown::Unknown;
+        state.probe_task = None;
+        let Some(source) = forge_source::source(cx) else {
+            return;
+        };
+        let root = self
+            .session_panel
+            .environment
+            .worktree
+            .as_ref()
+            .map_or_else(|| self.agent_cwd.clone(), |worktree| worktree.root.clone());
+        self.session_panel.change_request.probe_task = Some(cx.spawn(async move |this, cx| {
+            let has_forge = cx
+                .background_spawn(async move { source.has_forge(&root) })
+                .await;
+            let _ = this.update(cx, |chat, cx| {
+                let state = &mut chat.session_panel.change_request;
+                if state.forge == ForgeKnown::Unknown {
+                    state.forge = if has_forge {
+                        ForgeKnown::Present
+                    } else {
+                        ForgeKnown::None
+                    };
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
     /// The column opened or the card unfolded: reads on the first frame that
     /// paints it, when the last answer is old, and keeps reading every
     /// minute it was painted in until stopped.
@@ -314,9 +371,11 @@ impl Chat {
             state.host = None;
             state.shown = None;
             state.error = None;
+            state.forge = ForgeKnown::None;
             cx.notify();
             return;
         };
+        state.forge = ForgeKnown::Present;
         let BranchCardRead {
             card: mut result,
             mut linked_error,
@@ -420,13 +479,50 @@ mod tests {
             .find(|section| section.key == key)
     }
 
-    fn settle(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> SectionSnapshot {
+    /// Waits for the folded card: the probe has found a forge.
+    fn drawn(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
         pump_chat_until(cx, chat, |chat| {
             chat.control_snapshot()
                 .session_panel
                 .sections
                 .iter()
                 .any(|section| section.key == "change_request")
+        });
+    }
+
+    /// Unfolds the card as a click on its title does, once it is drawn.
+    fn unfold(chat: &Entity<Chat>, cx: &mut VisualTestContext) {
+        drawn(chat, cx);
+        chat.update_in(cx, |chat, window, cx| {
+            chat.session_panel_act(
+                SessionPanelAction::Toggle("change_request".to_string()),
+                window,
+                cx,
+            )
+        })
+        .expect("the card unfolds");
+    }
+
+    /// A chat whose column is open against `source` with the card unfolded:
+    /// it starts folded, and a folded card asks the forge nothing.
+    fn open_unfolded(
+        cx: &mut TestAppContext,
+        source: Arc<FakeSource>,
+    ) -> (Entity<Chat>, &mut VisualTestContext) {
+        let (chat, cx) = open_with(cx, source);
+        unfold(&chat, cx);
+        (chat, cx)
+    }
+
+    /// Waits for a row, not for the section: the folded card is one before
+    /// anything has been read.
+    fn settle(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> SectionSnapshot {
+        pump_chat_until(cx, chat, |chat| {
+            chat.control_snapshot()
+                .session_panel
+                .sections
+                .iter()
+                .any(|section| section.key == "change_request" && !section.rows.is_empty())
         });
         for _ in 0..3 {
             refresh_frame(cx);
@@ -443,7 +539,7 @@ mod tests {
     async fn the_branch_change_request_is_shown_and_opens_its_tab(cx: &mut TestAppContext) {
         let forge = forge_with(vec![testing::summary(112, "Fix login")]);
         let source = FakeSource::ready(testing::github_client(forge), Some("feat/login"));
-        let (chat, cx) = open_with(cx, source);
+        let (chat, cx) = open_unfolded(cx, source);
         let section = settle(&chat, cx);
         assert_eq!(section.rows[0].label, "#112 Fix login");
         assert!(section.rows[0].detail.starts_with("Open"), "{:?}", section.rows[0]);
@@ -477,7 +573,7 @@ mod tests {
             "Login from a deleted fork that has a long title",
         )]);
         let source = FakeSource::ready(testing::github_client(forge), Some("feat/login"));
-        let (chat, cx) = open_with(cx, source);
+        let (chat, cx) = open_unfolded(cx, source);
         let section = settle(&chat, cx);
         let key = &section.rows[0].key;
         let row = cx
@@ -503,7 +599,7 @@ mod tests {
     async fn a_branch_without_one_says_so(cx: &mut TestAppContext) {
         let forge = forge_with(Vec::new());
         let source = FakeSource::ready(testing::github_client(forge), Some("feat/none"));
-        let (chat, cx) = open_with(cx, source);
+        let (chat, cx) = open_unfolded(cx, source);
         let section = settle(&chat, cx);
         let row = only_row(&section);
         assert_eq!(row.label, "No pull request for this branch");
@@ -521,7 +617,7 @@ mod tests {
             };
             forge_pause::note_rate_limited(&mut error, style::now(), cx);
         });
-        let (chat, cx) = open_with(cx, source);
+        let (chat, cx) = open_unfolded(cx, source);
         let section = settle(&chat, cx);
         assert_eq!(forge.count("ChangeRequestForBranch"), 0, "a paused host is not asked");
         assert!(only_row(&section).label.starts_with("Rate limited"), "{:?}", section.rows);
@@ -531,7 +627,7 @@ mod tests {
     async fn no_forge_hides_the_section(cx: &mut TestAppContext) {
         let source = FakeSource::with(Connection::NoForgeRemote);
         let (chat, cx) = open_with(cx, source.clone());
-        pump_chat_until(cx, &chat, |_| *source.connects.lock().unwrap() >= 1);
+        pump_chat_until(cx, &chat, |_| *source.forge_probes.lock().unwrap() >= 1);
         for _ in 0..5 {
             refresh_frame(cx);
         }
@@ -540,10 +636,60 @@ mod tests {
     }
 
     #[gpui::test(iterations = 8)]
+    async fn a_folded_card_is_drawn_without_asking_the_forge(cx: &mut TestAppContext) {
+        let forge = forge_with(vec![testing::summary(7, "Whatever")]);
+        let source = FakeSource::ready(testing::github_client(forge.clone()), Some("feat/y"));
+        let (chat, cx) = open_with(cx, source.clone());
+        drawn(&chat, cx);
+        for _ in 0..5 {
+            refresh_frame(cx);
+        }
+        let section = section_of(&chat, cx, "change_request").expect("drawn folded");
+        assert!(
+            section.rows.is_empty() && section.summary.is_empty() && !section.expanded,
+            "{section:?}"
+        );
+        assert_eq!(forge.requests(), Vec::<String>::new(), "no forge request while folded");
+        assert_eq!(*source.connects.lock().unwrap(), 0, "connect waits for the unfold");
+    }
+
+    #[gpui::test(iterations = 8)]
+    async fn unfolding_the_card_reads_it(cx: &mut TestAppContext) {
+        let forge = forge_with(vec![testing::summary(7, "Whatever")]);
+        let source = FakeSource::ready(testing::github_client(forge.clone()), Some("feat/y"));
+        let (chat, cx) = open_with(cx, source);
+        unfold(&chat, cx);
+        let section = settle(&chat, cx);
+        assert!(section.expanded);
+        assert!(
+            section.rows.iter().any(|row| row.key == "change_request/card"),
+            "{section:?}"
+        );
+        assert_eq!(forge.count("ChangeRequestForBranch"), 1);
+    }
+
+    /// A host that is a forge by name but where nothing is signed in: the
+    /// probe cannot tell, so the folded card is drawn, and the read it owes
+    /// when unfolded finds there is nothing to show.
+    #[gpui::test]
+    async fn a_card_whose_read_finds_no_connection_goes_away(cx: &mut TestAppContext) {
+        let source = FakeSource::with(Connection::NotConnected {
+            forge: Forge::GitHub,
+            host: "ghe.test".to_string(),
+        });
+        let (chat, cx) = open_unfolded(cx, source.clone());
+        pump_chat_until(cx, &chat, |_| *source.connects.lock().unwrap() >= 1);
+        for _ in 0..5 {
+            refresh_frame(cx);
+        }
+        assert!(section_of(&chat, cx, "change_request").is_none());
+    }
+
+    #[gpui::test(iterations = 8)]
     async fn the_live_branch_read_updates_the_environment_line(cx: &mut TestAppContext) {
         let forge = forge_with(vec![testing::summary(7, "Whatever")]);
         let source = FakeSource::ready(testing::github_client(forge), Some("feat/y"));
-        let (chat, cx) = open_with(cx, source);
+        let (chat, cx) = open_unfolded(cx, source);
         settle(&chat, cx);
         for _ in 0..5 {
             refresh_frame(cx);
@@ -560,7 +706,7 @@ mod tests {
     async fn the_card_is_read_every_minute_only_while_open(cx: &mut TestAppContext) {
         let forge = forge_with(vec![testing::summary(112, "Fix login")]);
         let source = FakeSource::ready(testing::github_client(forge.clone()), Some("feat/login"));
-        let (chat, cx) = open_with(cx, source);
+        let (chat, cx) = open_unfolded(cx, source);
         settle(&chat, cx);
         assert_eq!(forge.count("ChangeRequestForBranch"), 1);
 
@@ -635,6 +781,17 @@ mod tests {
             )
         });
         chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
+        // The card is drawn folded once the probe has landed, and a reader
+        // had opened it before the chat went to a background tab.
+        cx.run_until_parked();
+        assert!(
+            chat.read_with(cx, |chat, _| chat
+                .session_panel_sections()
+                .iter()
+                .any(|section| section.key == "change_request")),
+            "the probe drew the folded card"
+        );
+        chat.update(cx, |chat, cx| chat.toggle_session_fold("change_request", cx));
         let wait = |cx: &mut TestAppContext, seconds: u64| {
             for _ in 0..seconds {
                 cx.executor().advance_clock(std::time::Duration::from_secs(1));
@@ -668,7 +825,7 @@ mod tests {
             serde_json::json!({"data": {"project": {"mergeRequests": {"nodes": []}}}}).to_string(),
         );
         let source = FakeSource::ready(testing::gitlab_client(forge), Some("feat/none"));
-        let (chat, cx) = open_with(cx, source);
+        let (chat, cx) = open_unfolded(cx, source);
         let section = settle(&chat, cx);
         assert_eq!(only_row(&section).label, "No merge request for this branch");
     }
@@ -684,7 +841,7 @@ mod tests {
             source_owner: None,
             linked: Some(testing::reference(7)),
         }));
-        let (chat, cx) = open_with(cx, source.clone());
+        let (chat, cx) = open_unfolded(cx, source.clone());
         let section = settle(&chat, cx);
         assert_eq!(section.rows[0].label, "#112 Fix login", "the branch lookup decided");
         assert!(
@@ -745,6 +902,7 @@ mod tests {
         cx.update(|_, cx| forge_source::set_source(source.clone(), cx));
         cx.simulate_resize(size(px(1100.0), px(700.0)));
         chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
+        unfold(&chat, cx);
         settle(&chat, cx);
         assert_eq!(forge.count("ChangeRequestForBranch"), 1);
 

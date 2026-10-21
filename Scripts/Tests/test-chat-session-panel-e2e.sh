@@ -11,13 +11,18 @@ set -euo pipefail
 # and driven through the debug-only `surface chat panel` verb, so no pixel is read.
 # Framed runs add PID-matched window captures to look at.
 #
-# The change request card is read only while a frame paints the column, so a run
-# with no display (--state-only alone) has nothing that paints and skips the two
-# scenarios that read the forge (change_request, rate_limit_shared); --state-only
-# with --display :N paints on that display without taking captures and runs all six.
+# Every card but Environment starts folded, and the change request card is read only
+# while it is unfolded and a frame paints the column, so a run with no display
+# (--state-only alone) has nothing that paints and skips the three scenarios that
+# read the forge (default_folds, change_request, rate_limit_shared); --state-only
+# with --display :N paints on that display without taking captures and runs all seven.
+# A scenario that works inside a card unfolds it first (unfold_cards).
 #
 # Scenarios (each starts a fresh Sirio with its own database, host and HOME):
 #   environment        the project, the chat's directory (the worktree's root) and the branch, tagged worktree
+#   default_folds      Environment open and the other cards folded, Context and Connectors with their
+#                      summaries, the folded change request card drawn while the forge sees no request
+#                      at all, and the card read once it is unfolded
 #   context            asked once on open with no prompt yet, then after a prompt: the first
 #                      reducible group, a plugin node unfolding to its agents, the project
 #                      CLAUDE.md row opening a file tab
@@ -55,7 +60,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirio"
 CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
-ALL_SCENARIOS=(environment context connectors change_request rate_limit_shared restore)
+ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore)
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
@@ -79,7 +84,7 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 [ -z "$WINDOW_SIZE" ] || [[ "$WINDOW_SIZE" =~ ^[0-9]+x[0-9]+$ ]] || refuse "--window-size is WxH, not $WINDOW_SIZE"
 # The scenarios that read the forge through the change request card, which reads only
 # while a frame paints the column.
-PAINTED_SCENARIOS=" change_request rate_limit_shared "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared "
 SCENARIOS=()
 SKIPPED=()
 for name in "${ALL_SCENARIOS[@]}"; do
@@ -407,6 +412,17 @@ open_column() {
     fi
   fi
 }
+# Unfolds the cards a scenario works inside: every card but Environment starts folded,
+# and a card that needs the agent or the forge is drawn, folded, only once it has found
+# what it needs.
+unfold_cards() { # key...
+  local key
+  for key in "$@"; do
+    wait_panel "the $key card is drawn" "S('$key') is not None"
+    panel_ctl toggle "$key" >/dev/null
+    wait_panel "the $key card is unfolded" "S('$key')['expanded'] is True"
+  done
+}
 # Folds the cards above the one a capture is of, so a narrow chat's column shows it whole.
 fold_cards() { # key...
   local key
@@ -613,9 +629,42 @@ scenario_environment() {
   stop_app
 }
 
+scenario_default_folds() {
+  chat_app default_folds
+  open_column
+  wait_panel "the change request card is drawn folded, with no row" "S('change_request') is not None and rows('change_request') == []"
+  wait_panel "Context shows its summary" "S('context') is not None and S('context')['summary'] != ''"
+  wait_panel "Connectors shows its summary" "S('connectors') is not None and S('connectors')['summary'] != ''"
+  check_panel "Environment is open and Context, Connectors and Change request are folded" \
+    "S('environment')['expanded'] is True and all(S(k)['expanded'] is False for k in ('context', 'connectors', 'change_request'))"
+  capture default-folds
+  # `chat_app` left the right panel on the change request list, which asks the forge
+  # while it is shown: move it off, or the log would be the list's and not the card's.
+  echo "step: the right panel leaves the change request list"
+  ctl surface open-list open --entry show >/dev/null
+  wait_field "the right panel shows the Open list" rightPanelView open 10 surface layout read
+  sleep 2
+  local before after
+  before=$(wc -l < "$RUN_DIR/github-requests.log")
+  echo "step: five seconds with the column open (forge requests so far: $before)"
+  sleep 5
+  after=$(wc -l < "$RUN_DIR/github-requests.log")
+  [ "$after" = "$before" ] || fail "the forge saw $((after - before)) request(s) while the card was folded ($before -> $after)"
+  check_panel "the card is still folded and unread" "S('change_request')['expanded'] is False and rows('change_request') == []"
+  echo "OK: the forge's whole request log did not move with the column open and the card folded ($before lines)"
+  echo "step: unfolding the card reads it"
+  unfold_cards change_request
+  wait_panel "the card is #112" "R('change_request', 'change_request/card') and R('change_request', 'change_request/card')['label'].startswith('#112')"
+  [ "$(card_reads)" -ge 1 ] || fail "the card shows #112 but the forge saw no read of the branch's change request"
+  echo "OK: the forge saw $(card_reads) read(s) of the branch's change request after the unfold"
+  capture default-folds-unfolded
+  stop_app
+}
+
 scenario_context() {
   chat_app context
   open_column
+  unfold_cards context
   # Opened before any prompt: the report is asked for once, on open.
   wait_panel "a context section appears with no prompt sent" "S('context') is not None and len(rows('context')) > 0"
   wait_panel "the first reducible group is Memory files, 34.2k" \
@@ -663,12 +712,13 @@ scenario_context() {
 scenario_connectors() {
   chat_app connectors
   open_column
+  unfold_cards connectors
   local codegraph="connectors/user/codegraph" notion="connectors/claude.ai/claude.ai Notion"
   wait_panel "codegraph failed, offering Reconnect" \
     "R('connectors', '$codegraph') and R('connectors', '$codegraph')['detail'] == 'failed' and R('connectors', '$codegraph')['action'] == 'Reconnect'"
   wait_panel "Notion needs sign-in, offering Sign in" \
     "R('connectors', '$notion') and R('connectors', '$notion')['detail'] == 'needs sign-in' and R('connectors', '$notion')['action'] == 'Sign in'"
-  fold_cards environment context
+  fold_cards environment
   capture connectors-before
   panel_ctl activate "$codegraph" >/dev/null
   wait_panel "codegraph reconnected" "R('connectors', '$codegraph')['detail'] == 'connected'"
@@ -687,8 +737,9 @@ scenario_connectors() {
 scenario_change_request() {
   chat_app change_request
   open_column
+  unfold_cards change_request
   wait_panel "the card is #112" "R('change_request', 'change_request/card') and R('change_request', 'change_request/card')['label'].startswith('#112')"
-  fold_cards environment context
+  fold_cards environment
   capture change_request
   panel_ctl activate change_request/card >/dev/null
   wait_field "a change request tab for #112 is open" label '#112' 20 surface change-request read
@@ -716,6 +767,7 @@ scenario_rate_limit_shared() {
   echo "step: the column opens during the pause (card reads so far: $before)"
   panel_ctl open >/dev/null
   wait_panel "the column is open" 'p["open"]'
+  unfold_cards change_request
   wait_panel "the card row says it is rate limited" \
     "'rate limited' in (R('change_request', 'change_request/error') or {}).get('label', '').lower()" 10
   capture rate-limited

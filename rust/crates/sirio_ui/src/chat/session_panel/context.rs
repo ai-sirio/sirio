@@ -584,6 +584,8 @@ mod tests {
     async fn a_click_folds_a_node_and_opens_a_file(cx: &mut TestAppContext) {
         let (chat, cx) = open_with(cx, Some(breakdown(3)));
         cx.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(900.0)));
+        // The card starts folded, and a folded card draws no rows to click.
+        act(&chat, cx, SessionPanelAction::Toggle("context".into()));
         refresh_frame(cx);
         let opened = Rc::new(RefCell::new(Vec::new()));
         let seen = opened.clone();

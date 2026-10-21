@@ -114,6 +114,13 @@ impl std::error::Error for RevisionError {}
 /// them on the background executor.
 pub trait ChangeRequestSource: Send + Sync {
     fn connect(&self, worktree: &Path) -> Connection;
+    /// Whether `worktree`'s remote is on a host this source can name a forge
+    /// for from what it already holds: a public name, a configured host, a
+    /// stored token, an answer it resolved before. It runs no `gh` or `glab`
+    /// and sends nothing to the host, which is what `connect` may do on a
+    /// first look, so the session panel asks it when the column opens and
+    /// leaves `connect` for the card's first read.
+    fn has_forge(&self, worktree: &Path) -> bool;
     /// The branch `worktree` has checked out now; `None` on a detached HEAD.
     /// `connect` reads it once, so a panel that stays open asks again.
     fn current_branch(&self, worktree: &Path) -> Option<String>;
@@ -211,6 +218,13 @@ pub(crate) mod testing {
                     r#"{"message":"rate limited"}"#.to_string(),
                 ),
             );
+        }
+
+        /// Every request the forge has seen, GraphQL and REST alike.
+        pub(crate) fn requests(&self) -> Vec<String> {
+            let mut all = self.seen.lock().unwrap().clone();
+            all.extend(self.rest_seen.lock().unwrap().iter().map(|(key, _)| key.clone()));
+            all
         }
 
         pub(crate) fn count(&self, operation: &str) -> usize {
@@ -431,6 +445,9 @@ pub(crate) mod testing {
         pub(crate) tokens: Mutex<Vec<(String, Forge, String)>>,
         pub(crate) token_answer: Mutex<Result<String, ForgeError>>,
         pub(crate) connects: Mutex<u32>,
+        /// How many times the UI asked `has_forge`, which never counts as a
+        /// `connect`.
+        pub(crate) forge_probes: Mutex<u32>,
         pub(crate) ensured: Mutex<Vec<(ChangeRef, Revisions, Option<String>)>>,
         pub(crate) revisions_answer: Mutex<Result<(), RevisionError>>,
         pub(crate) released: Mutex<Vec<Vec<ChangeRef>>>,
@@ -452,6 +469,7 @@ pub(crate) mod testing {
                 tokens: Mutex::new(Vec::new()),
                 token_answer: Mutex::new(Ok("me".to_string())),
                 connects: Mutex::new(0),
+                forge_probes: Mutex::new(0),
                 ensured: Mutex::new(Vec::new()),
                 revisions_answer: Mutex::new(Ok(())),
                 released: Mutex::new(Vec::new()),
@@ -482,6 +500,16 @@ pub(crate) mod testing {
         fn connect(&self, _worktree: &Path) -> Connection {
             *self.connects.lock().unwrap() += 1;
             self.connection.lock().unwrap().clone()
+        }
+
+        /// What the real source answers without asking anyone: a remote that
+        /// names no forge, or a host nothing identifies, is none.
+        fn has_forge(&self, _worktree: &Path) -> bool {
+            *self.forge_probes.lock().unwrap() += 1;
+            !matches!(
+                *self.connection.lock().unwrap(),
+                Connection::NoForgeRemote | Connection::UnknownForge { .. }
+            )
         }
 
         fn current_branch(&self, _worktree: &Path) -> Option<String> {

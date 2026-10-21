@@ -13,8 +13,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sirio_forge::{
     ChangeRef, CliProgram, CliTransport, Forge, ForgeClient, ForgeError, ForgeTarget, HostSetting,
-    Means, Resolution, Revisions, SystemProbes, TokenTransport, Transport, parse_remote_url,
-    resolve,
+    Means, Probes, Resolution, Revisions, SystemProbes, TokenTransport, Transport,
+    parse_remote_url, resolve,
 };
 use sirio_git::{FetchError, FetchRefspec};
 use sirio_ui::forge_source::{
@@ -213,6 +213,21 @@ fn token_key(host: &str) -> String {
     format!("forge:{host}")
 }
 
+/// Detection with the two probes that leave the process answering no: no
+/// `gh` or `glab` is run and nothing is asked of the host, so what `resolve`
+/// can still name is what the settings, a public name and a stored token say.
+struct LocalProbes;
+
+impl Probes for LocalProbes {
+    fn cli_signed_in(&self, _forge: Forge, _host: &str) -> bool {
+        false
+    }
+
+    fn is_github_enterprise(&self, _host: &str) -> bool {
+        false
+    }
+}
+
 /// One client per host, project and means, so a client's cached viewer and
 /// GitLab baseline flag survive refreshes and worktree switches.
 type ClientKey = (String, String, bool);
@@ -381,6 +396,37 @@ impl ChangeRequestSource for ForgeHub {
                 }
             }
         }
+    }
+
+    /// `connect` without its probes: `gh auth status` and the Enterprise
+    /// metadata call are what it may do on a first look, and the session
+    /// panel asks this when its column opens, before the reader has asked for
+    /// anything. A host reached only through a signed-in CLI, which nothing
+    /// has resolved yet, is not named here: its card is drawn once `connect`
+    /// has run for it, from the right panel's list or a tab.
+    fn has_forge(&self, worktree: &Path) -> bool {
+        let origin = sirio_git::remote_url(worktree, "origin");
+        let listed = sirio_git::remote_url(worktree, "upstream").or(origin);
+        let Some(target) = listed.as_deref().and_then(parse_remote_url) else {
+            return false;
+        };
+        // What `connect` resolved, probes included, is the better answer. The
+        // local one is never kept: the first real look must still find a CLI.
+        let cached = self
+            .resolutions
+            .lock()
+            .expect("resolutions lock")
+            .get(&target.host)
+            .copied();
+        let resolution = cached.unwrap_or_else(|| {
+            let setting = self
+                .host_settings()
+                .into_iter()
+                .find(|setting| setting.host == target.host);
+            let stored = self.stored_token(&target.host).map(|stored| stored.forge);
+            resolve(&target.host, setting.as_ref(), stored, &LocalProbes)
+        });
+        !matches!(resolution, Resolution::UnknownForge)
     }
 
     fn current_branch(&self, worktree: &Path) -> Option<String> {
