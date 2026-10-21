@@ -177,28 +177,54 @@ impl Chat {
                 let content =
                     project_tool_content(&content, raw_input.as_deref(), raw_output.as_deref());
                 let mut ordinal = 0usize;
+                let mut diff_ordinal = 0usize;
                 for item in &content {
-                    if matches!(item, ToolCallContentInfo::Text(_)) {
-                        let key = format!("tool-output-{entry_index}-{ordinal}");
-                        self.tool_output_scroll
-                            .entry(key)
-                            .or_insert_with(ScrollHandle::new);
-                        ordinal += 1;
+                    match item {
+                        ToolCallContentInfo::Text(_) => {
+                            let key = format!("tool-output-{entry_index}-{ordinal}");
+                            self.tool_output_scroll
+                                .entry(key)
+                                .or_insert_with(ScrollHandle::new);
+                            ordinal += 1;
+                        }
+                        // The diff preview's horizontal scrollbar needs a
+                        // handle that outlives a frame.
+                        ToolCallContentInfo::Diff(_) => {
+                            let key = format!("tool-diff-{entry_index}-{diff_ordinal}");
+                            self.tool_output_scroll
+                                .entry(key)
+                                .or_insert_with(ScrollHandle::new);
+                            diff_ordinal += 1;
+                        }
+                        ToolCallContentInfo::Other => {}
                     }
                 }
             }
             Entry::SubagentTask { tool_calls, .. } => {
                 for (child_index, call) in tool_calls.iter().enumerate() {
                     let mut ordinal = 0usize;
+                    let mut diff_ordinal = 0usize;
                     for item in &call.content {
-                        if matches!(item, ToolCallContentInfo::Text(_)) {
-                            let key = format!(
-                                "subagent-tool-output-{entry_index}-{child_index}-{ordinal}"
-                            );
-                            self.tool_output_scroll
-                                .entry(key)
-                                .or_insert_with(ScrollHandle::new);
-                            ordinal += 1;
+                        match item {
+                            ToolCallContentInfo::Text(_) => {
+                                let key = format!(
+                                    "subagent-tool-output-{entry_index}-{child_index}-{ordinal}"
+                                );
+                                self.tool_output_scroll
+                                    .entry(key)
+                                    .or_insert_with(ScrollHandle::new);
+                                ordinal += 1;
+                            }
+                            ToolCallContentInfo::Diff(_) => {
+                                let key = format!(
+                                    "subagent-diff-{entry_index}-{child_index}-{diff_ordinal}"
+                                );
+                                self.tool_output_scroll
+                                    .entry(key)
+                                    .or_insert_with(ScrollHandle::new);
+                                diff_ordinal += 1;
+                            }
+                            ToolCallContentInfo::Other => {}
                         }
                     }
                 }
@@ -415,11 +441,13 @@ impl Chat {
                             interaction: interaction.clone(),
                             line_starts: plain.diff_line_starts(diff_ordinal, source_start, drawn),
                         });
+                    let diff_id = format!("{diff_base}-{diff_ordinal}");
                     body = body.child(Self::render_tool_diff(
                         diff,
                         theme,
                         DiffPreviewContext {
-                            id_prefix: format!("{diff_base}-{diff_ordinal}"),
+                            scroll: output_scrolls.get(&diff_id).cloned(),
+                            id_prefix: diff_id,
                             entity: entity.clone(),
                             selection,
                         },
