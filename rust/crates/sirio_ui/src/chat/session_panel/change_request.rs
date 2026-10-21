@@ -1,7 +1,8 @@
 //! The Change request card: the pull or merge request of the chat's own
 //! branch, one row that opens its tab. Hidden when the worktree is on no
 //! forge, on a detached HEAD with no link, or when nothing installed a
-//! `ChangeRequestSource`.
+//! `ChangeRequestSource`. A forge nothing is signed in to keeps its card,
+//! with one row that says so.
 //!
 //! The card starts folded and a folded card asks the forge nothing, so it
 //! cannot wait for a read to be drawn. When the column opens, `has_forge`
@@ -22,6 +23,7 @@
 use super::{Row, Section, environment};
 use crate::branch_card::{BranchCard, BranchCardRead, read_branch_card};
 use crate::change_request_style as style;
+use crate::change_request_tab::unreachable_text;
 use crate::chat::{Chat, ChatEvent};
 use crate::forge_pause;
 use crate::forge_source::{self, Connection};
@@ -38,6 +40,9 @@ pub(super) enum Shown {
     Found(Box<ChangeSummary>),
     /// The branch has no change request; the forge names the noun.
     Missing(Forge),
+    /// The forge is known and nothing is signed in to it: the host, and the
+    /// sentence the right panel and the tab give for it.
+    NotSignedIn { host: String, text: String },
 }
 
 /// Whether the worktree has a forge, as the probe at the column's opening
@@ -128,6 +133,15 @@ pub(super) fn section(state: &ChangeRequest) -> Option<Section> {
             format!("No {} for this branch", noun(*forge)),
             "",
         )),
+        Some(Shown::NotSignedIn { host, text }) => rows.push(Row {
+            muted: true,
+            note: text.clone(),
+            ..Row::new(
+                "change_request/not_connected",
+                format!("Not signed in to {host}"),
+                "",
+            )
+        }),
         None => {}
     }
     if let Some(error) = &state.error {
@@ -286,12 +300,15 @@ impl Chat {
             let connection = cx
                 .background_spawn(async move { connecting.connect(&connecting_root) })
                 .await;
-            let Connection::Ready(ready) = connection else {
-                // No forge here: nothing to show, and nothing to read.
-                let _ = this.update(cx, |chat, cx| {
-                    chat.land_session_change_request(generation, branch_seq, None, cx);
-                });
-                return;
+            let ready = match connection {
+                Connection::Ready(ready) => ready,
+                // Nothing to read: no forge here, or none signed in to.
+                unready => {
+                    let _ = this.update(cx, |chat, cx| {
+                        chat.land_unready_session_change_request(generation, unready, cx);
+                    });
+                    return;
+                }
             };
             let host = ready.client.host().to_string();
             let forge = ready.client.forge();
@@ -321,7 +338,7 @@ impl Chat {
                 chat.land_session_change_request(
                     generation,
                     branch_seq,
-                    Some((forge, host, read)),
+                    (forge, host, read),
                     cx,
                 );
             });
@@ -350,14 +367,13 @@ impl Chat {
         }
     }
 
-    /// Takes a read's answer, or `None` when the worktree has no forge.
-    /// `branch_seq` is how many Environment reads had started when this one
-    /// did.
-    fn land_session_change_request(
+    /// Takes the answer of a read that found no client. A forge nothing is
+    /// signed in to keeps its card, with a row that says so; no forge at all
+    /// takes it away.
+    fn land_unready_session_change_request(
         &mut self,
         generation: u64,
-        branch_seq: u64,
-        answer: Option<(Forge, String, BranchCardRead)>,
+        connection: Connection,
         cx: &mut GpuiContext<Self>,
     ) {
         let state = &mut self.session_panel.change_request;
@@ -365,17 +381,41 @@ impl Chat {
             return;
         }
         state.last_read = Some(style::now());
-        let Some((forge, host, read)) = answer else {
-            // No forge here: a host cached from before must not block a
-            // different remote.
-            state.host = None;
-            state.shown = None;
-            state.error = None;
-            state.forge = ForgeKnown::None;
-            cx.notify();
+        // A host cached from before must not block a different remote.
+        state.host = None;
+        state.error = None;
+        match &connection {
+            Connection::NotConnected { host, .. } => {
+                state.shown = Some(Shown::NotSignedIn {
+                    host: host.clone(),
+                    text: unreachable_text(&connection),
+                });
+                state.forge = ForgeKnown::Present;
+            }
+            Connection::NoForgeRemote | Connection::UnknownForge { .. } | Connection::Ready(_) => {
+                state.shown = None;
+                state.forge = ForgeKnown::None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Takes a read's answer. `branch_seq` is how many Environment reads had
+    /// started when this one did.
+    fn land_session_change_request(
+        &mut self,
+        generation: u64,
+        branch_seq: u64,
+        answer: (Forge, String, BranchCardRead),
+        cx: &mut GpuiContext<Self>,
+    ) {
+        let state = &mut self.session_panel.change_request;
+        if state.generation != generation {
             return;
-        };
+        }
+        state.last_read = Some(style::now());
         state.forge = ForgeKnown::Present;
+        let (forge, host, read) = answer;
         let BranchCardRead {
             card: mut result,
             mut linked_error,
@@ -446,7 +486,7 @@ mod tests {
     use crate::forge_source::{self, Connection};
     use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
     use crate::forge_source::ReadyConnection;
-    use super::{BranchCard, BranchCardRead};
+    use super::{BranchCard, BranchCardRead, ForgeKnown};
     use sirio_forge::{Forge, ForgeError, Means};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -627,7 +667,10 @@ mod tests {
     async fn no_forge_hides_the_section(cx: &mut TestAppContext) {
         let source = FakeSource::with(Connection::NoForgeRemote);
         let (chat, cx) = open_with(cx, source.clone());
-        pump_chat_until(cx, &chat, |_| *source.forge_probes.lock().unwrap() >= 1);
+        pump_chat_until(cx, &chat, |chat| {
+            chat.session_panel.change_request.forge != ForgeKnown::Unknown
+        });
+        assert_eq!(*source.forge_probes.lock().unwrap(), 1);
         for _ in 0..5 {
             refresh_frame(cx);
         }
@@ -669,20 +712,69 @@ mod tests {
     }
 
     /// A host that is a forge by name but where nothing is signed in: the
-    /// probe cannot tell, so the folded card is drawn, and the read it owes
-    /// when unfolded finds there is nothing to show.
+    /// probe cannot tell, so the folded card is drawn, and once unfolded it
+    /// says what is missing instead of going away.
     #[gpui::test]
-    async fn a_card_whose_read_finds_no_connection_goes_away(cx: &mut TestAppContext) {
+    async fn a_card_whose_read_finds_no_sign_in_says_so(cx: &mut TestAppContext) {
         let source = FakeSource::with(Connection::NotConnected {
             forge: Forge::GitHub,
             host: "ghe.test".to_string(),
         });
         let (chat, cx) = open_unfolded(cx, source.clone());
+        let section = settle(&chat, cx);
+        assert!(section.expanded);
+        let row = only_row(&section);
+        assert_eq!(row.key, "change_request/not_connected");
+        assert_eq!(row.label, "Not signed in to ghe.test");
+        assert!(
+            row.note.contains("`gh auth login --hostname ghe.test`"),
+            "the sentence the right panel and the tab use: {:?}",
+            row.note
+        );
+        assert!(row.action.is_none(), "there is nothing to open");
+    }
+
+    /// The remote went away between the probe and the unfold: the read finds
+    /// no forge and the card goes.
+    #[gpui::test]
+    async fn a_card_whose_read_finds_no_forge_goes_away(cx: &mut TestAppContext) {
+        let forge = forge_with(vec![testing::summary(7, "Whatever")]);
+        let source = FakeSource::ready(testing::github_client(forge), Some("feat/y"));
+        let (chat, cx) = open_with(cx, source.clone());
+        drawn(&chat, cx);
+        source.set(Connection::NoForgeRemote);
+        unfold(&chat, cx);
         pump_chat_until(cx, &chat, |_| *source.connects.lock().unwrap() >= 1);
         for _ in 0..5 {
             refresh_frame(cx);
         }
         assert!(section_of(&chat, cx, "change_request").is_none());
+    }
+
+    /// A toggle that reaches the chat before the probe has drawn the card
+    /// still opens it: the fold of a default-folded card is not decided by
+    /// whether its section is drawn yet.
+    #[gpui::test]
+    async fn a_toggle_before_the_probe_lands_still_unfolds_the_card(cx: &mut TestAppContext) {
+        let forge = forge_with(vec![testing::summary(7, "Whatever")]);
+        let source = FakeSource::ready(testing::github_client(forge), Some("feat/y"));
+        let (chat, cx) = offline_chat_view(cx);
+        cx.update(|_, cx| forge_source::set_source(source, cx));
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        chat.update(cx, |chat, cx| {
+            chat.set_session_panel_open(true, cx);
+            assert!(
+                chat.session_panel_sections().iter().all(|section| section.key != "change_request"),
+                "the probe has not landed: no card is drawn"
+            );
+            chat.toggle_session_fold("change_request", cx);
+        });
+        let section = settle(&chat, cx);
+        assert!(section.expanded, "{section:?}");
+        assert!(
+            section.rows.iter().any(|row| row.key == "change_request/card"),
+            "{section:?}"
+        );
     }
 
     #[gpui::test(iterations = 8)]
@@ -957,7 +1049,7 @@ mod tests {
                 chat.land_session_change_request(
                     generation,
                     started_at,
-                    Some((Forge::GitHub, "ghe.test".to_string(), read)),
+                    (Forge::GitHub, "ghe.test".to_string(), read),
                     cx,
                 );
                 chat.session_panel.environment.branch.clone()

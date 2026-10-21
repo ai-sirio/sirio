@@ -213,6 +213,15 @@ fn token_key(host: &str) -> String {
     format!("forge:{host}")
 }
 
+/// What a worktree's remotes say: the project its change requests are listed
+/// on (`upstream`, else `origin`), and `origin`'s own URL, which names the
+/// viewer's fork.
+fn listed_target(worktree: &Path) -> (Option<ForgeTarget>, Option<String>) {
+    let origin = sirio_git::remote_url(worktree, "origin");
+    let listed = sirio_git::remote_url(worktree, "upstream").or_else(|| origin.clone());
+    (listed.as_deref().and_then(parse_remote_url), origin)
+}
+
 /// Detection with the two probes that leave the process answering no: no
 /// `gh` or `glab` is run and nothing is asked of the host, so what `resolve`
 /// can still name is what the settings, a public name and a stored token say.
@@ -291,16 +300,22 @@ impl ForgeHub {
         serde_json::from_str(&raw).ok()
     }
 
-    fn resolution(&self, host: &str) -> Resolution {
-        if let Some(found) = self.resolutions.lock().expect("resolutions lock").get(host) {
-            return *found;
-        }
+    /// What detection says for `host` from the settings and a stored token,
+    /// with `probes` answering for the rest.
+    fn detect(&self, host: &str, probes: &dyn Probes) -> Resolution {
         let setting = self
             .host_settings()
             .into_iter()
             .find(|setting| setting.host == host);
         let stored = self.stored_token(host).map(|stored| stored.forge);
-        let resolution = resolve(host, setting.as_ref(), stored, &SystemProbes);
+        resolve(host, setting.as_ref(), stored, probes)
+    }
+
+    fn resolution(&self, host: &str) -> Resolution {
+        if let Some(found) = self.resolutions.lock().expect("resolutions lock").get(host) {
+            return *found;
+        }
+        let resolution = self.detect(host, &SystemProbes);
         self.resolutions
             .lock()
             .expect("resolutions lock")
@@ -356,9 +371,8 @@ impl ForgeHub {
 
 impl ChangeRequestSource for ForgeHub {
     fn connect(&self, worktree: &Path) -> Connection {
-        let origin = sirio_git::remote_url(worktree, "origin");
-        let listed = sirio_git::remote_url(worktree, "upstream").or_else(|| origin.clone());
-        let Some(target) = listed.as_deref().and_then(parse_remote_url) else {
+        let (target, origin) = listed_target(worktree);
+        let Some(target) = target else {
             return Connection::NoForgeRemote;
         };
         match self.resolution(&target.host) {
@@ -401,13 +415,14 @@ impl ChangeRequestSource for ForgeHub {
     /// `connect` without its probes: `gh auth status` and the Enterprise
     /// metadata call are what it may do on a first look, and the session
     /// panel asks this when its column opens, before the reader has asked for
-    /// anything. A host reached only through a signed-in CLI, which nothing
-    /// has resolved yet, is not named here: its card is drawn once `connect`
-    /// has run for it, from the right panel's list or a tab.
+    /// anything. A host signed in to only through `gh` or `glab`, with no
+    /// `forge.hosts` entry and no stored token, is not named here until
+    /// `connect` has run for it in this run (the right panel's list, a tab):
+    /// the card appears for it on a column opened after that, or once the
+    /// host is added in Settings → Git Hosting.
     fn has_forge(&self, worktree: &Path) -> bool {
-        let origin = sirio_git::remote_url(worktree, "origin");
-        let listed = sirio_git::remote_url(worktree, "upstream").or(origin);
-        let Some(target) = listed.as_deref().and_then(parse_remote_url) else {
+        let (target, _) = listed_target(worktree);
+        let Some(target) = target else {
             return false;
         };
         // What `connect` resolved, probes included, is the better answer. The
@@ -418,14 +433,7 @@ impl ChangeRequestSource for ForgeHub {
             .expect("resolutions lock")
             .get(&target.host)
             .copied();
-        let resolution = cached.unwrap_or_else(|| {
-            let setting = self
-                .host_settings()
-                .into_iter()
-                .find(|setting| setting.host == target.host);
-            let stored = self.stored_token(&target.host).map(|stored| stored.forge);
-            resolve(&target.host, setting.as_ref(), stored, &LocalProbes)
-        });
+        let resolution = cached.unwrap_or_else(|| self.detect(&target.host, &LocalProbes));
         !matches!(resolution, Resolution::UnknownForge)
     }
 

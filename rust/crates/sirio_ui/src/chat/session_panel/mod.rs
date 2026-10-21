@@ -28,6 +28,11 @@ const MIN_CHAT_WIDTH: f32 = 640.0;
 /// What an overlaid column leaves of the chat to its left, at the most.
 const OVERLAY_MARGIN: f32 = 16.0;
 
+/// The cards that start folded: Environment is the only one open. A key here
+/// is a section's fold wherever its card is drawn yet or not, since some are
+/// drawn only once the agent or the forge has answered.
+const FOLDED_AT_START: [&str; 4] = ["context", "connectors", "trace", "change_request"];
+
 /// What the debug control verb and the tests can do to the column.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionPanelAction {
@@ -239,10 +244,7 @@ impl SessionPanel {
             // Every card but Environment starts folded: the column opens as
             // a list of titles with their summaries, and the reader unfolds
             // what they want. `trace` is folded ahead of its card.
-            collapsed: ["context", "connectors", "trace", "change_request"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
+            collapsed: FOLDED_AT_START.into_iter().map(str::to_string).collect(),
             flipped: HashSet::new(),
             context: context::Context::default(),
             connectors: connectors::Connectors::default(),
@@ -365,10 +367,11 @@ impl Chat {
     /// Folds or unfolds the section or node with this key. A section is
     /// folded when it is in `collapsed`; a node is flipped from its default.
     fn toggle_session_fold(&mut self, key: &str, cx: &mut Context<Self>) {
-        let is_section = self
-            .session_panel_sections()
-            .iter()
-            .any(|section| section.key == key);
+        let is_section = FOLDED_AT_START.contains(&key)
+            || self
+                .session_panel_sections()
+                .iter()
+                .any(|section| section.key == key);
         let set = if is_section {
             &mut self.session_panel.collapsed
         } else {

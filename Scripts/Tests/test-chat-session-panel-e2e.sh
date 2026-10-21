@@ -22,7 +22,9 @@ set -euo pipefail
 #   environment        the project, the chat's directory (the worktree's root) and the branch, tagged worktree
 #   default_folds      Environment open and the other cards folded, Context and Connectors with their
 #                      summaries, the folded change request card drawn while the forge sees no request
-#                      at all, and the card read once it is unfolded
+#                      at all, and the card read once it is unfolded; then a chat on a host nothing names
+#                      (no setting, no token), where opening the column runs neither `gh` nor `glab`
+#                      (stubs that record every call)
 #   context            asked once on open with no prompt yet, then after a prompt: the first
 #                      reducible group, a plugin node unfolding to its agents, the project
 #                      CLAUDE.md row opening a file tab
@@ -256,6 +258,15 @@ mkdir -p "$LINKED/src"
 printf '# Widgets\n\nThe project memory the stub claude reports.\n' > "$LINKED/CLAUDE.md"
 printf 'fn main() {}\n' > "$LINKED/src/main.rs"
 CHAT_CWD="$LINKED/src"
+# A repository whose remote is on a host nothing names: no setting, no token. default_folds
+# opens a chat on it with recording `gh` and `glab` (below).
+STRANGER="$RUN_DIR/stranger"
+mkdir -p "$STRANGER"
+git -C "$STRANGER" init -q -b main
+git -C "$STRANGER" config user.email t@example.com
+git -C "$STRANGER" config user.name Tester
+git -C "$STRANGER" commit -q --allow-empty -m first
+git -C "$STRANGER" remote add origin https://git.example.invalid/acme/stranger.git
 
 # ---- stubs: the claude shim first, the other agents, and a browser ---------
 STUBS="$ROOT/Scripts/Tests/stubs/session-panel"
@@ -278,6 +289,18 @@ printf '%s\n' "$name \$*" >>"$RUN_DIR/browser.log"
 exit 0
 STUB_EOF
   chmod +x "$RUN_DIR/bin/$name"
+done
+# `gh` and `glab` that record their arguments and say nobody is signed in. They are on the
+# PATH of the one launch that looks for them (default_folds), never of the others.
+CLI_STUBS="$RUN_DIR/clistubs"
+mkdir -p "$CLI_STUBS"
+for name in gh glab; do
+  cat >"$CLI_STUBS/$name" <<STUB_EOF
+#!/bin/sh
+printf '%s\n' "$name \$*" >>"$RUN_DIR/forge-cli.log"
+exit 1
+STUB_EOF
+  chmod +x "$CLI_STUBS/$name"
 done
 APP_PATH="$STUBS:$RUN_DIR/bin:/usr/local/bin:/usr/bin:/bin"
 resolved=$(PATH="$APP_PATH" command -v claude || true)
@@ -587,6 +610,11 @@ chat_app() { # name
   local account
   account=$(reply surface change-requests token --host ghe.test --forge github --token $'good\n' | python3 -c 'import json, sys; print(json.load(sys.stdin)[0].get("account", ""))')
   [ "$account" = "fake-user" ] || fail "the token signed in as '$account'"
+  open_chat
+}
+
+# Opens a Claude chat as the first and only tab of a fresh Sirio.
+open_chat() {
   # The Open list offers an agent once its CLI has been looked for.
   for _ in $(seq 1 50); do
     "$CTL" surface open-list open --entry agent:claude >/dev/null 2>&1 && break
@@ -658,6 +686,22 @@ scenario_default_folds() {
   [ "$(card_reads)" -ge 1 ] || fail "the card shows #112 but the forge saw no read of the branch's change request"
   echo "OK: the forge saw $(card_reads) read(s) of the branch's change request after the unfold"
   capture default-folds-unfolded
+  stop_app
+
+  # The probe asks nothing of a host: `gh auth status` would contact it. A worktree whose
+  # remote is on a host with no setting and no token has gh and glab recording every call.
+  echo "step: a host nothing names, with gh and glab that record every call"
+  local stubbed="$CLI_STUBS:$APP_PATH"
+  [ "$(PATH="$stubbed" command -v gh)" = "$CLI_STUBS/gh" ] || fail "gh does not resolve to the recording stub"
+  [ "$(PATH="$stubbed" command -v glab)" = "$CLI_STUBS/glab" ] || fail "glab does not resolve to the recording stub"
+  CHAT_CWD="$STRANGER" APP_PATH="$stubbed" launch default_folds_stranger
+  ctl project add "$STRANGER" >/dev/null
+  open_chat
+  open_column
+  sleep 5
+  check_panel "no change request card is drawn for a host nothing names" "S('change_request') is None"
+  [ ! -s "$RUN_DIR/forge-cli.log" ] || fail "opening the column ran gh or glab: $(tr '\n' ';' < "$RUN_DIR/forge-cli.log")"
+  echo "OK: opening the column on git.example.invalid ran neither gh nor glab"
   stop_app
 }
 

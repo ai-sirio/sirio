@@ -121,6 +121,12 @@ Nothing is copied from affectUI.
     `a_connectors_name_has_the_line_beside_its_action`.
 
   The fix is the setup, not the assertion.
+- **Known casualty of the probe.** A self-hosted forge signed in to only through
+  `gh` or `glab`, with no `forge.hosts` entry, no stored token and no resolution
+  cached in this run, gets no folded card: the probe runs no CLI, because
+  `gh auth status` contacts the host. The card appears for it on a column opened
+  after something ran `connect` for it in this run (the right panel's list, a
+  tab), or once the host is added in Settings → Git Hosting.
 
 ## §3 What a trace is
 
