@@ -701,6 +701,61 @@ def activity(run: Run) -> None:
     scenario.finish()
 
 
+def wide_content(run: Run) -> None:
+    """Content wider than the column: a diff row, a code fence and a table.
+
+    A tool row is collapsed until clicked, and no control verb expands one, so
+    the diff is drawn only after a real click on the row's header; the state
+    read's `expanded` says which click did it.
+    """
+    scenario = Scenario(run, "wide-content", "ely-wide")
+    chat = scenario.instance
+    chat.start()
+    chat.send("show wide content")
+    state = chat.until(
+        "the turn completes with the edit and the answer",
+        lambda s: s["status"] == "completed" and rows(s, "tool") and texts(s, "assistant"),
+    )
+    answer = "".join(texts(state, "assistant"))
+    if "```json" not in answer or "column-8" not in answer:
+        raise Failure(f"wide-content: the answer lacks the fence or the table: {answer[:200]!r}")
+    chat.frame("wide-content")
+    if run.state_only:
+        scenario.finish()
+        return
+    if shutil.which("xdotool") is None:
+        raise Failure("xdotool is required to open the edit's diff (or use --state-only)")
+    # Where the row lands depends on the answer's height, so walk a column
+    # down the transcript's upper half and stop at the click the state read
+    # reports as having opened it. A click elsewhere selects text or nothing.
+    window = run.window_for(chat.process.pid)
+    geometry = subprocess.run(
+        ["xwininfo", "-display", run.display, "-id", window], capture_output=True, text=True
+    ).stdout
+    width = int(re.search(r"Width:\s*(\d+)", geometry).group(1))
+    height = int(re.search(r"Height:\s*(\d+)", geometry).group(1))
+    env = dict(os.environ, DISPLAY=run.display)
+    expanded = lambda s: any(row.get("id") == "wide-edit" and row.get("expanded") == "true" for row in rows(s, "tool"))
+    for y in range(int(height * 0.08), int(height * 0.5), 10):
+        subprocess.run(
+            ["xdotool", "mousemove", "--window", window, str(int(width * 0.45)), str(y), "click", "1"],
+            env=env,
+            check=True,
+        )
+        time.sleep(0.3)
+        if expanded(chat.read()):
+            run.log(f"wide-content: the edit row opened at y {y}")
+            break
+    else:
+        raise Failure("wide-content: no click on the transcript opened the edit's row")
+    time.sleep(1)
+    chat.frame("wide-content-expanded")
+    # The transcript keeps its tail in view, so the opened diff is above it.
+    scroll_pane(run, chat.process.pid, 6, "4")
+    chat.frame("wide-content-diff")
+    scenario.finish()
+
+
 def subagent(run: Run) -> None:
     scenario = Scenario(run, "subagent", "subagent")
     chat = scenario.instance
@@ -809,6 +864,7 @@ SCENARIOS = [
     authentication,
     restore,
     activity,
+    wide_content,
     subagent,
     long_history,
 ]

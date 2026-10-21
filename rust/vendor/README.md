@@ -19,9 +19,9 @@ This directory holds `[patch.crates-io]` overrides for five packages: `bezel-gpu
 (`gpui`, `gpui_platform`, and the rest) and `libghostty-vt` itself still come straight from the
 published crates.io releases, unpatched.
 
-Each override changes one thing about its crate and nothing else; the five are unrelated fixes
-that happen to need the same mechanism. `gpui_linux` is described first and at length because it
-established the arrangement; `gpui_windows`, `bezel_ui`, `bezel_markdown` and `libghostty-vt-sys`
+Each override changes one thing about its crate and nothing else (`bezel_markdown` changes two, both
+in `src/render.rs`); the five are unrelated fixes that happen to need the same mechanism.
+`gpui_linux` is described first and at length because it established the arrangement; `gpui_windows`, `bezel_ui`, `bezel_markdown` and `libghostty-vt-sys`
 follow it, each with its own short section at the end.
 
 ## Why this exists: F-CORE-FILE-03A
@@ -184,9 +184,9 @@ name kept as `bezel-ui`, `[lib] name` kept as `ui`); no standalone `Cargo.lock`.
 bezel version means re-applying the one builder by hand, or dropping the override if upstream has
 gained a way to style a field's fill by then.
 
-## `bezel_markdown` — a selection that covers each wrapped row from its first glyph
+## `bezel_markdown` — a selection that covers each wrapped row from its first glyph, and a bar under wide blocks
 
-`vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with exactly one change:
+`vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with two changes. The first:
 `range_rects` in `src/render.rs`, the function that turns a byte range into one rectangle per
 visual row for the selection, the inline-code wash and the chips. Upstream 0.1.4 walked a range
 row by row through `TextLayout::position_for_index`, finding each row's last index by bisection
@@ -205,8 +205,24 @@ shows the path source, used by `sirio_ui` and by `bezel-editor`. The check is
 `Scripts/Tests/test-markdown-selection-probe.sh --xvfb` (`MARKDOWN SELECTION PROBE OK`): it draws
 `sirio_ui`'s `markdown_selection_probe` example, a selected document whose rows soft-wrap, break
 inside one paragraph and wrap an inline code span, and fails when any row's wash leaves the text's
-left edge bare — as it does with this override commented out. Bumping bezel past 0.1.4 drops this
-override, since 0.2.x carries the same function.
+left edge bare — as it does with this override commented out.
+
+The second is the horizontal scroll of a wide fenced block and a wide table. Upstream 0.1.4 draws
+both as `overflow_x_scroll` containers with no scroll handle and no bar, so wide content is reachable
+only with Shift+wheel and nothing says it is there; and the fence's horizontal padding sat on the
+scroll container itself, whose trailing padding is not part of what it scrolls to, so the last
+characters of a long line stayed under the right edge. Each block now keeps a `ScrollHandle`
+(`Sideways`, a `RenderOnce`, so the state is keyed under the element ids above it and two documents on
+one page do not share block 0's offset), draws a private horizontal bar as an overlay beside the
+scroller (a child would scroll away with the content; `bezel-ui` 0.1.4's bar is vertical only, and
+`bezel_markdown` takes no dependency on it or on Ely), and the fence's padding moved onto an inner
+column. The thumb stops a left mouse-down from propagating, because a host such as the chat's
+`MarkdownBody` starts a transcript selection from any left press on a response; the drag still
+starts. Upstream 0.2.x carries the same through `ui::scroll::Viewport`. Bumping bezel past 0.1.4
+drops both changes, since 0.2.x carries the function and the viewport. The second change's check is
+`Scripts/Tests/test-markdown-scroll-probe.sh --xvfb` (`MARKDOWN SCROLL PROBE OK`), next to the
+selection probe's: it draws `sirio_ui`'s `markdown_scroll_probe` example and drags the real thumb under
+a fence and a table, in dark and light.
 
 ## `libghostty-vt-sys` — a portable CPU floor for the Zig-built VT parser
 

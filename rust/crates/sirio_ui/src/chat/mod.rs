@@ -5556,6 +5556,7 @@ impl Chat {
             id_prefix,
             entity,
             selection,
+            scroll: scroll_handle,
         } = context;
         let open_path = diff.path.clone();
         let open_entity = entity.clone();
@@ -5567,10 +5568,25 @@ impl Chat {
             .id(SharedString::from(scroll_id))
             .w_full()
             .overflow_x_scroll()
+            // A vertical wheel over a diff keeps scrolling the transcript
+            // instead of being remapped onto the x-only container.
+            .restrict_scroll_to_axis()
             .flex()
             .flex_col()
             .items_start()
             .gap(px(8.0));
+        let overflowing = scroll_handle
+            .as_ref()
+            .is_some_and(|handle| handle.max_offset().x > Pixels::ZERO);
+        if let Some(handle) = &scroll_handle {
+            // The overlay bar sits in this bottom room, not over the last
+            // row. Reserved whether or not the rows overflow: overflow is
+            // known only a frame late, and a row of the virtualized
+            // transcript that grew then would make the list jump.
+            scroll = scroll
+                .track_scroll(handle)
+                .pb(px(DIFF_HBAR_HEIGHT - 2.0));
+        }
         for (index, line) in shown.iter().enumerate() {
             // Bezel's gallery diff uses a 10% success/danger wash, not the
             // 12% `VEIL_MID` `sirio_theme::diff_*_background` tokens (those
@@ -5750,7 +5766,57 @@ impl Chat {
                             ),
                     ),
             )
-            .child(scroll)
+            .child(match scroll_handle {
+                None => scroll.into_any_element(),
+                Some(handle) => {
+                    let bar_id = format!("{id_prefix}-hbar");
+                    let mut frame = div().relative().w_full().child(scroll);
+                    if overflowing {
+                        // Ely's track is absolute along the bottom of its
+                        // positioned parent; this wrapper is that parent,
+                        // and its press never reaches the diff rows under
+                        // it (it would start a transcript selection).
+                        frame = frame.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                .h(px(DIFF_HBAR_HEIGHT))
+                                .debug_selector({
+                                    let bar_id = bar_id.clone();
+                                    move || bar_id.clone()
+                                })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .child(ely_gpui_component::layout::Scrollbar::new(
+                                    SharedString::from(format!("{bar_id}-track")),
+                                    &handle,
+                                    gpui::Axis::Horizontal,
+                                )),
+                        );
+                    } else {
+                        // Ely's bar reads last frame's geometry: ask for
+                        // the frame that draws it once the rows first lay
+                        // out wider than the box. Self-limiting.
+                        let watched = handle.clone();
+                        frame = frame.child(
+                            canvas(
+                                move |_, window, _| {
+                                    if watched.max_offset().x > Pixels::ZERO {
+                                        window.request_animation_frame();
+                                    }
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        );
+                    }
+                    frame.into_any_element()
+                }
+            })
             .into_any_element()
     }
 
@@ -5991,15 +6057,24 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
             row.insert("text".into(), text.clone());
         }
         Entry::ToolCall {
-            id, title, status, ..
+            id,
+            title,
+            status,
+            expanded,
+            ..
         }
         | Entry::SubagentTask {
-            id, title, status, ..
+            id,
+            title,
+            status,
+            expanded,
+            ..
         } => {
             row.insert("kind".into(), "tool".into());
             row.insert("id".into(), id.clone());
             row.insert("text".into(), title.clone());
             row.insert("status".into(), status.clone());
+            row.insert("expanded".into(), expanded.to_string());
         }
         Entry::Permission {
             request_id,
@@ -6848,6 +6923,10 @@ fn diff_column_width(available: f32) -> f32 {
     available
 }
 
+/// Height of the diff preview's horizontal scrollbar track: twice Ely's
+/// `scrollbar_thickness` (6 px), which is how tall its track is.
+const DIFF_HBAR_HEIGHT: f32 = 12.0;
+
 /// Everything a drawn diff preview needs beyond the diff itself (F-CHAT-31).
 struct DiffPreviewContext {
     /// Stable prefix for this preview's interactive element ids, unique
@@ -6862,6 +6941,8 @@ struct DiffPreviewContext {
     /// there is no honest offset to anchor a selection at, and inventing one
     /// would make Ctrl+C copy text that is not what the highlight covers.
     selection: Option<DiffPreviewSelection>,
+    /// Persistent horizontal scroll state; `Some` draws a visible scrollbar.
+    scroll: Option<ScrollHandle>,
 }
 
 struct DiffPreviewSelection {

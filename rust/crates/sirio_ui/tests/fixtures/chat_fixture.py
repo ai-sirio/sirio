@@ -532,6 +532,24 @@ def main():
                     notification(update)
                 message_chunk("Verifica native dei tool e del diff Unicode.")
                 response(request["id"], {"stopReason": "end_turn"})
+            if mode == "ely-wide":
+                # Content wider than the transcript column: a diff row, a
+                # fenced code line and an 8-column table, so the horizontal
+                # overflow of each can be looked at in one frame.
+                wide_json = '{"entries": [' + ", ".join(f'"value-{n:03}"' for n in range(40)) + "]}"
+                notification({"sessionUpdate": "tool_call", "toolCallId": "wide-edit",
+                              "title": "Edit src/wide.json", "kind": "edit", "status": "completed",
+                              "content": [{"type": "diff", "path": "src/wide.json",
+                                           "oldText": '{"entries": []}\n',
+                                           "newText": wide_json + "\n"}]})
+                header = "| " + " | ".join(f"column-{n}" for n in range(1, 9)) + " |\n"
+                rule = "|" + "---|" * 8 + "\n"
+                rows_md = "".join(
+                    "| " + " | ".join(f"row-{row}-cell-{n}-with-some-text" for n in range(1, 9)) + " |\n"
+                    for row in (1, 2)
+                )
+                message_chunk("Wide JSON:\n\n```json\n" + wide_json + "\n```\n\n" + header + rule + rows_md)
+                response(request["id"], {"stopReason": "end_turn"})
             if mode == "permission":
                 request_permission()
                 sys.stdin.readline()  # the client's answer to the permission

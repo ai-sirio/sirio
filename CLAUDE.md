@@ -129,6 +129,13 @@ Scripts/Tests/test-ely-forge-probe.sh --xvfb   # -> prints "ELY FORGE PROBE OK"
 # defect the vendored bezel_markdown fixes (rust/vendor/README.md).
 Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SELECTION PROBE OK"
 
+# The horizontal bar bezel-markdown draws under a fence or a table wider than
+# its column (the vendored change of rust/vendor/README.md): a real xdotool
+# drag of each thumb to the end, the fence's last glyph clear of the edge, a
+# second document left unscrolled, and the press kept from the host's own
+# handler (the chat starts a selection there); dark and light.
+Scripts/Tests/test-markdown-scroll-probe.sh --xvfb   # -> prints "MARKDOWN SCROLL PROBE OK"
+
 # The file tab's editor (Ely's CodeEditor under sirio_ui::file_view) in a real,
 # isolated debug Sirio on a private Xvfb, driven through the debug-only
 # `sirioctl surface editor` verbs, real X keys and clicks, the Settings page and
