@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::future::Either;
-use sirio_acp::{AcpEvent, AvailableCommandInfo, ClaudeClient, ClaudeLaunch, SessionNotice};
+use sirio_acp::{
+    AcpEvent, AvailableCommandInfo, ClaudeClient, ClaudeLaunch, SessionNotice, SpanKind, TraceEvent,
+};
 use sirio_claude::FastMode;
 use sirio_acp::ThinkingDisplay;
 
@@ -634,6 +636,67 @@ fn a_permission_left_open_expires_into_a_refusal() {
         event,
         AcpEvent::ToolCallCompleted { status, .. } if status == "Failed"
     )));
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
+fn a_turn_and_its_permission_reach_the_trace_ahead_of_the_transcript() {
+    let (mut client, events) = launch("permission");
+    client.prompt("delete it").expect("prompt is accepted");
+    let mut seen = Vec::new();
+    let request_id = loop {
+        let event = next_event(&events);
+        let asked = match &event {
+            AcpEvent::PermissionRequest { request_id, .. } => Some(*request_id),
+            _ => None,
+        };
+        seen.push(event);
+        if let Some(request_id) = asked {
+            break request_id;
+        }
+    };
+    client
+        .respond_permission(request_id, "allow_once")
+        .expect("the choice reaches the agent");
+    seen.extend(drain_until_turn_end(&events));
+
+    let trace: Vec<&TraceEvent> = seen
+        .iter()
+        .filter_map(|event| match event {
+            AcpEvent::Trace(trace) => Some(trace),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(trace.first(), Some(TraceEvent::TurnStarted { .. })),
+        "the prompt opens the turn: {trace:?}"
+    );
+    assert!(trace.iter().any(|event| matches!(
+        event,
+        TraceEvent::SpanStarted { id, kind: SpanKind::Tool, .. } if id == "toolu_perm_1"
+    )));
+    // The wait is the permission card's own request id, on the tool's span,
+    // and the answer ends it.
+    assert!(trace.iter().any(|event| matches!(
+        event,
+        TraceEvent::WaitStarted { span: Some(span), request_id: waited, .. }
+            if span == "toolu_perm_1" && *waited == request_id
+    )));
+    assert!(trace.iter().any(|event| matches!(
+        event,
+        TraceEvent::WaitEnded { request_id: ended, .. } if *ended == request_id
+    )));
+    // The trace ends the turn when its `result` is read: ahead of the
+    // transcript's own end, which the context meter holds back.
+    let trace_end = seen
+        .iter()
+        .position(|event| matches!(event, AcpEvent::Trace(TraceEvent::TurnEnded { .. })))
+        .expect("the result ends the trace's turn");
+    let transcript_end = seen
+        .iter()
+        .position(|event| matches!(event, AcpEvent::TurnEnded { .. }))
+        .expect("the transcript's turn ends");
+    assert!(trace_end < transcript_end, "{seen:?}");
     client.shutdown().expect("clean shutdown");
 }
 

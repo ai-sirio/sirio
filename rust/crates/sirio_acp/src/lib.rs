@@ -33,9 +33,11 @@ use std::time::Duration;
 mod chat;
 mod claude;
 mod mcp_config;
+mod trace_event;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
 pub use claude::{ClaudeClient, ClaudeLaunch, McpControl};
+pub use trace_event::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
 pub use mcp_config::discover_mcp_servers;
 
 // `npx -y` may have to download and unpack the ACP adapter before the first
@@ -876,6 +878,10 @@ pub enum AcpEvent {
         /// The configured deadline.
         duration: Duration,
     },
+    /// One step in the life of the turn, for the chat's trace. Only the
+    /// native Claude client emits these; an ACP agent never does, so a chat
+    /// on one has no trace and the transcript is its only record.
+    Trace(TraceEvent),
 }
 
 /// Something that happened to the session and belongs in the transcript at

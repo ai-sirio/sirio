@@ -223,6 +223,9 @@ pub struct CanUseTool {
     pub tool_name: String,
     /// The `tool_use` block this decision belongs to, when named.
     pub tool_use_id: Option<String>,
+    /// The subagent that is asking, when one is: the `task_id` its
+    /// `task_started` named. A main-thread request carries none.
+    pub agent_id: Option<String>,
     /// The tool's arguments, echoed back verbatim in an `allow`.
     pub input: Value,
     /// Rules the CLI offers to remember. Non-empty is what makes an
@@ -246,6 +249,10 @@ impl CanUseTool {
             tool_name: request.get("tool_name")?.as_str()?.to_string(),
             tool_use_id: request
                 .get("tool_use_id")
+                .and_then(|id| id.as_str())
+                .map(str::to_string),
+            agent_id: request
+                .get("agent_id")
                 .and_then(|id| id.as_str())
                 .map(str::to_string),
             input: request.get("input").cloned().unwrap_or(Value::Null),
@@ -335,6 +342,8 @@ mod tests {
     use super::*;
 
     const CAN_USE_TOOL: &str = include_str!("../tests/fixtures/can_use_tool.json");
+    const CAN_USE_TOOL_SUBAGENT: &str =
+        include_str!("../tests/fixtures/trace_can_use_tool_subagent.json");
 
     #[test]
     fn ultracode_is_a_boolean_beside_the_level_not_a_level() {
@@ -466,6 +475,31 @@ mod tests {
             Some("rm -rf build")
         );
         assert_eq!(request.permission_suggestions.len(), 1);
+    }
+
+    #[test]
+    fn a_subagent_can_use_tool_carries_its_agent_id() {
+        let line: serde_json::Value =
+            serde_json::from_str(CAN_USE_TOOL_SUBAGENT).expect("fixture is valid JSON");
+        let request = CanUseTool::parse(&line).expect("a can_use_tool request");
+        assert_eq!(request.tool_name, "Bash");
+        assert_eq!(
+            request.tool_use_id.as_deref(),
+            Some("toolu_014DYePo4ygeZxzAcyxNMG5q")
+        );
+        // The id a `task_started` calls `task_id`, which is how a permission
+        // that beats its tool's own line still finds its subagent.
+        assert_eq!(request.agent_id.as_deref(), Some("a8e0a4cef6a86147f"));
+
+        // A main-thread request names no agent.
+        let main: serde_json::Value =
+            serde_json::from_str(CAN_USE_TOOL).expect("fixture is valid JSON");
+        assert_eq!(
+            CanUseTool::parse(&main)
+                .expect("a can_use_tool request")
+                .agent_id,
+            None
+        );
     }
 
     #[test]

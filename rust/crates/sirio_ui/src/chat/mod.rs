@@ -3236,6 +3236,9 @@ impl Chat {
                 self.session_connectors_init(cx);
             }
             AcpEvent::OtherSessionUpdate { .. } => {}
+            // Nothing here reads the trace yet, so it must not cost a redraw
+            // either.
+            AcpEvent::Trace(_) => return,
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
         // this chat's own `set_mode` resolving) only reaches the wire as an
