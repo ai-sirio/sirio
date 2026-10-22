@@ -591,6 +591,7 @@ pub fn persisted_kind(kind: TabKind) -> &'static str {
         TabKind::ProjectSettings => "settings",
         TabKind::ChangeRequest => "change_request",
         TabKind::CiLog => "ci_log",
+        TabKind::Trace => "trace",
     }
 }
 
@@ -607,6 +608,7 @@ pub fn kind_from_persisted(kind: &str) -> Option<TabKind> {
         "settings" => TabKind::ProjectSettings,
         "change_request" => TabKind::ChangeRequest,
         "ci_log" => TabKind::CiLog,
+        "trace" => TabKind::Trace,
         _ => return None,
     };
     Some(kind)
@@ -1674,6 +1676,11 @@ fn tabs_for_worktree(
     for record in records {
         // One list with the writer: every kind `persisted_kind` can spell is
         // loaded, and only a spelling this build does not know is skipped.
+        // A Trace tab is spelled but never written; a record that names one
+        // is skipped without a word, as nothing in it can be restored.
+        if kind_from_persisted(&record.kind) == Some(TabKind::Trace) {
+            continue;
+        }
         if kind_from_persisted(&record.kind).is_none() {
             diagnostics.push(format!(
                 "tab {:?} ({}) is not restorable in this build; skipped",
@@ -3220,6 +3227,7 @@ mod tests {
             TabKind::ProjectSettings,
             TabKind::ChangeRequest,
             TabKind::CiLog,
+            TabKind::Trace,
         ];
         for kind in &all {
             match kind {
@@ -3230,7 +3238,8 @@ mod tests {
                 | TabKind::Diff
                 | TabKind::ProjectSettings
                 | TabKind::ChangeRequest
-                | TabKind::CiLog => {}
+                | TabKind::CiLog
+                | TabKind::Trace => {}
             }
         }
         all
@@ -3249,6 +3258,57 @@ mod tests {
             );
         }
         assert_eq!(kind_from_persisted("hologram"), None);
+    }
+
+    /// The Trace tab has a spelling so that the exhaustive matches and this
+    /// round trip cover it; it is never written (`saved_layout`), and never
+    /// restored (below).
+    #[test]
+    fn a_trace_tab_round_trips_its_kind() {
+        assert_eq!(persisted_kind(TabKind::Trace), "trace");
+        assert_eq!(kind_from_persisted("trace"), Some(TabKind::Trace));
+    }
+
+    /// A session whose store names a Trace tab, which no build of Sirio
+    /// writes, comes back without it and without a word: the trace lives in
+    /// a chat's memory, and a restored chat has none.
+    #[test]
+    fn a_restored_session_skips_a_trace_tab_without_a_word() {
+        let dir = TempDir::new();
+        let db_path = dir.db_path("trace-tab-skipped");
+        let working_directory = dir.0.join("checkout");
+        std::fs::create_dir_all(&working_directory).expect("checkout dir");
+        let tab = |id: &str, title: &str, kind: &str, active: bool| SessionTab {
+            id: id.into(),
+            title: title.into(),
+            kind: kind.into(),
+            agent_id: None,
+            agent_session_id: None,
+            active,
+        };
+        let layout = SessionLayout {
+            working_directory: working_directory.clone(),
+            branch: "main".into(),
+            tabs: vec![
+                tab("shell", "Terminal", "terminal", true),
+                tab("trace", "Trace", "trace", false),
+            ],
+            tab_states: vec![SessionTabState::with_root(0), SessionTabState::with_root(1)],
+        };
+
+        let store = SessionStore::open(&db_path);
+        store.schedule(layout);
+        store.flush_now();
+
+        let restored = store.restore_tabs_for(&working_directory);
+        let ids: Vec<&str> = restored.tabs.iter().map(|tab| tab.id.as_str()).collect();
+        assert_eq!(ids, ["shell"], "the trace tab is not restored");
+        assert_eq!(restored.tabs.len(), restored.tab_states.len());
+        assert!(
+            restored.diagnostics.is_empty(),
+            "skipping it is not worth a log line: {:?}",
+            restored.diagnostics
+        );
     }
 
     /// #323 saved an Editor tab's file and the loader still skipped the tab

@@ -128,14 +128,7 @@ fn header(used: u64, window: u64) -> String {
     format!("{percent}% · {} / {}", tokens(used), tokens(window))
 }
 
-/// Below a thousand as they are, then `x.yk` with one decimal.
-pub(super) fn tokens(count: u64) -> String {
-    if count < 1000 {
-        count.to_string()
-    } else {
-        format!("{:.1}k", count as f64 / 1000.0)
-    }
-}
+pub(super) use crate::trace_style::compact_count as tokens;
 
 /// The rows and the bar of one card, built from the folded tree.
 struct Build<'a> {

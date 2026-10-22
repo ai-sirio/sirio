@@ -1594,6 +1594,11 @@ pub enum ChatEvent {
     /// The session panel's Trace card asked for the full trace: the
     /// workspace opens (or focuses) this chat's Trace tab.
     OpenTrace,
+    /// What the chat's trace shows changed: a span or wait moved, a turn
+    /// opened, was named or ended, or the store was emptied. The Trace tab
+    /// listens to this rather than observing the chat, which notifies on
+    /// every streamed chunk; the workspace ignores it.
+    TraceChanged,
 }
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
@@ -3186,7 +3191,7 @@ impl Chat {
                 self.client.take();
                 self.expire_unanswered();
                 let (message, kind) = classify_connection_error(message);
-                self.fail_trace_turn(&message);
+                self.fail_trace_turn(&message, cx);
                 self.push_entry(Entry::Error {
                     message,
                     retryable: true,
@@ -3207,7 +3212,7 @@ impl Chat {
                     "{operation:?} timed out after {:.1}s",
                     duration.as_secs_f32()
                 );
-                self.fail_trace_turn(&message);
+                self.fail_trace_turn(&message, cx);
                 self.push_entry(Entry::Error {
                     message,
                     retryable: true,
@@ -3275,6 +3280,7 @@ impl Chat {
                 // changed nothing the trace shows costs no redraw either.
                 if changed {
                     sirio_perf::event(perf_notification, cx.entity_id().as_u64());
+                    cx.emit(ChatEvent::TraceChanged);
                     cx.notify();
                 }
                 return;
@@ -3594,8 +3600,12 @@ impl Chat {
 
     /// The transport died, or a deadline ran out, with no `result` to end the
     /// turn: it ends failed, for the reason the transcript states.
-    fn fail_trace_turn(&mut self, reason: &str) {
+    fn fail_trace_turn(&mut self, reason: &str, cx: &mut Context<Self>) {
+        if !self.trace.is_running() {
+            return;
+        }
         self.trace.fail_open_turn(reason, std::time::Instant::now());
+        cx.emit(ChatEvent::TraceChanged);
     }
 
     /// The transcript row of the user message trace turn `turn` answers.
@@ -3836,6 +3846,7 @@ impl Chat {
         // was just dropped, so there is nothing left for them to reveal.
         self.trace = TraceStore::default();
         self.trace_users.clear();
+        cx.emit(ChatEvent::TraceChanged);
         self.thought_scroll.clear();
         self.tool_output_scroll.clear();
         // The list has a row per entry: let go of the old rows before the
@@ -4758,6 +4769,7 @@ impl Chat {
         // trace goes with it, rather than showing a turn that never ends.
         self.trace = TraceStore::default();
         self.trace_users.clear();
+        cx.emit(ChatEvent::TraceChanged);
         self.thought_scroll.clear();
         self.tool_output_scroll.clear();
         self.list_state.splice(0..old_count, 0);
@@ -4851,7 +4863,7 @@ impl Chat {
         {
             self.client.take();
             let message = format!("send failed: {error:#}");
-            self.fail_trace_turn(&message);
+            self.fail_trace_turn(&message, cx);
             self.push_entry(Entry::Error {
                 message,
                 retryable: true,
@@ -5371,7 +5383,7 @@ impl Chat {
         if self.streaming {
             self.expire_unanswered();
         }
-        self.fail_trace_turn(DISCONNECTED_MESSAGE);
+        self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.push_entry(Entry::Error {
             message: DISCONNECTED_MESSAGE.to_string(),
             // Restarting is exactly the right response here, so offer it
@@ -7364,6 +7376,71 @@ fn picker_chevron(theme: &Theme) -> impl IntoElement {
         .items_center()
         .justify_center()
         .child(IconElement::new(Icon::ChevronDown, IconSize::XSmall).text_color(theme.ely.fg_subtle))
+}
+
+/// What a test elsewhere in this crate needs to stand a chat up, give it a
+/// transcript and feed it the agent's trace: `Chat::new`, `handle_event` and
+/// the transcript's rows are private to this module.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use gpui::TestAppContext;
+
+    /// The globals a drawn chat reads.
+    pub(crate) fn prepare(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+    }
+
+    /// A chat that never connects, so no subprocess runs and nothing expires.
+    pub(crate) fn offline_chat(cx: &mut Context<Chat>) -> Chat {
+        Chat::new(
+            Some(LaunchSpec::Acp(AgentCommand::new(
+                "/definitely/missing/sirio-acp-agent",
+            ))),
+            std::env::temp_dir(),
+            cx,
+        )
+    }
+
+    /// The agent reports `event`, as the transport does.
+    pub(crate) fn feed(chat: &mut Chat, event: TraceEvent, cx: &mut Context<Chat>) {
+        chat.handle_event(AcpEvent::Trace(event), cx);
+    }
+
+    /// The user sends `text`: a user message and a turn on its way.
+    pub(crate) fn submit(chat: &mut Chat, text: &str, cx: &mut Context<Chat>) {
+        chat.submit_turn(text.to_string(), Vec::new(), Vec::new(), cx);
+    }
+
+    /// `count` assistant lines, so a reveal has somewhere to scroll.
+    pub(crate) fn answers(chat: &mut Chat, count: usize) {
+        for line in 0..count {
+            let text = format!("answer line {line}");
+            chat.push_entry(Entry::Assistant {
+                document: parse_chat_markdown(&text),
+                text,
+            });
+        }
+    }
+
+    /// The transcript row of a subagent's `Agent` call; returns its index.
+    pub(crate) fn agent_row(chat: &mut Chat, id: &str, title: &str) -> usize {
+        chat.push_entry(Entry::SubagentTask {
+            id: id.into(),
+            title: title.into(),
+            status: "Completed".into(),
+            tool_calls: Vec::new(),
+            expanded: false,
+        });
+        chat.entries.len() - 1
+    }
+
+    /// A new conversation: the chat forgets its transcript and its trace.
+    pub(crate) fn new_conversation(chat: &mut Chat, cx: &mut Context<Chat>) {
+        chat.new_conversation(cx);
+    }
 }
 
 #[cfg(test)]
@@ -16802,6 +16879,43 @@ two"
 
         chat.update(cx, |chat, cx| chat.handle_event(trace_started(), cx));
         assert_eq!(notified.get(), 1, "a turn opening redraws the chat");
+    }
+
+    #[gpui::test]
+    async fn the_chat_says_when_its_trace_changed_and_only_then(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        let said = Rc::new(Cell::new(0usize));
+        cx.update(|_, cx| {
+            let said = said.clone();
+            cx.subscribe(&chat, move |_, event: &ChatEvent, _| {
+                if matches!(event, ChatEvent::TraceChanged) {
+                    said.set(said.get() + 1);
+                }
+            })
+            .detach();
+        });
+
+        // Lines of a turn Sirio never started change nothing.
+        chat.update(cx, |chat, cx| chat.handle_event(trace_span("toolu_stray", None, SpanKind::Tool), cx));
+        assert_eq!(said.get(), 0);
+
+        chat.update(cx, |chat, cx| chat.handle_event(trace_started(), cx));
+        assert_eq!(said.get(), 1, "a turn opens");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(trace_span("toolu_run", None, SpanKind::Tool), cx)
+        });
+        assert_eq!(said.get(), 2, "a span opens");
+
+        // The transport dies with the turn open: no `result` will end it, so
+        // the chat does, and says so.
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(AcpEvent::TransportError("the agent died".into()), cx)
+        });
+        assert_eq!(said.get(), 3, "the turn ended failed");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(AcpEvent::TransportError("and again".into()), cx)
+        });
+        assert_eq!(said.get(), 3, "with no turn open an error changes nothing in the trace");
     }
 
     #[gpui::test]

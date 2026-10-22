@@ -2288,6 +2288,7 @@ impl Sidebar {
                             | TabKind::ProjectSettings => Icon::File,
                             TabKind::ChangeRequest => Icon::PullRequest,
                             TabKind::AgentChat => Icon::MessageSquare,
+                            TabKind::Trace => Icon::Clock,
                         },
                         |agent| agent.icon,
                     ),

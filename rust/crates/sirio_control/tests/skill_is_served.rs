@@ -182,6 +182,19 @@ fn every_command_the_skill_names_is_served_by_a_release_build() {
     }
 }
 
+/// `surface trace read` reads only, so a release build serves it, and what
+/// `sirioctl` sends names the chat it reads.
+#[test]
+fn the_trace_read_verb_is_served_by_a_release_build_and_names_its_chat() {
+    let request = dry_run_request(
+        &["surface", "trace", "read", "chat-7"],
+        "/nonexistent/sirio-trace-read.sock",
+    );
+    assert_eq!(request["method"], "surface.trace.read");
+    assert_eq!(request["params"]["surfaceId"], "chat-7");
+    assert!(served_methods(false).contains(&"surface.trace.read"));
+}
+
 #[test]
 fn dry_run_contacts_nothing() {
     let socket = "/nonexistent/sirio-dry-run.sock";

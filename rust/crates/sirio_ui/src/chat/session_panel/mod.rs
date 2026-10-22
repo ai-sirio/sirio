@@ -213,8 +213,9 @@ pub(super) struct Frame {
     /// other.
     trace_painted: Cell<bool>,
     /// A delayed frame of the trace's animation is on its way, which is how
-    /// it stays at 30 frames a second or fewer.
-    trace_frame_pending: Cell<bool>,
+    /// it stays at 30 frames a second or fewer. Shared with the loop's timer
+    /// task, which clears it.
+    trace_frame_pending: Rc<Cell<bool>>,
 }
 
 /// Where the column is drawn, which the chat's width decides.

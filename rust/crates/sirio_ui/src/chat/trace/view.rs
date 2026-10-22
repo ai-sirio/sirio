@@ -40,6 +40,19 @@ pub enum SpanState {
     Interrupted,
 }
 
+impl SpanState {
+    /// The word the control socket and the cards say it with.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
 /// The six numbers of a turn's stats row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TurnStats {

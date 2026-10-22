@@ -189,6 +189,7 @@ pub fn served_methods(debug: bool) -> Vec<&'static str> {
         "surface.chat.permission",
         "surface.chat.stop",
         "surface.chat.read",
+        "surface.trace.read",
     ];
     methods.extend(BROWSER_CAPABILITIES);
     if debug {

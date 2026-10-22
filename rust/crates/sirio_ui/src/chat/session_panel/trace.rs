@@ -9,8 +9,9 @@
 //! see it:
 //!
 //! - **Unfolded**, the body carries a canvas that asks for the next frame
-//!   from its own prepaint. A chat that is not painted never prepaints, so a
-//!   hidden chat asks for nothing, and a turn that has ended draws no canvas.
+//!   from its own prepaint (`trace_frame::frame_driver`, the loop the Trace tab
+//!   shares). A chat that is not painted never prepaints, so a hidden chat asks
+//!   for nothing, and a turn that has ended arms nothing.
 //!   One delayed frame is pending at a time, which keeps it at 30 frames a
 //!   second or fewer, as gpui's own `Animation::with_max_fps` does.
 //! - **Folded**, only the title's seconds move: a timer ticks once a second
@@ -32,20 +33,17 @@ use crate::chat::trace::{
     format_duration,
 };
 use crate::chat::{Chat, ChatEvent};
+use crate::trace_frame::{TICK, frame_driver};
+use crate::trace_style::{compact_count, state_color};
 use ely_gpui_component::{motion::ease_out_cubic, typography::ShimmerText};
 use gpui::{
     AnyElement, App, Context, CursorStyle, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, canvas, div, pattern_slash,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, div, pattern_slash,
     prelude::FluentBuilder as _, px, relative,
 };
 use sirio_theme::Theme;
 use std::time::{Duration, Instant};
 
-/// How long the animation waits between two frames: 30 a second at most.
-const FRAME: Duration = Duration::from_millis(33);
-/// What both the folded title's tick and the frames of a reader who asked for
-/// reduced motion wait for.
-const TICK: Duration = Duration::from_secs(1);
 /// A pulse's period, and the least it dims to.
 const PULSE: Duration = Duration::from_millis(1200);
 const PULSE_LOW: f32 = 0.35;
@@ -65,16 +63,6 @@ fn turn_word(state: TurnState) -> &'static str {
         TurnState::Done => "done",
         TurnState::Failed => "failed",
         TurnState::Interrupted => "interrupted",
-    }
-}
-
-fn span_word(state: SpanState) -> &'static str {
-    match state {
-        SpanState::Running => "running",
-        SpanState::Waiting => "waiting",
-        SpanState::Done => "done",
-        SpanState::Failed => "failed",
-        SpanState::Interrupted => "interrupted",
     }
 }
 
@@ -102,7 +90,7 @@ fn stat_values(stats: &TurnStats) -> [(&'static str, &'static str, String, bool)
             "Tokens",
             stats.tokens.as_ref().map_or_else(
                 || "—".to_string(),
-                |tokens| super::context::tokens(tokens.input + tokens.output),
+                |tokens| compact_count(tokens.input + tokens.output),
             ),
             false,
         ),
@@ -127,7 +115,7 @@ pub(super) fn section(store: &TraceStore, now: Instant) -> Option<Section> {
     for lane in turn.lanes(now) {
         rows.push(Row {
             depth: lane.depth,
-            tag: span_word(lane.state).to_string(),
+            tag: lane.state.word().to_string(),
             action: Some("reveal".to_string()),
             note: lane.now.clone().unwrap_or_default(),
             ..Row::new(
@@ -282,17 +270,6 @@ impl Beat {
     /// Where the band of the running "now" text is, 0 to 1 across a sweep.
     fn shimmer(&self) -> f32 {
         self.elapsed.as_secs_f32() % SHIMMER.as_secs_f32() / SHIMMER.as_secs_f32()
-    }
-}
-
-/// The colour of a lane's dot.
-fn state_color(theme: &Theme, state: SpanState) -> Hsla {
-    match state {
-        SpanState::Running => theme.ely.info,
-        SpanState::Waiting => theme.ely.warning,
-        SpanState::Done => theme.ely.success,
-        SpanState::Failed => theme.ely.danger,
-        SpanState::Interrupted => theme.ely.fg_subtle,
     }
 }
 
@@ -543,7 +520,13 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
         .child(numbers)
         .child(waterfall)
         .child(open)
-        .child(frame_driver(chat, running, reduced, cx))
+        .child(frame_driver(
+            chat.session_panel.frame.trace_frame_pending.clone(),
+            chat.session_panel.trace_frames.clone(),
+            running,
+            reduced,
+            cx.entity_id().as_u64(),
+        ))
         .into_any_element()
 }
 
@@ -781,40 +764,6 @@ fn render_track(lane: &Lane, axis: &Axis, beat: &Beat, theme: &Theme) -> AnyElem
         }))
         .children(now_line)
         .into_any_element()
-}
-
-/// The canvas that keeps a running turn moving: while the turn runs and the
-/// card is drawn it schedules the next frame from its own prepaint, one at a
-/// time and no sooner than `FRAME` after the last, and counts and traces each.
-/// A card that is folded draws no canvas, a chat that is not painted never
-/// prepaints it, and a turn that ended draws it unarmed.
-fn frame_driver(chat: &Chat, running: bool, reduced: bool, cx: &Context<Chat>) -> AnyElement {
-    let frame = chat.session_panel.frame.clone();
-    let counted = chat.session_panel.trace_frames.clone();
-    let entity = cx.entity_id().as_u64();
-    let wait = if reduced { TICK } else { FRAME };
-    canvas(
-        move |_, window, cx| {
-            if !running || frame.trace_frame_pending.replace(true) {
-                return;
-            }
-            counted.set(counted.get().saturating_add(1));
-            sirio_perf::event("trace.frame", entity);
-            let view = window.current_view();
-            let pending = frame.clone();
-            window
-                .spawn(cx, async move |cx| {
-                    cx.background_executor().timer(wait).await;
-                    pending.trace_frame_pending.set(false);
-                    cx.update(move |_, cx| cx.notify(view)).ok();
-                })
-                .detach();
-        },
-        |_, _, _, _| {},
-    )
-    .absolute()
-    .size_full()
-    .into_any_element()
 }
 
 #[cfg(test)]
