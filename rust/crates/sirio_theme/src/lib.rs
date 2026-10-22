@@ -1574,8 +1574,9 @@ impl Theme {
     /// `fading_an_already_translucent_surface_does_not_make_it_more_opaque`.
     /// The surfaces an event opens over the shell
     /// ([`SirioColors::dialog_surface`], [`SirioColors::floating_surface`])
-    /// are not faded either: translucency is the main window's background,
-    /// never a dialog's — see
+    /// and the ones Ely paints dialogs, menus, popovers and tooltips on
+    /// (`overlay`, `tooltip_bg`) are not faded either: translucency is the
+    /// main window's background, never a dialog's — see
     /// `event_opened_surfaces_stay_opaque_when_the_panels_fade`.
     pub fn with_translucency(self, enabled: bool) -> Self {
         self.with_translucency_at(enabled, Self::surface_opacity(true))
@@ -1596,9 +1597,11 @@ impl Theme {
         if !enabled {
             return theme;
         }
-        // The same surfaces under their new names, plus the copies Ely was
-        // handed *after* fading: overlay and tooltip_bg are surface_raised,
-        // on_accent is surface (spec §3.5).
+        // The structural surfaces fade. Ely's `overlay` and `tooltip_bg` are
+        // what it paints every dialog, menu, popover, tooltip and drag ghost
+        // on, so they stay opaque like `dialog_surface` and
+        // `floating_surface`; `on_accent` is ink on an accent fill and keeps
+        // full strength like all text (spec §3.5).
         let fade_hsla = |surface: Hsla| Hsla {
             a: surface.a * opacity,
             ..surface
@@ -1608,15 +1611,13 @@ impl Theme {
             &mut ely.bg,
             &mut ely.surface,
             &mut ely.sunken,
-            &mut ely.overlay,
-            &mut ely.tooltip_bg,
-            &mut ely.on_accent,
         ] {
             *surface = fade_hsla(*surface);
         }
         theme.colors.sirio.terminal_surface = fade_hsla(theme.colors.sirio.terminal_surface);
-        // `dialog_surface` and `floating_surface` are deliberately absent:
-        // a sheet or toast an event puts up stays opaque over the blur.
+        // `dialog_surface`, `floating_surface`, `overlay` and `tooltip_bg`
+        // are deliberately absent: a sheet, toast, menu or tooltip put up in
+        // the foreground stays opaque over the blur.
         theme
     }
 
@@ -2485,6 +2486,12 @@ mod tests {
                 assert_eq!(translucent.sirio.floating_surface, base.sirio.floating_surface);
                 assert_eq!(translucent.sirio.dialog_surface.a, 1.0);
                 assert_eq!(translucent.sirio.floating_surface.a, 1.0);
+                // Ely paints every dialog, menu, popover, tooltip and drag
+                // ghost on these two.
+                assert_eq!(translucent.ely.overlay, base.ely.overlay);
+                assert_eq!(translucent.ely.tooltip_bg, base.ely.tooltip_bg);
+                assert_eq!(translucent.ely.overlay.a, 1.0);
+                assert_eq!(translucent.ely.tooltip_bg.a, 1.0);
             }
         }
     }
@@ -2548,7 +2555,7 @@ mod tests {
     }
 
     #[test]
-    fn translucency_fades_every_surface_ely_receives() {
+    fn translucency_fades_the_structural_surfaces_ely_receives() {
         for base in BaseColor::ALL {
             for appearance in [Appearance::Dark, Appearance::Light] {
                 let mode = match appearance {
@@ -2562,9 +2569,6 @@ mod tests {
                     ("ely.bg", o.ely.bg, f.ely.bg),
                     ("ely.surface", o.ely.surface, f.ely.surface),
                     ("ely.sunken", o.ely.sunken, f.ely.sunken),
-                    ("ely.overlay", o.ely.overlay, f.ely.overlay),
-                    ("ely.tooltip_bg", o.ely.tooltip_bg, f.ely.tooltip_bg),
-                    ("ely.on_accent", o.ely.on_accent, f.ely.on_accent),
                     (
                         "sirio.terminal_surface",
                         o.sirio.terminal_surface,
@@ -2583,8 +2587,14 @@ mod tests {
                 assert_eq!(f.sirio.dialog_surface, o.sirio.dialog_surface);
                 assert_eq!(f.sirio.floating_surface, o.sirio.floating_surface);
                 assert_eq!(f.sirio.frame_surface, o.sirio.frame_surface);
-                // Text and washes keep full strength.
+                // Ely's foreground surfaces never fade (see
+                // `event_opened_surfaces_stay_opaque_when_the_panels_fade`).
+                assert_eq!(f.ely.overlay, o.ely.overlay, "{base:?}/{appearance:?}: ely.overlay faded");
+                assert_eq!(f.ely.tooltip_bg, o.ely.tooltip_bg, "{base:?}/{appearance:?}: ely.tooltip_bg faded");
+                // Text and washes keep full strength; `on_accent` is the ink
+                // on an accent button, not a surface.
                 assert_eq!(f.ely.fg, o.ely.fg);
+                assert_eq!(f.ely.on_accent, o.ely.on_accent, "{base:?}/{appearance:?}: ely.on_accent faded");
                 assert_eq!(f.ely.border, o.ely.border);
             }
         }

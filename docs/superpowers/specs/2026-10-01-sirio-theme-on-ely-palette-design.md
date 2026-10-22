@@ -255,6 +255,13 @@ too: `ely.overlay`, `ely.tooltip_bg` and `ely.on_accent`. The opaque twins
 (`sirio.dialog_surface`, `sirio.floating_surface`) and `sirio.frame_surface`
 are untouched, as now.
 
+**Amended 2026-10-21.** `ely.overlay`, `ely.tooltip_bg` and `ely.on_accent`
+no longer fade. The first two are the surfaces Ely paints every dialog, menu,
+popover and tooltip on, and translucency belongs to the main window's
+background alone; `on_accent` is text on an accent fill. Held by
+`event_opened_surfaces_stay_opaque_when_the_panels_fade` and
+`translucency_fades_the_structural_surfaces_ely_receives`.
+
 ## §4 Fonts, metrics, bootstrap
 
 - The five Geist TTFs (Regular, Medium, SemiBold, Bold, Mono) move into
