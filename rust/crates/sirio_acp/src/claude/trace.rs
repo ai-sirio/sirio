@@ -75,6 +75,9 @@ struct Wait {
 pub(crate) struct TraceFold {
     interrupted_this_turn: bool,
     interrupted_last_turn: bool,
+    /// The main call that was open when the interrupt was sent. Its
+    /// `message_stop` is the interrupt taking hold: that call did not finish.
+    interrupted_call: Option<String>,
     /// The previous `result`'s cumulative cost. `None` is unknown: a
     /// resumed process's first turn, or a result that carried none.
     baseline_cost: Option<f64>,
@@ -102,6 +105,7 @@ impl TraceFold {
         Self {
             interrupted_this_turn: false,
             interrupted_last_turn: false,
+            interrupted_call: None,
             baseline_cost: (!resumed).then_some(0.0),
             baseline_tokens: (!resumed).then_some(TokenCount {
                 input: 0,
@@ -123,13 +127,16 @@ impl TraceFold {
         // A Stop that landed after the last `result` belonged to no turn:
         // starting clean keeps it from marking this one.
         self.interrupted_this_turn = false;
+        self.interrupted_call = None;
         vec![TraceEvent::TurnStarted { at }]
     }
 
     /// An interrupt was written to the CLI: the turn in flight is
-    /// interrupted, whatever its `result` says.
+    /// interrupted, whatever its `result` says, and so is the model call
+    /// open at this moment.
     pub(crate) fn interrupt_sent(&mut self) {
         self.interrupted_this_turn = true;
+        self.interrupted_call = self.main_call.clone();
     }
 
     /// Folds one line, read at `at`.
@@ -192,7 +199,7 @@ impl TraceFold {
         }
         match event.lifecycle() {
             Some(MessageLifecycle::Start { id, model, .. }) => {
-                if self.main_call.as_deref() == Some(id.as_str()) {
+                if id.is_some() && self.main_call == id {
                     return Vec::new();
                 }
                 let mut events = Vec::new();
@@ -201,6 +208,9 @@ impl TraceFold {
                 if let Some(open) = self.main_call.take() {
                     events.push(ended(open, SpanOutcome::Done, at, None));
                 }
+                // A missing id drops the call's name, never the call: the fold
+                // names it, and its delta and stop still find it.
+                let id = id.unwrap_or_else(|| format!("call-{}", self.next_sequence()));
                 if self.seen_calls.insert(id.clone()) {
                     self.main_call = Some(id.clone());
                     events.push(call_started(id, None, model, at));
@@ -219,7 +229,16 @@ impl TraceFold {
             Some(MessageLifecycle::Stop) => self
                 .main_call
                 .take()
-                .map(|id| ended(id, SpanOutcome::Done, at, None))
+                .map(|id| {
+                    // The CLI stops the call within milliseconds of an
+                    // interrupt: a call the user cut short did not finish.
+                    let outcome = if self.interrupted_call.as_ref() == Some(&id) {
+                        SpanOutcome::Interrupted
+                    } else {
+                        SpanOutcome::Done
+                    };
+                    ended(id, outcome, at, None)
+                })
                 .into_iter()
                 .collect(),
             None => Vec::new(),
@@ -302,9 +321,9 @@ impl TraceFold {
         }
         let seq = self.next_sequence();
         let (kind, name, detail, agent) = if matches!(tool_use.name.as_str(), "Agent" | "Task") {
-            let name =
-                text_of(&tool_use.input, "subagent_type").unwrap_or_else(|| tool_use.name.clone());
-            let detail = text_of(&tool_use.input, "description").unwrap_or_default();
+            let name = line_of(&tool_use.input, "subagent_type")
+                .unwrap_or_else(|| one_line(&tool_use.name));
+            let detail = line_of(&tool_use.input, "description").unwrap_or_default();
             let agent = Agent {
                 name: name.clone(),
                 detail: detail.clone(),
@@ -313,7 +332,7 @@ impl TraceFold {
             (SpanKind::Subagent, name, detail, Some(agent))
         } else {
             let detail = one_line(&tools::describe(tool_use).title);
-            (SpanKind::Tool, tool_use.name.clone(), detail, None)
+            (SpanKind::Tool, one_line(&tool_use.name), detail, None)
         };
         self.spans.insert(
             tool_use.id.clone(),
@@ -434,11 +453,11 @@ impl TraceFold {
                     return Vec::new();
                 };
                 agent.edge = agent.edge.max(at);
-                if let Some(name) = &system.subagent_type {
-                    agent.name = name.clone();
+                if let Some(name) = system.subagent_type.as_deref().and_then(line) {
+                    agent.name = name;
                 }
-                if let Some(detail) = &system.description {
-                    agent.detail = detail.clone();
+                if let Some(detail) = system.description.as_deref().and_then(line) {
+                    agent.detail = detail;
                 }
                 let event = TraceEvent::SpanNamed {
                     id: id.to_string(),
@@ -462,8 +481,9 @@ impl TraceFold {
                 let tool_uses = system.usage.and_then(|usage| usage.tool_uses);
                 let activity = system
                     .description
-                    .clone()
-                    .or_else(|| system.last_tool_name.clone());
+                    .as_deref()
+                    .and_then(line)
+                    .or_else(|| system.last_tool_name.as_deref().and_then(line));
                 if tokens.is_none() && tool_uses.is_none() && activity.is_none() {
                     return Vec::new();
                 }
@@ -481,6 +501,14 @@ impl TraceFold {
     }
 
     fn result(&mut self, result: &ResultPayload, at: Instant) -> Vec<TraceEvent> {
+        // A card still waiting when the turn ends, a Stop pressed over it, is
+        // answered by nobody: its wait ends here, ahead of the turn.
+        let mut waiting: Vec<u64> = self.waits.keys().copied().collect();
+        waiting.sort_unstable();
+        let mut events: Vec<TraceEvent> = waiting
+            .into_iter()
+            .map(|request_id| TraceEvent::WaitEnded { request_id, at })
+            .collect();
         let interrupted = self.interrupted_this_turn;
         // The turn after an interrupt is unknown too: whether the counters
         // catch up on the spend the interrupt cut short is not known.
@@ -493,9 +521,9 @@ impl TraceFold {
             TurnOutcome::Failed {
                 reason: result
                     .result
-                    .clone()
-                    .filter(|text| !text.is_empty())
-                    .unwrap_or_else(|| result.subtype.clone()),
+                    .as_deref()
+                    .and_then(line)
+                    .unwrap_or_else(|| one_line(&result.subtype)),
             }
         } else {
             TurnOutcome::Done
@@ -503,25 +531,25 @@ impl TraceFold {
         self.interrupted_last_turn = interrupted;
         self.interrupted_this_turn = false;
         self.end_turn_scope();
-        vec![TraceEvent::TurnEnded {
+        events.push(TraceEvent::TurnEnded {
             at,
             outcome,
             measured_ms: result.duration_ms,
             cost_usd,
             tokens,
-        }]
+        });
+        events
     }
 
     /// This turn's spend: the process's running total less the last
-    /// result's. The baseline moves on every result, known or not.
+    /// `result`'s.
     fn turn_cost(&mut self, total: Option<f64>, known: bool) -> Option<f64> {
-        let baseline = std::mem::replace(&mut self.baseline_cost, total);
-        match (known, baseline, total) {
-            (true, Some(before), Some(now)) if now >= before => Some(now - before),
-            _ => None,
-        }
+        turn_share(&mut self.baseline_cost, total, known, |before, now| {
+            (now >= before).then_some(now - before)
+        })
     }
 
+    /// This turn's tokens, on the same terms, from the `modelUsage` sums.
     fn turn_tokens(&mut self, result: &ResultPayload, known: bool) -> Option<TokenCount> {
         let total = (!result.model_usage.is_empty()).then(|| {
             result.model_usage.values().fold(
@@ -539,18 +567,12 @@ impl TraceFold {
                 },
             )
         });
-        let baseline = std::mem::replace(&mut self.baseline_tokens, total.clone());
-        match (known, baseline, total) {
-            (true, Some(before), Some(now))
-                if now.input >= before.input && now.output >= before.output =>
-            {
-                Some(TokenCount {
-                    input: now.input - before.input,
-                    output: now.output - before.output,
-                })
-            }
-            _ => None,
-        }
+        turn_share(&mut self.baseline_tokens, total, known, |before, now| {
+            (now.input >= before.input && now.output >= before.output).then(|| TokenCount {
+                input: now.input - before.input,
+                output: now.output - before.output,
+            })
+        })
     }
 
     /// Forgets what belonged to the turn that just ended. Its open spans are
@@ -565,6 +587,7 @@ impl TraceFold {
         self.tasks.clear();
         self.waits.clear();
         self.main_call = None;
+        self.interrupted_call = None;
         self.seen_calls.clear();
     }
 
@@ -679,11 +702,36 @@ fn tokens_of(usage: &MessageUsage) -> TokenCount {
     }
 }
 
-fn text_of(input: &serde_json::Value, key: &str) -> Option<String> {
+/// A string field of a tool's input as one bounded line, `None` when it is
+/// absent or nothing is left of it.
+fn line_of(input: &serde_json::Value, key: &str) -> Option<String> {
     input
         .get(key)
         .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
+        .and_then(line)
+}
+
+/// `text` as one bounded line, `None` when nothing is left of it.
+fn line(text: &str) -> Option<String> {
+    Some(one_line(text)).filter(|line| !line.is_empty())
+}
+
+/// A turn's own share of a counter that runs for the whole process: the
+/// total less the last `result`'s, which `share` takes. The baseline moves on
+/// every `result`, known or not, and a share is unknown when the turn's own
+/// part cannot be told apart (`known` is false), when either side is missing,
+/// or when `share` finds the counter went down.
+fn turn_share<T: Clone, R>(
+    baseline: &mut Option<T>,
+    total: Option<T>,
+    known: bool,
+    share: impl FnOnce(&T, &T) -> Option<R>,
+) -> Option<R> {
+    let before = std::mem::replace(baseline, total.clone());
+    match (known, before, total) {
+        (true, Some(before), Some(now)) => share(&before, &now),
+        _ => None,
+    }
 }
 
 /// The first non-empty line, cut to [`LINE_LIMIT`] characters.
@@ -707,7 +755,6 @@ mod tests {
     use sirio_claude::CanUseTool;
 
     use super::*;
-    use crate::{SpanKind, SpanOutcome, TokenCount, TurnOutcome};
 
     const MESSAGE_START: &str =
         include_str!("../../../sirio_claude/tests/fixtures/trace_message_start.json");
@@ -878,7 +925,12 @@ mod tests {
         }
     }
 
-    fn ended(id: &str, outcome: SpanOutcome, at: Instant, measured_ms: Option<u64>) -> TraceEvent {
+    fn span_ended(
+        id: &str,
+        outcome: SpanOutcome,
+        at: Instant,
+        measured_ms: Option<u64>,
+    ) -> TraceEvent {
         TraceEvent::SpanEnded {
             id: id.into(),
             outcome,
@@ -900,7 +952,7 @@ mod tests {
 
     /// The first capture's opening: the main thread starts the `Agent` call,
     /// `task_started` names it, and the subagent runs `Bash` and gets its
-    /// result. Returns the instants of the last edge.
+    /// result, which leaves 6 849 ms as the agent's last edge.
     fn run_capture_prefix(fold: &mut TraceFold, clock: &Clock) {
         fold.prompt_sent(clock.at(0));
         fold.line(
@@ -927,21 +979,21 @@ mod tests {
         events.remove(0)
     }
 
-    fn cost_of(event: &TraceEvent) -> Option<f64> {
+    fn turn_end_cost(event: &TraceEvent) -> Option<f64> {
         match event {
             TraceEvent::TurnEnded { cost_usd, .. } => *cost_usd,
             other => panic!("not a TurnEnded: {other:?}"),
         }
     }
 
-    fn tokens_of(event: &TraceEvent) -> Option<TokenCount> {
+    fn turn_end_tokens(event: &TraceEvent) -> Option<TokenCount> {
         match event {
             TraceEvent::TurnEnded { tokens, .. } => tokens.clone(),
             other => panic!("not a TurnEnded: {other:?}"),
         }
     }
 
-    fn outcome_of(event: &TraceEvent) -> TurnOutcome {
+    fn turn_end_outcome(event: &TraceEvent) -> TurnOutcome {
         match event {
             TraceEvent::TurnEnded { outcome, .. } => outcome.clone(),
             other => panic!("not a TurnEnded: {other:?}"),
@@ -981,7 +1033,7 @@ mod tests {
         }));
         assert_eq!(
             fold.line(&stop, clock.at(2_710)),
-            vec![ended(call, SpanOutcome::Done, clock.at(2_710), None)]
+            vec![span_ended(call, SpanOutcome::Done, clock.at(2_710), None)]
         );
     }
 
@@ -1045,7 +1097,7 @@ mod tests {
             vec![
                 llm("msg_sub", Some("toolu_X"), clock.at(2_110)),
                 usage("msg_sub", 102, 8),
-                ended("msg_sub", SpanOutcome::Done, clock.at(3_000), None),
+                span_ended("msg_sub", SpanOutcome::Done, clock.at(3_000), None),
             ]
         );
         assert_eq!(
@@ -1158,7 +1210,7 @@ mod tests {
             vec![
                 llm("msg_011CgG43YcaswnMdLpDH97Lj", Some(AGENT), clock.at(4_903)),
                 usage("msg_011CgG43YcaswnMdLpDH97Lj", 19_689, 8),
-                ended(
+                span_ended(
                     "msg_011CgG43YcaswnMdLpDH97Lj",
                     SpanOutcome::Done,
                     clock.at(6_785),
@@ -1172,7 +1224,7 @@ mod tests {
                 &tool_result(Some(AGENT), BASH, false, "README.md\nsrc"),
                 clock.at(6_849)
             ),
-            vec![ended(BASH, SpanOutcome::Done, clock.at(6_849), None)]
+            vec![span_ended(BASH, SpanOutcome::Done, clock.at(6_849), None)]
         );
         // The next call runs from that tool's result: not from the previous
         // call's end (6 785) and not from the start (4 903).
@@ -1192,7 +1244,7 @@ mod tests {
             vec![
                 llm("msg_next", Some(AGENT), clock.at(6_849)),
                 usage("msg_next", 102, 8),
-                ended("msg_next", SpanOutcome::Done, clock.at(7_935), None),
+                span_ended("msg_next", SpanOutcome::Done, clock.at(7_935), None),
                 tool(
                     "toolu_R",
                     Some(AGENT),
@@ -1234,13 +1286,13 @@ mod tests {
             vec![
                 report(AGENT, clock.at(7_957)),
                 usage(&format!("{AGENT}/final"), 26_010, 187),
-                ended(
+                span_ended(
                     &format!("{AGENT}/final"),
                     SpanOutcome::Done,
                     clock.at(9_428),
                     None
                 ),
-                ended(AGENT, SpanOutcome::Done, clock.at(9_428), Some(4_537)),
+                span_ended(AGENT, SpanOutcome::Done, clock.at(9_428), Some(4_537)),
             ]
         );
     }
@@ -1412,7 +1464,7 @@ mod tests {
                 &tool_result(Some("toolu_ghost"), "toolu_R", false, "ok"),
                 clock.at(600)
             ),
-            vec![ended("toolu_R", SpanOutcome::Done, clock.at(600), None)]
+            vec![span_ended("toolu_R", SpanOutcome::Done, clock.at(600), None)]
         );
     }
 
@@ -1439,7 +1491,7 @@ mod tests {
         // The call that is open stays open and ends on its own result.
         assert_eq!(
             fold.line(&tool_result(None, "toolu_R", false, "ok"), clock.at(300)),
-            vec![ended("toolu_R", SpanOutcome::Done, clock.at(300), None)]
+            vec![span_ended("toolu_R", SpanOutcome::Done, clock.at(300), None)]
         );
     }
 
@@ -1465,13 +1517,13 @@ mod tests {
         assert_eq!(
             fold.line(&parse(AGENT_RESULT), clock.at(9_428)),
             vec![
-                ended(
+                span_ended(
                     "toolu_open",
                     SpanOutcome::Interrupted,
                     clock.at(9_428),
                     None
                 ),
-                ended(AGENT, SpanOutcome::Done, clock.at(9_428), Some(4_537)),
+                span_ended(AGENT, SpanOutcome::Done, clock.at(9_428), Some(4_537)),
             ]
         );
     }
@@ -1486,7 +1538,7 @@ mod tests {
         // because the agent is over, not because it was never there.
         let end = fold.line(&parse(AGENT_RESULT), clock.at(7_000));
         assert!(
-            end.contains(&ended(
+            end.contains(&span_ended(
                 AGENT,
                 SpanOutcome::Done,
                 clock.at(7_000),
@@ -1547,7 +1599,7 @@ mod tests {
         // The task did not turn the tool into a subagent.
         assert_eq!(
             fold.line(&tool_result(None, bash, false, "done"), clock.at(2_100)),
-            vec![ended(bash, SpanOutcome::Done, clock.at(2_100), None)]
+            vec![span_ended(bash, SpanOutcome::Done, clock.at(2_100), None)]
         );
     }
 
@@ -1653,7 +1705,7 @@ mod tests {
                     request_id: 7,
                     at: clock.at(260)
                 },
-                ended(
+                span_ended(
                     &tool_use_id,
                     SpanOutcome::Failed {
                         note: "not allowed".into()
@@ -1690,7 +1742,7 @@ mod tests {
                     request_id: 5,
                     at: clock.at(300_150)
                 },
-                ended(
+                span_ended(
                     "toolu_B",
                     SpanOutcome::Failed {
                         note: "not allowed by the probe".into()
@@ -1726,7 +1778,7 @@ mod tests {
                 &tool_result(None, "toolu_C", false, "ok"),
                 clock.at(301_600)
             ),
-            vec![ended("toolu_C", SpanOutcome::Done, clock.at(301_600), None)]
+            vec![span_ended("toolu_C", SpanOutcome::Done, clock.at(301_600), None)]
         );
     }
 
@@ -1740,9 +1792,9 @@ mod tests {
             0,
             &result_line(Some(0.005), (10, 100, 1_000, 500)),
         );
-        assert_close(cost_of(&first), 0.005);
+        assert_close(turn_end_cost(&first), 0.005);
         assert_eq!(
-            tokens_of(&first),
+            turn_end_tokens(&first),
             Some(TokenCount {
                 input: 1_510,
                 output: 100
@@ -1774,9 +1826,9 @@ mod tests {
             8_000,
             &result_line(Some(0.012), (100, 3_000, 90_000, 50_000)),
         );
-        assert_eq!(outcome_of(&after), TurnOutcome::Done);
-        assert_eq!(cost_of(&after), None);
-        assert_eq!(tokens_of(&after), None);
+        assert_eq!(turn_end_outcome(&after), TurnOutcome::Done);
+        assert_eq!(turn_end_cost(&after), None);
+        assert_eq!(turn_end_tokens(&after), None);
 
         // Two turns on, the baseline is the last result's and a difference
         // is known again.
@@ -1786,9 +1838,9 @@ mod tests {
             9_000,
             &result_line(Some(0.015), (110, 3_050, 90_300, 50_000)),
         );
-        assert_close(cost_of(&known), 0.003);
+        assert_close(turn_end_cost(&known), 0.003);
         assert_eq!(
-            tokens_of(&known),
+            turn_end_tokens(&known),
             Some(TokenCount {
                 input: 310,
                 output: 50
@@ -1808,9 +1860,9 @@ mod tests {
             0,
             &result_line(Some(0.012_841), (10, 1_345, 84_830, 66_349)),
         );
-        assert_close(cost_of(&first), 0.012_841);
+        assert_close(turn_end_cost(&first), 0.012_841);
         assert_eq!(
-            tokens_of(&first),
+            turn_end_tokens(&first),
             Some(TokenCount {
                 input: 151_189,
                 output: 1_345
@@ -1822,9 +1874,9 @@ mod tests {
             20_000,
             &result_line(Some(0.013_294_61), (12, 1_349, 124_106, 66_349)),
         );
-        assert_close(cost_of(&second), 0.000_453_61);
+        assert_close(turn_end_cost(&second), 0.000_453_61);
         assert_eq!(
-            tokens_of(&second),
+            turn_end_tokens(&second),
             Some(TokenCount {
                 input: 39_278,
                 output: 4
@@ -1844,17 +1896,17 @@ mod tests {
             0,
             &result_line(Some(0.5), (10, 100, 1_000, 500)),
         );
-        assert_eq!(cost_of(&first), None);
-        assert_eq!(tokens_of(&first), None);
+        assert_eq!(turn_end_cost(&first), None);
+        assert_eq!(turn_end_tokens(&first), None);
         let second = finish(
             &mut fold,
             &clock,
             5_000,
             &result_line(Some(0.52), (20, 130, 1_900, 700)),
         );
-        assert_close(cost_of(&second), 0.02);
+        assert_close(turn_end_cost(&second), 0.02);
         assert_eq!(
-            tokens_of(&second),
+            turn_end_tokens(&second),
             Some(TokenCount {
                 input: 1_110,
                 output: 30
@@ -1878,8 +1930,8 @@ mod tests {
             5_000,
             &result_line(Some(0.01), (5, 50, 500, 200)),
         );
-        assert_eq!(cost_of(&down), None);
-        assert_eq!(tokens_of(&down), None);
+        assert_eq!(turn_end_cost(&down), None);
+        assert_eq!(turn_end_tokens(&down), None);
         // The lower total is the baseline from then on.
         let next = finish(
             &mut fold,
@@ -1887,9 +1939,9 @@ mod tests {
             9_000,
             &result_line(Some(0.015), (15, 150, 1_500, 700)),
         );
-        assert_close(cost_of(&next), 0.005);
+        assert_close(turn_end_cost(&next), 0.005);
         assert_eq!(
-            tokens_of(&next),
+            turn_end_tokens(&next),
             Some(TokenCount {
                 input: 1_510,
                 output: 100
@@ -1927,7 +1979,7 @@ mod tests {
             "result": "Reached the maximum number of turns", "duration_ms": 1000
         }));
         assert_eq!(
-            outcome_of(&fold.line(&failed, clock.at(1_000))[0]),
+            turn_end_outcome(&fold.line(&failed, clock.at(1_000))[0]),
             TurnOutcome::Failed {
                 reason: "Reached the maximum number of turns".into()
             }
@@ -1938,7 +1990,7 @@ mod tests {
             "type": "result", "subtype": "error_during_execution", "is_error": true
         }));
         assert_eq!(
-            outcome_of(&fold.line(&bare, clock.at(3_000))[0]),
+            turn_end_outcome(&fold.line(&bare, clock.at(3_000))[0]),
             TurnOutcome::Failed {
                 reason: "error_during_execution".into()
             }
@@ -1959,7 +2011,7 @@ mod tests {
         let events = fold.line(&agent_result(None, AGENT, Some(4_537)), clock.at(4_746));
         assert_eq!(
             events.last(),
-            Some(&ended(
+            Some(&span_ended(
                 AGENT,
                 SpanOutcome::Done,
                 clock.at(4_746),
@@ -1983,7 +2035,7 @@ mod tests {
         let events = fold.line(&agent_result(None, "toolu_2", None), clock.at(13_000));
         assert_eq!(
             events.last(),
-            Some(&ended("toolu_2", SpanOutcome::Done, clock.at(13_000), None))
+            Some(&span_ended("toolu_2", SpanOutcome::Done, clock.at(13_000), None))
         );
         let bare = msg(json!({"type": "result", "subtype": "success", "is_error": false}));
         match &fold.line(&bare, clock.at(14_000))[0] {
@@ -2015,7 +2067,7 @@ mod tests {
             clock.at(1_000),
         );
         assert_eq!(first_end.len(), 1);
-        assert_eq!(outcome_of(&first_end[0]), TurnOutcome::Done);
+        assert_eq!(turn_end_outcome(&first_end[0]), TurnOutcome::Done);
 
         // The user hit Stop the instant the turn ended, and the composer's
         // queue wrote the next prompt right behind the result. The stray
@@ -2039,7 +2091,261 @@ mod tests {
             clock.at(2_000),
         );
         assert_eq!(second_end.len(), 1, "{second_end:?}");
-        assert_eq!(outcome_of(&second_end[0]), TurnOutcome::Done);
-        assert_close(cost_of(&second_end[0]), 0.01);
+        assert_eq!(turn_end_outcome(&second_end[0]), TurnOutcome::Done);
+        assert_close(turn_end_cost(&second_end[0]), 0.01);
+    }
+
+    fn message_stop() -> CliMessage {
+        msg(json!({
+            "type": "stream_event", "event": {"type": "message_stop"},
+            "parent_tool_use_id": null
+        }))
+    }
+
+    /// `message_start` with the model and input usage but no `message.id`.
+    fn message_start_without_id() -> CliMessage {
+        msg(json!({
+            "type": "stream_event",
+            "event": {"type": "message_start", "message": {
+                "model": HAIKU, "usage": {"input_tokens": 2, "output_tokens": 6}
+            }},
+            "parent_tool_use_id": null
+        }))
+    }
+
+    #[test]
+    fn an_interrupt_during_a_model_call_ends_that_call_interrupted() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let call = "msg_011CgG43GxW2BhRXx8chosrS";
+        fold.line(&parse(MESSAGE_START), clock.at(100));
+        fold.interrupt_sent();
+        // The capture: the CLI stops the call within milliseconds of the
+        // interrupt and answers with the `result` right behind it. A call
+        // the user cut short is not drawn as one that finished.
+        assert_eq!(
+            fold.line(&message_stop(), clock.at(2_000)),
+            vec![span_ended(
+                call,
+                SpanOutcome::Interrupted,
+                clock.at(2_000),
+                None
+            )]
+        );
+        let end = fold.line(&parse(RESULT_INTERRUPTED), clock.at(2_010));
+        assert_eq!(turn_end_outcome(&end[0]), TurnOutcome::Interrupted);
+    }
+
+    #[test]
+    fn a_call_that_stopped_before_the_interrupt_stays_done() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let call = "msg_011CgG43GxW2BhRXx8chosrS";
+        fold.line(&parse(MESSAGE_START), clock.at(100));
+        assert_eq!(
+            fold.line(&message_stop(), clock.at(900)),
+            vec![span_ended(call, SpanOutcome::Done, clock.at(900), None)]
+        );
+        // The interrupt lands in the gap between calls: nothing was open, so
+        // nothing is ended again and the turn alone is interrupted.
+        fold.interrupt_sent();
+        assert_eq!(fold.line(&message_stop(), clock.at(950)), Vec::new());
+        let end = fold.line(&parse(RESULT_INTERRUPTED), clock.at(1_000));
+        assert_eq!(end.len(), 1, "{end:?}");
+        assert_eq!(turn_end_outcome(&end[0]), TurnOutcome::Interrupted);
+    }
+
+    #[test]
+    fn an_open_wait_ends_before_its_turn_ends() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        fold.line(
+            &assistant(
+                None,
+                "m0",
+                vec![tool_use("toolu_B", "Bash", json!({"command": "rm x"}))],
+            ),
+            clock.at(100),
+        );
+        // Two cards waiting when Stop is pressed: the CLI ends the turn
+        // without a `tool_result` for either, and the worker's later deny
+        // would find nothing open.
+        fold.permission_asked(Some("toolu_B"), None, 4, clock.at(150));
+        fold.permission_asked(None, None, 3, clock.at(160));
+        fold.interrupt_sent();
+        let end = fold.line(&parse(RESULT_INTERRUPTED), clock.at(900));
+        assert_eq!(end.len(), 3, "{end:?}");
+        assert_eq!(
+            end[..2],
+            [
+                TraceEvent::WaitEnded {
+                    request_id: 3,
+                    at: clock.at(900)
+                },
+                TraceEvent::WaitEnded {
+                    request_id: 4,
+                    at: clock.at(900)
+                },
+            ]
+        );
+        assert_eq!(turn_end_outcome(&end[2]), TurnOutcome::Interrupted);
+        // Closed once: the deny that follows has nothing left to close.
+        assert_eq!(fold.permission_answered(4, clock.at(300_000)), Vec::new());
+    }
+
+    #[test]
+    fn a_model_call_with_no_message_id_still_spans() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        // A missing field drops its detail, never its span: the call gets an
+        // id of the fold's own, and its delta and stop still find it.
+        let started = fold.line(&message_start_without_id(), clock.at(100));
+        let [TraceEvent::SpanStarted { id, kind, model, .. }] = started.as_slice() else {
+            panic!("an id-less message_start still opens a call: {started:?}");
+        };
+        assert!(!id.is_empty());
+        assert_eq!(*kind, SpanKind::Llm);
+        assert_eq!(model.as_deref(), Some(HAIKU));
+        assert_eq!(
+            fold.line(&parse(MESSAGE_DELTA), clock.at(900)),
+            vec![usage(id, 39_278, 632)]
+        );
+        assert_eq!(
+            fold.line(&message_stop(), clock.at(910)),
+            vec![span_ended(id, SpanOutcome::Done, clock.at(910), None)]
+        );
+        // The next one is another call, not the first again.
+        let next = fold.line(&message_start_without_id(), clock.at(1_000));
+        let [TraceEvent::SpanStarted { id: next_id, .. }] = next.as_slice() else {
+            panic!("the second id-less call opens too: {next:?}");
+        };
+        assert_ne!(next_id, id);
+    }
+
+    #[test]
+    fn long_descriptions_are_cut_to_one_line() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let long = format!("{}\nsecond line", "x".repeat(500));
+        let cut = format!("{}…", "x".repeat(200));
+        // The `Agent` call's own input names the span.
+        let events = fold.line(
+            &assistant(
+                None,
+                "m0",
+                vec![tool_use(
+                    "toolu_X",
+                    "Agent",
+                    json!({"subagent_type": long, "description": long}),
+                )],
+            ),
+            clock.at(100),
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            TraceEvent::SpanStarted { name, detail, .. } => {
+                assert_eq!(name, &cut);
+                assert_eq!(detail, &cut);
+            }
+            other => panic!("not a SpanStarted: {other:?}"),
+        }
+        // As does `task_started`, and `task_progress` says what it is doing.
+        let started = msg(json!({
+            "type": "system", "subtype": "task_started", "task_id": "t",
+            "tool_use_id": "toolu_X", "description": long, "subagent_type": long
+        }));
+        assert_eq!(
+            fold.line(&started, clock.at(110)),
+            vec![TraceEvent::SpanNamed {
+                id: "toolu_X".into(),
+                name: cut.clone(),
+                detail: cut.clone(),
+            }]
+        );
+        let progress = msg(json!({
+            "type": "system", "subtype": "task_progress", "task_id": "t",
+            "tool_use_id": "toolu_X", "description": long
+        }));
+        assert_eq!(
+            fold.line(&progress, clock.at(120)),
+            vec![TraceEvent::SpanProgress {
+                id: "toolu_X".into(),
+                tokens: None,
+                tool_uses: None,
+                activity: Some(cut.clone()),
+            }]
+        );
+        // A tool's error and a turn's failure are text too.
+        let failed = tool_result(None, "toolu_X", true, &long);
+        assert!(fold.line(&failed, clock.at(130)).iter().any(|event| matches!(
+            event,
+            TraceEvent::SpanEnded { outcome: SpanOutcome::Failed { note }, .. } if note == &cut
+        )));
+        let error = msg(json!({
+            "type": "result", "subtype": "error_max_turns", "is_error": true, "result": long
+        }));
+        assert_eq!(
+            turn_end_outcome(&fold.line(&error, clock.at(140))[0]),
+            TurnOutcome::Failed { reason: cut }
+        );
+    }
+
+    #[test]
+    fn an_interrupt_mid_tool_leaves_the_tool_to_the_store() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        assert_eq!(
+            fold
+                .line(
+                    &assistant(
+                        None,
+                        "m0",
+                        vec![tool_use("toolu_B", "Bash", json!({"command": "sleep 100"}))],
+                    ),
+                    clock.at(100),
+                )
+                .len(),
+            1
+        );
+        fold.interrupt_sent();
+        // Which spans the turn abandoned is the store's to say at the turn's
+        // end: the fold ends the turn and does not end the tool.
+        let end = fold.line(&parse(RESULT_INTERRUPTED), clock.at(900));
+        assert_eq!(end.len(), 1, "{end:?}");
+        assert_eq!(turn_end_outcome(&end[0]), TurnOutcome::Interrupted);
+    }
+
+    #[test]
+    fn an_unknown_system_subtype_is_ignored() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        fold.line(
+            &assistant(
+                None,
+                "m0",
+                vec![tool_use("toolu_X", "Agent", json!({"prompt": "go"}))],
+            ),
+            clock.at(100),
+        );
+        let line = |subtype: &str| {
+            msg(json!({
+                "type": "system", "subtype": subtype, "task_id": "t",
+                "tool_use_id": "toolu_X", "description": "Reading README.md",
+                "usage": {"total_tokens": 10, "tool_uses": 1, "duration_ms": 5}
+            }))
+        };
+        // The same line under a name this build knows says something, so the
+        // silence of the others is the subtype's and not the line's.
+        assert_eq!(fold.line(&line("task_progress"), clock.at(200)).len(), 1);
+        for subtype in ["task_progress_v2", "task_updated", "task_notification", "init"] {
+            assert_eq!(fold.line(&line(subtype), clock.at(300)), Vec::new(), "{subtype}");
+        }
     }
 }

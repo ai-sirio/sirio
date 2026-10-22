@@ -465,7 +465,7 @@ impl StreamEventPayload {
     ///
     /// `message_delta` and `message_stop` name no message: the call they end
     /// is the one the last `message_start` opened, which is the caller's to
-    /// remember. A `message_start` that names no id yields `None`.
+    /// remember.
     #[must_use]
     pub fn lifecycle(&self) -> Option<MessageLifecycle> {
         let usage_of = |value: Option<&serde_json::Value>| {
@@ -475,11 +475,11 @@ impl StreamEventPayload {
         };
         match self.event.get("type")?.as_str()? {
             "message_start" => {
-                let message = self.event.get("message")?;
+                let message = self.event.get("message");
                 Some(MessageLifecycle::Start {
-                    id: string(message, "id")?,
-                    model: string(message, "model"),
-                    usage: usage_of(message.get("usage")),
+                    id: message.and_then(|message| string(message, "id")),
+                    model: message.and_then(|message| string(message, "model")),
+                    usage: usage_of(message.and_then(|message| message.get("usage"))),
                 })
             }
             "message_delta" => Some(MessageLifecycle::Delta {
@@ -494,9 +494,10 @@ impl StreamEventPayload {
 /// The three `stream_event`s that frame one model call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MessageLifecycle {
-    /// `message_start`: the call begins.
+    /// `message_start`: the call begins. A start that names no id is still a
+    /// call; naming it is the caller's.
     Start {
-        id: String,
+        id: Option<String>,
         model: Option<String>,
         /// The input side, known before any output: the tokens read, cached
         /// and newly cached.
@@ -568,13 +569,18 @@ impl AgentToolResult {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ModelUsage {
+    #[serde(deserialize_with = "lenient_count")]
     pub input_tokens: u64,
+    #[serde(deserialize_with = "lenient_count")]
     pub output_tokens: u64,
+    #[serde(deserialize_with = "lenient_count")]
     pub cache_read_input_tokens: u64,
+    #[serde(deserialize_with = "lenient_count")]
     pub cache_creation_input_tokens: u64,
     pub cost_usd: f64,
     /// The model's context window. `None` on a CLI that does not report it,
     /// which is why the context meter has a fallback at all.
+    #[serde(deserialize_with = "lenient")]
     pub context_window: Option<u64>,
 }
 
@@ -810,13 +816,31 @@ mod tests {
         assert_eq!(
             lifecycle,
             Some(MessageLifecycle::Start {
-                id: "msg_011CgG43GxW2BhRXx8chosrS".into(),
+                id: Some("msg_011CgG43GxW2BhRXx8chosrS".into()),
                 model: Some("claude-haiku-5-5".into()),
                 usage: MessageUsage {
                     input_tokens: 2,
                     output_tokens: 6,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 39_276,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn a_message_start_without_an_id_still_opens_a_call() {
+        // The line carries what it carries: the call is real whether or not
+        // it was named, and naming it is the caller's.
+        let line = r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":2}}},"parent_tool_use_id":null}"#;
+        assert_eq!(
+            stream_event(line).lifecycle(),
+            Some(MessageLifecycle::Start {
+                id: None,
+                model: Some("claude-haiku-5-5".into()),
+                usage: MessageUsage {
+                    input_tokens: 2,
+                    ..MessageUsage::default()
                 },
             })
         );
@@ -989,6 +1013,25 @@ mod tests {
         assert_eq!(result.stop_reason, None);
         assert_eq!(result.duration_ms, Some(6_002));
         assert_eq!(result.total_cost_usd, Some(0.008_954_355));
+    }
+
+    #[test]
+    fn a_result_with_a_malformed_model_usage_count_still_parses() {
+        // A word where a count belongs drops that count, not the `result`:
+        // the turn's end, in the transcript and in the trace, rides on it.
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.5,"modelUsage":{"claude-haiku-5-5":{"inputTokens":"many","outputTokens":5,"cacheReadInputTokens":null,"contextWindow":"wide"}}}"#;
+        let Some(CliMessage::Result(result)) = CliMessage::parse(line) else {
+            panic!("a malformed count must not demote the result line");
+        };
+        assert_eq!(result.total_cost_usd, Some(0.5));
+        let usage = result
+            .model_usage
+            .get("claude-haiku-5-5")
+            .expect("per-model usage");
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+        assert_eq!(usage.context_window, None);
     }
 
     #[test]

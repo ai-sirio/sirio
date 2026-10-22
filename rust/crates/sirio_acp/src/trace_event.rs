@@ -59,8 +59,12 @@ pub enum TraceEvent {
         at: Instant,
         measured_ms: Option<u64>,
     },
-    /// The turn's `result` arrived. Spans still open stay the store's to
-    /// close: this fold does not know which of them the turn abandoned.
+    /// The turn's `result` arrived. The fold has ended what it knows ends
+    /// with the turn: each wait still open, with a `WaitEnded` just ahead of
+    /// this event, and a subagent's open tools, which end with their
+    /// subagent. Any span still open at this point is one the turn
+    /// abandoned, and the store ends it as interrupted: the fold does not
+    /// say which they are.
     TurnEnded {
         at: Instant,
         outcome: TurnOutcome,

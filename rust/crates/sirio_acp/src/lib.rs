@@ -37,8 +37,8 @@ mod trace_event;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
 pub use claude::{ClaudeClient, ClaudeLaunch, McpControl};
-pub use trace_event::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
 pub use mcp_config::discover_mcp_servers;
+pub use trace_event::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
 
 // `npx -y` may have to download and unpack the ACP adapter before the first
 // protocol byte exists. Keep that cold-start budget bounded, but long enough

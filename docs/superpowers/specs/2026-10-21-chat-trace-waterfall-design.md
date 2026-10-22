@@ -212,7 +212,8 @@ Measured live on `claude` 2.1.306 on 2026-10-21 (§12).
     earlier, and its `agent_id` is the subagent's `task_id`.
   - The wait goes on that span, and the subagent's lane, then the root's,
     shows *waiting*.
-  - A `can_use_tool` whose id matches no known span puts the wait on the root.
+  - The wait goes on the span its `tool_use_id` names, else on the subagent its
+    `agent_id` names, else on the root.
 - **Cost:** `result.total_cost_usd` and `modelUsage` are **cumulative for the CLI
   process**. The capture read 0.01284 and then 0.01329 over two turns.
   - A turn's cost is this `result`'s total minus the previous `result`'s total
