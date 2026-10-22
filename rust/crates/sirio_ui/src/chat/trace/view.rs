@@ -5,7 +5,7 @@
 //! has ended no longer reads `now`: each of its spans has an end, and the
 //! agent's own clock wins over the instants wherever it reported one.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use sirio_acp::{SpanKind, SpanOutcome, TokenCount, TurnOutcome};
@@ -116,6 +116,19 @@ pub struct TreeRow {
     pub child_marks: Vec<Duration>,
     /// A failed span's error line, a failed turn's reason on the root.
     pub note: Option<String>,
+    /// The model of a model call, and of the root its latest call's.
+    pub model: Option<String>,
+    /// A model call's tokens; on the root, the turn's own once known.
+    pub tokens: Option<TokenCount>,
+    /// A subagent's running total from the agent's progress reports, to show
+    /// when no model call has reported `tokens`.
+    pub progress_tokens: Option<u64>,
+    /// How many tools a subagent has used, from its progress reports.
+    pub tool_uses: Option<u32>,
+    /// The waits on this span alone, as offsets from the turn's start; the
+    /// end is `None` while the wait is open. The root's are those on the
+    /// root.
+    pub waits: Vec<(Duration, Option<Duration>)>,
 }
 
 /// The transcript entry a span reveals.
@@ -138,9 +151,6 @@ pub struct Axis {
 
 /// How a turn's spans nest, worked out once per view.
 struct Shape {
-    /// The nearest subagent above each span, the agent it belongs to.
-    /// `None` is the root.
-    owner: Vec<Option<usize>>,
     /// How deep each span sits in the tree, the root's children at 1.
     depth: Vec<u8>,
     /// How deep each span's agent lane sits, the first subagents at 1.
@@ -148,21 +158,56 @@ struct Shape {
     /// Whether the span, or something under it, has an open wait.
     waiting: Vec<bool>,
     root_waiting: bool,
+    /// What each agent owns, gathered in one pass: slot 0 is the root and
+    /// slot `i + 1` the subagent that is span `i`.
+    lanes: Vec<LaneFacts>,
+}
+
+/// What one agent owns.
+#[derive(Clone, Default)]
+struct LaneFacts {
+    /// Its own tool and model-call spans, in arrival order.
+    calls: Vec<usize>,
+    /// The subagents directly under it that are still open.
+    running_agents: usize,
+    /// Its latest-started open tool and open model call.
+    running_tool: Option<usize>,
+    running_call: Option<usize>,
+    /// Its latest model call that names a model.
+    latest_model: Option<usize>,
+    /// Its waits, open or over, in arrival order: indices into `Turn::waits`.
+    waits: Vec<usize>,
+}
+
+/// An agent's slot in [`Shape::lanes`]; `None` is the root.
+fn slot(lane: Option<usize>) -> usize {
+    lane.map_or(0, |index| index + 1)
 }
 
 impl Span {
-    fn is_call(&self) -> bool {
-        matches!(self.kind, SpanKind::Tool | SpanKind::Llm)
+    /// How a lane's track draws it. A subagent is a lane of its own, never
+    /// a segment of its parent's.
+    fn segment_kind(&self) -> Option<SegmentKind> {
+        match self.kind {
+            SpanKind::Llm => Some(SegmentKind::Llm),
+            SpanKind::Tool => Some(SegmentKind::Tool),
+            SpanKind::Subagent => None,
+        }
     }
 
-    /// The agent's own clock when it reported one.
+    /// How long an ended span took: the agent's own clock when it reported
+    /// one.
+    fn ended_duration(&self) -> Option<Duration> {
+        self.end.as_ref().map(|end| {
+            end.measured
+                .unwrap_or_else(|| end.at.saturating_duration_since(self.start))
+        })
+    }
+
+    /// How long the span has taken as of `now`.
     fn duration(&self, now: Instant) -> Duration {
-        match &self.end {
-            Some(end) => end
-                .measured
-                .unwrap_or_else(|| end.at.saturating_duration_since(self.start)),
-            None => now.saturating_duration_since(self.start),
-        }
+        self.ended_duration()
+            .unwrap_or_else(|| now.saturating_duration_since(self.start))
     }
 
     fn failure(&self) -> Option<&str> {
@@ -178,10 +223,11 @@ impl Span {
 
 impl Turn {
     pub fn stats(&self, now: Instant) -> TurnStats {
+        let known = self.known_end();
         let mut stats = TurnStats {
             duration: self.elapsed(now),
-            cost_usd: self.ended.as_ref().and_then(|end| end.cost_usd),
-            tokens: self.ended.as_ref().and_then(|end| end.tokens.clone()),
+            cost_usd: known.and_then(|end| end.cost_usd),
+            tokens: known.and_then(|end| end.tokens.clone()),
             llm_calls: 0,
             tool_calls: 0,
             errors: 0,
@@ -209,7 +255,7 @@ impl Turn {
             name: ROOT_NAME.to_string(),
             detail: self.latest_model(None, &shape).unwrap_or_default(),
             state: self.root_state(),
-            calls: self.calls_of(None, &shape),
+            calls: shape.lanes[slot(None)].calls.len(),
             duration: self.elapsed(now),
             now: self.now_row(None, &shape, now),
             waits: self.waits_of(None, &shape),
@@ -221,17 +267,18 @@ impl Turn {
             .filter(|&index| self.spans[index].kind == SpanKind::Subagent)
             .map(|index| {
                 let span = &self.spans[index];
+                let lane = Some(index);
                 Lane {
                     span: span.id.clone(),
                     depth: shape.lane_depth[index],
                     name: span.name.clone(),
                     detail: self.detail_of(index, &shape),
                     state: self.span_state(index, &shape),
-                    calls: self.calls_of(Some(index), &shape),
+                    calls: shape.lanes[slot(lane)].calls.len(),
                     duration: span.duration(now),
-                    now: self.now_row(Some(index), &shape, now),
-                    waits: self.waits_of(Some(index), &shape),
-                    segments: self.segments_of(Some(index), &shape, now),
+                    now: self.now_row(lane, &shape, now),
+                    waits: self.waits_of(lane, &shape),
+                    segments: self.segments_of(lane, &shape, now),
                 }
             });
         std::iter::once(root).chain(agents).collect()
@@ -241,6 +288,15 @@ impl Turn {
     /// order its spans started. A span in `folded` hides everything under it.
     pub fn rows(&self, folded: &HashSet<String>, now: Instant) -> Vec<TreeRow> {
         let shape = self.shape();
+        // Each span's own waits, as offsets from the turn's start. `None` is
+        // the root's, and holds those on a span the turn did not keep.
+        let mut waits: HashMap<Option<usize>, Vec<(Duration, Option<Duration>)>> = HashMap::new();
+        for wait in &self.waits {
+            waits.entry(wait.span).or_default().push((
+                self.offset(wait.start),
+                wait.end.map(|end| self.offset(end)),
+            ));
+        }
         let mut rows = Vec::new();
         let everything: Vec<usize> = (0..self.spans.len()).collect();
         let root_folded = folded.contains(ROOT);
@@ -263,6 +319,11 @@ impl Turn {
                 }) if !reason.is_empty() => Some(reason.clone()),
                 _ => None,
             },
+            model: self.latest_model(None, &shape),
+            tokens: self.known_end().and_then(|end| end.tokens.clone()),
+            progress_tokens: None,
+            tool_uses: None,
+            waits: waits.remove(&None).unwrap_or_default(),
         });
         if root_folded {
             return rows;
@@ -291,6 +352,11 @@ impl Turn {
                     .failure()
                     .filter(|note| !note.is_empty())
                     .map(str::to_string),
+                model: span.model.clone(),
+                tokens: span.tokens.clone(),
+                progress_tokens: span.progress_tokens,
+                tool_uses: span.tool_uses,
+                waits: waits.remove(&Some(index)).unwrap_or_default(),
             });
             if hidden.is_empty() {
                 pending.extend(self.children_of(Some(index)).into_iter().rev());
@@ -336,11 +402,12 @@ impl Turn {
     pub fn slowest_leaf(&self) -> Option<&str> {
         let mut slowest: Option<(&Span, Duration)> = None;
         for span in &self.spans {
-            if !span.children.is_empty() || span.end.is_none() {
+            if !span.children.is_empty() {
                 continue;
             }
-            // `now` is not read: an ended span has its end.
-            let took = span.duration(self.started);
+            let Some(took) = span.ended_duration() else {
+                continue;
+            };
             if slowest.is_none_or(|(_, longest)| took > longest) {
                 slowest = Some((span, took));
             }
@@ -348,12 +415,28 @@ impl Turn {
         slowest.map(|(span, _)| span.id.as_str())
     }
 
+    /// How far the waterfall reaches from the turn's start: at least the
+    /// turn's own duration, and past it when a bar ends later. The agent's
+    /// clock for the turn can be shorter than the wall time its spans
+    /// were stamped in, so an axis sized from [`Turn::elapsed`] alone could
+    /// leave the last bar off its end.
+    pub fn extent(&self, now: Instant) -> Duration {
+        let spans = self
+            .spans
+            .iter()
+            .map(|span| self.offset(span.start) + span.duration(now));
+        let waits = self
+            .waits
+            .iter()
+            .map(|wait| self.offset(wait.end.unwrap_or(now)));
+        spans.chain(waits).fold(self.elapsed(now), Duration::max)
+    }
+
     /// The folded Trace card's title, `Live · 34s`.
     pub fn summary(&self, now: Instant) -> String {
         let elapsed = format_duration(self.elapsed(now));
         let cost = || {
-            self.ended
-                .as_ref()
+            self.known_end()
                 .and_then(|end| end.cost_usd)
                 .map(|cost| format!(" · ${cost:.2}"))
                 .unwrap_or_default()
@@ -367,16 +450,30 @@ impl Turn {
         }
     }
 
+    /// How the turn ended, when its cost and tokens are worth showing: an
+    /// interrupted turn has none, whatever its `TurnEnded` carried.
+    fn known_end(&self) -> Option<&TurnEnd> {
+        self.ended
+            .as_ref()
+            .filter(|end| !matches!(end.outcome, TurnOutcome::Interrupted))
+    }
+
     fn offset(&self, at: Instant) -> Duration {
         at.saturating_duration_since(self.started)
     }
 
+    /// Everything the views ask of how the spans nest and who owns what,
+    /// in one pass over the spans and one over the waits.
     fn shape(&self) -> Shape {
-        let mut owner: Vec<Option<usize>> = Vec::with_capacity(self.spans.len());
-        let mut depth: Vec<u8> = Vec::with_capacity(self.spans.len());
-        let mut lane_depth: Vec<u8> = Vec::with_capacity(self.spans.len());
+        let count = self.spans.len();
+        // The nearest subagent above each span, the agent it belongs to.
+        // `None` is the root.
+        let mut owner: Vec<Option<usize>> = Vec::with_capacity(count);
+        let mut depth: Vec<u8> = Vec::with_capacity(count);
+        let mut lane_depth: Vec<u8> = Vec::with_capacity(count);
+        let mut lanes = vec![LaneFacts::default(); count + 1];
         // A span's parent was opened before it, so is already here.
-        for span in &self.spans {
+        for (index, span) in self.spans.iter().enumerate() {
             let (above, deep) = match span.parent {
                 None => (None, 1),
                 Some(parent) => {
@@ -391,26 +488,66 @@ impl Turn {
             lane_depth.push(above.map_or(1, |above| lane_depth[above].saturating_add(1)));
             owner.push(above);
             depth.push(deep);
+
+            let facts = &mut lanes[slot(above)];
+            let open = span.end.is_none();
+            // On a tie the later span is the latest.
+            let newer = |best: Option<usize>| {
+                best.is_none_or(|best| span.start >= self.spans[best].start)
+            };
+            match span.kind {
+                SpanKind::Subagent => facts.running_agents += usize::from(open),
+                SpanKind::Tool => {
+                    facts.calls.push(index);
+                    if open && newer(facts.running_tool) {
+                        facts.running_tool = Some(index);
+                    }
+                }
+                SpanKind::Llm => {
+                    facts.calls.push(index);
+                    if open && newer(facts.running_call) {
+                        facts.running_call = Some(index);
+                    }
+                    if span.model.is_some() && newer(facts.latest_model) {
+                        facts.latest_model = Some(index);
+                    }
+                }
+            }
         }
-        let mut waiting = vec![false; self.spans.len()];
+        let mut waiting = vec![false; count];
         let mut root_waiting = false;
-        for wait in self.waits.iter().filter(|wait| wait.end.is_none()) {
+        for (index, wait) in self.waits.iter().enumerate() {
+            lanes[slot(self.wait_lane(wait.span, &owner))].waits.push(index);
+            if wait.end.is_some() {
+                continue;
+            }
             root_waiting = true;
             let mut cursor = wait.span;
-            while let Some(index) = cursor {
-                if waiting[index] {
+            while let Some(span) = cursor {
+                if waiting[span] {
                     break;
                 }
-                waiting[index] = true;
-                cursor = self.spans[index].parent;
+                waiting[span] = true;
+                cursor = self.spans[span].parent;
             }
         }
         Shape {
-            owner,
             depth,
             lane_depth,
             waiting,
             root_waiting,
+            lanes,
+        }
+    }
+
+    /// The agent a wait is listed on: the span's own when it is a subagent,
+    /// else the one its call belongs to; the root when it waits on the root.
+    fn wait_lane(&self, span: Option<usize>, owner: &[Option<usize>]) -> Option<usize> {
+        let span = span?;
+        if self.spans[span].kind == SpanKind::Subagent {
+            Some(span)
+        } else {
+            owner[span]
         }
     }
 
@@ -478,13 +615,8 @@ impl Turn {
 
     /// The model of the agent's latest model call that names one.
     fn latest_model(&self, lane: Option<usize>, shape: &Shape) -> Option<String> {
-        self.spans
-            .iter()
-            .enumerate()
-            .filter(|(index, span)| span.kind == SpanKind::Llm && shape.owner[*index] == lane)
-            .filter_map(|(_, span)| Some((span.start, span.model.as_ref()?)))
-            .max_by_key(|(start, _)| *start)
-            .map(|(_, model)| model.clone())
+        let call = shape.lanes[slot(lane)].latest_model?;
+        self.spans[call].model.clone()
     }
 
     /// What a row says beside its name: what the agent reported, else the
@@ -501,33 +633,10 @@ impl Turn {
         model.unwrap_or_default()
     }
 
-    fn calls_of(&self, lane: Option<usize>, shape: &Shape) -> usize {
-        self.spans
-            .iter()
-            .enumerate()
-            .filter(|(index, span)| span.is_call() && shape.owner[*index] == lane)
-            .count()
-    }
-
-    /// The agent's open spans of one kind.
-    fn running<'a>(
-        &'a self,
-        lane: Option<usize>,
-        kind: SpanKind,
-        shape: &'a Shape,
-    ) -> impl Iterator<Item = &'a Span> + 'a {
-        self.spans
-            .iter()
-            .enumerate()
-            .filter(move |(index, span)| {
-                span.end.is_none() && span.kind == kind && shape.owner[*index] == lane
-            })
-            .map(|(_, span)| span)
-    }
-
     /// What a running agent is doing, the first of: a permission waits,
-    /// subagents run, a tool runs, the model writes. The latest tool or
-    /// call of its kind when several are open.
+    /// subagents run, a tool runs, the model writes, and for a subagent the
+    /// last thing it reported. The latest tool or call of its kind when
+    /// several are open.
     fn now_row(&self, lane: Option<usize>, shape: &Shape, now: Instant) -> Option<String> {
         let (open, waiting) = match lane {
             None => (self.ended.is_none(), shape.root_waiting),
@@ -539,42 +648,33 @@ impl Turn {
         if waiting {
             return Some("Waiting for you".to_string());
         }
-        let agents = self.running(lane, SpanKind::Subagent, shape).count();
-        if agents > 0 {
+        let facts = &shape.lanes[slot(lane)];
+        if facts.running_agents > 0 {
+            let agents = facts.running_agents;
             let s = if agents == 1 { "" } else { "s" };
             return Some(format!("{agents} subagent{s} running"));
         }
         let age = |span: &Span| format_elapsed(now.saturating_duration_since(span.start));
-        if let Some(tool) = self
-            .running(lane, SpanKind::Tool, shape)
-            .max_by_key(|span| span.start)
-        {
+        if let Some(tool) = facts.running_tool.map(|tool| &self.spans[tool]) {
             return Some(format!("{} · {}", tool.name, age(tool)));
         }
-        let call = self
-            .running(lane, SpanKind::Llm, shape)
-            .max_by_key(|span| span.start)?;
-        Some(match &call.model {
-            Some(model) => format!("Thinking · {model} · {}", age(call)),
-            None => format!("Thinking · {}", age(call)),
-        })
-    }
-
-    /// The agent a wait is listed on: the span's own when it is a subagent,
-    /// else the one its call belongs to; the root when it waits on the root.
-    fn wait_lane(&self, span: Option<usize>, shape: &Shape) -> Option<usize> {
-        let span = span?;
-        if self.spans[span].kind == SpanKind::Subagent {
-            Some(span)
-        } else {
-            shape.owner[span]
+        if let Some(call) = facts.running_call.map(|call| &self.spans[call]) {
+            return Some(match &call.model {
+                Some(model) => format!("Thinking · {model} · {}", age(call)),
+                None => format!("Thinking · {}", age(call)),
+            });
         }
+        // A subagent between two calls has no open span; what it last
+        // reported is the best that is known.
+        lane.and_then(|index| self.spans[index].activity.clone())
     }
 
     fn waits_of(&self, lane: Option<usize>, shape: &Shape) -> Vec<LaneWait> {
-        self.waits
+        shape.lanes[slot(lane)]
+            .waits
             .iter()
-            .filter(|wait| wait.end.is_none() && self.wait_lane(wait.span, shape) == lane)
+            .map(|&wait| &self.waits[wait])
+            .filter(|wait| wait.end.is_none())
             .map(|wait| LaneWait {
                 request_id: wait.request_id,
                 tool: match wait.span {
@@ -590,37 +690,31 @@ impl Turn {
     /// The agent's calls in the order they started, then its waits, so a
     /// wait is drawn over the call it holds up.
     fn segments_of(&self, lane: Option<usize>, shape: &Shape, now: Instant) -> Vec<Segment> {
-        let mut segments: Vec<Segment> = self
-            .spans
+        let facts = &shape.lanes[slot(lane)];
+        let mut segments: Vec<Segment> = facts
+            .calls
             .iter()
-            .enumerate()
-            .filter(|(index, span)| span.is_call() && shape.owner[*index] == lane)
-            .map(|(_, span)| {
+            .filter_map(|&index| {
+                let span = &self.spans[index];
                 let start = self.offset(span.start);
-                Segment {
-                    kind: match span.kind {
-                        SpanKind::Llm => SegmentKind::Llm,
-                        SpanKind::Tool | SpanKind::Subagent => SegmentKind::Tool,
-                    },
+                Some(Segment {
+                    kind: span.segment_kind()?,
                     start,
                     end: start + span.duration(now),
-                }
+                })
             })
             .collect();
         segments.sort_by_key(|segment| segment.start);
-        let waits = self
-            .waits
-            .iter()
-            .filter(|wait| self.wait_lane(wait.span, shape) == lane)
-            .map(|wait| {
-                let start = self.offset(wait.start);
-                let end = self.offset(wait.end.unwrap_or(now));
-                Segment {
-                    kind: SegmentKind::Wait,
-                    start,
-                    end: end.max(start),
-                }
-            });
+        let waits = facts.waits.iter().map(|&index| {
+            let wait = &self.waits[index];
+            let start = self.offset(wait.start);
+            let end = self.offset(wait.end.unwrap_or(now));
+            Segment {
+                kind: SegmentKind::Wait,
+                start,
+                end: end.max(start),
+            }
+        });
         segments.extend(waits);
         segments
     }

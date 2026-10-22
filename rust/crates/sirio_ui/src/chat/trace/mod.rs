@@ -62,27 +62,32 @@ impl Default for TraceStore {
 }
 
 impl TraceStore {
-    /// Folds one event into the latest turn, or opens a turn.
-    pub fn apply(&mut self, event: TraceEvent) {
+    /// Folds one event into the latest turn, or opens a turn. Whether
+    /// anything a view reads changed: an event that names a span nobody
+    /// opened, repeats what is known, or arrives with no turn open is not.
+    pub fn apply(&mut self, event: TraceEvent) -> bool {
         match event {
-            TraceEvent::TurnStarted { at } => self.start_turn(at),
+            TraceEvent::TurnStarted { at } => {
+                self.start_turn(at);
+                true
+            }
             TraceEvent::TurnEnded {
                 at,
                 outcome,
                 measured_ms,
                 cost_usd,
                 tokens,
-            } => {
-                if let Some(turn) = self.open_turn() {
+            } => match self.open_turn() {
+                Some(turn) => {
                     let measured = measured_ms.map(Duration::from_millis);
                     turn.close(at, outcome, measured, cost_usd, tokens);
+                    true
                 }
-            }
-            event => {
-                if let Some(turn) = self.open_turn() {
-                    turn.apply(event);
-                }
-            }
+                None => false,
+            },
+            event => self
+                .open_turn()
+                .is_some_and(|turn| turn.apply(event)),
         }
     }
 
@@ -173,6 +178,8 @@ pub struct Turn {
     root_children: Vec<usize>,
     /// Every wait of the turn, in arrival order.
     waits: Vec<Wait>,
+    /// Where each request's wait is in `waits`.
+    wait_index: HashMap<u64, usize>,
     dropped: usize,
 }
 
@@ -197,6 +204,12 @@ struct Span {
     model: Option<String>,
     start: Instant,
     end: Option<SpanEnd>,
+    /// A model call's tokens, from its usage report.
+    tokens: Option<TokenCount>,
+    /// A subagent's latest totals and activity, from its progress reports.
+    progress_tokens: Option<u64>,
+    tool_uses: Option<u32>,
+    activity: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -228,6 +241,7 @@ impl Turn {
             by_id: HashMap::new(),
             root_children: Vec::new(),
             waits: Vec::new(),
+            wait_index: HashMap::new(),
             dropped: 0,
         }
     }
@@ -271,7 +285,7 @@ impl Turn {
         self.dropped
     }
 
-    fn apply(&mut self, event: TraceEvent) {
+    fn apply(&mut self, event: TraceEvent) -> bool {
         match event {
             TraceEvent::SpanStarted {
                 id,
@@ -293,18 +307,62 @@ impl Turn {
                     model,
                     start: at,
                     end: None,
+                    tokens: None,
+                    progress_tokens: None,
+                    tool_uses: None,
+                    activity: None,
                 },
             ),
             TraceEvent::SpanNamed { id, name, detail } => {
-                if let Some(&span) = self.by_id.get(&id) {
-                    let span = &mut self.spans[span];
-                    if !name.is_empty() {
-                        span.name = name;
-                    }
-                    if !detail.is_empty() {
-                        span.detail = detail;
-                    }
+                let Some(span) = self.span_mut(&id) else {
+                    return false;
+                };
+                let mut changed = false;
+                if !name.is_empty() && span.name != name {
+                    span.name = name;
+                    changed = true;
                 }
+                if !detail.is_empty() && span.detail != detail {
+                    span.detail = detail;
+                    changed = true;
+                }
+                changed
+            }
+            TraceEvent::SpanUsage { id, tokens } => {
+                let Some(span) = self.span_mut(&id) else {
+                    return false;
+                };
+                if span.tokens.as_ref() == Some(&tokens) {
+                    return false;
+                }
+                span.tokens = Some(tokens);
+                true
+            }
+            // A report names some of the totals; the rest stay as they were.
+            TraceEvent::SpanProgress {
+                id,
+                tokens,
+                tool_uses,
+                activity,
+            } => {
+                let Some(span) = self.span_mut(&id) else {
+                    return false;
+                };
+                let mut changed = false;
+                if tokens.is_some() && span.progress_tokens != tokens {
+                    span.progress_tokens = tokens;
+                    changed = true;
+                }
+                if tool_uses.is_some() && span.tool_uses != tool_uses {
+                    span.tool_uses = tool_uses;
+                    changed = true;
+                }
+                let activity = activity.filter(|activity| !activity.is_empty());
+                if activity.is_some() && span.activity != activity {
+                    span.activity = activity;
+                    changed = true;
+                }
+                changed
             }
             TraceEvent::WaitStarted {
                 span,
@@ -312,13 +370,15 @@ impl Turn {
                 at,
             } => self.open_wait(span, request_id, at),
             TraceEvent::WaitEnded { request_id, at } => {
-                let open = self
-                    .waits
-                    .iter_mut()
-                    .find(|wait| wait.request_id == request_id && wait.end.is_none());
-                if let Some(wait) = open {
-                    wait.end = Some(at);
+                let Some(&index) = self.wait_index.get(&request_id) else {
+                    return false;
+                };
+                let wait = &mut self.waits[index];
+                if wait.end.is_some() {
+                    return false;
                 }
+                wait.end = Some(at);
+                true
             }
             TraceEvent::SpanEnded {
                 id,
@@ -326,23 +386,24 @@ impl Turn {
                 at,
                 measured_ms,
             } => self.end_span(&id, outcome, at, measured_ms.map(Duration::from_millis)),
-            // The views read what a span holds, not the totals the agent
-            // reports while it runs: a model call's tokens and a subagent's
-            // progress are not drawn.
-            TraceEvent::SpanUsage { .. } | TraceEvent::SpanProgress { .. } => {}
             // The store itself opens and ends turns.
-            TraceEvent::TurnStarted { .. } | TraceEvent::TurnEnded { .. } => {}
+            TraceEvent::TurnStarted { .. } | TraceEvent::TurnEnded { .. } => false,
         }
     }
 
+    fn span_mut(&mut self, id: &str) -> Option<&mut Span> {
+        let index = *self.by_id.get(id)?;
+        self.spans.get_mut(index)
+    }
+
     /// Keeps `span` under `parent`, or counts it when the turn is full.
-    fn insert_span(&mut self, parent: Option<&str>, mut span: Span) {
+    fn insert_span(&mut self, parent: Option<&str>, mut span: Span) -> bool {
         if self.by_id.contains_key(&span.id) {
-            return;
+            return false;
         }
         if self.spans.len() >= MAX_SPANS {
             self.dropped += 1;
-            return;
+            return true;
         }
         // A parent nobody opened leaves the span under the root.
         span.parent = parent.and_then(|parent| self.by_id.get(parent).copied());
@@ -353,23 +414,30 @@ impl Turn {
         }
         self.by_id.insert(span.id.clone(), index);
         self.spans.push(span);
+        true
     }
 
-    fn open_wait(&mut self, span: Option<String>, request_id: u64, at: Instant) {
-        if self.waits.iter().any(|wait| wait.request_id == request_id) {
-            return;
+    fn open_wait(&mut self, span: Option<String>, request_id: u64, at: Instant) -> bool {
+        if self.wait_index.contains_key(&request_id) {
+            return false;
         }
         // A span nobody kept is waited on at the root: the user still has
         // to answer.
         let span = span
             .as_deref()
             .and_then(|span| self.by_id.get(span).copied());
+        // A span that has ended has nothing left to ask about.
+        if span.is_some_and(|span| self.spans[span].end.is_some()) {
+            return false;
+        }
+        self.wait_index.insert(request_id, self.waits.len());
         self.waits.push(Wait {
             request_id,
             span,
             start: at,
             end: None,
         });
+        true
     }
 
     fn end_span(
@@ -378,12 +446,12 @@ impl Turn {
         outcome: SpanOutcome,
         at: Instant,
         measured: Option<Duration>,
-    ) {
+    ) -> bool {
         let Some(&index) = self.by_id.get(id) else {
-            return;
+            return false;
         };
         if self.spans[index].end.is_some() {
-            return;
+            return false;
         }
         self.spans[index].end = Some(SpanEnd {
             at,
@@ -397,6 +465,7 @@ impl Turn {
                 wait.end = Some(at);
             }
         }
+        true
     }
 
     /// Ends the turn at `at`. Whatever is still open at that moment was
@@ -438,8 +507,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// Every instant a test names is an offset from one origin: the store
-    /// never reads a clock, so neither do these.
+    /// Every instant a test names is an offset from one origin. The origin
+    /// is the only clock read here: the store and the views never read one.
     struct Clock(Instant);
 
     impl Clock {
@@ -927,6 +996,26 @@ mod tests {
                 output: 80
             })
         );
+
+        // An interrupted turn has no cost or tokens to show, whatever its
+        // `TurnEnded` carried: the stats row agrees with the summary.
+        store.apply(TraceEvent::TurnStarted { at: c.at(10_000) });
+        finish_with(
+            &mut store,
+            &c,
+            12_000,
+            TurnOutcome::Interrupted,
+            Some(1500),
+            Some(0.05),
+            Some(TokenCount {
+                input: 10,
+                output: 5,
+            }),
+        );
+        let interrupted = store.latest().expect("a turn").stats(c.at(12_000));
+        assert_eq!(interrupted.cost_usd, None);
+        assert_eq!(interrupted.tokens, None);
+        assert_eq!(interrupted.duration, ms(1500));
     }
 
     #[test]
@@ -971,6 +1060,19 @@ mod tests {
         let turn = store.latest().expect("a turn");
         assert_eq!(turn.dropped_spans(), 1, "an event is not a span");
         assert_eq!(turn.state(), TurnState::Waiting, "its wait still waits");
+
+        // Counting a span is a change a view reads.
+        let counted = store.apply(TraceEvent::SpanStarted {
+            id: "toolu_2001".into(),
+            parent: None,
+            kind: SpanKind::Tool,
+            name: "Read".into(),
+            detail: String::new(),
+            model: None,
+            at: c.at(2300),
+        });
+        assert!(counted);
+        assert_eq!(store.latest().expect("a turn").dropped_spans(), 2);
     }
 
     #[test]
@@ -1399,5 +1501,359 @@ mod tests {
         assert_eq!(store.turn_indices(), 1..=2);
         assert!(store.is_running());
         assert_eq!(rows_of(&store, c.at(9000)).len(), 1, "it starts empty");
+    }
+
+    #[test]
+    fn a_tree_row_carries_model_tokens_and_waits() {
+        let (mut store, c) = open_turn();
+        call(&mut store, &c, "msg_1", None, "claude-opus-5-5", 0);
+        store.apply(TraceEvent::SpanUsage {
+            id: "msg_1".into(),
+            tokens: TokenCount {
+                input: 100,
+                output: 20,
+            },
+        });
+        end(&mut store, &c, "msg_1", 500);
+        tool(&mut store, &c, "toolu_a", None, "Bash", 600);
+        wait(&mut store, &c, Some("toolu_a"), 1, 700);
+        unwait(&mut store, &c, 1, 900);
+        wait(&mut store, &c, Some("toolu_a"), 2, 1000);
+        agent(&mut store, &c, "toolu_x", None, "reviewer", "", 1100);
+        store.apply(TraceEvent::SpanProgress {
+            id: "toolu_x".into(),
+            tokens: Some(4200),
+            tool_uses: Some(3),
+            activity: Some("Reading README.md".into()),
+        });
+        // A later report that names only some of the totals keeps the rest.
+        store.apply(TraceEvent::SpanProgress {
+            id: "toolu_x".into(),
+            tokens: None,
+            tool_uses: Some(4),
+            activity: None,
+        });
+        wait(&mut store, &c, None, 3, 1500);
+
+        let found = rows_of(&store, c.at(2000));
+        let model_call = row(&found, "msg_1");
+        assert_eq!(model_call.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(
+            model_call.tokens,
+            Some(TokenCount {
+                input: 100,
+                output: 20
+            })
+        );
+        assert_eq!(model_call.progress_tokens, None);
+        assert!(model_call.waits.is_empty());
+
+        let bash = row(&found, "toolu_a");
+        assert_eq!(bash.model, None);
+        assert_eq!(bash.tokens, None);
+        assert_eq!(
+            bash.waits,
+            vec![(ms(700), Some(ms(900))), (ms(1000), None)],
+            "its own waits, an open one without an end"
+        );
+
+        let subagent = row(&found, "toolu_x");
+        assert_eq!(subagent.tokens, None, "no usage was reported for it");
+        assert_eq!(subagent.progress_tokens, Some(4200));
+        assert_eq!(subagent.tool_uses, Some(4));
+        assert!(subagent.waits.is_empty(), "a wait on a tool is the tool's");
+
+        // The root's row holds the waits on the root, and the turn's own
+        // spend once it is known.
+        assert_eq!(row(&found, ROOT).waits, vec![(ms(1500), None)]);
+        assert_eq!(row(&found, ROOT).tokens, None);
+        assert_eq!(row(&found, ROOT).model.as_deref(), Some("claude-opus-5-5"));
+        finish_with(
+            &mut store,
+            &c,
+            3000,
+            TurnOutcome::Done,
+            None,
+            Some(0.31),
+            Some(TokenCount {
+                input: 1200,
+                output: 80,
+            }),
+        );
+        let found = rows_of(&store, c.at(9000));
+        assert_eq!(
+            row(&found, ROOT).tokens,
+            Some(TokenCount {
+                input: 1200,
+                output: 80
+            })
+        );
+        assert_eq!(
+            row(&found, "toolu_a").waits,
+            vec![(ms(700), Some(ms(900))), (ms(1000), Some(ms(3000)))],
+            "the turn's end closed the open wait"
+        );
+    }
+
+    #[test]
+    fn the_extent_covers_a_bar_that_outlasts_the_measured_duration() {
+        let (mut store, c) = open_turn();
+        tool(&mut store, &c, "toolu_a", None, "Bash", 100);
+        end(&mut store, &c, "toolu_a", 10_300);
+        let live = store.latest().expect("a turn");
+        assert_eq!(
+            live.extent(c.at(10_300)),
+            ms(10_300),
+            "while the turn runs it is as long as the turn"
+        );
+
+        // The agent's clock says 10.0 s; the last bar, in wall time, ends
+        // at 10.3 s.
+        finish_with(&mut store, &c, 10_400, TurnOutcome::Done, Some(10_000), None, None);
+        let turn = store.latest().expect("a turn");
+        assert_eq!(turn.elapsed(c.at(60_000)), ms(10_000));
+        assert_eq!(turn.extent(c.at(60_000)), ms(10_300));
+        let bar_end = rows_of(&store, c.at(60_000))
+            .iter()
+            .filter_map(|row| row.end)
+            .max();
+        assert!(bar_end.is_some_and(|end| turn.extent(c.at(60_000)) >= end));
+
+        // A turn whose bars end inside its measured duration is as long as it.
+        let (mut quick, c) = open_turn();
+        tool(&mut quick, &c, "toolu_a", None, "Read", 100);
+        end(&mut quick, &c, "toolu_a", 200);
+        finish_with(&mut quick, &c, 900, TurnOutcome::Done, Some(800), None, None);
+        assert_eq!(quick.latest().expect("a turn").extent(c.at(5000)), ms(800));
+
+        // An agent's own clock for a span counts too: it moves the bar's end.
+        let (mut long, c) = open_turn();
+        tool(&mut long, &c, "toolu_a", None, "Task", 1000);
+        long.apply(TraceEvent::SpanEnded {
+            id: "toolu_a".into(),
+            outcome: SpanOutcome::Done,
+            at: c.at(1100),
+            measured_ms: Some(9000),
+        });
+        finish_with(&mut long, &c, 1200, TurnOutcome::Done, Some(1200), None, None);
+        assert_eq!(long.latest().expect("a turn").extent(c.at(5000)), ms(10_000));
+    }
+
+    #[test]
+    fn a_subagent_between_calls_shows_its_last_activity() {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_x", None, "reviewer", "", 100);
+        let now = c.at(1000);
+        let progress = |store: &mut TraceStore, activity: &str| {
+            store.apply(TraceEvent::SpanProgress {
+                id: "toolu_x".into(),
+                tokens: None,
+                tool_uses: None,
+                activity: Some(activity.into()),
+            });
+        };
+        let agent_now = |store: &TraceStore| lane(&lanes_of(store, now), "toolu_x").now.clone();
+
+        assert_eq!(agent_now(&store), None, "nothing is known of it yet");
+        progress(&mut store, "Reading README.md");
+        assert_eq!(agent_now(&store).as_deref(), Some("Reading README.md"));
+        progress(&mut store, "Editing main.rs");
+        assert_eq!(agent_now(&store).as_deref(), Some("Editing main.rs"));
+        // The root has no agent reporting for it: its own rules only.
+        assert_eq!(
+            lanes_of(&store, now)[0].now.as_deref(),
+            Some("1 subagent running")
+        );
+
+        // A call that runs says more than the last thing reported.
+        tool(&mut store, &c, "toolu_x1", Some("toolu_x"), "Grep", 500);
+        assert_eq!(agent_now(&store).as_deref(), Some("Grep · 0.5s"));
+        end(&mut store, &c, "toolu_x1", 600);
+        assert_eq!(agent_now(&store).as_deref(), Some("Editing main.rs"));
+
+        // So does a subagent of its own, and a wait.
+        agent(&mut store, &c, "toolu_y", Some("toolu_x"), "explorer", "", 700);
+        assert_eq!(agent_now(&store).as_deref(), Some("1 subagent running"));
+        end(&mut store, &c, "toolu_y", 800);
+        wait(&mut store, &c, Some("toolu_x"), 1, 850);
+        assert_eq!(agent_now(&store).as_deref(), Some("Waiting for you"));
+        unwait(&mut store, &c, 1, 900);
+
+        // An agent that is over is doing nothing, whatever it last reported.
+        end(&mut store, &c, "toolu_x", 950);
+        assert_eq!(agent_now(&store), None);
+    }
+
+    #[test]
+    fn an_ignored_event_reports_no_change() {
+        let c = Clock(Instant::now());
+        let mut store = TraceStore::default();
+        let started = |id: &str, kind: SpanKind| TraceEvent::SpanStarted {
+            id: id.into(),
+            parent: None,
+            kind,
+            name: "reviewer".into(),
+            detail: "d".into(),
+            model: None,
+            at: c.at(100),
+        };
+        let tokens = TokenCount {
+            input: 1,
+            output: 1,
+        };
+
+        // With no turn open, only a turn's start is news.
+        assert!(!store.apply(started("toolu_a", SpanKind::Tool)));
+        assert!(!store.apply(TraceEvent::WaitStarted {
+            span: None,
+            request_id: 1,
+            at: c.at(100)
+        }));
+        assert!(!store.apply(TraceEvent::TurnEnded {
+            at: c.at(100),
+            outcome: TurnOutcome::Done,
+            measured_ms: None,
+            cost_usd: None,
+            tokens: None
+        }));
+        assert!(store.apply(TraceEvent::TurnStarted { at: c.at(0) }));
+
+        assert!(store.apply(started("toolu_a", SpanKind::Subagent)));
+        assert!(!store.apply(started("toolu_a", SpanKind::Subagent)), "a repeat");
+
+        let named = |name: &str, detail: &str| TraceEvent::SpanNamed {
+            id: "toolu_a".into(),
+            name: name.into(),
+            detail: detail.into(),
+        };
+        assert!(!store.apply(named("reviewer", "d")), "the same names");
+        assert!(!store.apply(named("", "")), "nothing to name it");
+        assert!(store.apply(named("tester", "")));
+        assert!(!store.apply(named("tester", "")));
+        assert!(!store.apply(TraceEvent::SpanNamed {
+            id: "toolu_nobody".into(),
+            name: "ghost".into(),
+            detail: String::new()
+        }));
+
+        let usage = |id: &str| TraceEvent::SpanUsage {
+            id: id.into(),
+            tokens: tokens.clone(),
+        };
+        assert!(!store.apply(usage("toolu_nobody")));
+        assert!(store.apply(usage("toolu_a")));
+        assert!(!store.apply(usage("toolu_a")), "the same tokens again");
+
+        let progress = |id: &str, total: u64| TraceEvent::SpanProgress {
+            id: id.into(),
+            tokens: Some(total),
+            tool_uses: None,
+            activity: None,
+        };
+        assert!(!store.apply(progress("toolu_nobody", 5)));
+        assert!(store.apply(progress("toolu_a", 5)));
+        assert!(!store.apply(progress("toolu_a", 5)));
+        assert!(store.apply(progress("toolu_a", 6)));
+
+        let ask = |request_id: u64| TraceEvent::WaitStarted {
+            span: Some("toolu_a".into()),
+            request_id,
+            at: c.at(200),
+        };
+        let unask = |request_id: u64| TraceEvent::WaitEnded {
+            request_id,
+            at: c.at(300),
+        };
+        assert!(!store.apply(unask(9)), "nobody asked");
+        assert!(store.apply(ask(1)));
+        assert!(!store.apply(ask(1)), "the same request");
+        assert!(store.apply(unask(1)));
+        assert!(!store.apply(unask(1)), "already answered");
+
+        let ended = |id: &str| TraceEvent::SpanEnded {
+            id: id.into(),
+            outcome: SpanOutcome::Done,
+            at: c.at(400),
+            measured_ms: None,
+        };
+        assert!(!store.apply(ended("toolu_nobody")));
+        assert!(store.apply(ended("toolu_a")));
+        assert!(!store.apply(ended("toolu_a")), "already over");
+
+        assert!(store.apply(TraceEvent::TurnEnded {
+            at: c.at(500),
+            outcome: TurnOutcome::Done,
+            measured_ms: None,
+            cost_usd: None,
+            tokens: None
+        }));
+        assert!(!store.apply(started("toolu_late", SpanKind::Tool)), "turn over");
+    }
+
+    #[test]
+    fn every_open_wait_is_listed_on_exactly_one_lane() {
+        let (mut store, c) = open_turn();
+        tool(&mut store, &c, "toolu_bash", None, "Bash", 100);
+        agent(&mut store, &c, "toolu_x", None, "reviewer", "", 200);
+        tool(&mut store, &c, "toolu_x1", Some("toolu_x"), "Write", 300);
+        agent(&mut store, &c, "toolu_y", Some("toolu_x"), "explorer", "", 400);
+        tool(&mut store, &c, "toolu_y1", Some("toolu_y"), "Edit", 500);
+        // On the root, on a subagent's tool, under a nested subagent, on a
+        // main-thread tool, on a subagent itself, and on a span nobody kept.
+        let asked: [(Option<&str>, u64, &str); 6] = [
+            (None, 1, ROOT),
+            (Some("toolu_x1"), 2, "toolu_x"),
+            (Some("toolu_y1"), 3, "toolu_y"),
+            (Some("toolu_bash"), 4, ROOT),
+            (Some("toolu_y"), 5, "toolu_y"),
+            (Some("toolu_nobody"), 6, ROOT),
+        ];
+        for (span, request_id, _) in asked {
+            wait(&mut store, &c, span, request_id, 600 + request_id);
+        }
+
+        let check = |store: &TraceStore, open: &[(Option<&str>, u64, &str)]| {
+            let lanes = lanes_of(store, c.at(1000));
+            for (_, request_id, owner) in open {
+                let holders: Vec<&str> = lanes
+                    .iter()
+                    .filter(|lane| lane.waits.iter().any(|wait| wait.request_id == *request_id))
+                    .map(|lane| lane.span.as_str())
+                    .collect();
+                assert_eq!(holders, [*owner], "request {request_id}");
+            }
+            let listed: usize = lanes.iter().map(|lane| lane.waits.len()).sum();
+            assert_eq!(listed, open.len(), "no wait is listed twice, or invented");
+        };
+        check(&store, &asked);
+
+        // Answered ones are listed nowhere.
+        unwait(&mut store, &c, 3, 700);
+        unwait(&mut store, &c, 1, 710);
+        let open: Vec<_> = asked
+            .iter()
+            .filter(|(_, request_id, _)| ![1, 3].contains(request_id))
+            .copied()
+            .collect();
+        check(&store, &open);
+    }
+
+    #[test]
+    fn a_wait_on_an_ended_span_is_ignored() {
+        let (mut store, c) = open_turn();
+        tool(&mut store, &c, "toolu_a", None, "Bash", 100);
+        end(&mut store, &c, "toolu_a", 200);
+
+        let changed = store.apply(TraceEvent::WaitStarted {
+            span: Some("toolu_a".into()),
+            request_id: 1,
+            at: c.at(300),
+        });
+
+        assert!(!changed);
+        let turn = store.latest().expect("a turn");
+        assert_eq!(turn.state(), TurnState::Live, "nothing to answer");
+        assert!(lanes_of(&store, c.at(400))[0].waits.is_empty());
+        assert!(row(&rows_of(&store, c.at(400)), "toolu_a").waits.is_empty());
     }
 }
