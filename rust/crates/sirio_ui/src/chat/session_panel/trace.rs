@@ -34,7 +34,7 @@ use crate::chat::trace::{
 };
 use crate::chat::{Chat, ChatEvent};
 use crate::trace_frame::{TICK, frame_driver};
-use crate::trace_style::{compact_count, state_color};
+use crate::trace_style::{compact_count, state_color, turn_color};
 use ely_gpui_component::{motion::ease_out_cubic, typography::ShimmerText};
 use gpui::{
     AnyElement, App, Context, CursorStyle, FontWeight, Hsla, InteractiveElement, IntoElement,
@@ -275,13 +275,15 @@ impl Beat {
 
 /// The colour and wash of the turn's status pill, and whether it pulses.
 fn turn_tone(theme: &Theme, state: TurnState) -> (Hsla, Hsla, bool) {
-    match state {
-        TurnState::Live => (theme.ely.info, theme.ely.info_subtle, true),
-        TurnState::Waiting => (theme.ely.warning, theme.ely.warning_subtle, true),
-        TurnState::Done => (theme.ely.success, theme.ely.success_subtle, false),
-        TurnState::Failed => (theme.ely.danger, theme.ely.danger_subtle, false),
-        TurnState::Interrupted => (theme.ely.fg_subtle, theme.ely.sunken, false),
-    }
+    let wash = match state {
+        TurnState::Live => theme.ely.info_subtle,
+        TurnState::Waiting => theme.ely.warning_subtle,
+        TurnState::Done => theme.ely.success_subtle,
+        TurnState::Failed => theme.ely.danger_subtle,
+        TurnState::Interrupted => theme.ely.sunken,
+    };
+    let pulses = matches!(state, TurnState::Live | TurnState::Waiting);
+    (turn_color(theme, state), wash, pulses)
 }
 
 /// The summary beside the card's title: `Live · 34s` in the running colour

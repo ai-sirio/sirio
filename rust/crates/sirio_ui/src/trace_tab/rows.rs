@@ -28,8 +28,22 @@ const INDENT: f32 = 14.0;
 /// The bar's place in a row.
 const BAR_TOP: f32 = 8.0;
 const BAR_HEIGHT: f32 = 12.0;
-/// A bar that ends past this share of the axis has its label on its left.
-const LABEL_FLIPS_AT: f32 = 0.72;
+/// The label's gap from the bar, and about how wide a character of it is at
+/// its size; the room a label needs is worked out from them, as the width of
+/// the text is not known until it is laid out.
+const LABEL_GAP: f32 = 6.0;
+const LABEL_CHAR: f32 = 6.5;
+/// The most characters of an error that its label counts on (it is cut at
+/// 240 px), and the width of the `Slowest` tag.
+const NOTE_CHARS: usize = 34;
+const SLOWEST_WIDTH: f32 = 60.0;
+/// The share of a bar's colour that a running agent's bar takes.
+const RUNNING_AGENT: f32 = 0.55;
+const NAME_SHARE: f32 = 0.34;
+const NAME_MIN: f32 = 200.0;
+const NAME_MAX: f32 = 360.0;
+/// A row's padding on each side.
+const ROW_PADDING: f32 = 12.0;
 
 /// `340ms` below a second, `4.1s` below a minute, then `1m 02s`: bars are
 /// short, so the whole seconds of `format_duration` would say `0s` of most.
@@ -86,6 +100,34 @@ pub(super) fn tooltip_lines(row: &TreeRow, elapsed: Duration) -> Vec<(&'static s
     lines
 }
 
+/// The colour of a row's bar: a failure is red, a model call violet, a tool
+/// teal, an agent that runs blue and one that ended from the grey ladder; an
+/// interrupted bar is dimmed.
+pub(super) fn bar_color(theme: &Theme, row: &TreeRow) -> Hsla {
+    let ely = &theme.ely;
+    let color = if row.state == SpanState::Failed {
+        ely.danger
+    } else {
+        match row.kind {
+            Some(SpanKind::Llm) => ely.chart[4],
+            Some(SpanKind::Tool) => ely.chart[1],
+            // An agent that is still running is drawn in the running colour,
+            // and goes back to the grey ladder once it has ended. A call keeps
+            // its own: its open end and the "now" line say it runs.
+            Some(SpanKind::Subagent) | None if row.end.is_none() => {
+                ely.info.opacity(RUNNING_AGENT)
+            }
+            Some(SpanKind::Subagent) => ely.fg_subtle.opacity(0.7),
+            None => ely.border_strong,
+        }
+    };
+    if row.state == SpanState::Interrupted {
+        color.opacity(0.7)
+    } else {
+        color
+    }
+}
+
 /// What a row is drawn with, once per frame.
 pub(super) struct RowStyle {
     pub(super) theme: Theme,
@@ -95,6 +137,8 @@ pub(super) struct RowStyle {
     pub(super) stacked: bool,
     pub(super) slowest: Option<String>,
     pub(super) selected: Option<String>,
+    /// How wide a row's bar column is, in pixels, as the tab is wide.
+    pub(super) track: f32,
     pub(super) entity: Entity<TraceTab>,
 }
 
@@ -104,25 +148,8 @@ impl RowStyle {
         (offset.as_secs_f32() / self.range.as_secs_f32().max(0.001)).clamp(0.0, 1.0)
     }
 
-    /// The colour of a row's bar: a failure is red, a model call violet, a
-    /// tool teal, an agent from the grey ladder.
     fn bar_color(&self, row: &TreeRow) -> Hsla {
-        let ely = &self.theme.ely;
-        let color = if row.state == SpanState::Failed {
-            ely.danger
-        } else {
-            match row.kind {
-                Some(SpanKind::Llm) => ely.chart[4],
-                Some(SpanKind::Tool) => ely.chart[1],
-                Some(SpanKind::Subagent) => ely.fg_subtle.opacity(0.7),
-                None => ely.border_strong,
-            }
-        };
-        if row.state == SpanState::Interrupted {
-            color.opacity(0.7)
-        } else {
-            color
-        }
+        bar_color(&self.theme, row)
     }
 
     /// The colour of a row's glyph: the bar's, except for an agent, whose
@@ -140,9 +167,20 @@ impl RowStyle {
     pub(super) fn name_column(&self) -> gpui::Div {
         div()
             .flex_none()
-            .w(relative(0.34))
-            .min_w(px(200.0))
-            .max_w(px(360.0))
+            .w(relative(NAME_SHARE))
+            .min_w(px(NAME_MIN))
+            .max_w(px(NAME_MAX))
+    }
+
+    /// How wide the bar column of a tab `tab` pixels wide is: what a row's
+    /// padding and its name column leave, or all of it when stacked.
+    pub(super) fn track_width(tab: f32, stacked: bool) -> f32 {
+        let inside = (tab - 2.0 * ROW_PADDING).max(0.0);
+        if stacked {
+            inside
+        } else {
+            inside - (inside * NAME_SHARE).clamp(NAME_MIN, NAME_MAX).min(inside)
+        }
     }
 }
 
@@ -243,6 +281,27 @@ fn render_name(rows: &[TreeRow], at: usize, style: &RowStyle) -> AnyElement {
         .into_any_element()
 }
 
+/// Where a row's label sits against its bar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    After,
+    Before,
+    On,
+}
+
+/// About how wide a label is: its duration, then the error of a failed span
+/// and the `Slowest` tag when it has them.
+fn label_width(took: &str, note: Option<&str>, slowest: bool) -> f32 {
+    let mut width = took.chars().count() as f32 * LABEL_CHAR;
+    if let Some(note) = note {
+        width += LABEL_GAP + note.chars().count().min(NOTE_CHARS) as f32 * LABEL_CHAR;
+    }
+    if slowest {
+        width += LABEL_GAP + SLOWEST_WIDTH;
+    }
+    width
+}
+
 /// A row's right cell: the grid, its bar, the hatched stretches it waited,
 /// the marks a folded parent shows for what it hides, the "now" line while
 /// the turn runs, and the label that says how long it took.
@@ -310,50 +369,65 @@ fn render_track(row: &TreeRow, style: &RowStyle) -> AnyElement {
             .bg(theme.ely.info.opacity(0.75))
     });
 
-    // Its duration, on the side of the bar with room for it, and what else
-    // there is to say of it.
+    // Its duration, and what else there is to say of it, where it fits: after
+    // the bar, else before it, else on the bar's own end, which every bar has
+    // room for when neither side has.
     let took = end_offset.saturating_sub(row.start);
-    let left_of_bar = end > LABEL_FLIPS_AT;
+    let took_text = short_duration(took);
+    let is_slowest = style.slowest.as_deref() == Some(span);
+    let room = label_width(&took_text, row.note.as_deref(), is_slowest);
+    let after = if open_end { 2.0 * LABEL_GAP + 2.0 } else { LABEL_GAP };
+    let place = if style.track * (1.0 - end) >= room + after {
+        Place::After
+    } else if style.track * start >= room + LABEL_GAP {
+        Place::Before
+    } else {
+        Place::On
+    };
     let label = div()
+        .debug_selector(selector("trace-label", span))
         .absolute()
         .top_0()
         .h_full()
         .flex()
         .items_center()
-        .gap(px(6.0))
+        .gap(px(LABEL_GAP))
         .whitespace_nowrap()
         .text_size(px(11.0))
-        .text_color(theme.ely.fg_muted)
-        .when(left_of_bar, |label| {
-            label.right(relative(1.0 - start)).mr(px(6.0))
+        .text_color(if place == Place::On {
+            theme.ely.fg
+        } else {
+            theme.ely.fg_muted
         })
-        .when(!left_of_bar, |label| {
-            label
-                .left(relative(end))
-                .ml(px(if open_end { 14.0 } else { 6.0 }))
+        .map(|label| match place {
+            Place::After => label.left(relative(end)).ml(px(after)),
+            Place::Before => label.right(relative(1.0 - start)).mr(px(LABEL_GAP)),
+            Place::On => label.right(relative(1.0 - end)).mr(px(LABEL_GAP)),
         })
-        .child(short_duration(took))
+        .child(took_text)
         .children(row.note.as_ref().map(|note| {
             div()
                 .debug_selector(selector("trace-note", span))
                 .max_w(px(240.0))
                 .truncate()
-                .text_color(theme.ely.danger)
+                .text_color(if place == Place::On {
+                    theme.ely.fg
+                } else {
+                    theme.ely.danger
+                })
                 .child(note.clone())
         }))
-        .children(
-            (style.slowest.as_deref() == Some(span)).then(|| {
-                div()
-                    .debug_selector(selector("trace-slowest", span))
-                    .px(px(5.0))
-                    .rounded(theme.radii.chip)
-                    .border_1()
-                    .border_color(theme.ely.warning.opacity(0.5))
-                    .bg(theme.ely.warning_subtle)
-                    .text_color(theme.ely.warning)
-                    .child("Slowest")
-            }),
-        );
+        .children(is_slowest.then(|| {
+            div()
+                .debug_selector(selector("trace-slowest", span))
+                .px(px(5.0))
+                .rounded(theme.radii.chip)
+                .border_1()
+                .border_color(theme.ely.warning.opacity(0.5))
+                .bg(theme.ely.warning_subtle)
+                .text_color(theme.ely.warning)
+                .child("Slowest")
+        }));
 
     div()
         .debug_selector(selector("trace-row-track", span))
@@ -388,7 +462,7 @@ pub(super) fn render_row(rows: &[TreeRow], at: usize, style: &RowStyle) -> AnyEl
         } else {
             ROW_HEIGHT
         }))
-        .px(px(12.0))
+        .px(px(ROW_PADDING))
         .flex()
         .when(style.stacked, |row| row.flex_col().justify_center())
         .when(!style.stacked, |row| row.items_center())

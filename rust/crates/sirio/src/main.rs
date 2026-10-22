@@ -1559,14 +1559,14 @@ struct ParkedWorktreeTabs {
 }
 
 /// A Trace tab kept while its worktree is parked. It holds no state of its
-/// own besides which turn is shown and what is folded, which the view keeps.
+/// own besides which turn is shown and what is folded, which the view keeps;
+/// its title is the chat tab's, read again when it comes back.
 struct ParkedTrace {
     /// The persistence id of the chat tab it shows, how that chat is found
     /// again among the restored tabs.
     chat_tab: String,
     /// The chat itself: the tab comes back only if this very session did.
     chat: gpui::EntityId,
-    title: String,
     view: Entity<TraceTab>,
 }
 
@@ -5237,6 +5237,11 @@ fn delegated_terminal_context_action(
 /// not cached.
 fn cached_full() -> StyleRefinement {
     StyleRefinement::default().size_full()
+}
+
+/// A Trace tab's title: the chat tab's, which it follows.
+fn trace_tab_title(chat_title: &str) -> String {
+    format!("Trace · {chat_title}")
 }
 
 /// The strip's entry for a Trace tab: Secondary, never moved, named by the
@@ -12991,6 +12996,7 @@ impl SirioWorkspace {
             && self.tabs[tab_index].title != title
         {
             self.tabs[tab_index].title = title;
+            self.sync_trace_titles(cx);
             self.rebuild_center_split();
             cx.notify();
         }
@@ -13047,6 +13053,7 @@ impl SirioWorkspace {
             return;
         }
         tab.title = title;
+        self.sync_trace_titles(cx);
         self.schedule_save(cx);
         self.mark_activity_dirty();
         cx.notify();
@@ -13367,25 +13374,18 @@ impl SirioWorkspace {
 
     /// The Trace tabs on screen, each with the chat tab it shows.
     fn parked_traces(&self, cx: &App) -> Vec<ParkedTrace> {
-        let mut parked = Vec::new();
-        for tab in &self.tabs {
-            tab.panes.for_each(&mut |_, content| {
-                let TabContent::Trace(view) = content else {
-                    return;
-                };
+        self.trace_views()
+            .into_iter()
+            .filter_map(|(_, view)| {
                 let chat = view.read(cx).chat_id();
-                let Some(chat_tab) = self.chat_tab_of(chat) else {
-                    return;
-                };
-                parked.push(ParkedTrace {
+                let chat_tab = self.chat_tab_of(chat)?;
+                Some(ParkedTrace {
                     chat_tab: chat_tab.persistence_id.clone(),
                     chat,
-                    title: tab.title.clone(),
-                    view: view.clone(),
-                });
-            });
-        }
-        parked
+                    view,
+                })
+            })
+            .collect()
     }
 
     fn park_current_worktree_tabs(&mut self, cx: &App) -> SessionLayout {
@@ -17008,24 +17008,49 @@ impl SirioWorkspace {
         })
     }
 
-    /// The id of the strip's Trace tab for the chat `chat`, if it has one.
-    fn trace_tab_of(&self, chat: gpui::EntityId, cx: &App) -> Option<usize> {
-        self.tabs.iter().find_map(|tab| {
-            let mut shows_it = false;
+    /// Every Trace tab of the strip on screen, with its tab id.
+    fn trace_views(&self) -> Vec<(usize, Entity<TraceTab>)> {
+        let mut found = Vec::new();
+        for tab in &self.tabs {
             tab.panes.for_each(&mut |_, content| {
                 if let TabContent::Trace(view) = content {
-                    shows_it |= view.read(cx).chat_id() == chat;
+                    found.push((tab.id, view.clone()));
                 }
             });
-            shows_it.then_some(tab.id)
-        })
+        }
+        found
+    }
+
+    /// The strip's Trace tab for the chat `chat`, if it has one.
+    fn trace_view_of(&self, chat: gpui::EntityId, cx: &App) -> Option<(usize, Entity<TraceTab>)> {
+        self.trace_views()
+            .into_iter()
+            .find(|(_, view)| view.read(cx).chat_id() == chat)
+    }
+
+    /// Names the Trace tab of each chat after the chat's own tab, which the
+    /// user, the summarizer or the first prompt may just have retitled.
+    fn sync_trace_titles(&mut self, cx: &App) {
+        let titles: Vec<(usize, String)> = self
+            .trace_views()
+            .into_iter()
+            .filter_map(|(id, view)| {
+                let chat_tab = self.chat_tab_of(view.read(cx).chat_id())?;
+                Some((id, trace_tab_title(&chat_tab.title)))
+            })
+            .collect();
+        for (id, title) in titles {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                tab.title = title;
+            }
+        }
     }
 
     /// Opens `chat`'s Trace tab, or brings forward the one it has: one per
     /// chat. The tab is named after the chat's own, and holds nothing but a
     /// handle to the chat's trace.
     fn add_trace_tab(&mut self, chat: &Entity<Chat>, cx: &mut Context<Self>) {
-        if let Some(tab_id) = self.trace_tab_of(chat.entity_id(), cx) {
+        if let Some((tab_id, _)) = self.trace_view_of(chat.entity_id(), cx) {
             self.select_tab(tab_id, None, cx);
             return;
         }
@@ -17034,7 +17059,7 @@ impl SirioWorkspace {
         let Some(chat_tab) = self.chat_tab_of(chat.entity_id()) else {
             return;
         };
-        let title = format!("Trace · {}", chat_tab.title);
+        let title = trace_tab_title(&chat_tab.title);
         let view = cx.new(|cx| TraceTab::new(chat.clone(), cx));
         Self::subscribe_trace_tab(&view, cx);
         let tab_id = self.next_tab_id;
@@ -17067,19 +17092,10 @@ impl SirioWorkspace {
         cx.subscribe(view, |workspace, emitter, event: &TraceTabEvent, cx| match event {
             TraceTabEvent::Close => {
                 let hosted: Vec<usize> = workspace
-                    .tabs
-                    .iter()
-                    .filter_map(|tab| {
-                        let mut found = false;
-                        tab.panes.for_each(&mut |_, content| {
-                            if let TabContent::Trace(view) = content
-                                && view.entity_id() == emitter.entity_id()
-                            {
-                                found = true;
-                            }
-                        });
-                        found.then_some(tab.id)
-                    })
+                    .trace_views()
+                    .into_iter()
+                    .filter(|(_, view)| view.entity_id() == emitter.entity_id())
+                    .map(|(tab_id, _)| tab_id)
                     .collect();
                 for tab_id in hosted {
                     workspace.close_tab_by_id(tab_id, None, cx);
@@ -17098,7 +17114,7 @@ impl SirioWorkspace {
             return;
         };
         for trace in parked {
-            let came_back = tabs.iter().any(|tab| {
+            let chat_tab = tabs.iter().find(|tab| {
                 let mut same = false;
                 tab.panes.for_each(&mut |_, content| {
                     if let TabContent::Chat(chat) = content {
@@ -17107,16 +17123,18 @@ impl SirioWorkspace {
                 });
                 same && tab.persistence_id == trace.chat_tab
             });
-            if !came_back {
+            // Named for the tab its chat comes back in, which may have been
+            // retitled while it was away.
+            let Some(title) = chat_tab.map(|tab| trace_tab_title(&tab.title)) else {
                 continue;
-            }
+            };
             // Tab ids are positions, and a pane id must not be one the
             // restored tabs hold.
             let pane_id = next_pane_id(tabs).max(self.next_pane_id);
             self.next_pane_id = pane_id + 1;
             let id = tabs.len();
             let persistence_id = self.session.new_tab_id(worktree, id);
-            tabs.push(trace_open_tab(id, persistence_id, trace.title, pane_id, trace.view));
+            tabs.push(trace_open_tab(id, persistence_id, title, pane_id, trace.view));
         }
     }
 
@@ -17143,18 +17161,7 @@ impl SirioWorkspace {
         let Some(chat) = chat else {
             return Err(format!("chat surface is not mounted: {surface_id}"));
         };
-        let view = self.tabs.iter().find_map(|tab| {
-            let mut found = None;
-            tab.panes.for_each(&mut |_, content| {
-                if let TabContent::Trace(view) = content
-                    && view.read(cx).chat_id() == chat
-                {
-                    found = Some(view.clone());
-                }
-            });
-            found
-        });
-        let Some(view) = view else {
+        let Some((_, view)) = self.trace_view_of(chat, cx) else {
             return Ok(vec![("open".to_string(), "0".to_string())]);
         };
         let snapshot = view.read(cx).snapshot(cx);
@@ -22450,6 +22457,7 @@ impl SirioWorkspace {
         // of automatic renaming, mirroring Swift's `tab.titleIsAutoNamed =
         // false` on manual rename.
         tab.title_is_auto_named = false;
+        self.sync_trace_titles(cx);
         self.schedule_save(cx);
         self.mark_activity_dirty();
         true
@@ -34016,15 +34024,11 @@ done
 
     /// Each Trace tab of the strip as (tab id, the chat it shows).
     fn trace_tabs(workspace: &SirioWorkspace, cx: &App) -> Vec<(usize, gpui::EntityId)> {
-        let mut found = Vec::new();
-        for tab in &workspace.tabs {
-            tab.panes.for_each(&mut |_, content| {
-                if let TabContent::Trace(view) = content {
-                    found.push((tab.id, view.read(cx).chat_id()));
-                }
-            });
-        }
-        found
+        workspace
+            .trace_views()
+            .into_iter()
+            .map(|(id, view)| (id, view.read(cx).chat_id()))
+            .collect()
     }
 
     #[gpui::test]
@@ -34246,6 +34250,78 @@ done
         cx.run_until_parked();
         workspace.read_with(&cx, |workspace, cx| {
             assert_eq!(trace_tabs(workspace, cx).len(), 1);
+        });
+    }
+
+    fn title_of_trace_tab(workspace: &SirioWorkspace) -> String {
+        workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.kind == TabKind::Trace)
+            .map(|tab| tab.title.clone())
+            .expect("the trace tab")
+    }
+
+    #[gpui::test]
+    async fn a_trace_tab_is_named_after_its_chats_current_title(cx: &mut TestAppContext) {
+        let (workspace, mut cx, repo, _other) = trace_test_workspace(cx, "trace-title");
+        let chat = workspace.update(&mut cx, |workspace, cx| {
+            push_trace_test_chat(workspace, "chat-a", &repo, cx)
+        });
+        chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(title_of_trace_tab(workspace), "Trace · Chat chat-a");
+        });
+
+        // The user renames the chat.
+        workspace.update(&mut cx, |workspace, cx| {
+            assert!(workspace.apply_manual_tab_title(0, "Fix the login", cx));
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(title_of_trace_tab(workspace), "Trace · Fix the login");
+        });
+
+        // The summarizer names it, once the chat is let to be named.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[0].title_is_auto_named = true;
+            workspace.apply_auto_title(0, "Repair the logout".into(), cx);
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(title_of_trace_tab(workspace), "Trace · Repair the logout");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_parked_trace_tab_is_named_for_the_chat_it_comes_back_with(cx: &mut TestAppContext) {
+        let (workspace, mut cx, repo, other) = trace_test_workspace(cx, "trace-title-parked");
+        let chat = workspace.update(&mut cx, |workspace, cx| {
+            let chat = push_trace_test_chat(workspace, "live-chat", &repo, cx);
+            workspace.session.save_layout_now(&persisted_layout(
+                &other,
+                "other",
+                vec![persisted_chat("other-a", "Other A", true)],
+            ));
+            chat
+        });
+        chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_worktree(other.clone(), None, cx).expect("switch away");
+            // The chat's tab is retitled while it is away.
+            let retained = workspace
+                .retained_worktree_chats
+                .get_mut(&repo.to_string_lossy().into_owned())
+                .and_then(|retained| retained.get_mut("live-chat"))
+                .expect("the chat is retained");
+            retained.title = "Renamed while away".into();
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_worktree(repo.clone(), None, cx).expect("switch back");
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(title_of_trace_tab(workspace), "Trace · Renamed while away");
         });
     }
 
