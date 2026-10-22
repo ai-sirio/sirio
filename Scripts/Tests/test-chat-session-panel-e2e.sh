@@ -13,9 +13,10 @@ set -euo pipefail
 #
 # Every card but Environment starts folded, and the change request card is read only
 # while it is unfolded and a frame paints the column, so a run with no display
-# (--state-only alone) has nothing that paints and skips the three scenarios that
-# read the forge (default_folds, change_request, rate_limit_shared); --state-only
-# with --display :N paints on that display without taking captures and runs all seven.
+# (--state-only alone) has nothing that paints and skips the scenarios that need a
+# frame (default_folds, change_request, rate_limit_shared, trace_tab, trace_idle);
+# --state-only with --display :N paints on that display without taking captures and
+# runs all of them.
 # A scenario that works inside a card unfolds it first (unfold_cards).
 #
 # Scenarios (each starts a fresh Sirio with its own database, host and HOME):
@@ -35,6 +36,33 @@ set -euo pipefail
 #                      too: the row says so and the forge sees no read of it during the pause
 #   restore            the column is open, Sirio quits and starts again: it is still open
 #
+# The trace scenarios (spec 2026-10-21-chat-trace-waterfall-design.md §8) use another stub,
+# Scripts/Tests/stubs/trace/claude, the same fixture in its trace mode: the first word of
+# a prompt picks a scripted turn (subagents, second, cancel, hang, die, subperm,
+# subperm_early) and TRACE_STEP_MS (400 by default) paces its lines, so a live state can be
+# read mid-turn. They are asserted on the card's rows in `sessionPanel`, on
+# `surface.trace.read` (the Trace tab) and on `firstVisibleEntry` of `surface.chat.read`.
+#   trace_live         a turn with two parallel agents (one nesting a third), an Edit that asks and
+#                      a Bash that fails and then works: the lanes, the waiting tag and its row, the
+#                      reveal of the permission, the failed and done calls, Done with $0.31
+#   trace_cost         a second turn's cost is the difference of the process's totals: $0.12
+#   trace_interrupt    Stop ends the turn Interrupted, its cost and the next turn's are unknown
+#   trace_death        the CLI dying mid-call ends the turn Failed, every lane failed or interrupted
+#   trace_hang         a call that never reports ends interrupted with the turn
+#   trace_subagent_permission  a subagent's request is a waiting lane and one Permission card, never a
+#                      tool row left pending, whether it comes after its call's line or before
+#   trace_reveal       a lane reveals its Agent row, the root the user's message
+#   trace_tab          the Trace tab: its tree, one per chat, kept across a worktree switch, never
+#                      restored, closed with its chat
+#   trace_idle         SIRIO_PERF_TRACE counts the frames the trace asks for (trace.frame): some while
+#                      a turn runs and the card or the tab is drawn, none with it folded, with another
+#                      tab selected, with the worktree parked or after the turn
+#   trace_keys         real X input on the Trace tab: a click on a row and Enter on the selected row
+#                      reveal its Agent row, a click on the Follow checkbox toggles it
+# trace_tab and trace_idle need a painted column (--display :N): the tab closes one paint after its
+# chat is released, and a frame that is never painted asks for nothing whatever the code does.
+# trace_keys needs a framed run at --window-size 2200x1000 (no --state-only): it clicks at pixels.
+#
 # Isolation: every Sirio starts under `env -i` with an allowlist (see launch()), the
 # stub agent CLIs first on PATH, a private HOME, XDG directories, database, socket,
 # credentials and host root. The run records the hash of the user's
@@ -44,8 +72,11 @@ set -euo pipefail
 #
 # The artifact: --out-dir DIR (default artifacts/chat-session-panel-e2e-<stamp>-<pid>)
 # keeps transcript.log (every call and every read of the column), the app logs, the
-# fake forge's request log, stub-calls.log and -- unless --state-only -- PID-matched
-# window captures in frames/. Rerunning the script reproduces it.
+# fake forge's request log, stub-calls.log, the performance traces of trace_idle
+# (trace_idle-*.tsv) and -- unless --state-only -- PID-matched window captures in
+# frames/. Rerunning the script reproduces it. The run's own directory is made under
+# $TMPDIR (a unix socket path must stay under 108 bytes, so point TMPDIR at a short
+# directory if /tmp is not wanted).
 #
 # Usage: Scripts/Tests/test-chat-session-panel-e2e.sh [--state-only] [--out-dir DIR]
 #          [--display :N] [--appearance light|dark] [--window-size WxH] [--only NAME[,NAME...]]
@@ -62,7 +93,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirio"
 CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
-ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore)
+ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
+  trace_live trace_cost trace_interrupt trace_death trace_hang trace_subagent_permission trace_reveal
+  trace_tab trace_idle trace_keys)
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
@@ -85,12 +118,20 @@ refuse() { echo "refused: $*" >&2; exit 2; }
 case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark, not $APPEARANCE" ;; esac
 [ -z "$WINDOW_SIZE" ] || [[ "$WINDOW_SIZE" =~ ^[0-9]+x[0-9]+$ ]] || refuse "--window-size is WxH, not $WINDOW_SIZE"
 # The scenarios that read the forge through the change request card, which reads only
-# while a frame paints the column.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared "
+# while a frame paints the column, and the two that need a frame for what they assert:
+# a Trace tab closes one paint after its chat is released, and a trace that asks for no
+# frame proves nothing when nothing is ever painted.
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys "
+# trace_keys sends real X clicks and keys at pixels of the 2200x1000 layout, so it needs a
+# framed run (no --state-only) at that window size.
+FRAMED_SCENARIOS=" trace_keys "
+framed_run() { [ "$STATE_ONLY" -eq 0 ] && [ "$WINDOW_SIZE" = 2200x1000 ]; }
 SCENARIOS=()
 SKIPPED=()
 for name in "${ALL_SCENARIOS[@]}"; do
   if [ -z "$DISPLAY_TARGET" ] && [[ "$PAINTED_SCENARIOS" == *" $name "* ]]; then
+    SKIPPED+=("$name")
+  elif [[ "$FRAMED_SCENARIOS" == *" $name "* ]] && ! framed_run; then
     SKIPPED+=("$name")
   else
     SCENARIOS+=("$name")
@@ -101,6 +142,7 @@ if [ -n "$ONLY" ]; then
   for name in "${SCENARIOS[@]}"; do
     case " ${ALL_SCENARIOS[*]} " in *" $name "*) ;; *) refuse "unknown scenario $name (${ALL_SCENARIOS[*]})" ;; esac
     [ -n "$DISPLAY_TARGET" ] || [[ "$PAINTED_SCENARIOS" != *" $name "* ]] || refuse "scenario $name needs a painted column: pass --display :N"
+    [[ "$FRAMED_SCENARIOS" != *" $name "* ]] || framed_run || refuse "scenario $name sends real clicks at the 2200x1000 layout: pass --display :N --window-size 2200x1000 and no --state-only"
   done
 fi
 # The display number of a local X display: ":97", ":0097" and ":97.0" are all 97.
@@ -147,7 +189,7 @@ command -v python3 >/dev/null || fail "python3 is required"
 command -v curl >/dev/null || fail "curl is required"
 echo "display: ${DISPLAY_TARGET:-none (--state-only)}; scenarios: ${SCENARIOS[*]}; appearance: ${APPEARANCE:-default}"
 for name in "${SKIPPED[@]:-}"; do
-  [ -z "$name" ] || [ -n "$ONLY" ] || echo "SKIP: scenario $name reads a column that only a frame paints, and there is no --display"
+  [ -z "$name" ] || [ -n "$ONLY" ] || echo "SKIP: scenario $name needs a framed run (a painted column; trace_keys also the 2200x1000 window and real X input)"
 done
 
 # ---- the user's mise config must not move ---------------------------------
@@ -221,6 +263,7 @@ cleanup() {
   stop_hosts
   stop_run_processes
   cp "$RUN_DIR"/*.log "$OUT_DIR/" 2>/dev/null || true
+  cp "$RUN_DIR"/*.tsv "$OUT_DIR/" 2>/dev/null || true
   rm -rf --one-file-system "$RUN_DIR"
 }
 trap cleanup EXIT
@@ -269,7 +312,6 @@ git -C "$STRANGER" commit -q --allow-empty -m first
 git -C "$STRANGER" remote add origin https://git.example.invalid/acme/stranger.git
 
 # ---- stubs: the claude shim first, the other agents, and a browser ---------
-STUBS="$ROOT/Scripts/Tests/stubs/session-panel"
 mkdir -p "$RUN_DIR/bin"
 for name in codex opencode pi omp; do
   cat >"$RUN_DIR/bin/$name" <<STUB_EOF
@@ -302,10 +344,22 @@ exit 1
 STUB_EOF
   chmod +x "$CLI_STUBS/$name"
 done
-APP_PATH="$STUBS:$RUN_DIR/bin:/usr/local/bin:/usr/bin:/bin"
-resolved=$(PATH="$APP_PATH" command -v claude || true)
-[ "$resolved" = "$STUBS/claude" ] || fail "claude resolves to '$resolved' under the app's PATH, not the shim"
-echo "OK: claude resolves to the shim"
+# Which claude shim the next launch puts first on the app's PATH: session-panel (the
+# column's own scenarios) or trace (the trace scenarios). A scenario picks its stub by
+# naming it in SIRIO_E2E_CLAUDE_STUB through use_stub, and the run loop puts the default
+# back before the next scenario.
+use_stub() { # session-panel|trace
+  SIRIO_E2E_CLAUDE_STUB=$1
+  local stubs="$ROOT/Scripts/Tests/stubs/$SIRIO_E2E_CLAUDE_STUB" resolved
+  APP_PATH="$stubs:$RUN_DIR/bin:/usr/local/bin:/usr/bin:/bin"
+  resolved=$(PATH="$APP_PATH" command -v claude || true)
+  [ "$resolved" = "$stubs/claude" ] || fail "claude resolves to '$resolved' under the app's PATH, not the $SIRIO_E2E_CLAUDE_STUB shim"
+}
+for stub in session-panel trace; do
+  use_stub "$stub"
+  echo "OK: claude resolves to the $stub shim"
+done
+use_stub session-panel
 
 VULKAN_ENV=()
 if [ -n "$DISPLAY_TARGET" ]; then
@@ -324,7 +378,7 @@ reply() { timeout -k 5 "$CALL_TIMEOUT" "$CTL" "$@" --json 2>/dev/null; }
 # every build serves) and for reading the column: it speaks the control socket's
 # line-delimited JSON itself.
 cat >"$RUN_DIR/e2e.py" <<'PY'
-import json, os, socket, sys, time
+import json, os, re, socket, sys, time
 
 
 def rpc(method, params):
@@ -345,8 +399,19 @@ def rpc(method, params):
     return response.get("result") or {}
 
 
+def state(surface):
+    """The column's JSON and the rest of the chat's own read: its status, its transcript
+    (the rows decoded) and where its list's top sits (`first`)."""
+    result = rpc("surface.chat.read", {"surfaceId": surface})
+    panel = json.loads(result["sessionPanel"])
+    chat = {k: v for k, v in result.items() if k != "sessionPanel"}
+    chat["transcript"] = json.loads(chat.get("transcript") or "[]")
+    chat["first"] = int(chat.get("firstVisibleEntry") or 0)
+    return panel, chat
+
+
 def panel(surface):
-    return json.loads(rpc("surface.chat.read", {"surfaceId": surface})["sessionPanel"])
+    return state(surface)[0]
 
 
 class Helpers:
@@ -365,11 +430,48 @@ class Helpers:
         return s["rows"] if s else []
 
 
-def evaluate(expr, p):
+def evaluate(expr, surface, p, c):
     # The expressions are this script's own, written next to their scenario; the
-    # only data they see is the column's JSON.
+    # only data they see is the chat's own reads: `p` the column's JSON, `c` the rest of
+    # `surface.chat.read`, and `tab()` the Trace tab's `surface.trace.read`.
     h = Helpers(p)
-    return eval(expr, {"p": p, "S": h.S, "R": h.R, "rows": h.rows, "json": json})
+
+    def lanes_of():
+        return {r["key"][len("trace/lane/"):]: r for r in h.rows("trace") if r["key"].startswith("trace/lane/")}
+
+    def wait_rows():
+        return [r for r in h.rows("trace") if r["key"].startswith("trace/wait/")]
+
+    def row_index(row_id):
+        # The transcript's own index of a tool or Agent row.
+        return next((i for i, r in enumerate(c["transcript"]) if r.get("kind") == "tool" and r.get("id") == row_id), None)
+
+    def drawn_index(row_id):
+        # The index the transcript draws a row at: consecutive tool rows are one box, drawn at
+        # the run's last row, so that is where a reveal of any of them lands.
+        at = row_index(row_id)
+        while at is not None and at + 1 < len(c["transcript"]) and c["transcript"][at + 1].get("kind") == "tool":
+            at += 1
+        return at
+
+    def pending():
+        return [(i, r["id"]) for i, r in enumerate(c["transcript"]) if r.get("kind") == "permission" and r.get("status") == "pending"]
+
+    def tab():
+        result = dict(rpc("surface.trace.read", {"surfaceId": surface}))
+        result["spans"] = json.loads(result.get("spans") or "[]")
+        return result
+
+    def T(span_id):
+        return next((s for s in tab()["spans"] if s["id"] == span_id), None)
+
+    namespace = {
+        "p": p, "c": c, "S": h.S, "R": h.R, "rows": h.rows, "json": json, "re": re,
+        "lane": lambda key: h.R("trace", "trace/lane/" + key), "lanes_of": lanes_of,
+        "wait_rows": wait_rows, "row_index": row_index, "drawn_index": drawn_index, "pending": pending,
+        "tab": tab, "T": T,
+    }
+    return eval(expr, namespace)
 
 
 command = sys.argv[1]
@@ -386,8 +488,8 @@ elif command in ("wait", "find"):
     last, error = None, None
     while True:
         try:
-            last = panel(surface)
-            got = evaluate(expr, last)
+            last, chat = state(surface)
+            got = evaluate(expr, surface, last, chat)
             if got:
                 print("  read: " + json.dumps(last, separators=(",", ":")), file=sys.stderr)
                 print(got if command == "find" else f"OK: {desc}")
@@ -408,12 +510,51 @@ elif command in ("wait", "find"):
 elif command == "check":
     # check SURFACE DESC EXPR: one read, no waiting.
     surface, desc, expr = sys.argv[2], sys.argv[3], sys.argv[4]
-    p = panel(surface)
+    p, chat = state(surface)
     print("  read: " + json.dumps(p, separators=(",", ":")), file=sys.stderr)
-    if not evaluate(expr, p):
+    if not evaluate(expr, surface, p, chat):
         print(f"FAIL: {desc}: {expr}", file=sys.stderr)
         sys.exit(1)
     print(f"OK: {desc}")
+elif command == "perf-window":
+    # perf-window FILE SECONDS: how many trace.frame events the app recorded in the next
+    # SECONDS, by wall clock (the file's header names the instant its own clock began),
+    # once its writer has flushed past the window, which it does about once a second. The
+    # writer drops events rather than block and says so in its health rows: the total it
+    # reports is part of the answer.
+    path, seconds = sys.argv[2], float(sys.argv[3])
+
+    def read_perf():
+        epoch, rows = None, []
+        with open(path) as handle:
+            for line in handle:
+                line = line.rstrip("\n")
+                if line.startswith("# sirio-perf-v1"):
+                    epoch = int(next(f for f in line.split("\t") if f.startswith("epoch_ns=")).split("=")[1])
+                elif line and not line.startswith("#"):
+                    start, _, kind, name, entity, _ = line.split("\t")[:6]
+                    rows.append((epoch + int(start), kind, name, int(entity)))
+        return rows
+
+    t0 = time.time_ns()
+    time.sleep(seconds)
+    t1 = time.time_ns()
+    deadline = time.time() + 10
+    while True:
+        rows = read_perf()
+        if any(name == "trace.dropped" and wall > t1 for wall, _, name, _ in rows):
+            break
+        if time.time() > deadline:
+            print("FAIL: the performance trace was not flushed past the window", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.25)
+    frames = {}
+    for wall, kind, name, entity in rows:
+        if name == "trace.frame" and t0 <= wall <= t1:
+            frames[entity] = frames.get(entity, 0) + 1
+    dropped = sum(entity for _, _, name, entity in rows if name == "trace.dropped")
+    print(json.dumps({"frames": sum(frames.values()), "by_entity": frames, "dropped": dropped,
+                      "frames_in_file": sum(1 for _, _, name, _ in rows if name == "trace.frame")}))
 PY
 E2E() { python3 "$RUN_DIR/e2e.py" "$@"; }
 SURFACE=""
@@ -445,6 +586,13 @@ unfold_cards() { # key...
     panel_ctl toggle "$key" >/dev/null
     wait_panel "the $key card is unfolded" "S('$key')['expanded'] is True"
   done
+}
+# Unfolds a card unless it is open already, where unfold_cards would toggle it shut.
+ensure_unfolded() { # key
+  wait_panel "the $1 card is drawn" "S('$1') is not None"
+  if ! E2E check "$SURFACE" "the $1 card is unfolded" "S('$1')['expanded'] is True" >/dev/null 2>&1; then
+    unfold_cards "$1"
+  fi
 }
 # Folds the cards above the one a capture is of, so a narrow chat's column shows it whole.
 fold_cards() { # key...
@@ -520,6 +668,8 @@ capture() { # name
 #   SIRIO_FORGE_TEST_ENDPOINTS  ghe.test -> the loopback fake forge (debug builds only)
 #   SIRIO_FIXTURE_REPO  where the stub claude says the project memory lives
 #   SIRIO_STUB_LOG  the shim's call log; SIRIO_CSP_E2E_RUN marks this run's processes
+#   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
+#   SIRIO_PERF_TRACE  trace_idle's performance trace (a file that does not exist yet)
 # How many `claude --version` probes the shim has recorded.
 probe_count() { local n; n=$(grep -c '^claude --version$' "$RUN_DIR/stub-calls.log" 2>/dev/null || true); echo "${n:-0}"; }
 launch() { # name (a relaunch under the same name keeps its database and host)
@@ -541,8 +691,10 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FORGE_TEST_ENDPOINTS=ghe.test=http://127.0.0.1:$FORGE_PORT"
     "GH_CONFIG_DIR=$home/gh" "GLAB_CONFIG_DIR=$home/glab"
     "SIRIO_FIXTURE_REPO=$LINKED" "SIRIO_STUB_LOG=$RUN_DIR/stub-calls.log"
-    "SIRIO_CSP_E2E_RUN=$RUN_DIR"
+    "SIRIO_CSP_E2E_RUN=$RUN_DIR" "TRACE_STEP_MS=${TRACE_STEP_MS:-400}"
   )
+  # A performance trace names a file that does not exist yet, one per launch.
+  [ -z "${PERF_TRACE:-}" ] || pairs+=("SIRIO_PERF_TRACE=$PERF_TRACE")
   [ -z "${LC_ALL:-}" ] || pairs+=("LC_ALL=$LC_ALL")
   if [ -n "$DISPLAY_TARGET" ]; then
     pairs+=("DISPLAY=$DISPLAY_TARGET" "GPUI_X11_SCALE_FACTOR=1" "${VULKAN_ENV[@]}")
@@ -637,6 +789,73 @@ open_chat() {
   done
   [ -n "$SURFACE" ] || fail "no chat tab opened"
   echo "OK: chat surface $SURFACE"
+}
+
+# ---- the trace scenarios' helpers -----------------------------------------------------
+# A fresh Sirio on the fixture with the trace stub and a Claude chat, its column open.
+# TRACE_STEP_MS (the optional second argument, in ms) paces the fixture's scripted lines;
+# a scenario that reads no live state runs them fast.
+trace_chat() { # name [step-ms]
+  use_stub trace
+  TRACE_STEP_MS=${2:-400}
+  launch "$1"
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  open_column
+}
+
+# Sends a prompt once the chat is neither connecting nor streaming (a prompt sent while the
+# agent connects is held back, and one sent while a turn streams is queued).
+send_prompt() { # text
+  wait_panel "the chat is ready for a prompt" 'c["status"] in ("idle", "completed")' 30
+  E2E rpc surface.chat.send surfaceId="$SURFACE" text="$1" >/dev/null || fail "sending '$1' failed"
+  echo "step: sent '$1'"
+}
+
+# Answers the permission card the turn waits on: allow_once or reject_once.
+answer_permission() { # option
+  local id
+  id=$(find_panel "a permission card is pending" 'next((r["id"] for r in c["transcript"] if r.get("kind") == "permission" and r.get("status") == "pending"), "")' 30)
+  E2E rpc surface.chat.permission surfaceId="$SURFACE" requestId="$id" optionId="$1" >/dev/null || fail "answering request $id with $1 failed"
+  echo "OK: request $id answered with $1"
+}
+
+# The Secondary half's tab kinds, comma separated, as `surface layout read` lists them.
+secondary_kinds() { reply surface layout read | python3 -c 'import json, sys; print(json.load(sys.stdin)[0].get("secondaryKinds", ""))'; }
+# How many trace tabs the Secondary half has (the chat's own tab is in it too).
+trace_tab_count() { secondary_kinds | tr ',' '\n' | grep -c '^trace$' || true; }
+# Polls the layout until the Secondary half has (present) or has not (absent) a trace tab.
+# The tab closes one paint after its chat is released, so the wait is bounded and the
+# window is painted: it is never read once.
+wait_trace_tab() { # desc present|absent seconds
+  local desc=$1 want=$2 seconds=${3:-20} kinds="" has _
+  for _ in $(seq 1 $((seconds * 3))); do
+    kinds=$(secondary_kinds || true)
+    case ",$kinds," in *,trace,*) has=present ;; *) has=absent ;; esac
+    if [ "$has" = "$want" ]; then echo "  read: secondaryKinds=$kinds"; echo "OK: $desc"; return 0; fi
+    sleep 0.3
+  done
+  fail "$desc: secondaryKinds is '$kinds', a trace tab is not $want"
+}
+
+# How many trace.frame events the app recorded in the next SECONDS, `zero` or `some` of
+# them expected. The performance trace is a file the run named for this launch.
+frames_in_window() { # desc seconds zero|some
+  local desc=$1 seconds=$2 want=$3 out frames dropped
+  out=$(E2E perf-window "$PERF_TRACE" "$seconds") || fail "$desc: the performance trace could not be read"
+  echo "  perf: $out"
+  frames=$(printf '%s' "$out" | python3 -c 'import json, sys; print(json.load(sys.stdin)["frames"])')
+  dropped=$(printf '%s' "$out" | python3 -c 'import json, sys; print(json.load(sys.stdin)["dropped"])')
+  [ "$dropped" = 0 ] || fail "$desc: the trace dropped $dropped event(s), so no count can be trusted"
+  case "$want" in
+    zero) [ "$frames" = 0 ] || fail "$desc: $frames trace.frame event(s) in $seconds s, expected none" ;;
+    # Software Vulkan paints a frame in well over the loop's 33 ms, so a drawn turn asks for
+    # a handful in three seconds, not ninety.
+    some) [ "$frames" -ge 3 ] || fail "$desc: $frames trace.frame event(s) in $seconds s, expected the animation's own (3 or more)" ;;
+  esac
+  # Who asked: the owners' entity ids of the window's frames, space separated, sorted.
+  LAST_ENTITIES=$(printf '%s' "$out" | python3 -c 'import json, sys; print(*sorted(json.load(sys.stdin)["by_entity"]))')
+  echo "OK: $desc: $frames trace.frame event(s) in $seconds s from entit(ies) [${LAST_ENTITIES:-none}] (dropped $dropped)"
 }
 
 # ---- scenarios ---------------------------------------------------------------------
@@ -848,9 +1067,304 @@ scenario_restore() {
   stop_app
 }
 
+# ---- the trace scenarios -----------------------------------------------------------
+# The latest turn is Done at $0.31: the summary of the card, and the turn's own number.
+DONE_031='re.match(r"^Done · .+ · \$0\.31$", S("trace")["summary"])'
+
+scenario_trace_live() {
+  trace_chat trace_live
+  send_prompt subagents
+  wait_panel "the Trace card appears with a live turn" 'S("trace") is not None and S("trace")["summary"].startswith("Live · ")' 30
+  check_panel "the card starts folded" 'S("trace")["expanded"] is False'
+  unfold_cards trace
+  wait_panel "the lanes are Claude Code, two agents and the third one of them started (depth 2)" \
+    '{k: (v["label"], v["depth"]) for k, v in lanes_of().items()} == {"root": ("Claude Code", 0), "toolu_agent_a": ("Explore", 1), "toolu_agent_b": ("Plan", 1), "toolu_agent_c": ("general-purpose", 2)}' 30
+  wait_panel "the Edit asks: the title, the root lane and one wait row say the turn waits for the user" \
+    'S("trace")["summary"].startswith("Waiting for you · ") and lane("root")["tag"] == "waiting" and len(wait_rows()) == 1' 30
+  local wait_key permission
+  wait_key=$(find_panel "the wait row" 'wait_rows()[0]["key"]')
+  permission=$(find_panel "the transcript's pending Permission entry" 'str(pending()[0][0])')
+  check_panel "the wait row and the Permission entry are the same request" "pending()[0][1] == '${wait_key#trace/wait/}' and pending()[0][0] > 0"
+  capture trace-live
+  echo "step: the root reveals the user's message, then the wait reveals the Permission entry ($permission)"
+  panel_ctl activate trace/lane/root >/dev/null
+  wait_panel "the root lane reveals the turn's user message" 'c["first"] == next(i for i, r in enumerate(c["transcript"]) if r.get("kind") == "user")' 10
+  panel_ctl activate "$wait_key" >/dev/null
+  # The Permission card is the transcript's last entry while it waits. Unpainted, the list's top
+  # sits at the entry; painted, gpui backs the top up from the end of the content until the
+  # viewport is full, so the card (entry $permission) is on screen with the top somewhere in
+  # (0, $permission]: it moved off the user's message, to the card or above it by what fits.
+  wait_panel "the wait reveals the Permission entry" "c['first'] == $permission or (p['drawn'] and 0 < c['first'] <= $permission)" 10
+  echo "step: the user allows the Edit"
+  E2E rpc surface.chat.permission surfaceId="$SURFACE" requestId="${wait_key#trace/wait/}" optionId=allow_once >/dev/null || fail "allowing the Edit failed"
+  wait_panel "the turn is Done at \$0.31" "$DONE_031" 40
+  check_panel "no wait is left, the root lane is done and the failed Bash is the one error" \
+    'len(wait_rows()) == 0 and lane("root")["tag"] == "done" and R("trace", "trace/stat/errors")["detail"] == "1" and R("trace", "trace/stat/cost")["detail"] == "$0.31"'
+  check_panel "the numbers are the script's: 11 model calls, 5 tool calls, the root's own 8 calls" \
+    'R("trace", "trace/stat/llm_calls")["detail"] == "11" and R("trace", "trace/stat/tool_calls")["detail"] == "5" and re.match(r"^8 calls · ", lane("root")["detail"])'
+  echo "step: the tab holds each call: the Bash that failed, then the one that worked"
+  panel_ctl activate trace/open >/dev/null
+  wait_panel "the Trace tab is open" 'tab()["open"] == "1"' 20
+  check_panel "the first Bash failed and ended, the second is done, in that order" \
+    'T("toolu_bash_fail")["state"] == "failed" and T("toolu_bash_fail")["ended"] == "1" and T("toolu_bash_ok")["state"] == "done" and [s["id"] for s in tab()["spans"] if s["id"] in ("toolu_bash_fail", "toolu_bash_ok")] == ["toolu_bash_fail", "toolu_bash_ok"]'
+  stop_app
+}
+
+scenario_trace_cost() {
+  trace_chat trace_cost 30
+  send_prompt subagents
+  answer_permission allow_once
+  wait_panel "the first turn is Done at \$0.31" "$DONE_031" 40
+  send_prompt second
+  wait_panel "the second turn's cost is the difference of the process's totals: \$0.12" \
+    're.match(r"^Done · .+ · \$0\.12$", S("trace")["summary"])' 30
+  unfold_cards trace
+  check_panel "the Cost number says \$0.12 too" 'R("trace", "trace/stat/cost")["detail"] == "$0.12"'
+  stop_app
+}
+
+scenario_trace_interrupt() {
+  trace_chat trace_interrupt
+  send_prompt cancel
+  wait_panel "the turn is live" 'S("trace") is not None and S("trace")["summary"].startswith("Live · ")' 30
+  echo "step: Stop"
+  E2E rpc surface.chat.stop surfaceId="$SURFACE" >/dev/null || fail "stopping the chat failed"
+  wait_panel "Stop ends the turn Interrupted" 'S("trace")["summary"].startswith("Interrupted · ")' 30
+  unfold_cards trace
+  check_panel "an interrupted turn's cost is unknown" 'R("trace", "trace/stat/cost")["detail"] == "—" and lane("root")["tag"] == "interrupted"'
+  send_prompt second
+  wait_panel "the next turn is Done, and its cost is unknown too" \
+    'S("trace")["summary"].startswith("Done · ") and "$" not in S("trace")["summary"] and R("trace", "trace/stat/cost")["detail"] == "—"' 30
+  stop_app
+}
+
+scenario_trace_death() {
+  trace_chat trace_death
+  send_prompt die
+  wait_panel "the CLI dying mid-call ends the turn Failed" 'S("trace") is not None and S("trace")["summary"].startswith("Failed · ")' 40
+  unfold_cards trace
+  wait_panel "the root and the agent it was waiting on are lanes" 'len(lanes_of()) == 2' 10
+  check_panel "every lane is failed or interrupted" 'all(v["tag"] in ("failed", "interrupted") for v in lanes_of().values())'
+  stop_app
+}
+
+scenario_trace_hang() {
+  trace_chat trace_hang
+  send_prompt hang
+  wait_panel "the turn is Done though its call never reported" 'S("trace") is not None and S("trace")["summary"].startswith("Done · ")' 40
+  unfold_cards trace
+  panel_ctl activate trace/open >/dev/null
+  wait_panel "the Trace tab is open" 'tab()["open"] == "1"' 20
+  check_panel "the call that never reported is interrupted, and ended" \
+    'T("toolu_hang") is not None and T("toolu_hang")["state"] == "interrupted" and T("toolu_hang")["ended"] == "1"'
+  stop_app
+}
+
+# One subagent's request: DECISION is the option to answer with, AGENT the Agent call that
+# owns the subagent and TOOL the call it asks about.
+subagent_permission() { # prompt agent tool
+  local prompt=$1 agent=$2 tool=$3 before
+  before=$(find_panel "the Permission cards the transcript has so far" 'str(len([r for r in c["transcript"] if r.get("kind") == "permission"]))' 10)
+  send_prompt "$prompt"
+  wait_panel "the Trace card appears" 'S("trace") is not None' 30
+  ensure_unfolded trace
+  wait_panel "the subagent's lane waits for the user, with one wait row" \
+    "lane('$agent') is not None and lane('$agent')['tag'] == 'waiting' and len(wait_rows()) == 1" 30
+  check_panel "the transcript has exactly one more Permission entry and no row for the subagent's call" \
+    "len([r for r in c['transcript'] if r.get('kind') == 'permission']) == $before + 1 and row_index('$tool') is None"
+  answer_permission reject_once
+  wait_panel "the turn is over, nothing waits and no card is pending" \
+    'c["status"] == "completed" and len(wait_rows()) == 0 and len(pending()) == 0 and S("trace")["summary"].startswith("Done · ")' 40
+  check_panel "no transcript row is left pending, and the call still has no row" \
+    "all(str(r.get('status', '')).lower() != 'pending' for r in c['transcript']) and row_index('$tool') is None and len([r for r in c['transcript'] if r.get('kind') == 'permission']) == $before + 1"
+}
+
+scenario_trace_subagent_permission() {
+  trace_chat trace_subagent_permission
+  echo "step: the request comes after the line that holds its call"
+  subagent_permission subperm toolu_agent_p toolu_sub_p
+  echo "step: the request comes before that line (the order seen live)"
+  subagent_permission subperm_early toolu_agent_pe toolu_sub_pe
+  stop_app
+}
+
+scenario_trace_reveal() {
+  trace_chat trace_reveal 30
+  send_prompt subagents
+  answer_permission allow_once
+  wait_panel "the turn is Done at \$0.31" "$DONE_031" 40
+  unfold_cards trace
+  echo "step: each agent's lane reveals its Agent row (at the index the transcript draws it), the root the user's message"
+  local user_row
+  user_row=$(find_panel "the user's message" 'str(next(i for i, r in enumerate(c["transcript"]) if r.get("kind") == "user"))' 10)
+  check_panel "the two Agent rows are rows of their own, below the user's message" \
+    'row_index("toolu_agent_a") is not None and drawn_index("toolu_agent_a") == row_index("toolu_agent_a") and drawn_index("toolu_agent_b") == row_index("toolu_agent_b") and row_index("toolu_agent_a") < row_index("toolu_agent_b")'
+  panel_ctl activate trace/lane/root >/dev/null
+  wait_panel "the root lane reveals the user's message" "c['first'] == $user_row" 10
+  panel_ctl activate trace/lane/toolu_agent_b >/dev/null
+  wait_panel "the Plan lane reveals the Plan Agent row" 'c["first"] == drawn_index("toolu_agent_b")' 10
+  panel_ctl activate trace/lane/toolu_agent_a >/dev/null
+  wait_panel "the Explore lane reveals the Explore Agent row, which is above" \
+    'c["first"] == drawn_index("toolu_agent_a") and drawn_index("toolu_agent_a") < drawn_index("toolu_agent_b")' 10
+  stop_app
+}
+
+scenario_trace_tab() {
+  trace_chat trace_tab 30
+  send_prompt subagents
+  answer_permission allow_once
+  wait_panel "the turn is Done at \$0.31" "$DONE_031" 40
+  unfold_cards trace
+  [ "$(trace_tab_count)" = 0 ] || fail "the Secondary half has a trace tab before one was opened: $(secondary_kinds)"
+  echo "step: the card opens the tab"
+  panel_ctl activate trace/open >/dev/null
+  wait_trace_tab "the layout lists a trace tab in the Secondary half" present 20
+  wait_panel "the tab reads turn 1 of 1, following the latest" 'tab()["open"] == "1" and tab()["turn"] == "1" and tab()["turns"] == "1" and tab()["follow"] == "1"' 20
+  check_panel "the tab holds the whole tree, each span under its parent" \
+    '{s["id"]: (s["parent"], s["kind"], s["depth"]) for s in tab()["spans"] if s["kind"] in ("root", "subagent", "tool")} == {"root": ("", "root", "0"), "toolu_agent_a": ("root", "subagent", "1"), "toolu_agent_b": ("root", "subagent", "1"), "toolu_agent_c": ("toolu_agent_b", "subagent", "2"), "toolu_a_bash": ("toolu_agent_a", "tool", "2"), "toolu_c_read": ("toolu_agent_c", "tool", "3"), "toolu_edit": ("root", "tool", "1"), "toolu_bash_fail": ("root", "tool", "1"), "toolu_bash_ok": ("root", "tool", "1")}'
+  check_panel "it also holds the model calls, each under an agent" \
+    'len([s for s in tab()["spans"] if s["kind"] == "llm"]) >= 5 and all(s["parent"] != "" for s in tab()["spans"] if s["kind"] == "llm")'
+  capture trace-tab
+  echo "step: a second open keeps one tab"
+  panel_ctl activate trace/open >/dev/null
+  sleep 1
+  [ "$(trace_tab_count)" = 1 ] || fail "opening the trace twice left the Secondary half with: $(secondary_kinds)"
+  echo "OK: one trace tab after two opens ($(secondary_kinds))"
+  echo "step: another worktree, and back"
+  ctl select-workspace --workspace "$PRIMARY" >/dev/null
+  sleep 1
+  ctl select-workspace --workspace "$LINKED" >/dev/null
+  wait_trace_tab "the trace tab is still there after a worktree switch" present 20
+  wait_panel "and still reads the chat's turn" 'tab()["open"] == "1" and tab()["turns"] == "1"' 20
+  echo "step: Sirio quits and starts again"
+  sleep 1
+  local first_surface=$SURFACE
+  stop_app
+  launch trace_tab
+  SURFACE=""
+  for _ in $(seq 1 100); do
+    SURFACE=$(E2E chat-surface 2>/dev/null || true)
+    [ -n "$SURFACE" ] && break
+    sleep 0.3
+  done
+  [ -n "$SURFACE" ] || fail "the chat was not restored"
+  echo "OK: the restored chat is $SURFACE (was $first_surface)"
+  sleep 3
+  [ "$(trace_tab_count)" = 0 ] || fail "the relaunch restored a trace tab: $(secondary_kinds)"
+  check_panel "no trace tab came back, and the chat has no trace of the turn before" 'tab()["open"] == "0" and S("trace") is None'
+  echo "OK: no trace tab is restored"
+  echo "step: a turn after the relaunch gives the chat a trace again; closing the chat closes its tab"
+  send_prompt second
+  wait_panel "the turn is Done" 'S("trace") is not None and S("trace")["summary"].startswith("Done · ")' 40
+  unfold_cards trace
+  panel_ctl activate trace/open >/dev/null
+  wait_trace_tab "the trace tab is open again" present 20
+  local position
+  position=$(tab_positions chat)
+  [ -n "$position" ] || fail "the chat tab is not in the tab list"
+  ctl surface tabs close "$position" --confirm >/dev/null
+  wait_trace_tab "closing the chat closes its trace tab" absent 20
+  stop_app
+}
+
+scenario_trace_idle() {
+  PERF_TRACE="$RUN_DIR/trace_idle-perf.tsv"
+  trace_chat trace_idle
+  [ -s "$PERF_TRACE" ] || fail "the app wrote no performance trace at $PERF_TRACE"
+  send_prompt cancel
+  wait_panel "the turn is live and will stay so" 'S("trace") is not None and S("trace")["summary"].startswith("Live · ")' 30
+  unfold_cards trace
+  sleep 1
+  frames_in_window "the card unfolded and drawn, mid-turn (the control: the animation does ask)" 3 some
+  local card_entity=$LAST_ENTITIES
+  [ -n "$card_entity" ] && [[ "$card_entity" != *" "* ]] || fail "the card's frames come from [$card_entity], not one owner"
+  fold_cards trace
+  sleep 1
+  frames_in_window "the card folded and no tab, mid-turn" 3 zero
+  unfold_cards trace
+  echo "step: the tab opens and is selected: the chat's tab is hidden"
+  panel_ctl activate trace/open >/dev/null
+  wait_trace_tab "the trace tab is open" present 20
+  sleep 1
+  frames_in_window "the tab drawn, the chat's card hidden behind it, mid-turn (the control for the tab's loop)" 3 some
+  local tab_entity=$LAST_ENTITIES
+  [ -n "$tab_entity" ] && [[ "$tab_entity" != *" "* ]] && [ "$tab_entity" != "$card_entity" ] \
+    || fail "the tab's frames come from [$tab_entity], and the card's owner is [$card_entity]: the hidden chat asked for frames, or the owners are not told apart"
+  echo "step: the chat's tab is selected again: the trace tab is hidden"
+  ctl surface tabs select "$(tab_positions chat)" >/dev/null
+  sleep 1
+  frames_in_window "the card drawn, the trace tab hidden behind the chat, mid-turn" 3 some
+  [ "$LAST_ENTITIES" = "$card_entity" ] || fail "with the tab hidden the frames came from [$LAST_ENTITIES], not from the card alone [$card_entity]"
+  echo "step: the worktree parked mid-turn, with the card unfolded and the tab open"
+  ctl select-workspace --workspace "$PRIMARY" >/dev/null
+  sleep 1
+  frames_in_window "the card and the tab both open but their worktree parked, mid-turn" 3 zero
+  ctl select-workspace --workspace "$LINKED" >/dev/null
+  sleep 1
+  ctl surface tabs select "$(tab_positions chat)" >/dev/null
+  echo "step: the turn ends"
+  E2E rpc surface.chat.stop surfaceId="$SURFACE" >/dev/null || fail "stopping the chat failed"
+  wait_panel "the chat is no longer streaming and the turn is over" 'c["status"] != "streaming" and S("trace")["summary"].startswith("Interrupted · ")' 30
+  sleep 1
+  frames_in_window "the turn over, the card drawn" 3 zero
+  ctl surface tabs select "$(tab_positions trace)" >/dev/null
+  sleep 1
+  frames_in_window "the turn over, the tab drawn" 3 zero
+  cp "$PERF_TRACE" "$OUT_DIR/" 2>/dev/null || true
+  stop_app
+}
+
+# The tab's keys and mouse, with real X events (xdotool): a click on a row selects it and
+# reveals its Agent row, Enter on the selected row reveals it again, and a click on the
+# "Follow the latest turn" checkbox toggles it. The clicks are at pixels of the 2200x1000
+# window's layout (PLAN_ROW_X/Y and FOLLOW_X/Y override them), so the scenario runs only
+# framed at that size. Enter *while the checkbox has focus* is not reachable from a real
+# keyboard in this build, and so is not asserted: the checkbox's mouse-down prevents the
+# default, which keeps a click from focusing it, and the app binds no Tab to FocusNext.
+click_at() { # x y
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool mousemove "$1" "$2" click 1 || fail "xdotool could not click at $1,$2"
+  sleep 1
+}
+press_key() { # key
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool key "$1" || fail "xdotool could not press $1"
+  sleep 1
+}
+scenario_trace_keys() {
+  trace_chat trace_keys 30
+  send_prompt subagents
+  answer_permission allow_once
+  wait_panel "the turn is Done at \$0.31" "$DONE_031" 40
+  ensure_unfolded trace
+  panel_ctl activate trace/open >/dev/null
+  wait_trace_tab "the trace tab is open" present 20
+  wait_panel "the tab shows the turn, following the latest" 'tab()["open"] == "1" and tab()["follow"] == "1"' 20
+  capture trace-keys-before
+  echo "step: a real click on the Plan row reveals its Agent row"
+  panel_ctl activate trace/lane/root >/dev/null
+  wait_panel "the list is at the user's message" 'c["first"] == 0' 10
+  click_at "${PLAN_ROW_X:-1157}" "${PLAN_ROW_Y:-323}"
+  wait_panel "the click revealed the Plan Agent row" 'c["first"] == drawn_index("toolu_agent_b")' 10
+  echo "step: the list goes back to the top, then a real Enter on the selected row reveals it again"
+  panel_ctl activate trace/lane/root >/dev/null
+  wait_panel "the list is at the user's message again" 'c["first"] == 0' 10
+  press_key Return
+  wait_panel "Enter on the selected row revealed the Plan Agent row" 'c["first"] == drawn_index("toolu_agent_b")' 10
+  capture trace-keys-enter
+  echo "step: a real click on the Follow checkbox toggles it, and another toggles it back"
+  click_at "${FOLLOW_X:-1702}" "${FOLLOW_Y:-97}"
+  wait_panel "the click toggled Follow off" 'tab()["follow"] == "0"' 10
+  capture trace-keys-follow-off
+  click_at "${FOLLOW_X:-1702}" "${FOLLOW_Y:-97}"
+  wait_panel "the second click toggled Follow on" 'tab()["follow"] == "1"' 10
+  stop_app
+}
+
 ran=0
 for name in "${SCENARIOS[@]}"; do
   echo "== scenario $name"
+  use_stub session-panel
+  TRACE_STEP_MS=400
+  PERF_TRACE=""
   "scenario_$name"
   check_mise "after scenario $name"
   ran=$((ran + 1))
@@ -863,5 +1377,5 @@ if [ -n "$ONLY" ]; then
   echo "CHAT SESSION PANEL E2E PARTIAL ($ran of ${#ALL_SCENARIOS[@]} scenarios: ${SCENARIOS[*]})"
 else
   skipped=$(( ${#ALL_SCENARIOS[@]} - ran ))
-  echo "CHAT SESSION PANEL E2E OK ($ran scenarios, $skipped skipped without a display, appearance ${APPEARANCE:-default}, state-only $STATE_ONLY, window ${WINDOW_SIZE:-default})"
+  echo "CHAT SESSION PANEL E2E OK ($ran scenarios, $skipped skipped, appearance ${APPEARANCE:-default}, state-only $STATE_ONLY, window ${WINDOW_SIZE:-default})"
 fi
