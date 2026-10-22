@@ -5314,6 +5314,9 @@ impl Chat {
             return;
         };
 
+        // The client and the pump that read it are replaced below, so a turn
+        // still open here would never hear of its end.
+        self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.client.take();
         self.session_panel.clear_session();
         self.connecting = true;
