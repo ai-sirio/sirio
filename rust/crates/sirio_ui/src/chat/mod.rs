@@ -52,6 +52,7 @@ mod question_dock;
 mod session_panel;
 mod thought;
 mod tool_calls;
+pub mod trace;
 mod transcript;
 mod turn_rail;
 use bezel::ui::input::TextField;
