@@ -92,6 +92,7 @@ pub(super) fn section(
         note: String::new(),
         bar: Vec::new(),
         rows: Vec::new(),
+        custom_body: false,
     };
     if let Some(report) = &context.report {
         section.summary = header(report.used, report.window);
@@ -128,7 +129,7 @@ fn header(used: u64, window: u64) -> String {
 }
 
 /// Below a thousand as they are, then `x.yk` with one decimal.
-fn tokens(count: u64) -> String {
+pub(super) fn tokens(count: u64) -> String {
     if count < 1000 {
         count.to_string()
     } else {

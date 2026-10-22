@@ -234,6 +234,7 @@ pub(super) fn section(
             note: String::new(),
             bar: Vec::new(),
             rows: vec![Row::new("connectors/none", "Reading connectors…".to_string(), "")],
+            custom_body: false,
         });
     };
     let signing_in = servers
@@ -310,6 +311,7 @@ pub(super) fn section(
         note: String::new(),
         bar: Vec::new(),
         rows,
+        custom_body: false,
     })
 }
 

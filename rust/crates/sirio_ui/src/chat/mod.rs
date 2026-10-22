@@ -1591,6 +1591,9 @@ pub enum ChatEvent {
         reference: sirio_forge::ChangeRef,
         title: String,
     },
+    /// The session panel's Trace card asked for the full trace: the
+    /// workspace opens (or focuses) this chat's Trace tab.
+    OpenTrace,
 }
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
@@ -3265,6 +3268,7 @@ impl Chat {
                 let changed = self.trace.apply(trace);
                 if started {
                     self.adopt_trace_turn();
+                    self.start_trace_title_tick(cx);
                 }
                 // A trace event changes nothing the transport's other state
                 // tracks, so it skips the re-reads below, and one that
@@ -7735,7 +7739,7 @@ mod tests {
     }
 
     /// A question with listed answers and a typed one.
-    fn open_question_with_free_text(request_id: u64) -> Entry {
+    pub(super) fn open_question_with_free_text(request_id: u64) -> Entry {
         Entry::Permission {
             request_id,
             title: "Which color?".into(),
@@ -16257,7 +16261,7 @@ two"
         });
     }
 
-    fn push_answers(chat: &mut Chat, count: usize) {
+    pub(super) fn push_answers(chat: &mut Chat, count: usize) {
         for line in 0..count {
             push_answer(chat, &format!("answer line {line}"));
         }
@@ -16265,12 +16269,12 @@ two"
 
     /// Lays the chat out in a pane too short for its entries, so a scroll
     /// position means something.
-    fn lay_out_short(cx: &mut VisualTestContext) {
+    pub(super) fn lay_out_short(cx: &mut VisualTestContext) {
         cx.simulate_resize(size(px(600.0), px(300.0)));
         refresh_frame(cx);
     }
 
-    fn top_entry(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> usize {
+    pub(super) fn top_entry(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> usize {
         chat.read_with(cx, |chat, _| chat.control_snapshot().first_visible_entry)
     }
 

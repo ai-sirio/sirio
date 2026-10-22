@@ -173,6 +173,7 @@ pub(super) fn section(state: &ChangeRequest) -> Option<Section> {
         note: String::new(),
         bar: Vec::new(),
         rows,
+        custom_body: false,
     })
 }
 

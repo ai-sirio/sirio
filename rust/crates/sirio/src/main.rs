@@ -8840,6 +8840,10 @@ impl SirioWorkspace {
                 ChatEvent::OpenChangeRequest { reference, title } => {
                     workspace.add_change_request_tab(reference.clone(), title.clone(), cx)
                 }
+                // The Trace card's "Open full trace". The tab it opens is a
+                // later task's: until it lands there is nothing to open, and
+                // the card's button emits the event all the same.
+                ChatEvent::OpenTrace => {}
                 ChatEvent::SessionIdentified(session_id) => {
                     // A hook write, like `save_session_ref`: the id must
                     // survive a restart that comes before any other save.
