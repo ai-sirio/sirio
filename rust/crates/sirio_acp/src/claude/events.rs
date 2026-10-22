@@ -5,7 +5,7 @@
 //! what the session id turned out to be — so every case can be a unit test
 //! with a JSON literal instead of a subprocess.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 use sirio_claude::message::{CliMessage, Delta, ResultPayload, SystemPayload};
@@ -54,6 +54,10 @@ struct OpenCall {
 #[derive(Debug, Default)]
 pub(crate) struct Fold {
     open_calls: BTreeMap<String, OpenCall>,
+    /// Ids of the calls a subagent's lines held. Those lines are dropped, so
+    /// the call's result never reaches the transcript either: a row opened for
+    /// one would never settle.
+    subagent_calls: HashSet<String>,
     session_id: Option<String>,
     claude_version: Option<String>,
     current_mode: Option<String>,
@@ -79,6 +83,11 @@ pub(crate) struct Fold {
 impl Fold {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether a subagent's line held this tool call.
+    pub(crate) fn is_subagent_call(&self, tool_use_id: &str) -> bool {
+        self.subagent_calls.contains(tool_use_id)
     }
 
     /// The Claude session id, once a line has named it. This is what a
@@ -161,6 +170,10 @@ impl Fold {
             }
             CliMessage::Assistant(assistant) => {
                 if assistant.parent_tool_use_id.is_some() {
+                    // The line draws nothing, but its calls are remembered: a
+                    // permission asked for one must not draw a row either.
+                    self.subagent_calls
+                        .extend(assistant.tool_uses().map(|tool_use| tool_use.id.clone()));
                     return Vec::new();
                 }
                 if let Some(model) = assistant.message.model.clone() {
@@ -270,7 +283,7 @@ impl Fold {
     }
 
     fn status_update(&mut self, tool_use_id: &str, status: &str) -> Vec<AcpEvent> {
-        if !self.open_calls.contains_key(tool_use_id) {
+        if self.is_subagent_call(tool_use_id) || !self.open_calls.contains_key(tool_use_id) {
             return Vec::new();
         }
         vec![AcpEvent::ToolCallUpdated {
@@ -295,6 +308,9 @@ impl Fold {
         tool_use_id: &str,
         input: &serde_json::Value,
     ) -> Vec<AcpEvent> {
+        if self.is_subagent_call(tool_use_id) {
+            return Vec::new();
+        }
         if self.open_calls.contains_key(tool_use_id) {
             return self.mark_pending(tool_use_id);
         }
@@ -898,5 +914,58 @@ mod tests {
             events.is_empty(),
             "subagent traffic must not draw rows: {events:?}"
         );
+    }
+
+    #[test]
+    fn a_subagents_permission_opens_no_tool_row() {
+        // The subagent's own lines never reach the transcript, so a row
+        // opened for its permission would never get its result: it would sit
+        // at the top level, running, for the rest of the turn.
+        let mut fold = Fold::new();
+        fold.apply(parse(json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "id": "toolu_sub", "name": "Bash",
+                                     "input": {"command": "ls"}}]},
+            "parent_tool_use_id": "toolu_parent"
+        })));
+        assert!(fold.is_subagent_call("toolu_sub"));
+        assert_eq!(
+            fold.start_from_permission("Bash", "toolu_sub", &json!({"command": "ls"})),
+            vec![]
+        );
+        assert_eq!(fold.mark_pending("toolu_sub"), vec![]);
+        assert_eq!(fold.mark_running("toolu_sub"), vec![]);
+    }
+
+    #[test]
+    fn a_main_thread_permission_still_opens_its_row() {
+        let mut fold = Fold::new();
+        fold.apply(parse(json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "id": "toolu_sub", "name": "Bash",
+                                     "input": {"command": "ls"}}]},
+            "parent_tool_use_id": "toolu_parent"
+        })));
+        // A different call, on the main thread, asks while the subagent's
+        // call is known.
+        assert!(!fold.is_subagent_call("toolu_main"));
+        let started = fold.start_from_permission("Bash", "toolu_main", &json!({"command": "ls"}));
+        assert!(matches!(
+            started.as_slice(),
+            [AcpEvent::ToolCallStarted { id, status, .. }]
+                if id == "toolu_main" && status == "Pending"
+        ));
+        let running = fold.mark_running("toolu_main");
+        assert!(matches!(
+            running.as_slice(),
+            [AcpEvent::ToolCallUpdated { id, status: Some(status), .. }]
+                if id == "toolu_main" && status == "InProgress"
+        ));
+        let pending = fold.mark_pending("toolu_main");
+        assert!(matches!(
+            pending.as_slice(),
+            [AcpEvent::ToolCallUpdated { id, status: Some(status), .. }]
+                if id == "toolu_main" && status == "Pending"
+        ));
     }
 }

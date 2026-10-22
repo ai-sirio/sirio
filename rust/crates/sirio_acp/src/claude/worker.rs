@@ -906,8 +906,10 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             .await;
                             // Draw or pause the row this decision belongs to,
                             // so a card never asks about a call nobody sees.
+                            // A subagent's call has no row: its lines stay out
+                            // of the transcript, so the row would never settle.
                             let row_events = match request.tool_use_id.as_deref() {
-                                Some(tool_use_id) => {
+                                Some(tool_use_id) if !is_subagent_permission(&fold, &request) => {
                                     let mut events = fold.start_from_permission(
                                         &request.tool_name,
                                         tool_use_id,
@@ -916,7 +918,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     events.extend(fold.mark_pending(tool_use_id));
                                     events
                                 }
-                                None => Vec::new(),
+                                _ => Vec::new(),
                             };
                             for event in row_events {
                                 let _ = event_tx.send(event).await;
@@ -1184,7 +1186,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             trace.permission_answered(request_id, std::time::Instant::now()),
                         )
                         .await;
-                        if allowed && let Some(tool_use_id) = pending.request.tool_use_id.as_deref()
+                        if allowed
+                            && !is_subagent_permission(&fold, &pending.request)
+                            && let Some(tool_use_id) = pending.request.tool_use_id.as_deref()
                         {
                             for event in fold.mark_running(tool_use_id) {
                                 let _ = event_tx.send(event).await;
@@ -1357,6 +1361,17 @@ async fn session(context: SessionContext) -> SessionOutcome {
             return SessionOutcome::NeverStarted;
         }
     }
+}
+
+/// Whether a permission request is a subagent's. It names its agent, or asks
+/// about a call a subagent's line held. The request may come before that line,
+/// which is why the agent counts as well as the call.
+fn is_subagent_permission(fold: &Fold, request: &sirio_claude::CanUseTool) -> bool {
+    request.agent_id.is_some()
+        || request
+            .tool_use_id
+            .as_deref()
+            .is_some_and(|id| fold.is_subagent_call(id))
 }
 
 /// Forwards the trace events one line, command or answer produced, in order.

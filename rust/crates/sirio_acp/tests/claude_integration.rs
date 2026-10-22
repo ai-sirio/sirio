@@ -701,6 +701,54 @@ fn a_turn_and_its_permission_reach_the_trace_ahead_of_the_transcript() {
 }
 
 #[test]
+fn a_subagents_permission_asks_without_opening_a_tool_row() {
+    // The subagent's request names its agent and arrives before the line that
+    // holds its call, so its tool id alone cannot say whose it is. Its own
+    // lines never reach the transcript: a row opened for it would never get
+    // its result and would stay at the top level for the rest of the turn.
+    let (mut client, events) = launch("subagent_permission_early");
+    client.prompt("delegate it").expect("prompt is accepted");
+    let mut seen = Vec::new();
+    let request_id = loop {
+        let event = next_event(&events);
+        let asked = match &event {
+            AcpEvent::PermissionRequest { request_id, .. } => Some(*request_id),
+            _ => None,
+        };
+        seen.push(event);
+        if let Some(request_id) = asked {
+            break request_id;
+        }
+    };
+    client
+        .respond_permission(request_id, "allow_once")
+        .expect("the choice reaches the agent");
+    seen.extend(drain_until_turn_end(&events));
+
+    assert!(
+        !seen.iter().any(|event| matches!(
+            event,
+            AcpEvent::ToolCallStarted { .. }
+                | AcpEvent::ToolCallUpdated { .. }
+                | AcpEvent::ToolCallCompleted { .. }
+        )),
+        "a subagent's call is not a row of the transcript: {seen:?}"
+    );
+    // The card is still asked, and the wait is still in the trace.
+    assert!(seen.iter().any(|event| matches!(
+        event,
+        AcpEvent::Trace(TraceEvent::WaitStarted { request_id: waited, .. })
+            if *waited == request_id
+    )));
+    assert!(seen.iter().any(|event| matches!(
+        event,
+        AcpEvent::Trace(TraceEvent::WaitEnded { request_id: ended, .. })
+            if *ended == request_id
+    )));
+    client.shutdown().expect("clean shutdown");
+}
+
+#[test]
 fn a_structured_question_carries_its_prompt_and_its_options() {
     let (mut client, events) = launch("question");
     client.prompt("ask me").expect("prompt is accepted");

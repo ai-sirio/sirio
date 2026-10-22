@@ -216,7 +216,7 @@ def session_panel_servers():
     ]
 
 
-def assistant_tool_use(tool_use_id, tool_name, tool_input):
+def assistant_tool_use(tool_use_id, tool_name, tool_input, parent=None):
     send({
         "type": "assistant",
         "message": {
@@ -231,24 +231,30 @@ def assistant_tool_use(tool_use_id, tool_name, tool_input):
             }],
             "stop_reason": None,
         },
-        "parent_tool_use_id": None,
+        "parent_tool_use_id": parent,
         "session_id": SESSION_ID,
         "uuid": "perm-assistant-uuid",
     })
 
 
-def ask_permission(cli_request_id, tool_name, tool_use_id, tool_input, suggestions=None):
-    PENDING[cli_request_id] = (tool_use_id, tool_name)
+def ask_permission(cli_request_id, tool_name, tool_use_id, tool_input, suggestions=None,
+                   agent_id=None, parent=None):
+    """`agent_id` makes it a subagent's request, as the real CLI does; `parent`
+    is the `parent_tool_use_id` its eventual result line carries."""
+    PENDING[cli_request_id] = (tool_use_id, tool_name, parent)
+    request = {
+        "subtype": "can_use_tool",
+        "tool_name": tool_name,
+        "tool_use_id": tool_use_id,
+        "input": tool_input,
+        "permission_suggestions": suggestions if suggestions is not None else [],
+    }
+    if agent_id is not None:
+        request["agent_id"] = agent_id
     send({
         "type": "control_request",
         "request_id": cli_request_id,
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": tool_name,
-            "tool_use_id": tool_use_id,
-            "input": tool_input,
-            "permission_suggestions": suggestions if suggestions is not None else [],
-        },
+        "request": request,
     })
 
 
@@ -256,7 +262,7 @@ def finish_permission(cli_request_id, answer_message):
     pending = PENDING.pop(cli_request_id, None)
     if pending is None:
         return
-    tool_use_id, _tool_name = pending
+    tool_use_id, _tool_name, parent = pending
     try:
         payload = answer_message.get("response", {}).get("response", {})
         behavior = payload.get("behavior", "deny")
@@ -271,7 +277,7 @@ def finish_permission(cli_request_id, answer_message):
             "is_error": not allowed,
             "content": "ran" if allowed else "denied",
         }]},
-        "parent_tool_use_id": None,
+        "parent_tool_use_id": parent,
         "session_id": SESSION_ID,
         "uuid": "perm-result-uuid",
     })
@@ -487,6 +493,17 @@ def main():
                     "cli-perm-1", "Bash", "toolu_perm_1", tool_input,
                     [{"type": "addRules", "behavior": "allow", "destination": "session"}],
                 )
+                continue
+            if MODE == "subagent_permission_early":
+                # A subagent asks before the line that holds its call arrives,
+                # the order seen live. Its own lines carry the parent's id.
+                init_line()
+                tool_input = {"command": "rm -rf build", "description": "Remove build"}
+                ask_permission(
+                    "cli-sub-1", "Bash", "toolu_sub_1", tool_input,
+                    agent_id="task-sub-1", parent="toolu_agent_1",
+                )
+                assistant_tool_use("toolu_sub_1", "Bash", tool_input, parent="toolu_agent_1")
                 continue
             if MODE == "permission_then_text":
                 init_line()
