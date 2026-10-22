@@ -3,15 +3,17 @@
 //! It holds one card per section, stacked and scrolling as a whole; a card
 //! opens and closes from its title. `Chat::session_panel_sections` is the one
 //! list of sections, in the order they are drawn (Environment, then Context,
-//! Connectors and Change request as they land), and both the drawing and the
-//! control snapshot read it, so a section appears in each at once. Open or
-//! closed is the chat's own and survives a relaunch (`SessionTabState`); which
-//! cards are folded does not.
+//! Connectors, Trace and Change request as they land), and both the drawing
+//! and the control snapshot read it, so a section appears in each at once.
+//! Open or closed is the chat's own and survives a relaunch
+//! (`SessionTabState`); which cards are folded does not: every card but
+//! Environment starts folded.
 
 mod change_request;
 mod connectors;
 mod context;
 mod environment;
+mod trace;
 
 use super::*;
 use ely_gpui_component::{
@@ -27,6 +29,11 @@ const COLUMN_WIDTH: f32 = 300.0;
 const MIN_CHAT_WIDTH: f32 = 640.0;
 /// What an overlaid column leaves of the chat to its left, at the most.
 const OVERLAY_MARGIN: f32 = 16.0;
+
+/// The cards that start folded: Environment is the only one open. A key here
+/// is a section's fold wherever its card is drawn yet or not, since some are
+/// drawn only once the agent or the forge has answered.
+const FOLDED_AT_START: [&str; 4] = ["context", "connectors", "trace", "change_request"];
 
 /// What the debug control verb and the tests can do to the column.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +59,7 @@ pub struct SessionPanelSnapshot {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct SectionSnapshot {
-    /// `environment`, `context`, `connectors` or `change_request`.
+    /// `environment`, `context`, `connectors`, `trace` or `change_request`.
     pub key: String,
     pub expanded: bool,
     /// The short line beside the title.
@@ -176,6 +183,9 @@ pub(super) struct Section {
     /// The stacked bar under the title: one segment per entry.
     pub(super) bar: Vec<BarSegment>,
     pub(super) rows: Vec<Row>,
+    /// Drawn by the card itself rather than from `rows`, which the snapshot
+    /// still reports: the Trace card's waterfall.
+    pub(super) custom_body: bool,
 }
 
 /// One segment of a card's bar: its share of the whole and its chart hue.
@@ -197,6 +207,15 @@ pub(super) struct Frame {
     painted: Cell<bool>,
     /// A read the change request owes to the next frame that paints.
     read_on_paint: Cell<bool>,
+    /// Set by every paint like `painted`, and cleared only by the trace's
+    /// own once-a-second timer: the Change request's loop takes `painted`
+    /// with `replace(false)`, and two readers of one flag would starve each
+    /// other.
+    trace_painted: Cell<bool>,
+    /// A delayed frame of the trace's animation is on its way, which is how
+    /// it stays at 30 frames a second or fewer. Shared with the loop's timer
+    /// task, which clears it.
+    trace_frame_pending: crate::trace_frame::Pending,
 }
 
 /// Where the column is drawn, which the chat's width decides.
@@ -223,6 +242,11 @@ pub(super) struct SessionPanel {
     frame: Rc<Frame>,
     environment: environment::Environment,
     environment_task: Option<gpui::Task<()>>,
+    /// The frames the trace card's body has asked for, shared with the
+    /// canvas that asks (a plain `Cell` cannot reach it).
+    trace_frames: Rc<Cell<u32>>,
+    /// The once-a-second tick of the folded title, alive while a turn runs.
+    trace_title_task: Option<gpui::Task<()>>,
 }
 
 impl SessionPanel {
@@ -236,7 +260,10 @@ impl SessionPanel {
     pub(super) fn new() -> Self {
         Self {
             open: false,
-            collapsed: HashSet::new(),
+            // Every card but Environment starts folded: the column opens as
+            // a list of titles with their summaries, and the reader unfolds
+            // what they want. `trace` is folded ahead of its card.
+            collapsed: FOLDED_AT_START.into_iter().map(str::to_string).collect(),
             flipped: HashSet::new(),
             context: context::Context::default(),
             connectors: connectors::Connectors::default(),
@@ -244,6 +271,8 @@ impl SessionPanel {
             frame: Rc::new(Frame::default()),
             environment: environment::Environment::default(),
             environment_task: None,
+            trace_frames: Rc::new(Cell::new(0)),
+            trace_title_task: None,
         }
     }
 }
@@ -265,6 +294,7 @@ impl Chat {
             self.refresh_session_environment(cx);
             self.ensure_session_context();
             self.reopen_session_connectors(cx);
+            self.probe_session_change_request_forge(cx);
             self.start_session_change_request(cx);
         } else {
             self.stop_session_change_request();
@@ -282,6 +312,7 @@ impl Chat {
             self.refresh_session_environment(cx);
             self.ensure_session_context();
             self.reopen_session_connectors(cx);
+            self.probe_session_change_request_forge(cx);
             self.start_session_change_request(cx);
         } else {
             self.stop_session_change_request();
@@ -331,10 +362,10 @@ impl Chat {
     }
 
     /// The cards, in the order they are drawn. The sections that need the
-    /// agent (Context, Connectors) and the forge (Change request) are added
-    /// here as they are built. It runs every frame and for every snapshot, so
-    /// it reads only what the panel has cached: no disk, git or environment
-    /// work belongs in it.
+    /// agent (Context, Connectors, Trace) and the forge (Change request) are
+    /// added here as they are built. It runs every frame and for every
+    /// snapshot, so it reads only what the panel has cached: no disk, git or
+    /// environment work belongs in it.
     fn session_panel_sections(&self) -> Vec<Section> {
         let panel = &self.session_panel;
         let mut sections = vec![environment::section(&panel.environment, &self.agent_cwd)];
@@ -350,6 +381,7 @@ impl Chat {
             self.client.as_ref().is_some_and(ChatClient::supports_connectors),
             &panel.flipped,
         ));
+        sections.extend(trace::section(&self.trace, std::time::Instant::now()));
         sections.extend(change_request::section(&panel.change_request));
         sections
     }
@@ -357,10 +389,11 @@ impl Chat {
     /// Folds or unfolds the section or node with this key. A section is
     /// folded when it is in `collapsed`; a node is flipped from its default.
     fn toggle_session_fold(&mut self, key: &str, cx: &mut Context<Self>) {
-        let is_section = self
-            .session_panel_sections()
-            .iter()
-            .any(|section| section.key == key);
+        let is_section = FOLDED_AT_START.contains(&key)
+            || self
+                .session_panel_sections()
+                .iter()
+                .any(|section| section.key == key);
         let set = if is_section {
             &mut self.session_panel.collapsed
         } else {
@@ -388,6 +421,9 @@ impl Chat {
         }
         if key.starts_with("change_request/") {
             return self.activate_change_request(key, cx);
+        }
+        if key.starts_with("trace/") {
+            return self.activate_trace(key, cx);
         }
         let sections = self.session_panel_sections();
         let Some(row) = sections
@@ -515,6 +551,7 @@ impl Chat {
         canvas(
             move |bounds, _, cx| {
                 frame.painted.set(true);
+                frame.trace_painted.set(true);
                 let width = bounds.size.width;
                 let before = frame.width.replace(Some(width));
                 let docked = |width: Option<Pixels>| width.map(|w| w >= px(MIN_CHAT_WIDTH));
@@ -625,6 +662,15 @@ impl Chat {
             .child(section.title)
             .child(div().flex_1())
             .when(!section.summary.is_empty(), |row| {
+                if section.custom_body {
+                    return row.child(trace::title_summary(
+                        self,
+                        &section.summary,
+                        collapsed,
+                        theme,
+                        cx,
+                    ));
+                }
                 row.child(
                     div()
                         .font_weight(FontWeight::NORMAL)
@@ -646,6 +692,11 @@ impl Chat {
             .bg(theme.ely.surface)
             .child(title)
             .when(!collapsed, |card| {
+                // The Trace card draws its own body; its rows are the
+                // snapshot's.
+                if section.custom_body {
+                    return card.child(trace::render_body(self, theme, cx));
+                }
                 card.when(!section.bar.is_empty(), |card| {
                     card.child(Self::render_session_bar(&section.bar, theme))
                 })
@@ -981,6 +1032,47 @@ mod tests {
             composer.right() <= docked.left(),
             "docked, the composer gives up the column's width"
         );
+    }
+
+    const CLAUDE_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../sirio_acp/tests/fixtures/claude_fixture.py"
+    );
+
+    /// Every card that needs the agent or the forge is drawn, and all of them
+    /// folded but Environment: a new chat's column is a list of titles with
+    /// the summaries beside them.
+    #[gpui::test]
+    async fn cards_start_folded_except_environment(cx: &mut TestAppContext) {
+        use crate::forge_source::testing::{self, CannedForge, FakeSource};
+        // The CLI's worker thread wakes the chat's event task, which the
+        // test scheduler refuses unless it is told real threads are in play.
+        cx.executor().allow_parking();
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        let forge = std::sync::Arc::new(CannedForge::default());
+        let source = FakeSource::ready(testing::github_client(forge), Some("feat/y"));
+        cx.update(|cx| crate::forge_source::set_source(source, cx));
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let launch = sirio_acp::ClaudeLaunch::fixture(
+                "python3",
+                vec![CLAUDE_FIXTURE.to_string(), "session_panel".to_string()],
+            );
+            Chat::from_test_command(LaunchSpec::Claude(launch), std::env::temp_dir(), cx)
+        });
+        chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
+        let keys = ["environment", "context", "connectors", "change_request"];
+        super::super::tests::pump_chat_until(cx, &chat, |chat| {
+            let drawn = chat.control_snapshot().session_panel.sections;
+            keys.iter().all(|key| drawn.iter().any(|section| section.key == *key))
+        });
+        let sections = chat.read_with(&cx.cx, |chat, _| chat.control_snapshot()).session_panel.sections;
+        let expanded = |key: &str| sections.iter().find(|section| section.key == key).map(|section| section.expanded);
+        assert_eq!(expanded("environment"), Some(true));
+        for key in ["context", "connectors", "change_request"] {
+            assert_eq!(expanded(key), Some(false), "{key} starts folded");
+        }
     }
 
     #[gpui::test]

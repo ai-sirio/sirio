@@ -92,6 +92,7 @@ pub(super) fn section(
         note: String::new(),
         bar: Vec::new(),
         rows: Vec::new(),
+        custom_body: false,
     };
     if let Some(report) = &context.report {
         section.summary = header(report.used, report.window);
@@ -127,14 +128,7 @@ fn header(used: u64, window: u64) -> String {
     format!("{percent}% · {} / {}", tokens(used), tokens(window))
 }
 
-/// Below a thousand as they are, then `x.yk` with one decimal.
-fn tokens(count: u64) -> String {
-    if count < 1000 {
-        count.to_string()
-    } else {
-        format!("{:.1}k", count as f64 / 1000.0)
-    }
-}
+pub(super) use crate::trace_style::compact_count as tokens;
 
 /// The rows and the bar of one card, built from the folded tree.
 struct Build<'a> {
@@ -584,6 +578,8 @@ mod tests {
     async fn a_click_folds_a_node_and_opens_a_file(cx: &mut TestAppContext) {
         let (chat, cx) = open_with(cx, Some(breakdown(3)));
         cx.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(900.0)));
+        // The card starts folded, and a folded card draws no rows to click.
+        act(&chat, cx, SessionPanelAction::Toggle("context".into()));
         refresh_frame(cx);
         let opened = Rc::new(RefCell::new(Vec::new()));
         let seen = opened.clone();

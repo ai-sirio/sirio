@@ -28,6 +28,11 @@ pub enum TabKind {
     ChangeRequest,
     /// A CI job's log, read-only (spec B2 §7.4, §15.2).
     CiLog,
+    /// A native Claude chat's full trace: the turns and spans its transport
+    /// reported, as a tree beside a timeline. Something the user looks at, so
+    /// it lives in the Secondary half. It holds no data of its own, only the
+    /// chat's trace store, so it is never saved and closes with its chat.
+    Trace,
 }
 
 /// Which half of the [center split] a tab is drawn in.
@@ -70,9 +75,13 @@ impl TabKind {
     pub fn default_pane(self) -> PaneRole {
         match self {
             Self::Terminal | Self::AgentChat => PaneRole::Primary,
-            Self::Browser | Self::Editor | Self::Diff | Self::ProjectSettings | Self::ChangeRequest | Self::CiLog => {
-                PaneRole::Secondary
-            }
+            Self::Browser
+            | Self::Editor
+            | Self::Diff
+            | Self::ProjectSettings
+            | Self::ChangeRequest
+            | Self::CiLog
+            | Self::Trace => PaneRole::Secondary,
         }
     }
 
@@ -83,7 +92,13 @@ impl TabKind {
     pub fn can_move_between_panes(self) -> bool {
         match self {
             Self::Terminal | Self::AgentChat => true,
-            Self::Browser | Self::Editor | Self::Diff | Self::ProjectSettings | Self::ChangeRequest | Self::CiLog => false,
+            Self::Browser
+            | Self::Editor
+            | Self::Diff
+            | Self::ProjectSettings
+            | Self::ChangeRequest
+            | Self::CiLog
+            | Self::Trace => false,
         }
     }
 
@@ -98,7 +113,13 @@ impl TabKind {
     pub fn appears_in_sidebar(self) -> bool {
         match self {
             Self::Terminal | Self::AgentChat => true,
-            Self::Browser | Self::Editor | Self::Diff | Self::ProjectSettings | Self::ChangeRequest | Self::CiLog => false,
+            Self::Browser
+            | Self::Editor
+            | Self::Diff
+            | Self::ProjectSettings
+            | Self::ChangeRequest
+            | Self::CiLog
+            | Self::Trace => false,
         }
     }
 }

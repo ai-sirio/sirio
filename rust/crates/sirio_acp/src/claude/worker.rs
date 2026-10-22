@@ -24,10 +24,11 @@ use sirio_claude::{
 use super::ClaudeLaunch;
 use super::events::{Fold, ResultSummary};
 use super::permission;
+use super::trace::TraceFold;
 use crate::{
     AcpError, AcpEvent, AgentMode, ChildHandle, ContextCost, ContextUsage, EffortChoice,
     EffortOption, ExitStatusSlot, ModeCatalog, ModelCatalog, ModelOption, StderrTail,
-    TimeoutOperation,
+    TimeoutOperation, TraceEvent,
 };
 
 /// What the client asks the worker to do.
@@ -471,6 +472,7 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
         activity: Arc::clone(&activity),
         prompt_timeout,
         permission_timeout,
+        resumed: launch.resume.is_some(),
     }));
 
     crate::record_exit_status(&exit_status, crate::terminate_and_reap_blocking(&child));
@@ -529,6 +531,9 @@ struct SessionContext {
     activity: crate::ActivityClock,
     prompt_timeout: Duration,
     permission_timeout: Duration,
+    /// Whether this process was started with `--resume`: its cost counter
+    /// has an unknown starting point, which the trace must not guess at.
+    resumed: bool,
 }
 
 async fn session(context: SessionContext) -> SessionOutcome {
@@ -543,9 +548,11 @@ async fn session(context: SessionContext) -> SessionOutcome {
         activity,
         prompt_timeout,
         permission_timeout,
+        resumed,
     } = context;
     let mut lines = BufReader::new(stdout).lines();
     let mut fold = Fold::new();
+    let mut trace = TraceFold::new(resumed);
     let request_ids = AtomicU64::new(1);
     let next_request_id = || format!("sirio-{}", request_ids.fetch_add(1, Ordering::Relaxed));
     let mut turn_in_flight = false;
@@ -586,6 +593,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
             );
         };
         crate::touch_activity(&activity);
+        let at = std::time::Instant::now();
         let Some(message) = CliMessage::parse(&line) else {
             // Not JSON. A CLI that prints a banner or a warning before its
             // protocol output is not a broken CLI.
@@ -606,6 +614,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
             }
         }
         // Anything else before the handshake answer is ordinary traffic.
+        send_trace(&event_tx, trace.line(&message, at)).await;
         for event in fold.apply(message) {
             let _ = event_tx.send(event).await;
         }
@@ -667,6 +676,10 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 match line {
                     Some(Ok(line)) => {
                         crate::touch_activity(&activity);
+                        // Stamped here, as the line leaves the pipe: the
+                        // trace's every edge is this instant, and the GPUI
+                        // thread can be behind by the time it hears of it.
+                        let at = std::time::Instant::now();
                         let Some(message) = CliMessage::parse(&line) else {
                             continue;
                         };
@@ -881,10 +894,22 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             && let Some(request) = sirio_claude::CanUseTool::parse(value)
                         {
                             let request_id = permission_counter.fetch_add(1, Ordering::Relaxed);
+                            send_trace(
+                                &event_tx,
+                                trace.permission_asked(
+                                    request.tool_use_id.as_deref(),
+                                    request.agent_id.as_deref(),
+                                    request_id,
+                                    at,
+                                ),
+                            )
+                            .await;
                             // Draw or pause the row this decision belongs to,
                             // so a card never asks about a call nobody sees.
+                            // A subagent's call has no row: its lines stay out
+                            // of the transcript, so the row would never settle.
                             let row_events = match request.tool_use_id.as_deref() {
-                                Some(tool_use_id) => {
+                                Some(tool_use_id) if !is_subagent_permission(&fold, &request) => {
                                     let mut events = fold.start_from_permission(
                                         &request.tool_name,
                                         tool_use_id,
@@ -893,7 +918,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     events.extend(fold.mark_pending(tool_use_id));
                                     events
                                 }
-                                None => Vec::new(),
+                                _ => Vec::new(),
                             };
                             for event in row_events {
                                 let _ = event_tx.send(event).await;
@@ -928,7 +953,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 request_id,
                                 PendingPermission {
                                     request,
-                                    asked_at: std::time::Instant::now(),
+                                    asked_at: at,
                                 },
                             );
                             continue;
@@ -956,6 +981,10 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 .send(AcpEvent::AvailableCommands(command_list(&catalog)))
                                 .await;
                         }
+                        // Ahead of the line's transcript events, and not held with
+                        // them: a turn's trace ends when its `result` is read,
+                        // not when the meter has answered.
+                        send_trace(&event_tx, trace.line(&message, at)).await;
                         let mut events = fold.apply(message);
                         if let Some(list) = fold.take_init_mcp_servers() {
                             shared.store_init_mcp_servers(&list);
@@ -1033,10 +1062,12 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         // reports is a turn that lives, however long it takes.
                         crate::touch_activity(&activity);
                         turn_in_flight = true;
+                        let at = std::time::Instant::now();
                         if write_line(&mut stdin, &line).await.is_err() {
                             end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(": could not write the turn".into());
                         }
+                        send_trace(&event_tx, trace.prompt_sent(at)).await;
                     }
                     Ok(Command::SetModel(model)) => {
                         let id = next_request_id();
@@ -1118,6 +1149,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(": could not write the interrupt".into());
                         }
+                        trace.interrupt_sent();
                     }
                     Ok(Command::RespondPermission { request_id, choice }) => {
                         let Some(pending) = pending_permissions.remove(&request_id) else {
@@ -1149,7 +1181,14 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             end_held_turn(&event_tx, &mut pending_context_usage).await;
                             return SessionOutcome::Died(": could not answer a permission".into());
                         }
-                        if allowed && let Some(tool_use_id) = pending.request.tool_use_id.as_deref()
+                        send_trace(
+                            &event_tx,
+                            trace.permission_answered(request_id, std::time::Instant::now()),
+                        )
+                        .await;
+                        if allowed
+                            && !is_subagent_permission(&fold, &pending.request)
+                            && let Some(tool_use_id) = pending.request.tool_use_id.as_deref()
                         {
                             for event in fold.mark_running(tool_use_id) {
                                 let _ = event_tx.send(event).await;
@@ -1286,6 +1325,12 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 end_held_turn(&event_tx, &mut pending_context_usage).await;
                 return SessionOutcome::Died(": could not expire a permission".into());
             }
+            // The deny is an answer: the wait is over though nobody gave it.
+            send_trace(
+                &event_tx,
+                trace.permission_answered(request_id, std::time::Instant::now()),
+            )
+            .await;
         }
         // The meter has its own grace: the turn it belongs to has already
         // finished, and a CLI that never answers must not hold its end open.
@@ -1315,6 +1360,24 @@ async fn session(context: SessionContext) -> SessionOutcome {
             end_held_turn(&event_tx, &mut pending_context_usage).await;
             return SessionOutcome::NeverStarted;
         }
+    }
+}
+
+/// Whether a permission request is a subagent's. It names its agent, or asks
+/// about a call a subagent's line held. The request may come before that line,
+/// which is why the agent counts as well as the call.
+fn is_subagent_permission(fold: &Fold, request: &sirio_claude::CanUseTool) -> bool {
+    request.agent_id.is_some()
+        || request
+            .tool_use_id
+            .as_deref()
+            .is_some_and(|id| fold.is_subagent_call(id))
+}
+
+/// Forwards the trace events one line, command or answer produced, in order.
+async fn send_trace(event_tx: &async_channel::Sender<AcpEvent>, events: Vec<TraceEvent>) {
+    for event in events {
+        let _ = event_tx.send(AcpEvent::Trace(event)).await;
     }
 }
 

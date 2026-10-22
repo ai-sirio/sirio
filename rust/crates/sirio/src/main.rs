@@ -76,6 +76,7 @@ use sirio_ui::change_request_tab::{
     HandoffState, InnerTab, Surface,
 };
 use sirio_ui::ci_log_tab::{CiLogTab, CiLogTabEvent};
+use sirio_ui::trace_tab::{TraceTab, TraceTabEvent};
 use sirio_ui::status::ActivityStatus;
 use sirio_ui::worktree_picker::{WorktreeChoice, WorktreePicker, WorktreePickerEvent};
 use sirio_ui::update_card::{UpdateCard, UpdateCardAction, UpdateCardInput, UpdateCardView, update_card_view};
@@ -1211,6 +1212,9 @@ enum ControlAction {
     },
     CiLogOpen { job: u64, reply: ControlReply },
     CiLogRead { reply: ControlReply },
+    /// `surface.trace.read`: a chat's Trace tab, if it has one. A read, so
+    /// every build serves it.
+    TraceRead { surface_id: String, reply: ControlReply },
     CiLogView {
         toggle: Option<usize>,
         jump_error: bool,
@@ -1552,6 +1556,18 @@ struct ParkedWorktreeTabs {
     /// Their sessions are another worktree's or a shown tab's, so closing the
     /// worktree must not end them (SP2 spec §4.2).
     attached_panes: HashSet<usize>,
+}
+
+/// A Trace tab kept while its worktree is parked. It holds no state of its
+/// own besides which turn is shown and what is folded, which the view keeps;
+/// its title is the chat tab's, read again when it comes back.
+struct ParkedTrace {
+    /// The persistence id of the chat tab it shows, how that chat is found
+    /// again among the restored tabs.
+    chat_tab: String,
+    /// The chat itself: the tab comes back only if this very session did.
+    chat: gpui::EntityId,
+    view: Entity<TraceTab>,
 }
 
 struct TabRename {
@@ -3151,6 +3167,12 @@ impl ControlHandler for AppControlHandler {
                 self.queue_action(request, move |reply| ControlAction::CiLogOpen { job, reply })
             }
             "surface.ci_log.read" => self.queue_action(request, |reply| ControlAction::CiLogRead { reply }),
+            "surface.trace.read" => {
+                let Some(surface_id) = request.params.get("surfaceId").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.trace.read requires surfaceId");
+                };
+                self.queue_action(request, move |reply| ControlAction::TraceRead { surface_id, reply })
+            }
             "surface.ci_log.view" => {
                 let toggle = match request.params.get("toggle") {
                     Some(value) => match value.parse() {
@@ -4837,6 +4859,7 @@ fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Ico
         TabKind::Diff => Icon::File,
         TabKind::ProjectSettings => Icon::Settings,
         TabKind::ChangeRequest => Icon::PullRequest,
+        TabKind::Trace => Icon::Clock,
     }
 }
 
@@ -5214,6 +5237,35 @@ fn delegated_terminal_context_action(
 /// not cached.
 fn cached_full() -> StyleRefinement {
     StyleRefinement::default().size_full()
+}
+
+/// A Trace tab's title: the chat tab's, which it follows.
+fn trace_tab_title(chat_title: &str) -> String {
+    format!("Trace · {chat_title}")
+}
+
+/// The strip's entry for a Trace tab: Secondary, never moved, named by the
+/// chat it shows rather than by the summarizer.
+fn trace_open_tab(
+    id: usize,
+    persistence_id: String,
+    title: String,
+    pane_id: usize,
+    view: Entity<TraceTab>,
+) -> OpenTab {
+    OpenTab {
+        id,
+        persistence_id,
+        title,
+        kind: TabKind::Trace,
+        pane: TabKind::Trace.default_pane(),
+        agent_icon: None,
+        agent_id: None,
+        session_state: SessionTabState::with_root(pane_id),
+        panes: PaneNode::leaf(pane_id, TabContent::Trace(view)),
+        focused_pane: pane_id,
+        title_is_auto_named: false,
+    }
 }
 
 fn next_pane_id(tabs: &[OpenTab]) -> usize {
@@ -5636,6 +5688,11 @@ struct SirioWorkspace {
     /// session -- when its worktree comes back. Dropped when the worktree is
     /// evicted or closed.
     retained_worktree_chats: BTreeMap<String, BTreeMap<String, OpenTab>>,
+    /// The Trace tabs of those worktrees, kept beside their chats. The tab is
+    /// never saved, so the database cannot bring it back the way it brings
+    /// back the rest of a strip: it comes back from here, and only when its
+    /// chat did. Cleared wherever `retained_worktree_chats` is.
+    parked_trace_tabs: BTreeMap<String, Vec<ParkedTrace>>,
     /// What each worktree the user switched away from still holds, as the
     /// sidebar lists it under that worktree: its persisted strip, mapped to
     /// parked rows (`SidebarTabRef::Parked`). Filled lazily by
@@ -6110,6 +6167,9 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::CiLogRead { reply } => {
                                     let _ = reply.send(workspace.control_read_ci_log(cx));
+                                }
+                                ControlAction::TraceRead { surface_id, reply } => {
+                                    let _ = reply.send(workspace.control_trace_read(&surface_id, cx));
                                 }
                                 ControlAction::CiLogView { toggle, jump_error, refresh, copy, reply } => {
                                     let _ = reply.send(workspace.control_ci_log_view(toggle, jump_error, refresh, copy, cx));
@@ -6707,6 +6767,7 @@ impl SirioWorkspace {
             parked_worktree_tabs: BTreeMap::new(),
             new_agent_launches: Vec::new(),
             retained_worktree_chats: BTreeMap::new(),
+            parked_trace_tabs: BTreeMap::new(),
             parked_sidebar_tabs: BTreeMap::new(),
             files_snapshots: HashMap::new(),
             files_snapshot_in_flight: HashSet::new(),
@@ -7340,8 +7401,8 @@ impl SirioWorkspace {
     }
 
     /// The shell's layout as held in memory: every tab of the worktree,
-    /// attached ones included. Parking keeps this, so a parked attached tab
-    /// comes back attached with its own pane.
+    /// attached ones and Trace tabs included. Parking keeps this, so a parked
+    /// attached tab comes back attached with its own pane.
     fn layout(&self, cx: &App) -> SessionLayout {
         self.layout_of(cx, self.worktree_tabs())
     }
@@ -7349,10 +7410,12 @@ impl SirioWorkspace {
     /// The layout the session save writes. An attached tab (Show session) is
     /// a view onto a session another client owns: it is never saved, so a
     /// relaunch cannot restore it as an owned tab (spec §5). The session
-    /// lives on in the host.
+    /// lives on in the host. A Trace tab is never saved either: its data is a
+    /// live chat's memory, and a restored chat has none.
     fn saved_layout(&self, cx: &App) -> SessionLayout {
-        let owned_tabs =
-            persisted_tabs(self.worktree_tabs(), |tab| tab_shows_attached_session(tab, cx));
+        let owned_tabs = persisted_tabs(self.worktree_tabs(), |tab| {
+            tab_shows_attached_session(tab, cx) || tab.kind == TabKind::Trace
+        });
         self.layout_of(cx, owned_tabs)
     }
 
@@ -7455,6 +7518,10 @@ impl SirioWorkspace {
                                 state.change_request = Some(view.reference().clone());
                                 state.change_request_tab = view.inner_tab().as_str().to_string();
                             }
+                            // Nothing to save: the tab is never written
+                            // (`saved_layout`), and the in-memory layout that
+                            // parking keeps needs no more than its place.
+                            TabContent::Trace(_) => {}
                             TabContent::CiLog(view) => {
                                 let view = view.read(cx);
                                 state.ci_log = Some(session::PersistedCiLog {
@@ -8840,6 +8907,10 @@ impl SirioWorkspace {
                 ChatEvent::OpenChangeRequest { reference, title } => {
                     workspace.add_change_request_tab(reference.clone(), title.clone(), cx)
                 }
+                // The Trace card's "Open full trace".
+                ChatEvent::OpenTrace => workspace.add_trace_tab(&chat_entity, cx),
+                // The Trace tab listens to this itself.
+                ChatEvent::TraceChanged => {}
                 ChatEvent::SessionIdentified(session_id) => {
                     // A hook write, like `save_session_ref`: the id must
                     // survive a restart that comes before any other save.
@@ -10209,6 +10280,7 @@ impl SirioWorkspace {
                 self.terminal_pane_cache.remove_worktree(&worktree_id);
                 self.parked_worktree_tabs.remove(&worktree_id);
                 self.retained_worktree_chats.remove(&worktree_id);
+                self.parked_trace_tabs.remove(&worktree_id);
             }
             // A settings tab of a removed project has no project left to show.
             let doomed: Vec<usize> = self
@@ -10906,7 +10978,8 @@ impl SirioWorkspace {
             | TabContent::Browser(_)
             | TabContent::ProjectSettings(_)
             | TabContent::ChangeRequest(_)
-            | TabContent::CiLog(_) => None,
+            | TabContent::CiLog(_)
+            | TabContent::Trace(_) => None,
         }
     }
 
@@ -10978,7 +11051,8 @@ impl SirioWorkspace {
                 | TabContent::Browser(_)
                 | TabContent::ProjectSettings(_)
                 | TabContent::ChangeRequest(_)
-                | TabContent::CiLog(_) => return,
+                | TabContent::CiLog(_)
+                | TabContent::Trace(_) => return,
                 _ => self.pane_status(tab, pane_id),
             };
             if status.is_none_or(|current| activity_rank(candidate) < activity_rank(current)) {
@@ -11051,7 +11125,8 @@ impl SirioWorkspace {
                 | TabContent::Browser(_)
                 | TabContent::ProjectSettings(_)
                 | TabContent::ChangeRequest(_)
-                | TabContent::CiLog(_) => ActivityStatus::Idle,
+                | TabContent::CiLog(_)
+                | TabContent::Trace(_) => ActivityStatus::Idle,
                 _ => self.pane_status(tab, pane_id),
             };
         });
@@ -11550,7 +11625,8 @@ impl SirioWorkspace {
                     | TabContent::Browser(_)
                     | TabContent::ProjectSettings(_)
                     | TabContent::ChangeRequest(_)
-                    | TabContent::CiLog(_) => (
+                    | TabContent::CiLog(_)
+                    | TabContent::Trace(_) => (
                         tab.title.clone(),
                         String::new(),
                         PaneStateSnapshot {
@@ -11674,6 +11750,7 @@ impl SirioWorkspace {
             self.terminal_pane_cache.remove_worktree(&id);
             self.parked_worktree_tabs.remove(&id);
             self.retained_worktree_chats.remove(&id);
+            self.parked_trace_tabs.remove(&id);
         }
     }
 
@@ -11741,7 +11818,7 @@ impl SirioWorkspace {
             for tab_id in outgoing_tab_ids {
                 self.track_terminal_panes_in_cache(tab_id);
             }
-            self.retain_worktree_chats(&old_path);
+            self.retain_worktree_chats(&old_path, cx);
             Some(self.park_current_worktree_tabs(cx))
         } else {
             None
@@ -11824,7 +11901,7 @@ impl SirioWorkspace {
                 }
             }
             let resume_agent_sessions = self.settings.read(cx).snapshot().resume_agent_sessions;
-            let (new_tabs, active, reused_terminal_panes) = restore_tabs_with_terminal_cache(
+            let (mut new_tabs, active, reused_terminal_panes) = restore_tabs_with_terminal_cache(
                 &restored,
                 &selected_path,
                 selected_is_git,
@@ -11837,6 +11914,8 @@ impl SirioWorkspace {
                 self.retained_worktree_chats.get(&selected_worktree_id),
                 cx,
             );
+            // The Trace tabs this worktree parked come back with their chats.
+            self.readopt_trace_tabs(&selected_worktree_id, &selected_path, &mut new_tabs);
             // Whatever this worktree had retained was just re-adopted into
             // `new_tabs`; a running chat whose tab the database no longer
             // names is dropped rather than resurrected, so the DB stays the
@@ -12235,6 +12314,7 @@ impl SirioWorkspace {
         self.terminal_pane_cache.remove_worktree(&worktree_id);
         self.parked_worktree_tabs.remove(&worktree_id);
         self.retained_worktree_chats.remove(&worktree_id);
+        self.parked_trace_tabs.remove(&worktree_id);
         if was_current {
             for index in (0..self.tabs.len()).rev() {
                 self.close_tab(index, None, cx);
@@ -12916,6 +12996,7 @@ impl SirioWorkspace {
             && self.tabs[tab_index].title != title
         {
             self.tabs[tab_index].title = title;
+            self.sync_trace_titles(cx);
             self.rebuild_center_split();
             cx.notify();
         }
@@ -12972,6 +13053,7 @@ impl SirioWorkspace {
             return;
         }
         tab.title = title;
+        self.sync_trace_titles(cx);
         self.schedule_save(cx);
         self.mark_activity_dirty();
         cx.notify();
@@ -12979,9 +13061,13 @@ impl SirioWorkspace {
 
     fn tab_width(kind: TabKind) -> f32 {
         match kind {
-            TabKind::AgentChat | TabKind::Editor | TabKind::Diff | TabKind::ProjectSettings | TabKind::ChangeRequest | TabKind::CiLog => {
-                CHAT_TAB_MIN_WIDTH
-            }
+            TabKind::AgentChat
+            | TabKind::Editor
+            | TabKind::Diff
+            | TabKind::ProjectSettings
+            | TabKind::ChangeRequest
+            | TabKind::CiLog
+            | TabKind::Trace => CHAT_TAB_MIN_WIDTH,
             TabKind::Terminal => TERMINAL_TAB_MIN_WIDTH,
             TabKind::Browser => CHAT_TAB_MIN_WIDTH,
         }
@@ -13259,7 +13345,7 @@ impl SirioWorkspace {
     /// adopts it by persistence id). A worktree whose live tabs hold no chat
     /// drops whatever it had retained: the DB strip is about to be rewritten
     /// from this same `self.tabs` snapshot, so nothing else can be stale.
-    fn retain_worktree_chats(&mut self, worktree_path: &Path) {
+    fn retain_worktree_chats(&mut self, worktree_path: &Path, cx: &App) {
         let worktree_id = worktree_path.to_string_lossy().into_owned();
         let mut retained: BTreeMap<String, OpenTab> = BTreeMap::new();
         for tab in &self.tabs {
@@ -13273,11 +13359,33 @@ impl SirioWorkspace {
                 retained.insert(tab.persistence_id.clone(), tab.clone());
             }
         }
+        let traces = self.parked_traces(cx);
+        if traces.is_empty() {
+            self.parked_trace_tabs.remove(&worktree_id);
+        } else {
+            self.parked_trace_tabs.insert(worktree_id.clone(), traces);
+        }
         if retained.is_empty() {
             self.retained_worktree_chats.remove(&worktree_id);
         } else {
             self.retained_worktree_chats.insert(worktree_id, retained);
         }
+    }
+
+    /// The Trace tabs on screen, each with the chat tab it shows.
+    fn parked_traces(&self, cx: &App) -> Vec<ParkedTrace> {
+        self.trace_views()
+            .into_iter()
+            .filter_map(|(_, view)| {
+                let chat = view.read(cx).chat_id();
+                let chat_tab = self.chat_tab_of(chat)?;
+                Some(ParkedTrace {
+                    chat_tab: chat_tab.persistence_id.clone(),
+                    chat,
+                    view,
+                })
+            })
+            .collect()
     }
 
     fn park_current_worktree_tabs(&mut self, cx: &App) -> SessionLayout {
@@ -16887,6 +16995,191 @@ impl SirioWorkspace {
         cx.notify();
     }
 
+    /// The tab of the strip on screen whose pane holds the chat `chat`.
+    fn chat_tab_of(&self, chat: gpui::EntityId) -> Option<&OpenTab> {
+        self.tabs.iter().find(|tab| {
+            let mut holds = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Chat(candidate) = content {
+                    holds |= candidate.entity_id() == chat;
+                }
+            });
+            holds
+        })
+    }
+
+    /// Every Trace tab of the strip on screen, with its tab id.
+    fn trace_views(&self) -> Vec<(usize, Entity<TraceTab>)> {
+        let mut found = Vec::new();
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Trace(view) = content {
+                    found.push((tab.id, view.clone()));
+                }
+            });
+        }
+        found
+    }
+
+    /// The strip's Trace tab for the chat `chat`, if it has one.
+    fn trace_view_of(&self, chat: gpui::EntityId, cx: &App) -> Option<(usize, Entity<TraceTab>)> {
+        self.trace_views()
+            .into_iter()
+            .find(|(_, view)| view.read(cx).chat_id() == chat)
+    }
+
+    /// Names the Trace tab of each chat after the chat's own tab, which the
+    /// user, the summarizer or the first prompt may just have retitled.
+    fn sync_trace_titles(&mut self, cx: &App) {
+        let titles: Vec<(usize, String)> = self
+            .trace_views()
+            .into_iter()
+            .filter_map(|(id, view)| {
+                let chat_tab = self.chat_tab_of(view.read(cx).chat_id())?;
+                Some((id, trace_tab_title(&chat_tab.title)))
+            })
+            .collect();
+        for (id, title) in titles {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                tab.title = title;
+            }
+        }
+    }
+
+    /// Opens `chat`'s Trace tab, or brings forward the one it has: one per
+    /// chat. The tab is named after the chat's own, and holds nothing but a
+    /// handle to the chat's trace.
+    fn add_trace_tab(&mut self, chat: &Entity<Chat>, cx: &mut Context<Self>) {
+        if let Some((tab_id, _)) = self.trace_view_of(chat.entity_id(), cx) {
+            self.select_tab(tab_id, None, cx);
+            return;
+        }
+        // A chat of a worktree that is parked has no tab on screen to sit
+        // beside; nothing asked for one.
+        let Some(chat_tab) = self.chat_tab_of(chat.entity_id()) else {
+            return;
+        };
+        let title = trace_tab_title(&chat_tab.title);
+        let view = cx.new(|cx| TraceTab::new(chat.clone(), cx));
+        Self::subscribe_trace_tab(&view, cx);
+        let tab_id = self.next_tab_id;
+        let persistence_id = self.session.new_tab_id(&self.working_directory, tab_id);
+        self.tabs.push(trace_open_tab(
+            tab_id,
+            persistence_id,
+            title.clone(),
+            self.next_pane_id,
+            view,
+        ));
+        self.tab_worktree_paths
+            .insert(tab_id, self.working_directory.clone());
+        self.active_tab = self.tabs.len() - 1;
+        self.next_tab_id += 1;
+        self.next_pane_id += 1;
+        self.open_secondary_pane();
+        if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Document, &title) {
+            self.rebuild_center_split();
+        }
+        self.schedule_save(cx);
+        self.mark_activity_dirty();
+        cx.notify();
+    }
+
+    /// A Trace tab closes when its chat is gone: the tab says so itself when
+    /// the chat is released, which every way of closing a chat comes to (a
+    /// tab, a worktree, a project), and which no handle of the tab's delays.
+    fn subscribe_trace_tab(view: &Entity<TraceTab>, cx: &mut Context<Self>) {
+        cx.subscribe(view, |workspace, emitter, event: &TraceTabEvent, cx| match event {
+            TraceTabEvent::Close => {
+                let hosted: Vec<usize> = workspace
+                    .trace_views()
+                    .into_iter()
+                    .filter(|(_, view)| view.entity_id() == emitter.entity_id())
+                    .map(|(tab_id, _)| tab_id)
+                    .collect();
+                for tab_id in hosted {
+                    workspace.close_tab_by_id(tab_id, None, cx);
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Puts back the Trace tabs `worktree_id` parked, among the restored
+    /// `tabs`: each whose chat came back as the same session. A chat the
+    /// database no longer names, or that was relaunched as a new one, has
+    /// nothing for the old trace to show.
+    fn readopt_trace_tabs(&mut self, worktree_id: &str, worktree: &Path, tabs: &mut Vec<OpenTab>) {
+        let Some(parked) = self.parked_trace_tabs.remove(worktree_id) else {
+            return;
+        };
+        for trace in parked {
+            let chat_tab = tabs.iter().find(|tab| {
+                let mut same = false;
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Chat(chat) = content {
+                        same |= chat.entity_id() == trace.chat;
+                    }
+                });
+                same && tab.persistence_id == trace.chat_tab
+            });
+            // Named for the tab its chat comes back in, which may have been
+            // retitled while it was away.
+            let Some(title) = chat_tab.map(|tab| trace_tab_title(&tab.title)) else {
+                continue;
+            };
+            // Tab ids are positions, and a pane id must not be one the
+            // restored tabs hold.
+            let pane_id = next_pane_id(tabs).max(self.next_pane_id);
+            self.next_pane_id = pane_id + 1;
+            let id = tabs.len();
+            let persistence_id = self.session.new_tab_id(worktree, id);
+            tabs.push(trace_open_tab(id, persistence_id, title, pane_id, trace.view));
+        }
+    }
+
+    /// `surface.trace.read`: whether `surface_id`'s chat has a Trace tab, and
+    /// the turn it shows with its spans and how many spans past the cap it
+    /// did not keep.
+    fn control_trace_read(
+        &self,
+        surface_id: &str,
+        cx: &App,
+    ) -> Result<Vec<(String, String)>, String> {
+        let Some(chat_tab) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.persistence_id == surface_id && tab.kind == TabKind::AgentChat)
+        else {
+            return Err(format!("unknown chat surface: {surface_id}"));
+        };
+        let mut chat = None;
+        chat_tab.panes.for_each(&mut |_, content| {
+            if let TabContent::Chat(entity) = content {
+                chat.get_or_insert(entity.entity_id());
+            }
+        });
+        let Some(chat) = chat else {
+            return Err(format!("chat surface is not mounted: {surface_id}"));
+        };
+        let Some((_, view)) = self.trace_view_of(chat, cx) else {
+            return Ok(vec![("open".to_string(), "0".to_string())]);
+        };
+        let snapshot = view.read(cx).snapshot(cx);
+        Ok(vec![
+            ("open".to_string(), "1".to_string()),
+            ("turn".to_string(), snapshot.turn.to_string()),
+            ("turns".to_string(), snapshot.turns.to_string()),
+            ("follow".to_string(), if snapshot.follow { "1" } else { "0" }.to_string()),
+            ("dropped".to_string(), snapshot.dropped.to_string()),
+            (
+                "spans".to_string(),
+                serde_json::to_string(&snapshot.spans)
+                    .expect("the trace tab's spans are serializable"),
+            ),
+        ])
+    }
+
     fn subscribe_ci_log_tab(view: &Entity<CiLogTab>, cx: &mut Context<Self>) {
         cx.subscribe(view, |workspace, emitter, event: &CiLogTabEvent, cx| match event {
             CiLogTabEvent::Close => {
@@ -20154,6 +20447,18 @@ impl SirioWorkspace {
                 serde_json::to_string(&snapshot.session_panel)
                     .expect("the session panel snapshot is serializable"),
             ),
+            // Where the transcript list's top sits, so a reveal can be told
+            // from a list that did not move.
+            (
+                "firstVisibleEntry".to_string(),
+                snapshot.first_visible_entry.to_string(),
+            ),
+            // Where it ends: a reveal of the transcript's last row is on screen when it is
+            // between the two, though it cannot be the top.
+            (
+                "lastVisibleEntry".to_string(),
+                snapshot.last_visible_entry.to_string(),
+            ),
         ]
     }
 
@@ -20277,6 +20582,8 @@ impl SirioWorkspace {
                     focused_content = match content {
                         TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                         TabContent::Terminal { view } => Some(view.focus_handle(cx)),
+                        // Its keys need the focus a click or a tab switch gives it.
+                        TabContent::Trace(view) => Some(view.focus_handle(cx)),
                         TabContent::File { .. }
                         | TabContent::Changes(_)
                         | TabContent::Browser(_)
@@ -20538,6 +20845,8 @@ impl SirioWorkspace {
                         replacement_content = match content {
                             TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                             TabContent::Terminal { view } => Some(view.focus_handle(cx)),
+                            // Its keys need the focus a click or a tab switch gives it.
+                            TabContent::Trace(view) => Some(view.focus_handle(cx)),
                             TabContent::File { .. }
                             | TabContent::Changes(_)
                             | TabContent::Browser(_)
@@ -20569,6 +20878,8 @@ impl SirioWorkspace {
                 handle = match content {
                     TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                     TabContent::Terminal { view } => Some(view.focus_handle(cx)),
+                    // Its keys need the focus a click or a tab switch gives it.
+                    TabContent::Trace(view) => Some(view.focus_handle(cx)),
                     TabContent::File { .. }
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
@@ -20609,6 +20920,8 @@ impl SirioWorkspace {
                 handle = match content {
                     TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                     TabContent::Terminal { view } => Some(view.focus_handle(cx)),
+                    // Its keys need the focus a click or a tab switch gives it.
+                    TabContent::Trace(view) => Some(view.focus_handle(cx)),
                     TabContent::File { .. }
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
@@ -20724,6 +21037,10 @@ impl SirioWorkspace {
                     TabContent::CiLog(view) => div()
                         .size_full()
                         .child(view.clone())
+                        .into_any_element(),
+                    TabContent::Trace(view) => div()
+                        .size_full()
+                        .child(self.child_view(view.clone()))
                         .into_any_element(),
                     // Not cached: the browser positions a native child window
                     // from its paint, which a replayed frame would skip.
@@ -21689,7 +22006,8 @@ impl SirioWorkspace {
                 | TabContent::Browser(_)
                 | TabContent::ProjectSettings(_)
                 | TabContent::ChangeRequest(_)
-                | TabContent::CiLog(_) => false,
+                | TabContent::CiLog(_)
+                | TabContent::Trace(_) => false,
             };
         });
         dirty
@@ -22147,6 +22465,7 @@ impl SirioWorkspace {
         // of automatic renaming, mirroring Swift's `tab.titleIsAutoNamed =
         // false` on manual rename.
         tab.title_is_auto_named = false;
+        self.sync_trace_titles(cx);
         self.schedule_save(cx);
         self.mark_activity_dirty();
         true
@@ -22271,6 +22590,8 @@ impl SirioWorkspace {
                 focus_handle = match content {
                     TabContent::Chat(chat) => Some(chat.focus_handle(cx)),
                     TabContent::Terminal { view } => Some(view.focus_handle(cx)),
+                    // Its keys need the focus a click or a tab switch gives it.
+                    TabContent::Trace(view) => Some(view.focus_handle(cx)),
                     TabContent::File { .. }
                     | TabContent::Changes(_)
                     | TabContent::Browser(_)
@@ -25686,6 +26007,9 @@ fn restore_tabs_with_terminal_cache(
             // Built by `restore_project_settings_tabs` once a workspace
             // exists: the seed comes from the sidebar.
             Some(TabKind::ProjectSettings) => continue,
+            // Never saved, so never restored: its data is a live chat's
+            // memory, and a restored chat has none.
+            Some(TabKind::Trace) => continue,
             None => continue,
         };
         let panes = match content {
@@ -26263,6 +26587,9 @@ fn restore_tabs_in_workspace(
             // Built by `restore_project_settings_tabs` once a workspace
             // exists: the seed comes from the sidebar.
             Some(TabKind::ProjectSettings) => continue,
+            // Never saved, so never restored: its data is a live chat's
+            // memory, and a restored chat has none.
+            Some(TabKind::Trace) => continue,
             None => continue,
         };
         let panes = replay_pane_events(pane_id, content, &tab_state.pane_events, |_| {
@@ -27858,6 +28185,7 @@ fn main() {
         sirio_ui::chat::init(cx);
         sirio_ui::text_selection::init(cx);
         sirio_ui::file_view::init(cx);
+        sirio_ui::trace_tab::init(cx);
 
         // Restore the stored layout; a missing, corrupt or newer-schema
         // database logs and falls back to the default layout — the app must
@@ -33649,6 +33977,445 @@ done
         });
         shutdown_workspace_terminals(&workspace, &mut cx);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A workspace on a repo with a second worktree and no tabs.
+    fn trace_test_workspace(
+        cx: &mut TestAppContext,
+        tag: &str,
+    ) -> (Entity<SirioWorkspace>, VisualTestContext, PathBuf, PathBuf) {
+        cx.set_global(Theme::light());
+        let repo = committed_test_repo(tag);
+        let other = parked_rows_other_dir(&repo);
+        let (repo_for_window, other_for_window) = (repo.clone(), other.clone());
+        let window = cx.add_window(|_window, cx| {
+            parked_rows_test_workspace(cx, &repo_for_window, &other_for_window)
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window.root::<SirioWorkspace>().flatten().expect("workspace root")
+        });
+        (workspace, cx, repo, other)
+    }
+
+    /// A chat tab on `repo`, bound the way `add_chat_tab` binds one, so its
+    /// events reach the workspace. Returns the chat.
+    fn push_trace_test_chat(
+        workspace: &mut SirioWorkspace,
+        persistence_id: &str,
+        repo: &Path,
+        cx: &mut Context<SirioWorkspace>,
+    ) -> Entity<Chat> {
+        let chat = cx.new(|cx| Chat::unavailable("fixture".into(), repo.to_path_buf(), cx));
+        SirioWorkspace::bind_chat(&chat, cx);
+        let (tab_id, pane_id) = (workspace.next_tab_id, workspace.next_pane_id);
+        workspace.tabs.push(OpenTab {
+            id: tab_id,
+            persistence_id: persistence_id.into(),
+            title: format!("Chat {persistence_id}"),
+            kind: TabKind::AgentChat,
+            pane: TabKind::AgentChat.default_pane(),
+            agent_icon: None,
+            agent_id: None,
+            session_state: SessionTabState::with_root(pane_id),
+            panes: PaneNode::leaf(pane_id, TabContent::Chat(chat.clone())),
+            focused_pane: pane_id,
+            title_is_auto_named: false,
+        });
+        workspace.tab_worktree_paths.insert(tab_id, repo.to_path_buf());
+        workspace.next_tab_id += 1;
+        workspace.next_pane_id += 1;
+        workspace.active_tab = workspace.tabs.len() - 1;
+        chat
+    }
+
+    /// Each Trace tab of the strip as (tab id, the chat it shows).
+    fn trace_tabs(workspace: &SirioWorkspace, cx: &App) -> Vec<(usize, gpui::EntityId)> {
+        workspace
+            .trace_views()
+            .into_iter()
+            .map(|(id, view)| (id, view.read(cx).chat_id()))
+            .collect()
+    }
+
+    #[gpui::test]
+    async fn opening_the_trace_twice_focuses_the_one_tab(cx: &mut TestAppContext) {
+        let (workspace, mut cx, repo, _other) = trace_test_workspace(cx, "trace-open-twice");
+        let (first, second) = workspace.update(&mut cx, |workspace, cx| {
+            let first = push_trace_test_chat(workspace, "chat-a", &repo, cx);
+            let second = push_trace_test_chat(workspace, "chat-b", &repo, cx);
+            (first, second)
+        });
+
+        first.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            let traces = trace_tabs(workspace, cx);
+            assert_eq!(traces.len(), 1, "the first ask opens a tab");
+            assert_eq!(traces[0].1, first.entity_id(), "on the chat that asked");
+            let tab = &workspace.tabs[workspace.active_tab];
+            assert_eq!(tab.kind, TabKind::Trace, "and shows it");
+            assert_eq!(tab.pane, PaneRole::Secondary, "in the Secondary half");
+        });
+
+        // The reader goes back to the chat, and asks again.
+        workspace.update(&mut cx, |workspace, cx| workspace.select_tab(0, None, cx));
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(workspace.tabs[workspace.active_tab].kind, TabKind::AgentChat);
+        });
+        first.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(trace_tabs(workspace, cx).len(), 1, "a second ask opens nothing");
+            assert_eq!(
+                workspace.tabs[workspace.active_tab].kind,
+                TabKind::Trace,
+                "it brings the one there is to the front"
+            );
+        });
+
+        // One per chat, not one in all.
+        second.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            let chats: Vec<_> = trace_tabs(workspace, cx).into_iter().map(|(_, chat)| chat).collect();
+            assert_eq!(chats.len(), 2);
+            assert!(chats.contains(&first.entity_id()) && chats.contains(&second.entity_id()));
+        });
+    }
+
+    #[gpui::test]
+    async fn closing_the_chat_closes_its_trace_tab(cx: &mut TestAppContext) {
+        let (workspace, mut cx, repo, _other) = trace_test_workspace(cx, "trace-closes-with-chat");
+        let (kept, closed) = workspace.update(&mut cx, |workspace, cx| {
+            let kept = push_trace_test_chat(workspace, "chat-kept", &repo, cx);
+            let closed = push_trace_test_chat(workspace, "chat-closed", &repo, cx);
+            (kept, closed)
+        });
+        kept.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        closed.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        let closed_tab = workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(trace_tabs(workspace, cx).len(), 2);
+            workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.persistence_id == "chat-closed")
+                .map(|tab| tab.id)
+                .expect("the chat tab")
+        });
+        // The chat is on screen: the frame it was painted in holds handles to
+        // it, as a real window's does until the next paint.
+        workspace.update(&mut cx, |workspace, cx| workspace.select_tab(closed_tab, None, cx));
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let weak = closed.downgrade();
+        drop(closed);
+
+        workspace.update(&mut cx, |workspace, cx| workspace.close_tab_by_id(closed_tab, None, cx));
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, cx| {
+            let chats: Vec<_> = trace_tabs(workspace, cx).into_iter().map(|(_, chat)| chat).collect();
+            assert_eq!(chats, vec![kept.entity_id()], "only the closed chat's trace went");
+            assert!(
+                workspace.tabs.iter().any(|tab| tab.persistence_id == "chat-kept"),
+                "the other chat is untouched"
+            );
+        });
+        // The frame the chat was painted in is replaced by the next paint.
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            weak.upgrade().is_none(),
+            "nothing, the trace tab included, keeps a closed chat's agent alive"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_session_save_never_names_a_trace_tab(cx: &mut TestAppContext) {
+        let (workspace, mut cx, repo, _other) = trace_test_workspace(cx, "trace-never-saved");
+        let chat = workspace.update(&mut cx, |workspace, cx| {
+            push_trace_test_chat(workspace, "chat-a", &repo, cx)
+        });
+        chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+
+        workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(trace_tabs(workspace, cx).len(), 1);
+            let live = workspace.layout(cx);
+            assert!(
+                live.tabs.iter().any(|tab| tab.kind == "trace"),
+                "the in-memory layout keeps it, so a parked worktree can"
+            );
+            assert_eq!(live.tabs.len(), live.tab_states.len());
+            let saved = workspace.saved_layout(cx);
+            assert!(
+                !saved.tabs.iter().any(|tab| tab.kind == "trace"),
+                "the session save never names it: {:?}",
+                saved.tabs.iter().map(|tab| tab.kind.as_str()).collect::<Vec<_>>()
+            );
+            assert_eq!(saved.tabs.len(), saved.tab_states.len(), "tabs and states stay paired");
+            assert!(
+                saved.tabs.iter().any(|tab| tab.id == "chat-a"),
+                "the chat itself is saved"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_trace_tab_survives_a_worktree_switch(cx: &mut TestAppContext) {
+        let (workspace, mut cx, repo, other) = trace_test_workspace(cx, "trace-switch");
+        let chat = workspace.update(&mut cx, |workspace, cx| {
+            let chat = push_trace_test_chat(workspace, "live-chat", &repo, cx);
+            // The destination has a strip of its own, so the switch restores
+            // a chat rather than spawning a default terminal.
+            workspace.session.save_layout_now(&persisted_layout(
+                &other,
+                "other",
+                vec![persisted_chat("other-a", "Other A", true)],
+            ));
+            chat
+        });
+        chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        let (trace_view, trace_tab_title) = workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(trace_tabs(workspace, cx).len(), 1);
+            let tab = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.kind == TabKind::Trace)
+                .expect("the trace tab");
+            let mut view = None;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Trace(found) = content {
+                    view = Some(found.clone());
+                }
+            });
+            (view.expect("its view"), tab.title.clone())
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_worktree(other.clone(), None, cx).expect("switch away");
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                trace_tabs(workspace, cx).is_empty(),
+                "the other worktree has no trace tab of its own"
+            );
+            assert!(
+                workspace.tabs.iter().all(|tab| tab.kind != TabKind::Trace),
+                "and the strip on screen names none"
+            );
+        });
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_worktree(repo.clone(), None, cx).expect("switch back");
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            let traces = trace_tabs(workspace, cx);
+            assert_eq!(traces.len(), 1, "the trace tab came back, once");
+            assert_eq!(
+                traces[0].1,
+                chat.entity_id(),
+                "bound to the same chat session the switch retained"
+            );
+            let tab = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.kind == TabKind::Trace)
+                .expect("the trace tab");
+            assert_eq!(tab.title, trace_tab_title);
+            assert_eq!(tab.pane, PaneRole::Secondary);
+            let mut same_view = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::Trace(found) = content {
+                    same_view = *found == trace_view;
+                }
+            });
+            assert!(same_view, "it is the same tab, with the same folds and selection");
+            // Tab ids stay what `next_tab_id` counts on: contiguous from 0.
+            let mut ids: Vec<usize> = workspace.tabs.iter().map(|tab| tab.id).collect();
+            ids.sort_unstable();
+            assert_eq!(ids, (0..workspace.tabs.len()).collect::<Vec<_>>());
+            assert_eq!(workspace.next_tab_id, workspace.tabs.len());
+            assert!(
+                workspace.saved_layout(cx).tabs.iter().all(|tab| tab.kind != "trace"),
+                "and it is still never saved"
+            );
+        });
+
+        // Asking again on the returned chat finds the returned tab rather
+        // than opening a second: the workspace's one subscription still
+        // answers.
+        chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(trace_tabs(workspace, cx).len(), 1);
+        });
+    }
+
+    fn title_of_trace_tab(workspace: &SirioWorkspace) -> String {
+        workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.kind == TabKind::Trace)
+            .map(|tab| tab.title.clone())
+            .expect("the trace tab")
+    }
+
+    #[gpui::test]
+    async fn a_trace_tab_is_named_after_its_chats_current_title(cx: &mut TestAppContext) {
+        let (workspace, mut cx, repo, _other) = trace_test_workspace(cx, "trace-title");
+        let chat = workspace.update(&mut cx, |workspace, cx| {
+            push_trace_test_chat(workspace, "chat-a", &repo, cx)
+        });
+        chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(title_of_trace_tab(workspace), "Trace · Chat chat-a");
+        });
+
+        // The user renames the chat.
+        workspace.update(&mut cx, |workspace, cx| {
+            assert!(workspace.apply_manual_tab_title(0, "Fix the login", cx));
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(title_of_trace_tab(workspace), "Trace · Fix the login");
+        });
+
+        // The summarizer names it, once the chat is let to be named.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.tabs[0].title_is_auto_named = true;
+            workspace.apply_auto_title(0, "Repair the logout".into(), cx);
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(title_of_trace_tab(workspace), "Trace · Repair the logout");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_parked_trace_tab_is_named_for_the_chat_it_comes_back_with(cx: &mut TestAppContext) {
+        let (workspace, mut cx, repo, other) = trace_test_workspace(cx, "trace-title-parked");
+        let chat = workspace.update(&mut cx, |workspace, cx| {
+            let chat = push_trace_test_chat(workspace, "live-chat", &repo, cx);
+            workspace.session.save_layout_now(&persisted_layout(
+                &other,
+                "other",
+                vec![persisted_chat("other-a", "Other A", true)],
+            ));
+            chat
+        });
+        chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_worktree(other.clone(), None, cx).expect("switch away");
+            // The chat's tab is retitled while it is away.
+            let retained = workspace
+                .retained_worktree_chats
+                .get_mut(&repo.to_string_lossy().into_owned())
+                .and_then(|retained| retained.get_mut("live-chat"))
+                .expect("the chat is retained");
+            retained.title = "Renamed while away".into();
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_worktree(repo.clone(), None, cx).expect("switch back");
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(title_of_trace_tab(workspace), "Trace · Renamed while away");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_trace_tab_whose_chat_was_closed_while_parked_does_not_come_back(
+        cx: &mut TestAppContext,
+    ) {
+        let (workspace, mut cx, repo, other) = trace_test_workspace(cx, "trace-switch-gone");
+        let chat = workspace.update(&mut cx, |workspace, cx| {
+            let chat = push_trace_test_chat(workspace, "live-chat", &repo, cx);
+            workspace.session.save_layout_now(&persisted_layout(
+                &other,
+                "other",
+                vec![persisted_chat("other-a", "Other A", true)],
+            ));
+            chat
+        });
+        chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_worktree(other.clone(), None, cx).expect("switch away");
+        });
+        cx.run_until_parked();
+        // While it is away the chat's tab leaves the saved strip, as when
+        // the database no longer names it.
+        workspace.update(&mut cx, |workspace, _| {
+            workspace.session.save_layout_now(&persisted_layout(
+                &repo,
+                "main",
+                vec![persisted_chat("another-chat", "Another", true)],
+            ));
+        });
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.select_worktree(repo.clone(), None, cx).expect("switch back");
+        });
+        cx.run_until_parked();
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                trace_tabs(workspace, cx).is_empty(),
+                "a trace tab with no chat to show is dropped"
+            );
+            assert!(workspace.tabs.iter().any(|tab| tab.persistence_id == "another-chat"));
+        });
+    }
+
+    #[gpui::test]
+    async fn surface_trace_read_reports_whether_the_chat_has_a_trace_tab(cx: &mut TestAppContext) {
+        let (workspace, mut cx, repo, _other) = trace_test_workspace(cx, "trace-read");
+        let chat = workspace.update(&mut cx, |workspace, cx| {
+            push_trace_test_chat(workspace, "chat-a", &repo, cx)
+        });
+        let read = |workspace: &Entity<SirioWorkspace>, cx: &mut VisualTestContext, surface: &str| {
+            workspace.read_with(cx, |workspace, cx| workspace.control_trace_read(surface, cx))
+        };
+
+        let closed = read(&workspace, &mut cx, "chat-a").expect("a chat with no trace tab answers");
+        assert_eq!(
+            closed,
+            vec![("open".to_string(), "0".to_string())],
+            "no trace tab: open=0 and nothing else"
+        );
+
+        chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::OpenTrace));
+        cx.run_until_parked();
+        let open: BTreeMap<String, String> = read(&workspace, &mut cx, "chat-a")
+            .expect("a chat with a trace tab answers")
+            .into_iter()
+            .collect();
+        assert_eq!(open["open"], "1");
+        assert_eq!(
+            (open["turn"].as_str(), open["turns"].as_str(), open["follow"].as_str()),
+            ("0", "0", "1"),
+            "a chat with no turn yet: turn 0 of 0, and following"
+        );
+        assert_eq!(
+            open["dropped"], "0",
+            "the spans past the cap the shown turn did not keep: a count, 0 with none"
+        );
+        let spans: Vec<BTreeMap<String, String>> =
+            serde_json::from_str(&open["spans"]).expect("spans is a JSON array of objects");
+        assert!(spans.is_empty());
+
+        assert!(
+            read(&workspace, &mut cx, "no-such-chat").is_err(),
+            "a surface that is not a chat is refused"
+        );
     }
 
     #[gpui::test]
@@ -43101,6 +43868,7 @@ done
             | ControlAction::ChangeRequestHandoff { reply, .. }
             | ControlAction::CiLogOpen { reply, .. }
             | ControlAction::CiLogRead { reply }
+            | ControlAction::TraceRead { reply, .. }
             | ControlAction::CiLogView { reply, .. }
             | ControlAction::ChangeRequestThread { reply, .. }
             | ControlAction::RevealChangeRequestFile { reply, .. }
@@ -43269,6 +44037,7 @@ done
             "surface.change_request.checkout" => request::change_request_checkout(),
             "surface.ci_log.open" => request::ci_log_open("2"),
             "surface.ci_log.read" => request::ci_log_read(),
+            "surface.trace.read" => request::trace_read("chat-1"),
             "surface.ci_log.view" => request::ci_log_view(None, true, false, None),
             "surface.change_request.reveal" => request::change_request_reveal("a.txt", Some("1")),
             "surface.change_request.thread" => request::change_request_thread(request::ThreadOp::Reveal("PRRT_1")),
@@ -43772,7 +44541,9 @@ done
                     TabContent::Changes(_) => {}
                     TabContent::Browser(_) => {}
                     TabContent::ProjectSettings(_) => {}
-                    TabContent::ChangeRequest(_) | TabContent::CiLog(_) => {}
+                    TabContent::ChangeRequest(_)
+                    | TabContent::CiLog(_)
+                    | TabContent::Trace(_) => {}
                 });
             }
             (failed, live)

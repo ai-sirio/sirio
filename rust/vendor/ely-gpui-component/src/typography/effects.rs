@@ -140,11 +140,21 @@ impl RenderOnce for GradientText {
     }
 }
 
+/// The text with the band of light at `t`, 0 to 1 across one sweep.
+fn shimmered(text: &SharedString, dim: Hsla, lit: Hsla, t: f32) -> StyledText {
+    let band = motion::lerp(-0.3, 1.3, t);
+    tinted(text, |ix, count| {
+        let x = ix as f32 / count.saturating_sub(1).max(1) as f32;
+        dim.mix(&lit, (1.0 - (x - band).abs() / 0.25).max(0.0))
+    })
+}
+
 /// A band of light that sweeps the text while it waits.
 #[derive(IntoElement)]
 pub struct ShimmerText {
     id: ElementId,
     text: SharedString,
+    phase: Option<f32>,
 }
 
 impl ShimmerText {
@@ -152,7 +162,17 @@ impl ShimmerText {
         Self {
             id: id.into(),
             text: text.into(),
+            phase: None,
         }
+    }
+
+    /// Draws the band where the caller says it is, 0 to 1 across one sweep
+    /// (a phase past 1 wraps), and animates nothing: the host repaints on its
+    /// own clock, so the shimmer asks for no frames of its own. Without it the
+    /// shimmer runs by itself, as it always did.
+    pub fn phase(mut self, phase: f32) -> Self {
+        self.phase = Some(phase);
+        self
     }
 }
 
@@ -168,18 +188,18 @@ impl RenderOnce for ShimmerText {
                 .child(text)
                 .into_any_element();
         }
+        if let Some(phase) = self.phase {
+            return div()
+                .id(self.id)
+                .child(shimmered(&text, dim, lit, phase.rem_euclid(1.0)))
+                .into_any_element();
+        }
         div()
             .id(self.id)
             .with_animation(
                 "shimmer",
                 Animation::new(SHIMMER).repeat(),
-                move |line, t| {
-                    let band = motion::lerp(-0.3, 1.3, t);
-                    line.child(tinted(&text, |ix, count| {
-                        let x = ix as f32 / count.saturating_sub(1).max(1) as f32;
-                        dim.mix(&lit, (1.0 - (x - band).abs() / 0.25).max(0.0))
-                    }))
-                },
+                move |line, t| line.child(shimmered(&text, dim, lit, t)),
             )
             .into_any_element()
     }

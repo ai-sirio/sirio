@@ -34,9 +34,10 @@ pub use control::{
 pub use launch::{ChatSession, LaunchLine};
 pub use mcp::{McpAuthStart, McpOrigin, McpServer, McpState, parse_mcp_status};
 pub use message::{
-    AssistantMessage, AssistantPayload, BackgroundTask, CliMessage, CompactMetadata, ContentBlock,
-    Delta, McpServerStatus, ModelUsage, RateLimitPush, ResultPayload, StreamEventPayload,
-    SystemPayload, ToolResult, ToolUse, UserMessage, UserPayload,
+    AgentToolResult, AssistantMessage, AssistantPayload, BackgroundTask, CliMessage,
+    CompactMetadata, ContentBlock, Delta, McpServerStatus, MessageLifecycle, MessageUsage,
+    ModelUsage, RateLimitPush, ResultPayload, StreamEventPayload, SystemPayload, TaskUsage,
+    ToolResult, ToolUse, UserMessage, UserPayload,
 };
 pub use tools::{ToolContent, ToolInfo, ToolKind, ToolLocation, describe, diff_from_result};
 pub use usage::{ContextUsageReport, PlanUsage, RateLimitWindow, RewindOutcome};

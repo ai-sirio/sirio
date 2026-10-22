@@ -172,6 +172,7 @@ fn usage() {
          \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
          \x20 surface layout read               whether the right pane is drawn, each half's tabs, the right panel's view\n\
          \x20 surface chat panel <surfaceId> open|close|toggle <key>|activate <key>  (debug builds) drive a chat's session panel\n\
+         \x20 surface trace read <surfaceId>     whether the chat has a Trace tab, and the turn and spans it shows\n\
          \x20 surface open-list open --entry show|chat|terminal|browser|changes|open-file|project-settings|other-agents|agent:<id>  (debug builds) click that row of the Open list\n\
          \x20 surface terminal open [--cmd c | --agent a]  (debug builds) open an app terminal tab running c, or agent a\n\
          \x20 surface host end-all             (debug builds) End All sessions without its dialog\n\
@@ -1117,6 +1118,13 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 socket,
                 &sirio_control::protocol::request::chat_panel(surface_id, verb, key),
             )
+        }
+        ("trace", "read") => {
+            let surface_id = parsed
+                .positional
+                .get(2)
+                .ok_or_else(|| "Missing chat surface id".to_string())?;
+            require_ok(socket, &sirio_control::protocol::request::trace_read(surface_id))
         }
         ("open-list", "open") => {
             let entry = parsed

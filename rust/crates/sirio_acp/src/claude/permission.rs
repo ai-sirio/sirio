@@ -196,6 +196,7 @@ mod tests {
             request_id: "cli-1".into(),
             tool_name: tool_name.into(),
             tool_use_id: Some("toolu_1".into()),
+            agent_id: None,
             input,
             permission_suggestions: suggestions,
             decision_reason: None,

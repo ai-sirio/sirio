@@ -8,7 +8,9 @@ talks to a network or reads the user's configuration.
 
 import json
 import os
+import queue
 import sys
+import threading
 import time
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "normal"
@@ -44,9 +46,15 @@ if PID_PATH:
         pid_file.write(str(os.getpid()))
 
 
+# The `trace` mode writes from two threads (the turn's script and the answers
+# to control requests); a line is never split between them.
+SEND_LOCK = threading.Lock()
+
+
 def send(message):
-    sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    with SEND_LOCK:
+        sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
 
 
 def control_response(request_id, payload):
@@ -216,7 +224,7 @@ def session_panel_servers():
     ]
 
 
-def assistant_tool_use(tool_use_id, tool_name, tool_input):
+def assistant_tool_use(tool_use_id, tool_name, tool_input, parent=None):
     send({
         "type": "assistant",
         "message": {
@@ -231,24 +239,30 @@ def assistant_tool_use(tool_use_id, tool_name, tool_input):
             }],
             "stop_reason": None,
         },
-        "parent_tool_use_id": None,
+        "parent_tool_use_id": parent,
         "session_id": SESSION_ID,
         "uuid": "perm-assistant-uuid",
     })
 
 
-def ask_permission(cli_request_id, tool_name, tool_use_id, tool_input, suggestions=None):
-    PENDING[cli_request_id] = (tool_use_id, tool_name)
+def ask_permission(cli_request_id, tool_name, tool_use_id, tool_input, suggestions=None,
+                   agent_id=None, parent=None):
+    """`agent_id` makes it a subagent's request, as the real CLI does; `parent`
+    is the `parent_tool_use_id` its eventual result line carries."""
+    PENDING[cli_request_id] = (tool_use_id, tool_name, parent)
+    request = {
+        "subtype": "can_use_tool",
+        "tool_name": tool_name,
+        "tool_use_id": tool_use_id,
+        "input": tool_input,
+        "permission_suggestions": suggestions if suggestions is not None else [],
+    }
+    if agent_id is not None:
+        request["agent_id"] = agent_id
     send({
         "type": "control_request",
         "request_id": cli_request_id,
-        "request": {
-            "subtype": "can_use_tool",
-            "tool_name": tool_name,
-            "tool_use_id": tool_use_id,
-            "input": tool_input,
-            "permission_suggestions": suggestions if suggestions is not None else [],
-        },
+        "request": request,
     })
 
 
@@ -256,7 +270,7 @@ def finish_permission(cli_request_id, answer_message):
     pending = PENDING.pop(cli_request_id, None)
     if pending is None:
         return
-    tool_use_id, _tool_name = pending
+    tool_use_id, _tool_name, parent = pending
     try:
         payload = answer_message.get("response", {}).get("response", {})
         behavior = payload.get("behavior", "deny")
@@ -271,14 +285,433 @@ def finish_permission(cli_request_id, answer_message):
             "is_error": not allowed,
             "content": "ran" if allowed else "denied",
         }]},
-        "parent_tool_use_id": None,
+        "parent_tool_use_id": parent,
         "session_id": SESSION_ID,
         "uuid": "perm-result-uuid",
     })
     result()
 
 
+# ---------------------------------------------------------------------------
+# `trace`: scripted turns for the trace waterfall's end-to-end test.
+#
+# The first word of a prompt picks the script (see TRACE_SCRIPTS). Line shapes
+# copy the ones `claude` 2.1.306 wrote (rust/crates/sirio_claude/tests/fixtures/
+# trace_*.json). Each step is paced by TRACE_STEP_MS (default 400), so a live
+# state can be read mid-turn. A script runs on its own thread: the main loop
+# keeps answering control requests (an interrupt, a context report) and records
+# the answer to a permission the script is waiting for. The cost counter is the
+# process's own and only ever grows, as the CLI's `total_cost_usd` does.
+# ---------------------------------------------------------------------------
+
+TRACE_MODEL = "claude-haiku-5-5"
+TRACE_STEP = float(os.environ.get("TRACE_STEP_MS", "400")) / 1000.0
+TRACE_COST = {"total": 0.0}
+TRACE_COUNTER = {"n": 0}
+TRACE_INTERRUPT = threading.Event()
+TRACE_EOF = threading.Event()
+TRACE_PROMPTS = queue.Queue()
+TRACE_ANSWERS = {}
+TRACE_ANSWERED = threading.Condition()
+
+
+def trace_uuid():
+    TRACE_COUNTER["n"] += 1
+    return f"00000000-0000-4000-8000-{TRACE_COUNTER['n']:012d}"
+
+
+def pause(steps=1.0):
+    time.sleep(TRACE_STEP * steps)
+
+
+def trace_stream(event):
+    send({
+        "type": "stream_event",
+        "event": event,
+        "session_id": SESSION_ID,
+        "parent_tool_use_id": None,
+        "uuid": trace_uuid(),
+    })
+
+
+def message_start(message_id):
+    trace_stream({"type": "message_start", "message": {
+        "model": TRACE_MODEL, "id": message_id, "type": "message", "role": "assistant",
+        "content": [], "stop_reason": None,
+        "usage": {"input_tokens": 2, "cache_creation_input_tokens": 0,
+                  "cache_read_input_tokens": 1200, "output_tokens": 6},
+    }})
+
+
+def message_end(stop_reason="end_turn", output_tokens=120):
+    trace_stream({"type": "message_delta", "delta": {"stop_reason": stop_reason},
+                  "usage": {"input_tokens": 2, "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 1200, "output_tokens": output_tokens}})
+    trace_stream({"type": "message_stop"})
+
+
+def tool_use(tool_use_id, name, tool_input):
+    return {"type": "tool_use", "id": tool_use_id, "name": name, "input": tool_input,
+            "caller": {"type": "direct"}}
+
+
+def trace_assistant(message_id, block, parent=None, agent_id=None):
+    """One content block of a model call. A subagent's line names its parent
+    call and its agent; the main thread's names neither."""
+    line = {
+        "type": "assistant",
+        "message": {"model": TRACE_MODEL, "id": message_id, "type": "message", "role": "assistant",
+                    "content": [block], "stop_reason": None,
+                    "usage": {"input_tokens": 2, "cache_creation_input_tokens": 0,
+                              "cache_read_input_tokens": 1200, "output_tokens": 8}},
+        "parent_tool_use_id": parent,
+        "session_id": SESSION_ID,
+        "uuid": trace_uuid(),
+    }
+    if agent_id is not None:
+        line["agent_id"] = agent_id
+    send(line)
+
+
+def trace_result_line(tool_use_id, body, is_error=False, parent=None, totals=None):
+    line = {
+        "type": "user",
+        "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": tool_use_id,
+            "content": [{"type": "text", "text": body}], "is_error": is_error,
+        }]},
+        "parent_tool_use_id": parent,
+        "session_id": SESSION_ID,
+        "uuid": trace_uuid(),
+    }
+    if totals is not None:
+        line["tool_use_result"] = totals
+    send(line)
+
+
+def agent_totals(agent_id, duration_ms, tools_used):
+    return {
+        "status": "completed", "agentId": agent_id, "agentType": "general-purpose",
+        "resolvedModel": TRACE_MODEL, "totalDurationMs": duration_ms,
+        "totalTokens": 26197, "totalToolUseCount": tools_used,
+        "usage": {"input_tokens": 2, "cache_creation_input_tokens": 141,
+                  "cache_read_input_tokens": 25867, "output_tokens": 187},
+    }
+
+
+def task_started(task_id, tool_use_id, description, subagent_type, depth):
+    send({"type": "system", "subtype": "task_started", "task_id": task_id,
+          "run_id": f"run-{task_id}", "tool_use_id": tool_use_id,
+          "description": description, "subagent_type": subagent_type,
+          "is_backgrounded": False, "spawn_depth": depth, "task_type": "local_agent",
+          "prompt": description, "uuid": trace_uuid(), "session_id": SESSION_ID})
+
+
+def task_progress(task_id, tool_use_id, description, tokens, tools_used, last_tool, duration_ms):
+    send({"type": "system", "subtype": "task_progress", "task_id": task_id,
+          "run_id": f"run-{task_id}", "tool_use_id": tool_use_id,
+          "description": description, "last_tool_name": last_tool,
+          "usage": {"total_tokens": tokens, "tool_uses": tools_used, "duration_ms": duration_ms},
+          "uuid": trace_uuid(), "session_id": SESSION_ID})
+
+
+def trace_ask(cli_request_id, tool_name, tool_use_id, tool_input, agent_id=None):
+    request = {"subtype": "can_use_tool", "tool_name": tool_name, "display_name": tool_name,
+               "input": tool_input, "tool_use_id": tool_use_id,
+               "permission_suggestions": [{"type": "addRules", "behavior": "allow",
+                                           "destination": "session",
+                                           "rules": [{"toolName": tool_name}]}]}
+    if agent_id is not None:
+        request["agent_id"] = agent_id
+    send({"type": "control_request", "request_id": cli_request_id, "request": request})
+
+
+def wait_answer(cli_request_id):
+    """What the user answered: `allow` or `deny`. A closed stdin answers deny,
+    so a piped self-check runs the whole script."""
+    with TRACE_ANSWERED:
+        while cli_request_id not in TRACE_ANSWERS and not TRACE_EOF.is_set():
+            TRACE_ANSWERED.wait(0.2)
+        return TRACE_ANSWERS.get(cli_request_id, "deny")
+
+
+def trace_result(cost, started, interrupted=False):
+    TRACE_COST["total"] = round(TRACE_COST["total"] + cost, 6)
+    usage = {"claude-haiku-5-5": {
+        "inputTokens": 2, "outputTokens": 400, "cacheReadInputTokens": 9000,
+        "cacheCreationInputTokens": 300, "costUSD": TRACE_COST["total"],
+        "contextWindow": 200000}}
+    body = {
+        "type": "result",
+        "subtype": "error_during_execution" if interrupted else "success",
+        "is_error": interrupted,
+        "duration_ms": int((time.time() - started) * 1000),
+        "num_turns": 1,
+        "result": "Interrupted by user" if interrupted else "Done.",
+        "stop_reason": None if interrupted else "end_turn",
+        "total_cost_usd": TRACE_COST["total"],
+        "modelUsage": usage,
+        "permission_denials": [],
+        "session_id": SESSION_ID,
+        "uuid": trace_uuid(),
+    }
+    if interrupted:
+        body["terminal_reason"] = "aborted_streaming"
+    send(body)
+
+
+def summary_text():
+    # Long enough that the rows above it can be scrolled to the top.
+    return "".join(f"{n}. A line of the summary the model writes at the end.\n\n" for n in range(1, 61))
+
+
+def preamble_text():
+    # Long enough that the transcript is taller than a window before the turn's first call:
+    # with the list at the user's message, the card of a permission asked later is below the
+    # last row the list draws, so a reveal of it has somewhere to move the list to.
+    return "".join(f"Step {n} of the plan the model lays out before it starts.\n\n" for n in range(1, 31))
+
+
+def script_subagents():
+    started = time.time()
+    # One model call, streamed, that calls two agents at once.
+    message_start("msg_main_1")
+    text("I will split this across two agents. ")
+    text(preamble_text())
+    pause()
+    # The model writes between its two calls, as it does: the two Agent rows are
+    # not one run of tool rows, so each lane reveals a row of its own.
+    for agent, kind, description, remark in (
+        ("toolu_agent_a", "Explore", "Survey the sources", "An explorer first. "),
+        ("toolu_agent_b", "Plan", "Draft the plan", "And a planner. "),
+    ):
+        text(remark)
+        trace_assistant("msg_main_1", tool_use(agent, "Agent", {
+            "description": description, "subagent_type": kind, "prompt": description}))
+    message_end("tool_use", 90)
+    task_started("task-a", "toolu_agent_a", "Survey the sources", "Explore", 1)
+    task_started("task-b", "toolu_agent_b", "Draft the plan", "Plan", 1)
+    pause()
+    # Both agents work; the second calls a third.
+    trace_assistant("msg_a_1", tool_use("toolu_a_bash", "Bash", {
+        "command": "ls", "description": "List the sources"}),
+        parent="toolu_agent_a", agent_id="task-a")
+    trace_assistant("msg_b_1", tool_use("toolu_agent_c", "Agent", {
+        "description": "Check the tests", "subagent_type": "general-purpose",
+        "prompt": "Check the tests"}),
+        parent="toolu_agent_b", agent_id="task-b")
+    task_started("task-c", "toolu_agent_c", "Check the tests", "general-purpose", 2)
+    pause()
+    task_progress("task-a", "toolu_agent_a", "Running List the sources", 19991, 1, "Bash", 1892)
+    trace_assistant("msg_c_1", tool_use("toolu_c_read", "Read", {"file_path": "/repo/src/lib.rs"}),
+                    parent="toolu_agent_c", agent_id="task-c")
+    pause()
+    trace_result_line("toolu_a_bash", "README.md\nsrc", parent="toolu_agent_a")
+    trace_result_line("toolu_c_read", "fn main() {}", parent="toolu_agent_c")
+    pause()
+    trace_result_line("toolu_agent_c", "The tests are in place.", parent="toolu_agent_b",
+                      totals=agent_totals("task-c", 1800, 1))
+    pause()
+    trace_result_line("toolu_agent_a", "README.md and src", totals=agent_totals("task-a", 2600, 1))
+    trace_result_line("toolu_agent_b", "A two step plan.", totals=agent_totals("task-b", 3100, 1))
+    pause()
+    # The second model call edits a file, and asks first.
+    message_start("msg_main_2")
+    text("Both agents are back. Applying the fix. ")
+    trace_assistant("msg_main_2", tool_use("toolu_edit", "Edit", {
+        "file_path": "/repo/src/main.rs", "old_string": "fn main() {}",
+        "new_string": "fn main() { run(); }"}))
+    message_end("tool_use", 60)
+    trace_ask("cli-edit-1", "Edit", "toolu_edit", {
+        "file_path": "/repo/src/main.rs", "old_string": "fn main() {}",
+        "new_string": "fn main() { run(); }"})
+    allowed = wait_answer("cli-edit-1") == "allow"
+    trace_result_line("toolu_edit", "edited" if allowed else "denied", is_error=not allowed)
+    pause()
+    # A Bash that fails, then one that works.
+    message_start("msg_main_3")
+    trace_assistant("msg_main_3", tool_use("toolu_bash_fail", "Bash", {
+        "command": "make test", "description": "Run the tests"}))
+    message_end("tool_use", 40)
+    pause()
+    trace_result_line("toolu_bash_fail", "make: *** No rule to make target 'test'.  Stop.",
+                      is_error=True)
+    message_start("msg_main_4")
+    trace_assistant("msg_main_4", tool_use("toolu_bash_ok", "Bash", {
+        "command": "make check", "description": "Run the checks"}))
+    message_end("tool_use", 40)
+    pause()
+    trace_result_line("toolu_bash_ok", "all checks passed")
+    message_start("msg_main_5")
+    text(summary_text())
+    message_end("end_turn", 300)
+    pause()
+    trace_result(0.31, started)
+
+
+def script_second():
+    started = time.time()
+    message_start("msg_second_1")
+    text("A second turn. ")
+    pause()
+    message_end("end_turn", 20)
+    trace_result(0.12, started)
+
+
+def script_cancel():
+    started = time.time()
+    message_start("msg_cancel_1")
+    text("Working on it. ")
+    # Mid-call until the interrupt; the CLI then stops the call and reports it.
+    while not TRACE_INTERRUPT.wait(0.2) and not TRACE_EOF.is_set():
+        pass
+    message_end("end_turn", 4)
+    trace_result(0.02, started, interrupted=True)
+
+
+def script_hang():
+    started = time.time()
+    message_start("msg_hang_1")
+    trace_assistant("msg_hang_1", tool_use("toolu_hang", "Bash", {
+        "command": "sleep 3600", "description": "A call that never reports"}))
+    message_end("tool_use", 30)
+    pause(3)
+    trace_result(0.05, started)
+
+
+def script_die():
+    message_start("msg_die_1")
+    text("Starting. ")
+    trace_assistant("msg_die_1", tool_use("toolu_agent_d", "Agent", {
+        "description": "Work that never ends", "subagent_type": "Explore",
+        "prompt": "Work that never ends"}))
+    message_end("tool_use", 30)
+    task_started("task-d", "toolu_agent_d", "Work that never ends", "Explore", 1)
+    pause(2)
+    sys.stderr.write("fixture agent: fatal error, going away\n")
+    sys.stderr.flush()
+    os._exit(3)
+
+
+def script_subagent_permission(early):
+    started = time.time()
+    agent, task, tool = ("toolu_agent_pe", "task-pe", "toolu_sub_pe") if early \
+        else ("toolu_agent_p", "task-p", "toolu_sub_p")
+    tool_input = {"command": "rm -rf build", "description": "Remove build"}
+    message_start("msg_sp_1" + ("e" if early else ""))
+    text("Delegating a cleanup. ")
+    trace_assistant("msg_sp_1" + ("e" if early else ""), tool_use(agent, "Agent", {
+        "description": "Clean the build", "subagent_type": "general-purpose",
+        "prompt": "Clean the build"}))
+    message_end("tool_use", 40)
+    task_started(task, agent, "Clean the build", "general-purpose", 1)
+    pause()
+    if early:
+        # The request beats the line that holds its call, the order seen live.
+        trace_ask("cli-sub-" + task, "Bash", tool, tool_input, agent_id=task)
+        pause()
+        trace_assistant("msg_sub_" + task, tool_use(tool, "Bash", tool_input),
+                        parent=agent, agent_id=task)
+    else:
+        trace_assistant("msg_sub_" + task, tool_use(tool, "Bash", tool_input),
+                        parent=agent, agent_id=task)
+        pause()
+        trace_ask("cli-sub-" + task, "Bash", tool, tool_input, agent_id=task)
+    allowed = wait_answer("cli-sub-" + task) == "allow"
+    trace_result_line(tool, "ran" if allowed else "denied", is_error=not allowed, parent=agent)
+    pause()
+    trace_result_line(agent, "Cleaned." if allowed else "The cleanup was refused.",
+                      totals=agent_totals(task, 1500, 1))
+    message_start("msg_sp_2" + ("e" if early else ""))
+    text("Finished. ")
+    message_end("end_turn", 10)
+    trace_result(0.07, started)
+
+
+TRACE_SCRIPTS = {
+    "subagents": script_subagents,
+    "second": script_second,
+    "cancel": script_cancel,
+    "hang": script_hang,
+    "die": script_die,
+    "subperm": lambda: script_subagent_permission(False),
+    "subperm_early": lambda: script_subagent_permission(True),
+}
+
+
+def script_other():
+    started = time.time()
+    message_start("msg_other_1")
+    text("Hello. ")
+    message_end("end_turn", 5)
+    trace_result(0.01, started)
+
+
+def trace_turns():
+    while True:
+        prompt = TRACE_PROMPTS.get()
+        if prompt is None:
+            return
+        TRACE_INTERRUPT.clear()
+        first = prompt.split(None, 1)[0].lower() if prompt.split() else ""
+        TRACE_SCRIPTS.get(first, script_other)()
+
+
+def trace_prompt_text(message):
+    content = message.get("message", {}).get("content", "")
+    if isinstance(content, list):
+        content = " ".join(block.get("text", "") for block in content if isinstance(block, dict))
+    return content if isinstance(content, str) else ""
+
+
+def trace_main():
+    init_line()
+    turns = threading.Thread(target=trace_turns, daemon=True)
+    turns.start()
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        kind = message.get("type")
+        if kind == "control_request":
+            request = message.get("request", {})
+            subtype = request.get("subtype")
+            request_id = message.get("request_id")
+            if subtype == "initialize":
+                control_response(request_id, initialize_payload())
+            elif subtype == "interrupt":
+                control_response(request_id, {"still_queued": 0})
+                TRACE_INTERRUPT.set()
+            elif subtype == "get_context_usage":
+                control_response(request_id, {
+                    "totalTokens": 48000, "rawMaxTokens": 200000, "maxTokens": 180000,
+                    "percentage": 24, "model": TRACE_MODEL, "categories": []})
+            elif subtype == "mcp_status":
+                control_response(request_id, {"mcpServers": []})
+            elif subtype == "set_permission_mode":
+                control_response(request_id, {"mode": request.get("mode")})
+            else:
+                control_response(request_id, {})
+        elif kind == "control_response":
+            response = message.get("response", {})
+            payload = response.get("response") or {}
+            with TRACE_ANSWERED:
+                TRACE_ANSWERS[response.get("request_id")] = (
+                    "allow" if payload.get("behavior") == "allow" else "deny")
+                TRACE_ANSWERED.notify_all()
+        elif kind == "user":
+            TRACE_PROMPTS.put(trace_prompt_text(message))
+    # stdin closed: the script in flight runs on to its end, then the process.
+    TRACE_EOF.set()
+    TRACE_PROMPTS.put(None)
+    turns.join()
+
+
 def main():
+    if MODE == "trace":
+        trace_main()
+        return
     if MODE == "refuse_resume" and "--resume" in sys.argv:
         # The session file is gone: refuse the resume the way the real CLI
         # does, so the worker must come back without the id.
@@ -487,6 +920,17 @@ def main():
                     "cli-perm-1", "Bash", "toolu_perm_1", tool_input,
                     [{"type": "addRules", "behavior": "allow", "destination": "session"}],
                 )
+                continue
+            if MODE == "subagent_permission_early":
+                # A subagent asks before the line that holds its call arrives,
+                # the order seen live. Its own lines carry the parent's id.
+                init_line()
+                tool_input = {"command": "rm -rf build", "description": "Remove build"}
+                ask_permission(
+                    "cli-sub-1", "Bash", "toolu_sub_1", tool_input,
+                    agent_id="task-sub-1", parent="toolu_agent_1",
+                )
+                assistant_tool_use("toolu_sub_1", "Bash", tool_input, parent="toolu_agent_1")
                 continue
             if MODE == "permission_then_text":
                 init_line()

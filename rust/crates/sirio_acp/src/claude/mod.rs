@@ -10,6 +10,7 @@
 mod events;
 mod permission;
 mod prompt;
+mod trace;
 mod worker;
 
 use std::path::{Path, PathBuf};

@@ -234,6 +234,7 @@ pub(super) fn section(
             note: String::new(),
             bar: Vec::new(),
             rows: vec![Row::new("connectors/none", "Reading connectors…".to_string(), "")],
+            custom_body: false,
         });
     };
     let signing_in = servers
@@ -310,6 +311,7 @@ pub(super) fn section(
         note: String::new(),
         bar: Vec::new(),
         rows,
+        custom_body: false,
     })
 }
 
@@ -868,6 +870,11 @@ mod tests {
         let (chat, cx) = native_chat(cx);
         cx.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(900.0)));
         settle(cx, |cx| row(&chat, cx, NOTION).is_some_and(|(d, _)| d == "needs sign-in"));
+        // The card starts folded, and a folded card draws no rows to measure.
+        chat.update_in(cx, |chat, window, cx| {
+            chat.session_panel_act(SessionPanelAction::Toggle("connectors".to_string()), window, cx)
+        })
+        .expect("the card unfolds");
         for _ in 0..3 {
             refresh_frame(cx);
         }

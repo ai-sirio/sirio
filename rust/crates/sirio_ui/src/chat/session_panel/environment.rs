@@ -96,6 +96,7 @@ pub(super) fn section(environment: &Environment, cwd: &Path) -> Section {
         note: String::new(),
         bar: Vec::new(),
         rows,
+        custom_body: false,
     }
 }
 

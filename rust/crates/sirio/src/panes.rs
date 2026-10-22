@@ -594,6 +594,8 @@ pub(crate) enum PaneContent {
     ChangeRequest(Entity<sirio_ui::change_request_tab::ChangeRequestTab>),
     /// A CI job log in a read-only Secondary tab.
     CiLog(Entity<sirio_ui::ci_log_tab::CiLogTab>),
+    /// A native Claude chat's full trace, read-only, in the Secondary half.
+    Trace(Entity<sirio_ui::trace_tab::TraceTab>),
 }
 
 impl PaneContent {
@@ -606,7 +608,8 @@ impl PaneContent {
             | Self::Browser(_)
             | Self::ProjectSettings(_)
             | Self::ChangeRequest(_)
-            | Self::CiLog(_) => None,
+            | Self::CiLog(_)
+            | Self::Trace(_) => None,
         }
     }
 }

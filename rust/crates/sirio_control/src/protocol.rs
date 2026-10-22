@@ -1093,6 +1093,16 @@ pub mod request {
         )
     }
 
+    /// `surface.trace.read {surfaceId}`: whether the chat has a Trace tab,
+    /// and the turn it shows with its spans. Reads only, so every build
+    /// serves it.
+    pub fn trace_read(surface_id: &str) -> ControlRequest {
+        request(
+            "surface.trace.read",
+            BTreeMap::from([("surfaceId".to_string(), surface_id.to_string())]),
+        )
+    }
+
     /// Debug-only `surface.chat.panel {surfaceId, action, key?}`: does to a
     /// chat's session panel what the button and the card titles do. `action`
     /// is `open`, `close`, `toggle` or `activate`; the last two name a `key`.
