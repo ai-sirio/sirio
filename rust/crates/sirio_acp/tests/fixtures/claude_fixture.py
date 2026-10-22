@@ -465,11 +465,19 @@ def summary_text():
     return "".join(f"{n}. A line of the summary the model writes at the end.\n\n" for n in range(1, 61))
 
 
+def preamble_text():
+    # Long enough that the transcript is taller than a window before the turn's first call:
+    # with the list at the user's message, the card of a permission asked later is below the
+    # last row the list draws, so a reveal of it has somewhere to move the list to.
+    return "".join(f"Step {n} of the plan the model lays out before it starts.\n\n" for n in range(1, 31))
+
+
 def script_subagents():
     started = time.time()
     # One model call, streamed, that calls two agents at once.
     message_start("msg_main_1")
     text("I will split this across two agents. ")
+    text(preamble_text())
     pause()
     # The model writes between its two calls, as it does: the two Agent rows are
     # not one run of tool rows, so each lane reveals a row of its own.

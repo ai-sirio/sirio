@@ -41,10 +41,12 @@ set -euo pipefail
 # a prompt picks a scripted turn (subagents, second, cancel, hang, die, subperm,
 # subperm_early) and TRACE_STEP_MS (400 by default) paces its lines, so a live state can be
 # read mid-turn. They are asserted on the card's rows in `sessionPanel`, on
-# `surface.trace.read` (the Trace tab) and on `firstVisibleEntry` of `surface.chat.read`.
+# `surface.trace.read` (the Trace tab) and on `firstVisibleEntry` and `lastVisibleEntry` of
+# `surface.chat.read`.
 #   trace_live         a turn with two parallel agents (one nesting a third), an Edit that asks and
 #                      a Bash that fails and then works: the lanes, the waiting tag and its row, the
-#                      reveal of the permission, the failed and done calls, Done with $0.31
+#                      reveal of the permission (the list's top at it unpainted, the card between the
+#                      first and last row drawn painted), the failed and done calls, Done with $0.31
 #   trace_cost         a second turn's cost is the difference of the process's totals: $0.12
 #   trace_interrupt    Stop ends the turn Interrupted, its cost and the next turn's are unknown
 #   trace_death        the CLI dying mid-call ends the turn Failed, every lane failed or interrupted
@@ -55,8 +57,8 @@ set -euo pipefail
 #   trace_tab          the Trace tab: its tree, one per chat, kept across a worktree switch, never
 #                      restored, closed with its chat
 #   trace_idle         SIRIO_PERF_TRACE counts the frames the trace asks for (trace.frame): some while
-#                      a turn runs and the card or the tab is drawn, none with it folded, with another
-#                      tab selected, with the worktree parked or after the turn
+#                      a turn runs and the card or the tab is drawn, none with it folded, with the tab
+#                      or a third tab selected in its place, with the worktree parked or after the turn
 #   trace_keys         real X input on the Trace tab: a click on a row and Enter on the selected row
 #                      reveal its Agent row, a click on the Follow checkbox toggles it
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes one paint after its
@@ -401,12 +403,13 @@ def rpc(method, params):
 
 def state(surface):
     """The column's JSON and the rest of the chat's own read: its status, its transcript
-    (the rows decoded) and where its list's top sits (`first`)."""
+    (the rows decoded) and the first and last transcript row its list drew (`first`, `last`)."""
     result = rpc("surface.chat.read", {"surfaceId": surface})
     panel = json.loads(result["sessionPanel"])
     chat = {k: v for k, v in result.items() if k != "sessionPanel"}
     chat["transcript"] = json.loads(chat.get("transcript") or "[]")
     chat["first"] = int(chat.get("firstVisibleEntry") or 0)
+    chat["last"] = int(chat.get("lastVisibleEntry") or 0)
     return panel, chat
 
 
@@ -820,21 +823,45 @@ answer_permission() { # option
   echo "OK: request $id answered with $1"
 }
 
-# The Secondary half's tab kinds, comma separated, as `surface layout read` lists them.
-secondary_kinds() { reply surface layout read | python3 -c 'import json, sys; print(json.load(sys.stdin)[0].get("secondaryKinds", ""))'; }
-# How many trace tabs the Secondary half has (the chat's own tab is in it too).
-trace_tab_count() { secondary_kinds | tr ',' '\n' | grep -c '^trace$' || true; }
+# The Secondary half's tab kinds, comma separated, as `surface layout read` lists them. A read
+# that failed, or one with no `secondaryKinds`, is an error and prints nothing: it is never an
+# empty list, which would read as "no trace tab".
+secondary_kinds() {
+  local out
+  out=$(reply surface layout read) || return 1
+  python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["secondaryKinds"])' <<<"$out" 2>/dev/null
+}
+# How many trace tabs the Secondary half has (the chat's own tab is in it too). An error when
+# the layout could not be read.
+trace_tab_count() {
+  local kinds
+  kinds=$(secondary_kinds) || return 1
+  printf '%s\n' "$kinds" | tr ',' '\n' | grep -c '^trace$' || true
+}
+# Fails unless the Secondary half has exactly WANT trace tabs, or the layout cannot be read.
+expect_trace_tabs() { # desc want
+  local got
+  got=$(trace_tab_count) || fail "$1: the layout could not be read"
+  [ "$got" = "$2" ] || fail "$1: $got trace tab(s), expected $2 ($(secondary_kinds || echo unreadable))"
+  echo "OK: $1 ($got trace tab(s))"
+}
 # Polls the layout until the Secondary half has (present) or has not (absent) a trace tab.
 # The tab closes one paint after its chat is released, so the wait is bounded and the
-# window is painted: it is never read once.
+# window is painted. A read that fails is "not yet", never "absent": the wait can end in
+# a match only on a layout it read.
 wait_trace_tab() { # desc present|absent seconds
-  local desc=$1 want=$2 seconds=${3:-20} kinds="" has _
+  local desc=$1 want=$2 seconds=${3:-20} kinds="" has="" read_ok=0 _
   for _ in $(seq 1 $((seconds * 3))); do
-    kinds=$(secondary_kinds || true)
-    case ",$kinds," in *,trace,*) has=present ;; *) has=absent ;; esac
-    if [ "$has" = "$want" ]; then echo "  read: secondaryKinds=$kinds"; echo "OK: $desc"; return 0; fi
+    if kinds=$(secondary_kinds); then
+      read_ok=1
+      case ",$kinds," in *,trace,*) has=present ;; *) has=absent ;; esac
+      if [ "$has" = "$want" ]; then echo "  read: secondaryKinds=$kinds"; echo "OK: $desc"; return 0; fi
+    else
+      read_ok=0
+    fi
     sleep 0.3
   done
+  [ "$read_ok" = 1 ] || fail "$desc: the layout could not be read at the end of $seconds s"
   fail "$desc: secondaryKinds is '$kinds', a trace tab is not $want"
 }
 
@@ -1089,12 +1116,16 @@ scenario_trace_live() {
   echo "step: the root reveals the user's message, then the wait reveals the Permission entry ($permission)"
   panel_ctl activate trace/lane/root >/dev/null
   wait_panel "the root lane reveals the turn's user message" 'c["first"] == next(i for i, r in enumerate(c["transcript"]) if r.get("kind") == "user")' 10
+  # The fixture's long first reply makes the transcript taller than a window, so with the list
+  # at the user's message the card is below the last row the list drew (unpainted nothing is
+  # drawn, and the last row is the first).
+  check_panel "with the list at the user's message the Permission entry is below its last row" "c['last'] < $permission"
   panel_ctl activate "$wait_key" >/dev/null
-  # The Permission card is the transcript's last entry while it waits. Unpainted, the list's top
-  # sits at the entry; painted, gpui backs the top up from the end of the content until the
-  # viewport is full, so the card (entry $permission) is on screen with the top somewhere in
-  # (0, $permission]: it moved off the user's message, to the card or above it by what fits.
-  wait_panel "the wait reveals the Permission entry" "c['first'] == $permission or (p['drawn'] and 0 < c['first'] <= $permission)" 10
+  # The Permission card is the transcript's last entry while it waits, so painted it cannot be the
+  # list's top: gpui backs the top up from the end of the content until the pane is full. Painted,
+  # the reveal is read as the card on screen: between the first and last row the list drew, the
+  # list moved there from the user's message. Unpainted the list's top sits at the card.
+  wait_panel "the wait reveals the Permission entry" "c['first'] == $permission or (p['drawn'] and c['first'] <= $permission <= c['last'])" 10
   echo "step: the user allows the Edit"
   E2E rpc surface.chat.permission surfaceId="$SURFACE" requestId="${wait_key#trace/wait/}" optionId=allow_once >/dev/null || fail "allowing the Edit failed"
   wait_panel "the turn is Done at \$0.31" "$DONE_031" 40
@@ -1215,21 +1246,20 @@ scenario_trace_tab() {
   answer_permission allow_once
   wait_panel "the turn is Done at \$0.31" "$DONE_031" 40
   unfold_cards trace
-  [ "$(trace_tab_count)" = 0 ] || fail "the Secondary half has a trace tab before one was opened: $(secondary_kinds)"
+  expect_trace_tabs "no trace tab before one was opened" 0
   echo "step: the card opens the tab"
   panel_ctl activate trace/open >/dev/null
   wait_trace_tab "the layout lists a trace tab in the Secondary half" present 20
   wait_panel "the tab reads turn 1 of 1, following the latest" 'tab()["open"] == "1" and tab()["turn"] == "1" and tab()["turns"] == "1" and tab()["follow"] == "1"' 20
   check_panel "the tab holds the whole tree, each span under its parent" \
     '{s["id"]: (s["parent"], s["kind"], s["depth"]) for s in tab()["spans"] if s["kind"] in ("root", "subagent", "tool")} == {"root": ("", "root", "0"), "toolu_agent_a": ("root", "subagent", "1"), "toolu_agent_b": ("root", "subagent", "1"), "toolu_agent_c": ("toolu_agent_b", "subagent", "2"), "toolu_a_bash": ("toolu_agent_a", "tool", "2"), "toolu_c_read": ("toolu_agent_c", "tool", "3"), "toolu_edit": ("root", "tool", "1"), "toolu_bash_fail": ("root", "tool", "1"), "toolu_bash_ok": ("root", "tool", "1")}'
-  check_panel "it also holds the model calls, each under an agent" \
-    'len([s for s in tab()["spans"] if s["kind"] == "llm"]) >= 5 and all(s["parent"] != "" for s in tab()["spans"] if s["kind"] == "llm")'
+  check_panel "it also holds the model calls, each under the agent that made it" \
+    '{s["id"]: s["parent"] for s in tab()["spans"] if s["kind"] == "llm"} == {"msg_main_1": "root", "msg_main_2": "root", "msg_main_3": "root", "msg_main_4": "root", "msg_main_5": "root", "msg_a_1": "toolu_agent_a", "toolu_agent_a/final": "toolu_agent_a", "msg_b_1": "toolu_agent_b", "toolu_agent_b/final": "toolu_agent_b", "msg_c_1": "toolu_agent_c", "toolu_agent_c/final": "toolu_agent_c"}'
   capture trace-tab
   echo "step: a second open keeps one tab"
   panel_ctl activate trace/open >/dev/null
   sleep 1
-  [ "$(trace_tab_count)" = 1 ] || fail "opening the trace twice left the Secondary half with: $(secondary_kinds)"
-  echo "OK: one trace tab after two opens ($(secondary_kinds))"
+  expect_trace_tabs "one trace tab after two opens" 1
   echo "step: another worktree, and back"
   ctl select-workspace --workspace "$PRIMARY" >/dev/null
   sleep 1
@@ -1250,7 +1280,7 @@ scenario_trace_tab() {
   [ -n "$SURFACE" ] || fail "the chat was not restored"
   echo "OK: the restored chat is $SURFACE (was $first_surface)"
   sleep 3
-  [ "$(trace_tab_count)" = 0 ] || fail "the relaunch restored a trace tab: $(secondary_kinds)"
+  expect_trace_tabs "the relaunch restored no trace tab" 0
   check_panel "no trace tab came back, and the chat has no trace of the turn before" 'tab()["open"] == "0" and S("trace") is None'
   echo "OK: no trace tab is restored"
   echo "step: a turn after the relaunch gives the chat a trace again; closing the chat closes its tab"
@@ -1295,6 +1325,21 @@ scenario_trace_idle() {
   sleep 1
   frames_in_window "the card drawn, the trace tab hidden behind the chat, mid-turn" 3 some
   [ "$LAST_ENTITIES" = "$card_entity" ] || fail "with the tab hidden the frames came from [$LAST_ENTITIES], not from the card alone [$card_entity]"
+  echo "step: the trace tab open, and a third tab selected in the Secondary half"
+  ctl surface open-list open --entry changes >/dev/null
+  local kinds=""
+  for _ in $(seq 1 60); do
+    kinds=$(secondary_kinds || true)
+    case ",$kinds," in *,diff,*) break ;; esac
+    sleep 0.3
+  done
+  # The Changes tab's kind is `diff`.
+  case ",$kinds," in *,diff,*) ;; *) fail "the Changes tab did not open in the Secondary half beside the chat and the trace: [$kinds]" ;; esac
+  echo "OK: the Secondary half holds [$kinds], the Changes tab selected"
+  sleep 1
+  frames_in_window "the trace tab open but another tab selected beside it: neither the card nor the tab is drawn, mid-turn" 3 zero
+  ctl surface tabs select "$(tab_positions chat)" >/dev/null
+  sleep 1
   echo "step: the worktree parked mid-turn, with the card unfolded and the tab open"
   ctl select-workspace --workspace "$PRIMARY" >/dev/null
   sleep 1

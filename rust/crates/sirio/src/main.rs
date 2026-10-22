@@ -20451,6 +20451,12 @@ impl SirioWorkspace {
                 "firstVisibleEntry".to_string(),
                 snapshot.first_visible_entry.to_string(),
             ),
+            // Where it ends: a reveal of the transcript's last row is on screen when it is
+            // between the two, though it cannot be the top.
+            (
+                "lastVisibleEntry".to_string(),
+                snapshot.last_visible_entry.to_string(),
+            ),
         ]
     }
 

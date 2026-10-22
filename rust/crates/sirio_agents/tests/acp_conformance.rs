@@ -354,9 +354,9 @@ fn claude_answers_the_session_panel_requests() {
 ///
 ///     cargo nextest run -p sirio_agents --test acp_conformance --run-ignored only claude_streams_the_lines_the_trace_reads
 ///
-/// It SKIPs without `claude`, below the claimed floor, and when the CLI exits for want
-/// of a login. The scratch directory is under `std::env::temp_dir()`; the test expects
-/// `TMPDIR` to be set, because without it that is `/tmp`.
+/// It SKIPs without `claude` and below the claimed floor, like its siblings, and fails when
+/// the CLI is not logged in: a check that could not run must not read as one that passed. Its
+/// scratch directory is under the target directory (`CARGO_TARGET_TMPDIR`).
 #[test]
 #[ignore = "spends one real turn"]
 fn claude_streams_the_lines_the_trace_reads() {
@@ -388,7 +388,8 @@ fn claude_streams_the_lines_the_trace_reads() {
     // messages are what put `message_start` on the stream. `--strict-mcp-config` with
     // no `--mcp-config` starts no MCP server, and `disableAllHooks` runs none.
     let line = sirio_claude::LaunchLine::usage_probe();
-    let scratch = std::env::temp_dir().join(format!("sirio-trace-live-{}", std::process::id()));
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("trace-live-{}", std::process::id()));
     std::fs::create_dir_all(&scratch).expect("a scratch directory");
     std::fs::write(scratch.join("README.md"), "scratch\n").expect("a file to list");
     let mut child = Command::new(&program)
@@ -462,10 +463,14 @@ fn claude_streams_the_lines_the_trace_reads() {
     };
     if result.is_error {
         let text = result.result.clone().unwrap_or_default().to_lowercase();
-        if text.contains("not logged in") || text.contains("please run /login") {
-            eprintln!("SKIP: claude is not logged in");
-            return;
-        }
+        // A logged-out CLI is a machine that cannot answer this check, not one that has
+        // nothing to say: it fails, and says what to do, rather than passing for the lines it
+        // never streamed.
+        assert!(
+            !(text.contains("not logged in") || text.contains("please run /login")),
+            "claude is not logged in, so the trace's lines were not checked: run `claude /login` \
+             and run this test again"
+        );
     }
 
     let main_message_start = messages.iter().any(|message| match message {

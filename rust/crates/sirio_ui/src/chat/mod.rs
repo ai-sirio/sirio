@@ -916,6 +916,10 @@ pub struct ChatControlSnapshot {
     pub session_panel: SessionPanelSnapshot,
     /// The transcript row at the top of the list: where a reveal landed.
     pub first_visible_entry: usize,
+    /// The last transcript row the list drew, from what it laid out. A row that is the
+    /// transcript's last cannot reach the top of a list that fills its pane, so a reveal of
+    /// it is read as `first_visible_entry <= row <= last_visible_entry`.
+    pub last_visible_entry: usize,
 }
 
 impl Entry {
@@ -3732,7 +3736,24 @@ impl Chat {
             transcript: self.entries.iter().map(control_entry_row).collect(),
             session_panel: self.session_panel_snapshot(),
             first_visible_entry: self.list_state.logical_scroll_top().item_ix,
+            last_visible_entry: self.last_visible_entry(),
         }
+    }
+
+    /// The last transcript row the list drew: the last one from the top row down that the
+    /// list measured and that starts above the viewport's bottom edge. A list that was never
+    /// laid out measured nothing, so it has drawn only the row at its top.
+    fn last_visible_entry(&self) -> usize {
+        let first = self.list_state.logical_scroll_top().item_ix;
+        let bottom = self.list_state.viewport_bounds().bottom();
+        let mut last = first;
+        for row in first..self.entries.len() {
+            match self.list_state.bounds_for_item(row) {
+                Some(bounds) if bounds.top() < bottom => last = row,
+                _ => break,
+            }
+        }
+        last
     }
 
     fn restore_persisted_transcript(&mut self) {
@@ -16499,6 +16520,81 @@ two"
         assert!(
             !chat.read_with(cx, |chat, _| chat.list_state.is_following_tail()),
             "a reveal must not be undone by the next line"
+        );
+    }
+
+    pub(super) fn bottom_entry(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> usize {
+        chat.read_with(cx, |chat, _| chat.control_snapshot().last_visible_entry)
+    }
+
+    #[gpui::test]
+    async fn the_snapshot_names_the_last_entry_the_list_drew(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            push_answers(chat, 40);
+            cx.notify();
+        });
+        let count = chat.read_with(cx, |chat, _| chat.entries.len());
+        // A pane that shows several rows of the forty, and not all of them.
+        cx.simulate_resize(size(px(600.0), px(700.0)));
+        refresh_frame(cx);
+        assert_eq!(
+            bottom_entry(&chat, cx),
+            count - 1,
+            "following the tail, the list draws down to the last row"
+        );
+        assert!(top_entry(&chat, cx) > 0, "and a short pane has scrolled off the first rows");
+
+        chat.update(cx, |chat, _| {
+            chat.list_state.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+        });
+        refresh_frame(cx);
+        let (top, bottom) = (top_entry(&chat, cx), bottom_entry(&chat, cx));
+        assert_eq!(top, 0);
+        assert!(
+            bottom > top && bottom < count - 1,
+            "at the top a short pane draws some rows and not the last (drew {top}..={bottom} of {count})"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_revealed_card_at_the_end_is_on_screen_between_the_first_and_last_entry(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = offline_chat_view(cx);
+        let permission = chat.update(cx, |chat, cx| {
+            chat.submit_turn("deploy it".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+            chat.handle_event(trace_span("toolu_deploy", None, SpanKind::Tool), cx);
+            chat.handle_event(trace_wait("toolu_deploy", 42), cx);
+            push_answers(chat, 40);
+            // A permission waiting is the last thing in the transcript.
+            chat.push_entry(open_question_with_free_text(42));
+            cx.notify();
+            chat.entries.len() - 1
+        });
+        lay_out_short(cx);
+        chat.update(cx, |chat, _| {
+            chat.list_state.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+        });
+        refresh_frame(cx);
+        assert!(
+            bottom_entry(&chat, cx) < permission,
+            "before the reveal the card is below the list's last row"
+        );
+
+        chat.update(cx, |chat, cx| chat.reveal_wait(42, cx));
+        refresh_frame(cx);
+        let (top, bottom) = (top_entry(&chat, cx), bottom_entry(&chat, cx));
+        assert!(
+            top <= permission && permission <= bottom,
+            "the reveal put the card on screen: drew {top}..={bottom}, the card is entry {permission}"
         );
     }
 

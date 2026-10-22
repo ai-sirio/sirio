@@ -721,8 +721,10 @@ agents get a total-only Context. The debug-only `surface.chat.panel`
 (`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>`) drives
 it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
 JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` asserts on.
-`surface.chat.read` also reports `firstVisibleEntry`, where the transcript list's top sits,
-which a reveal moves.
+`surface.chat.read` also reports `firstVisibleEntry` and `lastVisibleEntry`, the first and last
+transcript rows the list drew, so a reveal reads as the row being between them: a row that is
+the transcript's last cannot reach the top of a list that fills its pane, and unpainted nothing is
+drawn, so the two are equal.
 
 **The Trace card** shows what the native Claude transport reports of the chat's latest turn, and
 only once the chat has received a `TraceEvent`, which no ACP client ever sends. Folded it is one
@@ -737,9 +739,10 @@ no line carries a time (the CLI's own durations win where it sends one), and
 `result`'s `total_cost_usd` less the previous one's in the same process, and unknown (a dash) for
 a resumed process's first turn, an interrupted turn and the turn after it. A subagent's permission
 opens no tool row of its own, only the one Permission card its lane's wait points at. The trace
-asks for frames only while a span runs and the card is unfolded or the tab is painted, from one
-loop capped at 30 a second (`trace_frame::frame_driver`) that counts each as a `trace.frame`
-event in the performance trace; a finished, folded or hidden turn asks for none.
+asks for frames only from a capped loop per painted card or tab (33 ms,
+`trace_frame::frame_driver`), each counted as a `trace.frame` event in the performance trace; a
+finished, folded or hidden turn asks for none, though a folded card's title still ticks once a
+second while it is painted.
 **The Trace tab** (`TabKind::Trace`, `sirio_ui::trace_tab`) is the full waterfall in the
 Secondary half, one per chat, opened by the card's last row. It holds a handle to the chat's
 trace, closes one paint after its chat is released, and is never saved and never restored, so
