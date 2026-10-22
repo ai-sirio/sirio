@@ -17,18 +17,22 @@
 //!   and tells the chat while the turn runs, the column is open and a frame
 //!   painted it since the last tick. It ends with the turn.
 //!
-//! The pulses are phase of the card's own clock rather than gpui
-//! animations, so the one loop above is the only thing that asks for frames;
-//! with gpui's reduced-motion setting they hold still, and the loop slows to
-//! a tick a second, enough for the numbers.
+//! Everything that moves is a function of the turn's own clock, painted by
+//! that one loop: the pulses, the band of the shimmering "now" text (Ely's
+//! `ShimmerText::phase`, which animates nothing itself) and a lane's entry,
+//! a short rise over its first 200 ms. Nothing in the card runs a gpui
+//! animation or `AnimatePresence`, which would ask for frames of their own,
+//! uncapped and uncounted. A turn that ends draws what is there at once: no
+//! lane leaves. With gpui's reduced-motion setting the marks hold still and
+//! the loop slows to a tick a second, enough for the numbers.
 
 use super::{Row, Section};
 use crate::chat::trace::{
-    Axis, Lane, Segment, SegmentKind, SpanState, TraceStore, TurnState, TurnStats, axis,
+    Axis, Lane, ROOT, Segment, SegmentKind, SpanState, TraceStore, TurnState, TurnStats, axis,
     format_duration,
 };
 use crate::chat::{Chat, ChatEvent};
-use ely_gpui_component::{motion::AnimatePresence, typography::ShimmerText};
+use ely_gpui_component::{motion::ease_out_cubic, typography::ShimmerText};
 use gpui::{
     AnyElement, App, Context, CursorStyle, FontWeight, Hsla, InteractiveElement, IntoElement,
     ParentElement, SharedString, StatefulInteractiveElement, Styled, canvas, div, pattern_slash,
@@ -47,6 +51,11 @@ const PULSE: Duration = Duration::from_millis(1200);
 const PULSE_LOW: f32 = 0.35;
 /// How far a lane steps in for each level it is nested.
 const INDENT: f32 = 12.0;
+/// How long a lane takes to appear, and how far it rises as it does.
+const ENTER: Duration = Duration::from_millis(200);
+const ENTER_RISE: f32 = 6.0;
+/// One sweep of the "now" text's band of light, as Ely's own shimmer runs it.
+const SHIMMER: Duration = Duration::from_millis(1800);
 
 /// The word a turn's tag and pill say.
 fn turn_word(state: TurnState) -> &'static str {
@@ -71,7 +80,8 @@ fn span_word(state: SpanState) -> &'static str {
 
 /// What a lane says of itself at its end once it has finished.
 fn lane_count(lane: &Lane) -> String {
-    format!("{} calls · {}", lane.calls, format_duration(lane.duration))
+    let calls = if lane.calls == 1 { "call" } else { "calls" };
+    format!("{} {calls} · {}", lane.calls, format_duration(lane.duration))
 }
 
 /// The six numbers, as `(key, label, value, bad)`. An unknown cost or token
@@ -238,6 +248,43 @@ fn pulse(elapsed: Duration, reduced_motion: bool) -> f32 {
     middle + (1.0 - middle) * (phase * std::f32::consts::TAU).cos()
 }
 
+/// How far a lane has come in, 0 to 1, `elapsed` into the turn: it takes
+/// `ENTER` from the lane's own start and eases out. Read from the turn's
+/// clock, so the card's one capped loop paints it and nothing else asks for
+/// frames. A turn that has ended draws every lane whole.
+fn entry(running: bool, elapsed: Duration, start: Duration) -> f32 {
+    if !running {
+        return 1.0;
+    }
+    let share = elapsed.saturating_sub(start).as_secs_f32() / ENTER.as_secs_f32();
+    ease_out_cubic(share.min(1.0))
+}
+
+/// What the turn's clock says at the frame being drawn.
+struct Beat {
+    running: bool,
+    reduced: bool,
+    /// How far into the turn: the "now" line's place, and the clock the
+    /// pulses, the shimmer and the lanes' entries run on.
+    elapsed: Duration,
+}
+
+impl Beat {
+    /// How bright a pulsing mark is.
+    fn pulse(&self) -> f32 {
+        if self.running {
+            pulse(self.elapsed, self.reduced)
+        } else {
+            1.0
+        }
+    }
+
+    /// Where the band of the running "now" text is, 0 to 1 across a sweep.
+    fn shimmer(&self) -> f32 {
+        self.elapsed.as_secs_f32() % SHIMMER.as_secs_f32() / SHIMMER.as_secs_f32()
+    }
+}
+
 /// The colour of a lane's dot.
 fn state_color(theme: &Theme, state: SpanState) -> Hsla {
     match state {
@@ -314,7 +361,12 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
     let caption = theme.typography.footnote;
     let state = turn.state();
     let elapsed = turn.elapsed(now);
-    let alpha = if running { pulse(elapsed, reduced) } else { 1.0 };
+    let beat = Beat {
+        running,
+        reduced,
+        elapsed,
+    };
+    let alpha = beat.pulse();
     let lanes = turn.lanes(now);
     let axis = axis(turn.extent(now));
     let entity = cx.entity();
@@ -412,19 +464,21 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
         .child(div().flex().gap_2().children(first))
         .child(div().flex().gap_2().children(second));
 
-    // The axis, and the lanes under it with the grid and the "now" line laid
-    // over the same width.
+    // The axis, with the "now" dot on it, and the lanes under it. The grid
+    // and the "now" line are drawn inside each lane's track, never across the
+    // lane's text.
     let range = axis.range.as_secs_f32().max(0.001);
     let across = |offset: Duration| (offset.as_secs_f32() / range).clamp(0.0, 1.0);
     let last = axis.ticks.len().saturating_sub(1);
     let ticks = div()
         .relative()
-        .h(px(14.0))
+        .h(px(17.0))
         .children(axis.ticks.iter().enumerate().map(|(at, tick)| {
             let label = div()
                 .absolute()
                 .top_0()
                 .text_size(px(10.0))
+                .line_height(px(12.0))
                 .text_color(theme.ely.fg_subtle)
                 .whitespace_nowrap()
                 .child(format_duration(*tick));
@@ -433,52 +487,26 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
             } else {
                 label.left(relative(across(*tick)))
             }
+        }))
+        .children(running.then(|| {
+            div()
+                .absolute()
+                .bottom(px(1.0))
+                .left(relative(across(elapsed)))
+                .ml(px(-2.5))
+                .size(px(5.0))
+                .rounded_full()
+                .bg(theme.ely.info)
         }));
-    let grid = axis.ticks.iter().map(|tick| {
-        div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left(relative(across(*tick)))
-            .w(px(1.0))
-            .bg(theme.ely.border)
-    });
-    let mut presence = AnimatePresence::new("trace-lanes");
-    for (at, lane) in lanes.iter().enumerate() {
-        presence = presence.row(
-            SharedString::from(lane.span.clone()),
-            true,
-            render_lane(lane, at == 0, &axis, alpha, theme, &entity),
-        );
-    }
-    let now_line = running.then(|| {
-        div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left(relative(across(elapsed)))
-            .w(px(1.0))
-            .bg(theme.ely.info.opacity(0.75))
-            .child(
-                div()
-                    .absolute()
-                    .top(px(-2.0))
-                    .left(px(-2.5))
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(theme.ely.info),
-            )
-    });
     let waterfall = div()
         .flex()
         .flex_col()
         .child(ticks)
-        .child(
-            div()
-                .relative()
-                .children(grid)
-                .child(presence)
-                .children(now_line),
+        .children(
+            lanes
+                .iter()
+                .enumerate()
+                .map(|(at, lane)| render_lane(lane, at == 0, &axis, &beat, theme, &entity)),
         );
 
     let open = div()
@@ -527,7 +555,7 @@ fn render_lane(
     lane: &Lane,
     first: bool,
     axis: &Axis,
-    alpha: f32,
+    beat: &Beat,
     theme: &Theme,
     entity: &gpui::Entity<Chat>,
 ) -> AnyElement {
@@ -537,6 +565,10 @@ fn render_lane(
     let indent = f32::from(lane.depth) * INDENT;
     let own_waits = !lane.waits.is_empty();
     let header = div()
+        .debug_selector({
+            let selector = format!("trace-lane-header-{}", lane.span);
+            move || selector.clone()
+        })
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -547,7 +579,7 @@ fn render_lane(
                 .size(px(7.0))
                 .rounded_full()
                 .bg(color)
-                .opacity(if open { alpha } else { 1.0 }),
+                .opacity(if open { beat.pulse() } else { 1.0 }),
         )
         .child(
             div()
@@ -573,11 +605,7 @@ fn render_lane(
             div()
                 .flex_none()
                 .text_color(theme.ely.fg_muted)
-                .child(if open {
-                    format_duration(lane.duration)
-                } else {
-                    lane_count(lane)
-                }),
+                .child(lane_count(lane)),
         );
     // What it is doing: the running text shimmers, a wait is the next lines.
     let doing = lane
@@ -595,10 +623,15 @@ fn render_lane(
                     theme.ely.fg_muted
                 });
             if lane.state == SpanState::Running {
-                line.child(ShimmerText::new(
-                    SharedString::from(format!("trace-now-{}", lane.span)),
-                    text.clone(),
-                ))
+                // The band is where the turn's clock puts it: the card's own
+                // loop repaints it, and the text asks for no frames.
+                line.child(
+                    ShimmerText::new(
+                        SharedString::from(format!("trace-now-{}", lane.span)),
+                        text.clone(),
+                    )
+                    .phase(beat.shimmer()),
+                )
             } else {
                 line.child(text.clone())
             }
@@ -628,7 +661,7 @@ fn render_lane(
         .on_click(reveal)
         .child(header)
         .children(doing)
-        .child(render_track(lane, axis, theme));
+        .child(render_track(lane, axis, beat, theme));
     let waits = lane.waits.iter().map(|wait| {
         let request_id = wait.request_id;
         let entity = entity.clone();
@@ -655,26 +688,79 @@ fn render_lane(
             })
             .child(line)
     });
+    // A lane that has just begun rises into place over `ENTER`, by the turn's
+    // clock; a still card, a finished turn and reduced motion draw it whole.
+    let entered = entry(beat.running && !beat.reduced, beat.elapsed, lane.start);
     div()
+        .relative()
         .flex()
         .flex_col()
+        .when(entered < 1.0, |lane| {
+            lane.top(px(-(1.0 - entered) * ENTER_RISE)).opacity(entered)
+        })
         .child(clickable)
         .children(waits)
         .into_any_element()
 }
 
-/// A lane's track: its model calls, tools and waits on the shared axis.
-fn render_track(lane: &Lane, axis: &Axis, theme: &Theme) -> AnyElement {
+/// A lane's track: the grid, the faint band of a subagent's lifetime, its
+/// model calls, tools and waits on the shared axis, and the "now" line over
+/// them while the turn runs. A failed call is drawn in the danger colour.
+fn render_track(lane: &Lane, axis: &Axis, beat: &Beat, theme: &Theme) -> AnyElement {
     let range = axis.range.as_secs_f32().max(0.001);
+    let across = |offset: Duration| (offset.as_secs_f32() / range).clamp(0.0, 1.0);
+    let span = lane.span.clone();
+    let grid = axis.ticks.iter().enumerate().map(|(at, tick)| {
+        let selector = format!("trace-grid-{span}-{at}");
+        div()
+            .debug_selector(move || selector.clone())
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(relative(across(*tick)))
+            .w(px(1.0))
+            .bg(theme.ely.border)
+    });
+    // The root lives as long as the turn, which its track already shows; a
+    // subagent's lifetime is what tells a lane with no calls from an empty one.
+    let band = (lane.span != ROOT).then(|| {
+        let start = across(lane.start);
+        let end = across(lane.end.unwrap_or(beat.elapsed));
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(relative(start))
+            .w(relative((end - start).max(0.0)))
+            .min_w(px(2.0))
+            .bg(theme.ely.fg_subtle.opacity(0.25))
+    });
+    let now_line = beat.running.then(|| {
+        let selector = format!("trace-nowline-{span}");
+        div()
+            .debug_selector(move || selector.clone())
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(relative(across(beat.elapsed)))
+            .w(px(1.0))
+            .bg(theme.ely.info.opacity(0.75))
+    });
     div()
+        .debug_selector({
+            let selector = format!("trace-track-{}", lane.span);
+            move || selector.clone()
+        })
         .relative()
         .h(px(10.0))
         .w_full()
         .rounded(px(3.0))
         .overflow_hidden()
-        .bg(theme.ely.sunken)
+        .bg(theme.sirio.overlay)
+        .children(grid)
+        .children(band)
         .children(lane.segments.iter().map(|segment: &Segment| {
-            let start = (segment.start.as_secs_f32() / range).clamp(0.0, 1.0);
+            let start = across(segment.start);
             let length = segment.end.saturating_sub(segment.start).as_secs_f32() / range;
             let bar = div()
                 .absolute()
@@ -684,14 +770,16 @@ fn render_track(lane: &Lane, axis: &Axis, theme: &Theme) -> AnyElement {
                 .w(relative(length.clamp(0.0, 1.0 - start)))
                 .min_w(px(2.0))
                 .rounded(px(2.0));
-            match segment.kind {
-                SegmentKind::Llm => bar.bg(theme.ely.chart[4].opacity(0.65)),
-                SegmentKind::Tool => bar.bg(theme.ely.chart[1].opacity(0.8)),
-                SegmentKind::Wait => {
+            match (segment.kind, segment.state) {
+                (SegmentKind::Wait, _) => {
                     bar.bg(pattern_slash(theme.ely.warning.opacity(0.75), 3.0, 6.0))
                 }
+                (_, SpanState::Failed) => bar.bg(theme.ely.danger),
+                (SegmentKind::Llm, _) => bar.bg(theme.ely.chart[4].opacity(0.65)),
+                (SegmentKind::Tool, _) => bar.bg(theme.ely.chart[1].opacity(0.8)),
             }
         }))
+        .children(now_line)
         .into_any_element()
 }
 
@@ -732,6 +820,7 @@ fn frame_driver(chat: &Chat, running: bool, reduced: bool, cx: &Context<Chat>) -
 #[cfg(test)]
 mod tests {
     use super::super::SessionPanelAction;
+    use super::entry;
     use crate::chat::tests::{
         lay_out_short, offline_chat_view, open_question_with_free_text, pump_chat_until,
         push_answers, refresh_frame, top_entry,
@@ -1019,7 +1108,7 @@ mod tests {
                 row("trace/stat/tool_calls", 0, "Tool calls", "2", "", None),
                 row("trace/stat/errors", 0, "Errors", "0", "", None),
                 row("trace/lane/root", 0, "Claude Code", "2 calls · 12s", "done", Some("reveal")),
-                row("trace/lane/toolu_agent", 1, "Explore", "1 calls · 6s", "done", Some("reveal")),
+                row("trace/lane/toolu_agent", 1, "Explore", "1 call · 6s", "done", Some("reveal")),
                 row("trace/open", 0, "Open full trace", "", "", Some("open")),
             ]
         );
@@ -1216,6 +1305,183 @@ mod tests {
             next_frame(cx);
         }
         assert_eq!(frames(&chat, cx), finished, "a finished turn requests nothing");
+    }
+
+    /// A real click at the middle of a drawn element.
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"));
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        for _ in 0..3 {
+            refresh_frame(cx);
+        }
+    }
+
+    /// A selector built at run time, which `debug_bounds` wants as `'static`.
+    fn selector(text: String) -> &'static str {
+        Box::leak(text.into_boxed_str())
+    }
+
+    /// A chat with a running turn whose card is unfolded and painted: the
+    /// root runs a tool, so its "now" line is drawn.
+    fn running_card(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        chat.update(cx, |chat, cx| {
+            chat.set_session_panel_open(true, cx);
+            let now = Instant::now() - Duration::from_secs(5);
+            chat.handle_event(started(now), cx);
+            chat.handle_event(
+                span("toolu_run", None, SpanKind::Tool, "Bash", "", None, secs(now, 1.0)),
+                cx,
+            );
+        });
+        act(&chat, cx, SessionPanelAction::Toggle("trace".into())).expect("the card unfolds");
+        for _ in 0..4 {
+            refresh_frame(cx);
+        }
+        (chat, cx)
+    }
+
+    #[gpui::test]
+    async fn the_card_asks_for_no_frame_but_its_own(cx: &mut TestAppContext) {
+        let (chat, cx) = running_card(cx);
+        // The test window has no frame loop: the callbacks a draw asks the
+        // next frame for wait until they are delivered by hand.
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        // A lane arrives: whatever draws it in must not ask for frames of its
+        // own, and neither may the shimmering "now" text of the running lane.
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                span(
+                    "toolu_agent",
+                    None,
+                    SpanKind::Subagent,
+                    "Explore",
+                    "scan",
+                    None,
+                    Instant::now(),
+                ),
+                cx,
+            );
+        });
+        for _ in 0..6 {
+            refresh_frame(cx);
+        }
+        let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
+        assert_eq!(
+            asked, 0,
+            "every frame the trace causes comes from its own capped loop"
+        );
+    }
+
+    #[gpui::test]
+    async fn frames_are_capped_at_thirty_a_second(cx: &mut TestAppContext) {
+        let (chat, cx) = running_card(cx);
+        let before = frames(&chat, cx);
+        for _ in 0..100 {
+            cx.cx.executor().advance_clock(Duration::from_millis(10));
+            cx.run_until_parked();
+            refresh_frame(cx);
+        }
+        let asked = frames(&chat, cx) - before;
+        assert!(asked >= 1, "a running card keeps moving");
+        assert!(asked <= 31, "{asked} frames in a second is past 30 a second");
+    }
+
+    #[gpui::test]
+    async fn a_wait_rows_click_does_not_reveal_its_lane(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        let (user, permission) = chat.update(cx, |chat, cx| {
+            chat.set_session_panel_open(true, cx);
+            chat.submit_turn("deploy it".into(), Vec::new(), Vec::new(), cx);
+            let user = chat.entries.len() - 1;
+            let now = Instant::now() - Duration::from_secs(5);
+            chat.handle_event(started(now), cx);
+            chat.handle_event(
+                span("toolu_deploy", None, SpanKind::Tool, "Deploy", "", None, secs(now, 1.0)),
+                cx,
+            );
+            chat.handle_event(wait("toolu_deploy", 42, secs(now, 2.0)), cx);
+            push_answers(chat, 12);
+            chat.push_entry(open_question_with_free_text(42));
+            let permission = chat.entries.len() - 1;
+            push_answers(chat, 60);
+            cx.notify();
+            (user, permission)
+        });
+        act(&chat, cx, SessionPanelAction::Toggle("trace".into())).expect("the card unfolds");
+        for _ in 0..4 {
+            refresh_frame(cx);
+        }
+        assert!(top_entry(&chat, cx) > permission, "the tail is far below the request");
+
+        click(cx, "trace-wait-42");
+        assert_eq!(
+            top_entry(&chat, cx),
+            permission,
+            "the yellow row reaches the request, not the lane under which it sits"
+        );
+        assert_ne!(top_entry(&chat, cx), user);
+    }
+
+    #[gpui::test]
+    async fn the_axis_lines_stay_inside_the_tracks(cx: &mut TestAppContext) {
+        let (chat, cx) = running_card(cx);
+        chat.update(cx, |chat, cx| {
+            let now = Instant::now() - Duration::from_secs(3);
+            chat.handle_event(
+                span("toolu_agent", None, SpanKind::Subagent, "Explore", "scan", None, now),
+                cx,
+            );
+        });
+        for _ in 0..4 {
+            refresh_frame(cx);
+        }
+        for lane in ["root", "toolu_agent"] {
+            let header = cx
+                .debug_bounds(selector(format!("trace-lane-header-{lane}")))
+                .unwrap_or_else(|| panic!("the header of {lane} is drawn"));
+            let track = cx
+                .debug_bounds(selector(format!("trace-track-{lane}")))
+                .unwrap_or_else(|| panic!("the track of {lane} is drawn"));
+            for line in [
+                selector(format!("trace-nowline-{lane}")),
+                selector(format!("trace-grid-{lane}-1")),
+            ] {
+                let bounds = cx
+                    .debug_bounds(line)
+                    .unwrap_or_else(|| panic!("{line} is drawn"));
+                assert!(
+                    bounds.top() >= track.top() && bounds.bottom() <= track.bottom(),
+                    "{line} {bounds:?} leaves its track {track:?}"
+                );
+                assert!(
+                    !bounds.intersects(&header),
+                    "{line} {bounds:?} crosses the header {header:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_lane_enters_over_two_hundred_milliseconds_from_its_start() {
+        let at = |millis: u64| entry(true, Duration::from_millis(millis), Duration::from_secs(10));
+        // Not there yet, which a clock a little behind the lane's own
+        // instants can say, must not underflow.
+        assert_eq!(entry(true, Duration::from_secs(9), Duration::from_secs(10)), 0.0);
+        assert_eq!(at(10_000), 0.0);
+        assert!(at(10_100) > 0.5 && at(10_100) < 1.0, "an ease-out: past half at half time");
+        assert_eq!(at(10_200), 1.0);
+        assert_eq!(at(60_000), 1.0);
+        // A turn that ended draws every lane whole, whenever it began.
+        assert_eq!(
+            entry(false, Duration::from_millis(10_050), Duration::from_secs(10)),
+            1.0
+        );
     }
 
     #[gpui::test]

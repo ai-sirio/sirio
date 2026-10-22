@@ -859,14 +859,95 @@ mod tests {
                 Segment {
                     kind: SegmentKind::Llm,
                     start: ms(800),
-                    end: ms(900)
+                    end: ms(900),
+                    state: SpanState::Done,
                 },
                 Segment {
                     kind: SegmentKind::Tool,
                     start: ms(900),
-                    end: ms(1000)
+                    end: ms(1000),
+                    state: SpanState::Done,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_failed_call_segment_says_failed() {
+        let (mut store, c) = open_turn();
+        tool(&mut store, &c, "toolu_f", None, "Bash", 100);
+        end_as(
+            &mut store,
+            &c,
+            "toolu_f",
+            SpanOutcome::Failed {
+                note: "exit 1".into(),
+            },
+            400,
+        );
+        tool(&mut store, &c, "toolu_ok", None, "Read", 400);
+        end(&mut store, &c, "toolu_ok", 600);
+        tool(&mut store, &c, "toolu_run", None, "Bash", 700);
+
+        let found = |store: &TraceStore| {
+            let lanes = lanes_of(store, c.at(1000));
+            lanes[0]
+                .segments
+                .iter()
+                .map(|segment| (segment.kind, segment.state))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            found(&store),
+            [
+                (SegmentKind::Tool, SpanState::Failed),
+                (SegmentKind::Tool, SpanState::Done),
+                (SegmentKind::Tool, SpanState::Running),
+            ]
+        );
+
+        // A call held up by a permission is waiting, and so is the stretch
+        // of the wait itself; once answered the stretch is over.
+        wait(&mut store, &c, Some("toolu_run"), 1, 800);
+        let held = found(&store);
+        assert_eq!(held[2], (SegmentKind::Tool, SpanState::Waiting));
+        assert_eq!(held[3], (SegmentKind::Wait, SpanState::Waiting));
+        unwait(&mut store, &c, 1, 900);
+        assert_eq!(found(&store)[3], (SegmentKind::Wait, SpanState::Done));
+    }
+
+    #[test]
+    fn a_subagent_lane_knows_its_lifetime() {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_a", None, "reviewer", "", 1000);
+        store.apply(TraceEvent::SpanEnded {
+            id: "toolu_a".into(),
+            outcome: SpanOutcome::Done,
+            at: c.at(3000),
+            measured_ms: Some(1234),
+        });
+        agent(&mut store, &c, "toolu_b", None, "tester", "", 1500);
+
+        let lanes = lanes_of(&store, c.at(4000));
+        assert_eq!((lane(&lanes, ROOT).start, lane(&lanes, ROOT).end), (ms(0), None));
+        assert_eq!(
+            (lane(&lanes, "toolu_a").start, lane(&lanes, "toolu_a").end),
+            (ms(1000), Some(ms(1000 + 1234))),
+            "the agent's own clock wins over the instants"
+        );
+        assert_eq!(
+            (lane(&lanes, "toolu_b").start, lane(&lanes, "toolu_b").end),
+            (ms(1500), None),
+            "a running agent has no end yet"
+        );
+
+        finish(&mut store, &c, 5000, TurnOutcome::Done);
+        let lanes = lanes_of(&store, c.at(9000));
+        assert_eq!(lane(&lanes, ROOT).end, Some(ms(5000)), "the root ends with the turn");
+        assert_eq!(
+            lane(&lanes, "toolu_b").end,
+            Some(ms(5000)),
+            "an agent the turn abandoned ends with the turn"
         );
     }
 

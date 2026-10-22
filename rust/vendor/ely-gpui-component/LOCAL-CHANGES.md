@@ -732,3 +732,16 @@ and `Scripts/Tests/test-editor-e2e.sh --xvfb` (the whole file tab, 27
 scenarios, with the fake language server `Scripts/Tests/fake_lsp.py`); the
 performance record is `docs/perf/2026-10-ely-code-editor.md`. Linux X11 only:
 macOS and Windows keys and a real input method are not covered.
+
+## Trace card (chat trace waterfall, Task 6)
+
+- `src/typography/effects.rs`: `ShimmerText::phase(f32)` draws the band at the
+  phase the host gives (0 to 1 across one sweep, wrapping) and animates
+  nothing, so the text asks for no frames of its own. Upstream's shimmer is a
+  `with_animation(..).repeat()` with no frame cap, which repaints the window at
+  the display's rate for as long as it is mounted; Sirio's Trace card repaints on
+  its own capped loop (at most 30 frames a second, counted and traced as
+  `trace.frame`) and passes the phase from the turn's clock. Without `phase` the
+  shimmer is unchanged, and reduced motion still draws the dim, static text
+  either way. The band's colouring moved into one private function both paths
+  call.

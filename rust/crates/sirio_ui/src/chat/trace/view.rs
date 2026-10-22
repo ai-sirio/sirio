@@ -79,6 +79,10 @@ pub struct Lane {
     /// wait is listed on one lane only, though every lane above it waits.
     pub waits: Vec<LaneWait>,
     pub segments: Vec<Segment>,
+    /// When the agent's lifetime began, as an offset from the turn's start.
+    pub start: Duration,
+    /// When it ended, on the same terms; `None` while it runs.
+    pub end: Option<Duration>,
 }
 
 /// A stretch of a lane's track, as offsets from the turn's start.
@@ -87,6 +91,8 @@ pub struct Segment {
     pub kind: SegmentKind,
     pub start: Duration,
     pub end: Duration,
+    /// How the call, or the wait, stands: what colours the bar.
+    pub state: SpanState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,6 +266,8 @@ impl Turn {
             now: self.now_row(None, &shape, now),
             waits: self.waits_of(None, &shape),
             segments: self.segments_of(None, &shape, now),
+            start: Duration::ZERO,
+            end: self.ended.as_ref().map(|_| self.elapsed(now)),
         };
         let agents = self
             .preorder()
@@ -268,6 +276,7 @@ impl Turn {
             .map(|index| {
                 let span = &self.spans[index];
                 let lane = Some(index);
+                let start = self.offset(span.start);
                 Lane {
                     span: span.id.clone(),
                     depth: shape.lane_depth[index],
@@ -279,6 +288,8 @@ impl Turn {
                     now: self.now_row(lane, &shape, now),
                     waits: self.waits_of(lane, &shape),
                     segments: self.segments_of(lane, &shape, now),
+                    start,
+                    end: span.end.as_ref().map(|_| start + span.duration(now)),
                 }
             });
         std::iter::once(root).chain(agents).collect()
@@ -701,6 +712,7 @@ impl Turn {
                     kind: span.segment_kind()?,
                     start,
                     end: start + span.duration(now),
+                    state: self.span_state(index, shape),
                 })
             })
             .collect();
@@ -713,6 +725,11 @@ impl Turn {
                 kind: SegmentKind::Wait,
                 start,
                 end: end.max(start),
+                state: if wait.end.is_some() {
+                    SpanState::Done
+                } else {
+                    SpanState::Waiting
+                },
             }
         });
         segments.extend(waits);
