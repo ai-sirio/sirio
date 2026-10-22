@@ -744,4 +744,6 @@ macOS and Windows keys and a real input method are not covered.
   `trace.frame`) and passes the phase from the turn's clock. Without `phase` the
   shimmer is unchanged, and reduced motion still draws the dim, static text
   either way. The band's colouring moved into one private function both paths
-  call.
+  call. This is a change of shape in a file upstream also edits: a sync must
+  keep `ShimmerText::phase`, the early return that animates nothing, and the
+  shared `shimmered` path.

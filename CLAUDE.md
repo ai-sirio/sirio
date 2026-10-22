@@ -735,20 +735,28 @@ transcript to its row (`Chat::reveal_span`, `reveal_wait`); consecutive tool row
 drawn at the run's last row, so a reveal of any of them lands there. `sirio_acp::claude::trace`
 folds the CLI's lines into `TraceEvent`s, stamped with the instant the worker read them because
 no line carries a time (the CLI's own durations win where it sends one), and
-`sirio_ui::chat::trace::TraceStore` keeps 20 turns of at most 2 000 spans. A turn's cost is its
+`sirio_ui::chat::trace::TraceStore` keeps 20 turns of at most 2 000 spans: past that a span is counted
+and not kept, the card's LLM calls, Tool calls and Errors read as at least (`1998+`) and a muted row
+says how many were left out (`3 spans past the 2000 cap not drawn`). An agent that runs in the
+background (`is_backgrounded`, or a `task_type` other than `local_agent`) is traced as its launch
+only: its `tool_result` ends the call at once, with no report, and what it writes after is not
+traced. A turn's cost is its
 `result`'s `total_cost_usd` less the previous one's in the same process, and unknown (a dash) for
 a resumed process's first turn, an interrupted turn and the turn after it. A subagent's permission
 opens no tool row of its own, only the one Permission card its lane's wait points at. The trace
-asks for frames only from a capped loop per painted card or tab (33 ms,
-`trace_frame::frame_driver`), each counted as a `trace.frame` event in the performance trace; a
-finished, folded or hidden turn asks for none, though a folded card's title still ticks once a
-second while it is painted.
+asks for frames only from one loop per painted card or tab (`trace_frame::frame_driver`, each frame
+counted as a `trace.frame` event in the performance trace). The loop runs at 30 frames a second at
+most while a span runs (`Turn::is_moving`: a model call streaming, a tool running or a subagent
+working, not one waiting for the user), ticks once a second while the turn only waits, which keeps its
+clock and its "now" line moving with the marks held still, and asks for nothing once the turn has
+ended or when nothing paints it. A folded card's title ticks once a second while it is painted.
 **The Trace tab** (`TabKind::Trace`, `sirio_ui::trace_tab`) is the full waterfall in the
 Secondary half, one per chat, opened by the card's last row. It holds a handle to the chat's
-trace, closes one paint after its chat is released, and is never saved and never restored, so
-`surface.layout.read` lists it as `trace` only while it is open. `surface.trace.read <surfaceId>`
-(`sirioctl surface trace read`, every build) reports `open`, and for a chat with a tab the shown
-`turn`, `turns`, `follow` and the visible `spans`, each with `id`, `parent`, `kind`, `state`,
+trace, closes when its chat is released (`observe_release`, then `TraceTabEvent::Close`), and is
+never saved and never restored, so `surface.layout.read` lists it as `trace` only while it is open.
+`surface.trace.read <surfaceId>` (`sirioctl surface trace read`, every build) reports `open`, and for
+a chat with a tab the shown `turn`, `turns`, `follow`, `dropped` (the spans the cap left out, 0 with
+none, which its header also says) and the visible `spans`, each with `id`, `parent`, `kind`, `state`,
 `ended`, `depth` and `folded`. `docs/superpowers/specs/2026-10-20-chat-session-panel-design.md`
 has the panel's design and `docs/superpowers/specs/2026-10-21-chat-trace-waterfall-design.md`
 the folded cards, the Trace card and the tab; `claude_streams_the_lines_the_trace_reads`
