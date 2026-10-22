@@ -241,7 +241,7 @@ On Windows three chords move one family over, because the originals are system-w
 
 ## Developing
 
-Want to contribute or run locally? [CONTRIBUTING.md](CONTRIBUTING.md) covers the toolchain, the 25-crate workspace layout, the verification gate and the rules a change has to follow. The architecture notes an agent needs live in [`CLAUDE.md`](CLAUDE.md).
+Want to contribute or run locally? [CONTRIBUTING.md](CONTRIBUTING.md) covers the toolchain, the 25-crate workspace layout, the verification gate and the rules a change has to follow. The architecture notes an agent needs start in [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
