@@ -16,7 +16,11 @@
 //!   call, the report, sends no line at all: the gap before the `Agent`
 //!   result is that call;
 //! - the CLI's own durations (`result.duration_ms`, the `Agent` result's
-//!   `totalDurationMs`) win where they exist and ride along as `measured_ms`.
+//!   `totalDurationMs`) win where they exist and ride along as `measured_ms`;
+//! - an agent that runs in the background (`is_backgrounded`, or a
+//!   `task_type` other than `local_agent`) is traced as its launch only: its
+//!   `tool_result` ends the call at once, with no report and no duration of
+//!   the agent's, and what the agent writes after it is not traced.
 //!
 //! Degrade, never reject: a missing field drops its detail and never its
 //! span, an unknown `system` subtype is ignored, and a span whose parent is
@@ -99,6 +103,10 @@ pub(crate) struct TraceFold {
     /// line that names an id nobody opened hangs under the root. Kept for
     /// the process, because a background agent writes on after its turn.
     ended_agents: HashSet<String>,
+    /// The open subagents that run on their own: `task_started` said
+    /// `is_backgrounded`, or a `task_type` other than `local_agent`. Their
+    /// `tool_result` is the launch, not the end of the work.
+    backgrounded: HashSet<String>,
     waits: HashMap<u64, Wait>,
     next_seq: u64,
 }
@@ -123,6 +131,7 @@ impl TraceFold {
             spans: HashMap::new(),
             tasks: HashMap::new(),
             ended_agents: HashSet::new(),
+            backgrounded: HashSet::new(),
             waits: HashMap::new(),
             next_seq: 0,
         }
@@ -406,7 +415,8 @@ impl TraceFold {
         events
     }
 
-    /// An `Agent` call's `tool_result`: the subagent is over.
+    /// An `Agent` call's `tool_result`: the subagent is over, unless it runs
+    /// in the background and the result is only its launch.
     fn agent_returned(
         &mut self,
         result: &ToolResult,
@@ -415,6 +425,13 @@ impl TraceFold {
         events: &mut Vec<TraceEvent>,
     ) {
         let id = result.tool_use_id.as_str();
+        // An agent that runs on its own is traced as its launch only (spec
+        // §10): the result ends the call, and says nothing of the agent's
+        // report, tokens or duration, which are not drawn from it.
+        if self.backgrounded.contains(id) {
+            self.end_span(id, outcome_of(result), at, None, events);
+            return;
+        }
         let totals = tool_use_result.and_then(AgentToolResult::parse);
         let has_children = self
             .spans
@@ -479,10 +496,21 @@ impl TraceFold {
                 if let Some(detail) = system.description.as_deref().and_then(line) {
                     agent.detail = detail;
                 }
+                let background = system.is_backgrounded == Some(true)
+                    || system
+                        .task_type
+                        .as_deref()
+                        .is_some_and(|task_type| task_type != "local_agent");
+                let detail = if background {
+                    self.backgrounded.insert(id.to_string());
+                    in_background(&agent.detail)
+                } else {
+                    agent.detail.clone()
+                };
                 let event = TraceEvent::SpanNamed {
                     id: id.to_string(),
                     name: agent.name.clone(),
-                    detail: agent.detail.clone(),
+                    detail,
                 };
                 if let Some(task_id) = &system.task_id {
                     self.tasks.insert(task_id.clone(), id.to_string());
@@ -611,6 +639,7 @@ impl TraceFold {
             }
         }
         self.tasks.clear();
+        self.backgrounded.clear();
         self.waits.clear();
         self.main_call = None;
         self.interrupted_call = None;
@@ -656,6 +685,7 @@ impl TraceFold {
         };
         if span.agent.is_some() {
             self.ended_agents.insert(id.to_string());
+            self.backgrounded.remove(id);
             self.tasks.retain(|_, agent| agent != id);
         }
         events.push(ended(id.to_string(), outcome, at, measured_ms));
@@ -725,6 +755,16 @@ fn tokens_of(usage: &MessageUsage) -> TokenCount {
             .saturating_add(usage.cache_read_input_tokens)
             .saturating_add(usage.cache_creation_input_tokens),
         output: usage.output_tokens,
+    }
+}
+
+/// What a background agent's span says beside its name: what it was asked
+/// to do, and that it runs on its own.
+fn in_background(detail: &str) -> String {
+    if detail.is_empty() {
+        "in background".to_string()
+    } else {
+        format!("{detail} · in background")
     }
 }
 
@@ -882,6 +922,51 @@ mod tests {
             "type": "system", "subtype": "task_started", "task_id": task_id,
             "tool_use_id": tool_use_id, "description": "work", "subagent_type": "worker",
             "spawn_depth": depth, "task_type": "local_agent"
+        }))
+    }
+
+    /// A `task_started` for the `Agent` call `tool_use_id`, with the two
+    /// fields that say the agent runs on its own, `is_backgrounded` and
+    /// `task_type`. The first capture's own is `false` and `local_agent`.
+    fn task_started_as(
+        task_id: &str,
+        tool_use_id: &str,
+        is_backgrounded: Option<bool>,
+        task_type: &str,
+    ) -> CliMessage {
+        let mut line = json!({
+            "type": "system", "subtype": "task_started", "task_id": task_id,
+            "tool_use_id": tool_use_id, "description": "work", "subagent_type": "worker",
+            "spawn_depth": 1, "task_type": task_type
+        });
+        if let Some(flag) = is_backgrounded {
+            line["is_backgrounded"] = json!(flag);
+        }
+        msg(line)
+    }
+
+    /// The `tool_result` of an `Agent` call that launched its agent and came
+    /// back at once. No capture of one exists: this is the first capture's
+    /// `tool_use_result`, `usage` and `totalDurationMs` included (the
+    /// fields a launch result might carry too), with the `status` the case
+    /// names, or none.
+    fn launch_result(id: &str, status: Option<&str>) -> CliMessage {
+        let mut totals = json!({
+            "agentType": "general-purpose", "resolvedModel": HAIKU,
+            "totalDurationMs": 4537, "totalTokens": 26197,
+            "usage": {"input_tokens": 2, "output_tokens": 187,
+                      "cache_read_input_tokens": 25867, "cache_creation_input_tokens": 141}
+        });
+        if let Some(status) = status {
+            totals["status"] = json!(status);
+        }
+        msg(json!({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": id, "content": "launched"}
+            ]},
+            "parent_tool_use_id": null,
+            "tool_use_result": totals
         }))
     }
 
@@ -1321,6 +1406,72 @@ mod tests {
                 span_ended(AGENT, SpanOutcome::Done, clock.at(9_428), Some(4_537)),
             ]
         );
+    }
+
+    /// What an agent that runs on its own is drawn as (spec §10): the tool
+    /// call that launched it, and nothing of the work after. Its result is
+    /// the launch, so no report is invented from it and no duration of its
+    /// is the agent's, whatever the result carries.
+    #[test]
+    fn a_background_agent_is_traced_as_its_launch_only() {
+        // (the case, the `task_started`'s `is_backgrounded` and `task_type`,
+        // the launch result's `status`)
+        let cases = [
+            ("flagged, no status", Some(true), "local_agent", None),
+            ("flagged, completed", Some(true), "local_agent", Some("completed")),
+            ("flagged, async_launched", Some(true), "local_agent", Some("async_launched")),
+            ("another task type, no flag, no status", None, "remote_agent", None),
+            ("another task type, completed", Some(false), "remote_agent", Some("completed")),
+        ];
+        for (case, backgrounded, task_type, status) in cases {
+            let clock = Clock::new();
+            let mut fold = TraceFold::new(false);
+            fold.prompt_sent(clock.at(0));
+            fold.line(
+                &assistant(
+                    None,
+                    "msg_main",
+                    vec![tool_use(AGENT, "Agent", json!({"prompt": "go"}))],
+                ),
+                clock.at(100),
+            );
+            assert_eq!(
+                fold.line(
+                    &task_started_as("task-bg", AGENT, backgrounded, task_type),
+                    clock.at(124)
+                ),
+                vec![TraceEvent::SpanNamed {
+                    id: AGENT.into(),
+                    name: "worker".into(),
+                    detail: "work · in background".into(),
+                }],
+                "{case}: the launch is named as a background agent"
+            );
+            assert_eq!(
+                fold.line(&launch_result(AGENT, status), clock.at(400)),
+                vec![span_ended(AGENT, SpanOutcome::Done, clock.at(400), None)],
+                "{case}: the call ends at its result, with no report and no duration of the \
+                 agent's"
+            );
+            // What the agent does after its launch is not traced.
+            assert_eq!(
+                fold.line(
+                    &assistant(
+                        Some(AGENT),
+                        "msg_late",
+                        vec![tool_use("toolu_late", "Bash", json!({"command": "ls"}))]
+                    ),
+                    clock.at(900)
+                ),
+                Vec::new(),
+                "{case}"
+            );
+            assert_eq!(
+                fold.line(&parse(TASK_PROGRESS), clock.at(950)),
+                Vec::new(),
+                "{case}"
+            );
+        }
     }
 
     #[test]
@@ -1806,6 +1957,58 @@ mod tests {
             ),
             vec![span_ended("toolu_C", SpanOutcome::Done, clock.at(301_600), None)]
         );
+    }
+
+    /// Spec §9, "a permission denied": the user presses Deny. The worker
+    /// writes the answer, which ends the wait; the CLI refuses the call and
+    /// sends its error result a moment later, which ends the tool failed and
+    /// has no wait left to end.
+    #[test]
+    fn a_denied_permission_ends_its_wait_once_and_its_tool_failed() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        fold.line(
+            &assistant(
+                None,
+                "m0",
+                vec![tool_use(
+                    "toolu_E",
+                    "Edit",
+                    json!({"file_path": "/repo/a.rs", "old_string": "a", "new_string": "b"}),
+                )],
+            ),
+            clock.at(100),
+        );
+        fold.permission_asked(Some("toolu_E"), None, 8, clock.at(150));
+
+        assert_eq!(
+            fold.permission_answered(8, clock.at(2_000)),
+            vec![TraceEvent::WaitEnded {
+                request_id: 8,
+                at: clock.at(2_000)
+            }]
+        );
+        let refusal = "The user rejected this action.";
+        assert_eq!(
+            fold.line(
+                &tool_result(None, "toolu_E", true, &format!("{refusal}\nTry something else")),
+                clock.at(2_011)
+            ),
+            vec![span_ended(
+                "toolu_E",
+                SpanOutcome::Failed {
+                    note: refusal.into()
+                },
+                clock.at(2_011),
+                None
+            )],
+            "the answer already ended the wait, so the result ends only the tool"
+        );
+        // The turn goes on, and ends with nothing of the denial left open.
+        let end = fold.line(&result_line(Some(0.01), (2, 40, 9_000, 300)), clock.at(3_000));
+        assert_eq!(end.len(), 1, "a result is one TurnEnded: {end:?}");
+        assert_eq!(turn_end_outcome(&end[0]), TurnOutcome::Done);
     }
 
     #[test]
