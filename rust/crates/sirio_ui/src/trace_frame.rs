@@ -54,7 +54,8 @@ impl Pace {
 /// timer tasks, which end what they own.
 pub(crate) type Pending = Rc<Cell<(u32, Option<Duration>)>>;
 
-/// Whether a frame is on its way.
+/// Whether a frame is on its way, which the tests that step the clock read.
+#[cfg(test)]
 pub(crate) fn is_pending(pending: &Pending) -> bool {
     pending.get().1.is_some()
 }
