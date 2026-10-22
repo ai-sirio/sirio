@@ -168,6 +168,7 @@ impl RenderOnce for Dialog {
                 .flex_col()
                 .size_full()
                 .bg(colors.bg)
+                .text_color(colors.fg)
                 .child(
                     div()
                         .flex()
@@ -222,6 +223,8 @@ impl RenderOnce for Dialog {
                 .p_6()
                 .rounded(theme.radius(Radius::Xl))
                 .bg(colors.overlay)
+                // The card's own foreground, not whatever the owner rendered it under.
+                .text_color(colors.fg)
                 .border_1()
                 .border_color(colors.border)
                 .shadow(theme.elevation(Elevation::Modal))

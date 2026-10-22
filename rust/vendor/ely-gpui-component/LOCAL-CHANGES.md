@@ -39,6 +39,10 @@ terminal/webview/editor dependencies and Gallery runtime are excluded.
   This file also retains `Fit/fuzzy/marked` from
   `navigation/palette/mod.rs` for Ely's searchable menus; the independent
   command palette/launcher is excluded.
+- `overlays/dialog.rs`: the card (both the centred and the fullscreen one) sets
+  `text_color(colors.fg)`, because a dialog is raised above its owner and
+  otherwise inherited the owner's text colour (in Sirio gpui's default black,
+  unreadable on a dark card).
 - `layout/scroll.rs`, `overlays/hover.rs`, `primitives/tooltip.rs`: the pinned
   Bezel GPUI has `on_hover` but no newer `HoverListenerMode` policy setter.
   These components use the fork's existing hover dispatch, like Bezel's

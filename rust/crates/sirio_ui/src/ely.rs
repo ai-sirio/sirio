@@ -165,9 +165,10 @@ mod tests {
             let ely = cx.global::<ElyTheme>();
             assert_eq!(ely.colors, faded.colors.ely);
             assert_eq!(
-                ely.colors.overlay.a,
-                opaque.colors.ely.overlay.a * faded.translucent_surface_opacity
+                ely.colors.surface.a,
+                opaque.colors.ely.surface.a * faded.translucent_surface_opacity
             );
+            assert_eq!(ely.colors.overlay, opaque.colors.ely.overlay, "Ely's dialogs must not fade");
             assert!(bezel_holds(cx, &opaque), "bezel must never fade");
         });
     }
