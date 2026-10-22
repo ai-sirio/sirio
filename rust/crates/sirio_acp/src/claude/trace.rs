@@ -73,6 +73,11 @@ struct Wait {
 /// The state of one `claude` process's trace: what is open, and the running
 /// totals a turn's own cost is the difference of.
 pub(crate) struct TraceFold {
+    /// A prompt was written and its `result` has not come.
+    turn_open: bool,
+    /// Prompts written while a turn was open: each starts its turn at the
+    /// `result` of the one before it.
+    queued_prompts: usize,
     interrupted_this_turn: bool,
     interrupted_last_turn: bool,
     /// The main call that was open when the interrupt was sent. Its
@@ -103,6 +108,8 @@ impl TraceFold {
     /// cost counter has an unknown starting point.
     pub(crate) fn new(resumed: bool) -> Self {
         Self {
+            turn_open: false,
+            queued_prompts: 0,
             interrupted_this_turn: false,
             interrupted_last_turn: false,
             interrupted_call: None,
@@ -121,9 +128,22 @@ impl TraceFold {
         }
     }
 
-    /// The user's line was written to the CLI. Every prompt opens a turn of
-    /// its own, whether or not the last one's `result` has come.
+    /// The user's line was written to the CLI. Every prompt has a turn of its
+    /// own. When the last turn's `result` has not come, the CLI is still
+    /// working on that one (a stopped turn winds down after the composer is
+    /// free again), so the new turn starts at that `result`: opening it now
+    /// would end the old one without an outcome, and let the old `result`
+    /// end the new one.
     pub(crate) fn prompt_sent(&mut self, at: Instant) -> Vec<TraceEvent> {
+        if self.turn_open {
+            self.queued_prompts += 1;
+            return Vec::new();
+        }
+        self.start_turn(at)
+    }
+
+    fn start_turn(&mut self, at: Instant) -> Vec<TraceEvent> {
+        self.turn_open = true;
         // A Stop that landed after the last `result` belonged to no turn:
         // starting clean keeps it from marking this one.
         self.interrupted_this_turn = false;
@@ -531,6 +551,7 @@ impl TraceFold {
         self.interrupted_last_turn = interrupted;
         self.interrupted_this_turn = false;
         self.end_turn_scope();
+        self.turn_open = false;
         events.push(TraceEvent::TurnEnded {
             at,
             outcome,
@@ -538,6 +559,11 @@ impl TraceFold {
             cost_usd,
             tokens,
         });
+        // A prompt written while this turn was open starts its turn now.
+        if self.queued_prompts > 0 {
+            self.queued_prompts -= 1;
+            events.extend(self.start_turn(at));
+        }
         events
     }
 
@@ -2093,6 +2119,78 @@ mod tests {
         assert_eq!(second_end.len(), 1, "{second_end:?}");
         assert_eq!(turn_end_outcome(&second_end[0]), TurnOutcome::Done);
         assert_close(turn_end_cost(&second_end[0]), 0.01);
+    }
+
+    #[test]
+    fn a_prompt_written_before_the_interrupted_result_starts_its_turn_after_it() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        let first = finish(
+            &mut fold,
+            &clock,
+            0,
+            &result_line(Some(0.005), (10, 100, 1_000, 500)),
+        );
+        assert_close(turn_end_cost(&first), 0.005);
+
+        assert_eq!(
+            fold.prompt_sent(clock.at(1_000)),
+            vec![TraceEvent::TurnStarted {
+                at: clock.at(1_000)
+            }]
+        );
+        fold.line(&parse(MESSAGE_START), clock.at(1_100));
+        // Stop frees the composer at once, so the next prompt is written
+        // while the CLI is still winding the stopped turn down: its `result`
+        // has not come. The stopped turn is still the one open, so the prompt
+        // waits for that result and neither ends the turn nor clears the
+        // interrupt.
+        fold.interrupt_sent();
+        assert_eq!(
+            fold.prompt_sent(clock.at(1_500)),
+            Vec::new(),
+            "a turn is open, so the prompt opens none yet"
+        );
+
+        // The stopped turn's result ends it interrupted, and the prompt that
+        // waited starts its turn right behind it.
+        assert_eq!(
+            fold.line(&parse(RESULT_INTERRUPTED), clock.at(2_000)),
+            vec![
+                TraceEvent::TurnEnded {
+                    at: clock.at(2_000),
+                    outcome: TurnOutcome::Interrupted,
+                    measured_ms: Some(6_002),
+                    cost_usd: None,
+                    tokens: None,
+                },
+                TraceEvent::TurnStarted {
+                    at: clock.at(2_000)
+                },
+            ]
+        );
+
+        // What follows belongs to the new turn, which the late result no
+        // longer ends early, and the cost rules go on: unknown after an
+        // interrupt, known again the turn after.
+        assert_eq!(
+            fold.line(&parse(MESSAGE_START), clock.at(2_200)),
+            vec![llm("msg_011CgG43GxW2BhRXx8chosrS", None, clock.at(2_200))]
+        );
+        let second = fold.line(
+            &result_line(Some(0.02), (20, 200, 2_000, 1_000)),
+            clock.at(3_000),
+        );
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert_eq!(turn_end_outcome(&second[0]), TurnOutcome::Done);
+        assert_eq!(turn_end_cost(&second[0]), None);
+        let third = finish(
+            &mut fold,
+            &clock,
+            4_000,
+            &result_line(Some(0.025), (30, 300, 3_000, 1_500)),
+        );
+        assert_close(turn_end_cost(&third), 0.005);
     }
 
     fn message_stop() -> CliMessage {

@@ -3585,7 +3585,7 @@ impl Chat {
         self.trace_users.insert(turn, place);
         // The store lets go of its oldest turn past its cap; so does this.
         let oldest = *self.trace.turn_indices().start();
-        self.trace_users = self.trace_users.split_off(&oldest);
+        self.trace_users.retain(|turn, _| *turn >= oldest);
     }
 
     /// The transport died, or a deadline ran out, with no `result` to end the
@@ -3639,8 +3639,8 @@ impl Chat {
 
     /// Scrolls the transcript to the entry a span of trace turn `turn`
     /// belongs to, and stops following the tail. A span the transcript has no
-    /// row for reaches the turn's user message, so a reveal always lands
-    /// somewhere.
+    /// row for reaches the turn's user message, and a transcript with no
+    /// message for it, its last row: a reveal always lands somewhere.
     pub fn reveal_span(&mut self, turn: usize, span: &str, cx: &mut Context<Self>) {
         let target = self
             .trace
@@ -3648,7 +3648,8 @@ impl Chat {
             .map_or(RevealTarget::UserMessage, |turn| turn.reveal_target(span));
         let entry = self
             .entry_of_reveal_target(&target)
-            .or_else(|| self.user_entry_of_trace_turn(turn));
+            .or_else(|| self.user_entry_of_trace_turn(turn))
+            .or_else(|| self.entries.len().checked_sub(1));
         if let Some(entry) = entry {
             self.reveal_entry(entry, cx);
         }
@@ -3661,7 +3662,8 @@ impl Chat {
         let latest = self.trace.latest().map_or(0, trace::Turn::index);
         let entry = self
             .entry_of_reveal_target(&RevealTarget::Permission(request_id))
-            .or_else(|| self.user_entry_of_trace_turn(latest));
+            .or_else(|| self.user_entry_of_trace_turn(latest))
+            .or_else(|| self.entries.len().checked_sub(1));
         if let Some(entry) = entry {
             self.reveal_entry(entry, cx);
         }
@@ -3675,7 +3677,12 @@ impl Chat {
         let Some(last) = self.entries.len().checked_sub(1) else {
             return;
         };
+        // A run of tool calls is one box, drawn at the run's last entry; the
+        // rest of its rows are empty. A call hidden in a collapsed fold of
+        // the box stays there: the box is what the transcript draws for it.
         let index = index.min(last);
+        let index = tool_call_run_bounds_inclusive(&self.entries, index)
+            .map_or(index, |(_, end)| end);
         let folded_footer = segment_turns(&self.entries)
             .into_iter()
             .find(|turn| turn.start <= index && index <= turn.end)
@@ -3814,14 +3821,22 @@ impl Chat {
         };
         persistence.tab_id = tab_id;
         self.transcript_generation = self.transcript_generation.wrapping_add(1);
+        let old_count = self.entries.len();
         self.entries.clear();
         self.turn_message_ids.clear();
         // F-CHAT-22: `folded_turns` is keyed by entry index, so anything
         // that renumbers entries must drop it rather than let a key point at
         // whatever slid into its place.
         self.folded_turns.clear();
+        // The turns the trace holds answer messages of the transcript that
+        // was just dropped, so there is nothing left for them to reveal.
+        self.trace = TraceStore::default();
+        self.trace_users.clear();
         self.thought_scroll.clear();
         self.tool_output_scroll.clear();
+        // The list has a row per entry: let go of the old rows before the
+        // restored ones are pushed in.
+        self.list_state.splice(0..old_count, 0);
         for turn in transcript.turns {
             for entry in turn.entries {
                 self.push_entry(restored_entry(entry));
@@ -4831,8 +4846,10 @@ impl Chat {
                 client.prompt_content(text, mention_paths, images, self.agent_cwd.clone())
         {
             self.client.take();
+            let message = format!("send failed: {error:#}");
+            self.fail_trace_turn(&message);
             self.push_entry(Entry::Error {
-                message: format!("send failed: {error:#}"),
+                message,
                 retryable: true,
                 kind: ErrorKind::Connection,
             });
@@ -16548,6 +16565,239 @@ two"
         chat.update(cx, |chat, cx| chat.reveal_wait(7, cx));
         refresh_frame(cx);
         assert_eq!(top_entry(&chat, cx), user);
+    }
+
+    #[gpui::test]
+    async fn a_failed_send_ends_the_running_trace_turn_failed(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, cx| {
+            // Stop listening, so that only the send can find out the agent
+            // is gone: the event loop would otherwise take the client first.
+            chat._event_task = None;
+            chat.handle_event(trace_started(), cx);
+            // The worker is gone but the chat still holds its client, as it
+            // does in the moment between the death and its report.
+            chat.client
+                .as_mut()
+                .expect("connected")
+                .shutdown()
+                .expect("the agent shuts down");
+            chat.submit_turn("again".into(), Vec::new(), Vec::new(), cx);
+        });
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.client.is_none());
+            let shown = last_error_message(chat);
+            assert!(shown.starts_with("send failed:"), "{shown}");
+            assert_eq!(trace_failure(chat).as_deref(), Some(shown.as_str()));
+        });
+    }
+
+    /// A chat tab with a stored past session to open and a current one.
+    fn chat_with_a_past_session(
+        cx: &mut TestAppContext,
+        dir: &TempDir,
+        past_prompts: &[&str],
+    ) -> Entity<Chat> {
+        use sirio_persistence::{ProjectRecord, TabRecord, WorktreeRecord};
+        let path = dir.0.join("history.sqlite");
+        let db = AppDatabase::open(&path).expect("history database");
+        db.save_project(&ProjectRecord {
+            id: "project".into(),
+            name: "Project".into(),
+            root_path: "/tmp/project".into(),
+            order_idx: 0,
+            color_hex: None,
+            display_name: None,
+            icon_kind: "icon".into(),
+            icon_value: None,
+            avatar_image: None,
+            default_worktree_base: None,
+            worktree_location_override: None,
+        })
+        .unwrap();
+        db.save_worktree(&WorktreeRecord {
+            id: "worktree".into(),
+            project_id: "project".into(),
+            branch: "main".into(),
+            path: "/tmp/project".into(),
+            order_idx: 0,
+            is_primary: true,
+            comment: None,
+            created_at: None,
+            updated_at: None,
+            secondary_pane_hidden: false,
+        })
+        .unwrap();
+        let tab = |id: &str| TabRecord {
+            id: id.into(),
+            worktree_id: "worktree".into(),
+            title: id.into(),
+            kind: "chat".into(),
+            agent_id: None,
+            agent_session_id: None,
+            order_idx: 0,
+            is_active: false,
+            last_event_at: None,
+            closed_at: None,
+        };
+        db.save_tabs("worktree", &[tab("current-chat"), tab("past-chat")])
+            .unwrap();
+        let turns = past_prompts
+            .iter()
+            .map(|prompt| ChatTurn {
+                entries: vec![
+                    ChatEntry::UserMessage {
+                        text: (*prompt).into(),
+                        at: None,
+                    },
+                    ChatEntry::TurnFooter {
+                        text: "12:00".into(),
+                    },
+                ],
+            })
+            .collect();
+        db.save_chat_transcript(&ChatTranscript {
+            tab_id: "past-chat".into(),
+            turns,
+        })
+        .unwrap();
+
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        let (chat, _) = cx.add_window_view(|_, cx| {
+            let mut chat = Chat::new(None, std::env::temp_dir(), cx);
+            chat.persistence = Some(ChatPersistence {
+                database_path: path,
+                tab_id: "current-chat".into(),
+                worktree_id: "worktree".into(),
+            });
+            chat
+        });
+        chat
+    }
+
+    #[gpui::test]
+    async fn opening_a_history_session_clears_the_trace(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let chat = chat_with_a_past_session(cx, &dir, &["an older question"]);
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn("this session".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+            chat.handle_event(trace_span("toolu_edit", None, SpanKind::Tool), cx);
+        });
+        assert!(chat.read_with(cx, |chat, _| chat.trace().is_running()));
+
+        chat.update(cx, |chat, cx| {
+            chat.open_chat_history_session("past-chat".into(), cx)
+        });
+        chat.read_with(cx, |chat, _| {
+            assert!(
+                matches!(
+                    chat.entries.first(),
+                    Some(Entry::User { text, .. }) if text == "an older question"
+                ),
+                "the past session replaced the transcript"
+            );
+            assert!(
+                chat.trace().is_empty(),
+                "the turns the trace holds belong to a transcript that is gone"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn opening_a_history_session_resyncs_the_list(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let chat = chat_with_a_past_session(cx, &dir, &["one", "two"]);
+        chat.update(cx, |chat, cx| {
+            for _ in 0..3 {
+                push_answer(chat, "what the tab held before");
+            }
+            cx.notify();
+        });
+
+        chat.update(cx, |chat, cx| {
+            chat.open_chat_history_session("past-chat".into(), cx)
+        });
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.entries.len(), 4, "two turns of a message and a footer");
+            assert_eq!(
+                chat.list_state.item_count(),
+                chat.entries.len(),
+                "the list has one row per entry"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn revealing_a_member_of_a_tool_run_reveals_the_runs_box(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        let tail = chat.update(cx, |chat, cx| {
+            chat.submit_turn("look around".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+            chat.handle_event(trace_span("toolu_a", None, SpanKind::Tool), cx);
+            push_answer(chat, "three calls follow");
+            // One box, drawn at the last of its calls: the others are empty
+            // rows.
+            for id in ["toolu_a", "toolu_b", "toolu_c"] {
+                chat.push_entry(test_tool_call(id));
+            }
+            let tail = chat.entries.len() - 1;
+            push_answers(chat, 40);
+            cx.notify();
+            tail
+        });
+        lay_out_short(cx);
+
+        chat.update(cx, |chat, cx| chat.reveal_span(1, "toolu_a", cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), tail);
+    }
+
+    #[gpui::test]
+    async fn a_reveal_with_no_user_message_lands_on_the_last_row(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        let last = chat.update(cx, |chat, cx| {
+            push_answers(chat, 40);
+            // A turn the transcript holds no message for.
+            chat.handle_event(trace_started(), cx);
+            cx.notify();
+            chat.entries.len() - 1
+        });
+        lay_out_short(cx);
+        assert!(chat.read_with(cx, |chat, _| chat.list_state.is_following_tail()));
+
+        chat.update(cx, |chat, cx| chat.reveal_span(1, trace::ROOT, cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), last);
+        assert!(
+            !chat.read_with(cx, |chat, _| chat.list_state.is_following_tail()),
+            "a reveal never does nothing"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_trace_event_that_changes_nothing_does_not_notify(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        // What the chat starts on its own settles before anything is counted.
+        refresh_frame(cx);
+        let notified = Rc::new(Cell::new(0usize));
+        cx.update(|_, cx| {
+            let notified = notified.clone();
+            cx.observe(&chat, move |_, _| notified.set(notified.get() + 1))
+                .detach();
+        });
+
+        // Lines of a turn Sirio never started: the store has no turn for them.
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(trace_span("toolu_stray", None, SpanKind::Tool), cx);
+            chat.handle_event(trace_ended(), cx);
+        });
+        assert_eq!(notified.get(), 0, "nothing the trace shows changed");
+
+        chat.update(cx, |chat, cx| chat.handle_event(trace_started(), cx));
+        assert_eq!(notified.get(), 1, "a turn opening redraws the chat");
     }
 
     #[gpui::test]
