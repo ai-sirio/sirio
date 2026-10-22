@@ -18,7 +18,7 @@ use sirio_acp::{
     AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage,
     EffortOption, FastMode, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption,
     SessionNotice, THINKING_DISPLAYS, ThinkingDisplay, ToolCallContentInfo, ToolCallDiff,
-    ToolCallLocationInfo,
+    ToolCallLocationInfo, TraceEvent,
 };
 use sirio_git::{GitActions, status as git_status};
 use sirio_markdown::{
@@ -63,6 +63,7 @@ pub use session_panel::{
 };
 use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
 use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
+use trace::{RevealTarget, TraceStore};
 
 /// F-CORE-FILE-04: overrides a rendered Markdown link's click, used by
 /// callers (File Preview) that want to try resolving the link as a local
@@ -913,6 +914,8 @@ pub struct ChatControlSnapshot {
     /// The session panel's column: whether it is open, whether it is drawn
     /// at this width, and each section's rows.
     pub session_panel: SessionPanelSnapshot,
+    /// The transcript row at the top of the list: where a reveal landed.
+    pub first_visible_entry: usize,
 }
 
 impl Entry {
@@ -1426,6 +1429,10 @@ enum ErrorKind {
     /// is the wrong affordance when this row IS the tab's whole content.
     Unavailable,
 }
+
+/// What the transcript says when the agent's process is gone and no event
+/// said why.
+const DISCONNECTED_MESSAGE: &str = "Agent disconnected — the process has terminated.";
 
 /// A mid-session `TransportError` never carries the typed `AcpError` that
 /// caused it — the ACP layer folds it to a plain `String` before it crosses
@@ -2039,6 +2046,16 @@ pub struct Chat {
     /// this set as well, rather than leave keys pointing at whatever slid
     /// into their place.
     folded_turns: BTreeSet<usize>,
+    /// What the native Claude transport reported of each turn: the Trace
+    /// card and tab draw from it, and it is empty for every other agent.
+    trace: TraceStore,
+    /// The user message each trace turn answers, as its place among the
+    /// transcript's [`Entry::User`] entries, by the trace turn's index. Read
+    /// when the turn starts, because the message the turn answers is then the
+    /// latest one, and counting from the start of the transcript would be
+    /// wrong for a chat restored with turns the trace never saw. Dropped with
+    /// the entries it counts.
+    trace_users: BTreeMap<usize, usize>,
     copied_target: Option<CopyTarget>,
     edit_summaries: BTreeMap<usize, EditSummaryState>,
     /// When each live tool call started, by protocol id, so its first
@@ -2371,6 +2388,8 @@ impl Chat {
             transcript_selection: None,
             transcript_dragging: false,
             folded_turns: BTreeSet::new(),
+            trace: TraceStore::default(),
+            trace_users: BTreeMap::new(),
             copied_target: None,
             edit_summaries: BTreeMap::new(),
             tool_started: HashMap::new(),
@@ -2701,6 +2720,7 @@ impl Chat {
         let perf_notification = match &event {
             AcpEvent::AgentMessageChunk(_) => "notify.Chat.acp_message",
             AcpEvent::ThoughtChunk(_) => "notify.Chat.acp_thought",
+            AcpEvent::Trace(_) => "notify.Chat.acp_trace",
             _ => "notify.Chat.acp_other",
         };
         match event {
@@ -3163,6 +3183,7 @@ impl Chat {
                 self.client.take();
                 self.expire_unanswered();
                 let (message, kind) = classify_connection_error(message);
+                self.fail_trace_turn(&message);
                 self.push_entry(Entry::Error {
                     message,
                     retryable: true,
@@ -3179,11 +3200,13 @@ impl Chat {
                 // leaving the composer stuck in its streaming state.
                 self.client.take();
                 self.expire_unanswered();
+                let message = format!(
+                    "{operation:?} timed out after {:.1}s",
+                    duration.as_secs_f32()
+                );
+                self.fail_trace_turn(&message);
                 self.push_entry(Entry::Error {
-                    message: format!(
-                        "{operation:?} timed out after {:.1}s",
-                        duration.as_secs_f32()
-                    ),
+                    message,
                     retryable: true,
                     kind: ErrorKind::Connection,
                 });
@@ -3237,9 +3260,21 @@ impl Chat {
                 self.session_connectors_init(cx);
             }
             AcpEvent::OtherSessionUpdate { .. } => {}
-            // Nothing here reads the trace yet, so it must not cost a redraw
-            // either.
-            AcpEvent::Trace(_) => return,
+            AcpEvent::Trace(trace) => {
+                let started = matches!(trace, TraceEvent::TurnStarted { .. });
+                let changed = self.trace.apply(trace);
+                if started {
+                    self.adopt_trace_turn();
+                }
+                // A trace event changes nothing the transport's other state
+                // tracks, so it skips the re-reads below, and one that
+                // changed nothing the trace shows costs no redraw either.
+                if changed {
+                    sirio_perf::event(perf_notification, cx.entity_id().as_u64());
+                    cx.notify();
+                }
+                return;
+            }
         }
         // F-CHAT-15: a `CurrentModeUpdate` (agent-initiated mode switch, or
         // this chat's own `set_mode` resolving) only reaches the wire as an
@@ -3521,6 +3556,141 @@ impl Chat {
         self.cancel_turn(cx);
     }
 
+    /// What the native Claude transport reported of this chat's turns.
+    pub fn trace(&self) -> &TraceStore {
+        &self.trace
+    }
+
+    /// A trace turn just opened for the prompt this chat sent: it takes the
+    /// prompt's first line as its title, and remembers which user message it
+    /// answers, as that message's place among the transcript's user messages
+    /// (the turn rail's tick). Read now rather than when revealing, because
+    /// now the message is the latest one whatever the transcript held before
+    /// the trace began, and a chat restored from disk holds turns the trace
+    /// never saw.
+    fn adopt_trace_turn(&mut self) {
+        let Some(turn) = self.trace.latest().map(trace::Turn::index) else {
+            return;
+        };
+        let mut prompts = self.entries.iter().filter_map(|entry| match entry {
+            Entry::User { text, .. } => Some(text.as_str()),
+            _ => None,
+        });
+        let Some(latest) = prompts.next_back() else {
+            return;
+        };
+        let latest = latest.to_string();
+        let place = prompts.count();
+        self.trace.set_latest_title(&latest);
+        self.trace_users.insert(turn, place);
+        // The store lets go of its oldest turn past its cap; so does this.
+        let oldest = *self.trace.turn_indices().start();
+        self.trace_users = self.trace_users.split_off(&oldest);
+    }
+
+    /// The transport died, or a deadline ran out, with no `result` to end the
+    /// turn: it ends failed, for the reason the transcript states.
+    fn fail_trace_turn(&mut self, reason: &str) {
+        self.trace.fail_open_turn(reason, std::time::Instant::now());
+    }
+
+    /// The transcript row of the user message trace turn `turn` answers.
+    /// Falls back to the latest message when the chat no longer holds it,
+    /// as after the transcript was replaced.
+    fn user_entry_of_trace_turn(&self, turn: usize) -> Option<usize> {
+        let users: Vec<usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| matches!(entry, Entry::User { .. }))
+            .map(|(index, _)| index)
+            .collect();
+        self.trace_users
+            .get(&turn)
+            .and_then(|place| users.get(*place))
+            .or(users.last())
+            .copied()
+    }
+
+    /// The transcript row `target` names, if the transcript has one.
+    fn entry_of_reveal_target(&self, target: &RevealTarget) -> Option<usize> {
+        match target {
+            RevealTarget::ToolRow(id) => self
+                .entries
+                .iter()
+                .rposition(|entry| {
+                    matches!(
+                        entry,
+                        Entry::ToolCall { id: row, .. } | Entry::SubagentTask { id: row, .. }
+                            if row == id
+                    )
+                })
+                // The transcript nests some main-thread calls in the task
+                // card of the subagent running beside them.
+                .or_else(|| self.nested_tool_call_position(id).map(|(task, _)| task)),
+            // A request id can come round again in a later process, so the
+            // latest card with it is the one asked.
+            RevealTarget::Permission(request_id) => self.entries.iter().rposition(|entry| {
+                matches!(entry, Entry::Permission { request_id: id, .. } if id == request_id)
+            }),
+            RevealTarget::UserMessage => None,
+        }
+    }
+
+    /// Scrolls the transcript to the entry a span of trace turn `turn`
+    /// belongs to, and stops following the tail. A span the transcript has no
+    /// row for reaches the turn's user message, so a reveal always lands
+    /// somewhere.
+    pub fn reveal_span(&mut self, turn: usize, span: &str, cx: &mut Context<Self>) {
+        let target = self
+            .trace
+            .turn(turn)
+            .map_or(RevealTarget::UserMessage, |turn| turn.reveal_target(span));
+        let entry = self
+            .entry_of_reveal_target(&target)
+            .or_else(|| self.user_entry_of_trace_turn(turn));
+        if let Some(entry) = entry {
+            self.reveal_entry(entry, cx);
+        }
+    }
+
+    /// Scrolls the transcript to the permission request `request_id`. When
+    /// the transcript holds no card for it, to the latest turn's user
+    /// message: a wait is asked in the turn that is running.
+    pub fn reveal_wait(&mut self, request_id: u64, cx: &mut Context<Self>) {
+        let latest = self.trace.latest().map_or(0, trace::Turn::index);
+        let entry = self
+            .entry_of_reveal_target(&RevealTarget::Permission(request_id))
+            .or_else(|| self.user_entry_of_trace_turn(latest));
+        if let Some(entry) = entry {
+            self.reveal_entry(entry, cx);
+        }
+    }
+
+    /// Scrolls the transcript list to `index` and leaves the tail: the list
+    /// would otherwise take the reader straight back down on the next line.
+    /// A row inside a turn the reader folded away is zero-height, so that
+    /// turn opens first.
+    fn reveal_entry(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(last) = self.entries.len().checked_sub(1) else {
+            return;
+        };
+        let index = index.min(last);
+        let folded_footer = segment_turns(&self.entries)
+            .into_iter()
+            .find(|turn| turn.start <= index && index <= turn.end)
+            .and_then(|turn| turn.footer)
+            .filter(|footer| self.folded_turns.contains(footer));
+        if let Some(footer) = folded_footer {
+            self.toggle_turn_folded(footer, cx);
+        }
+        self.list_state.scroll_to(gpui::ListOffset {
+            item_ix: index,
+            offset_in_item: px(0.0),
+        });
+        cx.notify();
+    }
+
     /// Produces the control API's read model from the entity that owns the
     /// composer and transcript on screen.
     pub fn control_snapshot(&self) -> ChatControlSnapshot {
@@ -3540,6 +3710,7 @@ impl Chat {
             queued: self.queue.iter().cloned().collect(),
             transcript: self.entries.iter().map(control_entry_row).collect(),
             session_panel: self.session_panel_snapshot(),
+            first_visible_entry: self.list_state.logical_scroll_top().item_ix,
         }
     }
 
@@ -4564,6 +4735,10 @@ impl Chat {
         self.turn_message_ids.clear();
         self.pending_rewind = None;
         self.folded_turns.clear();
+        // The agent that ran the old turns is dropped without a word: its
+        // trace goes with it, rather than showing a turn that never ends.
+        self.trace = TraceStore::default();
+        self.trace_users.clear();
         self.thought_scroll.clear();
         self.tool_output_scroll.clear();
         self.list_state.splice(0..old_count, 0);
@@ -5140,26 +5315,7 @@ impl Chat {
                     // what tells the two apart from an already-handled
                     // `TransportError`/`Timeout`, both of which already took
                     // it — this only runs when nothing else has.
-                    let _ = this.update(cx, |chat, cx| {
-                        if chat.client.is_some() {
-                            chat.client.take();
-                            if chat.streaming {
-                                chat.expire_unanswered();
-                            }
-                            chat.push_entry(Entry::Error {
-                                message: "Agent disconnected — the process has terminated."
-                                    .to_string(),
-                                // Restarting is exactly the right response
-                                // here, so offer it rather than dead-ending
-                                // (rendered as "Restart agent", not "Retry"
-                                // — F-CHAT-03).
-                                retryable: true,
-                                kind: ErrorKind::Disconnected,
-                            });
-                            chat.streaming = false;
-                            cx.notify();
-                        }
-                    });
+                    let _ = this.update(cx, |chat, cx| chat.event_source_closed(cx));
                 }
                 Err(error) => {
                     let (message, kind) =
@@ -5181,6 +5337,30 @@ impl Chat {
                 }
             }
         }));
+    }
+
+    /// The event source closed with no terminal event: see the call site in
+    /// `start_connection`. `client` still being `Some` is what tells this
+    /// from an already-handled `TransportError`/`Timeout`.
+    fn event_source_closed(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_none() {
+            return;
+        }
+        self.client.take();
+        if self.streaming {
+            self.expire_unanswered();
+        }
+        self.fail_trace_turn(DISCONNECTED_MESSAGE);
+        self.push_entry(Entry::Error {
+            message: DISCONNECTED_MESSAGE.to_string(),
+            // Restarting is exactly the right response here, so offer it
+            // rather than dead-ending (rendered as "Restart agent", not
+            // "Retry" — F-CHAT-03).
+            retryable: true,
+            kind: ErrorKind::Disconnected,
+        });
+        self.streaming = false;
+        cx.notify();
     }
 
     pub(crate) const REWIND_ACTION_LABEL: &'static str = "Restore files to this message";
@@ -7169,7 +7349,7 @@ fn picker_chevron(theme: &Theme) -> impl IntoElement {
 mod tests {
     use super::*;
     use gpui::{FileDropEvent, Modifiers, TestAppContext, VisualTestContext, size};
-    use sirio_acp::EffortChoice;
+    use sirio_acp::{EffortChoice, SpanKind, TimeoutOperation, TurnOutcome};
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -16011,5 +16191,453 @@ two"
             Some(full),
             "Select All selects the whole transcript"
         );
+    }
+
+    // --- the chat's trace, and revealing the transcript entry of a span ---
+
+    use trace::TurnState;
+
+    fn trace_started() -> AcpEvent {
+        AcpEvent::Trace(TraceEvent::TurnStarted {
+            at: std::time::Instant::now(),
+        })
+    }
+
+    fn trace_ended() -> AcpEvent {
+        AcpEvent::Trace(TraceEvent::TurnEnded {
+            at: std::time::Instant::now(),
+            outcome: TurnOutcome::Done,
+            measured_ms: None,
+            cost_usd: None,
+            tokens: None,
+        })
+    }
+
+    fn trace_span(id: &str, parent: Option<&str>, kind: SpanKind) -> AcpEvent {
+        AcpEvent::Trace(TraceEvent::SpanStarted {
+            id: id.into(),
+            parent: parent.map(str::to_string),
+            kind,
+            name: id.into(),
+            detail: String::new(),
+            model: None,
+            at: std::time::Instant::now(),
+        })
+    }
+
+    fn trace_wait(span: &str, request_id: u64) -> AcpEvent {
+        AcpEvent::Trace(TraceEvent::WaitStarted {
+            span: Some(span.into()),
+            request_id,
+            at: std::time::Instant::now(),
+        })
+    }
+
+    fn push_answer(chat: &mut Chat, text: &str) {
+        chat.push_entry(Entry::Assistant {
+            document: parse_chat_markdown(text),
+            text: text.into(),
+        });
+    }
+
+    fn push_answers(chat: &mut Chat, count: usize) {
+        for line in 0..count {
+            push_answer(chat, &format!("answer line {line}"));
+        }
+    }
+
+    /// Lays the chat out in a pane too short for its entries, so a scroll
+    /// position means something.
+    fn lay_out_short(cx: &mut VisualTestContext) {
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        refresh_frame(cx);
+    }
+
+    fn top_entry(chat: &Entity<Chat>, cx: &mut VisualTestContext) -> usize {
+        chat.read_with(cx, |chat, _| chat.control_snapshot().first_visible_entry)
+    }
+
+    /// The failure line the latest trace turn shows on its root row.
+    fn trace_failure(chat: &Chat) -> Option<String> {
+        let turn = chat.trace().latest()?;
+        assert_eq!(turn.state(), TurnState::Failed);
+        let rows = turn.rows(&HashSet::new(), std::time::Instant::now());
+        rows.first()?.note.clone()
+    }
+
+    fn last_error_message(chat: &Chat) -> String {
+        chat.entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                Entry::Error { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("the transcript states the error")
+    }
+
+    #[gpui::test]
+    async fn trace_events_build_the_chats_trace(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn(
+                "fix the rounding\nin the invoice total".into(),
+                Vec::new(),
+                Vec::new(),
+                cx,
+            );
+            chat.handle_event(trace_started(), cx);
+            chat.handle_event(trace_span("toolu_edit", None, SpanKind::Tool), cx);
+        });
+        chat.read_with(cx, |chat, _| {
+            let turn = chat.trace().latest().expect("the prompt opened a turn");
+            assert_eq!(turn.title(), "fix the rounding");
+            assert_eq!(turn.index(), 1);
+            assert!(chat.trace().is_running());
+            let rows = turn.rows(&HashSet::new(), std::time::Instant::now());
+            assert_eq!(rows.len(), 2, "the root and the tool the turn ran");
+        });
+
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(trace_ended(), cx);
+            chat.submit_turn("now the tests".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+        });
+        chat.read_with(cx, |chat, _| {
+            let latest = chat.trace().latest().expect("a second turn");
+            assert_eq!((latest.index(), latest.title()), (2, "now the tests"));
+            let first = chat.trace().turn(1).expect("the first turn is kept");
+            assert_eq!(first.title(), "fix the rounding");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_transport_error_ends_the_running_trace_turn_failed(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn("go".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+            // The one message the transcript rewrites before it shows it.
+            chat.handle_event(
+                AcpEvent::TransportError("claude requires authentication".into()),
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| {
+            let shown = last_error_message(chat);
+            assert!(shown.contains("Sign in from a terminal"), "{shown}");
+            assert_eq!(
+                trace_failure(chat).as_deref(),
+                Some(shown.as_str()),
+                "the trace gives the reason the transcript gives"
+            );
+            assert!(!chat.trace().is_running());
+        });
+    }
+
+    #[gpui::test]
+    async fn a_timeout_ends_the_running_trace_turn_failed(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn("go".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+            chat.handle_event(
+                AcpEvent::Timeout {
+                    operation: TimeoutOperation::Startup,
+                    duration: std::time::Duration::from_secs(30),
+                },
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| {
+            let shown = last_error_message(chat);
+            assert!(shown.contains("timed out after 30.0s"), "{shown}");
+            assert_eq!(trace_failure(chat).as_deref(), Some(shown.as_str()));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_disconnect_ends_the_running_trace_turn_failed(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(trace_started(), cx);
+            // What the event loop does when the channel closes with no
+            // terminal event.
+            chat.event_source_closed(cx);
+        });
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.client.is_none());
+            let shown = last_error_message(chat);
+            assert_eq!(shown, DISCONNECTED_MESSAGE);
+            assert_eq!(trace_failure(chat).as_deref(), Some(shown.as_str()));
+        });
+    }
+
+    #[gpui::test]
+    async fn revealing_a_span_scrolls_to_its_entry_and_stops_following(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        let row = chat.update(cx, |chat, cx| {
+            chat.submit_turn("run the build".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+            chat.handle_event(trace_span("toolu_build", None, SpanKind::Tool), cx);
+            push_answer(chat, "starting the build");
+            // Alone between two replies: a run of tool calls draws as one
+            // box at its last entry, which would hide a wrong index.
+            chat.push_entry(test_tool_call("toolu_build"));
+            let row = chat.entries.len() - 1;
+            push_answers(chat, 40);
+            cx.notify();
+            row
+        });
+        lay_out_short(cx);
+        assert!(chat.read_with(cx, |chat, _| chat.list_state.is_following_tail()));
+        assert!(top_entry(&chat, cx) > row, "the tail is far below the row");
+
+        chat.update(cx, |chat, cx| chat.reveal_span(1, "toolu_build", cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), row);
+        assert!(
+            !chat.read_with(cx, |chat, _| chat.list_state.is_following_tail()),
+            "a reveal must not be undone by the next line"
+        );
+    }
+
+    #[gpui::test]
+    async fn revealing_a_span_nested_in_a_subagent_task_reveals_its_container(
+        cx: &mut TestAppContext,
+    ) {
+        let nested_call = |id: &str| SubagentToolCall {
+            id: id.into(),
+            title: "grep".into(),
+            status: "Completed".into(),
+            kind: "Search".into(),
+            content: vec![],
+            locations: vec![],
+            expanded: false,
+            duration_ms: None,
+        };
+        let task = |id: &str, tool_calls: Vec<SubagentToolCall>| Entry::SubagentTask {
+            id: id.into(),
+            title: "Explore".into(),
+            status: "Completed".into(),
+            tool_calls,
+            expanded: false,
+        };
+        let (chat, cx) = offline_chat_view(cx);
+        let (container, agent) = chat.update(cx, |chat, cx| {
+            chat.submit_turn("audit the crate".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+            // A main-thread tool that the transcript drew inside a task card,
+            chat.handle_event(trace_span("toolu_grep", None, SpanKind::Tool), cx);
+            // and a subagent with a tool of its own.
+            chat.handle_event(trace_span("toolu_agent", None, SpanKind::Subagent), cx);
+            chat.handle_event(
+                trace_span("toolu_read", Some("toolu_agent"), SpanKind::Tool),
+                cx,
+            );
+            push_answer(chat, "looking around");
+            chat.push_entry(task("toolu_other", vec![nested_call("toolu_grep")]));
+            let container = chat.entries.len() - 1;
+            push_answers(chat, 10);
+            chat.push_entry(task("toolu_agent", Vec::new()));
+            let agent = chat.entries.len() - 1;
+            push_answers(chat, 30);
+            cx.notify();
+            (container, agent)
+        });
+        lay_out_short(cx);
+
+        chat.update(cx, |chat, cx| chat.reveal_span(1, "toolu_grep", cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), container);
+
+        chat.update(cx, |chat, cx| chat.reveal_span(1, "toolu_read", cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), agent, "a subagent's tool reaches its Agent row");
+    }
+
+    #[gpui::test]
+    async fn a_span_with_no_entry_reveals_the_turns_user_message(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        let users = chat.update(cx, |chat, cx| {
+            let mut users = Vec::new();
+            for (prompt, call) in [("first prompt", "msg_one"), ("second prompt", "msg_two")] {
+                chat.submit_turn(prompt.into(), Vec::new(), Vec::new(), cx);
+                users.push(chat.entries.len() - 1);
+                chat.handle_event(trace_started(), cx);
+                chat.handle_event(trace_span(call, None, SpanKind::Llm), cx);
+                push_answers(chat, 20);
+                chat.handle_event(trace_ended(), cx);
+            }
+            users
+        });
+        lay_out_short(cx);
+
+        // A model call has no row of its own, and the latest turn is the one
+        // on screen: the first turn's message is what tells the mapping from
+        // "the latest message".
+        chat.update(cx, |chat, cx| chat.reveal_span(1, "msg_one", cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), users[0]);
+        assert!(!chat.read_with(cx, |chat, _| chat.list_state.is_following_tail()));
+
+        chat.update(cx, |chat, cx| chat.reveal_span(2, "msg_two", cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), users[1]);
+
+        chat.update(cx, |chat, cx| chat.reveal_span(1, "toolu_nobody_opened", cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), users[0], "so does a span the turn never held");
+    }
+
+    #[gpui::test]
+    async fn a_trace_turn_reaches_its_own_message_in_a_restored_chat(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        let fresh = chat.update(cx, |chat, cx| {
+            // Three turns the trace never saw: the chat came back from disk.
+            for n in 1..=3 {
+                chat.push_entry(Entry::User {
+                    text: format!("restored question {n}"),
+                    at: None,
+                });
+                push_answers(chat, 8);
+            }
+            chat.submit_turn("fresh prompt".into(), Vec::new(), Vec::new(), cx);
+            let fresh = chat.entries.len() - 1;
+            chat.handle_event(trace_started(), cx);
+            push_answers(chat, 20);
+            fresh
+        });
+        lay_out_short(cx);
+
+        chat.update(cx, |chat, cx| chat.reveal_span(1, trace::ROOT, cx));
+        refresh_frame(cx);
+        assert_eq!(
+            top_entry(&chat, cx),
+            fresh,
+            "turn 1 of the trace is the fourth message of the chat"
+        );
+    }
+
+    #[gpui::test]
+    async fn revealing_a_wait_reaches_its_permission_entry(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        let (user, permission) = chat.update(cx, |chat, cx| {
+            chat.submit_turn("deploy it".into(), Vec::new(), Vec::new(), cx);
+            let user = chat.entries.len() - 1;
+            chat.handle_event(trace_started(), cx);
+            chat.handle_event(trace_span("toolu_deploy", None, SpanKind::Tool), cx);
+            chat.handle_event(trace_wait("toolu_deploy", 42), cx);
+            push_answers(chat, 12);
+            chat.push_entry(open_question_with_free_text(42));
+            let permission = chat.entries.len() - 1;
+            push_answers(chat, 30);
+            cx.notify();
+            (user, permission)
+        });
+        lay_out_short(cx);
+
+        chat.update(cx, |chat, cx| chat.reveal_wait(42, cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), permission);
+        assert!(!chat.read_with(cx, |chat, _| chat.list_state.is_following_tail()));
+
+        // A request the transcript holds no card for lands on the message.
+        chat.update(cx, |chat, cx| chat.reveal_wait(7, cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), user);
+    }
+
+    #[gpui::test]
+    async fn a_new_conversation_forgets_the_trace_of_the_old_one(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn("a long task".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+            chat.handle_event(trace_span("toolu_slow", None, SpanKind::Tool), cx);
+        });
+        assert!(chat.read_with(cx, |chat, _| chat.trace().is_running()));
+
+        // The old agent goes with its turn, and never says it ended.
+        chat.update(cx, |chat, cx| chat.new_conversation(cx));
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.trace().is_empty(), "no turn is left running");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_reveal_near_the_end_stays_off_the_tail_when_the_chat_grows(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = offline_chat_view(cx);
+        let permission = chat.update(cx, |chat, cx| {
+            chat.submit_turn("deploy it".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+            chat.handle_event(trace_span("toolu_deploy", None, SpanKind::Tool), cx);
+            chat.handle_event(trace_wait("toolu_deploy", 42), cx);
+            push_answers(chat, 40);
+            // A permission waiting is the last thing in the transcript.
+            chat.push_entry(open_question_with_free_text(42));
+            let permission = chat.entries.len() - 1;
+            push_answer(chat, "waiting on you");
+            cx.notify();
+            permission
+        });
+        lay_out_short(cx);
+
+        chat.update(cx, |chat, cx| chat.reveal_wait(42, cx));
+        refresh_frame(cx);
+        assert_eq!(top_entry(&chat, cx), permission, "the list keeps its logical top");
+        assert!(!chat.read_with(cx, |chat, _| chat.list_state.is_following_tail()));
+
+        // The agent keeps writing, as one waiting on its own tool does.
+        chat.update(cx, |chat, cx| {
+            push_answer(chat, "another line");
+            cx.notify();
+        });
+        refresh_frame(cx);
+        assert!(
+            !chat.read_with(cx, |chat, _| chat.list_state.is_following_tail()),
+            "a new line must not take the reader back down"
+        );
+        assert!(
+            chat.read_with(cx, |chat, _| chat.list_state.bounds_for_item(permission).is_some()),
+            "the revealed card is still drawn"
+        );
+    }
+
+    #[gpui::test]
+    async fn revealing_an_entry_of_a_folded_turn_unfolds_that_turn(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        let (footer, row) = chat.update(cx, |chat, cx| {
+            chat.submit_turn("the old turn".into(), Vec::new(), Vec::new(), cx);
+            chat.handle_event(trace_started(), cx);
+            chat.handle_event(trace_span("toolu_old", None, SpanKind::Tool), cx);
+            push_answer(chat, "before");
+            chat.push_entry(test_tool_call("toolu_old"));
+            let row = chat.entries.len() - 1;
+            push_answer(chat, "after");
+            chat.handle_event(trace_ended(), cx);
+            chat.push_entry(Entry::TurnFooter("12:00".into()));
+            let footer = chat.entries.len() - 1;
+            chat.submit_turn("the later turn".into(), Vec::new(), Vec::new(), cx);
+            push_answers(chat, 30);
+            // The reader folded the old turn away.
+            chat.toggle_turn_folded(footer, cx);
+            (footer, row)
+        });
+        lay_out_short(cx);
+        assert!(chat.read_with(cx, |chat, _| chat.folded_turns.contains(&footer)));
+
+        chat.update(cx, |chat, cx| chat.reveal_span(1, "toolu_old", cx));
+        refresh_frame(cx);
+        assert!(
+            chat.read_with(cx, |chat, _| chat.folded_turns.is_empty()),
+            "a row folded out of sight cannot be revealed"
+        );
+        assert_eq!(top_entry(&chat, cx), row);
     }
 }

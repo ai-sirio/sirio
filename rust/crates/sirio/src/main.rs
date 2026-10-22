@@ -20154,6 +20154,12 @@ impl SirioWorkspace {
                 serde_json::to_string(&snapshot.session_panel)
                     .expect("the session panel snapshot is serializable"),
             ),
+            // Where the transcript list's top sits, so a reveal can be told
+            // from a list that did not move.
+            (
+                "firstVisibleEntry".to_string(),
+                snapshot.first_visible_entry.to_string(),
+            ),
         ]
     }
 
