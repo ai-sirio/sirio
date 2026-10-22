@@ -4,7 +4,7 @@
 use gpui::Hsla;
 use sirio_theme::Theme;
 
-use crate::chat::trace::{SpanState, TurnState};
+use crate::chat::trace::{MAX_SPANS, SpanState, TurnState};
 
 /// The colour of a state's dot or tag.
 pub(crate) fn state_color(theme: &Theme, state: SpanState) -> Hsla {
@@ -37,4 +37,11 @@ pub(crate) fn compact_count(count: u64) -> String {
     } else {
         format!("{:.1}k", count as f64 / 1000.0)
     }
+}
+
+/// What a turn that outgrew the span cap says of the spans it did not keep,
+/// on the card and in the tab's header.
+pub(crate) fn dropped_note(dropped: usize) -> String {
+    let spans = if dropped == 1 { "span" } else { "spans" };
+    format!("{dropped} {spans} past the {MAX_SPANS} cap not drawn")
 }

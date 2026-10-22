@@ -549,6 +549,91 @@ async fn the_tab_moves_only_while_its_turn_runs(cx: &mut TestAppContext) {
     assert_eq!(frames(&host, cx), finished, "a finished turn requests nothing");
 }
 
+/// The frames the tab asks for over `steps` clock steps of 10 ms. The window
+/// is drawn once a frame comes due, which is when a drawn tab would be, and
+/// not on every step: nothing else would repaint it, and a draw while a frame
+/// is pending asks for nothing.
+fn frames_over(host: &Entity<Host>, cx: &mut VisualTestContext, steps: u32) -> u32 {
+    let tab = tab_of(host, cx);
+    let before = tab.read_with(cx, |tab, _| tab.frames.get());
+    for _ in 0..steps {
+        cx.cx.executor().advance_clock(Duration::from_millis(10));
+        cx.run_until_parked();
+        if !tab.read_with(cx, |tab, _| crate::trace_frame::is_pending(&tab.frame_pending)) {
+            refresh(cx);
+        }
+    }
+    tab.read_with(cx, |tab, _| tab.frames.get()) - before
+}
+
+#[gpui::test]
+async fn the_tab_ticks_once_a_second_while_its_turn_only_waits(cx: &mut TestAppContext) {
+    let (host, cx) = host(cx, false);
+    let base = Instant::now() - Duration::from_secs(5);
+    feed(&host, cx, started(base));
+    feed(&host, cx, span("toolu_edit", None, SpanKind::Tool, "Edit", secs(base, 1.0)));
+    feed(
+        &host,
+        cx,
+        TraceEvent::WaitStarted {
+            span: Some("toolu_edit".into()),
+            request_id: 1,
+            at: secs(base, 2.0),
+        },
+    );
+    refresh(cx);
+    let asked = frames_over(&host, cx, 300);
+    assert!(asked >= 1, "an open turn's clock keeps moving");
+    assert!(
+        asked <= 4,
+        "{asked} frames in 3 s of waiting for the user is past a tick a second"
+    );
+
+    // A subagent starts working beside the wait. The tick on its way comes
+    // due first, then the tab is painted at the capped frames.
+    feed(&host, cx, span("toolu_agent", None, SpanKind::Subagent, "Explore", Instant::now()));
+    frames_over(&host, cx, 110);
+    let asked = frames_over(&host, cx, 100);
+    assert!(asked >= 10, "{asked} frames in a second is a tick, not an animation");
+    assert!(asked <= 31, "{asked} frames in a second is past 30 a second");
+}
+
+#[gpui::test]
+async fn the_tab_says_how_many_spans_the_turn_did_not_keep(cx: &mut TestAppContext) {
+    let (host, cx) = host(cx, false);
+    let base = Instant::now() - Duration::from_secs(60);
+    // The tab is left undrawn while the turn fills: it would be drawn, rows
+    // and all, for every span.
+    host.update(cx, |host, cx| {
+        host.show_tab = false;
+        cx.notify();
+    });
+    feed(&host, cx, started(base));
+    // Exactly the cap.
+    for n in 0..2000 {
+        let id = format!("toolu_{n}");
+        feed(&host, cx, span(&id, None, SpanKind::Tool, "Read", secs(base, 1.0)));
+    }
+    host.update(cx, |host, cx| {
+        host.show_tab = true;
+        cx.notify();
+    });
+    refresh(cx);
+    let dropped = |host: &Entity<Host>, cx: &mut VisualTestContext| {
+        tab_of(host, cx).read_with(cx, |tab, cx| tab.snapshot(cx)).dropped
+    };
+    assert_eq!(dropped(&host, cx), 0, "at the cap nothing was left out");
+    assert!(cx.debug_bounds("trace-tab-dropped").is_none(), "and the header says nothing of it");
+
+    for n in 2000..2003 {
+        let id = format!("toolu_{n}");
+        feed(&host, cx, span(&id, None, SpanKind::Tool, "Read", secs(base, 2.0)));
+    }
+    refresh(cx);
+    assert_eq!(dropped(&host, cx), 3, "the spans past the cap are counted");
+    assert!(cx.debug_bounds("trace-tab-dropped").is_some(), "and the header says so");
+}
+
 #[gpui::test]
 async fn the_tab_follows_its_shown_turn_not_the_latest_for_its_frames(
     cx: &mut TestAppContext,

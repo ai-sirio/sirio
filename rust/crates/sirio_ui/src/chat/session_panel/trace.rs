@@ -13,7 +13,10 @@
 //!   shares). A chat that is not painted never prepaints, so a hidden chat asks
 //!   for nothing, and a turn that has ended arms nothing.
 //!   One delayed frame is pending at a time, which keeps it at 30 frames a
-//!   second or fewer, as gpui's own `Animation::with_max_fps` does.
+//!   second or fewer, as gpui's own `Animation::with_max_fps` does. While
+//!   the turn only waits, with no span running (`Turn::is_moving`), the delay
+//!   is a second and the marks hold still: the clock and the "now" line are
+//!   all that move.
 //! - **Folded**, only the title's seconds move: a timer ticks once a second
 //!   and tells the chat while the turn runs, the column is open and a frame
 //!   painted it since the last tick. It ends with the turn.
@@ -29,12 +32,12 @@
 
 use super::{Row, Section};
 use crate::chat::trace::{
-    Axis, Lane, ROOT, Segment, SegmentKind, SpanState, TraceStore, TurnState, TurnStats, axis,
-    format_duration,
+    Axis, Lane, ROOT, Segment, SegmentKind, SpanState, TraceStore, Turn, TurnState, TurnStats,
+    axis, format_duration,
 };
 use crate::chat::{Chat, ChatEvent};
-use crate::trace_frame::{TICK, frame_driver};
-use crate::trace_style::{compact_count, state_color, turn_color};
+use crate::trace_frame::{Pace, TICK, frame_driver};
+use crate::trace_style::{compact_count, dropped_note, state_color, turn_color};
 use ely_gpui_component::{motion::ease_out_cubic, typography::ShimmerText};
 use gpui::{
     AnyElement, App, Context, CursorStyle, FontWeight, Hsla, InteractiveElement, IntoElement,
@@ -73,8 +76,17 @@ fn lane_count(lane: &Lane) -> String {
 }
 
 /// The six numbers, as `(key, label, value, bad)`. An unknown cost or token
-/// count is a dash: the turn's result has not said, or cannot.
+/// count is a dash: the turn's result has not said, or cannot. A turn that
+/// left spans out of its trace counts only the ones it kept, so its three
+/// counts read as at least: `1998+`.
 fn stat_values(stats: &TurnStats) -> [(&'static str, &'static str, String, bool); 6] {
+    let count = |count: usize| {
+        if stats.dropped > 0 {
+            format!("{count}+")
+        } else {
+            count.to_string()
+        }
+    };
     [
         ("duration", "Duration", format_duration(stats.duration), false),
         (
@@ -94,9 +106,9 @@ fn stat_values(stats: &TurnStats) -> [(&'static str, &'static str, String, bool)
             ),
             false,
         ),
-        ("llm_calls", "LLM calls", stats.llm_calls.to_string(), false),
-        ("tool_calls", "Tool calls", stats.tool_calls.to_string(), false),
-        ("errors", "Errors", stats.errors.to_string(), stats.errors > 0),
+        ("llm_calls", "LLM calls", count(stats.llm_calls), false),
+        ("tool_calls", "Tool calls", count(stats.tool_calls), false),
+        ("errors", "Errors", count(stats.errors), stats.errors > 0),
     ]
 }
 
@@ -109,8 +121,15 @@ pub(super) fn section(store: &TraceStore, now: Instant) -> Option<Section> {
         tag: turn_word(turn.state()).to_string(),
         ..Row::new("trace/turn", turn.title().to_string(), "")
     }];
-    for (key, label, value, _) in stat_values(&turn.stats(now)) {
+    let stats = turn.stats(now);
+    for (key, label, value, _) in stat_values(&stats) {
         rows.push(Row::new(&format!("trace/stat/{key}"), label.to_string(), &value));
+    }
+    if stats.dropped > 0 {
+        rows.push(Row {
+            muted: true,
+            ..Row::new("trace/dropped", dropped_note(stats.dropped), "")
+        });
     }
     for lane in turn.lanes(now) {
         rows.push(Row {
@@ -250,7 +269,13 @@ fn entry(running: bool, elapsed: Duration, start: Duration) -> f32 {
 
 /// What the turn's clock says at the frame being drawn.
 struct Beat {
+    /// The turn has not ended: its clock, its duration and the "now" line
+    /// move, on the loop's tick at least.
     running: bool,
+    /// Some span is running (`Turn::is_moving`): the loop is at its frames,
+    /// and the marks pulse and a lane steps in. A turn that only waits holds
+    /// them still, as reduced motion does, and moves on the tick alone.
+    moving: bool,
     reduced: bool,
     /// How far into the turn: the "now" line's place, and the clock the
     /// pulses, the shimmer and the lanes' entries run on.
@@ -260,7 +285,7 @@ struct Beat {
 impl Beat {
     /// How bright a pulsing mark is.
     fn pulse(&self) -> f32 {
-        if self.running {
+        if self.moving {
             pulse(self.elapsed, self.reduced)
         } else {
             1.0
@@ -286,6 +311,17 @@ fn turn_tone(theme: &Theme, state: TurnState) -> (Hsla, Hsla, bool) {
     (turn_color(theme, state), wash, pulses)
 }
 
+/// How bright the title's dot is at `now`. It pulses with the frames the open
+/// card asks for, so only while the card is unfolded, and holds still while
+/// the turn only waits, as the card's own marks do.
+fn title_dot_alpha(turn: &Turn, folded: bool, now: Instant, reduced_motion: bool) -> f32 {
+    if !folded && turn.is_moving() {
+        pulse(turn.elapsed(now), reduced_motion)
+    } else {
+        1.0
+    }
+}
+
 /// The summary beside the card's title: `Live · 34s` in the running colour
 /// with a dot, plain and muted once the turn is over. The dot pulses only
 /// while the card is open, because a folded card asks for no frames.
@@ -303,10 +339,9 @@ pub(super) fn title_summary(
         Some(TurnState::Waiting) => theme.ely.warning,
         _ => theme.ely.fg_muted,
     };
-    let alpha = match chat.trace.latest() {
-        Some(turn) if marked && !folded => pulse(turn.elapsed(Instant::now()), cx.reduce_motion()),
-        _ => 1.0,
-    };
+    let alpha = chat.trace.latest().map_or(1.0, |turn| {
+        title_dot_alpha(turn, folded, Instant::now(), cx.reduce_motion())
+    });
     div()
         .flex()
         .items_center()
@@ -340,8 +375,10 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
     let caption = theme.typography.footnote;
     let state = turn.state();
     let elapsed = turn.elapsed(now);
+    let moving = turn.is_moving();
     let beat = Beat {
         running,
+        moving,
         reduced,
         elapsed,
     };
@@ -398,7 +435,8 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
         );
 
     // The numbers, three to a line.
-    let stats = stat_values(&turn.stats(now));
+    let turn_stats = turn.stats(now);
+    let stats = stat_values(&turn_stats);
     let stat = |(key, label, value, bad): (&str, &str, String, bool)| {
         div()
             .flex_1()
@@ -442,6 +480,14 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
         .border_color(theme.ely.border)
         .child(div().flex().gap_2().children(first))
         .child(div().flex().gap_2().children(second));
+    // What the cap left out, under the numbers it makes at-least counts.
+    let dropped = (turn_stats.dropped > 0).then(|| {
+        div()
+            .debug_selector(|| "trace-dropped".into())
+            .text_size(caption)
+            .text_color(theme.ely.fg_subtle)
+            .child(dropped_note(turn_stats.dropped))
+    });
 
     // The axis, with the "now" dot on it, and the lanes under it. The grid
     // and the "now" line are drawn inside each lane's track, never across the
@@ -520,13 +566,13 @@ pub(super) fn render_body(chat: &Chat, theme: &Theme, cx: &mut Context<Chat>) ->
         .gap_2()
         .child(top)
         .child(numbers)
+        .children(dropped)
         .child(waterfall)
         .child(open)
         .child(frame_driver(
             chat.session_panel.frame.trace_frame_pending.clone(),
             chat.session_panel.trace_frames.clone(),
-            running,
-            reduced,
+            Pace::of(running, moving, reduced),
             cx.entity_id().as_u64(),
         ))
         .into_any_element()
@@ -675,7 +721,7 @@ fn render_lane(
     });
     // A lane that has just begun rises into place over `ENTER`, by the turn's
     // clock; a still card, a finished turn and reduced motion draw it whole.
-    let entered = entry(beat.running && !beat.reduced, beat.elapsed, lane.start);
+    let entered = entry(beat.moving && !beat.reduced, beat.elapsed, lane.start);
     div()
         .relative()
         .flex()
@@ -771,7 +817,7 @@ fn render_track(lane: &Lane, axis: &Axis, beat: &Beat, theme: &Theme) -> AnyElem
 #[cfg(test)]
 mod tests {
     use super::super::SessionPanelAction;
-    use super::entry;
+    use super::{Beat, entry};
     use crate::chat::tests::{
         lay_out_short, offline_chat_view, open_question_with_free_text, pump_chat_until,
         push_answers, refresh_frame, top_entry,
@@ -821,6 +867,17 @@ mod tests {
         AcpEvent::Trace(TraceEvent::SpanEnded {
             id: id.into(),
             outcome: SpanOutcome::Done,
+            at,
+            measured_ms: None,
+        })
+    }
+
+    fn span_failed(id: &str, at: Instant) -> AcpEvent {
+        AcpEvent::Trace(TraceEvent::SpanEnded {
+            id: id.into(),
+            outcome: SpanOutcome::Failed {
+                note: "boom".into(),
+            },
             at,
             measured_ms: None,
         })
@@ -1433,6 +1490,250 @@ mod tests {
             entry(false, Duration::from_millis(10_050), Duration::from_secs(10)),
             1.0
         );
+    }
+
+    /// A running turn whose card is unfolded and painted, and whose one open
+    /// call waits on the user: the turn is open and nothing in it runs. With
+    /// `agent` a subagent works beside the wait.
+    fn waiting_card(
+        cx: &mut TestAppContext,
+        agent: bool,
+    ) -> (Entity<Chat>, &mut VisualTestContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        chat.update(cx, |chat, cx| {
+            chat.set_session_panel_open(true, cx);
+            let now = Instant::now() - Duration::from_secs(5);
+            chat.handle_event(started(now), cx);
+            chat.handle_event(
+                span("toolu_edit", None, SpanKind::Tool, "Edit", "", None, secs(now, 1.0)),
+                cx,
+            );
+            chat.handle_event(wait("toolu_edit", 1, secs(now, 2.0)), cx);
+            if agent {
+                chat.handle_event(
+                    span(
+                        "toolu_agent",
+                        None,
+                        SpanKind::Subagent,
+                        "Explore",
+                        "scan",
+                        None,
+                        secs(now, 3.0),
+                    ),
+                    cx,
+                );
+            }
+        });
+        act(&chat, cx, SessionPanelAction::Toggle("trace".into())).expect("the card unfolds");
+        for _ in 0..4 {
+            refresh_frame(cx);
+        }
+        (chat, cx)
+    }
+
+    /// The frames the card asks for over `steps` clock steps of 10 ms. The
+    /// window is drawn once a frame comes due, which is when a drawn card
+    /// would be, and not on every step: nothing else would repaint it, and a
+    /// draw while a frame is pending asks for nothing.
+    fn frames_over(chat: &Entity<Chat>, cx: &mut VisualTestContext, steps: u32) -> u32 {
+        let before = frames(chat, cx);
+        for _ in 0..steps {
+            cx.cx.executor().advance_clock(Duration::from_millis(10));
+            cx.run_until_parked();
+            let pending = chat.read_with(cx, |chat, _| {
+                crate::trace_frame::is_pending(&chat.session_panel.frame.trace_frame_pending)
+            });
+            if !pending {
+                refresh_frame(cx);
+            }
+        }
+        frames(chat, cx) - before
+    }
+
+    #[gpui::test]
+    async fn a_card_that_only_waits_ticks_once_a_second(cx: &mut TestAppContext) {
+        let (chat, cx) = waiting_card(cx, false);
+        let asked = frames_over(&chat, cx, 300);
+        assert!(asked >= 1, "an open turn's clock keeps moving");
+        assert!(
+            asked <= 4,
+            "{asked} frames in 3 s of waiting for the user is past a tick a second"
+        );
+    }
+
+    #[gpui::test]
+    async fn an_agent_running_beside_the_wait_brings_the_capped_frames_back(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = waiting_card(cx, true);
+        let asked = frames_over(&chat, cx, 100);
+        assert!(asked >= 10, "{asked} frames in a second is a tick, not an animation");
+        assert!(asked <= 31, "{asked} frames in a second is past 30 a second");
+    }
+
+    #[gpui::test]
+    async fn a_span_that_starts_while_a_tick_is_on_its_way_gets_its_frames_at_once(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = offline_chat_view(cx);
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        chat.update(cx, |chat, cx| {
+            chat.set_session_panel_open(true, cx);
+            chat.handle_event(started(Instant::now() - Duration::from_secs(1)), cx);
+        });
+        act(&chat, cx, SessionPanelAction::Toggle("trace".into())).expect("the card unfolds");
+        for _ in 0..4 {
+            refresh_frame(cx);
+        }
+        // The turn is open and nothing in it runs, so the next paint is a
+        // second away. Then a call starts: it is not held for that second.
+        assert_eq!(frames(&chat, cx), 1, "one frame is on its way, a tick");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                span("toolu_run", None, SpanKind::Tool, "Bash", "", None, Instant::now()),
+                cx,
+            );
+        });
+        refresh_frame(cx);
+        let asked = frames_over(&chat, cx, 20);
+        assert!(asked >= 3, "{asked} frames in 200 ms after a call started: the tick held them");
+    }
+
+    #[test]
+    fn a_mark_pulses_only_while_the_turn_is_moving() {
+        let beat = |moving| Beat {
+            running: true,
+            moving,
+            reduced: false,
+            // 600 ms is the bottom of a 1.2 s pulse.
+            elapsed: Duration::from_millis(600),
+        };
+        assert!(beat(true).pulse() < 0.4, "a moving turn's mark dims");
+        assert_eq!(beat(false).pulse(), 1.0, "a turn that only waits holds its marks still");
+    }
+
+    #[test]
+    fn the_titles_dot_pulses_only_while_the_card_is_open_and_the_turn_moves() {
+        use crate::chat::trace::TraceStore;
+        let base = Instant::now();
+        let mut store = TraceStore::default();
+        let mut feed = |event| {
+            store.apply(event);
+        };
+        feed(TraceEvent::TurnStarted { at: base });
+        feed(TraceEvent::SpanStarted {
+            id: "toolu_edit".into(),
+            parent: None,
+            kind: SpanKind::Tool,
+            name: "Edit".into(),
+            detail: String::new(),
+            model: None,
+            at: secs(base, 0.1),
+        });
+        // 600 ms is the bottom of a 1.2 s pulse.
+        let at = secs(base, 0.6);
+        let alpha = |store: &TraceStore, folded| {
+            super::title_dot_alpha(store.latest().expect("a turn"), folded, at, false)
+        };
+        assert!(alpha(&store, false) < 0.4, "a running turn's dot pulses while the card is open");
+        assert_eq!(alpha(&store, true), 1.0, "a folded card asks for no frames to pulse on");
+
+        store.apply(TraceEvent::WaitStarted {
+            span: Some("toolu_edit".into()),
+            request_id: 1,
+            at: secs(base, 0.2),
+        });
+        assert_eq!(alpha(&store, false), 1.0, "a turn that only waits holds the dot still");
+    }
+
+    #[gpui::test]
+    async fn a_turn_past_the_span_cap_says_what_it_did_not_draw(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        cx.simulate_resize(size(px(1100.0), px(700.0)));
+        let base = Instant::now() - Duration::from_secs(5);
+        // Exactly the cap: a call, 1 998 reads and one failed read.
+        chat.update(cx, |chat, cx| {
+            chat.set_session_panel_open(true, cx);
+            chat.handle_event(started(base), cx);
+            chat.handle_event(
+                span("msg_1", None, SpanKind::Llm, "claude", "", Some("opus"), base),
+                cx,
+            );
+            for n in 0..1998 {
+                let id = format!("toolu_{n}");
+                chat.handle_event(
+                    span(&id, None, SpanKind::Tool, "Read", "", None, secs(base, 1.0)),
+                    cx,
+                );
+            }
+            chat.handle_event(
+                span("toolu_bad", None, SpanKind::Tool, "Bash", "", None, secs(base, 1.5)),
+                cx,
+            );
+            chat.handle_event(span_failed("toolu_bad", secs(base, 2.0)), cx);
+        });
+        let detail = |card: &crate::chat::SectionSnapshot, key: &str| {
+            card.rows
+                .iter()
+                .find(|row| row.key == key)
+                .map(|row| row.detail.clone())
+                .unwrap_or_else(|| panic!("no row {key}"))
+        };
+        let counts = |card: &crate::chat::SectionSnapshot| {
+            [
+                detail(card, "trace/stat/llm_calls"),
+                detail(card, "trace/stat/tool_calls"),
+                detail(card, "trace/stat/errors"),
+            ]
+        };
+        let card = trace_section(&chat, cx).expect("the card is drawn");
+        assert_eq!(counts(&card), ["1", "1999", "1"], "at the cap nothing was left out");
+        assert!(
+            card.rows.iter().all(|row| row.key != "trace/dropped"),
+            "and the card says nothing of it"
+        );
+
+        // One span too many.
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                span("toolu_past_0", None, SpanKind::Tool, "Read", "", None, secs(base, 3.0)),
+                cx,
+            );
+        });
+        let card = trace_section(&chat, cx).expect("the card is drawn");
+        assert_eq!(
+            counts(&card),
+            ["1+", "1999+", "1+"],
+            "a count that leaves spans out is at least what it says"
+        );
+        assert_eq!(
+            card.rows.iter().position(|row| row.key == "trace/dropped"),
+            Some(7),
+            "the row sits under the six numbers"
+        );
+        assert_eq!(card.rows[7].label, "1 span past the 2000 cap not drawn");
+
+        // And two more.
+        chat.update(cx, |chat, cx| {
+            for n in 1..3 {
+                let id = format!("toolu_past_{n}");
+                chat.handle_event(
+                    span(&id, None, SpanKind::Tool, "Read", "", None, secs(base, 3.0)),
+                    cx,
+                );
+            }
+        });
+        let card = trace_section(&chat, cx).expect("the card is drawn");
+        assert_eq!(card.rows[7].label, "3 spans past the 2000 cap not drawn");
+
+        // Unfolded, the card draws the same row. Drawing it is the slow
+        // part: a lane of 2 000 calls.
+        act(&chat, cx, SessionPanelAction::Toggle("trace".into())).expect("the card unfolds");
+        for _ in 0..2 {
+            next_frame(cx);
+        }
+        assert!(cx.debug_bounds("trace-dropped").is_some(), "and draws it in the card");
     }
 
     #[gpui::test]

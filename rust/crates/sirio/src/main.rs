@@ -17139,7 +17139,8 @@ impl SirioWorkspace {
     }
 
     /// `surface.trace.read`: whether `surface_id`'s chat has a Trace tab, and
-    /// the turn it shows with its spans.
+    /// the turn it shows with its spans and how many spans past the cap it
+    /// did not keep.
     fn control_trace_read(
         &self,
         surface_id: &str,
@@ -17170,6 +17171,7 @@ impl SirioWorkspace {
             ("turn".to_string(), snapshot.turn.to_string()),
             ("turns".to_string(), snapshot.turns.to_string()),
             ("follow".to_string(), if snapshot.follow { "1" } else { "0" }.to_string()),
+            ("dropped".to_string(), snapshot.dropped.to_string()),
             (
                 "spans".to_string(),
                 serde_json::to_string(&snapshot.spans)
@@ -34401,6 +34403,10 @@ done
             (open["turn"].as_str(), open["turns"].as_str(), open["follow"].as_str()),
             ("0", "0", "1"),
             "a chat with no turn yet: turn 0 of 0, and following"
+        );
+        assert_eq!(
+            open["dropped"], "0",
+            "the spans past the cap the shown turn did not keep: a count, 0 with none"
         );
         let spans: Vec<BTreeMap<String, String>> =
             serde_json::from_str(&open["spans"]).expect("spans is a JSON array of objects");

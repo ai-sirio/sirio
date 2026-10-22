@@ -215,7 +215,7 @@ pub(super) struct Frame {
     /// A delayed frame of the trace's animation is on its way, which is how
     /// it stays at 30 frames a second or fewer. Shared with the loop's timer
     /// task, which clears it.
-    trace_frame_pending: Rc<Cell<bool>>,
+    trace_frame_pending: crate::trace_frame::Pending,
 }
 
 /// Where the column is drawn, which the chat's width decides.

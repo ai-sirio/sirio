@@ -37,8 +37,9 @@ pub const ROOT: &str = "root";
 pub const ROOT_NAME: &str = "Claude Code";
 /// The turns a chat keeps; the oldest is let go.
 const MAX_TURNS: usize = 20;
-/// The spans a turn keeps. Past this a span is counted, not kept.
-const MAX_SPANS: usize = 2000;
+/// The spans a turn keeps. Past this a span is counted, not kept, and the
+/// card and the tab say how many.
+pub const MAX_SPANS: usize = 2000;
 /// The longest a turn's title runs, in characters.
 const TITLE_LIMIT: usize = 200;
 /// Why a turn that was still open when the next one started ended.
@@ -397,13 +398,16 @@ impl Turn {
     }
 
     /// Keeps `span` under `parent`, or counts it when the turn is full.
+    /// Whether anything a view draws changed: a counted span changes none,
+    /// so a flood of them asks for no redraw. The loop that repaints a
+    /// running turn and the turn's end show the count.
     fn insert_span(&mut self, parent: Option<&str>, mut span: Span) -> bool {
         if self.by_id.contains_key(&span.id) {
             return false;
         }
         if self.spans.len() >= MAX_SPANS {
             self.dropped += 1;
-            return true;
+            return false;
         }
         // A parent nobody opened leaves the span under the root.
         span.parent = parent.and_then(|parent| self.by_id.get(parent).copied());
@@ -1142,7 +1146,9 @@ mod tests {
         assert_eq!(turn.dropped_spans(), 1, "an event is not a span");
         assert_eq!(turn.state(), TurnState::Waiting, "its wait still waits");
 
-        // Counting a span is a change a view reads.
+        // A span that is counted and not kept changes nothing a view draws,
+        // so it asks for no redraw: the running loop and the turn's end show
+        // the count.
         let counted = store.apply(TraceEvent::SpanStarted {
             id: "toolu_2001".into(),
             parent: None,
@@ -1152,8 +1158,67 @@ mod tests {
             model: None,
             at: c.at(2300),
         });
-        assert!(counted);
+        assert!(!counted, "counting a dropped span is not a change a view reads");
         assert_eq!(store.latest().expect("a turn").dropped_spans(), 2);
+    }
+
+    fn moving(store: &TraceStore) -> bool {
+        store.latest().expect("a turn").is_moving()
+    }
+
+    /// A turn moves while a span runs; one that only waits for the user, or
+    /// sits between two calls with nothing open, is open and still.
+    #[test]
+    fn a_turn_moves_only_while_some_span_runs() {
+        let (mut store, c) = open_turn();
+        assert!(!moving(&store), "a turn with nothing open yet is still");
+
+        tool(&mut store, &c, "toolu_edit", None, "Edit", 100);
+        assert!(moving(&store), "a tool runs");
+        wait(&mut store, &c, Some("toolu_edit"), 1, 200);
+        assert!(!moving(&store), "the only call that runs waits for the user");
+
+        agent(&mut store, &c, "toolu_a", None, "Explore", "", 300);
+        assert!(moving(&store), "an agent works beside the wait");
+        end(&mut store, &c, "toolu_a", 400);
+        assert!(!moving(&store), "and goes: the wait is all that is open again");
+
+        unwait(&mut store, &c, 1, 500);
+        assert!(moving(&store), "the answer sets the tool running");
+        end(&mut store, &c, "toolu_edit", 600);
+        assert!(!moving(&store), "between two calls nothing runs");
+
+        call(&mut store, &c, "msg_2", None, "claude-haiku-5-5", 700);
+        assert!(moving(&store), "a model call streams");
+        end(&mut store, &c, "msg_2", 800);
+
+        finish(&mut store, &c, 900, TurnOutcome::Done);
+        assert!(!moving(&store), "a turn that ended moves nothing");
+    }
+
+    #[test]
+    fn a_wait_below_an_agent_stops_it_and_a_wait_on_the_root_stops_nothing() {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_a", None, "Explore", "", 100);
+        tool(&mut store, &c, "toolu_a_bash", Some("toolu_a"), "Bash", 200);
+        assert!(moving(&store));
+        // The tool waits, and the agent above it waits with it.
+        wait(&mut store, &c, Some("toolu_a_bash"), 1, 300);
+        assert!(!moving(&store), "an agent whose only call waits does not run");
+        agent(&mut store, &c, "toolu_b", None, "Plan", "", 400);
+        assert!(moving(&store), "a second agent runs");
+        end(&mut store, &c, "toolu_b", 500);
+        assert!(!moving(&store));
+
+        // A permission that waits on no span the turn kept waits at the
+        // root, and nothing that runs is held up by it.
+        unwait(&mut store, &c, 1, 600);
+        end(&mut store, &c, "toolu_a_bash", 650);
+        end(&mut store, &c, "toolu_a", 700);
+        wait(&mut store, &c, None, 2, 800);
+        assert!(!moving(&store), "a wait on the root alone moves nothing");
+        tool(&mut store, &c, "toolu_c", None, "Read", 900);
+        assert!(moving(&store), "a tool runs beside the root's wait");
     }
 
     #[test]

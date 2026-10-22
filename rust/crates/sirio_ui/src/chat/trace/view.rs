@@ -64,6 +64,9 @@ pub struct TurnStats {
     pub llm_calls: usize,
     pub tool_calls: usize,
     pub errors: usize,
+    /// The spans past the cap the turn did not keep. The three counts above
+    /// cover only the spans it kept, so each is at least what it says.
+    pub dropped: usize,
 }
 
 /// A permission a lane is waiting on.
@@ -250,6 +253,7 @@ impl Turn {
             llm_calls: 0,
             tool_calls: 0,
             errors: 0,
+            dropped: self.dropped,
         };
         for span in &self.spans {
             match span.kind {
@@ -262,6 +266,20 @@ impl Turn {
             }
         }
         stats
+    }
+
+    /// Whether the turn is drawn moving: it has not ended and some span is
+    /// running, a model call streaming, a tool running or a subagent working,
+    /// not waiting on the user. A turn that only waits, or sits between two
+    /// calls with nothing open, is still open and its clock goes on, but
+    /// nothing in it moves: the card and the tab ask for a frame a second,
+    /// not thirty.
+    pub fn is_moving(&self) -> bool {
+        if self.ended.is_some() {
+            return false;
+        }
+        let shape = self.shape();
+        (0..self.spans.len()).any(|index| self.span_state(index, &shape) == SpanState::Running)
     }
 
     /// The root first, then each subagent in tree order, depth-first and

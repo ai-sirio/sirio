@@ -61,8 +61,10 @@ set -euo pipefail
 #                      or a third tab selected in its place, with the worktree parked or after the turn
 #   trace_keys         real X input on the Trace tab: a click on a row and Enter on the selected row
 #                      reveal its Agent row, a click on the Follow checkbox toggles it
-# trace_tab and trace_idle need a painted column (--display :N): the tab closes one paint after its
-# chat is released, and a frame that is never painted asks for nothing whatever the code does.
+# trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
+# released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
+# that replaces the chat's last frame, and a frame that is never painted asks for nothing
+# whatever the code does.
 # trace_keys needs a framed run at --window-size 2200x1000 (no --state-only): it clicks at pixels.
 #
 # Isolation: every Sirio starts under `env -i` with an allowlist (see launch()), the
@@ -121,8 +123,9 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 [ -z "$WINDOW_SIZE" ] || [[ "$WINDOW_SIZE" =~ ^[0-9]+x[0-9]+$ ]] || refuse "--window-size is WxH, not $WINDOW_SIZE"
 # The scenarios that read the forge through the change request card, which reads only
 # while a frame paints the column, and the two that need a frame for what they assert:
-# a Trace tab closes one paint after its chat is released, and a trace that asks for no
-# frame proves nothing when nothing is ever painted.
+# a Trace tab closes when its chat is released, which in a window comes after the paint
+# that replaces the chat's last frame, and a trace that asks for no frame proves nothing
+# when nothing is ever painted.
 PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys "
 # trace_keys sends real X clicks and keys at pixels of the 2200x1000 layout, so it needs a
 # framed run (no --state-only) at that window size.
@@ -1250,7 +1253,7 @@ scenario_trace_tab() {
   echo "step: the card opens the tab"
   panel_ctl activate trace/open >/dev/null
   wait_trace_tab "the layout lists a trace tab in the Secondary half" present 20
-  wait_panel "the tab reads turn 1 of 1, following the latest" 'tab()["open"] == "1" and tab()["turn"] == "1" and tab()["turns"] == "1" and tab()["follow"] == "1"' 20
+  wait_panel "the tab reads turn 1 of 1, following the latest, with no span left out" 'tab()["open"] == "1" and tab()["turn"] == "1" and tab()["turns"] == "1" and tab()["follow"] == "1" and tab()["dropped"] == "0"' 20
   check_panel "the tab holds the whole tree, each span under its parent" \
     '{s["id"]: (s["parent"], s["kind"], s["depth"]) for s in tab()["spans"] if s["kind"] in ("root", "subagent", "tool")} == {"root": ("", "root", "0"), "toolu_agent_a": ("root", "subagent", "1"), "toolu_agent_b": ("root", "subagent", "1"), "toolu_agent_c": ("toolu_agent_b", "subagent", "2"), "toolu_a_bash": ("toolu_agent_a", "tool", "2"), "toolu_c_read": ("toolu_agent_c", "tool", "3"), "toolu_edit": ("root", "tool", "1"), "toolu_bash_fail": ("root", "tool", "1"), "toolu_bash_ok": ("root", "tool", "1")}'
   check_panel "it also holds the model calls, each under the agent that made it" \

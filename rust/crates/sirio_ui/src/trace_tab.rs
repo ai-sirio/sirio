@@ -18,7 +18,8 @@
 //!   panel's card does.
 //! - **Frames.** A running turn is repainted by the one loop the card shares
 //!   (`trace_frame::frame_driver`): only while the shown turn runs and the tab
-//!   is drawn, 30 times a second at most. Nothing here runs a gpui animation.
+//!   is drawn, 30 times a second at most while a span runs and once a second
+//!   while the turn only waits. Nothing here runs a gpui animation.
 //! - **Narrow.** Below 560 px each bar is stacked under its name.
 
 use std::cell::Cell;
@@ -40,8 +41,8 @@ use sirio_theme::Theme;
 use crate::chat::trace::{Axis, TraceStore, TreeRow, Turn, TurnState, axis, format_duration};
 use crate::chat::{Chat, ChatEvent};
 use crate::ely_ui;
-use crate::trace_frame::frame_driver;
-use crate::trace_style::turn_color;
+use crate::trace_frame::{Pace, Pending, frame_driver};
+use crate::trace_style::{dropped_note, turn_color};
 
 mod rows;
 
@@ -82,6 +83,8 @@ pub struct TraceTabSnapshot {
     /// The latest turn's index; 0 with no turn yet.
     pub turns: usize,
     pub follow: bool,
+    /// The spans past the cap the shown turn did not keep; 0 with none.
+    pub dropped: usize,
     /// The rows on screen, folds applied. Each has `id`, `parent` (empty for
     /// the root), `kind` (`root`, `subagent`, `llm` or `tool`), `state`,
     /// `ended` (`0` or `1`), `depth` and `folded` (`0` or `1`).
@@ -101,7 +104,7 @@ pub struct TraceTab {
     scroll: UniformListScrollHandle,
     vertical_bar: Option<ScrollbarState>,
     /// Shared with the frame loop's timer task, which clears it.
-    frame_pending: Rc<Cell<bool>>,
+    frame_pending: Pending,
     /// The frames the loop has asked for.
     frames: Rc<Cell<u32>>,
     /// The tab's width as last painted.
@@ -125,6 +128,10 @@ struct Shown {
     title: String,
     summary: String,
     state: TurnState,
+    /// Whether some span runs: what decides how often the tab is painted.
+    moving: bool,
+    /// The spans past the cap the turn did not keep.
+    dropped: usize,
     rows: Vec<TreeRow>,
     axis: Axis,
     /// How far into the turn `now` is: the "now" line, and where a running
@@ -179,6 +186,9 @@ impl TraceTab {
             turn: self.turn,
             turns,
             follow: self.follow,
+            dropped: self
+                .read(cx, |store| store.turn(self.turn).map_or(0, Turn::dropped_spans))
+                .unwrap_or(0),
             spans: encode(&rows, &self.folded),
         }
     }
@@ -289,6 +299,8 @@ impl TraceTab {
                 title: turn.title().to_string(),
                 summary: turn.summary(now),
                 state: turn.state(),
+                moving: turn.is_moving(),
+                dropped: turn.dropped_spans(),
                 rows: turn.rows(&self.folded, now),
                 axis: axis(turn.extent(now)),
                 elapsed: turn.elapsed(now),
@@ -504,6 +516,13 @@ impl TraceTab {
                     .text_color(tone)
                     .child(shown.summary.clone()),
             )
+            .children((shown.dropped > 0).then(|| {
+                div()
+                    .debug_selector(|| "trace-tab-dropped".into())
+                    .flex_none()
+                    .text_color(theme.ely.fg_subtle)
+                    .child(dropped_note(shown.dropped))
+            }))
             .child(
                 div()
                     .flex_1()
@@ -603,6 +622,7 @@ impl Render for TraceTab {
             );
         };
         let running = matches!(shown.state, TurnState::Live | TurnState::Waiting);
+        let moving = shown.moving;
         let stacked = self.width.get().is_some_and(|width| width < px(STACK_BELOW));
         // Until the tab has been measured it is drawn wide.
         let track = RowStyle::track_width(self.width.get().map_or(1000.0, f32::from), stacked);
@@ -645,8 +665,7 @@ impl Render for TraceTab {
             .child(frame_driver(
                 self.frame_pending.clone(),
                 self.frames.clone(),
-                running,
-                cx.reduce_motion(),
+                Pace::of(running, moving, cx.reduce_motion()),
                 cx.entity_id().as_u64(),
             ))
     }
