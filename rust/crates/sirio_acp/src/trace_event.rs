@@ -83,6 +83,34 @@ pub enum TraceEvent {
         /// The turn's own tokens, on the same terms as `cost_usd`.
         tokens: Option<TokenCount>,
     },
+    /// The main thread's `result` came while background agents of this turn
+    /// still run: the turn stays open, its main thread is over. Targets the
+    /// latest turn whose main thread is still open. `cost_usd` and `tokens`
+    /// are what is known so far (provisional).
+    MainEnded {
+        at: Instant,
+        outcome: TurnOutcome,
+        cost_usd: Option<f64>,
+        tokens: Option<TokenCount>,
+    },
+    /// The last background agent of a waiting turn ended: the turn ends.
+    /// `anchor` is the id of any span in that turn (the fold passes one of
+    /// its agents). The turn's outcome is the one its `MainEnded` carried.
+    AgentsEnded {
+        anchor: String,
+        at: Instant,
+        cost_usd: Option<f64>,
+        tokens: Option<TokenCount>,
+        /// The spend is a floor: some of it could not be told.
+        at_least: bool,
+    },
+    /// The latest turn's spend is now this (a CLI-started `result` added to
+    /// it).
+    TurnSpend {
+        cost_usd: Option<f64>,
+        tokens: Option<TokenCount>,
+        at_least: bool,
+    },
 }
 
 /// What a span is.

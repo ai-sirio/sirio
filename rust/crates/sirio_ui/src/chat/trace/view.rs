@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use sirio_acp::{SpanKind, SpanOutcome, TokenCount, TurnOutcome};
 
-use super::{ROOT, ROOT_NAME, Span, SpanEnd, Turn, TurnEnd};
+use super::{ROOT, ROOT_NAME, Span, SpanEnd, Spend, Turn, TurnEnd};
 
 /// What an axis is divided by, smallest first, in seconds: 1, 2, 5, 10, 15
 /// and 30 s, then 1, 2, 5, 10, 15 and 30 min. Past the last the step doubles.
@@ -61,6 +61,9 @@ pub struct TurnStats {
     pub cost_usd: Option<f64>,
     /// On the same terms as `cost_usd`.
     pub tokens: Option<TokenCount>,
+    /// `cost_usd` is a floor: background agents still run, or some of their
+    /// spend could not be told.
+    pub cost_at_least: bool,
     pub llm_calls: usize,
     pub tool_calls: usize,
     pub errors: usize,
@@ -245,11 +248,12 @@ impl Span {
 
 impl Turn {
     pub fn stats(&self, now: Instant) -> TurnStats {
-        let known = self.known_end();
+        let known = self.known_spend();
         let mut stats = TurnStats {
             duration: self.elapsed(now),
-            cost_usd: known.and_then(|end| end.cost_usd),
-            tokens: known.and_then(|end| end.tokens.clone()),
+            cost_usd: known.and_then(|spend| spend.cost_usd),
+            tokens: known.and_then(|spend| spend.tokens.clone()),
+            cost_at_least: known.is_some_and(|spend| spend.at_least),
             llm_calls: 0,
             tool_calls: 0,
             errors: 0,
@@ -362,7 +366,9 @@ impl Turn {
                 _ => None,
             },
             model: self.latest_model(None, &shape),
-            tokens: self.known_end().and_then(|end| end.tokens.clone()),
+            tokens: self
+                .known_spend()
+                .and_then(|spend| spend.tokens.clone()),
             progress_tokens: None,
             tool_uses: None,
             waits: waits.remove(&None).unwrap_or_default(),
@@ -478,8 +484,8 @@ impl Turn {
     pub fn summary(&self, now: Instant) -> String {
         let elapsed = format_duration(self.elapsed(now));
         let cost = || {
-            self.known_end()
-                .and_then(|end| end.cost_usd)
+            self.known_spend()
+                .and_then(|spend| spend.cost_usd)
                 .map(|cost| format!(" · ${cost:.2}"))
                 .unwrap_or_default()
         };
@@ -492,12 +498,18 @@ impl Turn {
         }
     }
 
-    /// How the turn ended, when its cost and tokens are worth showing: an
-    /// interrupted turn has none, whatever its `TurnEnded` carried.
-    fn known_end(&self) -> Option<&TurnEnd> {
-        self.ended
-            .as_ref()
-            .filter(|end| !matches!(end.outcome, TurnOutcome::Interrupted))
+    /// What the turn cost, when it is worth showing: an interrupted turn has
+    /// none, whatever its `TurnEnded` carried, nor does a waiting turn whose
+    /// main thread was interrupted.
+    fn known_spend(&self) -> Option<&Spend> {
+        let outcome = match &self.ended {
+            Some(end) => Some(&end.outcome),
+            None => self.main_outcome.as_ref(),
+        };
+        if matches!(outcome, Some(TurnOutcome::Interrupted)) {
+            return None;
+        }
+        self.spend.as_ref()
     }
 
     fn offset(&self, at: Instant) -> Duration {
