@@ -87,6 +87,8 @@ fn stat_values(stats: &TurnStats) -> [(&'static str, &'static str, String, bool)
             count.to_string()
         }
     };
+    // What agents still running may add to is a floor: `≥ $3.28`.
+    let mark = if stats.cost_at_least { "≥ " } else { "" };
     [
         ("duration", "Duration", format_duration(stats.duration), false),
         (
@@ -94,7 +96,7 @@ fn stat_values(stats: &TurnStats) -> [(&'static str, &'static str, String, bool)
             "Cost",
             stats
                 .cost_usd
-                .map_or_else(|| "—".to_string(), |cost| format!("${cost:.2}")),
+                .map_or_else(|| "—".to_string(), |cost| format!("{mark}${cost:.2}")),
             false,
         ),
         (
@@ -102,7 +104,7 @@ fn stat_values(stats: &TurnStats) -> [(&'static str, &'static str, String, bool)
             "Tokens",
             stats.tokens.as_ref().map_or_else(
                 || "—".to_string(),
-                |tokens| compact_count(tokens.input + tokens.output),
+                |tokens| format!("{mark}{}", compact_count(tokens.input + tokens.output)),
             ),
             false,
         ),
@@ -834,6 +836,54 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../sirio_acp/tests/fixtures/claude_fixture.py"
     );
+
+    #[test]
+    fn a_provisional_cost_reads_at_least() {
+        let base = Instant::now();
+        let mut store = crate::chat::trace::TraceStore::default();
+        for event in [
+            TraceEvent::TurnStarted { at: base },
+            TraceEvent::SpanStarted {
+                id: "toolu_bg".into(),
+                parent: None,
+                kind: SpanKind::Subagent,
+                name: "fork".into(),
+                detail: String::new(),
+                model: None,
+                at: secs(base, 0.1),
+            },
+            TraceEvent::MainEnded {
+                at: secs(base, 0.5),
+                outcome: TurnOutcome::Done,
+                cost_usd: None,
+                tokens: None,
+            },
+            TraceEvent::AgentsEnded {
+                anchor: "toolu_bg".into(),
+                at: secs(base, 48.0),
+                cost_usd: Some(3.28),
+                tokens: Some(TokenCount { input: 40_000, output: 8_200 }),
+                at_least: true,
+            },
+        ] {
+            store.apply(event);
+        }
+
+        let turn = store.latest().expect("a turn");
+        let now = secs(base, 900.0);
+        assert_eq!(turn.summary(now), "Done · 48s · ≥ $3.28");
+        let stats = turn.stats(now);
+        let values = super::stat_values(&stats);
+        let cell = |key: &str| {
+            values
+                .iter()
+                .find(|(k, ..)| *k == key)
+                .map(|(.., value, _)| value.clone())
+                .expect("the stat exists")
+        };
+        assert_eq!(cell("cost"), "≥ $3.28");
+        assert_eq!(cell("tokens"), "≥ 48.2k");
+    }
 
     fn secs(base: Instant, seconds: f64) -> Instant {
         base + Duration::from_secs_f64(seconds)

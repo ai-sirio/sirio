@@ -485,8 +485,10 @@ impl Turn {
         let elapsed = format_duration(self.elapsed(now));
         let cost = || {
             self.known_spend()
-                .and_then(|spend| spend.cost_usd)
-                .map(|cost| format!(" · ${cost:.2}"))
+                .and_then(|spend| {
+                    let mark = if spend.at_least { "≥ " } else { "" };
+                    spend.cost_usd.map(|cost| format!(" · {mark}${cost:.2}"))
+                })
                 .unwrap_or_default()
         };
         match self.state() {
@@ -619,6 +621,8 @@ impl Turn {
 
     fn root_state(&self) -> SpanState {
         match self.state() {
+            // A turn that waits on its agents has a finished main thread.
+            TurnState::Live if self.main_ended() => SpanState::Done,
             TurnState::Live => SpanState::Running,
             TurnState::Waiting => SpanState::Waiting,
             TurnState::Done => SpanState::Done,

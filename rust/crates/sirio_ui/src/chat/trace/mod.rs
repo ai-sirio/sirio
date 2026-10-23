@@ -2368,6 +2368,39 @@ mod tests {
     }
 
     #[test]
+    fn a_live_turn_waiting_on_agents_draws_its_main_thread_finished() {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_bg", None, "fork", "", 100);
+        assert_eq!(lanes_of(&store, c.at(300))[0].state, SpanState::Running);
+
+        main_ended(&mut store, &c, 500, TurnOutcome::Done, Some(3.28));
+
+        let turn = store.latest().expect("a turn");
+        assert_eq!(turn.state(), TurnState::Live);
+        let lanes = lanes_of(&store, c.at(900));
+        assert_eq!(lanes[0].state, SpanState::Done);
+        assert_eq!(lane(&lanes, "toolu_bg").state, SpanState::Running);
+    }
+
+    #[test]
+    fn a_final_cost_has_no_mark() {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_bg", None, "fork", "", 100);
+        main_ended(&mut store, &c, 500, TurnOutcome::Done, Some(3.28));
+        agents_ended(&mut store, &c, "toolu_bg", 48_000, Some(3.51), true);
+        store.apply(TraceEvent::TurnSpend {
+            cost_usd: Some(4.10),
+            tokens: None,
+            at_least: false,
+        });
+
+        assert_eq!(
+            store.latest().expect("a turn").summary(c.at(900_000)),
+            "Done · 48s · $4.10"
+        );
+    }
+
+    #[test]
     fn turn_spend_replaces_the_latest_turns_cost() {
         let (mut store, c) = open_turn();
         finish_with(
