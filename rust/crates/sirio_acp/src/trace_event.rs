@@ -16,8 +16,11 @@ pub enum TraceEvent {
     /// The user's line was written to the agent.
     TurnStarted { at: Instant },
     /// A span opened. A subagent's id is its `Agent` (formerly `Task`)
-    /// `tool_use` id; a tool's is its own; a model call's is the Messages API
-    /// `message.id`, except a subagent's final report, `"<agent id>/final"`.
+    /// `tool_use` id; a tool's is its own; a subagent's model call's is the
+    /// Messages API `message.id`, and its final report's is
+    /// `"<agent id>/final"`. A main-thread model call opened at the request
+    /// is `call-<n>`; one opened at `message_start` (a CLI that sends no
+    /// `requesting`) is the Messages API `message.id`.
     SpanStarted {
         id: String,
         parent: Option<String>,
@@ -33,6 +36,10 @@ pub enum TraceEvent {
         name: String,
         detail: String,
     },
+    /// The agent named the model of a call it had already opened: a
+    /// main-thread call opens when its request goes out, before the model is
+    /// known.
+    SpanModel { id: String, model: String },
     /// A running subagent's live totals, from `task_progress`.
     SpanProgress {
         id: String,
@@ -75,6 +82,34 @@ pub enum TraceEvent {
         cost_usd: Option<f64>,
         /// The turn's own tokens, on the same terms as `cost_usd`.
         tokens: Option<TokenCount>,
+    },
+    /// The main thread's `result` came while background agents of this turn
+    /// still run: the turn stays open, its main thread is over. Targets the
+    /// latest turn whose main thread is still open. `cost_usd` and `tokens`
+    /// are what is known so far (provisional).
+    MainEnded {
+        at: Instant,
+        outcome: TurnOutcome,
+        cost_usd: Option<f64>,
+        tokens: Option<TokenCount>,
+    },
+    /// The last background agent of a waiting turn ended: the turn ends.
+    /// `anchor` is the id of any span in that turn (the fold passes one of
+    /// its agents). The turn's outcome is the one its `MainEnded` carried.
+    AgentsEnded {
+        anchor: String,
+        at: Instant,
+        cost_usd: Option<f64>,
+        tokens: Option<TokenCount>,
+        /// The spend is a floor: some of it could not be told.
+        at_least: bool,
+    },
+    /// The latest turn's spend is now this (a CLI-started `result` added to
+    /// it).
+    TurnSpend {
+        cost_usd: Option<f64>,
+        tokens: Option<TokenCount>,
+        at_least: bool,
     },
 }
 

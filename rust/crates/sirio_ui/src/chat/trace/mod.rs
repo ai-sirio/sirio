@@ -9,6 +9,11 @@
 //!   whatever the turn's outcome;
 //! - a turn with no `TurnEnded` (a transport error, the CLI's death, the
 //!   prompt timeout) is ended by [`TraceStore::fail_open_turn`];
+//! - a turn whose main thread ended while background agents run stays open,
+//!   and a span event reaches the turn that holds the span, whichever turn is
+//!   the latest, for as long as that turn has not ended: an ended turn takes
+//!   no new span, name, usage or wait, and is kept past the cap only while it
+//!   is the oldest and still open;
 //! - span, wait and `TurnEnded` events that arrive with no turn open belong to
 //!   a turn Sirio did not start, and are ignored.
 //!
@@ -78,29 +83,127 @@ impl TraceStore {
                 measured_ms,
                 cost_usd,
                 tokens,
-            } => match self.open_turn() {
+            } => match self.main_open_turn() {
                 Some(turn) => {
                     let measured = measured_ms.map(Duration::from_millis);
-                    turn.close(at, outcome, measured, cost_usd, tokens);
+                    let spend = Spend::new(cost_usd, tokens, false);
+                    turn.close(at, outcome, measured, Some(spend));
                     true
                 }
                 None => false,
             },
-            event => self
-                .open_turn()
-                .is_some_and(|turn| turn.apply(event)),
+            TraceEvent::MainEnded {
+                at,
+                outcome,
+                cost_usd,
+                tokens,
+            } => match self.main_open_turn() {
+                Some(turn) => {
+                    turn.end_main(at, outcome, Spend::new(cost_usd, tokens, true));
+                    true
+                }
+                None => false,
+            },
+            TraceEvent::AgentsEnded {
+                anchor,
+                at,
+                cost_usd,
+                tokens,
+                at_least,
+            } => match self.turn_holding(&anchor) {
+                Some(turn) => turn.end_agents(at, Spend::new(cost_usd, tokens, at_least)),
+                None => false,
+            },
+            TraceEvent::TurnSpend {
+                cost_usd,
+                tokens,
+                at_least,
+            } => match self.turns.back_mut() {
+                Some(turn) => turn.set_spend(Spend::new(cost_usd, tokens, at_least)),
+                None => false,
+            },
+            // A span that opens under a known parent belongs to the turn that
+            // holds the parent, which a later prompt may have left behind.
+            TraceEvent::SpanStarted {
+                id,
+                parent,
+                kind,
+                name,
+                detail,
+                model,
+                at,
+            } => {
+                let event = TraceEvent::SpanStarted {
+                    id,
+                    parent: parent.clone(),
+                    kind,
+                    name,
+                    detail,
+                    model,
+                    at,
+                };
+                let held = parent
+                    .as_deref()
+                    .and_then(|parent| self.turn_holding(parent));
+                match held {
+                    Some(turn) => turn.ended.is_none() && turn.apply(event),
+                    None => self
+                        .main_open_turn()
+                        .is_some_and(|turn| turn.apply(event)),
+                }
+            }
+            TraceEvent::WaitStarted {
+                span,
+                request_id,
+                at,
+            } => {
+                let held = span.as_deref().and_then(|span| self.turn_holding(span));
+                let event = TraceEvent::WaitStarted {
+                    span,
+                    request_id,
+                    at,
+                };
+                match held {
+                    Some(turn) => turn.ended.is_none() && turn.apply(event),
+                    None => self
+                        .main_open_turn()
+                        .is_some_and(|turn| turn.apply(event)),
+                }
+            }
+            TraceEvent::WaitEnded { request_id, at } => self
+                .turns
+                .iter_mut()
+                .rev()
+                .find(|turn| turn.wait_index.contains_key(&request_id))
+                .is_some_and(|turn| turn.apply(TraceEvent::WaitEnded { request_id, at })),
+            event => {
+                let id = match &event {
+                    TraceEvent::SpanNamed { id, .. }
+                    | TraceEvent::SpanModel { id, .. }
+                    | TraceEvent::SpanProgress { id, .. }
+                    | TraceEvent::SpanUsage { id, .. }
+                    | TraceEvent::SpanEnded { id, .. } => id.clone(),
+                    _ => return false,
+                };
+                // An ended turn's spans are all closed and final; only a
+                // `SpanEnded`, harmless there, still reaches it.
+                let ends = matches!(event, TraceEvent::SpanEnded { .. });
+                self.turn_holding(&id)
+                    .is_some_and(|turn| (ends || turn.ended.is_none()) && turn.apply(event))
+            }
         }
     }
 
-    /// Ends the open turn `Failed` with `reason`, as a transport error, the
-    /// CLI's death or the prompt timeout does: none of them brings a
-    /// `TurnEnded`. Nothing happens when no turn is open.
+    /// Ends every turn that has not ended `Failed` with `reason`, as a
+    /// transport error, the CLI's death or the prompt timeout does: none of
+    /// them brings a `TurnEnded`, and a turn that waits on background agents
+    /// loses them with the CLI. Nothing happens when every turn has ended.
     pub fn fail_open_turn(&mut self, reason: &str, at: Instant) {
-        if let Some(turn) = self.open_turn() {
+        for turn in self.turns.iter_mut().filter(|turn| turn.ended.is_none()) {
             let outcome = TurnOutcome::Failed {
                 reason: reason.to_string(),
             };
-            turn.close(at, outcome, None, None, None);
+            turn.close(at, outcome, None, None);
         }
     }
 
@@ -139,26 +242,50 @@ impl TraceStore {
         self.latest().is_some_and(|turn| turn.ended.is_none())
     }
 
+    /// Whether any kept turn has not ended: the latest, or an earlier one
+    /// still waiting on background agents.
+    pub fn has_open_turn(&self) -> bool {
+        self.turns.iter().any(|turn| turn.ended.is_none())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.turns.is_empty()
     }
 
-    fn open_turn(&mut self) -> Option<&mut Turn> {
-        self.turns.back_mut().filter(|turn| turn.ended.is_none())
+    /// The latest turn that has not ended and whose main thread is still
+    /// open: the one a new top-level span, a `TurnEnded` or a `MainEnded`
+    /// belongs to.
+    fn main_open_turn(&mut self) -> Option<&mut Turn> {
+        self.turns
+            .iter_mut()
+            .rev()
+            .find(|turn| turn.ended.is_none() && turn.main_end.is_none())
     }
 
-    /// A prompt was written. A turn still open when the next starts never
-    /// got its `result`: it ends failed, then the new one opens.
+    /// The newest kept turn that holds the span `id`.
+    fn turn_holding(&mut self, id: &str) -> Option<&mut Turn> {
+        self.turns
+            .iter_mut()
+            .rev()
+            .find(|turn| turn.by_id.contains_key(id))
+    }
+
+    /// A prompt was written. A turn whose main thread is still open when the
+    /// next starts never got its `result`: it ends failed, then the new one
+    /// opens. A turn waiting on background agents stays open, and is kept
+    /// until it ends.
     fn start_turn(&mut self, at: Instant) {
-        if let Some(turn) = self.open_turn() {
+        if let Some(turn) = self.main_open_turn() {
             let outcome = TurnOutcome::Failed {
                 reason: ABANDONED.to_string(),
             };
-            turn.close(at, outcome, None, None, None);
+            turn.close(at, outcome, None, None);
         }
         let index = self.first + self.turns.len();
         self.turns.push_back(Turn::new(index, at));
-        if self.turns.len() > MAX_TURNS {
+        while self.turns.len() > MAX_TURNS
+            && self.turns.front().is_some_and(|turn| turn.ended.is_some())
+        {
             self.turns.pop_front();
             self.first += 1;
         }
@@ -172,6 +299,14 @@ pub struct Turn {
     title: String,
     started: Instant,
     ended: Option<TurnEnd>,
+    /// When the main thread's `result` came while background agents still
+    /// ran. The turn is open until they end.
+    main_end: Option<Instant>,
+    /// How the main thread ended, kept for the turn's end.
+    main_outcome: Option<TurnOutcome>,
+    /// What the turn cost: the last report of its `TurnEnded`, `MainEnded`,
+    /// `AgentsEnded` and `TurnSpend`.
+    spend: Option<Spend>,
     /// In arrival order, so a span's parent is always before it.
     spans: Vec<Span>,
     by_id: HashMap<String, usize>,
@@ -190,8 +325,25 @@ struct TurnEnd {
     outcome: TurnOutcome,
     /// The agent's own clock for the turn.
     measured: Option<Duration>,
+}
+
+/// What a turn cost, and whether that is all of it.
+#[derive(Clone, Debug)]
+struct Spend {
     cost_usd: Option<f64>,
     tokens: Option<TokenCount>,
+    /// A floor: background agents still run, or some of it could not be told.
+    at_least: bool,
+}
+
+impl Spend {
+    fn new(cost_usd: Option<f64>, tokens: Option<TokenCount>, at_least: bool) -> Self {
+        Self {
+            cost_usd,
+            tokens,
+            at_least,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -238,6 +390,9 @@ impl Turn {
             title: String::new(),
             started,
             ended: None,
+            main_end: None,
+            main_outcome: None,
+            spend: None,
             spans: Vec::new(),
             by_id: HashMap::new(),
             root_children: Vec::new(),
@@ -279,6 +434,12 @@ impl Turn {
                 .unwrap_or_else(|| end.at.saturating_duration_since(self.started)),
             None => now.saturating_duration_since(self.started),
         }
+    }
+
+    /// Whether the main thread's `result` came, whether or not the turn has
+    /// ended: background agents may still run.
+    pub fn main_ended(&self) -> bool {
+        self.main_end.is_some()
     }
 
     /// The spans past the cap this turn did not keep.
@@ -328,6 +489,16 @@ impl Turn {
                     changed = true;
                 }
                 changed
+            }
+            TraceEvent::SpanModel { id, model } => {
+                let Some(span) = self.span_mut(&id) else {
+                    return false;
+                };
+                if span.model.as_deref() == Some(model.as_str()) {
+                    return false;
+                }
+                span.model = Some(model);
+                true
             }
             TraceEvent::SpanUsage { id, tokens } => {
                 let Some(span) = self.span_mut(&id) else {
@@ -388,7 +559,11 @@ impl Turn {
                 measured_ms,
             } => self.end_span(&id, outcome, at, measured_ms.map(Duration::from_millis)),
             // The store itself opens and ends turns.
-            TraceEvent::TurnStarted { .. } | TraceEvent::TurnEnded { .. } => false,
+            TraceEvent::TurnStarted { .. }
+            | TraceEvent::TurnEnded { .. }
+            | TraceEvent::MainEnded { .. }
+            | TraceEvent::AgentsEnded { .. }
+            | TraceEvent::TurnSpend { .. } => false,
         }
     }
 
@@ -479,8 +654,7 @@ impl Turn {
         at: Instant,
         outcome: TurnOutcome,
         measured: Option<Duration>,
-        cost_usd: Option<f64>,
-        tokens: Option<TokenCount>,
+        spend: Option<Spend>,
     ) {
         for span in &mut self.spans {
             if span.end.is_none() {
@@ -496,13 +670,46 @@ impl Turn {
                 wait.end = Some(at);
             }
         }
+        self.main_end.get_or_insert(at);
+        if spend.is_some() {
+            self.spend = spend;
+        }
         self.ended = Some(TurnEnd {
             at,
             outcome,
             measured,
-            cost_usd,
-            tokens,
         });
+    }
+
+    /// The main thread's `result` came: the turn stays open for its
+    /// background agents.
+    fn end_main(&mut self, at: Instant, outcome: TurnOutcome, spend: Spend) {
+        self.main_end = Some(at);
+        self.main_outcome = Some(outcome);
+        self.spend = Some(spend);
+    }
+
+    /// The last background agent ended: the turn ends the way its main
+    /// thread did. Nothing changes for a turn that is not waiting on agents.
+    fn end_agents(&mut self, at: Instant, spend: Spend) -> bool {
+        if self.ended.is_some() {
+            return false;
+        }
+        let Some(outcome) = self.main_outcome.clone() else {
+            return false;
+        };
+        self.close(at, outcome, None, Some(spend));
+        true
+    }
+
+    fn set_spend(&mut self, spend: Spend) -> bool {
+        let unchanged = self.spend.as_ref().is_some_and(|known| {
+            known.cost_usd == spend.cost_usd
+                && known.tokens == spend.tokens
+                && known.at_least == spend.at_least
+        });
+        self.spend = Some(spend);
+        !unchanged
     }
 }
 
@@ -1937,6 +2144,32 @@ mod tests {
     }
 
     #[test]
+    fn a_model_named_after_its_span_opened_shows_on_the_row() {
+        let (mut store, c) = open_turn();
+        let named = |id: &str, model: &str| TraceEvent::SpanModel {
+            id: id.into(),
+            model: model.into(),
+        };
+        store.apply(TraceEvent::SpanStarted {
+            id: "call-1".into(),
+            parent: None,
+            kind: SpanKind::Llm,
+            name: "Model call".into(),
+            detail: String::new(),
+            model: None,
+            at: c.at(0),
+        });
+        // No span of that id: nothing changed.
+        assert!(!store.apply(named("call-nobody", "claude-opus-5-5")));
+        assert!(store.apply(named("call-1", "claude-opus-5-5")));
+        assert_eq!(
+            row(&rows_of(&store, c.at(100)), "call-1").model.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert!(!store.apply(named("call-1", "claude-opus-5-5")), "the same model");
+    }
+
+    #[test]
     fn every_open_wait_is_listed_on_exactly_one_lane() {
         let (mut store, c) = open_turn();
         tool(&mut store, &c, "toolu_bash", None, "Bash", 100);
@@ -2001,5 +2234,329 @@ mod tests {
         assert_eq!(turn.state(), TurnState::Live, "nothing to answer");
         assert!(lanes_of(&store, c.at(400))[0].waits.is_empty());
         assert!(row(&rows_of(&store, c.at(400)), "toolu_a").waits.is_empty());
+    }
+
+    fn main_ended(
+        store: &mut TraceStore,
+        c: &Clock,
+        at: u64,
+        outcome: TurnOutcome,
+        cost_usd: Option<f64>,
+    ) {
+        store.apply(TraceEvent::MainEnded {
+            at: c.at(at),
+            outcome,
+            cost_usd,
+            tokens: None,
+        });
+    }
+
+    fn agents_ended(
+        store: &mut TraceStore,
+        c: &Clock,
+        anchor: &str,
+        at: u64,
+        cost_usd: Option<f64>,
+        at_least: bool,
+    ) {
+        store.apply(TraceEvent::AgentsEnded {
+            anchor: anchor.into(),
+            at: c.at(at),
+            cost_usd,
+            tokens: None,
+            at_least,
+        });
+    }
+
+    /// Turn 1 holds a background agent and has seen its main thread end; a
+    /// second turn is open.
+    fn waiting_turn_then_next_prompt() -> (TraceStore, Clock) {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_bg", None, "fork", "", 100);
+        main_ended(&mut store, &c, 500, TurnOutcome::Done, Some(3.28));
+        store.apply(TraceEvent::TurnStarted { at: c.at(1000) });
+        (store, c)
+    }
+
+    fn span_ids(store: &TraceStore, turn: usize) -> Vec<String> {
+        store
+            .turn(turn)
+            .expect("a kept turn")
+            .rows(&HashSet::new(), Instant::now())
+            .into_iter()
+            .map(|row| row.span)
+            .collect()
+    }
+
+    #[test]
+    fn span_events_route_to_the_turn_that_holds_the_span() {
+        let (mut store, c) = waiting_turn_then_next_prompt();
+
+        let started = store.apply(TraceEvent::SpanStarted {
+            id: "toolu_child".into(),
+            parent: Some("toolu_bg".into()),
+            kind: SpanKind::Tool,
+            name: "Read".into(),
+            detail: String::new(),
+            model: None,
+            at: c.at(1200),
+        });
+        assert!(started);
+        let ended = store.apply(TraceEvent::SpanEnded {
+            id: "toolu_bg".into(),
+            outcome: SpanOutcome::Done,
+            at: c.at(1500),
+            measured_ms: None,
+        });
+        assert!(ended);
+
+        assert_eq!(span_ids(&store, 1), [ROOT, "toolu_bg", "toolu_child"]);
+        assert_eq!(span_ids(&store, 2), [ROOT]);
+        let first = store.turn(1).expect("turn 1");
+        let rows = first.rows(&HashSet::new(), c.at(2000));
+        assert_eq!(row(&rows, "toolu_bg").state, SpanState::Done);
+    }
+
+    #[test]
+    fn a_turn_waiting_on_agents_is_not_abandoned_by_the_next_prompt() {
+        let (store, _c) = waiting_turn_then_next_prompt();
+
+        let first = store.turn(1).expect("turn 1");
+        assert_eq!(first.state(), TurnState::Live);
+        assert!(first.main_ended());
+        assert!(store.has_open_turn());
+        assert_eq!(store.turn(2).expect("turn 2").state(), TurnState::Live);
+    }
+
+    #[test]
+    fn agents_ended_ends_the_turn_that_holds_the_anchor() {
+        let (mut store, c) = waiting_turn_then_next_prompt();
+        call(&mut store, &c, "msg_2", None, "claude-haiku-5-5", 1100);
+
+        agents_ended(&mut store, &c, "toolu_bg", 4000, Some(3.51), false);
+
+        let first = store.turn(1).expect("turn 1");
+        assert_eq!(first.state(), TurnState::Done);
+        assert_eq!(first.elapsed(c.at(9000)), ms(4000));
+        let stats = first.stats(c.at(9000));
+        assert_eq!(stats.cost_usd, Some(3.51));
+        assert!(!stats.cost_at_least);
+        let rows = first.rows(&HashSet::new(), c.at(9000));
+        assert_eq!(row(&rows, "toolu_bg").state, SpanState::Interrupted);
+        let second = store.turn(2).expect("turn 2");
+        assert_eq!(second.state(), TurnState::Live);
+        assert!(!second.main_ended());
+        assert!(store.has_open_turn());
+    }
+
+    #[test]
+    fn a_waiting_turn_reads_live_and_moving_while_an_agent_runs() {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_bg", None, "fork", "", 100);
+        assert!(moving(&store));
+        assert!(!store.latest().expect("a turn").stats(c.at(200)).cost_at_least);
+
+        main_ended(&mut store, &c, 500, TurnOutcome::Done, Some(3.28));
+
+        let turn = store.latest().expect("a turn");
+        assert_eq!(turn.state(), TurnState::Live);
+        assert!(moving(&store), "the agent still runs");
+        let stats = turn.stats(c.at(900));
+        assert_eq!(stats.cost_usd, Some(3.28));
+        assert!(stats.cost_at_least, "what is known so far is a floor");
+        assert_eq!(stats.duration, ms(900), "the clock goes on");
+    }
+
+    #[test]
+    fn a_live_turn_waiting_on_agents_draws_its_main_thread_finished() {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_bg", None, "fork", "", 100);
+        assert_eq!(lanes_of(&store, c.at(300))[0].state, SpanState::Running);
+
+        main_ended(&mut store, &c, 500, TurnOutcome::Done, Some(3.28));
+
+        let turn = store.latest().expect("a turn");
+        assert_eq!(turn.state(), TurnState::Live);
+        let lanes = lanes_of(&store, c.at(900));
+        assert_eq!(lanes[0].state, SpanState::Done);
+        assert_eq!(lane(&lanes, "toolu_bg").state, SpanState::Running);
+    }
+
+    #[test]
+    fn a_waiting_turns_root_lane_ends_when_its_main_thread_ended() {
+        let failed = TurnOutcome::Failed {
+            reason: "boom".into(),
+        };
+        for (outcome, state) in [
+            (TurnOutcome::Done, SpanState::Done),
+            (failed, SpanState::Failed),
+        ] {
+            let (mut store, c) = open_turn();
+            agent(&mut store, &c, "toolu_bg", None, "fork", "", 100);
+            let running = lanes_of(&store, c.at(300));
+            assert_eq!(running[0].end, None, "the main thread still works");
+
+            main_ended(&mut store, &c, 500, outcome, Some(3.28));
+
+            // The agent runs on, and `now` goes on: the root does not.
+            for now in [900, 60_000] {
+                let lanes = lanes_of(&store, c.at(now));
+                assert_eq!(lanes[0].state, state);
+                assert_eq!(lanes[0].end, Some(ms(500)), "at {now}");
+                assert_eq!(lanes[0].duration, ms(500), "at {now}");
+                assert_eq!(lane(&lanes, "toolu_bg").end, None);
+                let rows = rows_of(&store, c.at(now));
+                assert_eq!(rows[0].state, state);
+                assert_eq!(rows[0].end, Some(ms(500)), "at {now}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_final_cost_has_no_mark() {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_bg", None, "fork", "", 100);
+        main_ended(&mut store, &c, 500, TurnOutcome::Done, Some(3.28));
+        agents_ended(&mut store, &c, "toolu_bg", 48_000, Some(3.51), true);
+        store.apply(TraceEvent::TurnSpend {
+            cost_usd: Some(4.10),
+            tokens: None,
+            at_least: false,
+        });
+
+        assert_eq!(
+            store.latest().expect("a turn").summary(c.at(900_000)),
+            "Done · 48s · $4.10"
+        );
+    }
+
+    #[test]
+    fn turn_spend_replaces_the_latest_turns_cost() {
+        let (mut store, c) = open_turn();
+        finish_with(
+            &mut store,
+            &c,
+            500,
+            TurnOutcome::Done,
+            None,
+            Some(0.31),
+            None,
+        );
+        let before = store.latest().expect("a turn").stats(c.at(600));
+        assert_eq!(before.cost_usd, Some(0.31));
+        assert!(!before.cost_at_least);
+
+        let changed = store.apply(TraceEvent::TurnSpend {
+            cost_usd: Some(0.40),
+            tokens: None,
+            at_least: true,
+        });
+        assert!(changed);
+        let floor = store.latest().expect("a turn").stats(c.at(600));
+        assert_eq!(floor.cost_usd, Some(0.40));
+        assert!(floor.cost_at_least);
+
+        store.apply(TraceEvent::TurnSpend {
+            cost_usd: Some(0.52),
+            tokens: None,
+            at_least: false,
+        });
+        let exact = store.latest().expect("a turn").stats(c.at(600));
+        assert_eq!(exact.cost_usd, Some(0.52));
+        assert!(!exact.cost_at_least);
+    }
+
+    #[test]
+    fn the_oldest_waiting_turn_is_never_evicted() {
+        let (mut store, c) = open_turn();
+        agent(&mut store, &c, "toolu_bg", None, "fork", "", 10);
+        main_ended(&mut store, &c, 20, TurnOutcome::Done, None);
+        for i in 2..=20u64 {
+            store.apply(TraceEvent::TurnStarted { at: c.at(i * 100) });
+            finish(&mut store, &c, i * 100 + 50, TurnOutcome::Done);
+        }
+        store.apply(TraceEvent::TurnStarted { at: c.at(5000) });
+
+        assert_eq!(store.turn_indices(), 1..=21, "the waiting turn stays");
+        assert_eq!(store.turn(1).expect("kept").state(), TurnState::Live);
+
+        agents_ended(&mut store, &c, "toolu_bg", 6000, None, false);
+        store.apply(TraceEvent::TurnStarted { at: c.at(7000) });
+
+        assert_eq!(
+            store.turn_indices(),
+            3..=22,
+            "twenty turns again once the oldest is let go"
+        );
+        assert!(store.turn(1).is_none());
+        assert!(store.turn(2).is_none());
+    }
+
+    #[test]
+    fn a_span_event_for_an_ended_turn_changes_nothing() {
+        let (mut store, c) = waiting_turn_then_next_prompt();
+        agents_ended(&mut store, &c, "toolu_bg", 2000, None, false);
+        let before = span_ids(&store, 1);
+
+        let events = [
+            TraceEvent::SpanStarted {
+                id: "toolu_late".into(),
+                parent: Some("toolu_bg".into()),
+                kind: SpanKind::Tool,
+                name: "Read".into(),
+                detail: String::new(),
+                model: None,
+                at: c.at(2500),
+            },
+            TraceEvent::SpanNamed {
+                id: "toolu_bg".into(),
+                name: "renamed".into(),
+                detail: String::new(),
+            },
+            TraceEvent::SpanProgress {
+                id: "toolu_bg".into(),
+                tokens: Some(10),
+                tool_uses: None,
+                activity: None,
+            },
+            TraceEvent::WaitStarted {
+                span: Some("toolu_bg".into()),
+                request_id: 9,
+                at: c.at(2500),
+            },
+        ];
+        for event in events {
+            assert!(!store.apply(event.clone()), "{event:?}");
+        }
+
+        assert_eq!(span_ids(&store, 1), before);
+        let first = store.turn(1).expect("turn 1");
+        assert_eq!(first.state(), TurnState::Done);
+        let rows = first.rows(&HashSet::new(), c.at(9000));
+        assert_eq!(row(&rows, "toolu_bg").name, "fork");
+        assert_eq!(row(&rows, "toolu_bg").state, SpanState::Interrupted);
+    }
+
+    #[test]
+    fn a_dead_cli_fails_every_open_turn() {
+        let (mut store, c) = waiting_turn_then_next_prompt();
+        tool(&mut store, &c, "toolu_run", None, "Bash", 1200);
+
+        store.fail_open_turn("The CLI died", c.at(3000));
+
+        assert!(!store.has_open_turn());
+        for index in [1, 2] {
+            let turn = store.turn(index).expect("kept");
+            assert_eq!(turn.state(), TurnState::Failed, "turn {index}");
+            let rows = turn.rows(&HashSet::new(), c.at(9000));
+            assert!(
+                rows.iter()
+                    .skip(1)
+                    .all(|row| matches!(row.state, SpanState::Interrupted)),
+                "every span of turn {index} ended"
+            );
+        }
+        let first = store.turn(1).expect("turn 1");
+        assert_eq!(first.elapsed(c.at(9000)), ms(3000));
     }
 }
