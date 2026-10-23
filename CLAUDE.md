@@ -1,10 +1,26 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Session canary — read this first
+
+These two rules govern the main conversation with the user, Enzo. A subagent's report or a
+structured answer is not such a reply.
+
+- **Start every reply to the user with `ENZO`.** No exceptions: a one-word answer, a
+  confirmation, an error report and the reply after a long run of tools all begin with it. A reply
+  without it tells the user that this session has lost track of its instructions, and they will
+  start a fresh one.
+- **Say when the session is slipping, and hand off first.** When the session has grown long, or
+  you can no longer clearly recall what was done earlier in it, say so in your reply, and before
+  anything else write a short `HANDOFF.md` at the root of the current checkout, replacing any
+  earlier one: the goal, what is done, what is left, the key files and the open questions, enough for a new
+  session to continue from that file alone. `HANDOFF.md` is gitignored; never commit it.
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. It keeps what applies to every change; the details of each area live in `docs/agents/`,
+linked below. A linked file is not loaded on its own: read it before you change that area.
 
 ## What this is
 
-Sirio — a native app for macOS, Linux and Windows (Rust, [gpui](https://github.com/zed-industries/zed)) for running multiple AI coding agents (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) side by side, one sidebar per project, one terminal per git worktree. **macOS is the reference release platform** — it gates every release, with Linux and Windows released behind it; see `docs/superpowers/specs/2026-08-29-macos-release-platform-design.md`. The macOS release job runs on a GitHub-hosted `macos-15`, pinned rather than `macos-latest` because the Zig 0.15.2 tarball cannot link on macOS 26 (see the Zig step in `build-release.yml`), and publishes a signed, notarized DMG beside the Linux AppImage and the Windows installer, with the signed manifest served from `dl.sirioai.app/<channel>.json`. A *stable* `v*.*.*` tag needs a hand-written `docs/release-notes/<version>.md` and a tag matching `rust/Cargo.toml` (`Scripts/check-release-version.sh` refuses otherwise). The macOS code paths are deliberate and specific (the libproc process walk in `sirio_activity`, `getpeereid` peer identity in `sirio_control`, a native `NSStatusItem` tray in `sirio`, the TCC permission probe in `sirio_privacy`). Originally a macOS/Swift app (itself a fork of Orca with reduced scope); the Swift app was retired once this Rust/gpui port covered its inventory. Its final commit is `5430d7bfdb4a295be8ce072526ae5108259b80f8`; read any of its source with `git show 5430d7bfdb4a295be8ce072526ae5108259b80f8:<path>`, or check it out with `git worktree add <dir> 5430d7bfdb4a295be8ce072526ae5108259b80f8`. Terminal rendering is built on `libghostty-vt`, with `portable-pty` supplying the PTY.
+Sirio — a native app for macOS, Linux and Windows (Rust, [gpui](https://github.com/zed-industries/zed)) for running multiple AI coding agents (Claude Code, Codex, OpenCode, Pi, Oh-My-Pi) side by side, one sidebar per project, one terminal per git worktree. **macOS is the reference release platform** — it gates every release, with Linux and Windows released behind it; see `docs/superpowers/specs/2026-08-29-macos-release-platform-design.md`. The macOS code paths are deliberate and specific (the libproc process walk in `sirio_activity`, `getpeereid` peer identity in `sirio_control`, a native `NSStatusItem` tray in `sirio`, the TCC permission probe in `sirio_privacy`). Originally a macOS/Swift app (itself a fork of Orca with reduced scope); the Swift app was retired once this Rust/gpui port covered its inventory. Its final commit is `5430d7bfdb4a295be8ce072526ae5108259b80f8`; read any of its source with `git show 5430d7bfdb4a295be8ce072526ae5108259b80f8:<path>`, or check it out with `git worktree add <dir> 5430d7bfdb4a295be8ce072526ae5108259b80f8`. Terminal rendering is built on `libghostty-vt`, with `portable-pty` supplying the PTY.
 
 ### External references
 
@@ -26,158 +42,6 @@ Scripts/ci.sh    # -> prints "CI OK" if everything passes
 # additionally covers and why some of its stages are allowed to SKIP or report BLOCKED.
 Scripts/ci-linux.sh
 
-# Live end-to-end test of the update chain: signs a manifest, serves it over
-# loopback and drives a probe compiled the way the release job compiles the app.
-# Publishes nothing and touches no installed copy. SIRIO_UPDATE_E2E_VERBOSE=1
-# prints each stage the probe reported.
-Scripts/Tests/test-update-e2e.sh   # -> prints "UPDATE E2E OK"
-
-# The update card in a real, isolated Sirio compiled as Nightly against a
-# loopback manifest: the launch card, Restart to update relaunching into the
-# swapped stand-in AppImage (stage chain), every card state, Later and the
-# indicator, the agent warning, the keyboard and focus (stage ui).
-# --stage chain|ui|all (all runs chain, then ui); --display :N is required
-# unless --state-only, and must be an Xvfb this user started, never $DISPLAY;
-# --out-dir DIR, --appearance light|dark.
-Scripts/Tests/test-update-ui-e2e.sh   # -> prints "UPDATE UI E2E OK"
-
-# The host foundation: a real sirio-host started detached, adopted, killed
-# around, idled out and drained across a protocol major; --out-dir DIR keeps
-# every host's log and state; SIRIO_HOST_E2E_VERBOSE=1 prints each probe line.
-Scripts/Tests/test-host-e2e.sh      # -> prints "HOST E2E OK (<n> cases, <s>s)"
-# Whether a detached process survives its parent's world, row by row.
-Scripts/Tests/probe-host-detach.sh  # -> prints "DETACH PROBE OK"
-
-# The host's terminal sessions (SP2) with a real sirio-host held by a real client,
-# driven only through the term.* verbs; one fresh data root per case. --out-dir DIR
-# keeps each case's host logs, state files and transcript; SIRIO_TERM_E2E_VERBOSE=1
-# prints each probe call.
-Scripts/Tests/test-term-e2e.sh      # -> prints "TERM E2E OK (<n> cases, <s>s)"
-# The app end to end: a debug sirio on an isolated display adopting or starting a
-# real host, killed, quit and relaunched, observed through sirioctl and the host's
-# probe. --out-dir DIR keeps logs, state and PID-matched captures; --state-only takes
-# no captures (macOS runs that way); --xvfb or --display :N picks the display (Linux);
-# --only N[,N...] runs some cases and prints "HOST SESSIONS E2E PARTIAL" instead.
-Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> cases, <s>s)"
-# The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
-# socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
-# mount kept out of a pane, quit and relaunch, every stub agent's hooks, the skill,
-# SIRIO_WORKTREE_ID and the flags sirioctl offers. Linux runs it with --xvfb or
-# --display :N; --state-only skips cases 4, 4c, 5, 6 and 10 and is what macOS runs.
-# --out-dir DIR keeps the transcript, logs and env dumps; --only N[,N...] prints
-# "SIRIOCTL E2E PARTIAL"; --mutate claude-prompt-hook is case 6's mutation check.
-Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
-
-# The chat's session panel column in a real, isolated Sirio: a stub `claude`
-# (Scripts/Tests/stubs/session-panel/claude over claude_fixture.py's session_panel
-# mode) and the fake forge, asserted on `surface.chat.read`'s `sessionPanel`:
-# Environment, the Context fold (asked on open, a plugin node, the CLAUDE.md row
-# opening a file tab), Connectors (reconnect, sign in), the Change request card, the
-# shared rate-limit pause and the open state across a relaunch. The trace scenarios
-# (trace_live, trace_cost, trace_interrupt, trace_death, trace_hang,
-# trace_subagent_permission, trace_reveal, trace_tab, trace_idle, trace_keys) use
-# Scripts/Tests/stubs/trace/claude, the fixture's trace mode, whose scripted turns the
-# first word of a prompt picks (TRACE_STEP_MS paces them): agents and a nested agent, a
-# wait and its reveal, the cost of a second turn, Stop, a CLI that dies, a call that never
-# reports, a subagent's permission, the Trace tab across a worktree switch, a relaunch
-# and its chat's close, the frames the trace asks for (SIRIO_PERF_TRACE) and real X
-# clicks and keys on the tab. Each scenario is a fresh Sirio; --state-only skips the
-# captures; --display :N is a private Xvfb (at least --window-size, default 2200x1000)
-# with Mesa's lavapipe, and trace_tab and trace_idle need one (--state-only with it paints
-# but takes no captures), trace_keys a framed run at --window-size 2200x1000;
-# --appearance light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL".
-Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
-
-# Live end-to-end test of the forge layer (sirio_forge): the token transport
-# and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
-# transcript and the fake forges' request logs; SIRIO_FORGE_E2E_VERBOSE=1
-# prints every probe answer.
-Scripts/Tests/test-forge-e2e.sh    # -> prints "FORGE E2E OK"
-
-# The change request view and tab in a real, isolated Sirio against the fake
-# forge, over the control socket; --state-only skips the window captures.
-Scripts/Tests/test-forge-ui-e2e.sh  # -> prints "FORGE UI E2E OK"
-
-# A change request's diff, the editor hand-off (local file or read-only
-# snapshot, across a quit and relaunch) and the fetch with its failures,
-# against a bare repository and the fake forge; includes unified/split review
-# threads, resolved folds and outdated sections; same flags as above.
-Scripts/Tests/test-forge-diff-e2e.sh   # -> prints "FORGE DIFF E2E OK"
-
-# The Changes surface on Ely against a real repository: unified and split,
-# git failing and recovering, the in-window Discard confirmation (confirmed
-# through the debug-only `surface changes confirm`); same flags as above,
-# plus --appearance light|dark.
-Scripts/Tests/test-changes-e2e.sh   # -> prints "CHANGES E2E OK"
-
-# A project whose disk is unplugged between launches: kept with its worktrees
-# and tabs while the disk is away, whole again once it is back; --out-dir DIR,
-# --display :N adds two PID-matched captures.
-Scripts/Tests/test-unplugged-volume-e2e.sh   # -> prints "UNPLUGGED VOLUME E2E OK"
-
-# The Secondary pane on demand and the right panel's Open list in a real,
-# isolated Sirio: one centre pane at launch, the list and its Chat
-# expansion, a pane that comes and goes with its tabs, across a quit and
-# relaunch; same flags as test-changes-e2e.sh.
-Scripts/Tests/test-open-list-e2e.sh   # -> prints "OPEN LIST E2E OK"
-
-# Acting on a change request: every write of sirio_forge on the wire (the token
-# transport and the real gh/glab), then the tab's actions in a real, isolated
-# Sirio driven by the debug-only `surface change-request act` verb. --stage NAME
-# runs one stage (wire-github, wire-gitlab, failures, merge, metadata, cli,
-# scopes, ci, ui); ci covers re-runs and job logs. --state-only skips captures;
-# --appearance light|dark seeds the isolated app's appearance.
-Scripts/Tests/test-forge-actions-e2e.sh   # -> prints "FORGE ACTIONS E2E OK"
-
-# Checking a change request out into a worktree (change requests C1): same
-# repository, forks that accept and refuse pushes, a gone branch and a closed
-# request, reuse with fast-forward, refusals and the pinned card, against bare
-# repositories and the fake forge; then handing it to an agent (C2): stub CLIs
-# on PATH for every adapter, every purpose on GitHub and GitLab, the chat, the
-# warning, the refusals and a worktree switch mid-hand-off; same flags as the
-# other forge E2Es.
-Scripts/Tests/test-change-request-handoff-e2e.sh   # -> prints "HANDOFF E2E OK"
-
-# Ely's Tabs and git badges with Sirio's theme, on a private Xvfb with
-# Mesa's lavapipe: PID-matched captures, a click per tab, the badge tooltip,
-# dark and light (docs/testing/ely-forge-probe.md).
-Scripts/Tests/test-ely-forge-probe.sh --xvfb   # -> prints "ELY FORGE PROBE OK"
-
-# The selection bezel-markdown paints (a chat response, the Markdown Preview):
-# a selected document whose rows soft-wrap, break and wrap a code span, on a
-# private Xvfb; fails when any row's wash starts after its first glyph, the
-# defect the vendored bezel_markdown fixes (rust/vendor/README.md).
-Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SELECTION PROBE OK"
-
-# The horizontal bar bezel-markdown draws under a fence or a table wider than
-# its column (the vendored change of rust/vendor/README.md): a real xdotool
-# drag of each thumb to the end, the fence's last glyph clear of the edge, a
-# second document left unscrolled, and the press kept from the host's own
-# handler (the chat starts a selection there); dark and light.
-Scripts/Tests/test-markdown-scroll-probe.sh --xvfb   # -> prints "MARKDOWN SCROLL PROBE OK"
-
-# The file tab's editor (Ely's CodeEditor under sirio_ui::file_view) in a real,
-# isolated debug Sirio on a private Xvfb, driven through the debug-only
-# `sirioctl surface editor` verbs, real X keys and clicks, the Settings page and
-# the files on disk, with a fake language server (Scripts/Tests/fake_lsp.py):
-# editing, CRLF, disk conflicts, find and replace, hover and definition, the
-# breadcrumb, snapshots, git marks, the status row and its bell, the worktree
-# drawer (Problems, Search, Replace all) and every Editor preference.
-# --xvfb or --display :N picks the display (never your own $DISPLAY);
-# --state-only takes no captures; --appearance light|dark; --out-dir DIR keeps the
-# transcript and the PID-matched captures; --only NAME[,NAME...] runs some
-# scenarios and prints "EDITOR E2E PARTIAL" instead; --no-file-watch starts the
-# app with SIRIO_NO_FILE_WATCH=1 (as macOS has no watcher) and is meant for
-# `--only replace_mixed`, which then proves Replace all tells the open tabs itself.
-Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
-
-# The editor's hosting hooks on a real frame, on a private Xvfb with Mesa's
-# lavapipe: the host's per-line colour (and Ely's own lexer kept out), a git mark,
-# a diagnostic, the gutter, and the events a host hears, each from a real xdotool
-# gesture. --xvfb or --display :N, --out-dir DIR, --no-build,
-# --no-software-vulkan.
-Scripts/Tests/test-ely-editor-probe.sh --xvfb   # -> prints "ELY EDITOR PROBE OK"
-
 # Iterate on one crate only
 cd rust && cargo test -p <crate>
 
@@ -192,613 +56,72 @@ cd rust && cargo nextest run -p sirio_agents --test hooks_live --run-ignored onl
 
 # Dev build+launch loop: cargo build -> kill any running instance -> relaunch.
 Scripts/build-dev.sh
-
-# Release (macOS). Each stage takes the previous stage's artifact, so any of
-# them can be run by hand against a local build. CODESIGN_IDENTITY must name a
-# Developer ID Application identity.
-Scripts/check-release-version.sh v0.6.0          # tag vs rust/Cargo.toml
-Scripts/set-workspace-version.sh <version>       # what the nightly job compiles in
-Scripts/build-app-bundle.sh <binary> <version> build/Sirio.app <sirio-host-binary> <sirioctl-binary>
-Scripts/build-dmg.sh build/Sirio.app Sirio build/Sirio-<version>.dmg
 ```
 
-Both release channels go through `.github/workflows/build-release.yml`: `release.yml`
-calls it for a `v*.*.*` tag (Stable — needs a hand-written `docs/release-notes/<version>.md`,
-see its README) and `nightly.yml` from `main` on a schedule (Nightly — stamps
-`<workspace>-nightly.<YYYYMMDDHHMM>`). Both need the two repository settings in
-`docs/release-signing.md`; the manifest lands on the `gh-pages` branch, which #312 wires
-to `dl.sirioai.app`.
-
-`rust/target/` is gitignored, generated by `cargo`. `Scripts/ci.sh` and `Scripts/ci-linux.sh` are two tiers of the same gate, not duplicates that can drift silently: `Scripts/ci.sh` runs only what is verified clean on this tree today (`cargo build --workspace --all-targets`, then `cargo nextest run --workspace` — see the comment at its own top for exactly which checks it deliberately leaves out and why), `Scripts/ci-linux.sh` is the comprehensive one. The tests run under [nextest](https://nexte.st) rather than `cargo test` for two reasons: cargo runs this workspace's 45 test binaries strictly one after another, so the two slow ones dominate the wall clock while the other 43 wait at idle cores; and a test that owns its own process cannot be tripped by a neighbour sharing one, which is where several of this gate's macOS failures came from. `rust/.config/nextest.toml` holds the profiles, the PTY test group and the release gate's skip list, each written next to the reasoning for it.
-
-Anything that builds `sirio_terminal` (both gates, `cargo build/test --workspace`, any `-p sirio_terminal` command) needs **Zig exactly 0.15.2** on PATH: `libghostty-vt-sys` shells out to `zig build` and upstream pins that version exactly — a *newer* Zig fails too, so the upgrade reflex makes it worse; install 0.15.2 alongside and put it first on PATH. Both CI scripts fail fast with a clear message when it is missing or mismatched (#63). Optional: point `GHOSTTY_SOURCE_DIR` at a local ghostty checkout to skip the build script's network clone. `libghostty-vt-sys` is served from `rust/vendor/` rather than crates.io, so that the Zig build targets a portable `baseline` CPU instead of the build machine's own — v0.9.6's Windows binary could not start on a Zen 3 desktop without it; `rust/vendor/README.md` has the whole story. Note for whoever next reaches for a version bump there: **every upstream release carrying that fix also requires Zig 0.16.0**, so taking it means moving this pin at the same time, not separately.
+Anything that builds `sirio_terminal` (both gates, `cargo build/test --workspace`, any
+`-p sirio_terminal` command) needs **Zig exactly 0.15.2** on PATH: a *newer* Zig fails too, so
+install 0.15.2 alongside and put it first on PATH. Both CI scripts fail fast when it is missing or
+mismatched. Why, and what a version bump of the vendored `libghostty-vt-sys` drags with it:
+[`docs/agents/build-and-release.md`](docs/agents/build-and-release.md).
 
 `Scripts/ci.sh` additionally needs **cargo-nextest** on PATH — `cargo install cargo-nextest --locked`, or `brew install cargo-nextest` — and fails fast with that install line when it is missing, the same shape as the Zig preflight.
 
 On Windows, the MSVC toolchain is required; see `docs/prototypes/ghostty-pane-windows.md`.
 
+- [`docs/agents/e2e-tests.md`](docs/agents/e2e-tests.md): every end-to-end test and probe under
+  `Scripts/Tests/`, what it proves, its flags and the line it prints on success. Run the one for
+  the area you changed.
+- [`docs/agents/build-and-release.md`](docs/agents/build-and-release.md): the release platform,
+  the release commands and channels, the two CI tiers and why the tests run under nextest.
+
 ## Architecture
 
-### Crate boundaries (`rust/crates/`)
+There is no single crate everything funnels through: each concern lives in its own largely
+independent crate, and `sirio`'s `main.rs` wires them together. Each area links its notes in
+`docs/agents/architecture/`; read the file before you change that area. The rule after each link holds
+everywhere, read or not.
 
-```
-sirio_perf       (below everything — no deps at all, not even gpui, so any
-                    layer may instrument without inverting the graph. Imported
-                    by sirio_git, sirio_persistence, sirio_terminal,
-                    sirio_activity, sirio_forge, sirio_lsp, sirio_term_session,
-                    sirio_ui, sirio, and the vendored gpui_windows and
-                    ely-gpui-component)
-sirio_env        (below everything, beside sirio_perf — no dependencies. It is
-                    the user environment every child process starts in: the
-                    launch snapshot minus the launcher's own variables (APPIMAGE,
-                    APPDIR, ARGV0, OWD, SIRIO_LAUNCH_ENV), the stable `sirioctl`
-                    directory first on `PATH`, the per-pane names stripped
-                    (`SIRIO_WORKTREE_ID`, `SIRIO_PANE_ID`, `TILLER_PANE_ID`), and
-                    `for_child()` for a site that cannot spawn through `command`.
-                    Its dependents are sirio_acp, sirio_control, sirio_diagram,
-                    sirio_forge, sirio_git, sirio_lsp, sirio_project,
-                    sirio_registry, sirio_terminal, sirio_ui, sirio_usage and sirio.
-                    With the host's `term.env_exact` (`sirio_host_protocol::term`)
-                    a session's environment is exactly the client's map; a host
-                    without it gets that map plus an empty value for each app
-                    variable the user environment lacks, except `SHELL`
-                    (`sirio_env::host_create_env`).
-                    The panel resolver (`worktree_environment_resolver` in
-                    `sirio/src/main.rs`) sets `SIRIO_WORKTREE_ID` from the deepest
-                    worktree holding the pane's starting directory)
-    ^
-sirio_theme, sirio_project, sirio_git, sirio_persistence,
-sirio_activity, sirio_markdown, sirio_registry, sirio_release,
-sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram,
-sirio_forge, sirio_privacy, sirio_ipc, sirio_host_protocol,
-sirio_term_session
-                                (leaves — no local deps beyond sirio_perf and sirio_env;
-                                 sirio_theme takes `bezel-theme` (pinned
-                                 `=0.1.4`) and the vendored `ely-palette`;
-                                 sirio_ui takes the external `bezel` crate;
-                                 sirio_syntax takes `bezel-syntax` plus the
-                                 fifteen tree-sitter grammars bezel does not
-                                 carry; sirio_claude is Claude Code's own
-                                 stdio protocol as types and pure functions —
-                                 no process, no channels — which is what lets
-                                 sirio_agents, sirio_acp and sirio_usage all
-                                 take it without inverting the graph;
-                                 sirio_forge is GitHub and GitLab change
-                                 requests over GraphQL, with the token
-                                 handed in by its caller;
-                                 sirio_privacy is the macOS TCC permissions
-                                 as a pure model plus the one probe that asks
-                                 macOS, on the objc2 0.6 family gpui links;
-                                 sirio_ipc is the local transport — unix
-                                 socket or Windows named pipe, peer identity,
-                                 a process's start time — extracted from
-                                 sirio_control so the host shares it;
-                                 sirio_host_protocol is the host's wire as
-                                 types and pure functions — frames, version
-                                 negotiation, the liveness verdict — no I/O;
-                                 sirio_term_session is the terminal session
-                                 engine — PTYs, one resident `libghostty-vt`
-                                 terminal per session, the journal a resume
-                                 reads — with no GPUI; it takes `sirio_perf`,
-                                 `libghostty-vt` and `portable-pty`)
-    ^
-sirio_agents     (-> sirio_claude)
-sirio_usage      (-> sirio_claude)
-sirio_acp        (-> sirio_persistence, sirio_claude)
-sirio_terminal    (-> sirio_project, sirio_theme, sirio_ui, sirio_host_client, sirio_host_protocol, sirio_term_session, and `bezel` directly for its scrollbar)
-sirio_control    (-> sirio_acp, sirio_persistence, sirio_ipc, sirio_host_client, sirio_host_protocol)
-sirio_host       (-> sirio_ipc, sirio_host_protocol, sirio_term_session; the `sirio-host` binary)
-sirio_host_client (-> sirio_ipc, sirio_host_protocol)
-sirio_update     (-> sirio_control, sirio_registry, sirio_release)
-sirio_apply      (-> sirio_update)
-    ^
-sirio_ui         (-> sirio_acp, sirio_agents, sirio_diagram, sirio_forge, sirio_git,
-                      sirio_lsp, sirio_markdown, sirio_persistence, sirio_privacy,
-                      sirio_project, sirio_registry, sirio_syntax, sirio_theme,
-                      sirio_usage)
-    ^
-sirio            (the app: main.rs — the only crate that depends on everything above
-                    except sirio_host, which it never links (the boundary of the host
-                    section below), including sirio_terminal, sirio_control,
-                    sirio_host_client and sirio_activity, which sirio_ui itself does
-                    not touch)
-```
-
-`sirio_theme` holds Sirio's palette in Ely's vocabulary: `ThemeColors` is
-`{ ely: ely_palette::Palette, sirio: SirioColors }`, with values frozen in
-`presets.rs` from what bezel's `Theme::branded` and Sirio's ladders produced
-(`docs/THEME-PROVENANCE.md`). `sirio_ui::ely` feeds Ely's theme and
-bezel-theme's registry from the `Theme` global; `Theme::to_bezel_theme` still
-derives bezel's own tokens for bezel widgets and bezel-markdown. A bezel bump
-therefore changes bezel widgets and Markdown, not Sirio's tokens. `ThemeMode`
-is bezel-theme's `AppearanceMode` re-exported; the only other appearance enum
-is `sirio_persistence::AppearanceMode`, which carries the serde contract, and
-`sirio`'s `main.rs` holds the single conversion between them.
-
-There is no single crate every other crate funnels through the way Swift's `TillerCore` worked — each concern (git, persistence, agent adapters, activity detection, terminal, control socket, UI primitives) lives in its own largely-independent leaf or near-leaf crate, and `sirio`'s `main.rs` is the integration point that wires `PaneRegistry` (`sirio_control`), `AgentActivityModel` (`sirio_activity`), and the ACP/agent/git/persistence layers into the `sirio_ui` components it renders. Run `cargo build -p <crate>` to check one crate compiles in isolation before assuming a change is layered correctly.
-
-### Performance trace (`sirio_perf`, `sirio/src/native_perf.rs`)
-
-`sirio_perf` is off unless `SIRIO_PERF_TRACE` names a file that does not yet
-exist. Unset, `event` and `span` are a `OnceLock` read and a branch, which is
-why they sit directly in hot `render` bodies. Set, one writer thread drains a
-bounded channel (32768) to a TSV; a full channel drops events and reports how
-many in a once-a-second `health` row named `trace.dropped` (the count rides in
-the `entity` column), so **a trace is allowed to lose events and says when it
-did** — read those rows before trusting a count. Instrumentation is
-deliberately shallow: a `span` at the top of a `Render::render`, an `event`
-where something decides to `notify`. The vendored `ely-gpui-component` takes
-`sirio_perf` for the code editor's `CodeEditor.*` spans (the render and its
-steps, each with the editor's entity id in the `entity` column).
-
-**Every `name` is a content-free `&'static str`** — that is the crate's one
-hard rule, pinned by a test that asserts a fixture's text never reaches the
-trace (`acp_redraw_trace_names_notifications_without_recording_content`, in
-`sirio_ui`'s `chat`). Never interpolate a title, a path, a prompt or scrollback
-into a label; the `entity` u64 is how a row is told apart from its siblings.
-
-Two separate switches, easily confused: the env var above turns the TSV on in
-any build, while `sirio`'s `perf-native` **cargo feature** additionally compiles
-`native_perf.rs`, which exports GPUI's bounded foreground journal (frames,
-input, task polls) as JSON and pulls in `gpui/profiler` plus a pinned
-`bezel-zed-scheduler`. A default build has no journal at all. `Scripts/perf/`
-holds the harness and report scripts; `docs/perf/` holds the captures, each
-recording its own commands, hashes and bounds.
-
-### Release, update, apply — three crates, one hand-off each
-
-`sirio_release` owns the signed-artifact format: the channel manifest, the accepted
-Ed25519 key set, and `AcceptedKeys::verify` (recompute SHA-256, then `verify_strict`).
-`sirio_update` reads the manifest for the compiled-in channel (`sirio_control::
-ReleaseChannel::RELEASE_CHANNEL`), downloads, and verifies — and **stops there**,
-handing back a `VerifiedUpdate { version, notes, path, platform }`. `sirio_apply` is the
-only crate that touches the running installation. The boundary is deliberate: a `Dev`
-build never reaches the network at all (`updates_enabled()` is false), and refusing to
-apply is a real outcome — `sirio_apply` rejects an install it cannot self-locate rather
-than guessing a path. Every packaging file reads its identity from `Scripts/identity.sh`;
-`SIRIO_INNO_APP_ID` must never change, because Inno decides upgrade-in-place by comparing it.
-
-Three things in that chain are `option_env!`, baked in at build time and therefore
-invisible to any unit test: the manifest URL (`SIRIO_UPDATE_MANIFEST_URL`, honoured only
-in debug builds so a shipped Stable binary has no test endpoint), the channel
-(`SIRIO_RELEASE_CHANNEL`) and the accepted key set (`SIRIO_RELEASE_ACCEPTED_KEYS`). A
-build that never received them behaves exactly like an updater with nothing to report,
-which is the failure this chain is least able to notice on its own.
-`Scripts/Tests/test-update-e2e.sh` is the answer: it signs a manifest with the real
-`sirio-release` CLI, serves it over loopback, compiles
-`rust/crates/sirio_apply/examples/update_probe.rs` the way the release job compiles the
-app, and drives the real `Updater` through check → download → verify → apply — including,
-on Windows, the real silent spawn of the staged extensionless PE. Run it after any change
-to the three crates or to the compiled-in environment; `Scripts/ci-linux.sh` runs it as a
-stage.
-
-### Change requests: one GraphQL layer, two transports (`sirio_forge`)
-
-`sirio_forge` reads GitHub pull requests and GitLab merge requests —
-"change requests" — through GraphQL on both forges, and parses each forge's
-answers once. How the request travels is the user's *means*: `CliTransport`
-hands it to `gh api` / `glab api --include`, which own authentication;
-`TokenTransport` sends it with `ureq` and the platform certificate verifier,
-so a self-managed forge behind a corporate CA verifies. The token is handed
-in by the caller and never stored or logged by the crate. GitLab queries
-that carry a merge request summary have a baseline variant, used from the
-first `Field '…' doesn't exist` onward, because GraphQL rejects a whole
-query that names a field an older server lacks. `SIRIO_FORGE_TEST_ENDPOINTS`
-points hosts at loopback in debug builds only, and `SIRIO_FORGE_FETCH_TIMEOUT_MS`
-shortens the fetch's 120 s bound the same way. `Scripts/Tests/test-forge-e2e.sh`
-proves the seam; `tests/forge_live.rs` notices the day a query stops
-matching the live schema (it SKIPs without credentials and is off both
-gates). `docs/superpowers/specs/2026-09-27-change-requests-design.md` has the
-design.
-
-The UI reads through one seam, `sirio_ui::forge_source::ChangeRequestSource`,
-a GPUI global the host sets once (`sirio/src/forge.rs`, `ForgeHub`): the
-right panel's fifth view and the `ChangeRequest` tab in the Secondary half
-never see a token or a setting. `ForgeHub` owns the `forge.hosts` setting —
-a Settings-screen save re-applies the stored value — and keeps tokens in the
-credential store under `forge:<host>`. The list asks nothing before it is
-shown and refreshes only while visible. A rate limit pauses every read until
-its reset (a minute when the forge names none), and the list looks again by
-itself when it ends. `surface.change_requests.search` sets the list's real
-search field, including its debounce. A restored tab loads when shown.
-
-The detail tab's *Files* is the diff, read by `sirio_git::range_*` between
-the commits `sirio_forge::Revisions` names. When either is not local,
-`ForgeHub` makes them local with one non-interactive `git fetch` into
-`refs/sirio/change-requests/<remote>/<N>/{head,base}` — invisible to
-History's `--branches`, visible to an external `git log --all`. The fetch
-runs with git's own credentials (a helper or an ssh key), never with the
-token Sirio holds; when the target branch is gone from the forge the head
-ref is fetched alone. Those refs only anchor objects against `git gc`, and
-are swept — at startup, on a worktree switch and when a tab that held them
-closes — of whatever no tab, open or parked with another worktree, holds.
-*Open in editor* opens the local file when the worktree is at the head, and
-a read-only snapshot tab otherwise; a persisted snapshot's sha and path are
-refused before they reach a label or a path. Its Discard asks inside the
-window (an Ely `Dialog`), and a row's right-click offers *Copy path* and, on
-a change request, *Open on the forge*.
-`docs/superpowers/specs/2026-09-28-change-request-diff-design.md` has the
-design; `Scripts/Tests/test-forge-diff-e2e.sh` proves it.
-
-**Acting on a change request** goes through one door, `ForgeClient::act(number,
-&Action)` (`sirio_forge::action`). It reads the change request's id, state and
-permissions afresh, refuses in `check_action` — a pure function — whatever the
-forge would refuse, and only then sends the mutation: GraphQL on both forges,
-and GitLab's approval as REST (`Transport::request`; GitLab has no approve
-mutation). The answer is read as a *write's*: GitHub refuses with HTTP 200 and
-a `null` payload, GitLab with the reason in the payload's `errors`, and the
-interpreter that reads queries would call either a success. Sirio never
-retries a write; after any write the tab re-reads the forge instead of patching
-its own state, and a connection dropped after the send reads as "could not
-confirm". In the UI, `ChangeRequestTab::perform` is the one function the
-buttons, the composer and the edit fields call, and the control socket's
-`surface change-request act` verb calls it too — **in debug builds only**: a
-release build answers "unknown method" and does not list it, so nothing that
-writes to a forge is reachable over the socket. Two live tests, the
-`…_accepts_every_document_sirio_writes_with` pair, notice a mutation that stops
-matching the forge's schema: they send every document with an id that names
-nothing.
-`docs/superpowers/specs/2026-09-29-change-request-actions-design.md` has the
-design; `Scripts/Tests/test-forge-actions-e2e.sh` proves it.
-
-**CI** (slice B2c, spec §15): a check that is a GitHub Actions or GitLab CI
-job carries a `CheckJob` (job and run ids, whether the forge would retry it).
-*Re-run* and *Re-run failed* are `Action::Rerun` through `act` — GitHub REST,
-GitLab `jobRetry`/`pipelineRetry`; GitLab retries per pipeline, so its *Re-run
-failed* sits on the pipeline row, not on a stage. `ForgeClient::job_log` reads
-the job's status, then its log: GitHub answers with a redirect to a signed
-URL on another host, which the token means fetches itself with **no
-credential** (`RestRequest.log` turns redirects off for it) and `gh` follows
-the same way; `gh api` prints terminal escapes only with
-`--allow-escape-sequences`. Only the last 4 MiB are kept, cut at a line, and
-the tab says so. `sirio_ui::ansi_log` turns the text into styled lines and
-folding groups without a terminal; `CiLogTab` (`TabKind::CiLog`, `"ci_log"`)
-draws it in a `uniform_list` and reloads a running job's log every 5 s only
-while it is drawn. The `ci` stage of `test-forge-actions-e2e.sh` proves the
-re-runs and log state; drawing and visible reload require its framed run.
-
-**Review threads** (B3) are read by `ForgeClient::review_threads` — GitHub
-`reviewThreads`, GitLab diff `discussions`, a GitLab thread outdated when its
-position names an older head — and drawn and written in the *Files* diff:
-`ChangesTab` takes forge-neutral `Annotation`s (`sirio_ui::diff_annotations`)
-and one view per key, splits a context band so an anchored line is never
-hidden, and puts a thread whose line is not drawn at the top of its file.
-`ChangeRequestTab` owns the `ThreadView`s and replaces the Conversation's
-line-comment footnotes with one entry per thread. Threads are read on first
-load, a manual refresh, entering *Files* when idle and after a write, never
-by the CI timer. The `threads` scenarios of `test-forge-diff-e2e.sh` prove it.
-B3b writes through the same door: `Reply`, `Resolve` and `LineComment`
-(GitHub REST review comments, which publish at once; GitLab REST
-`discussions`, a range with `line_range` and GitLab's `line_code`), each
-reply or resolve preceded by a fresh read of that thread's permissions.
-`ChangesTab` draws a gutter "+" only when its owner calls `set_commentable`,
-on the lines within 3 of a change (`diff_annotations::commentable`), and
-emits `CommentOn`; the change request tab owns the one composer and every
-thread card's fields.
-`surface change-request thread --compose / --cancel / --suggest` serve every
-build; `act reply|resolve|unresolve|line-comment|edit-thread-comment|review-add|
-review-submit|review-discard|review-discard-confirm|draft-edit|draft-delete`
-are debug-only. The `threads` stage of `test-forge-actions-e2e.sh` proves the
-wire and `scenario_thread_writes` of `test-forge-diff-e2e.sh` the UI.
-
-B3c drafts a review **on the forge**. On GitHub that is the pending review:
-`addPullRequestReview` starts it with its first line comment in the same
-mutation. On GitLab it is the draft notes, over REST because GraphQL has none,
-and `bulk_publish` followed by B2's verdict submits them; a verdict that fails
-after the publish is a warning. `ChangeHeader.draft` is read with the header,
-and `act` reads it afresh before every review write, so *Start a review* joins a
-draft started elsewhere. The strip, the submit dialog and the discard
-confirmation live in `change_request_tab/review.rs`, and B2's *Approve* /
-*Request changes* submit the draft while one exists. A ```` ```suggestion ````
-block draws as a small diff whose "before" lines are the end of the thread's
-`diff_hunk` (`change_request_tab/suggestion.rs`); applying stays on the forge.
-Outdated threads have a `ThreadView` each, hosted by their file's
-`OutdatedView`, so they take writes and keep a reply across a re-read. `act
-review-add|review-submit|review-discard|review-discard-confirm|draft-edit|draft-delete`
-are debug-only; `thread --suggest` serves every build. The `review` stage of
-`test-forge-actions-e2e.sh` proves the wire, and `scenario_review` of
-`test-forge-diff-e2e.sh` the UI. The debug-only `review-open-submit` helper
-opens the submit dialog without sending, for the framed test.
-
-**C1** checks a change request out into a worktree. `sirio_ui::handoff`
-decides, purely, the local branch (`<source_branch>`, `<owner>/<source_branch>`
-for a fork, or `pr-<N>`/`mr-<N>` when the head repository is gone), the push
-target (the listed remote, the viewer's own fork remote when a project remote
-already names the head repository and the viewer may push to it (and the local
-branch of the source name is free or tracks that remote), a `sirio-<owner>-<number>` remote when the
-viewer may push to a fork, or none — read-only) and whether to reuse, create or
-refuse. Each fork change request has its own remote, because a remote's push
-mapping is per remote: two change requests sharing one would make a plain
-`git push` from either worktree push both branches. The remote is removed with
-the last linked worktree, and only when its single push mapping names that
-worktree's branch. `ForgeHub::checkout`
-(`sirio/src/forge/checkout.rs`) fetches the head through B1's
-`RevisionFetcher` first, so nothing is created before a refusal, then runs the
-`sirio_git` steps off the GPUI thread. A fork's local `<owner>/<branch>` gets
-`remote.sirio-<owner>-<number>.push = refs/heads/<owner>/<branch>:refs/heads/<branch>`,
-because a plain `git push` under `push.default=simple` would not reach
-`<branch>`. A reused worktree is fast-forwarded only when it is clean and on
-the change request's branch; one switched elsewhere, dirty or diverged is left
-as it is and the status line says why. A worktree whose folder was deleted
-outside git is unregistered (one entry, never a prune) and created again. The
-link worktree → change request lives in `sirio_persistence` (`change_request_link`,
-v22, keyed by the exact path the sidebar uses, with the branch it was made for;
-the card honours it only while the worktree is on that branch), and the card
-reads it with `ForgeClient::summary` before the branch match. *Open in a worktree* is in the tab's action bar and the list
-row's menu (which opens the tab); the outcome is the tab's checkout status
-line. `surface change-request checkout` acts on the open tab and serves every
-build because it touches only local git. `test-change-request-handoff-e2e.sh`
-proves it.
-
-**C2** hands that worktree to an agent. *Hand off to an agent* (the tab's
-action bar and the list row's menu), a thread card's *Fix with agent* and a
-failed check's open one Ely dialog (`change_request_tab/handoff.rs`): purpose
-(`comments`, `ci` — only when CI failed —, `review`, `resume`), agent or none,
-terminal or chat, instructions, and the worktree C1 would use, previewed with
-C1's plan in a dry mode. `ForgeClient::context` reads what the purpose needs
-**before** git is touched, so a failed or rate-limited read creates nothing;
-then C1 checks out and `sirio_ui::handoff::context::render` writes
-`.sirio/handoff/<N>-<purpose>-<YYYYMMDD-HHMMSS>.md` (excluded through the common
-dir's `info/exclude`, ten kept, a symlinked `.sirio` refused). A worktree C1
-reuses on another branch or a detached HEAD refuses the hand-off (a review
-excepted); a dirty or diverged one gets a note. Every forge text — bodies,
-comments, hunks, paths, names, logs, a log's error — loses its control
-characters, shows bidi controls as `<U+…>`, and sits in an
-````untrusted id="<nonce>" source="…" author="@…"```` block whose fence is one
-backtick longer than the text's longest run (at least four), followed by
-Sirio's line `(end of untrusted block <nonce>)`; the nonce is random per file,
-so forge text cannot fake a block's end even to a model that miscounts. Sirio's
-own lines name no forge text, not even the branch to push to, and a link stands
-outside a block only as printable ASCII. The user's instructions section is
-always written. The file is cut at 1 MiB, oldest first, and every part that
-cannot be dropped is bounded. `prepare` and `install_skill` read and write the
-worktree only through `sirio_agents`' `safe_write`, which refuses a committed
-symlink anywhere on the path. A terminal agent is
-launched as a restored pane is, `prepare` then `command_with_prompt` (every CLI
-takes the two-line prompt as an argument; Windows folds it to one line for
-`cmd`), and `TerminalView::start` runs it before its tab is drawn; a chat gets
-the prompt through `Chat::send_when_ready`. The agent starts in the hand-off's
-worktree even if the user switched meanwhile. Agent and surface are remembered
-per project (`handoff_choice`, v23). `surface change-request handoff` serves
-every build and acts on the open tab; a start sent while the preview loads is
-queued (`handoff_queued`). The C2 scenarios of
-`test-change-request-handoff-e2e.sh` prove it with stub CLIs on PATH, and
-`sirio_agents/tests/initial_prompt_live.rs` notices the day a CLI stops taking
-the prompt.
-
-**Merge, reviewers and labels** (B2b) go through the same door.
-`Action::Merge` carries the head the user saw when the confirmation opened, and
-`act` refuses `HeadMoved` before sending, ahead of the forge's own
-`expectedHeadOid` / `sha` guard. The strip is drawn from `MergeCapability`,
-whose `Unreported` verdict draws nothing. GitHub deletes the branch with a REST
-`DELETE` after a successful merge, never for a fork's head; if only that call
-fails, the outcome is a merge with a warning. GitLab deletes it with a flag of
-the accept, offers no rebase (its method is per project), and cancels an
-auto-merge over REST, since GraphQL has no mutation for it. A reviewer or label
-picker sends one `Set*` when its popover closes; that relies on two vendored
-Ely hooks, `Popover::on_close` and `Popover::open` (`LOCAL-CHANGES.md`). The
-`merge`, `metadata` and `ui` stages of `test-forge-actions-e2e.sh` prove it.
-
-### Languages: one list, two independent answers (`sirio_syntax`, `sirio_lsp`)
-
-`sirio_ui::editor::Language` is the list of what Sirio recognises — twenty-three
-languages plus plain text, resolved from the extension, never from content. Two
-separate things hang off it, and they failed independently for most of the
-project's life:
-
-- **Colour** is compiled in. `sirio_syntax` holds one tree-sitter grammar per
-  language `bezel-syntax` does not carry, registered through bezel's own
-  `Lang::new` extension point so the spans are ordinary `HighlightKind`s and
-  reach `Theme::syntax_palette` with no second code path. A grammar crate
-  qualifies only if it reaches tree-sitter through `tree-sitter-language`
-  rather than naming a `tree-sitter` version of its own — two tree-sitters in
-  the graph are two unrelated `Language` types with one name.
-- **Navigation** needs a program on `PATH`. `sirio_lsp::LanguageTable::defaults`
-  names one server per language; naming it is not shipping it, and a command
-  that is not installed resolves to `LspError::NotInstalled`. Nothing is
-  *volunteered* about that — no card, ever, or there would be one on almost
-  every file. The context menu is the exception, because it is asked: it
-  names the missing program (`jdtls is not on PATH`) rather than describing
-  Sirio. The name reaches it through `lsp::Dead::NotInstalled` and
-  `FileContextFacts::missing_language_server`, and the failure path pushes the
-  facts a second time because the tab computed its own before anyone had
-  looked.
-
-The failure mode both halves share is silence: an unlisted language is detected,
-named in the status line, and then rendered as plain text with no action in its
-context menu — indistinguishable from a file with nothing to say. The three
-tests that make the lists agree are
-`sirio_ui`'s `every_language_the_editor_recognises_has_a_grammar`,
-`sirio`'s `every_language_the_editor_recognises_has_a_server`, and
-`sirio_syntax`'s `every_query_compiles_against_its_grammar`.
-`docs/superpowers/specs/2026-09-16-language-coverage-design.md` carries the table
-of which server each language names and why a missing one says nothing.
-
-### Markdown Preview: HTML, Mermaid, PlantUML (`sirio_markdown::expand_html`, `sirio_diagram`)
-
-The file view's Preview has no HTML engine. `expand_html` maps a GitHub-style
-subset of raw HTML onto the existing `Block`/`Inline` model and reduces the rest
-to text; `sirio_ui::markdown_preview` then turns lone images into picture blocks
-and diagram fences into SVG files in a per-user cache, which bezel's
-`BlockKind::Image` draws. gpui rasterises SVG images at 2× on its own, so the
-SVG is cached as rendered. Mermaid renders in-process
-(`mermaid-rs-renderer`, pinned `=0.3.1` because its version is part of the cache
-key). PlantUML follows `sirio_lsp`'s "a program on PATH" model — `plantuml` is
-found, never shipped — with one difference: a fence it cannot render gets a
-one-line note, because the author asked for a picture. The local run is
-sandboxed (`PLANTUML_SECURITY_PROFILE=SANDBOX`: no network, no local
-includes — only the embedded stdlib); PlantUML older than 1.2023.9 is refused
-with a note, because its sandbox profile is unsafe, and the optional server
-(`markdown.plantumlServer`) is off by default because it sends the source off
-the machine.
-`docs/superpowers/specs/2026-09-23-markdown-rich-preview-design.md` has the design.
-
-### Text you can select and copy (`sirio_ui::text_selection`, `selectable_markdown`)
-
-gpui paints a `&str`/`String`/`SharedString` child and does nothing else with it —
-no hitbox, no mouse handlers — and bezel has no selectable text, so **text drawn as a
-plain child cannot be selected**. Only the chat transcript, the file editor and the
-terminal had their own selection; everything else (Settings, change requests, banners,
-dialogs, the diff) was inert. Use `selectable_text(..)` where a string is shown to be
-read: it lays out exactly like the string it replaces, takes a drag, a double-click (one
-segment of a path or branch: `/` and `\` separate, `-` `.` `_` do not) and a triple-click
-(the whole line), and Ctrl/Cmd+C copies it. One
-selection exists at a time, in a `Global`; selecting moves focus into a sink (the
-workspace root's `root_focus`) so a terminal or composer is never handed a copy.
-
-- **Never inside something clickable** — a row, a button, a tab, a palette entry: a
-  press there fires the click on release even after a drag, and the I-beam would replace
-  the pointer. The titlebar's drag region is out too.
-- **Selection is per run of text.** A drag does not continue into the next label; the
-  chat transcript alone has a document-wide offset space. In a loop, give each item an
-  identity with `.id(..)` (the default is the call site), or two identical strings
-  select together.
-- **Ctrl+C must never be swallowed.** gpui dispatches a bound action *before* any raw
-  `on_key_down` and stops there unless the handler propagates, so `on_copy` declines
-  (`cx.propagate()`) whenever it has nothing to copy or the sink is not focused, and the
-  binding is scoped `!Terminal`. A terminal's Ctrl+C stays SIGINT.
-- Rendered Markdown outside the chat goes through
-  `Chat::render_markdown_document_with_link_override` → `SelectableMarkdown`, which
-  keeps a link's click when nothing was selected. The chat's own cards use the
-  transcript selection (`Chat::render_plain_text`) so Select All highlights what it copies.
-- The host wires three things: `text_selection::init`, `set_sink(root_focus)`, and
-  `.on_action(text_selection::on_copy)` on the root of **each** render branch (Settings
-  and the main shell). `text_selected_in_settings_is_copied_by_the_real_shell` and
-  `text_selected_in_the_main_shell_…` in `sirio` fail if any of them is missing.
-- Tests: host the view under `text_selection::testing::host`, then `copy_line` /
-  `copy_span` — a real drag and a real Ctrl+C against the real clipboard.
-
-### File editor on Ely (`sirio_ui::file_view`, vendored `ely-gpui-component`)
-
-The file tab draws and edits its code with Ely's `CodeEditor`, and the two halves keep a strict division: `CodeEditor` owns the text on screen and what the keyboard does, `Editor` (`sirio_ui::editor`) owns the disk (load, save, external change, conflict, snapshot) and the Markdown operations. Text flows `CodeEditor` → `Editor` on every `Changed`, and back through `reset_keeping_view` (a reload, a disk adoption; the caret and scroll stay) or `edit` (a Markdown op, one undo step) — `file_view/code_surface.rs` holds both directions, and `file_view/sync.rs` the minimal edit that carries a change across. The buffer is LF only: `sirio_markdown::Document` reads the file's line ending (`LineEnding`, re-exported from `sirio_ui::editor`), keeps it, and writes it back on save, and the code editor normalises a paste or an IME commit to LF so it never holds a `\r`. Colour is Ely's per-line highlighter hook fed by `sirio_syntax` (bezel's spans, `code_spans`) through a bounded per-line-text `SpanCache` that rotates once per render, so Ely's own lexer never colours a file; the git marks in the gutter are `sirio_git::diff_entry(.., 0)` (no context lines, `--inter-hunk-context=0`), fetched off the thread with one request in flight and one trailing re-run, and a mark opens its hunk in place. A breadcrumb row (the path, then the language server's symbols around the caret) and the find bar are docked above the code, in that order, not floating over it, and the status row below carries the branch, the server, the caret, indent, line ending, language and the notification bell; a snapshot (a change request's file at a revision) is read-only with one banner of Sirio's own (`without_read_only_banner`). Everything that is Sirio's own on top of Ely is a local change recorded in `rust/vendor/ely-gpui-component/LOCAL-CHANGES.md`, which also names the pinned revision (`e17e31a6`, not on upstream `main`), the ports from `main` and what is not vendored — read it before a sync, and keep each hook it lists (`select_in_place`, `reset_keeping_view`, `diagnostics`, the read-only banner, hard tabs, the pointer leaving the code). The editor's keys are Ely's, bound only in the `ElyEditor` context by `init_editor`; `ctrl-alt-up/down` stay Sirio's pane focus (add-cursor is `shift-alt-up/down`), an empty-selection Copy hands the chord on, and Escape is `SingleCursor`, which `FileView` captures to close find or an open hunk first. The performance record is `docs/perf/2026-10-ely-code-editor.md`: the cost that grew with the file's length is gone, and a constant 1.4–2.5 ms per typed or scrolled frame (median) over main remains, accepted; the one visible difference is that the minimap of a file taller than itself shows one sampled line per pixel row instead of blending every line. **The drawer** under the code (`sirio_ui::drawer`, `WorktreeDrawer`) is one per worktree, not per tab: Problems and Search tabs, `secondary-j` toggles it and `secondary-shift-f` opens Search (both in the `FileEditor` context, so Ctrl on Linux and Windows and Cmd on macOS), its height (default 240 px, 96 px minimum) and open tab are persisted in `editor_drawer` (v24, keyed by the worktree's path string) and a parked worktree keeps its drawer, problems and search across a switch. **Problems has one store**, `ProblemStore`, which feeds both the gutter marks of every open file view and the list: worktree-relative paths, every server's findings for a file, fed by each publish and by a view's load; a server that ends goes through `language_server_gone` and `LspSupervisor::forget`, and its findings vanish and it stops being named. Only *errors* open the drawer, by identity `(server key, worktree-relative path, message)` against a persisted seen set that moves only while Problems is shown (once, 250 ms after the last publish of a burst) and when the drawer closes (`ErrorAlarm`, spec §4.4); Problems draws at most 1 500 rows, built once per store change, and says how many more are not drawn (its tab label and toggles keep the exact counts, through the vendored `ProblemsPanel::counts`); it has three accepted costs, written there: an error the user saw, fixed while not looking and returning identically does not reopen it, a close landing between a server's clear and its republish reopens it once, and a quit inside the 250 ms pause after a burst seen in Problems reopens it once at the next launch. **Search** (`drawer::search_engine`) lists the worktree as `git ls-files -z --cached --others --exclude-standard` does, matches the whole LF-normalised text with Ely's `Finder` and `GlobFilter` (vendored, split out of `find_all`/`passes`), skips and counts files over 1 MiB, binary and non-UTF-8 (a listed name that is not UTF-8 included), and skips symlinks silently (never followed, so no text from outside the worktree reaches a result); it stops at 20 000 matches and says so, a dirty buffer is searched instead of its file, and results are not live: opening a hit re-checks the match against the target's current text and shows only its line when it moved. **Replace all** is literal (`$1` stays `$1`, as the in-file Replace), skips unsaved (the tabs dirty at the press, and again, through a live handle the workspace keeps current, immediately before each file is written), symlink, outside-the-worktree, read-only and not-a-file paths and names each in a report, leaves every byte outside a match as it was (a mixed-ending file included), keeps the file's mode through `write_atomically`, and is disabled while capped or with an empty field; macOS has no file watcher (`FileSystemEventMonitor` is unsupported there), so Replace all itself tells each open clean tab to adopt the new text through `check_external`, and the debug switch `SIRIO_NO_FILE_WATCH` (the E2E's `--no-file-watch`) reproduces that on Linux. `Scripts/Tests/test-editor-e2e.sh` and `Scripts/Tests/test-ely-editor-probe.sh` prove it, and what neither covers is checked by hand: macOS keys (and `Cmd+J` / `Cmd+Shift+F` in particular), `Ctrl+Shift+F` reaching the app on Windows (#374), a real input method (and the drawer's fields), and the ⚠ in Problems' label, which draws as a colour emoji on Linux.
-
-### Agent adapters (`sirio_agents`)
-
-Every supported CLI implements the `AgentAdapter` trait (`id`, `display_name`, `has_native_hooks`, `prepare`, `command`, `resume_command`). `sirio_agents::ALL` is the fixed list of 5 adapters, in display order. An adapter's ACP claim (`builtin_acp`) covers only its own binary's subcommand — verified, defaulting to `None`; everything reachable through a separate package resolves through `sirio_registry`. `prepare` writes only worktree-local files, its hook config and the skill, and **never** touches user-global config (`~/.claude/settings.json`, `~/.codex/config.toml`, etc.). The writers outside Sirio's own data are explicit buttons and two startup steps, never a pane. Settings → General → **Install Hooks** (`install_global_hooks`, a trait method defaulting to `NotSupported`) writes the hooks: Claude merges the five hook arrays into `$CLAUDE_CONFIG_DIR`/`~/.claude/settings.json`, Codex sets `notify` in `$CODEX_HOME`/`~/.codex/config.toml` via `toml_edit` (format-preserving), OpenCode writes `~/.config/opencode/plugins/sirio-session.js`; Pi and omp honestly report no user-global mechanism. Those hooks carry **no** `--session`: `sirioctl notify`/`session-ref` fall back to the `SIRIO_PANE_ID` every Sirio pane exports and exit 0 silently outside one (no pane, or no socket), so a global hook never surfaces an error inside an agent Sirio did not launch. Adapters that generate command-line overrides embedding JSON (Codex's `-c notify=[...]`, omp's hook file) share `json_string_literal` in `sirio_agents/src/shell_quote.rs` — it must build a JSON string literal without escaping slashes, because Codex's `-c key=value` override is parsed as **TOML**, and `\/` (JSON's optional slash-escaping) is not a valid TOML escape. Getting this wrong makes Codex fail silently at config load, before it ever reaches its TUI. Codex, pi, opencode and omp `prepare` write `.agents/skills/sirio/SKILL.md` in the worktree, from the copy the binary ships, and the app keeps that file out of git through the common dir's `info/exclude` (`keep_agent_skill_out_of_git` in `sirio/src/main.rs`, for `SHARED_SKILL_ADAPTERS`); Claude writes `.claude/skills/sirio/SKILL.md`, and that folder is not excluded. The skill is no longer installed with `npx`. **Install Skill** writes the user-level copy for each CLI, at the paths `sirio_agents::user_skill_paths` names: `<CLAUDE_CONFIG_DIR or ~/.claude>/skills/sirio/SKILL.md`, `~/.agents/skills/sirio/SKILL.md` (Codex, Pi and Oh-My-Pi read it together) and `<XDG_CONFIG_HOME or ~/.config>/opencode/skills/sirio/SKILL.md`; a file without the managed marker is never replaced. The startup refresh rewrites only a copy Sirio already wrote, and only when it differs from the bundled skill; a debug build runs it only with `SIRIO_CLI_AS_RELEASE=1` (`cli_install::stable_is_debug`).
-
-### A Claude chat talks to Claude Code, not to a wrapper
-
-A chat tab for Claude Code drives the `claude` already on the user's PATH
-over the stdio protocol the Claude Agent SDK uses internally
-(`claude -p --output-format stream-json --input-format stream-json`), not
-the `claude-acp` registry wrapper. `sirio_claude` is that protocol as types
-and pure functions; `sirio_acp::claude` owns the process and emits the same
-`AcpEvent`s the ACP client does, so `sirio_ui::chat` cannot tell which
-transport a tab uses. The resolution lives in `sirio`'s `claude_transport`:
-native when `claude` is on PATH at or above `sirio_claude::MIN_CLAUDE_VERSION`
-(2.1.257, the version the official wrapper's SDK bundles and therefore
-certifies), the wrapper otherwise, with the reason shown in Settings →
-Agents. `SIRIO_CLAUDE_TRANSPORT=acp` forces the fallback for diagnosis.
-
-**That protocol is not a published contract.** It is versioned with the
-Agent SDK, and `claude` self-updates, so everything in `sirio_claude` is
-written to degrade rather than reject: an unknown `type` or `subtype`
-becomes an `Other`, unknown fields are ignored, a malformed line is skipped,
-and a control request the CLI refuses degrades that one feature rather than
-the session. `claude_answers_the_native_handshake_it_claims`
-(`sirio_agents/tests/acp_conformance.rs`) is what notices the day the claim
-stops holding; like its two siblings it SKIPs without the binary and is on
-the release gate's skip list. The terminal pane is unaffected — it has
-always run `claude` interactively.
-
-**The session panel** is a column beside a chat's transcript and composer
-(`sirio_ui::chat::session_panel`, about 300 px, docked while the chat is at least
-640 px wide and laid over the transcript's right edge, above the composer, below that;
-open or closed is the chat's own and survives a relaunch). Every card but Environment
-starts folded, and which cards are folded does not survive a relaunch. Its cards: Environment
-(project, the chat's own directory, the branch read live), Context (what fills the window,
-folded by origin, from `get_context_usage` through `sirio_claude::context`; asked once on open
-when no report exists yet), Connectors (the session's MCP servers by origin, with Sign in and
-Reconnect, from `sirio_claude::mcp` and `sirio_acp::McpControl`, whose calls wait for the CLI
-and so run off the GPUI thread), Trace (below) and Change request (the branch's pull or merge
-request through the forge source, sharing the right panel's per-host rate-limit pause, and read
-only once the card is unfolded and a frame paints the column, so a chat in a background tab asks
-the forge nothing). Opening the column runs a probe, `ChangeRequestSource::has_forge`, to decide
-whether the Change request card is drawn at all; it reads local git config and the credential
-file and never runs `gh` or `glab`, and a forge you are not signed in to shows a muted "Not
-signed in to <host>" row rather than hiding the card. Connectors is Claude-native only and other
-agents get a total-only Context. The debug-only `surface.chat.panel`
-(`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>`) drives
-it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
-JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` asserts on.
-`surface.chat.read` also reports `firstVisibleEntry` and `lastVisibleEntry`, the first and last
-transcript rows the list drew, so a reveal reads as the row being between them: a row that is
-the transcript's last cannot reach the top of a list that fills its pane, and unpainted nothing is
-drawn, so the two are equal.
-
-**The Trace card** shows what the native Claude transport reports of the chat's latest turn, and
-only once the chat has received a `TraceEvent`, which no ACP client ever sends. Folded it is one
-line (`Live · 34s`, `Waiting for you · 46s`, `Done · 14s · $0.31`, `Interrupted · 12s`,
-`Failed · 1m 02s`); unfolded it adds six numbers, one lane per agent on a shared axis with the
-permission it waits on beneath it, and a row that opens the tab. A lane or a wait scrolls the
-transcript to its row (`Chat::reveal_span`, `reveal_wait`); consecutive tool rows are one box,
-drawn at the run's last row, so a reveal of any of them lands there. `sirio_acp::claude::trace`
-folds the CLI's lines into `TraceEvent`s, stamped with the instant the worker read them because
-no line carries a time (the CLI's own durations win where it sends one), and
-`sirio_ui::chat::trace::TraceStore` keeps 20 turns of at most 2 000 spans: past that a span is counted
-and not kept, the card's LLM calls, Tool calls and Errors read as at least (`1998+`) and a muted row
-says how many were left out (`3 spans past the 2000 cap not drawn`). An agent that runs in the
-background (`is_backgrounded`, or a `task_type` other than `local_agent`) is traced as its launch
-only: its `tool_result` ends the call at once, with no report, and what it writes after is not
-traced. A turn's cost is its
-`result`'s `total_cost_usd` less the previous one's in the same process, and unknown (a dash) for
-a resumed process's first turn, an interrupted turn and the turn after it. A subagent's permission
-opens no tool row of its own, only the one Permission card its lane's wait points at. The trace
-asks for frames only from one loop per painted card or tab (`trace_frame::frame_driver`, each frame
-counted as a `trace.frame` event in the performance trace). The loop runs at 30 frames a second at
-most while a span runs (`Turn::is_moving`: a model call streaming, a tool running or a subagent
-working, not one waiting for the user), ticks once a second while the turn only waits, which keeps its
-clock and its "now" line moving with the marks held still, and asks for nothing once the turn has
-ended or when nothing paints it. A folded card's title ticks once a second while it is painted.
-**The Trace tab** (`TabKind::Trace`, `sirio_ui::trace_tab`) is the full waterfall in the
-Secondary half, one per chat, opened by the card's last row. It holds a handle to the chat's
-trace, closes when its chat is released (`observe_release`, then `TraceTabEvent::Close`), and is
-never saved and never restored, so `surface.layout.read` lists it as `trace` only while it is open.
-`surface.trace.read <surfaceId>` (`sirioctl surface trace read`, every build) reports `open`, and for
-a chat with a tab the shown `turn`, `turns`, `follow`, `dropped` (the spans the cap left out, 0 with
-none, which its header also says) and the visible `spans`, each with `id`, `parent`, `kind`, `state`,
-`ended`, `depth` and `folded`. `docs/superpowers/specs/2026-10-20-chat-session-panel-design.md`
-has the panel's design and `docs/superpowers/specs/2026-10-21-chat-trace-waterfall-design.md`
-the folded cards, the Trace card and the tab; `claude_streams_the_lines_the_trace_reads`
-(`sirio_agents/tests/acp_conformance.rs`, opt-in because it spends a real turn, off the release
-gate) notices the day the CLI stops streaming the lines the trace reads.
-
-### Agent activity detection — layered evidence, not one signal (`sirio_activity`)
-
-Whether a pane shows as running/idle/needs-input is resolved from four independent evidence layers, weakest overridden by strongest as it arrives — ported byte-for-byte in intent from the original Swift `AgentActivityModel`, and `sirio_activity` carries no GPUI dependency, so this stays pure state-machine logic testable without a window:
-
-- **Layer A — `sirioctl notify` hooks.** Authoritative when present. Agents with `has_native_hooks() == true` call `sirioctl notify --session <paneId> --status <status>` themselves (user-global hooks omit `--session` and let sirioctl read `SIRIO_PANE_ID`); a recent Layer-A push suppresses Layer B for a debounce window (`should_apply_title_signal`, `sirio_activity::title`).
-- **Layer B — OSC terminal title.** `identify_agent_from_title` assigns an unregistered pane's agent identity from its title text; `detect_status_from_title` reads status from the same title using each CLI's own convention. Every CLI has its own title format, captured empirically, not guessed: Claude idles as `✳ …`, works as `. …` or a braille spinner; Pi titles `π - <cwd>`; its omp fork titles `π: <cwd>` (the colon is the only distinguishing mark); Codex 0.144+ also writes a braille "dots" spinner into its title while working — a bare spinner alone is therefore ambiguous between Claude and Codex and must **not** be used to assign identity (`contains_braille_spinner`; both are caught by Layer D instead).
-- **Layer C — content signal.** `detect_content_status` matches live pane scrollback content on output-settle; not debounced against Layer A, since a genuine content match is closer to ground truth than a stale title.
-- **Layer D — foreground process.** `inspect_foreground_agent` (`sirio_activity::process`) walks the pane shell's direct child processes via `/proc` and matches comm names against the catalog. This is the only signal that catches agents with no usable title convention. Node/Bun-hosted CLIs (pi, omp) are invisible here and rely on Layer B instead.
-
-Pane ownership determines who is allowed to clear a pane's status, and matters when changing this code: **spawn-owned** (Sirio launched it — cleared by watching process exit), **title-owned** (cleared only when the title stops matching that agent's conventions), **process-owned** (Layer D — cleared only by `AgentActivityModel::process_gone`, never by an unrelated title change). Mixing these up reintroduces bugs where one layer's signal (or absence of one) wipes state that another layer is still relying on.
-
-### Control socket (`sirio_control`)
-
-`ControlServer` listens on a unix socket (`$SIRIO_SOCKET` if set, otherwise `$XDG_RUNTIME_DIR/Sirio/control.sock`, falling back to the XDG state directory when no runtime directory exists) and dispatches line-delimited JSON `ControlRequest`s to a `ControlHandler` the app (`sirio`) implements. This is both the `sirioctl` CLI's transport and how agent lifecycle hooks talk back to Sirio (Layer A above). `PaneRegistry` (in `sirio_control`, not the terminal crate) is the shared source of truth for live panes that both the control handler and the foreground-process walk (Layer D) read from. Its method groups — panel.*, workspace.* (worktrees), project.*, pane.* and tab.*, surface.*, browser.*, notification.*, system.* (ping/capabilities/identify), session.* and a few singletons — are all dispatched from `rust/crates/sirio/src/main.rs`, and `sirioctl capabilities` lists the full set a running instance serves; the flat kebab sirioctl commands (`list-workspaces`, `new-workspace`, `select-workspace`, …) mirror cmux's CLI names. `panel.*` is also answered by the host (SP2): the app forwards every `panel.*` to the host, `sirio_control::host_panels` is the translation both sides share, and the app adds only the layout fields it alone knows. `sirioctl` asks the app first and goes to the host only when the app's socket is missing or refuses (`sirio_control::route`); a socket that accepts and stays silent is waited for, never bypassed to the host, because loss of contact is not evidence of death. With no app and no host it prints "Sirio is not running and no host is up" and never starts one; `--worktree` needs the app. Debug builds also serve `surface.host.end_all`, `surface.terminal.open`, `surface.open_list.open`, `surface.chat.panel`, `surface.settings.act` and `surface.terminal.state` (whose `agentStatus` names the pane's status word), which release `capabilities` omits; `surface.layout.read` (whether the Secondary pane is drawn, each half's tabs, the right panel's view) serves every build. `sirio_control::served::served_methods(debug)` is the one list a build serves, and `system.capabilities` passes it `cfg!(debug_assertions)`. `sirioctl --dry-run` prints the one JSON request it would send and contacts nothing; `panel wait` exits with the waited child's code. The stable copy is `<data>/Sirio/bin/sirioctl` (`bin-debug` for a debug build; `cli_install`), a copy and never a symlink, kept current by content. The PATH link (`cli_path`) is `~/.local/bin/sirioctl` on Linux; on macOS it is `/usr/local/bin/sirioctl` when the user can write there, else `~/.local/bin` when the login PATH searches it, and the administrator's password is asked only by the Settings button, never at startup; on Windows the stable directory joins the user's HKCU `Path`, which the Inno uninstaller removes. A file Sirio did not make at a link's place is never replaced, and the card names it. The socket can be disabled in Settings (`controlSocket.enabled` / `SIRIO_SOCKET_ENABLE`), which also disables Layer-A hooks.
-
-### Pane hierarchy
-
-`SirioWorkspace` (`rust/crates/sirio/src/main.rs`, the `gpui::Render` root) holds the open tabs/panes and a `Vec` of workspace rows (project/worktree/branch/path, each with a `mounted` bool) — the Rust equivalent of Swift's `Project -> [Worktree]` plus `openWorktreeIds`. A worktree's `mounted` flag tracks whether its terminal hosts stay mounted (attached to their sessions) across sidebar selection changes; this is a live contract other code depends on; see the `tab_has_live_foreground_process` comment in `main.rs` for a case where an activity-model shortcut nearly broke it. Terminals are host sessions (SP2): the PTY, the resident VT and the journal live in `sirio-host`, and a `TerminalView` holds a `HostLink` to one. **Quit detaches.** `PaneRegistry` (`sirio_control::panel`) owns no PTYs; it keeps the app's own panes — the in-process `LocalLink` fallback — and the control-session entries that feed sidebar status. On app quit (`cx.on_app_quit`), `PaneRegistry::shutdown` forgets the app's panes and ends nothing, and the host's sessions keep running. A plain window close only flushes session state (`cx.on_window_closed`). Dropping a `TerminalView` **detaches** (its `Drop` calls `detach`, never `end`), and so does eviction of an unmounted worktree from `TerminalPaneCache`. Closing a tab, a worktree or a project ends its sessions: closing a worktree or project `term.close`s its control sessions (`PaneRegistry::shutdown_for`, then `end_control_sessions`) and every `origin: app` session it owns (`end_app_sessions`, off the GPUI thread): the sessions whose cwd the deepest worktree holds, and, for a session no known worktree holds, those its persisted or parked layout names, attached parked panes aside (`host_sessions::app_sessions_to_end`; a layout id alone never ends another known worktree's session, because a stale id can still name one). Selection changes and cache eviction only detach. A **Show session** tab (palette "Show Session: …", `sirioctl panel show <id>`, app only) is attached, not owned: it never creates or closes a session, its close detaches, it shows *Session lost* without Restart if the session vanishes, and it is never written to the saved layout (a parked worktree keeps it). The centre's Secondary half is drawn only while it holds a tab and is not hidden (`secondary_pane_visible`); an empty one is never drawn, and what its tile launcher offered lives in the right panel's **Open** view (`sirio_ui::right_panel::open_list`, opened through `SirioWorkspace::open_surface`). Dragging a movable tab right while the pane is absent shows a drop zone as wide as the pane will be. `docs/superpowers/specs/2026-10-15-secondary-on-demand-design.md` has the design; `Scripts/Tests/test-open-list-e2e.sh` proves it.
-
-### A host behind the app (`sirio_host`, `sirio_host_client`)
-
-`sirio-host` is a detached process that owns everything that runs, so that agents survive a crash, a Force Quit, a Quit or an update of the app. It is a programme of seven sub-projects. **SP1** is the foundation (`docs/superpowers/specs/2026-10-05-host-foundation-design.md`; the programme is its §2): `host.ping`, `host.info`, `host.shutdown` and the `host.state` topic. **SP2** (`docs/superpowers/specs/2026-10-06-host-terminal-sessions-design.md`) puts every PTY Sirio owns in the host: the `term.*` verbs and the `term.sessions` topic serve sessions from the `sirio_term_session` engine (a PTY, one resident `libghostty-vt` terminal per session, and a journal a resume reads from), and the `terminal` capability in `protocol/host-v1/` (its ledger, the generated schema and the conformance cases the E2E replays against a real host) is how a client learns the host has them. The app shows the host's status in Settings → General. Without a host the app runs as it always did, and its terminals fall back as described below.
-
-A terminal tab runs `term.create` then `term.attach`, and on relaunch attaches to each persisted `session_id` the host still lists (a snapshot when the ring has moved on). A session the host holds with `origin` `app` that no tab references is adopted into the worktree whose path holds its cwd, the deepest one, so an agent never disappears silently. An exited session stays with its last screen until it is closed. A host that dies while the app runs leaves its tabs *Session lost*, with Restart, and `ensure_host` starts a host again. **`LocalLink`** is the fallback when no host or no `terminal` capability is there: an in-process session that dies with the app. Its tab shows *This terminal will not survive closing Sirio* with the reason, and the reason is logged (`[sirio] terminal on the in-process fallback`). It exists for the release that introduces host sessions and is removed in the first cycle after a stable release that shipped them with no report against the host's sessions (spec §10): a `refactor:` commit deletes `LocalLink`, the banner and its E2E case.
-
-The boundary is one dependency edge: `sirio` → `sirio_host_client`, **never** `sirio_host`. At startup `ensure_host` (off the GPUI thread) observes the host's state, adopts a live host or stages the packaged `sirio-host` into the data root and starts it from there, detached from the app's process group — a systemd scope or `setsid` on Linux, a launchd job on macOS, a breakaway process on Windows (`Scripts/Tests/probe-host-detach.sh` is how each arm is proven: its macOS and Windows rows run in CI and Force Quit by hand, and `docs/testing/host-detach-probe.md` records which rows are done). There is at most one host per protocol major per data root, and a client speaks majors N and N−1, so an older host drains instead of being replaced.
-
-The data root is `$SIRIO_HOST_HOME` if absolute; else, when the database in use is not the stable user-wide one (an explicit `SIRIO_DB`, or a checkout-local database), a `host` directory beside it, so an isolated Sirio or a build run from a checkout gets its own host and its terminals; the app resolves it once, in process (`session::host_root`), passes it to the host as `--root`, and gives its panes the same root as `SIRIO_PANE_HOST_HOME`, which only `sirioctl` and `host_probe` read inside a pane (`HostPaths::from_environment`), so a pane's `sirioctl` reaches the same host; the app, the host and `root_for_database` never read that variable (`HostPaths::from_app_environment`), and the app never exports `SIRIO_HOST_HOME`, which every child would inherit; else `<XDG_DATA_HOME | ~/.local/share | %LOCALAPPDATA%>/Sirio/host`, where a debug build names the leaf `host-debug` so it never adopts the release host. **No temp-dir fallback**, a host on tmpfs loses its state. Per major N it holds `host-v<N>.sock` (a named pipe on Windows), `host-v<N>.lock` (held for the host's whole life), `host-v<N>.json` (pid, start time, version, generation), `log/host-v<N>.log` (4 MiB, two generations; names and ids, never session content, the `sirio_perf` rule), `bin/<version>/sirio-host`, and on macOS `launchd/`.
-
-**One ensure at a time.** `HostRoute` (`sirio/src/main.rs`) runs one `ensure_host` at a time and shares its answer with the terminals that waited for it. A failure that leaves no host to lose is answered for 30 s (`NO_HOST_BACKOFF`); a failure with a live host is shared only with those waiters, so a terminal opened later asks again. `EnsureError::means_no_host` says which failures are which, and a success clears the failure, so the first open after a lost client ensures at once.
-
-**Nothing kills a host on the strength of a failed connection.** A host that holds its lock and does not answer reads `Unverifiable` and is waited for, never replaced or signalled; a recorded pid counts only with its start time. Only `host.shutdown` ends a host, and it refuses with `sessions_live` unless `force`. The idle exit (60 s with no client and no live session, only in `on-demand` mode) is the host's own decision.
-
-The debug-only knobs — `SIRIO_HOST_PROTOCOL_MAJOR`, `SIRIO_HOST_IDLE_GRACE_MS`, `SIRIO_HOST_BIN` and the methods `host.debug.hold_session` and the debug-only `surface.*` verbs of the app — are compiled out of release builds with `cfg!(debug_assertions)`, which is why `Scripts/Tests/test-host-e2e.sh` and `Scripts/Tests/test-term-e2e.sh` drive debug builds only.
-
-Quit detaches (see Pane hierarchy): the host keeps its sessions, and `host.shutdown` is still the only thing that ends a host.
+- [Crate boundaries](docs/agents/architecture/crates.md): read before adding a crate, a dependency between crates,
+  or touching `sirio_theme`. `sirio_perf` and `sirio_env` sit below everything; `sirio` is the
+  integration point and never links `sirio_host`. `cargo build -p <crate>` checks that one crate
+  compiles on its own.
+- [Performance trace](docs/agents/architecture/perf-trace.md) (`sirio_perf`): every `name` is a content-free
+  `&'static str`; never interpolate a title, a path, a prompt or scrollback into a label.
+- [Release, update, apply](docs/agents/architecture/release-update-apply.md): only `sirio_apply` touches the running
+  installation, and `SIRIO_INNO_APP_ID` must never change. Run `Scripts/Tests/test-update-e2e.sh`
+  after any change to `sirio_release`, `sirio_update`, `sirio_apply` or the compiled-in
+  environment.
+- [Change requests](docs/agents/architecture/change-requests.md) (`sirio_forge`, the list and tab, CI, review threads,
+  checkout, hand-off): every write goes through `ForgeClient::act` and is never retried; nothing
+  that writes to a forge is reachable over the control socket in a release build; forge text in a
+  hand-off file stays inside its untrusted block.
+- [Languages](docs/agents/architecture/languages.md) (`sirio_syntax`, `sirio_lsp`): a missing language server is never
+  volunteered; only the context menu names it, because it was asked.
+- [Markdown Preview](docs/agents/architecture/markdown-preview.md) (`expand_html`, `sirio_diagram`): there is no HTML
+  engine; PlantUML runs sandboxed, and its server is off by default because it sends the source
+  off the machine.
+- [Text you can select and copy](docs/agents/architecture/text-selection.md): show text meant to be read with
+  `selectable_text(..)`, never inside something clickable; Ctrl+C is never swallowed, and a
+  terminal's Ctrl+C stays SIGINT.
+- [File editor on Ely](docs/agents/architecture/file-editor.md) (`sirio_ui::file_view`, the drawer): `CodeEditor` owns
+  the text and the keys, `Editor` the disk; the buffer is LF only; keep every hook
+  `rust/vendor/ely-gpui-component/LOCAL-CHANGES.md` lists.
+- [Agent adapters](docs/agents/architecture/agent-adapters.md) (`sirio_agents`): `prepare` writes only worktree-local
+  files and never user-global config; `json_string_literal` must not escape slashes, because Codex
+  parses its `-c` override as TOML.
+- [Claude chat](docs/agents/architecture/claude-chat.md) (the native transport, the session panel, Trace): Claude
+  Code's stdio protocol is not a published contract, so `sirio_claude` degrades rather than
+  rejects.
+- [Agent activity detection](docs/agents/architecture/activity-detection.md) (`sirio_activity`): four evidence
+  layers; who owns a pane (spawn, title or process) decides who may clear its status.
+- [Control socket](docs/agents/architecture/control-socket.md) (`sirio_control`, `sirioctl`):
+  `served::served_methods(debug)` is the one list a build serves; a file Sirio did not make at a
+  link's place is never replaced.
+- [Pane hierarchy](docs/agents/architecture/panes.md): quitting, dropping a `TerminalView` and evicting a worktree
+  detach; only closing a tab, a worktree or a project ends its sessions.
+- [The host](docs/agents/architecture/host.md) (`sirio_host`, `sirio_host_client`): nothing kills a host on the
+  strength of a failed connection, and only `host.shutdown` ends one; its debug knobs are compiled
+  out of release builds.
 
 ## Conventions
 

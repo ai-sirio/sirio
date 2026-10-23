@@ -1,0 +1,86 @@
+# A Claude chat talks to Claude Code, not to a wrapper
+
+A chat tab for Claude Code drives the `claude` already on the user's PATH
+over the stdio protocol the Claude Agent SDK uses internally
+(`claude -p --output-format stream-json --input-format stream-json`), not
+the `claude-acp` registry wrapper. `sirio_claude` is that protocol as types
+and pure functions; `sirio_acp::claude` owns the process and emits the same
+`AcpEvent`s the ACP client does, so `sirio_ui::chat` cannot tell which
+transport a tab uses. The resolution lives in `sirio`'s `claude_transport`:
+native when `claude` is on PATH at or above `sirio_claude::MIN_CLAUDE_VERSION`
+(2.1.257, the version the official wrapper's SDK bundles and therefore
+certifies), the wrapper otherwise, with the reason shown in Settings →
+Agents. `SIRIO_CLAUDE_TRANSPORT=acp` forces the fallback for diagnosis.
+
+**That protocol is not a published contract.** It is versioned with the
+Agent SDK, and `claude` self-updates, so everything in `sirio_claude` is
+written to degrade rather than reject: an unknown `type` or `subtype`
+becomes an `Other`, unknown fields are ignored, a malformed line is skipped,
+and a control request the CLI refuses degrades that one feature rather than
+the session. `claude_answers_the_native_handshake_it_claims`
+(`sirio_agents/tests/acp_conformance.rs`) is what notices the day the claim
+stops holding; like its two siblings it SKIPs without the binary and is on
+the release gate's skip list. The terminal pane is unaffected — it has
+always run `claude` interactively.
+
+**The session panel** is a column beside a chat's transcript and composer
+(`sirio_ui::chat::session_panel`, about 300 px, docked while the chat is at least
+640 px wide and laid over the transcript's right edge, above the composer, below that;
+open or closed is the chat's own and survives a relaunch). Every card but Environment
+starts folded, and which cards are folded does not survive a relaunch. Its cards: Environment
+(project, the chat's own directory, the branch read live), Context (what fills the window,
+folded by origin, from `get_context_usage` through `sirio_claude::context`; asked once on open
+when no report exists yet), Connectors (the session's MCP servers by origin, with Sign in and
+Reconnect, from `sirio_claude::mcp` and `sirio_acp::McpControl`, whose calls wait for the CLI
+and so run off the GPUI thread), Trace (below) and Change request (the branch's pull or merge
+request through the forge source, sharing the right panel's per-host rate-limit pause, and read
+only once the card is unfolded and a frame paints the column, so a chat in a background tab asks
+the forge nothing). Opening the column runs a probe, `ChangeRequestSource::has_forge`, to decide
+whether the Change request card is drawn at all; it reads local git config and the credential
+file and never runs `gh` or `glab`, and a forge you are not signed in to shows a muted "Not
+signed in to <host>" row rather than hiding the card. Connectors is Claude-native only and other
+agents get a total-only Context. The debug-only `surface.chat.panel`
+(`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>`) drives
+it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
+JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` asserts on.
+`surface.chat.read` also reports `firstVisibleEntry` and `lastVisibleEntry`, the first and last
+transcript rows the list drew, so a reveal reads as the row being between them: a row that is
+the transcript's last cannot reach the top of a list that fills its pane, and unpainted nothing is
+drawn, so the two are equal.
+
+**The Trace card** shows what the native Claude transport reports of the chat's latest turn, and
+only once the chat has received a `TraceEvent`, which no ACP client ever sends. Folded it is one
+line (`Live · 34s`, `Waiting for you · 46s`, `Done · 14s · $0.31`, `Interrupted · 12s`,
+`Failed · 1m 02s`); unfolded it adds six numbers, one lane per agent on a shared axis with the
+permission it waits on beneath it, and a row that opens the tab. A lane or a wait scrolls the
+transcript to its row (`Chat::reveal_span`, `reveal_wait`); consecutive tool rows are one box,
+drawn at the run's last row, so a reveal of any of them lands there. `sirio_acp::claude::trace`
+folds the CLI's lines into `TraceEvent`s, stamped with the instant the worker read them because
+no line carries a time (the CLI's own durations win where it sends one), and
+`sirio_ui::chat::trace::TraceStore` keeps 20 turns of at most 2 000 spans: past that a span is counted
+and not kept, the card's LLM calls, Tool calls and Errors read as at least (`1998+`) and a muted row
+says how many were left out (`3 spans past the 2000 cap not drawn`). An agent that runs in the
+background (`is_backgrounded`, or a `task_type` other than `local_agent`) is traced as its launch
+only: its `tool_result` ends the call at once, with no report, and what it writes after is not
+traced. A turn's cost is its
+`result`'s `total_cost_usd` less the previous one's in the same process, and unknown (a dash) for
+a resumed process's first turn, an interrupted turn and the turn after it. A subagent's permission
+opens no tool row of its own, only the one Permission card its lane's wait points at. The trace
+asks for frames only from one loop per painted card or tab (`trace_frame::frame_driver`, each frame
+counted as a `trace.frame` event in the performance trace). The loop runs at 30 frames a second at
+most while a span runs (`Turn::is_moving`: a model call streaming, a tool running or a subagent
+working, not one waiting for the user), ticks once a second while the turn only waits, which keeps its
+clock and its "now" line moving with the marks held still, and asks for nothing once the turn has
+ended or when nothing paints it. A folded card's title ticks once a second while it is painted.
+**The Trace tab** (`TabKind::Trace`, `sirio_ui::trace_tab`) is the full waterfall in the
+Secondary half, one per chat, opened by the card's last row. It holds a handle to the chat's
+trace, closes when its chat is released (`observe_release`, then `TraceTabEvent::Close`), and is
+never saved and never restored, so `surface.layout.read` lists it as `trace` only while it is open.
+`surface.trace.read <surfaceId>` (`sirioctl surface trace read`, every build) reports `open`, and for
+a chat with a tab the shown `turn`, `turns`, `follow`, `dropped` (the spans the cap left out, 0 with
+none, which its header also says) and the visible `spans`, each with `id`, `parent`, `kind`, `state`,
+`ended`, `depth` and `folded`. `docs/superpowers/specs/2026-10-20-chat-session-panel-design.md`
+has the panel's design and `docs/superpowers/specs/2026-10-21-chat-trace-waterfall-design.md`
+the folded cards, the Trace card and the tab; `claude_streams_the_lines_the_trace_reads`
+(`sirio_agents/tests/acp_conformance.rs`, opt-in because it spends a real turn, off the release
+gate) notices the day the CLI stops streaming the lines the trace reads.

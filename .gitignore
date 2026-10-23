@@ -21,6 +21,9 @@ skills-lock.json
 opencode.json
 /.air/
 /.codex/
+# The handoff CLAUDE.md asks for when a session runs long: one session's
+# notes for the next, never shared.
+/HANDOFF.md
 
 # Python bytecode from the Linux verification scripts
 __pycache__/
@@ -30,8 +33,9 @@ __pycache__/
 # local except five directories and one file the repo itself depends on. Each needs the
 # `/docs/*` + `!` shape, because a parent excluded with `/docs/` could not
 # be re-included:
-#   - agents: CLAUDE.md sends the engineering skills there for the issue
-#     tracker, the triage labels and the domain docs.
+#   - agents: CLAUDE.md links each area's notes there (architecture, the
+#     end-to-end catalogue, build and release) and sends the engineering
+#     skills there for the issue tracker, the triage labels and the domain docs.
 #   - release-notes: release.yml refuses a tag whose
 #     docs/release-notes/<version>.md is missing.
 #   - superpowers/specs: shipped rustdoc links into them by URL (sirio_apply

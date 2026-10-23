@@ -71,7 +71,7 @@ The Rust workspace is 25 crates under `rust/crates/`. Leaves have no local depen
 | `sirio_update` | Discovers, downloads and verifies an update, then stops at `VerifiedUpdate` |
 | `sirio_apply` | The only crate that touches the running installation |
 
-`CLAUDE.md`'s Architecture section has the dependency graph and the design notes each subsystem relies on.
+`CLAUDE.md`'s Architecture section links the dependency graph (`docs/agents/architecture/crates.md`) and the design notes each subsystem relies on.
 
 ## Rules
 
