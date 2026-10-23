@@ -16,7 +16,8 @@ use serde::Deserialize;
 #[derive(Clone, Debug, PartialEq)]
 pub enum CliMessage {
     /// `system` — `init` at the head of a turn, `status` after a mode
-    /// change, `commands_changed`, `compact_boundary`, and others.
+    /// change or as a main-thread API request goes out, `commands_changed`,
+    /// `compact_boundary`, and others.
     System(SystemPayload),
     /// A Messages-API assistant message. With partial messages enabled its
     /// text also arrives as deltas, so callers read only its tool uses.
@@ -89,8 +90,9 @@ pub struct McpServerStatus {
 }
 
 /// A `system` line. Every field beyond `subtype` is optional because the
-/// subtypes share one wire type: `status` carries a permission mode and
-/// nothing else, `init` carries the lot.
+/// subtypes share one wire type: `status` carries a permission mode, or
+/// reports `"requesting"` when the CLI sends a main-thread API request, and
+/// `init` carries the lot.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SystemPayload {
@@ -132,7 +134,9 @@ pub struct SystemPayload {
     /// it, so a caller that wants only background tasks has to remember
     /// the start keyed by `task_id`.
     pub is_backgrounded: Option<bool>,
-    /// Present on `task_notification`, e.g. `completed`.
+    /// Present on `task_notification`, e.g. `completed`, and on `status`,
+    /// where `"requesting"` says the CLI sent a main-thread API request (a
+    /// permission-mode change carries `permissionMode` instead).
     pub status: Option<String>,
     /// Present on `task_notification`: the CLI's own sentence about the
     /// task, already written for a reader.

@@ -56,7 +56,9 @@ permission it waits on beneath it, and a row that opens the tab. A lane or a wai
 transcript to its row (`Chat::reveal_span`, `reveal_wait`); consecutive tool rows are one box,
 drawn at the run's last row, so a reveal of any of them lands there. `sirio_acp::claude::trace`
 folds the CLI's lines into `TraceEvent`s, stamped with the instant the worker read them because
-no line carries a time (the CLI's own durations win where it sends one), and
+no line carries a time (the CLI's own durations win where it sends one); a main-thread model call
+runs from the CLI's `status: requesting` line (the request going out) to `message_stop`, and
+`message_start` only names its model, so the wait for the first token is part of the call; and
 `sirio_ui::chat::trace::TraceStore` keeps 20 turns of at most 2 000 spans: past that a span is counted
 and not kept, the card's LLM calls, Tool calls and Errors read as at least (`1998+`) and a muted row
 says how many were left out (`3 spans past the 2000 cap not drawn`). An agent that runs in the
