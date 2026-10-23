@@ -465,6 +465,8 @@ fn claude_streams_the_lines_the_trace_reads() {
     // when the first turn failed: the checks on it say why.
     let background_from = messages.len();
     let mut background_started = None;
+    // The `task_id` that `task_started` gave it: `task_updated` names the agent by this only.
+    let mut background_task = None;
     let mut background_ended = false;
     if result.as_ref().is_some_and(|result| !result.is_error) {
         let background_prompt = serde_json::json!({
@@ -494,6 +496,7 @@ fn claude_streams_the_lines_the_trace_reads() {
                         if background_started.is_none() && system.is_backgrounded == Some(true) =>
                     {
                         background_started = system.tool_use_id.clone();
+                        background_task = system.task_id.clone();
                     }
                     "task_notification" => {
                         background_ended = background_started.is_some()
@@ -637,10 +640,16 @@ fn claude_streams_the_lines_the_trace_reads() {
          the agent's work after the main thread finished could not be traced"
     );
     assert!(
+        background_task.is_some(),
+        "the `task_started` of the background agent {background_agent} carried no `task_id`: \
+         the trace could not tell which agent a `task_updated` ends"
+    );
+    assert!(
         background.iter().any(|message| matches!(
             message,
             CliMessage::System(system)
                 if system.subtype == "task_updated"
+                    && system.task_id == background_task
                     && system
                         .patch
                         .as_ref()
@@ -649,8 +658,9 @@ fn claude_streams_the_lines_the_trace_reads() {
                             matches!(status, "completed" | "killed" | "stopped" | "failed")
                         })
         )),
-        "no `task_updated` with a terminal `patch.status`: the end of the background agent \
-         {background_agent} was not announced, so its lane would end only at the notification"
+        "no `task_updated` naming task {background_task:?} (the background agent \
+         {background_agent}) with a terminal `patch.status`: its end was not announced, so its \
+         lane would end only at the notification"
     );
     assert!(
         background_ended,

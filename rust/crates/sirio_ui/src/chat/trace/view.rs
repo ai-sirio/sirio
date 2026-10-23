@@ -297,12 +297,12 @@ impl Turn {
             detail: self.latest_model(None, &shape).unwrap_or_default(),
             state: self.root_state(),
             calls: shape.lanes[slot(None)].calls.len(),
-            duration: self.elapsed(now),
+            duration: self.root_duration(now),
             now: self.now_row(None, &shape, now),
             waits: self.waits_of(None, &shape),
             segments: self.segments_of(None, &shape, now),
             start: Duration::ZERO,
-            end: self.ended.as_ref().map(|_| self.elapsed(now)),
+            end: self.root_end(now),
         };
         let agents = self
             .preorder()
@@ -355,7 +355,7 @@ impl Turn {
             detail: self.latest_model(None, &shape).unwrap_or_default(),
             state: self.root_state(),
             start: Duration::ZERO,
-            end: self.ended.as_ref().map(|_| self.elapsed(now)),
+            end: self.root_end(now),
             hidden_children: hidden.len(),
             child_marks: self.marks_of(hidden),
             note: match &self.ended {
@@ -619,10 +619,34 @@ impl Turn {
         }
     }
 
+    /// When the root lane ends, as an offset from the turn's start: with the
+    /// turn, or, while the turn waits on its agents, with its main thread.
+    fn root_end(&self, now: Instant) -> Option<Duration> {
+        match (&self.ended, self.main_end) {
+            (Some(_), _) => Some(self.elapsed(now)),
+            (None, Some(main_end)) => Some(self.offset(main_end)),
+            (None, None) => None,
+        }
+    }
+
+    /// How long the root lane has taken: the turn's own clock, but only up to
+    /// the main thread's end while the turn waits on its agents.
+    fn root_duration(&self, now: Instant) -> Duration {
+        match (&self.ended, self.main_end) {
+            (None, Some(main_end)) => self.offset(main_end),
+            _ => self.elapsed(now),
+        }
+    }
+
     fn root_state(&self) -> SpanState {
         match self.state() {
-            // A turn that waits on its agents has a finished main thread.
-            TurnState::Live if self.main_ended() => SpanState::Done,
+            // A turn that waits on its agents has a finished main thread,
+            // that ended the way its `result` said.
+            TurnState::Live | TurnState::Waiting if self.main_ended() => match self.main_outcome {
+                Some(TurnOutcome::Failed { .. }) => SpanState::Failed,
+                Some(TurnOutcome::Interrupted) => SpanState::Interrupted,
+                _ => SpanState::Done,
+            },
             TurnState::Live => SpanState::Running,
             TurnState::Waiting => SpanState::Waiting,
             TurnState::Done => SpanState::Done,

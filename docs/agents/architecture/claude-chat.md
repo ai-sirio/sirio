@@ -74,7 +74,8 @@ added to the latest prompt-started turn, whose cost reads `≥ $x` while its age
 turn's cost is its `result`'s `total_cost_usd` less the previous one's in the same process, and
 unknown (a dash) for a resumed process's first turn, an interrupted turn and the turn after it; a
 prompt written while agents run leaves the old turn's cost at `≥` what was known and gives the new
-turn a dash. A subagent's permission opens no tool row of its own, only the one Permission card its
+turn a dash, as does one written while a foreign agent (one a CLI-started turn launched) still runs
+or after an agent ended and no `result` has read its last spend. A subagent's permission opens no tool row of its own, only the one Permission card its
 lane's wait points at. The trace asks for frames only from one loop per painted card or tab
 (`trace_frame::frame_driver`, each frame counted as a `trace.frame` event in the performance trace).
 The loop runs at 30 frames a second at most while a span runs (`Turn::is_moving`: a model call

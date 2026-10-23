@@ -2383,6 +2383,36 @@ mod tests {
     }
 
     #[test]
+    fn a_waiting_turns_root_lane_ends_when_its_main_thread_ended() {
+        let failed = TurnOutcome::Failed {
+            reason: "boom".into(),
+        };
+        for (outcome, state) in [
+            (TurnOutcome::Done, SpanState::Done),
+            (failed, SpanState::Failed),
+        ] {
+            let (mut store, c) = open_turn();
+            agent(&mut store, &c, "toolu_bg", None, "fork", "", 100);
+            let running = lanes_of(&store, c.at(300));
+            assert_eq!(running[0].end, None, "the main thread still works");
+
+            main_ended(&mut store, &c, 500, outcome, Some(3.28));
+
+            // The agent runs on, and `now` goes on: the root does not.
+            for now in [900, 60_000] {
+                let lanes = lanes_of(&store, c.at(now));
+                assert_eq!(lanes[0].state, state);
+                assert_eq!(lanes[0].end, Some(ms(500)), "at {now}");
+                assert_eq!(lanes[0].duration, ms(500), "at {now}");
+                assert_eq!(lane(&lanes, "toolu_bg").end, None);
+                let rows = rows_of(&store, c.at(now));
+                assert_eq!(rows[0].state, state);
+                assert_eq!(rows[0].end, Some(ms(500)), "at {now}");
+            }
+        }
+    }
+
+    #[test]
     fn a_final_cost_has_no_mark() {
         let (mut store, c) = open_turn();
         agent(&mut store, &c, "toolu_bg", None, "fork", "", 100);
