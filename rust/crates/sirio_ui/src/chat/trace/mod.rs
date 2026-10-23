@@ -11,7 +11,9 @@
 //!   prompt timeout) is ended by [`TraceStore::fail_open_turn`];
 //! - a turn whose main thread ended while background agents run stays open,
 //!   and a span event reaches the turn that holds the span, whichever turn is
-//!   the latest;
+//!   the latest, for as long as that turn has not ended: an ended turn takes
+//!   no new span, name, usage or wait, and is kept past the cap only while it
+//!   is the oldest and still open;
 //! - span, wait and `TurnEnded` events that arrive with no turn open belong to
 //!   a turn Sirio did not start, and are ignored.
 //!
@@ -144,7 +146,7 @@ impl TraceStore {
                     .as_deref()
                     .and_then(|parent| self.turn_holding(parent));
                 match held {
-                    Some(turn) => turn.apply(event),
+                    Some(turn) => turn.ended.is_none() && turn.apply(event),
                     None => self
                         .main_open_turn()
                         .is_some_and(|turn| turn.apply(event)),
@@ -162,7 +164,7 @@ impl TraceStore {
                     at,
                 };
                 match held {
-                    Some(turn) => turn.apply(event),
+                    Some(turn) => turn.ended.is_none() && turn.apply(event),
                     None => self
                         .main_open_turn()
                         .is_some_and(|turn| turn.apply(event)),
@@ -183,8 +185,11 @@ impl TraceStore {
                     | TraceEvent::SpanEnded { id, .. } => id.clone(),
                     _ => return false,
                 };
+                // An ended turn's spans are all closed and final; only a
+                // `SpanEnded`, harmless there, still reaches it.
+                let ends = matches!(event, TraceEvent::SpanEnded { .. });
                 self.turn_holding(&id)
-                    .is_some_and(|turn| turn.apply(event))
+                    .is_some_and(|turn| (ends || turn.ended.is_none()) && turn.apply(event))
             }
         }
     }
@@ -278,7 +283,7 @@ impl TraceStore {
         }
         let index = self.first + self.turns.len();
         self.turns.push_back(Turn::new(index, at));
-        if self.turns.len() > MAX_TURNS
+        while self.turns.len() > MAX_TURNS
             && self.turns.front().is_some_and(|turn| turn.ended.is_some())
         {
             self.turns.pop_front();
@@ -2415,8 +2420,58 @@ mod tests {
         agents_ended(&mut store, &c, "toolu_bg", 6000, None, false);
         store.apply(TraceEvent::TurnStarted { at: c.at(7000) });
 
-        assert_eq!(store.turn_indices(), 2..=22, "now it is let go");
+        assert_eq!(
+            store.turn_indices(),
+            3..=22,
+            "twenty turns again once the oldest is let go"
+        );
         assert!(store.turn(1).is_none());
+        assert!(store.turn(2).is_none());
+    }
+
+    #[test]
+    fn a_span_event_for_an_ended_turn_changes_nothing() {
+        let (mut store, c) = waiting_turn_then_next_prompt();
+        agents_ended(&mut store, &c, "toolu_bg", 2000, None, false);
+        let before = span_ids(&store, 1);
+
+        let events = [
+            TraceEvent::SpanStarted {
+                id: "toolu_late".into(),
+                parent: Some("toolu_bg".into()),
+                kind: SpanKind::Tool,
+                name: "Read".into(),
+                detail: String::new(),
+                model: None,
+                at: c.at(2500),
+            },
+            TraceEvent::SpanNamed {
+                id: "toolu_bg".into(),
+                name: "renamed".into(),
+                detail: String::new(),
+            },
+            TraceEvent::SpanProgress {
+                id: "toolu_bg".into(),
+                tokens: Some(10),
+                tool_uses: None,
+                activity: None,
+            },
+            TraceEvent::WaitStarted {
+                span: Some("toolu_bg".into()),
+                request_id: 9,
+                at: c.at(2500),
+            },
+        ];
+        for event in events {
+            assert!(!store.apply(event.clone()), "{event:?}");
+        }
+
+        assert_eq!(span_ids(&store, 1), before);
+        let first = store.turn(1).expect("turn 1");
+        assert_eq!(first.state(), TurnState::Done);
+        let rows = first.rows(&HashSet::new(), c.at(9000));
+        assert_eq!(row(&rows, "toolu_bg").name, "fork");
+        assert_eq!(row(&rows, "toolu_bg").state, SpanState::Interrupted);
     }
 
     #[test]
