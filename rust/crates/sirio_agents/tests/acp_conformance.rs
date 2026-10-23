@@ -650,7 +650,7 @@ fn claude_streams_the_lines_the_trace_reads() {
                         })
         )),
         "no `task_updated` with a terminal `patch.status`: the end of the background agent \
-         {background_agent} was not announced, so its lane could not end at the CLI's own instant"
+         {background_agent} was not announced, so its lane would end only at the notification"
     );
     assert!(
         background_ended,

@@ -70,17 +70,18 @@ turn. Any other background task (a `task_type` other than `local_agent`) is trac
 only: its `tool_result` ends the call at once, with no report, and what it writes after is not
 traced. The turns the CLI starts on its own once an agent completes are not drawn: their spend is
 added to the latest prompt-started turn, whose cost reads `≥ $x` while its agents run, drops the
-`≥` at the first of their results after the last agent ended, and still grows by later ones. A turn's cost is its
-`result`'s `total_cost_usd` less the previous one's in the same process, and unknown (a dash) for
-a resumed process's first turn, an interrupted turn and the turn after it; a prompt written while
-agents run leaves the old turn's cost at `≥` what was known and gives the new turn a dash. A subagent's permission
-opens no tool row of its own, only the one Permission card its lane's wait points at. The trace
-asks for frames only from one loop per painted card or tab (`trace_frame::frame_driver`, each frame
-counted as a `trace.frame` event in the performance trace). The loop runs at 30 frames a second at
-most while a span runs (`Turn::is_moving`: a model call streaming, a tool running or a subagent
-working, not one waiting for the user), ticks once a second while the turn only waits, which keeps its
-clock and its "now" line moving with the marks held still, and asks for nothing once the turn has
-ended or when nothing paints it. A folded card's title ticks once a second while it is painted.
+`≥` at the first of their results after the last agent ended, and still grows by later ones. A
+turn's cost is its `result`'s `total_cost_usd` less the previous one's in the same process, and
+unknown (a dash) for a resumed process's first turn, an interrupted turn and the turn after it; a
+prompt written while agents run leaves the old turn's cost at `≥` what was known and gives the new
+turn a dash. A subagent's permission opens no tool row of its own, only the one Permission card its
+lane's wait points at. The trace asks for frames only from one loop per painted card or tab
+(`trace_frame::frame_driver`, each frame counted as a `trace.frame` event in the performance trace).
+The loop runs at 30 frames a second at most while a span runs (`Turn::is_moving`: a model call
+streaming, a tool running or a subagent working, not one waiting for the user), ticks once a second
+while the turn only waits, which keeps its clock and its "now" line moving with the marks held
+still, and asks for nothing once the turn has ended or when nothing paints it. A folded card's title
+ticks once a second while it is painted.
 **The Trace tab** (`TabKind::Trace`, `sirio_ui::trace_tab`) is the full waterfall in the
 Secondary half, one per chat, opened by the card's last row. It holds a handle to the chat's
 trace, closes when its chat is released (`observe_release`, then `TraceTabEvent::Close`), and is
