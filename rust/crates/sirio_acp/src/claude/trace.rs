@@ -211,6 +211,11 @@ impl TraceFold {
     /// interrupted, whatever its `result` says, and so is the model call
     /// open at this moment.
     pub(crate) fn interrupt_sent(&mut self) {
+        // With no turn open only agents run (their turn's main thread
+        // ended): the Stop kills them, and is no turn's.
+        if !self.turn_open {
+            return;
+        }
         self.interrupted_this_turn = true;
         self.interrupted_call = self.main_call.clone();
     }
@@ -504,7 +509,13 @@ impl TraceFold {
         // A background agent goes on after its launch: the span stays open
         // and the launch is its next call's start. An agent that never
         // launched sends no notification, so its error ends it here.
-        if self.bg_agents.contains(id) && !result.is_error {
+        // An agent that was done before its launch came back sends no
+        // notification either, and ends here like a foreground agent.
+        let launched = totals
+            .as_ref()
+            .and_then(|totals| totals.status.as_deref())
+            .is_none_or(|status| status != "completed");
+        if self.bg_agents.contains(id) && !result.is_error && launched {
             if let Some(agent) = self
                 .spans
                 .get_mut(id)
@@ -595,7 +606,7 @@ impl TraceFold {
         measured_ms: Option<u64>,
         events: &mut Vec<TraceEvent>,
     ) {
-        if !self.bg_agents.contains(id) || !self.is_agent(id) {
+        if !self.bg_agents.contains(id) {
             return;
         }
         let outcome = match status {
@@ -654,11 +665,9 @@ impl TraceFold {
                 };
                 // A foreground `Bash` raises `task_started` too, for its own
                 // call: only a subagent this fold opened is named.
-                let Some(span) = self.spans.get_mut(id) else {
-                    return Vec::new();
-                };
-                let launched_by_main = span.parent.is_none();
-                let Some(agent) = span.agent.as_mut() else {
+                let in_turn_scope = self.turn_open && self.reaches_main_on_foot(id);
+                let Some(agent) = self.spans.get_mut(id).and_then(|span| span.agent.as_mut())
+                else {
                     return Vec::new();
                 };
                 agent.edge = agent.edge.max(at);
@@ -676,7 +685,7 @@ impl TraceFold {
                 let detail = if on_its_own && is_agent_task {
                     self.bg_agents.insert(id.to_string());
                     // The turn that ends with it still working waits for it.
-                    if self.turn_open && launched_by_main {
+                    if in_turn_scope {
                         self.turn_agents.insert(id.to_string());
                     }
                     in_background(&agent.detail)
@@ -904,6 +913,28 @@ impl TraceFold {
         })
     }
 
+    /// Whether the chain of parents above span `id` reaches the main thread
+    /// without crossing a background agent. A background agent that does
+    /// not is ended by the one above it; one that does lives on its own, and
+    /// the turn waits for it.
+    fn reaches_main_on_foot(&self, id: &str) -> bool {
+        let mut current = self.spans.get(id).and_then(|span| span.parent.as_deref());
+        // The bound keeps a parent loop from spinning.
+        for _ in 0..=self.spans.len() {
+            let Some(parent) = current else {
+                return true;
+            };
+            if self.bg_agents.contains(parent) {
+                return false;
+            }
+            current = self
+                .spans
+                .get(parent)
+                .and_then(|span| span.parent.as_deref());
+        }
+        false
+    }
+
     /// The open spans that belong to a background agent still at work, bar
     /// those of the agents in `abandoned`: the agent's own and everything
     /// under it. They are the turn that launched the agent's to carry on.
@@ -995,9 +1026,13 @@ impl TraceFold {
     ) {
         // Only a subagent has children, so a tool's end costs no scan.
         let mut children: Vec<(u64, String)> = if self.is_agent(id) {
+            // A background agent the turn waits for is not its launcher's to
+            // end: it ends on the CLI's word.
             self.spans
                 .iter()
-                .filter(|(_, span)| span.parent.as_deref() == Some(id))
+                .filter(|(child, span)| {
+                    span.parent.as_deref() == Some(id) && !self.turn_agents.contains(*child)
+                })
                 .map(|(child, span)| (span.seq, child.clone()))
                 .collect()
         } else {
@@ -2156,6 +2191,188 @@ mod tests {
                 tokens: None,
             }],
             "nothing waits: the turn ends at its result"
+        );
+    }
+
+    #[test]
+    fn a_background_agent_a_subagent_launched_keeps_the_turn_waiting() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        // The main thread's foreground subagent F launches background agent B.
+        fold.line(
+            &assistant(
+                None,
+                "msg_main",
+                vec![tool_use("toolu_F", "Agent", json!({"prompt": "go"}))],
+            ),
+            clock.at(100),
+        );
+        fold.line(&task_started("task-f", "toolu_F", 1), clock.at(110));
+        fold.line(
+            &assistant(
+                Some("toolu_F"),
+                "msg_f",
+                vec![tool_use("toolu_B", "Agent", json!({"prompt": "go"}))],
+            ),
+            clock.at(200),
+        );
+        fold.line(
+            &task_started_as("task-b", "toolu_B", Some(true), "local_agent"),
+            clock.at(210),
+        );
+        fold.line(
+            &msg(json!({
+                "type": "user",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_B", "content": "launched"}
+                ]},
+                "parent_tool_use_id": "toolu_F",
+                "tool_use_result": {"status": "async_launched", "isAsync": true}
+            })),
+            clock.at(260),
+        );
+        // F returns before the main thread does, B still works.
+        fold.line(&agent_result(None, "toolu_F", Some(500)), clock.at(600));
+
+        assert_eq!(
+            fold.line(&main_result(), clock.at(1_000)),
+            vec![main_ended(clock.at(1_000))]
+        );
+        let end = fold.line(
+            &task_notification_of("task-b", "toolu_B", "completed", 4_000),
+            clock.at(5_000),
+        );
+        let ended = end
+            .iter()
+            .position(|event| {
+                matches!(event, TraceEvent::SpanEnded { id, .. } if id.as_str() == "toolu_B")
+            })
+            .expect("B ends");
+        assert_eq!(end.len(), ended + 2, "B's end is the second last: {end:?}");
+        assert_eq!(
+            end.last(),
+            Some(&TraceEvent::AgentsEnded {
+                anchor: "toolu_B".into(),
+                at: clock.at(5_000),
+                cost_usd: Some(0.5),
+                tokens: Some(TokenCount {
+                    input: 1_510,
+                    output: 100
+                }),
+                at_least: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_stop_while_only_agents_run_leaves_the_next_turn_known() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        launch_background(&mut fold, &clock, AGENT, "task-bg", 100);
+        fold.line(&main_result(), clock.at(1_000));
+
+        // No turn is open, only the agent: Stop kills it.
+        fold.interrupt_sent();
+        let killed = fold.line(&task_updated("task-bg", "killed"), clock.at(2_000));
+        assert!(
+            matches!(killed.last(), Some(TraceEvent::AgentsEnded { .. })),
+            "{killed:?}"
+        );
+
+        // The next prompt is an ordinary turn: it is not the interrupted one.
+        let next = finish(
+            &mut fold,
+            &clock,
+            3_000,
+            &result_line(Some(0.8), (20, 200, 2_000, 1_000)),
+        );
+        assert_eq!(turn_end_outcome(&next), TurnOutcome::Done);
+        assert_close(turn_end_cost(&next), 0.3);
+    }
+
+    #[test]
+    fn a_background_launch_that_returns_completed_ends_the_agent() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        fold.line(
+            &assistant(
+                None,
+                "msg_main",
+                vec![tool_use(AGENT, "Agent", json!({"prompt": "go"}))],
+            ),
+            clock.at(100),
+        );
+        fold.line(
+            &task_started_as("task-bg", AGENT, Some(true), "local_agent"),
+            clock.at(124),
+        );
+        // The agent was done before the launch result came back: nothing
+        // will follow, so the result ends it as a foreground agent's would.
+        assert_eq!(
+            fold.line(&launch_result(AGENT, Some("completed")), clock.at(400)),
+            vec![
+                report(AGENT, clock.at(124)),
+                usage(&format!("{AGENT}/final"), 26_010, 187),
+                span_ended(
+                    &format!("{AGENT}/final"),
+                    SpanOutcome::Done,
+                    clock.at(400),
+                    None
+                ),
+                span_ended(AGENT, SpanOutcome::Done, clock.at(400), Some(4_537)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_background_agent_survives_a_later_turns_result() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        launch_background(&mut fold, &clock, AGENT, "task-bg", 100);
+        assert_eq!(
+            fold.line(&main_result(), clock.at(1_000)),
+            vec![main_ended(clock.at(1_000))]
+        );
+
+        // A second prompt runs and ends while the agent still works.
+        let second = finish(
+            &mut fold,
+            &clock,
+            2_000,
+            &result_line(Some(0.8), (20, 200, 2_000, 1_000)),
+        );
+        assert_eq!(turn_end_outcome(&second), TurnOutcome::Done);
+
+        assert_eq!(
+            fold.permission_asked(None, Some("task-bg"), 9, clock.at(4_000)),
+            vec![TraceEvent::WaitStarted {
+                span: Some(AGENT.into()),
+                request_id: 9,
+                at: clock.at(4_000),
+            }]
+        );
+        let end = fold.line(&task_updated("task-bg", "completed"), clock.at(5_000));
+        assert!(
+            end.contains(&span_ended(AGENT, SpanOutcome::Done, clock.at(5_000), None)),
+            "{end:?}"
+        );
+        assert_eq!(
+            end.last(),
+            Some(&TraceEvent::AgentsEnded {
+                anchor: AGENT.into(),
+                at: clock.at(5_000),
+                cost_usd: Some(0.5),
+                tokens: Some(TokenCount {
+                    input: 1_510,
+                    output: 100
+                }),
+                at_least: true,
+            }),
+            "the first turn's agents end the first turn"
         );
     }
 
