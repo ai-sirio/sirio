@@ -10,9 +10,10 @@
 //! as `gutter.rs` does: the breakpoint slot `[0, 2a)`, the digits, the fold
 //! chevron `[4a, 6a)` and the git bar at `6a`. The text starts one advance
 //! past the gutter. The `geometry` line prints those values, computed the way
-//! `CodeEditor::render` computes them, so the script can aim at a row.
+//! `CodeEditor::render` computes them, so the script can aim at a row. Line 12
+//! is far wider than the window, for the horizontal scroll.
 //!
-//! stdout: `geometry …` and `line 3 bytes …` once; `breakpoints {…}` at start
+//! stdout: `geometry …`, `line 3 bytes …` and `line 12 bytes …` once; `breakpoints {…}` at start
 //! and on each change; `event …` for every `EditorEvent`.
 //! Env: `ELY_PROBE_APPEARANCE` (`light`, otherwise dark), `ELY_PROBE_UI_SIZE`,
 //! and `ELY_PROBE_BREAKPOINTS=on`, which keeps the breakpoint slot live: the
@@ -35,6 +36,8 @@ const LINES: usize = 60;
 const HIGHLIGHTED: usize = 3;
 /// The line of square brackets, which Ely's lexer would colour with punctuation.
 const BRACKETS: usize = 4;
+/// The line far wider than the window: the horizontal scroll's subject.
+const WIDE: usize = 12;
 /// Rows of code a row's height holds, as leading (`view.rs`).
 const LEADING: f32 = 1.6;
 
@@ -46,6 +49,7 @@ fn fixture() -> String {
         .map(|line| match line {
             HIGHLIGHTED => "    let bars = \"||||||||||||||||\";".to_string(),
             BRACKETS => "    let nest = [[[[[[[[[[[[[[[[]]]]]]]]]]]]]]];".to_string(),
+            WIDE => format!("    let wide = \"{}\"; // tail", "w".repeat(300)),
             _ => format!("    let value_{line:02} = compute({line});"),
         })
         .collect::<Vec<_>>()
@@ -143,6 +147,8 @@ impl Probe {
         });
         let shown = BTreeSet::new();
         println!("line {HIGHLIGHTED} bytes {}..{}", highlighted.start, highlighted.end);
+        let wide = bytes_of(&text, WIDE);
+        println!("line {WIDE} bytes {}..{}", wide.start, wide.end);
         println!("breakpoints {shown:?}");
         let subscriptions = vec![
             cx.subscribe(&editor, |_, _, event: &EditorEvent, _| {

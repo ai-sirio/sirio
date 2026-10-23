@@ -1,20 +1,25 @@
 use std::{ops::Range, rc::Rc};
 
 use gpui::{
-    AnyElement, App, Bounds, Context, ElementInputHandler, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
-    StatefulInteractiveElement, Styled, StyledText, Window, canvas, div, fill, font, point, px, size,
-    uniform_list,
+    AnyElement, App, AppContext as _, Bounds, Context, DragMoveEvent, ElementInputHandler,
+    EmptyView, EntityId, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
+    StatefulInteractiveElement, Styled, StyledText, Window, canvas, div, fill, font, point, px,
+    size, uniform_list,
 };
 
 use super::{
     decor::ReadOnlyBanner,
     keys::{CONTEXT, listen},
     layout::{MinimapPlan, Row, Rows, hidden, minimap_plan},
+    sideways,
     state::{CodeEditor, EditorEvent},
     syntax::{self, Bracket},
 };
-use crate::theme::{ActiveTheme, TextSize};
+use crate::{
+    layout::on_axis,
+    theme::{ActiveTheme, TextSize},
+};
 
 /// What one render worked out, for the rows the list builds after it.
 #[derive(Default)]
@@ -32,6 +37,11 @@ pub(crate) struct Frame {
     pub stamp: u64,
     /// The minimap's box, from its last paint.
     pub minimap: Bounds<Pixels>,
+}
+
+/// A drag of the horizontal bar's thumb, by the editor that owns the bar; where it was pressed is the editor's `bar_press`.
+struct BarDrag {
+    owner: EntityId,
 }
 
 /// Lines of code a row's height holds, as leading.
@@ -102,14 +112,18 @@ impl CodeEditor {
                 .child(
                     div()
                         .flex_none()
-                        .w(self.frame.advance * (self.gutter_columns() + 1) as f32),
+                        .w(self.frame.advance * self.gutter_columns() as f32),
                 )
                 .child(
-                    div()
-                        .line_height(self.frame.line)
-                        .whitespace_nowrap()
-                        .text_color(colors.syntax.variable)
-                        .child(StyledText::new(text).with_highlights(styles)),
+                    div().flex_1().overflow_hidden().child(
+                        div()
+                            .relative()
+                            .left(self.frame.advance - self.scroll_x)
+                            .line_height(self.frame.line)
+                            .whitespace_nowrap()
+                            .text_color(colors.syntax.variable)
+                            .child(StyledText::new(text).with_highlights(styles)),
+                    ),
                 )
         });
         Some(
@@ -241,11 +255,126 @@ impl CodeEditor {
         window: &Window,
         cx: &Context<Self>,
     ) -> Option<usize> {
-        // The code column begins one advance before the text, past the gutter.
-        if position.x < self.metrics.left - self.metrics.advance {
+        // The code column begins past the gutter, whatever the sideways scroll.
+        if position.x < self.metrics.code_left {
             return None;
         }
         self.offset_at(position, window, cx)
+    }
+
+    /// How far the code column can scroll, from its widest line, and where to move it so a caret that has moved stays in view.
+    fn scroll_sideways(&mut self, window: &Window, cx: &Context<Self>) {
+        let (advance, width) = (self.metrics.advance, self.metrics.code_width);
+        let stamp = self.buffer.stamp();
+        let widest = match self.widest {
+            Some((at, widest)) if at == stamp => widest,
+            _ => {
+                // The line with the most bytes, found without laying any line out; only that one is measured.
+                let line = (0..self.buffer.lines())
+                    .max_by_key(|line| self.buffer.line_range(*line).len())
+                    .unwrap_or(0);
+                let (shown, measured) = self.measured(line, window, cx);
+                let widest = advance + measured.x(shown.text.chars().count());
+                self.widest = Some((stamp, widest));
+                widest
+            }
+        };
+        self.scroll_x_max = if width > Pixels::ZERO {
+            (widest + advance * 2.0 - width).max(Pixels::ZERO)
+        } else {
+            Pixels::ZERO
+        };
+        self.scroll_x = self.scroll_x.max(Pixels::ZERO).min(self.scroll_x_max);
+        let head = self.primary().head;
+        // Only a caret that moved is followed: a wheel scroll never snaps back to it.
+        if width <= Pixels::ZERO || self.followed == Some(head) {
+            return;
+        }
+        self.followed = Some(head);
+        let line = self.buffer.line_of(head);
+        if self.frame.rows.row_of(line).is_none() {
+            return;
+        }
+        let text = self.row_text(line);
+        let (shown, measured) = self.measured(line, window, cx);
+        let column = shown.column(text, self.buffer.point(head).1.min(text.len()));
+        let caret = advance + measured.x(column);
+        let to = sideways::follow(self.scroll_x, caret, width, advance * 4.0);
+        self.scroll_x = to.max(Pixels::ZERO).min(self.scroll_x_max);
+    }
+
+    /// The bar over the code column's bottom edge, when a line is wider than the column.
+    fn horizontal_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (span, reach, scrolled) = (
+            self.metrics.code_width,
+            self.scroll_x_max,
+            self.scroll_x,
+        );
+        if reach <= Pixels::ZERO || span <= Pixels::ZERO {
+            return None;
+        }
+        let theme = cx.theme();
+        let rem = window.rem_size();
+        let thickness = theme.scrollbar_thickness().to_pixels(rem);
+        let min_thumb = theme.scrollbar_min_thumb().to_pixels(rem);
+        let length = (span * (span / (span + reach))).max(min_thumb).min(span);
+        let travel = span - length;
+        if travel <= Pixels::ZERO {
+            return None;
+        }
+        let start = travel * (scrolled / reach).clamp(0.0, 1.0);
+        let (idle, busy) = (theme.colors.fg.opacity(0.22), theme.colors.fg.opacity(0.42));
+        let (owner, entity) = (cx.entity_id(), cx.entity());
+        let thumb = div()
+            .id("code-editor-hthumb")
+            .absolute()
+            .left(start)
+            .top_0()
+            .h(thickness)
+            .w(length)
+            .rounded_full()
+            .bg(idle)
+            .hover(|style| style.bg(busy))
+            .on_drag(BarDrag { owner }, |_, _, _, cx| cx.new(|_| EmptyView));
+        let press = cx.entity();
+        Some(
+            div()
+                .id("code-editor-hbar")
+                .debug_selector(|| "code-editor-hbar".into())
+                .absolute()
+                .left(self.metrics.code_left - self.metrics.body_left)
+                .w(span)
+                .bottom_0()
+                .h(thickness * 2.0)
+                .pt(thickness * 0.5)
+                // A press on the bar is the bar's: it reaches neither the code under it nor the caret.
+                .block_mouse_except_scroll()
+                .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, window, cx| {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    // The drag starts a few pixels later and the frames in between rebuild the bar,
+                    // so the press is kept on the editor: the thumb then follows the pointer from it.
+                    press.update(cx, |editor, _| {
+                        editor.bar_press = Some((event.position.x - editor.metrics.code_left, start));
+                    });
+                })
+                .on_drag_move(move |event: &DragMoveEvent<BarDrag>, _, cx| {
+                    if event.drag(cx).owner != owner {
+                        return;
+                    }
+                    let along = (event.event.position - event.bounds.origin).x;
+                    entity.update(cx, |editor, cx| {
+                        let Some((pressed, from)) = editor.bar_press else {
+                            return;
+                        };
+                        let ratio = ((from + along - pressed) / travel).clamp(0.0, 1.0);
+                        editor.scroll_x = reach * ratio;
+                        cx.notify();
+                    });
+                })
+                .child(thumb)
+                .into_any_element(),
+        )
     }
 
     /// Scrolls so the row under a minimap point sits in the middle of the view.
@@ -326,6 +455,9 @@ impl Render for CodeEditor {
         self.metrics.advance = advance;
         self.metrics.line = line;
         self.metrics.size = pixels;
+        let scan = sirio_perf::span("CodeEditor.sideways", id);
+        self.scroll_sideways(window, cx);
+        drop(scan);
         let scan = sirio_perf::span("CodeEditor.sticky", id);
         let sticky = if self.options.sticky {
             self.sticky(cx)
@@ -334,16 +466,19 @@ impl Render for CodeEditor {
         };
         drop(scan);
         let count = self.frame.rows.len();
-        let list = uniform_list(
-            "editor-rows",
-            count,
-            cx.processor(|editor, range: Range<usize>, window, cx| {
-                let _rows = sirio_perf::span("CodeEditor.visible_rows", cx.entity_id().as_u64());
-                range.map(|ix| editor.row(ix, window, cx)).collect()
-            }),
-        )
-        .track_scroll(&self.scroll)
-        .size_full();
+        let list = on_axis(
+            uniform_list(
+                "editor-rows",
+                count,
+                cx.processor(|editor, range: Range<usize>, window, cx| {
+                    let _rows =
+                        sirio_perf::span("CodeEditor.visible_rows", cx.entity_id().as_u64());
+                    range.map(|ix| editor.row(ix, window, cx)).collect()
+                }),
+            )
+            .track_scroll(&self.scroll)
+            .size_full(),
+        );
         let (top, focus, input) = (cx.entity(), self.focus.clone(), cx.entity());
         let unlock = cx.entity();
         let banner = self.draws_read_only_banner().then(|| {
@@ -365,10 +500,14 @@ impl Render for CodeEditor {
             .h_full()
             .child(list)
             .children(sticky)
+            .children(self.horizontal_bar(window, cx))
             .child(
                 canvas(
                     move |bounds, _, cx| {
-                        top.update(cx, |editor, _| editor.metrics.top = bounds.origin.y);
+                        top.update(cx, |editor, _| {
+                            editor.metrics.top = bounds.origin.y;
+                            editor.metrics.body_left = bounds.origin.x;
+                        });
                     },
                     |_, _, _, _| {},
                 )
@@ -377,6 +516,22 @@ impl Render for CodeEditor {
                 .left_0()
                 .size_full(),
             )
+            // The list keeps to the vertical axis, so the sideways scroll is taken here.
+            .on_scroll_wheel(cx.listener(
+                |editor, event: &ScrollWheelEvent, window, cx| {
+                    let delta = event.delta.pixel_delta(window.line_height());
+                    if delta.x == Pixels::ZERO {
+                        return;
+                    }
+                    let to = (editor.scroll_x - delta.x)
+                        .max(Pixels::ZERO)
+                        .min(editor.scroll_x_max);
+                    if to != editor.scroll_x {
+                        editor.scroll_x = to;
+                        cx.notify();
+                    }
+                },
+            ))
             .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, window, cx| {
                 if event.dragging() {
                     return;
