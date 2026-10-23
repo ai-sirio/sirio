@@ -86,9 +86,27 @@ struct WaitingTurn {
     agents: HashSet<String>,
     cost_usd: Option<f64>,
     tokens: Option<TokenCount>,
-    /// The turn's spend can no longer grow. Nothing sets it yet.
-    #[allow(dead_code)]
+    /// A prompt was written while the turn waited: the next `result` mixes
+    /// the new turn's spend with the agents', so this turn's can no longer
+    /// grow.
     frozen: bool,
+}
+
+/// The latest prompt-started turn: whose spend a CLI-started `result` adds
+/// to. It outlives the turn's end, because the CLI's reactions to a
+/// background agent come after it.
+struct Owner {
+    /// The turn's own share was told apart from the process's running total.
+    /// A turn after an interrupt, or one that ran while another turn's agents
+    /// did, cannot say; nothing is added to it then, and a figure that is
+    /// not known is never made up.
+    known: bool,
+    /// The turn's spend so far, reactions included.
+    cost_usd: Option<f64>,
+    tokens: Option<TokenCount>,
+    /// While the turn still waits on agents: the anchor of its
+    /// [`WaitingTurn`], where the spend goes until `AgentsEnded` carries it.
+    anchor: Option<String>,
 }
 
 /// A permission the user has not answered.
@@ -147,6 +165,14 @@ pub(crate) struct TraceFold {
     turn_agents: HashSet<String>,
     /// The turns whose main thread ended with background agents still open.
     waiting: Vec<WaitingTurn>,
+    /// The agents launched while no prompt-started turn was open (by a turn
+    /// the CLI started on its own). They are not drawn, nor are their lines.
+    foreign_agents: HashSet<String>,
+    /// Whom a CLI-started `result` charges.
+    owner: Option<Owner>,
+    /// This turn started while another turn's agents worked, so its spend
+    /// cannot be told apart from theirs.
+    mixed_this_turn: bool,
     waits: HashMap<u64, Wait>,
     next_seq: u64,
 }
@@ -178,6 +204,9 @@ impl TraceFold {
             bg_agents: HashSet::new(),
             turn_agents: HashSet::new(),
             waiting: Vec::new(),
+            foreign_agents: HashSet::new(),
+            owner: None,
+            mixed_this_turn: false,
             waits: HashMap::new(),
             next_seq: 0,
         }
@@ -204,6 +233,12 @@ impl TraceFold {
         self.interrupted_this_turn = false;
         self.interrupted_call = None;
         self.forget_main_call();
+        // Agents of an earlier turn are at work: this turn's `result` will
+        // carry their spend too.
+        self.mixed_this_turn = !self.waiting.is_empty();
+        for turn in &mut self.waiting {
+            turn.frozen = true;
+        }
         vec![TraceEvent::TurnStarted { at }]
     }
 
@@ -255,6 +290,10 @@ impl TraceFold {
                 let agent = self.tasks.get(agent_id?)?;
                 self.spans.contains_key(agent).then(|| agent.clone())
             });
+        // A card of a turn the CLI started on its own is no turn's wait.
+        if span.is_none() && !self.turn_open {
+            return Vec::new();
+        }
         self.waits.insert(
             request_id,
             Wait {
@@ -282,6 +321,10 @@ impl TraceFold {
         // A subagent sends no stream events; one that did would be a second
         // call on the main thread's line.
         if event.parent_tool_use_id.is_some() {
+            return Vec::new();
+        }
+        // The calls of a turn the CLI started on its own are not drawn.
+        if !self.turn_open {
             return Vec::new();
         }
         match event.lifecycle() {
@@ -353,6 +396,11 @@ impl TraceFold {
         let mut events = Vec::new();
         let owner = match assistant.parent_tool_use_id.as_deref() {
             None => None,
+            Some(parent) if self.foreign_agents.contains(parent) => {
+                // What a foreign agent launches is foreign too.
+                self.adopt_foreign(assistant);
+                return events;
+            }
             Some(parent) if self.ended_agents.contains(parent) => return events,
             Some(parent) if self.is_agent(parent) => {
                 self.subagent_call(parent, assistant, at, &mut events);
@@ -362,10 +410,26 @@ impl TraceFold {
             // root. No call is invented, there is no edge to time one from.
             Some(_) => None,
         };
+        // A root line outside a prompt's turn is the CLI's own turn: its
+        // tools are not drawn, and an agent it launches is remembered so
+        // that nothing of it is.
+        if owner.is_none() && !self.turn_open {
+            self.adopt_foreign(assistant);
+            return events;
+        }
         for tool_use in assistant.tool_uses() {
             self.open_span(tool_use, owner.as_deref(), at, &mut events);
         }
         events
+    }
+
+    /// Remembers the agents `assistant` launches as foreign.
+    fn adopt_foreign(&mut self, assistant: &AssistantPayload) {
+        for tool_use in assistant.tool_uses() {
+            if is_agent_call(tool_use) {
+                self.foreign_agents.insert(tool_use.id.clone());
+            }
+        }
     }
 
     /// The model call a subagent's `assistant` line ends. It started at the
@@ -428,7 +492,7 @@ impl TraceFold {
             return;
         }
         let seq = self.next_sequence();
-        let (kind, name, detail, agent) = if matches!(tool_use.name.as_str(), "Agent" | "Task") {
+        let (kind, name, detail, agent) = if is_agent_call(tool_use) {
             let name = line_of(&tool_use.input, "subagent_type")
                 .unwrap_or_else(|| one_line(&tool_use.name));
             let detail = line_of(&tool_use.input, "description").unwrap_or_default();
@@ -463,11 +527,9 @@ impl TraceFold {
     }
 
     fn user(&mut self, user: &UserPayload, at: Instant) -> Vec<TraceEvent> {
-        if user
-            .parent_tool_use_id
-            .as_deref()
-            .is_some_and(|parent| self.ended_agents.contains(parent))
-        {
+        if user.parent_tool_use_id.as_deref().is_some_and(|parent| {
+            self.ended_agents.contains(parent) || self.foreign_agents.contains(parent)
+        }) {
             return Vec::new();
         }
         let mut events = Vec::new();
@@ -646,6 +708,15 @@ impl TraceFold {
                 continue;
             }
             let turn = self.waiting.remove(index);
+            // Its agents are over: what the CLI does next is a reaction,
+            // charged to the turn as a running total.
+            if let Some(owner) = self
+                .owner
+                .as_mut()
+                .filter(|owner| owner.anchor.as_deref() == Some(turn.anchor.as_str()))
+            {
+                owner.anchor = None;
+            }
             events.push(TraceEvent::AgentsEnded {
                 anchor: turn.anchor,
                 at,
@@ -770,6 +841,10 @@ impl TraceFold {
     /// and `message_start` will only name it. Any other `status` line is a
     /// permission mode and falls through to the ignored subtypes.
     fn requested(&mut self, at: Instant) -> Vec<TraceEvent> {
+        // A request outside a prompt's turn is the CLI's own turn.
+        if !self.turn_open {
+            return Vec::new();
+        }
         // A second request before any token is the same answer again.
         if self.main_waiting {
             return Vec::new();
@@ -788,6 +863,9 @@ impl TraceFold {
     }
 
     fn result(&mut self, result: &ResultPayload, at: Instant) -> Vec<TraceEvent> {
+        if !self.turn_open {
+            return self.cli_started_result(result);
+        }
         let interrupted = self.interrupted_this_turn;
         // The turn's background agents still at work. A Stop kills them, and
         // an interrupted turn waits for nobody: they are over with it.
@@ -825,7 +903,7 @@ impl TraceFold {
             .collect();
         // The turn after an interrupt is unknown too: whether the counters
         // catch up on the spend the interrupt cut short is not known.
-        let known = !interrupted && !self.interrupted_last_turn;
+        let known = !interrupted && !self.interrupted_last_turn && !self.mixed_this_turn;
         let cost_usd = self.turn_cost(result.total_cost_usd, known);
         let tokens = self.turn_tokens(result, known);
         let outcome = if interrupted {
@@ -843,8 +921,15 @@ impl TraceFold {
         };
         self.interrupted_last_turn = interrupted;
         self.interrupted_this_turn = false;
+        self.mixed_this_turn = false;
         self.end_turn_scope(&surviving);
         self.turn_open = false;
+        self.owner = Some(Owner {
+            known,
+            cost_usd,
+            tokens: tokens.clone(),
+            anchor: working.first().map(|(_, anchor)| anchor.clone()),
+        });
         match working.first() {
             // The main thread is over and its agents are not: the turn goes
             // on, with what is known of its spend so far.
@@ -877,6 +962,42 @@ impl TraceFold {
             events.extend(self.start_turn(at));
         }
         events
+    }
+
+    /// A `result` of a turn the CLI started on its own (the reaction to a
+    /// background agent that ended). It ends no turn and draws nothing; its
+    /// spend belongs to the latest prompt-started turn, whose running total
+    /// it grows. While that turn waits on agents the sum rides in its
+    /// [`WaitingTurn`] and nothing is said yet. After the last agent, the
+    /// total is final bar later reactions, and says so.
+    fn cli_started_result(&mut self, result: &ResultPayload) -> Vec<TraceEvent> {
+        // The baseline moves on every `result`, charged or not.
+        let cost = self.turn_cost(result.total_cost_usd, true);
+        let tokens = self.turn_tokens(result, true);
+        let Some(owner) = self.owner.as_mut().filter(|owner| owner.known) else {
+            return Vec::new();
+        };
+        owner.cost_usd = owner.cost_usd.zip(cost).map(|(sum, share)| sum + share);
+        owner.tokens = owner.tokens.take().zip(tokens).map(|(sum, share)| TokenCount {
+            input: sum.input.saturating_add(share.input),
+            output: sum.output.saturating_add(share.output),
+        });
+        if let Some(anchor) = &owner.anchor {
+            if let Some(turn) = self
+                .waiting
+                .iter_mut()
+                .find(|turn| turn.anchor == *anchor && !turn.frozen)
+            {
+                turn.cost_usd = owner.cost_usd;
+                turn.tokens = owner.tokens.clone();
+            }
+            return Vec::new();
+        }
+        vec![TraceEvent::TurnSpend {
+            cost_usd: owner.cost_usd,
+            tokens: owner.tokens.clone(),
+            at_least: false,
+        }]
     }
 
     /// This turn's spend: the process's running total less the last
@@ -1073,6 +1194,12 @@ impl TraceFold {
             events.push(TraceEvent::WaitEnded { request_id, at });
         }
     }
+}
+
+/// Whether the call opens a subagent: `Agent`, and the `Task` it was called
+/// before.
+fn is_agent_call(tool_use: &ToolUse) -> bool {
+    matches!(tool_use.name.as_str(), "Agent" | "Task")
 }
 
 fn ended(id: String, outcome: SpanOutcome, at: Instant, measured_ms: Option<u64>) -> TraceEvent {
@@ -3805,5 +3932,270 @@ mod tests {
             fold.line(&message_stop(), clock.at(1_000)),
             vec![span_ended(&call, SpanOutcome::Done, clock.at(1_000), None)]
         );
+    }
+
+    /// Every `TurnSpend` in `events`, as (cost, tokens, at_least).
+    fn spend_of(events: &[TraceEvent]) -> Vec<(Option<f64>, Option<TokenCount>, bool)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                TraceEvent::TurnSpend {
+                    cost_usd,
+                    tokens,
+                    at_least,
+                } => Some((*cost_usd, tokens.clone(), *at_least)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `system init` line a CLI-started turn opens with.
+    fn init_line() -> CliMessage {
+        msg(json!({"type": "system", "subtype": "init", "session_id": "f336cf12"}))
+    }
+
+    /// The lines of a turn the CLI started on its own, up to and not
+    /// including its `result`: the lines the fold must not draw.
+    fn cli_started_lines(fold: &mut TraceFold, clock: &Clock, ms: u64) -> Vec<TraceEvent> {
+        let mut events = Vec::new();
+        for (offset, line) in [
+            init_line(),
+            requesting(),
+            message_start_of("msg_cli"),
+            assistant(
+                None,
+                "msg_cli",
+                vec![tool_use("toolu_cli_bash", "Bash", json!({"command": "ls"}))],
+            ),
+            message_stop(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            events.extend(fold.line(line, clock.at(ms + offset as u64 * 10)));
+        }
+        events
+    }
+
+    #[test]
+    fn a_cli_started_turns_lines_open_nothing() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let end = fold.line(&main_result(), clock.at(1_000));
+        assert!(matches!(end.as_slice(), [TraceEvent::TurnEnded { .. }]), "{end:?}");
+
+        let mut events = cli_started_lines(&mut fold, &clock, 2_000);
+        assert_eq!(events, Vec::new(), "no span opens outside a prompt's turn");
+        // Its result adds its own $0.20 and 30 output tokens to the turn.
+        events.extend(fold.line(
+            &result_line(Some(0.7), (12, 130, 1_000, 500)),
+            clock.at(2_100),
+        ));
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, TraceEvent::TurnEnded { .. } | TraceEvent::SpanStarted { .. })),
+            "{events:?}"
+        );
+        let spend = spend_of(&events);
+        let [(cost, tokens, at_least)] = spend.as_slice() else {
+            panic!("exactly one TurnSpend: {events:?}");
+        };
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_close(*cost, 0.7);
+        assert_eq!(
+            *tokens,
+            Some(TokenCount {
+                input: 1_512,
+                output: 130
+            })
+        );
+        assert!(!at_least);
+    }
+
+    #[test]
+    fn an_agent_a_cli_started_turn_launches_is_dropped() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        fold.line(&main_result(), clock.at(1_000));
+
+        let id = "toolu_cli_agent";
+        let progress = msg(json!({
+            "type": "system", "subtype": "task_progress", "task_id": "task-cli",
+            "tool_use_id": id, "description": "Running work",
+            "usage": {"total_tokens": 900, "tool_uses": 1, "duration_ms": 500},
+            "last_tool_name": "Bash"
+        }));
+        let lines = [
+            assistant(None, "msg_cli", vec![tool_use(id, "Agent", json!({"prompt": "go"}))]),
+            task_started_as("task-cli", id, Some(true), "local_agent"),
+            launch_result(id, Some("async_launched")),
+            assistant(
+                Some(id),
+                "msg_cli_agent",
+                vec![tool_use("toolu_cli_inner", "Bash", json!({"command": "ls"}))],
+            ),
+            tool_result(Some(id), "toolu_cli_inner", false, "README.md"),
+            progress,
+            task_updated("task-cli", "completed"),
+            task_notification_of("task-cli", id, "completed", 2_000),
+        ];
+        for (index, line) in lines.iter().enumerate() {
+            assert_eq!(
+                fold.line(line, clock.at(2_000 + index as u64 * 100)),
+                Vec::new(),
+                "line {index} of a CLI-started agent draws nothing"
+            );
+        }
+        // The agent keeps no turn open: a later prompt's result ends it.
+        let next = finish(
+            &mut fold,
+            &clock,
+            4_000,
+            &result_line(Some(0.9), (20, 200, 2_000, 1_000)),
+        );
+        assert_eq!(turn_end_outcome(&next), TurnOutcome::Done);
+    }
+
+    #[test]
+    fn a_notification_nobody_opened_changes_nothing() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        launch_background(&mut fold, &clock, AGENT, "task-bg", 100);
+        fold.line(&main_result(), clock.at(1_000));
+
+        for line in [
+            task_notification_of("task-ghost", "toolu_ghost", "completed", 10),
+            task_updated("task-ghost", "completed"),
+            task_notification_of("task-ghost", "toolu_ghost", "failed", 10),
+        ] {
+            assert_eq!(fold.line(&line, clock.at(2_000)), Vec::new());
+        }
+        // The turn still waits on its own agent.
+        let end = fold.line(
+            &task_notification_of("task-bg", AGENT, "completed", 3_000),
+            clock.at(3_000),
+        );
+        assert!(
+            matches!(end.last(), Some(TraceEvent::AgentsEnded { anchor, .. }) if anchor.as_str() == AGENT),
+            "{end:?}"
+        );
+    }
+
+    #[test]
+    fn the_cost_after_the_last_agent_is_final_and_reactions_add_to_it() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        launch_background(&mut fold, &clock, AGENT, "task-bg", 100);
+        assert!(matches!(
+            fold.line(&result_line(Some(1.0), (10, 100, 1_000, 500)), clock.at(1_000)).as_slice(),
+            [TraceEvent::MainEnded { .. }]
+        ));
+        let ended = fold.line(
+            &task_notification_of("task-bg", AGENT, "completed", 3_000),
+            clock.at(3_000),
+        );
+        match ended.last() {
+            Some(TraceEvent::AgentsEnded {
+                cost_usd, at_least, ..
+            }) => {
+                assert_close(*cost_usd, 1.0);
+                assert!(*at_least, "no result after the agent has come yet");
+            }
+            other => panic!("the agent ends the turn: {other:?}"),
+        }
+
+        // The CLI reacts to the notification, then to a second one.
+        let first = fold.line(
+            &result_line(Some(1.5), (20, 300, 2_000, 1_000)),
+            clock.at(4_000),
+        );
+        let spend = spend_of(&first);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_close(spend[0].0, 1.5);
+        assert_eq!(
+            spend[0].1,
+            Some(TokenCount {
+                input: 3_020,
+                output: 300
+            })
+        );
+        assert!(!spend[0].2);
+        let second = fold.line(
+            &result_line(Some(1.6), (22, 320, 2_000, 1_000)),
+            clock.at(5_000),
+        );
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert_close(spend_of(&second)[0].0, 1.6);
+        assert!(!spend_of(&second)[0].2);
+    }
+
+    #[test]
+    fn an_agent_that_ended_before_the_main_result_still_gets_its_reaction_spend() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        launch_background(&mut fold, &clock, AGENT, "task-bg", 100);
+        fold.line(&task_updated("task-bg", "completed"), clock.at(800));
+        let end = fold.line(&result_line(Some(1.0), (10, 100, 1_000, 500)), clock.at(1_000));
+        assert_eq!(end.len(), 1, "{end:?}");
+        assert_close(turn_end_cost(&end[0]), 1.0);
+
+        let reaction = fold.line(
+            &result_line(Some(1.3), (15, 150, 1_000, 500)),
+            clock.at(2_000),
+        );
+        assert_eq!(reaction.len(), 1, "{reaction:?}");
+        let spend = spend_of(&reaction);
+        assert_close(spend[0].0, 1.3);
+        assert!(!spend[0].2);
+    }
+
+    #[test]
+    fn a_prompt_while_agents_run_freezes_the_old_cost_and_hides_the_new() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        launch_background(&mut fold, &clock, AGENT, "task-bg", 100);
+        assert!(matches!(
+            fold.line(&result_line(Some(1.0), (10, 100, 1_000, 500)), clock.at(1_000)).as_slice(),
+            [TraceEvent::MainEnded { .. }]
+        ));
+
+        // Turn 2's spend and the agent's cannot be told apart.
+        let second = finish(
+            &mut fold,
+            &clock,
+            2_000,
+            &result_line(Some(1.8), (20, 200, 2_000, 1_000)),
+        );
+        assert_eq!(turn_end_outcome(&second), TurnOutcome::Done);
+        assert_eq!(turn_end_cost(&second), None);
+        assert_eq!(turn_end_tokens(&second), None);
+
+        let end = fold.line(&task_updated("task-bg", "completed"), clock.at(5_000));
+        match end.last() {
+            Some(TraceEvent::AgentsEnded {
+                anchor,
+                cost_usd,
+                at_least,
+                ..
+            }) => {
+                assert_eq!(anchor.as_str(), AGENT);
+                assert_close(*cost_usd, 1.0);
+                assert!(*at_least, "turn 1's cost stays a floor");
+            }
+            other => panic!("the agent ends turn 1: {other:?}"),
+        }
+        // Reactions to a turn whose cost is unknown add nothing to a dash.
+        let reaction = fold.line(
+            &result_line(Some(2.0), (22, 220, 2_000, 1_000)),
+            clock.at(6_000),
+        );
+        assert_eq!(reaction, Vec::new());
     }
 }
