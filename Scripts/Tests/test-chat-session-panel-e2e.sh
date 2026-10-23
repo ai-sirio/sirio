@@ -1209,7 +1209,7 @@ scenario_trace_background() {
     "S('trace')['summary'].startswith('Live · ') and $BG_COST == '≥ \$1.00' and $(bg_agent_running toolu_bg_a) and $(bg_agent_running toolu_bg_b) and $ROOT_CALLS == 2"
   echo "step: agent A ends and the CLI reacts in a turn of its own (\$0.20) while B still runs"
   wait_panel "agent A is done and ended" 'T("toolu_bg_a")["state"] == "done" and T("toolu_bg_a")["ended"] == "1"' 30
-  # The reaction's result comes about a second and a half after A's end (three steps), and the
+  # The reaction's result comes about a second after A's end (two steps), and the
   # fixture holds B for twenty: a read four seconds on is after the result and before B's end.
   sleep 4
   check_panel "still Live with B running, the cost still at least \$1.00 and never an exact figure, and A's reaction drew no call under the root" \
@@ -1243,7 +1243,7 @@ scenario_trace_background_prompt() {
     "$ROOT_CALLS >= 1 and not any(s['kind'] == 'subagent' or s['id'].startswith('toolu_bp') for s in tab()['spans'])"
   # The fixture ends the agent twenty steps (ten seconds) after the second turn's result.
   echo "step: the agent ends; the second turn does not change"
-  sleep 12
+  sleep 15
   check_panel "the second turn is as it was: Done, cost unknown, no agent span in it" \
     "S('trace')['summary'].startswith('Done · ') and '\$' not in S('trace')['summary'] and $BG_COST == '—' and not any(s['kind'] == 'subagent' or s['id'].startswith('toolu_bp') for s in tab()['spans'])"
   stop_app
