@@ -315,9 +315,14 @@ TRACE_ANSWERS = {}
 TRACE_ANSWERED = threading.Condition()
 
 
+TRACE_UUID_LOCK = threading.Lock()
+
+
 def trace_uuid():
-    TRACE_COUNTER["n"] += 1
-    return f"00000000-0000-4000-8000-{TRACE_COUNTER['n']:012d}"
+    # A background agent's thread writes beside the turn's script.
+    with TRACE_UUID_LOCK:
+        TRACE_COUNTER["n"] += 1
+        return f"00000000-0000-4000-8000-{TRACE_COUNTER['n']:012d}"
 
 
 def pause(steps=1.0):
@@ -647,6 +652,146 @@ def script_subagent_permission(early):
     trace_result(0.07, started)
 
 
+# A background agent: `task_started` says `is_backgrounded`, the `Agent` result is only its
+# launch (`async_launched`), and its lines keep coming after the main thread's `result`,
+# until `task_updated` and `task_notification` end it (the lines `claude` 2.1.309 wrote).
+# The scripts hold between those steps for TRACE_BACKGROUND_HOLD steps of TRACE_STEP_MS,
+# long enough for a check to read each state.
+TRACE_BACKGROUND_HOLD = 20
+# Set once the prompt after `bgprompt` has been answered: its agent ends then.
+TRACE_NEXT_ANSWERED = threading.Event()
+
+
+def task_started_background(task_id, tool_use_id, description):
+    send({"type": "system", "subtype": "task_started", "task_id": task_id,
+          "run_id": f"run-{task_id}", "tool_use_id": tool_use_id,
+          "description": description, "subagent_type": "fork",
+          "is_backgrounded": True, "spawn_depth": 1, "task_type": "local_agent",
+          "prompt": description, "uuid": trace_uuid(), "session_id": SESSION_ID})
+
+
+def async_launched(tool_use_id, task_id):
+    trace_result_line(tool_use_id, "Async agent launched successfully.", totals={
+        "isAsync": True, "status": "async_launched", "agentId": task_id,
+        "description": "A background agent", "prompt": "Work in the background",
+        "resolvedModel": TRACE_MODEL})
+
+
+def task_ended(task_id, tool_use_id, duration_ms):
+    send({"type": "system", "subtype": "task_updated", "task_id": task_id,
+          "patch": {"status": "completed", "end_time": int(time.time() * 1000)},
+          "uuid": trace_uuid(), "session_id": SESSION_ID})
+    send({"type": "system", "subtype": "task_notification", "task_id": task_id,
+          "tool_use_id": tool_use_id, "status": "completed",
+          "summary": "Agent finished the work", "output_file": f"/tmp/{task_id}.output",
+          "usage": {"total_tokens": 26197, "tool_uses": 2, "duration_ms": duration_ms},
+          "uuid": trace_uuid(), "session_id": SESSION_ID})
+
+
+def background_work(agent, task, remark):
+    """One step of a background agent's own work: a Bash call it makes and finishes."""
+    tool = f"{agent}_{remark}"
+    trace_assistant(f"msg_{tool}", tool_use(tool, "Bash", {
+        "command": "ls", "description": "List the files"}), parent=agent, agent_id=task)
+    pause()
+    trace_result_line(tool, "README.md\nsrc", parent=agent)
+    task_progress(task, agent, "Working in the background", 9000, 1, "Bash", 3000)
+
+
+def cli_started_turn(message_id, cost):
+    """The turn the CLI starts on its own to react to a notification: no prompt of
+    Sirio's, its own cumulative cost."""
+    started = time.time()
+    init_line()
+    requesting()
+    pause()
+    message_start(message_id)
+    text("The agent finished. ")
+    message_end("end_turn", 20)
+    trace_result(cost, started)
+
+
+def script_background():
+    started = time.time()
+    requesting()
+    pause()
+    message_start("msg_bg_1")
+    text("I will start two agents in the background. ")
+    for agent, description in (("toolu_bg_a", "Survey the sources"),
+                               ("toolu_bg_b", "Draft the plan")):
+        trace_assistant("msg_bg_1", tool_use(agent, "Agent", {
+            "description": description, "subagent_type": "fork", "prompt": description,
+            "run_in_background": True}))
+    message_end("tool_use", 90)
+    task_started_background("task-bg-a", "toolu_bg_a", "Survey the sources")
+    task_started_background("task-bg-b", "toolu_bg_b", "Draft the plan")
+    pause()
+    async_launched("toolu_bg_a", "task-bg-a")
+    async_launched("toolu_bg_b", "task-bg-b")
+    # The main thread goes on: a second call writes the answer and the turn ends, while
+    # both agents work.
+    requesting()
+    pause()
+    message_start("msg_bg_2")
+    text("Both agents are running. ")
+    message_end("end_turn", 30)
+    trace_result(1.00, started)
+    # What the agents do after the result.
+    pause()
+    background_work("toolu_bg_a", "task-bg-a", "bash")
+    background_work("toolu_bg_b", "task-bg-b", "bash")
+    for agent, task in (("toolu_bg_a", "task-bg-a"), ("toolu_bg_b", "task-bg-b")):
+        trace_assistant(f"msg_{agent}_read", tool_use(f"{agent}_read", "Read", {
+            "file_path": "/repo/src/lib.rs"}), parent=agent, agent_id=task)
+    # Both agents run, with children, for the hold: the turn reads Live and its cost "at least".
+    pause(TRACE_BACKGROUND_HOLD)
+    # Agent A ends; the CLI reacts in a turn of its own ($0.20) while B still runs.
+    task_ended("task-bg-a", "toolu_bg_a", 6000)
+    pause()
+    cli_started_turn("msg_react_a", 0.20)
+    pause(TRACE_BACKGROUND_HOLD)
+    # Agent B ends: the turn is Done, its cost still "at least" until the CLI reacts.
+    task_ended("task-bg-b", "toolu_bg_b", 9000)
+    pause(TRACE_BACKGROUND_HOLD)
+    cli_started_turn("msg_react_b", 0.10)
+
+
+def script_bgprompt():
+    started = time.time()
+    requesting()
+    pause()
+    message_start("msg_bp_1")
+    text("I will start an agent in the background. ")
+    trace_assistant("msg_bp_1", tool_use("toolu_bp", "Agent", {
+        "description": "Work on its own", "subagent_type": "fork", "prompt": "Work on its own",
+        "run_in_background": True}))
+    message_end("tool_use", 40)
+    task_started_background("task-bp", "toolu_bp", "Work on its own")
+    pause()
+    async_launched("toolu_bp", "task-bp")
+    requesting()
+    pause()
+    message_start("msg_bp_2")
+    text("The agent is running. ")
+    message_end("end_turn", 20)
+    trace_result(1.00, started)
+    TRACE_NEXT_ANSWERED.clear()
+    threading.Thread(target=bgprompt_agent, daemon=True).start()
+
+
+def bgprompt_agent():
+    """The agent keeps working, in a thread of its own, until the prompt after
+    `bgprompt` has been answered and read; then it ends, with no reaction turn."""
+    step = 0
+    while not TRACE_NEXT_ANSWERED.is_set() and not TRACE_EOF.is_set():
+        step += 1
+        background_work("toolu_bp", "task-bp", f"step{step}")
+    if TRACE_EOF.is_set():
+        return
+    pause(TRACE_BACKGROUND_HOLD)
+    task_ended("task-bp", "toolu_bp", 12000)
+
+
 TRACE_SCRIPTS = {
     "subagents": script_subagents,
     "second": script_second,
@@ -656,6 +801,8 @@ TRACE_SCRIPTS = {
     "die": script_die,
     "subperm": lambda: script_subagent_permission(False),
     "subperm_early": lambda: script_subagent_permission(True),
+    "background": script_background,
+    "bgprompt": script_bgprompt,
 }
 
 
@@ -675,6 +822,8 @@ def trace_turns():
         TRACE_INTERRUPT.clear()
         first = prompt.split(None, 1)[0].lower() if prompt.split() else ""
         TRACE_SCRIPTS.get(first, script_other)()
+        if first != "bgprompt":
+            TRACE_NEXT_ANSWERED.set()
 
 
 def trace_prompt_text(message):

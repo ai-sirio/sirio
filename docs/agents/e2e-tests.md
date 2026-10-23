@@ -54,12 +54,15 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # opening a file tab), Connectors (reconnect, sign in), the Change request card, the
 # shared rate-limit pause and the open state across a relaunch. The trace scenarios
 # (trace_live, trace_cost, trace_request, trace_interrupt, trace_death, trace_hang,
-# trace_subagent_permission, trace_reveal, trace_tab, trace_idle, trace_keys) use
+# trace_subagent_permission, trace_background, trace_background_prompt, trace_reveal,
+# trace_tab, trace_idle, trace_keys) use
 # Scripts/Tests/stubs/trace/claude, the fixture's trace mode, whose scripted turns the
 # first word of a prompt picks (TRACE_STEP_MS paces them): agents and a nested agent, a
 # wait and its reveal, the cost of a second turn, Stop, a CLI that dies, a call that never
-# reports, a subagent's permission, the Trace tab across a worktree switch, a relaunch
-# and its chat's close, the frames the trace asks for (SIRIO_PERF_TRACE) and real X
+# reports, a subagent's permission, background agents that outlive the turn's result (the
+# turn stays Live, its cost "at least" until they end, the CLI-started turns after them
+# charged to it and never drawn, and a prompt written while one runs), the Trace tab across
+# a worktree switch, a relaunch and its chat's close, the frames the trace asks for (SIRIO_PERF_TRACE) and real X
 # clicks and keys on the tab. Each scenario is a fresh Sirio; --state-only skips the
 # captures; --display :N is a private Xvfb (at least --window-size, default 2200x1000)
 # with Mesa's lavapipe, and trace_tab and trace_idle need one (--state-only with it paints
