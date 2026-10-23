@@ -288,13 +288,19 @@ The CLI reports cost only as a cumulative per-process total at each `result` (20
 
 These were settled by the reviewer reading this document as a builder, and are recorded so
 the plan does not reopen them:
-- **Instants.** `task_updated.end_time` (epoch ms) is converted to the trace's read instants
-  against the wall clock at the moment the line is read.
+- **Instants.** An agent ends at the read instant of the `task_updated` that gives it a
+  terminal status (`completed`, `killed`, `failed`), which is the line carrying `end_time`.
+  If the notification comes first, it ends at the notification's read instant. The probe
+  read `task_updated` within 1 ms of the CLI's own `end_time`, and converting epoch ms would
+  make the fold read the wall clock (the planner's call; it supersedes the "`end_time`"
+  wording in §3).
 - **The CLI dies.** Every open turn ends Failed, not only the latest.
 - **The main thread's lane** is drawn as finished while the turn is `Live` on agents only.
-- **A missing notification.** `background_tasks_changed` (already parsed in
-  `sirio_acp::claude::events`) dropping a task is the fallback end when no notification
-  comes.
+- **A missing notification.** There is no fallback end. `background_tasks_changed` was
+  considered and dropped: its own doc in `sirio_claude::message` says the list drains
+  *before* the matching notification, so it would end an agent without its outcome. An
+  agent whose end never comes stays open until the CLI dies or the chat closes, both of
+  which already end every open turn Failed.
 - **Retention.** Turns are dropped only from the oldest end. The store grows past 20 while
   the oldest turn is live, so turn numbers stay contiguous and the pager is unchanged.
 - **A Stop in turn 14 that kills turn 13's agents.** Turn 13 ends with its main result's
