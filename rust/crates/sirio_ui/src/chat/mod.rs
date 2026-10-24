@@ -30,7 +30,7 @@ use sirio_persistence::{
     ChatSessionSummary, ChatToolLocation, ChatTranscript, ChatTurn,
 };
 use sirio_theme::Theme;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -46,6 +46,7 @@ mod bypass;
 mod composer_view;
 mod controls;
 mod file_links;
+use file_links::file_link_target;
 mod history;
 mod list_scroll;
 mod menus;
@@ -122,9 +123,14 @@ pub(crate) fn markdown_block_link_at(document: &markdown::Doc, block: usize) -> 
 /// required by `markdown::render`. File Preview can therefore keep its
 /// existing source-only seam while chat entries use the same renderer.
 struct MarkdownBody {
-    document: markdown::Doc,
+    /// Shared with the release handler of a transcript response, which looks
+    /// a link up in it without copying the document each frame.
+    document: Rc<markdown::Doc>,
     selection: Option<MarkdownSelection>,
     rendered: Option<AnyElement>,
+    /// What a transcript response's last layout recorded, read after paint to
+    /// report where its links are drawn.
+    hit: Option<DocHit>,
 }
 
 /// Where an assistant response's rendered markdown sits in the transcript's
@@ -257,9 +263,10 @@ impl DocHit {
 impl MarkdownBody {
     fn new(document: markdown::Doc) -> Self {
         Self {
-            document,
+            document: Rc::new(document),
             selection: None,
             rendered: None,
+            hit: None,
         }
     }
 
@@ -271,12 +278,13 @@ impl MarkdownBody {
         source_start: usize,
     ) -> Self {
         Self {
-            document,
+            document: Rc::new(document),
             selection: Some(MarkdownSelection {
                 interaction,
                 source_start,
             }),
             rendered: None,
+            hit: None,
         }
     }
 
@@ -289,7 +297,7 @@ impl MarkdownBody {
         selection: MarkdownSelection,
         window: &mut Window,
         cx: &mut App,
-    ) -> AnyElement {
+    ) -> (AnyElement, DocHit) {
         let parts = Rc::new(DocParts::of(&self.document));
         let doc_selection = selection
             .interaction
@@ -322,13 +330,21 @@ impl MarkdownBody {
 
         let down_hit = hit.clone();
         let down_interaction = interaction.clone();
-        let move_hit = hit;
+        let move_hit = hit.clone();
         let move_interaction = interaction.clone();
-        let up_interaction = interaction;
-        div()
+        let up_interaction = interaction.clone();
+        let file_up_hit = hit.clone();
+        let file_up_interaction = interaction;
+        let document = self.document.clone();
+        let element = div()
             .w_full()
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                let Some(offset) = down_hit.offset_at(event.position) else {
+                let offset = down_hit.offset_at(event.position);
+                // Where the press landed, for the release to compare with.
+                down_interaction
+                    .chat
+                    .update(cx, |chat, _| chat.transcript_press = offset);
+                let Some(offset) = offset else {
                     return;
                 };
                 down_interaction.chat.update(cx, |chat, cx| {
@@ -362,15 +378,118 @@ impl MarkdownBody {
                     cx.notify();
                 });
             })
+            // A file link is Sirio's to open, so its release is taken before
+            // bezel's text can hand the `file://` URL to the system opener
+            // (which a drag ending inside the label would do as well). Any
+            // other link falls through to bezel untouched.
+            .capture_any_mouse_up(move |event, window, cx| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                let position = event.position;
+                let layouts = &file_up_hit.layouts;
+                let Some(target) = layouts
+                    .over_text(position)
+                    .then(|| layouts.hit(position))
+                    .flatten()
+                    .and_then(|cursor| markdown_link_at(&document, cursor))
+                    .and_then(|url| file_link_target(&url))
+                else {
+                    return;
+                };
+                let release = file_up_hit.offset_at(position);
+                file_up_interaction.chat.update(cx, |chat, cx| {
+                    let pressed = chat.transcript_press.take();
+                    chat.transcript_dragging = false;
+                    if release.is_some() && pressed == release {
+                        cx.emit(ChatEvent::OpenFileAt {
+                            path: target.path.clone(),
+                            line: target.line,
+                            column: target.column,
+                        });
+                    }
+                    cx.notify();
+                });
+                cx.stop_propagation();
+                window.prevent_default();
+            })
             .child(rendered)
-            .into_any_element()
+            .into_any_element();
+        (element, hit)
     }
 
-    fn build(&self, window: &mut Window, cx: &mut App) -> AnyElement {
+    fn build(&self, window: &mut Window, cx: &mut App) -> (AnyElement, Option<DocHit>) {
         if let Some(selection) = self.selection.clone() {
-            return self.build_selectable(selection, window, cx);
+            let (element, hit) = self.build_selectable(selection, window, cx);
+            return (element, Some(hit));
         }
-        markdown::render(&self.document, markdown::Caption::Shown, window, cx)
+        (
+            markdown::render(&self.document, markdown::Caption::Shown, window, cx),
+            None,
+        )
+    }
+}
+
+/// Adds a row to `out` for every link the last paint of `document` drew, in
+/// window pixels: the `kind` (`file` for a file link, `web` otherwise), the
+/// `label` as written, the `target`, the point `x`, `y` a few pixels into the
+/// label at its vertical middle, and `w`, how wide the label painted (its
+/// first line, when it wraps).
+fn record_links(
+    document: &markdown::Doc,
+    layouts: &markdown::BlockLayouts,
+    out: &mut Vec<BTreeMap<String, String>>,
+) {
+    for (block_ix, block) in document.blocks.iter().enumerate() {
+        for part in block.parts() {
+            let Some(text) = block.text_at(part) else {
+                continue;
+            };
+            for span in &text.marks {
+                let markdown::Mark::Link(target) = &span.mark else {
+                    continue;
+                };
+                let at = |offset| markdown::Cursor::new(block_ix, part, offset);
+                let Some((start, line_height)) = layouts.position(at(span.range.start)) else {
+                    continue;
+                };
+                let label = text.text.get(span.range.clone()).unwrap_or_default();
+                let same_row = |point: gpui::Point<Pixels>| (point.y - start.y).abs() < line_height / 2.0;
+                let end = layouts
+                    .position(at(span.range.end))
+                    .map(|(point, _)| point)
+                    .filter(|point| same_row(*point));
+                let width = end.map(|point| point.x).unwrap_or_else(|| {
+                    // The label wraps: its first line ends at the last
+                    // character still on the starting row.
+                    label
+                        .char_indices()
+                        .skip(1)
+                        .filter_map(|(ix, _)| layouts.position(at(span.range.start + ix)))
+                        .map(|(point, _)| point)
+                        .take_while(|point| same_row(*point))
+                        .last()
+                        .map_or(start.x, |point| point.x)
+                }) - start.x;
+                let inset = px(4.0).min(width / 2.0);
+                let kind = if file_link_target(target).is_some() {
+                    "file"
+                } else {
+                    "web"
+                };
+                out.push(BTreeMap::from([
+                    ("kind".to_string(), kind.to_string()),
+                    ("label".to_string(), label.to_string()),
+                    ("target".to_string(), target.clone()),
+                    ("x".to_string(), format!("{:.1}", f32::from(start.x + inset))),
+                    (
+                        "y".to_string(),
+                        format!("{:.1}", f32::from(start.y + line_height / 2.0)),
+                    ),
+                    ("w".to_string(), format!("{:.1}", f32::from(width))),
+                ]));
+            }
+        }
     }
 }
 
@@ -394,7 +513,9 @@ impl Element for MarkdownBody {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         if self.rendered.is_none() {
-            self.rendered = Some(self.build(window, cx));
+            let (element, hit) = self.build(window, cx);
+            self.rendered = Some(element);
+            self.hit = hit;
         }
         let rendered = self
             .rendered
@@ -432,6 +553,12 @@ impl Element for MarkdownBody {
             .as_mut()
             .expect("markdown body prepainted before paint")
             .paint(window, cx);
+        // The layouts are filled by the paint above: position arithmetic
+        // only, no disk.
+        if let (Some(selection), Some(hit)) = (&self.selection, &self.hit) {
+            let links = selection.interaction.chat.read(cx).transcript_links.clone();
+            record_links(&self.document, &hit.layouts, &mut links.borrow_mut());
+        }
     }
 }
 
@@ -467,6 +594,19 @@ const MODEL_PICKER_LIST_MAX_H: f32 = 260.0;
 fn parse_chat_markdown(source: &str) -> markdown::Doc {
     let _perf = sirio_perf::span("Chat.parse_markdown", source.len() as u64);
     markdown::parse(source)
+}
+
+/// An assistant response's document with the files it names marked as links.
+/// The disk is asked here, while the document is built, and never while it
+/// paints; `memo` answers a candidate already seen in this response.
+fn parse_linked_markdown(
+    source: &str,
+    cwd: &Path,
+    memo: &mut file_links::FileLinkMemo,
+) -> markdown::Doc {
+    let mut document = parse_chat_markdown(source);
+    file_links::link_file_paths(&mut document, cwd, std::env::home_dir().as_deref(), memo);
+    document
 }
 
 pub(crate) fn bezel_doc_from_legacy(document: LegacyDocument) -> markdown::Doc {
@@ -921,6 +1061,10 @@ pub struct ChatControlSnapshot {
     /// transcript's last cannot reach the top of a list that fills its pane, so a reveal of
     /// it is read as `first_visible_entry <= row <= last_visible_entry`.
     pub last_visible_entry: usize,
+    /// The links the transcript's last paint drew: `kind` (`file` or `web`),
+    /// `label`, `target`, `x`, `y` (window pixels, a few px into the label at
+    /// its vertical middle) and `w` (the label's painted width).
+    pub transcript_links: Vec<BTreeMap<String, String>>,
 }
 
 impl Entry {
@@ -1562,6 +1706,13 @@ impl TranscriptContextItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatEvent {
     OpenFile(PathBuf),
+    /// A file named in an assistant response was clicked: the file, and the
+    /// line (and column) the agent wrote after it, 1-based as written.
+    OpenFileAt {
+        path: PathBuf,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
     /// F-BRW-09: a plain click on an HTTP(S) link in the transcript. The
     /// workspace owns tab creation, so it decides whether to open Sirio's
     /// internal browser tab; the human Cmd+Shift bypass to the system
@@ -2048,6 +2199,17 @@ pub struct Chat {
     transcript_bar: list_scroll::ListScrollbarState,
     transcript_selection: Option<TranscriptSelection>,
     transcript_dragging: bool,
+    /// Where the left button last went down on a response's text, as a
+    /// transcript offset: a release at the same offset is a click, which is
+    /// what opens a file link (a release elsewhere ended a drag).
+    transcript_press: Option<usize>,
+    /// Which candidate paths exist, for the assistant entry being built: one
+    /// disk lookup per distinct candidate, not one per streamed chunk. Reset
+    /// whenever a new assistant entry starts.
+    file_link_memo: file_links::FileLinkMemo,
+    /// Every link the transcript's last paint drew, for the control socket.
+    /// Cleared as the chat renders and refilled by each response painted.
+    transcript_links: Rc<RefCell<Vec<BTreeMap<String, String>>>>,
     /// F-CHAT-22, turn half: turns the reader has explicitly folded, keyed
     /// by the entry index of the [`Entry::TurnFooter`] that closes each one.
     /// Nothing is ever added here except by the reader's click: a turn is
@@ -2400,6 +2562,9 @@ impl Chat {
             transcript_bar: list_scroll::ListScrollbarState::new(bezel::motion::Painter::of(cx)),
             transcript_selection: None,
             transcript_dragging: false,
+            transcript_press: None,
+            file_link_memo: file_links::FileLinkMemo::default(),
+            transcript_links: Rc::default(),
             folded_turns: BTreeSet::new(),
             trace: TraceStore::default(),
             trace_users: BTreeMap::new(),
@@ -2744,13 +2909,15 @@ impl Chat {
                 }) = self.entries.last_mut()
                 {
                     existing.push_str(&text);
-                    *document = parse_chat_markdown(existing);
+                    *document =
+                        parse_linked_markdown(existing, &self.agent_cwd, &mut self.file_link_memo);
                     self.remeasure_entry(self.entries.len() - 1);
                 } else {
-                    self.push_entry(Entry::Assistant {
-                        document: parse_chat_markdown(&text),
-                        text,
-                    });
+                    // A new response: what the last one found is not this one's.
+                    self.file_link_memo.clear();
+                    let document =
+                        parse_linked_markdown(&text, &self.agent_cwd, &mut self.file_link_memo);
+                    self.push_entry(Entry::Assistant { document, text });
                 }
             }
             AcpEvent::ThoughtChunk(text) => {
@@ -3738,6 +3905,7 @@ impl Chat {
             session_panel: self.session_panel_snapshot(),
             first_visible_entry: self.list_state.logical_scroll_top().item_ix,
             last_visible_entry: self.last_visible_entry(),
+            transcript_links: self.transcript_links.borrow().clone(),
         }
     }
 
@@ -3755,6 +3923,24 @@ impl Chat {
             }
         }
         last
+    }
+
+    /// A stored entry as the transcript shows it: an assistant response
+    /// comes back with the files it names marked as links, since its
+    /// Markdown source is kept. (`restore_transcript` does not do this: its
+    /// one flattened entry mixes user, thought and tool text, spec §2.)
+    fn restore_entry(&mut self, entry: ChatEntry) -> Entry {
+        let mut entry = restored_entry(entry);
+        if let Entry::Assistant { document, .. } = &mut entry {
+            self.file_link_memo.clear();
+            file_links::link_file_paths(
+                document,
+                &self.agent_cwd,
+                std::env::home_dir().as_deref(),
+                &mut self.file_link_memo,
+            );
+        }
+        entry
     }
 
     fn restore_persisted_transcript(&mut self) {
@@ -3781,7 +3967,8 @@ impl Chat {
         };
         for turn in transcript.turns {
             for entry in turn.entries {
-                self.push_entry(restored_entry(entry));
+                let entry = self.restore_entry(entry);
+                self.push_entry(entry);
             }
         }
         self.has_completed_turn = !self.entries.is_empty();
@@ -3876,7 +4063,8 @@ impl Chat {
         self.list_state.splice(0..old_count, 0);
         for turn in transcript.turns {
             for entry in turn.entries {
-                self.push_entry(restored_entry(entry));
+                let entry = self.restore_entry(entry);
+                self.push_entry(entry);
             }
         }
         self.has_completed_turn = !self.entries.is_empty();
@@ -6489,6 +6677,8 @@ impl Render for Chat {
             sirio_perf::event("motion.Chat.woken", cx.entity_id().as_u64());
         }
         sirio_perf::event("Chat.entries", self.entries.len() as u64);
+        // The responses painted from here on refill it.
+        self.transcript_links.borrow_mut().clear();
         // Fetched fresh every frame from the global, so a change of
         // appearance is picked up without the chat surface holding a stale
         // copy — never `Theme::dark()`, never a field.

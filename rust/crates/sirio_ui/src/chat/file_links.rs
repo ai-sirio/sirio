@@ -5,7 +5,6 @@
 //! `docs/superpowers/specs/2026-10-24-chat-file-links-design.md`), so every
 //! candidate costs one disk lookup, which [`FileLinkMemo`] answers once per
 //! entry instead of once per streamed chunk.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashMap;
 use std::path::Path;

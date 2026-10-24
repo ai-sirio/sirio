@@ -535,12 +535,14 @@ elif command == "check":
         print(f"FAIL: {desc}: {expr}", file=sys.stderr)
         sys.exit(1)
     print(f"OK: {desc}")
-elif command in ("links-check", "link"):
+elif command in ("links-check", "link", "link-width"):
     # The links `surface.chat.read` reports for the chat's last paint: rows with kind (file|web),
-    # label, target and the window pixel (x, y) of the label's vertical middle.
+    # label, target, the window pixel (x, y) a few pixels into the label at its vertical middle, and w,
+    # its painted width.
     # links-check SURFACE SECONDS WEB_LABEL FILE_LABEL...: poll until the file links are exactly
     #   FILE_LABEL... (in any order) and the web links exactly WEB_LABEL.
     # link SURFACE KIND LABEL: poll until a link of that kind and label is reported, print "x y".
+    # link-width SURFACE KIND LABEL: the same link, print `w`, how many pixels wide its label painted.
     surface = sys.argv[2]
 
     def read_links():
@@ -565,7 +567,7 @@ elif command in ("links-check", "link"):
             else:
                 row = next((r for r in rows if r["kind"] == sys.argv[3] and r["label"] == sys.argv[4]), None)
                 if row:
-                    print(f"{int(float(row['x']))} {int(float(row['y']))}")
+                    print(int(float(row["w"])) if command == "link-width" else f"{int(float(row['x']))} {int(float(row['y']))}")
                     sys.exit(0)
         except SystemExit:
             raise
@@ -1470,8 +1472,8 @@ scenario_trace_keys() {
 # tab, which hides the chat, so each click is preceded by showing the chat tab again. The
 # files are written into the worktree before the app starts; the stub's one answer names
 # them, names one that is not there, a version, a fenced path and a web link.
-# LINK_DRAG_END_DX is how far past a label's start the second drag ends: the label is about
-# 120 px wide, and what follows it on the line is plain text for about 100 px more.
+# A row of `transcriptLinks` also carries `w`, the label's painted width: the second drag ends
+# 10 px past the label's end (x + w + 10), where plain text follows it on the line.
 # The tabs: `surface tabs read` lists them (`count`, and `active` is the selected one's
 # position); `surface editor state` reads the active tab's file, so it only answers while a
 # file tab is selected. The steps that must open nothing therefore compare `count` and `active`
@@ -1494,18 +1496,20 @@ link_xy() { # kind label
   echo "  link: $1 '$2' at $xy" >&2
   echo "$xy"
 }
-# A click on the link of KIND and LABEL, the chat shown first.
+# A click on the link of KIND and LABEL, the chat shown first. The press and the release are
+# 0.3 s apart, as a hand's are: a web link's text only listens for the release in the frame
+# after the press, and this window paints in software, so an instant `click 1` outruns it.
 click_link() { # kind label [modifiers...]
   local kind=$1 label=$2 xy
   shift 2
   show_chat
   xy=$(link_xy "$kind" "$label")
   if [ $# -gt 0 ]; then
-    DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool keydown "$@" mousemove ${xy% *} ${xy#* } click 1 keyup "$@" || fail "xdotool could not click at $xy with $*"
-    sleep 1
+    DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool keydown "$@" mousemove ${xy% *} ${xy#* } mousedown 1 sleep 0.3 mouseup 1 keyup "$@" || fail "xdotool could not click at $xy with $*"
   else
-    click_at ${xy% *} ${xy#* }
+    DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool mousemove ${xy% *} ${xy#* } mousedown 1 sleep 0.3 mouseup 1 || fail "xdotool could not click at $xy"
   fi
+  sleep 1
 }
 # A drag from (X1, Y1) to (X2, Y2): a press, two moves, a release.
 drag_at() { # x1 y1 x2 y2
@@ -1539,8 +1543,12 @@ sys.exit(0 if ok else 1)' "$want_path" "$want_mode" "$want_selections" 2>/dev/nu
   echo "  read: $(printf '%s' "$out" | cut -c1-400)" >&2
   fail "$desc: the editor is not on $want_path in $want_mode${want_selections:+ with selections $want_selections}"
 }
-# The browser stub's log: how many calls it has recorded.
-browser_calls() { wc -l <"$RUN_DIR/browser.log" 2>/dev/null || echo 0; }
+# The browser stub's log: how many calls it has recorded. gpui starts `xdg-open` without
+# waiting for it, so a check that nothing was recorded lets it run first.
+browser_calls() {
+  sleep 1
+  if [ -f "$RUN_DIR/browser.log" ]; then wc -l <"$RUN_DIR/browser.log"; else echo 0; fi
+}
 scenario_file_links() {
   use_stub file-links
   local docs_main="$LINKED/docs/NOME-FILE.md" docs_other="$LINKED/docs/ALTRO.md" main_rs="$LINKED/src/main.rs" readme="$LINKED/README.md"
@@ -1566,7 +1574,6 @@ PY
   open_chat
   send_prompt "mostrami i file"
   wait_panel "the turn is over" 'c["status"] == "completed"' 40
-  local end_dx=${LINK_DRAG_END_DX:-150}
   echo "step: the links of the response"
   E2E links-check "$SURFACE" 30 sito '/docs/NOME-FILE.md' 'src/main.rs:42' 'README.md' 'docs/NOME-FILE.md:30' 'docs/ALTRO.md:10' \
     || fail "the response's links are not the expected ones"
@@ -1616,9 +1623,12 @@ PY
   [ "$(browser_calls)" = "$browser" ] || fail "a drag inside src/main.rs:42 called the browser: $(tail -n 3 "$RUN_DIR/browser.log")"
   echo "OK: nothing opened (tabs '$count_active')"
 
-  echo "step: a drag from the start of src/main.rs:42 past its end opens nothing either"
+  echo "step: a drag from inside src/main.rs:42 to just past its end opens nothing either"
   xy=$(link_xy file 'src/main.rs:42')
-  drag_at "${xy% *}" "${xy#* }" $((${xy% *} + end_dx)) "${xy#* }"
+  local width
+  width=$(E2E link-width "$SURFACE" file 'src/main.rs:42') || fail "no painted width for src/main.rs:42"
+  [ "$width" -gt 20 ] || fail "src/main.rs:42 reports a painted width of $width px"
+  drag_at "${xy% *}" "${xy#* }" $((${xy% *} + width + 10)) "${xy#* }"
   [ "$(tabs_state)" = "$count_active" ] || fail "a drag across src/main.rs:42 changed the tabs: '$(tabs_state)', was '$count_active'"
   [ "$(browser_calls)" = "$browser" ] || fail "a drag across src/main.rs:42 called the browser: $(tail -n 3 "$RUN_DIR/browser.log")"
   echo "OK: nothing opened (tabs '$count_active')"
@@ -1627,6 +1637,7 @@ PY
   echo "step: a click on the web link still reaches the browser"
   click_link web sito
   [ "$(tabs_state)" = "$count_active" ] || fail "the web link opened a tab: '$(tabs_state)', was '$count_active'"
+  sleep 1
   line=""
   for _ in $(seq 1 50); do
     line=$(grep -Fx 'xdg-open https://example.com/docs/NOME-FILE.md' "$RUN_DIR/browser.log" 2>/dev/null | head -n 1 || true)

@@ -8873,6 +8873,9 @@ impl SirioWorkspace {
             chat,
             |workspace, chat_entity, event: &ChatEvent, cx| match event {
                 ChatEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+                ChatEvent::OpenFileAt { path, line, column } => {
+                    workspace.open_chat_file(path.clone(), *line, *column, cx)
+                }
                 // F-BRW-09: this subscription predates a Window-aware callback
                 // (see `bind_chat`'s two call sites, one of which has no
                 // Window), so queue the browser-tab creation for the
@@ -17526,6 +17529,39 @@ impl SirioWorkspace {
         }
     }
 
+    /// Opens a file a chat response named, at the 1-based `line` (and
+    /// `column`) it wrote after the path. A Markdown file with a line is shown
+    /// as source, since the line only exists there; without one it opens as
+    /// any Markdown file does. The column counts UTF-16 units, which is exact
+    /// for an ASCII line. `open_local_file` stays as it is: a change request's
+    /// file must not switch modes.
+    fn open_chat_file(
+        &mut self,
+        path: PathBuf,
+        line: Option<usize>,
+        column: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_file_tab(path.clone(), cx);
+        let Some(line) = line else {
+            return;
+        };
+        let line = line.saturating_sub(1);
+        let target = match column {
+            Some(column) => RevealTarget::LineColumnUtf16(line, column.saturating_sub(1)),
+            None => RevealTarget::Line(line),
+        };
+        for tab in &self.tabs {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content
+                    && paths_name_the_same_document(view.read(cx).path(), &path)
+                {
+                    view.update(cx, |view, cx| view.reveal_in_code(target.clone(), cx));
+                }
+            });
+        }
+    }
+
     fn add_browser_tab(
         &mut self,
         initial_url: impl Into<String>,
@@ -20441,6 +20477,11 @@ impl SirioWorkspace {
             (
                 "transcript".to_string(),
                 sirio_control::protocol::rows::encode(&snapshot.transcript),
+            ),
+            // Every link the last paint drew, with the window pixel to click it at.
+            (
+                "transcriptLinks".to_string(),
+                sirio_control::protocol::rows::encode(&snapshot.transcript_links),
             ),
             (
                 "sessionPanel".to_string(),
