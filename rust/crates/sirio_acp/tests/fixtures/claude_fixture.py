@@ -912,6 +912,20 @@ def main():
                 text("Hello")
                 result()
                 continue
+            if MODE == "file_links":
+                # One answer to any prompt, whose paths and links the chat's file
+                # links E2E clicks. The first path is cut in two chunks, as a
+                # stream delivers it.
+                init_line()
+                text("Ho creato il file, l'ho messo in /docs/NOME-")
+                text("FILE.md.\n"
+                     "Il punto da guardare è `src/main.rs:42`, e c'è anche README.md.\n")
+                text("La sezione è in docs/NOME-FILE.md:30, e l'altra nota in docs/ALTRO.md:10.\n"
+                     "Non esiste: missing/nowhere.md. Versione 1.2.3. "
+                     "Link web: [sito](https://example.com/docs/NOME-FILE.md).\n\n"
+                     "```text\nsrc/main.rs\n```\n")
+                result()
+                continue
             if MODE == "permission":
                 init_line()
                 tool_input = {"command": "rm -rf build", "description": "Remove build"}

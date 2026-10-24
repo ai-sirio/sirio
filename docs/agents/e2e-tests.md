@@ -60,10 +60,15 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # wait and its reveal, the cost of a second turn, Stop, a CLI that dies, a call that never
 # reports, a subagent's permission, the Trace tab across a worktree switch, a relaunch
 # and its chat's close, the frames the trace asks for (SIRIO_PERF_TRACE) and real X
-# clicks and keys on the tab. Each scenario is a fresh Sirio; --state-only skips the
+# clicks and keys on the tab. The file_links scenario uses Scripts/Tests/stubs/file-links/claude,
+# the fixture's file_links mode: one answer holding paths that exist in the worktree, ones that do
+# not, a version, a fenced path and a web link, then real X clicks and drags on it, asserted on
+# `transcriptLinks` of `surface.chat.read`, `surface.editor.state`, `surface tabs read` and the
+# browser stub (a click opens the file, at its line, reusing its tab; a drag opens nothing; the
+# web link still reaches the browser). Each scenario is a fresh Sirio; --state-only skips the
 # captures; --display :N is a private Xvfb (at least --window-size, default 2200x1000)
 # with Mesa's lavapipe, and trace_tab and trace_idle need one (--state-only with it paints
-# but takes no captures), trace_keys a framed run at --window-size 2200x1000;
+# but takes no captures), trace_keys and file_links a framed run at --window-size 2200x1000;
 # --appearance light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL".
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
 
