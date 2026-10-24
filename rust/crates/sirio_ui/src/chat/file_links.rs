@@ -153,8 +153,10 @@ pub(crate) fn link_file_paths(
         // hands a URL without `://` to gpui as a path, which `fs::read`s it
         // against the process's cwd, so a device would never end, a FIFO would
         // block and a share would open a connection. A local picture is kept
-        // only when it resolves like a file link to a regular file, and then
-        // names that file by its absolute path.
+        // only when it is an existing regular file, non-empty and at most
+        // `MAX_IMAGE_BYTES`, resolved like a file link (relative to the
+        // worktree, absolute, or under `~/`) and never a network or device
+        // path; it then names that file by its absolute path.
         match &mut block.kind {
             markdown::BlockKind::Bookmark { url, .. } if !is_web_target(url) => {
                 block.kind = markdown::BlockKind::Paragraph(markdown::Text::plain(url.clone()));
@@ -200,6 +202,13 @@ fn local_image_path(
         return None;
     }
     let path = memo.resolve(url, cwd, home)?.path;
+    // Read whole when painted: an empty file is no picture (and procfs calls
+    // its endless files regular and empty), and past the chat's image cap
+    // the read would stall the turn.
+    let len = std::fs::metadata(&path).ok()?.len();
+    if len == 0 || len > super::MAX_IMAGE_BYTES {
+        return None;
+    }
     let path = path.to_string_lossy().into_owned();
     // bezel fetches anything with `://` in it as a URL.
     (!path.contains("://") && Path::new(&path).is_absolute()).then_some(path)
@@ -858,6 +867,51 @@ mod tests {
             assert_eq!(image_block_url(&doc), Some(expected), "{source}");
             assert!(Path::new(&image_block_url(&doc).unwrap()).is_absolute(), "{source}");
         }
+    }
+
+    #[test]
+    fn a_local_image_is_shown_only_within_the_image_size_cap() {
+        // The picture is read whole when painted: an empty file is no
+        // picture, and past the chat's image cap the read would stall it.
+        let fx = fixture();
+        std::fs::write(fx.wt.join("docs/empty.png"), b"").unwrap();
+        let sized = |name: &str, len: u64| {
+            let file = std::fs::File::create(fx.wt.join("docs").join(name)).unwrap();
+            file.set_len(len).unwrap();
+        };
+        sized("big.png", super::super::MAX_IMAGE_BYTES + 1);
+        sized("cap.png", super::super::MAX_IMAGE_BYTES);
+        for source in ["![alt words](docs/empty.png)", "![alt words](docs/big.png)"] {
+            let doc = linked(&fx, source);
+            assert!(
+                matches!(&doc.blocks[0].kind, markdown::BlockKind::Paragraph(text) if text.text == "alt words"),
+                "{source}: {:?}",
+                doc.blocks[0].kind
+            );
+        }
+        let doc = linked(&fx, "![alt words](docs/cap.png)");
+        assert_eq!(
+            image_block_url(&doc),
+            Some(fx.wt.join("docs/cap.png").display().to_string())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_procfs_file_is_never_shown_as_a_local_image() {
+        // procfs reports its files as regular and empty; pagemap reads on
+        // for hundreds of gigabytes.
+        if !Path::new("/proc/self/pagemap").exists() {
+            eprintln!("/proc/self/pagemap missing: skipped");
+            return;
+        }
+        let fx = fixture();
+        let doc = linked(&fx, "![alt words](/proc/self/pagemap)");
+        assert!(
+            matches!(&doc.blocks[0].kind, markdown::BlockKind::Paragraph(text) if text.text == "alt words"),
+            "{:?}",
+            doc.blocks[0].kind
+        );
     }
 
     #[test]
