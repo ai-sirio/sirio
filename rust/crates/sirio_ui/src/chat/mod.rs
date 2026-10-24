@@ -45,6 +45,7 @@ pub(crate) mod identity;
 mod bypass;
 mod composer_view;
 mod controls;
+mod file_links;
 mod history;
 mod list_scroll;
 mod menus;
