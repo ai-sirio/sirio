@@ -149,19 +149,24 @@ pub(crate) fn link_file_paths(
     for block in &mut doc.blocks {
         // A block that would open, or load, something that is not on the web
         // is shown as plain text instead. A bookmark card opens its URL when
-        // clicked; an image block loads its URL as a picture, which for a
-        // share or a device is a connection the reader never asked for. (A
-        // plain local path is a picture the reader can see, and stays.)
-        match &block.kind {
+        // clicked. An image block is read as soon as it is painted: bezel
+        // hands a URL without `://` to gpui as a path, which `fs::read`s it
+        // against the process's cwd, so a device would never end, a FIFO would
+        // block and a share would open a connection. A local picture is kept
+        // only when it resolves like a file link to a regular file, and then
+        // names that file by its absolute path.
+        match &mut block.kind {
             markdown::BlockKind::Bookmark { url, .. } if !is_web_target(url) => {
                 block.kind = markdown::BlockKind::Paragraph(markdown::Text::plain(url.clone()));
             }
-            markdown::BlockKind::Image { url, alt, .. }
-                if !is_web_target(url)
-                    && (url_scheme(url).is_some()
-                        || is_network_or_device_path(Path::new(url))) =>
-            {
-                block.kind = markdown::BlockKind::Paragraph(markdown::Text::plain(alt.text.clone()));
+            markdown::BlockKind::Image { url, alt, .. } if !is_web_target(url) => {
+                match local_image_path(url, cwd, home, memo) {
+                    Some(path) => *url = path,
+                    None => {
+                        let alt = markdown::Text::plain(alt.text.clone());
+                        block.kind = markdown::BlockKind::Paragraph(alt);
+                    }
+                }
             }
             _ => {}
         }
@@ -177,6 +182,27 @@ pub(crate) fn link_file_paths(
             }
         }
     }
+}
+
+/// The absolute path of the regular file a non-web image URL names, if any.
+/// A URL that starts with whitespace or a control character is refused before
+/// anything else: the resolver would trim it, while bezel paints it as written
+/// (and fetches it, if it holds `://`). A line suffix means nothing to a
+/// picture and is dropped.
+fn local_image_path(
+    url: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    memo: &mut FileLinkMemo,
+) -> Option<String> {
+    let first = url.chars().next()?;
+    if first.is_whitespace() || first.is_control() {
+        return None;
+    }
+    let path = memo.resolve(url, cwd, home)?.path;
+    let path = path.to_string_lossy().into_owned();
+    // bezel fetches anything with `://` in it as a URL.
+    (!path.contains("://") && Path::new(&path).is_absolute()).then_some(path)
 }
 
 fn link_text(text: &mut markdown::Text, cwd: &Path, home: Option<&Path>, memo: &mut FileLinkMemo) {
@@ -745,11 +771,92 @@ mod tests {
             ("see ![x](https://example.com/a.png) now", "https://example.com/a.png"),
             ("<https://example.com>", "https://example.com"),
             ("![x](https://example.com/a.png)", "https://example.com/a.png"),
-            ("![x](docs/a.png)", "docs/a.png"),
         ] {
             let before = markdown::parse(source);
             assert_eq!(clickable(&before), vec![url.to_string()], "{source}");
             assert_eq!(linked(&fx, source), before, "{source}");
+        }
+    }
+
+    /// The block's kind after linking, when it is an image: its url.
+    fn image_block_url(doc: &markdown::Doc) -> Option<String> {
+        match &doc.blocks.first()?.kind {
+            markdown::BlockKind::Image { url, .. } => Some(url.clone()),
+            _ => None,
+        }
+    }
+
+    fn image_block(url: &str) -> markdown::Doc {
+        markdown::Doc {
+            blocks: vec![markdown::Block::new(markdown::BlockKind::Image {
+                url: url.to_string(),
+                alt: markdown::Text::plain("alt words"),
+                width: None,
+            })],
+        }
+    }
+
+    #[test]
+    fn a_local_image_block_that_is_not_a_regular_file_becomes_its_alt_text() {
+        // gpui reads a local picture with `fs::read` as soon as it is painted:
+        // a device never ends, a FIFO blocks, and a path that is not a checked
+        // file in the project is not a picture the response may show.
+        let fx = fixture();
+        std::fs::write(fx.wt.join("docs/a.png"), b"png").unwrap();
+        let fifo = fx.wt.join("docs/pipe.png");
+        let made_fifo = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|status| status.success());
+        let mut docs = vec![
+            ("/dev/zero".to_string(), markdown::parse("![alt words](/dev/zero)")),
+            ("/dev/random".to_string(), markdown::parse("![alt words](/dev/random)")),
+            ("missing".to_string(), markdown::parse("![alt words](docs/missing.png)")),
+            ("directory".to_string(), markdown::parse("![alt words](docs/sub)")),
+            ("../outside".to_string(), markdown::parse("![alt words](../outside.txt)")),
+            // a leading space or control character: render.rs would still see
+            // `://` and fetch it, and the resolver would trim it to a file
+            ("space web".to_string(), image_block(" http://example.com/a.png")),
+            ("control web".to_string(), image_block("\u{1}https://example.com/a.png")),
+            ("space file".to_string(), image_block(" docs/a.png")),
+            ("tab file".to_string(), image_block("\tdocs/a.png")),
+        ];
+        if made_fifo {
+            docs.push(("fifo".to_string(), markdown::parse("![alt words](docs/pipe.png)")));
+        } else {
+            eprintln!("mkfifo unavailable: the FIFO case is skipped");
+        }
+        for (case, raw) in docs {
+            assert!(image_block_url(&raw).is_some(), "{case}: {:?}", raw.blocks);
+            let mut doc = raw;
+            link_file_paths(&mut doc, &fx.wt, Some(&fx.home), &mut FileLinkMemo::default());
+            assert_eq!(clickable(&doc), Vec::<String>::new(), "{case}");
+            assert!(
+                matches!(&doc.blocks[0].kind, markdown::BlockKind::Paragraph(text) if text.text == "alt words"),
+                "{case}: {:?}",
+                doc.blocks[0].kind
+            );
+        }
+    }
+
+    #[test]
+    fn a_local_image_block_that_is_a_file_reads_it_by_its_absolute_path() {
+        // bezel hands a non-URL to gpui as a path, which the process resolves
+        // against its own cwd: the block must name exactly the checked file.
+        let fx = fixture();
+        std::fs::write(fx.wt.join("docs/a.png"), b"png").unwrap();
+        std::fs::write(fx.home.join("pic.png"), b"png").unwrap();
+        let in_wt = fx.wt.join("docs/a.png").display().to_string();
+        for (source, expected) in [
+            ("![x](docs/a.png)".to_string(), in_wt.clone()),
+            ("![x](/docs/a.png)".to_string(), in_wt.clone()),
+            (format!("![x]({in_wt})"), in_wt.clone()),
+            (format!("![x](file://{in_wt})"), in_wt.clone()),
+            ("![x](~/pic.png)".to_string(), fx.home.join("pic.png").display().to_string()),
+        ] {
+            let doc = linked(&fx, &source);
+            assert_eq!(image_block_url(&doc), Some(expected), "{source}");
+            assert!(Path::new(&image_block_url(&doc).unwrap()).is_absolute(), "{source}");
         }
     }
 
