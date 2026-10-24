@@ -14,11 +14,17 @@ use sirio_project::{FileLinkTarget, resolve_file_link};
 /// Candidate string -> what it resolved to, for one chat entry. Not keyed by
 /// working directory or home: an entry's memo lives and dies with its entry.
 #[derive(Default)]
-pub(crate) struct FileLinkMemo(HashMap<String, Option<FileLinkTarget>>);
+pub(crate) struct FileLinkMemo {
+    links: HashMap<String, Option<FileLinkTarget>>,
+    /// Image url -> the absolute path it is kept as, or `None` when it is shown
+    /// as its alt text: the resolution and the size check, asked once.
+    images: HashMap<String, Option<String>>,
+}
 
 impl FileLinkMemo {
     pub(crate) fn clear(&mut self) {
-        self.0.clear();
+        self.links.clear();
+        self.images.clear();
     }
 
     /// The memoised resolution of one candidate, asking the disk only the
@@ -29,11 +35,11 @@ impl FileLinkMemo {
         cwd: &Path,
         home: Option<&Path>,
     ) -> Option<FileLinkTarget> {
-        if let Some(known) = self.0.get(candidate) {
+        if let Some(known) = self.links.get(candidate) {
             return known.clone();
         }
         let found = resolve_chat_path(candidate, cwd, home);
-        self.0.insert(candidate.to_string(), found.clone());
+        self.links.insert(candidate.to_string(), found.clone());
         found
     }
 }
@@ -48,6 +54,14 @@ pub(crate) fn resolve_chat_path(
     cwd: &Path,
     home: Option<&Path>,
 ) -> Option<FileLinkTarget> {
+    // `tel:123` is a telephone number and `vscode:x` an app's address, not the
+    // file `tel` at line 123. A name with an extension (`main.rs:42`) is a file
+    // and a line: only a bare word before the colon counts as a scheme.
+    if url_scheme(raw.trim())
+        .is_some_and(|scheme| !scheme.eq_ignore_ascii_case("file") && !scheme.contains('.'))
+    {
+        return None;
+    }
     let normalized = lowercase_file_scheme(normalize_location(raw.trim()));
     let text = match normalized.strip_prefix("~/") {
         Some(rest) => home?.join(rest).to_string_lossy().into_owned(),
@@ -93,6 +107,21 @@ fn lowercase_file_scheme(text: String) -> String {
     match text.get(..7) {
         Some(head) if head.eq_ignore_ascii_case("file://") => format!("file://{}", &text[7..]),
         _ => text,
+    }
+}
+
+/// Whether a click on a file link may open `path`, judged at the click (one
+/// stat, never at paint). A regular file does. A file that was there when the
+/// response was built and is gone now does too: the editor tab it opens says
+/// the file is missing, which is better than a link that does nothing. A
+/// share or device, a directory, a FIFO and any other error do not.
+pub(crate) fn may_open_on_click(path: &Path) -> bool {
+    if is_network_or_device_path(path) {
+        return false;
+    }
+    match std::fs::metadata(path) {
+        Ok(metadata) => metadata.is_file(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     }
 }
 
@@ -192,6 +221,20 @@ pub(crate) fn link_file_paths(
 /// (and fetches it, if it holds `://`). A line suffix means nothing to a
 /// picture and is dropped.
 fn local_image_path(
+    url: &str,
+    cwd: &Path,
+    home: Option<&Path>,
+    memo: &mut FileLinkMemo,
+) -> Option<String> {
+    if let Some(known) = memo.images.get(url) {
+        return known.clone();
+    }
+    let kept = local_image_on_disk(url, cwd, home, memo);
+    memo.images.insert(url.to_string(), kept.clone());
+    kept
+}
+
+fn local_image_on_disk(
     url: &str,
     cwd: &Path,
     home: Option<&Path>,
@@ -912,6 +955,69 @@ mod tests {
             "{:?}",
             doc.blocks[0].kind
         );
+    }
+
+    #[test]
+    fn a_scheme_other_than_file_is_never_a_file_named_like_it() {
+        let fx = fixture();
+        for name in ["tel", "vscode", "smb"] {
+            std::fs::write(fx.wt.join(name), "x\n").unwrap();
+        }
+        for source in [
+            "see [x](tel:123) now",
+            "see tel:123 now",
+            "see `tel:123` now",
+            "see [x](vscode:foo) now",
+            "see [x](smb:x) now",
+        ] {
+            assert_eq!(links(&linked(&fx, source)), vec![], "{source}");
+        }
+        // a file with an extension followed by a line is still a file and a line
+        std::fs::write(fx.wt.join("main.rs"), "x\n").unwrap();
+        assert_eq!(links(&linked(&fx, "see main.rs:42 now")).len(), 1);
+        // a drive letter is not a scheme
+        assert_eq!(url_scheme(r"C:\x"), None);
+        assert_eq!(url_scheme("C:/x"), None);
+    }
+
+    #[test]
+    fn a_local_image_is_read_from_the_disk_once_per_entry() {
+        let fx = fixture();
+        let picture = fx.wt.join("docs/a.png");
+        std::fs::write(&picture, b"png").unwrap();
+        let mut memo = FileLinkMemo::default();
+        let mut link = || {
+            let mut doc = markdown::parse("![alt words](docs/a.png)");
+            link_file_paths(&mut doc, &fx.wt, None, &mut memo);
+            doc
+        };
+        let first = link();
+        assert!(matches!(first.blocks[0].kind, markdown::BlockKind::Image { .. }));
+        // a streamed chunk later, the entry is linked again with the same memo
+        std::fs::remove_file(&picture).unwrap();
+        assert_eq!(link(), first, "the second pass asked the disk again");
+    }
+
+    #[test]
+    fn a_click_opens_a_regular_file_or_one_that_vanished_and_nothing_else() {
+        let fx = fixture();
+        let file = fx.wt.join("README.md");
+        assert!(may_open_on_click(&file), "a file");
+        // deleted since the response was built: the tab shows it as missing
+        assert!(may_open_on_click(&fx.wt.join("docs/gone.md")), "a vanished file");
+        assert!(!may_open_on_click(&fx.wt.join("docs")), "a directory");
+        assert!(!may_open_on_click(Path::new("//host/share/x.md")), "a share");
+        #[cfg(unix)]
+        {
+            assert!(!may_open_on_click(Path::new("/dev/null")), "a device");
+            let fifo = fx.wt.join("pipe");
+            let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+            if made.is_ok_and(|status| status.success()) {
+                assert!(!may_open_on_click(&fifo), "a FIFO");
+            }
+            // a file inside something that is not a directory is not a vanished file
+            assert!(!may_open_on_click(&file.join("inside")), "under a file");
+        }
     }
 
     #[test]

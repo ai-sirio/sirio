@@ -1473,7 +1473,8 @@ scenario_trace_keys() {
 # files are written into the worktree before the app starts; the stub's one answer names
 # them, names one that is not there, a version, a fenced path and a web link.
 # A row of `transcriptLinks` also carries `w`, the label's painted width: the second drag ends
-# 10 px past the label's end (x + w + 10), where plain text follows it on the line.
+# 14 px past the label's end (x already sits 4 px into the label, so x + w + 10), where plain
+# text follows it on the line.
 # The tabs: `surface tabs read` lists them (`count`, and `active` is the selected one's
 # position); `surface editor state` reads the active tab's file, so it only answers while a
 # file tab is selected. The steps that must open nothing therefore compare `count` and `active`
@@ -1543,6 +1544,24 @@ sys.exit(0 if ok else 1)' "$want_path" "$want_mode" "$want_selections" 2>/dev/nu
   echo "  read: $(printf '%s' "$out" | cut -c1-400)" >&2
   fail "$desc: the editor is not on $want_path in $want_mode${want_selections:+ with selections $want_selections}"
 }
+# Polls the active file tab until it is PATH and in the editor's missing-file state: `error`
+# with the message `This file does not exist: PATH` (`Editor::load_message`).
+expect_missing() { # desc path
+  local desc=$1 want_path=$2 out="" _
+  for _ in $(seq 1 50); do
+    out=$(reply surface editor state || true)
+    if printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)[0]
+sys.exit(0 if d.get("path") == sys.argv[1] and d.get("state") == "error" and d.get("error") == "This file does not exist: " + sys.argv[1] else 1)' "$want_path" 2>/dev/null; then
+      echo "OK: $desc"
+      return 0
+    fi
+    sleep 0.3
+  done
+  echo "  read: $(printf '%s' "$out" | cut -c1-400)" >&2
+  fail "$desc: the active tab is not $want_path in the missing-file state"
+}
 # The browser stub's log: how many calls it has recorded. gpui starts `xdg-open` without
 # waiting for it, so a check that nothing was recorded lets it run first.
 browser_calls() {
@@ -1562,9 +1581,9 @@ open(main_rs, "w").write("".join(f"// riga {n}\n" if n != 1 else "fn main() {}\n
 open(readme, "w").write("# Widgets\n\nIl file che il progetto ha già.\n")
 PY
   # What opens a URL is gpui's `xdg-open`, started in `sirio_env::for_child`'s PATH: the login
-  # shell's (`$SHELL -lc`, run in this private HOME with the launch PATH, which it extends and
-  # never reorders) before the launch's. The harness's `xdg-open` stub leads both, and this
-  # profile keeps it first even if a system profile prepended directories, so any `xdg-open`
+  # shell's (`$SHELL -lc`, run in this private HOME with the launch PATH, which it normally
+  # extends) before the launch's. The harness's `xdg-open` stub leads both, and this private
+  # `.bash_profile` guarantees that even if a system profile prepended directories, so any `xdg-open`
   # the app runs (a file:// as much as the web link) lands in $RUN_DIR/browser.log and never
   # starts a real browser on the display.
   mkdir -p "$RUN_DIR/file_links-home"
@@ -1605,6 +1624,17 @@ PY
   click_link file 'docs/ALTRO.md:10'
   expect_editor "docs/ALTRO.md:10 opened in code at line 10, not in Preview" "$docs_other" code "$(line_offset "$docs_other" 10)..$(line_offset "$docs_other" 10)"
   [ "$(tab_count)" = $((after_main + 1)) ] || fail "docs/ALTRO.md:10 did not open exactly one more tab: $(tab_count) tabs"
+
+  echo "step: a click on docs/ALTRO.md:10 after the file was deleted opens a tab that says it is missing"
+  # The tab of step 5 is the selected one: closing it and deleting the file leaves a link
+  # (built while the file existed) to a file that is gone.
+  local altro_tab
+  altro_tab=$(tabs_state | cut -d' ' -f2)
+  reply surface tabs close "$altro_tab" >/dev/null || fail "could not close the tab $altro_tab of docs/ALTRO.md"
+  rm -f "$docs_other"
+  click_link file 'docs/ALTRO.md:10'
+  expect_missing "the click on the vanished docs/ALTRO.md:10 opened its tab as missing" "$docs_other"
+  [ "$(tab_count)" = $((after_main + 1)) ] || fail "the vanished file did not open exactly one tab: $(tab_count) tabs"
 
   echo "step: Super+Shift+click on README.md still opens the editor, not the browser"
   browser=$(browser_calls)

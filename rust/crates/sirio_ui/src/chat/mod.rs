@@ -384,6 +384,11 @@ impl MarkdownBody {
             // bezel's text can hand the `file://` URL to the system opener
             // (which a drag ending inside the label would do as well). Any
             // other link falls through to bezel untouched.
+            // Known gpui quirk: an intercepted release leaves bezel's
+            // `InteractiveText` holding its `mouse_down_index` (its own release
+            // handler never ran), so the next web-link click in the same
+            // paragraph can be swallowed once. It heals when the element
+            // leaves the frame.
             .capture_any_mouse_up(move |event, window, cx| {
                 if event.button != MouseButton::Left {
                     return;
@@ -403,13 +408,13 @@ impl MarkdownBody {
                 file_up_interaction.chat.update(cx, |chat, cx| {
                     let pressed = chat.transcript_press.take();
                     chat.transcript_dragging = false;
-                    // The one stat of the click: the path was checked when the
-                    // response was built, and a link is only ever opened if it
-                    // is still a plain local file.
+                    // The one stat of the click (never at paint): the path was
+                    // checked when the response was built, and a click opens it
+                    // if it is still a regular file or has vanished since, which
+                    // the tab it opens shows as missing.
                     if release.is_some()
                         && pressed == release
-                        && !file_links::is_network_or_device_path(&target.path)
-                        && target.path.is_file()
+                        && file_links::may_open_on_click(&target.path)
                     {
                         cx.emit(ChatEvent::OpenFileAt {
                             path: target.path.clone(),
