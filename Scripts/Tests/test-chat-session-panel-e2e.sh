@@ -1553,6 +1553,14 @@ for path in (docs_main, docs_other):
 open(main_rs, "w").write("".join(f"// riga {n}\n" if n != 1 else "fn main() {}\n" for n in range(1, 61)))
 open(readme, "w").write("# Widgets\n\nIl file che il progetto ha già.\n")
 PY
+  # What opens a URL is gpui's `xdg-open`, started in `sirio_env::for_child`'s PATH: the login
+  # shell's (`$SHELL -lc`, run in this private HOME with the launch PATH, which it extends and
+  # never reorders) before the launch's. The harness's `xdg-open` stub leads both, and this
+  # profile keeps it first even if a system profile prepended directories, so any `xdg-open`
+  # the app runs (a file:// as much as the web link) lands in $RUN_DIR/browser.log and never
+  # starts a real browser on the display.
+  mkdir -p "$RUN_DIR/file_links-home"
+  printf 'export PATH="%s/bin:$PATH"\n' "$RUN_DIR" >"$RUN_DIR/file_links-home/.bash_profile"
   launch file_links
   ctl project add "$PRIMARY" >/dev/null
   open_chat
@@ -1621,14 +1629,17 @@ PY
   [ "$(tabs_state)" = "$count_active" ] || fail "the web link opened a tab: '$(tabs_state)', was '$count_active'"
   line=""
   for _ in $(seq 1 50); do
-    line=$(grep -F 'https://example.com/docs/NOME-FILE.md' "$RUN_DIR/browser.log" 2>/dev/null | head -n 1 || true)
+    line=$(grep -Fx 'xdg-open https://example.com/docs/NOME-FILE.md' "$RUN_DIR/browser.log" 2>/dev/null | head -n 1 || true)
     [ -n "$line" ] && break
     sleep 0.3
   done
-  [ -n "$line" ] || fail "the browser stub never recorded https://example.com/docs/NOME-FILE.md (it recorded: $(cat "$RUN_DIR/browser.log" 2>/dev/null || echo nothing))"
-  echo "OK: the browser stub recorded: $line"
+  [ -n "$line" ] || fail "the harness's xdg-open stub never recorded 'xdg-open https://example.com/docs/NOME-FILE.md' (it recorded: $(cat "$RUN_DIR/browser.log" 2>/dev/null || echo nothing))"
+  echo "OK: the xdg-open stub recorded: $line"
   echo "OK: file_links: the response's paths open their files, a drag opens nothing, and the web link reaches the browser"
   stop_app
+  # The fixture worktree is shared with the scenarios that run after this one.
+  rm -rf "$LINKED/docs" "$LINKED/README.md"
+  printf 'fn main() {}\n' >"$main_rs"
 }
 
 ran=0
