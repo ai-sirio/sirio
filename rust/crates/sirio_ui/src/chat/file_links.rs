@@ -147,6 +147,24 @@ pub(crate) fn link_file_paths(
     memo: &mut FileLinkMemo,
 ) {
     for block in &mut doc.blocks {
+        // A block that would open, or load, something that is not on the web
+        // is shown as plain text instead. A bookmark card opens its URL when
+        // clicked; an image block loads its URL as a picture, which for a
+        // share or a device is a connection the reader never asked for. (A
+        // plain local path is a picture the reader can see, and stays.)
+        match &block.kind {
+            markdown::BlockKind::Bookmark { url, .. } if !is_web_target(url) => {
+                block.kind = markdown::BlockKind::Paragraph(markdown::Text::plain(url.clone()));
+            }
+            markdown::BlockKind::Image { url, alt, .. }
+                if !is_web_target(url)
+                    && (url_scheme(url).is_some()
+                        || is_network_or_device_path(Path::new(url))) =>
+            {
+                block.kind = markdown::BlockKind::Paragraph(markdown::Text::plain(alt.text.clone()));
+            }
+            _ => {}
+        }
         if matches!(
             block.kind,
             markdown::BlockKind::Code { .. } | markdown::BlockKind::Image { .. }
@@ -169,6 +187,11 @@ fn link_text(text: &mut markdown::Text, cwd: &Path, home: Option<&Path>, memo: &
     // handed to the system opener by a click, so it loses its mark and its
     // text stays.
     text.marks.retain_mut(|span| {
+        // A chip or an inline picture is clicked open like a link, so it gets
+        // the same rule, minus the retargeting: not web, no mark, text stays.
+        if let markdown::Mark::Mention { url, .. } | markdown::Mark::Image(url) = &span.mark {
+            return is_web_target(url);
+        }
         let markdown::Mark::Link(target) = &span.mark else {
             return true;
         };
@@ -627,6 +650,107 @@ mod tests {
         let doc = linked(&fx, &format!("see [x](FILE://{}) now", readme.display()));
         assert_eq!(links(&doc).len(), 1, "{:?}", link_marks(&doc));
         assert!(file_link_target("File:///tmp/a.md").is_some());
+    }
+
+    /// Every URL the doc could hand to the system when clicked: a link,
+    /// chip or image mark, and a bookmark or image block.
+    fn clickable(doc: &markdown::Doc) -> Vec<String> {
+        let mut found = Vec::new();
+        for block in &doc.blocks {
+            match &block.kind {
+                markdown::BlockKind::Bookmark { url, .. }
+                | markdown::BlockKind::Image { url, .. } => found.push(url.clone()),
+                _ => {}
+            }
+            for part in block.parts() {
+                if let Some(text) = block.text_at(part) {
+                    for span in &text.marks {
+                        match &span.mark {
+                            markdown::Mark::Link(url)
+                            | markdown::Mark::Image(url)
+                            | markdown::Mark::Mention { url, .. } => found.push(url.clone()),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_non_web_chip_or_inline_image_loses_its_click() {
+        let fx = fixture();
+        for source in [
+            "see <smb://host/x> now",
+            "see <FILE:////host/x> now",
+            "<smb://host/x>",
+            r#"see [x](<C:\evil.exe> "chip") now"#,
+            r#"see [x](<\\host\share\x> "embed") now"#,
+            r"see ![x](<\\host\share\x.exe>) now",
+        ] {
+            // the parser does make a clickable of it, so the pass is what removes it
+            assert_eq!(clickable(&markdown::parse(source)).len(), 1, "{source}");
+            let doc = linked(&fx, source);
+            assert_eq!(clickable(&doc), Vec::<String>::new(), "{source}");
+            assert_eq!(doc.blocks.len(), 1, "{source}");
+            assert_eq!(texts(&doc), texts(&markdown::parse(source)), "{source}");
+        }
+    }
+
+    #[test]
+    fn a_non_web_bookmark_or_image_block_becomes_a_paragraph() {
+        let fx = fixture();
+        // The parser only makes a bookmark of an http(s) URL, so a non-web one is
+        // built by hand: a document from elsewhere (or a parser that grows) is
+        // not trusted either.
+        let bookmark = |url: &str| markdown::Doc {
+            blocks: vec![markdown::Block::new(markdown::BlockKind::Bookmark {
+                url: url.to_string(),
+                form: markdown::Form::Chip,
+            })],
+        };
+        for (raw, shown) in [
+            (bookmark("smb://host/x"), "smb://host/x"),
+            (bookmark(r"\\host\share\x"), r"\\host\share\x"),
+            (markdown::parse("![alt words](//host/share/x.png)"), "alt words"),
+            (markdown::parse("![alt words](smb://host/x.png)"), "alt words"),
+        ] {
+            assert!(
+                matches!(
+                    raw.blocks[0].kind,
+                    markdown::BlockKind::Bookmark { .. } | markdown::BlockKind::Image { .. }
+                ),
+                "{shown}: {:?}",
+                raw.blocks[0].kind
+            );
+            let source = shown;
+            let mut doc = raw;
+            link_file_paths(&mut doc, &fx.wt, Some(&fx.home), &mut FileLinkMemo::default());
+            assert_eq!(clickable(&doc), Vec::<String>::new(), "{source}");
+            assert!(
+                matches!(&doc.blocks[0].kind, markdown::BlockKind::Paragraph(text) if text.text == shown),
+                "{source}: {:?}",
+                doc.blocks[0].kind
+            );
+        }
+    }
+
+    #[test]
+    fn web_chips_images_and_blocks_keep_their_click() {
+        let fx = fixture();
+        for (source, url) in [
+            ("see <https://example.com> now", "https://example.com"),
+            (r#"see [x](https://example.com "chip") now"#, "https://example.com"),
+            ("see ![x](https://example.com/a.png) now", "https://example.com/a.png"),
+            ("<https://example.com>", "https://example.com"),
+            ("![x](https://example.com/a.png)", "https://example.com/a.png"),
+            ("![x](docs/a.png)", "docs/a.png"),
+        ] {
+            let before = markdown::parse(source);
+            assert_eq!(clickable(&before), vec![url.to_string()], "{source}");
+            assert_eq!(linked(&fx, source), before, "{source}");
+        }
     }
 
     #[test]
