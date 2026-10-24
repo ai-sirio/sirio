@@ -54,21 +54,6 @@ pub(crate) fn resolve_chat_path(
     cwd: &Path,
     home: Option<&Path>,
 ) -> Option<FileLinkTarget> {
-    // `vscode:x` is an app's address and `tel:+39…` a telephone number, not a
-    // file named `vscode` or `tel`. A name with an extension (`main.rs:42`) or
-    // followed only by a line and column (`Makefile:10:2`) is a file and a line.
-    if let Some((scheme, (_, rest))) = url_scheme(raw.trim()).zip(raw.trim().split_once(':'))
-        && !scheme.eq_ignore_ascii_case("file")
-        && !scheme.contains('.')
-        && !rest.split(':').all(|part| {
-            is_number(part)
-                || part
-                    .split_once('-')
-                    .is_some_and(|(a, b)| is_number(a) && is_number(b))
-        })
-    {
-        return None;
-    }
     let normalized = lowercase_file_scheme(normalize_location(raw.trim()));
     let text = match normalized.strip_prefix("~/") {
         Some(rest) => home?.join(rest).to_string_lossy().into_owned(),
@@ -965,24 +950,16 @@ mod tests {
     }
 
     #[test]
-    fn a_scheme_other_than_file_is_never_a_file_named_like_it() {
+    fn an_extensionless_file_named_with_a_line_is_a_link() {
         let fx = fixture();
-        for name in ["tel", "vscode", "smb"] {
-            std::fs::write(fx.wt.join(name), "x\n").unwrap();
-        }
-        for source in [
-            "see [x](tel:+39123) now",
-            "see tel:+39123 now",
-            "see `tel:+39123` now",
-            "see [x](vscode:foo) now",
-            "see [x](smb:x) now",
-        ] {
-            assert_eq!(links(&linked(&fx, source)), vec![], "{source}");
-        }
         // a file without an extension followed only by a line and column is a file
         // (in code or a link: a bare prose word is never a candidate)
         std::fs::write(fx.wt.join("Makefile"), "x\n").unwrap();
-        for source in ["see `Makefile:10` now", "see `Makefile:10:2` now", "see [m](Makefile:10-12) now"] {
+        for source in [
+            "see `Makefile:10` now",
+            "see `Makefile:10:2` now",
+            "see [m](Makefile:10-12) now",
+        ] {
             assert_eq!(links(&linked(&fx, source)).len(), 1, "{source}");
         }
         // a file with an extension followed by a line is still a file and a line
