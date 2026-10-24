@@ -48,7 +48,7 @@ pub(crate) fn resolve_chat_path(
     cwd: &Path,
     home: Option<&Path>,
 ) -> Option<FileLinkTarget> {
-    let normalized = normalize_location(raw.trim());
+    let normalized = lowercase_file_scheme(normalize_location(raw.trim()));
     let text = match normalized.strip_prefix("~/") {
         Some(rest) => home?.join(rest).to_string_lossy().into_owned(),
         None => normalized,
@@ -86,6 +86,14 @@ pub(crate) fn is_network_or_device_path(path: &Path) -> bool {
         );
     }
     false
+}
+
+/// `FILE://x` is `file://x`: the scheme is case-insensitive.
+fn lowercase_file_scheme(text: String) -> String {
+    match text.get(..7) {
+        Some(head) if head.eq_ignore_ascii_case("file://") => format!("file://{}", &text[7..]),
+        _ => text,
+    }
 }
 
 fn existing_file(text: &str, cwd: &Path) -> Option<FileLinkTarget> {
@@ -154,9 +162,12 @@ pub(crate) fn link_file_paths(
 }
 
 fn link_text(text: &mut markdown::Text, cwd: &Path, home: Option<&Path>, memo: &mut FileLinkMemo) {
-    // Retarget the Markdown links that point at a file. A `file://` link that
-    // names no existing file is dropped (its text stays), so nothing unchecked
-    // is ever left to be opened.
+    // The links an agent wrote are an allowlist: one survives only if it is a
+    // web link (http, https, mailto) or points at a file that was checked, and
+    // then it is retargeted to that file. Anything else (a path that is not
+    // there, a share, a drive path, `smb:`, `vscode:`, an anchor) would be
+    // handed to the system opener by a click, so it loses its mark and its
+    // text stays.
     text.marks.retain_mut(|span| {
         let markdown::Mark::Link(target) = &span.mark else {
             return true;
@@ -169,7 +180,7 @@ fn link_text(text: &mut markdown::Text, cwd: &Path, home: Option<&Path>, memo: &
                 span.mark = markdown::Mark::Link(file_link_url(&found));
                 true
             }
-            None => !target.starts_with("file://"),
+            None => false,
         }
     });
 
@@ -233,8 +244,26 @@ fn inside_a_link(marks: &[markdown::MarkSpan], range: &std::ops::Range<usize>) -
     })
 }
 
+/// The scheme of a link target: the text before the first `:` when it starts
+/// with a letter and goes on with letters, digits, `+`, `-` or `.`. A single
+/// letter is a Windows drive (`C:\x`), not a scheme.
+fn url_scheme(target: &str) -> Option<&str> {
+    let (scheme, _) = target.split_once(':')?;
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    (scheme.len() >= 2
+        && first.is_ascii_alphabetic()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+    .then_some(scheme)
+}
+
+/// A link a click may hand to the system: http, https or mailto, in any case.
 fn is_web_target(target: &str) -> bool {
-    (target.contains("://") && !target.starts_with("file://")) || target.starts_with("mailto:")
+    url_scheme(target).is_some_and(|scheme| {
+        ["http", "https", "mailto"]
+            .iter()
+            .any(|web| scheme.eq_ignore_ascii_case(web))
+    })
 }
 
 /// The byte ranges of `text` that no code, link, mention or image mark covers.
@@ -332,10 +361,11 @@ pub(crate) fn file_link_url(target: &FileLinkTarget) -> String {
 
 /// The inverse of [`file_link_url`]: `Some` only for a `file://` URL.
 pub(crate) fn file_link_target(url: &str) -> Option<FileLinkTarget> {
+    let url = lowercase_file_scheme(url.to_string());
     if !url.starts_with("file://") {
         return None;
     }
-    resolve_file_link(url, Path::new("/"))
+    resolve_file_link(&url, Path::new("/"))
 }
 
 #[cfg(test)]
@@ -538,6 +568,65 @@ mod tests {
         let readme = fx.wt.join("README.md");
         let doc = linked(&fx, &format!("see [x](file://{}) now", readme.display()));
         assert_eq!(file_marks(&doc).len(), 1);
+    }
+
+    /// Every `Mark::Link` target in the doc, whatever it points at.
+    fn link_marks(doc: &markdown::Doc) -> Vec<String> {
+        let mut found = Vec::new();
+        for block in &doc.blocks {
+            for part in block.parts() {
+                if let Some(text) = block.text_at(part) {
+                    for span in &text.marks {
+                        if let markdown::Mark::Link(url) = &span.mark {
+                            found.push(url.clone());
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_markdown_link_that_is_neither_web_nor_a_checked_file_loses_its_mark() {
+        let fx = fixture();
+        for target in [
+            r"\\host\share\x.md",
+            "//host/share/x.md",
+            r"C:\path\evil.exe",
+            "FILE:////host/share/x.md",
+            "smb://host/x",
+            "vscode://file/x",
+            "tel:123",
+            "#top",
+            "missing/nowhere.md",
+        ] {
+            // angle brackets let a target hold backslashes and the like
+            let source = format!("see [x](<{target}>) now");
+            // the parser does make a link of it, so the pass is what removes it
+            assert_eq!(link_marks(&markdown::parse(&source)).len(), 1, "{target}");
+            let doc = linked(&fx, &source);
+            assert_eq!(link_marks(&doc), Vec::<String>::new(), "{target}");
+            assert_eq!(texts(&doc), vec!["see x now".to_string()], "{target}");
+        }
+    }
+
+    #[test]
+    fn a_web_link_keeps_its_mark_in_any_case_of_its_scheme() {
+        let fx = fixture();
+        for target in ["HTTPS://example.com/a", "https://example.com/a", "mailto:a@b.c"] {
+            let doc = linked(&fx, &format!("see [x]({target}) now"));
+            assert_eq!(link_marks(&doc), vec![target.to_string()], "{target}");
+        }
+    }
+
+    #[test]
+    fn a_file_url_in_capitals_resolves_like_the_lowercase_one() {
+        let fx = fixture();
+        let readme = fx.wt.join("README.md");
+        let doc = linked(&fx, &format!("see [x](FILE://{}) now", readme.display()));
+        assert_eq!(links(&doc).len(), 1, "{:?}", link_marks(&doc));
+        assert!(file_link_target("File:///tmp/a.md").is_some());
     }
 
     #[test]
