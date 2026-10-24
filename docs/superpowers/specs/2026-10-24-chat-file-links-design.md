@@ -175,8 +175,11 @@ worktree the agent runs in.
   Inline code is `markdown::Mark::Code` and links are `markdown::Mark::Link(target)`
   spans over `Text::text` (`rust/vendor/bezel_markdown/src/doc.rs`).
 - Rendering and hit-testing: `MarkdownBody` / `MarkdownBody::selectable` in
-  `chat/mod.rs`, with `markdown_link_at` finding the link under a cursor. Today a
-  link click ends in `ChatEvent::OpenLink(target)`.
+  `chat/mod.rs`. bezel paints a response's links as `InteractiveText`, whose click
+  calls `cx.open_url(url)`. So today a link click in a response goes to the system
+  opener. It does **not** go through `ChatEvent::OpenLink`, which only
+  `TranscriptSelectableText` emits, and both of its call sites pass no links. "Web
+  links exactly as today" means this system-opener route stays.
 - Workspace side: `Workspace::bind_chat` in `rust/crates/sirio/src/main.rs` maps
   `ChatEvent::OpenFile(path)` to `add_file_tab` and `ChatEvent::OpenLink(url)` to
   `WorkspaceAction::OpenBrowserLink`.
