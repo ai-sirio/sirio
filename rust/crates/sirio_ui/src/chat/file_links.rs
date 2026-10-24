@@ -53,6 +53,10 @@ pub(crate) fn resolve_chat_path(
         Some(rest) => home?.join(rest).to_string_lossy().into_owned(),
         None => normalized,
     };
+    // Not even the fallback below: `//host/x` is a share, not "x" in the project.
+    if is_network_or_device_path(Path::new(&text)) {
+        return None;
+    }
     if let Some(target) = existing_file(&text, cwd) {
         return Some(target);
     }
@@ -62,8 +66,31 @@ pub(crate) fn resolve_chat_path(
     existing_file(text.trim_start_matches(['/', '\\']), cwd)
 }
 
+/// Whether `path` names a network share or a device rather than a place on
+/// this machine: `//host/..` and `\\host\..` (also `\\?\` and `\\.\`), and on
+/// Windows a UNC, device or verbatim prefix. Text an agent wrote can be
+/// prompt-injected, and asking the disk about such a path opens a connection
+/// (NTLM on Windows) or hangs on a dead mount, so it is refused before any
+/// lookup, and again before a click opens it.
+pub(crate) fn is_network_or_device_path(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    if text.starts_with("//") || text.starts_with("\\\\") {
+        return true;
+    }
+    #[cfg(windows)]
+    if let Some(std::path::Component::Prefix(prefix)) = path.components().next() {
+        use std::path::Prefix;
+        return matches!(
+            prefix.kind(),
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(_) | Prefix::Verbatim(_)
+        );
+    }
+    false
+}
+
 fn existing_file(text: &str, cwd: &Path) -> Option<FileLinkTarget> {
-    resolve_file_link(text, cwd).filter(|target| target.path.is_file())
+    resolve_file_link(text, cwd)
+        .filter(|target| !is_network_or_device_path(&target.path) && target.path.is_file())
 }
 
 /// Rewrites a trailing `#L<n>`, `#L<n>-L<m>` or `:<n>-<m>` into `:<n>`;
@@ -127,15 +154,24 @@ pub(crate) fn link_file_paths(
 }
 
 fn link_text(text: &mut markdown::Text, cwd: &Path, home: Option<&Path>, memo: &mut FileLinkMemo) {
-    // Retarget the Markdown links that point at a file.
-    for span in &mut text.marks {
-        if let markdown::Mark::Link(target) = &span.mark
-            && !is_web_target(target)
-            && let Some(found) = memo.resolve(target, cwd, home)
-        {
-            span.mark = markdown::Mark::Link(file_link_url(&found));
+    // Retarget the Markdown links that point at a file. A `file://` link that
+    // names no existing file is dropped (its text stays), so nothing unchecked
+    // is ever left to be opened.
+    text.marks.retain_mut(|span| {
+        let markdown::Mark::Link(target) = &span.mark else {
+            return true;
+        };
+        if is_web_target(target) {
+            return true;
         }
-    }
+        match memo.resolve(target, cwd, home) {
+            Some(found) => {
+                span.mark = markdown::Mark::Link(file_link_url(&found));
+                true
+            }
+            None => !target.starts_with("file://"),
+        }
+    });
 
     let mut before_code: Vec<(usize, markdown::MarkSpan)> = Vec::new();
     let mut in_prose: Vec<markdown::MarkSpan> = Vec::new();
@@ -413,6 +449,95 @@ mod tests {
             }
         }
         all
+    }
+
+    #[test]
+    fn network_and_device_paths_are_refused() {
+        for shape in [
+            r"\\host\share\x.md",
+            "//host/share/x.md",
+            r"\\?\C:\x",
+            r"\\?\UNC\host\share\x",
+            r"\\.\pipe\x",
+        ] {
+            assert!(is_network_or_device_path(Path::new(shape)), "{shape}");
+        }
+    }
+
+    #[test]
+    fn ordinary_paths_are_not_refused() {
+        for shape in ["/tmp/x", "docs/x.md", "C:/x", "./a//b", "/a//b"] {
+            assert!(!is_network_or_device_path(Path::new(shape)), "{shape}");
+        }
+    }
+
+    #[test]
+    fn a_file_url_with_an_empty_host_and_a_network_path_is_refused() {
+        let target = file_link_target("file:////host/share/x.md");
+        assert!(
+            target
+                .as_ref()
+                .is_none_or(|target| is_network_or_device_path(&target.path)),
+            "{target:?}"
+        );
+    }
+
+    #[test]
+    fn a_double_slash_path_is_never_looked_up_even_when_it_names_a_local_file() {
+        // `//tmp/..` is a local file on unix, and exactly the shape that
+        // names a network host on Windows: it is refused before the disk is asked.
+        let fx = fixture();
+        let outside = fx.wt.parent().unwrap().join("outside.txt");
+        let double = format!("/{}", outside.display());
+        assert!(double.starts_with("//"));
+        assert_eq!(resolve_chat_path(&double, &fx.wt, None), None);
+        assert_eq!(resolve_chat_path(&format!("file://{double}"), &fx.wt, None), None);
+        // the same file, written plainly, is still a link
+        assert!(resolve_chat_path(&outside.display().to_string(), &fx.wt, None).is_some());
+    }
+
+    fn file_marks(doc: &markdown::Doc) -> Vec<String> {
+        let mut found = Vec::new();
+        for block in &doc.blocks {
+            for part in block.parts() {
+                if let Some(text) = block.text_at(part) {
+                    for span in &text.marks {
+                        if let markdown::Mark::Link(url) = &span.mark
+                            && url.starts_with("file://")
+                        {
+                            found.push(url.clone());
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_markdown_link_to_a_missing_file_url_is_unlinked_and_its_text_stays() {
+        let fx = fixture();
+        let doc = linked(&fx, "see [x](file:///definitely/missing.md) now");
+        assert_eq!(file_marks(&doc), Vec::<String>::new());
+        assert_eq!(texts(&doc), vec!["see x now".to_string()]);
+    }
+
+    #[test]
+    fn a_markdown_link_to_a_network_file_url_is_unlinked() {
+        let fx = fixture();
+        let doc = linked(&fx, "see [x](file:////host/share/x.md) now");
+        assert_eq!(file_marks(&doc), Vec::<String>::new());
+        let outside = fx.wt.parent().unwrap().join("outside.txt");
+        let doc = linked(&fx, &format!("see [x](file://{}) now", format!("/{}", outside.display())));
+        assert_eq!(file_marks(&doc), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_markdown_link_to_an_existing_file_url_is_kept() {
+        let fx = fixture();
+        let readme = fx.wt.join("README.md");
+        let doc = linked(&fx, &format!("see [x](file://{}) now", readme.display()));
+        assert_eq!(file_marks(&doc).len(), 1);
     }
 
     #[test]

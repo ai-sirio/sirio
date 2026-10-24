@@ -375,6 +375,8 @@ impl MarkdownBody {
             .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                 up_interaction.chat.update(cx, |chat, cx| {
                     chat.transcript_dragging = false;
+                    // A press that did not end on a file link is over.
+                    chat.transcript_press = None;
                     cx.notify();
                 });
             })
@@ -401,7 +403,14 @@ impl MarkdownBody {
                 file_up_interaction.chat.update(cx, |chat, cx| {
                     let pressed = chat.transcript_press.take();
                     chat.transcript_dragging = false;
-                    if release.is_some() && pressed == release {
+                    // The one stat of the click: the path was checked when the
+                    // response was built, and a link is only ever opened if it
+                    // is still a plain local file.
+                    if release.is_some()
+                        && pressed == release
+                        && !file_links::is_network_or_device_path(&target.path)
+                        && target.path.is_file()
+                    {
                         cx.emit(ChatEvent::OpenFileAt {
                             path: target.path.clone(),
                             line: target.line,
@@ -1982,6 +1991,8 @@ impl Element for TranscriptSelectableText {
                         head: position,
                     });
                     chat.transcript_dragging = true;
+                    // A press on plain text is not the press of a file link.
+                    chat.transcript_press = None;
                     cx.notify();
                 });
                 window.focus(&interaction.focus, cx);
@@ -4182,6 +4193,7 @@ impl Chat {
         }
         self.push_entry(Entry::Assistant {
             text: transcript.to_string(),
+            // Not linked: this flattened text mixes user, thought and tool text (spec §2).
             document: parse_chat_markdown(transcript),
         });
         self.has_completed_turn = true;
