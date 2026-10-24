@@ -100,22 +100,21 @@ pub fn is_markdown_path(path: &Path) -> bool {
         })
 }
 
+/// Splits a trailing `:line` or `:line:column` off a path. The head is
+/// everything before the numeric suffix, so a `:` inside the path (a drive
+/// letter, `/tmp/a:b`) stays in it. A column counts only after a numeric line.
 fn split_location(raw: &str) -> (String, Option<usize>, Option<usize>) {
-    let mut pieces = raw.rsplitn(3, ':');
-    let last = pieces.next();
-    let before_last = pieces.next();
-    let before_before_last = pieces.next();
-    match (last, before_last, before_before_last) {
-        (Some(column), Some(line), Some(path))
-            if is_positive_number(line) && is_positive_number(column) =>
+    if let Some((head, last)) = raw.rsplit_once(':')
+        && is_positive_number(last)
+    {
+        if let Some((path, line)) = head.rsplit_once(':')
+            && is_positive_number(line)
         {
-            (path.to_string(), line.parse().ok(), column.parse().ok())
+            return (path.to_string(), line.parse().ok(), last.parse().ok());
         }
-        (Some(line), Some(path), _) if is_positive_number(line) => {
-            (path.to_string(), line.parse().ok(), None)
-        }
-        _ => (raw.to_string(), None, None),
+        return (head.to_string(), last.parse().ok(), None);
     }
+    (raw.to_string(), None, None)
 }
 
 fn is_positive_number(value: &str) -> bool {

@@ -666,6 +666,8 @@ mod tests {
             "/tmp/hash#tag/file#1.txt",
             "/tmp/100%/done%20.txt",
             "/tmp/città/è già.txt",
+            "/tmp/a:b/f.txt",
+            "/C:/dir/f.rs",
         ];
         for path in paths {
             for (line, column) in [(None, None), (Some(42), None), (Some(42), Some(7))] {
