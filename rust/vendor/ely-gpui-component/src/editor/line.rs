@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Context, FontWeight, HighlightStyle, InteractiveElement, IntoElement, MouseButton,
+    AnyElement, Context, CursorStyle, FontWeight, HighlightStyle, InteractiveElement, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Stateful, Styled, StyledText,
     UnderlineStyle, Window, canvas, div, px, prelude::*,
 };
@@ -328,6 +328,7 @@ impl CodeEditor {
             .flex_1()
             .h_full()
             .overflow_hidden()
+            .cursor(CursorStyle::IBeam)
             .when(current && focused, |code| code.bg(colors.hover))
             .when(added, |code| code.bg(colors.success.opacity(0.08)))
             .children(selections)
