@@ -2338,7 +2338,8 @@ pub struct Chat {
     /// Sirio last asked for one on its own account. An agent that answers
     /// with the same report is not asked again, because each answer is itself
     /// an effort report. It is cleared when a report brings a different
-    /// ladder.
+    /// ladder, when a report needs no request, and when a new agent process
+    /// starts.
     effort_auto_attempt: Option<(Vec<String>, Option<String>)>,
     /// Test seam: paths handed to the attach control instead of the native
     /// file picker (never set outside `#[cfg(test)]`).
@@ -5064,6 +5065,10 @@ impl Chat {
             &effort.choices,
             self.effort_user_choice.as_deref(),
         ) else {
+            // The agent is where the chat wants it, so what moves it away
+            // later is a new event and gets its own request. An agent that
+            // refuses never gets here: its answer still has a target.
+            self.effort_auto_attempt = None;
             return;
         };
         let attempt = (ladder, current);
@@ -5592,6 +5597,10 @@ impl Chat {
         // still open here would never hear of its end.
         self.fail_trace_turn(DISCONNECTED_MESSAGE, cx);
         self.client.take();
+        // A new process is a new agent to ask: the guard only stops one
+        // process answering one report in a loop, and what the last process
+        // answered says nothing of this one.
+        self.effort_auto_attempt = None;
         self.session_panel.clear_session();
         self.connecting = true;
         let cwd = self.agent_cwd.clone();
@@ -13300,6 +13309,106 @@ two"
             "the refused level was asked for again and again: {requests:?}"
         );
         assert_eq!(current_effort(&chat, cx).as_deref(), Some("medium"));
+    }
+
+    /// Restart agent launches a new process, which reports the level it
+    /// starts on, the same report the last process's request was made for.
+    /// It is a new agent to ask, so the chat asks it for High again.
+    #[gpui::test]
+    async fn a_restarted_agent_is_asked_for_high_again(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("config.jsonl");
+        let (chat, cx) = chat_view_logging_config(cx, "composer", &log);
+        pump_chat_until(cx, &chat, |chat| {
+            !config_requests(&log).is_empty()
+                && chat
+                    .effort
+                    .as_ref()
+                    .is_some_and(|effort| effort.current_value.as_deref() == Some("high"))
+        });
+        let_the_agent_answer(cx);
+        assert_eq!(config_requests(&log).len(), 1, "the first process is asked once");
+
+        chat.update(cx, |chat, cx| chat.retry(cx));
+        pump_chat_until(cx, &chat, |_| config_requests(&log).len() >= 2);
+        let_the_agent_answer(cx);
+
+        let high = ("effort".to_string(), "high".to_string());
+        assert_eq!(
+            config_requests(&log),
+            vec![high.clone(), high],
+            "the restarted process is asked for High as well, once"
+        );
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("high"));
+    }
+
+    /// The same, for an agent that refused: a new process is not bound by
+    /// what the last one answered, so it is asked once, and left alone after.
+    #[gpui::test]
+    async fn a_restarted_agent_that_kept_its_level_is_asked_once_more(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("config.jsonl");
+        let (chat, cx) = chat_view_logging_config(cx, "effort-stubborn", &log);
+        pump_chat_until(cx, &chat, |chat| {
+            !config_requests(&log).is_empty()
+                && chat
+                    .effort
+                    .as_ref()
+                    .is_some_and(|effort| effort.current_value.as_deref() == Some("medium"))
+        });
+        let_the_agent_answer(cx);
+        assert_eq!(config_requests(&log).len(), 1, "the first process is asked once");
+
+        chat.update(cx, |chat, cx| chat.retry(cx));
+        pump_chat_until(cx, &chat, |chat| {
+            config_requests(&log).len() >= 2
+                && chat
+                    .effort
+                    .as_ref()
+                    .is_some_and(|effort| effort.current_value.as_deref() == Some("medium"))
+        });
+        let_the_agent_answer(cx);
+
+        let high = ("effort".to_string(), "high".to_string());
+        assert_eq!(
+            config_requests(&log),
+            vec![high.clone(), high],
+            "the new process refused as well, and was asked no more than once"
+        );
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("medium"));
+    }
+
+    /// An agent that has reached High and then reports Medium again, with the
+    /// ladder unchanged, is a new event, not the answer to the last request:
+    /// the chat asks for High once more.
+    #[gpui::test]
+    async fn an_agent_that_drops_back_on_the_same_ladder_is_asked_again(cx: &mut TestAppContext) {
+        let (chat, cx) = effort_chat(cx, "high", CLAUDE_LADDER);
+        let report = |current: &str| {
+            AcpEvent::Effort(EffortOption {
+                option_id: "effort".into(),
+                name: Some("Effort".into()),
+                current_value: Some(current.into()),
+                choices: ["low", "medium", "high"]
+                    .into_iter()
+                    .map(|value| EffortChoice {
+                        value: value.into(),
+                        name: value.into(),
+                    })
+                    .collect(),
+            })
+        };
+
+        let reports = [("medium", "high"), ("high", "high"), ("medium", "high")];
+        for (index, (reported, expected)) in reports.into_iter().enumerate() {
+            chat.update(cx, |chat, cx| chat.handle_event(report(reported), cx));
+            assert_eq!(
+                current_effort(&chat, cx).as_deref(),
+                Some(expected),
+                "after report {} ({reported})",
+                index + 1
+            );
+        }
     }
 
     /// A structured question is named by its own header, not by the asking
