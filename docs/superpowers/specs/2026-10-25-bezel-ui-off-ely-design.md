@@ -104,14 +104,15 @@ Behaviour:
   it does today for the reset value.
 - **Starting on High.** Every chat starts on High when the agent offers a level whose value is
   `high`. Otherwise it stays on whatever the agent reports. This holds for:
-  - native Claude: `sirio_acp::claude::worker` starts `selected_effort` at `high` instead of
-    `EFFORT_DEFAULT` when the model's catalog offers it, **and sends the CLI the matching
-    `set_effort` control request at launch**. The chip must name the effort the CLI actually
-    runs at; today `selected_effort` is only a value reported to the UI and nothing is sent until
-    the user picks a level;
-  - ACP agents (Codex, OpenCode, Pi, Oh-My-Pi): when a session's first effort report arrives and
-    it is not `high` but offers it, Sirio sends one `set_config_option` for it, the same request
-    `Chat::select_effort` sends today.
+  - **One place for every agent.** When an effort report arrives that is not `high` but offers
+    it, `Chat` sends one `set_config_option` for it, the same request a click sends. The CLI is
+    told for real, and the chip names the effort the agent actually runs at.
+  - **Native Claude:** that request becomes the worker's `SetEffort` and the CLI's `set_effort`
+    control request. Today `selected_effort` starts at `default` and nothing is sent until the
+    user picks a level.
+  - **ACP agents** (Codex, OpenCode, Pi, Oh-My-Pi): the request is `session/set_config_option`.
+  - **No loops:** an agent that answers with another level is asked once, not again. The guard
+    is the last automatic request's ladder and reported level.
 - **Scope of a choice:** it holds for that chat only. The next new chat starts on High again.
   Effort is not persisted today, and this change does not start persisting it.
 - **A restored chat** (reconnected after a restart) also starts on High, since nothing
