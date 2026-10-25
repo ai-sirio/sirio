@@ -4397,6 +4397,7 @@ impl Chat {
         }
         self.model_picker_open = false;
         self.mode_picker_open = false;
+        self.thinking_picker_open = false;
         self.context_popover_open = false;
         self.effort_picker_open = !self.effort_picker_open;
         if self.effort_picker_open {
@@ -12900,14 +12901,14 @@ two"
                 "{value} is step {filled} of the five levels"
             );
         }
-        for value in ["ultracode", "default"] {
-            for filled in 0..=7 {
-                for total in 0..=7 {
-                    assert!(
-                        !effort_steps_drawn(cx, value, filled, total),
-                        "{value} is not a step on the scale, yet it drew {filled} of {total}"
-                    );
-                }
+        // Ultracode counted as a sixth level would show up in a bar of its own
+        // and in every other level's total.
+        for total in 5..=7 {
+            for filled in 1..=7 {
+                assert!(
+                    !effort_steps_drawn(cx, "ultracode", filled, total),
+                    "Ultracode is not a step on the scale, yet it drew {filled} of {total}"
+                );
             }
         }
         assert!(
@@ -13012,7 +13013,8 @@ two"
     }
 
     /// A model that offers one level still draws a bar, one step of one, and
-    /// the level is a row like any other.
+    /// the level is a row like any other. With no reset on offer there is no
+    /// Default row.
     #[gpui::test]
     async fn a_single_level_has_one_full_step(cx: &mut TestAppContext) {
         let (_chat, cx) = effort_chat(cx, "xhigh", &[("xhigh", "Extra high")]);
@@ -13022,18 +13024,9 @@ two"
             effort_steps_drawn(cx, "xhigh", 1, 1),
             "the only level is the whole scale"
         );
-    }
-
-    /// The slider is retired, not hidden behind the list.
-    #[gpui::test]
-    async fn the_slider_is_gone(cx: &mut TestAppContext) {
-        let (_chat, cx) = effort_chat(cx, "high", CLAUDE_LADDER);
-        open_effort_picker(cx);
-
-        assert!(cx.debug_bounds("effort-picker").is_some());
         assert!(
-            cx.debug_bounds("effort-slider").is_none(),
-            "the list replaces the track"
+            effort_option(cx, "default").is_none(),
+            "Default appears only where the agent offers a reset"
         );
     }
 

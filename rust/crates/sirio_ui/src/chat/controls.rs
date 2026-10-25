@@ -478,32 +478,42 @@ impl Chat {
                         .on_click(self.picker_click(PickerRow::Effort(value), cx))
                 };
 
+                // The menu's entries in the order drawn, `None` being a separator.
+                // This is the one place the order is written down.
                 let total = split.levels.len();
-                let mut menu = Menu::new();
+                let mut entries: Vec<Option<MenuItem>> = Vec::new();
                 for (index, level) in split.levels.iter().enumerate() {
                     let filled = index + 1;
                     let selector = format!("effort-steps-{}-{filled}-{total}", level.value);
-                    menu = menu.item(row(level).trailing(move |_| {
+                    entries.push(Some(row(level).trailing(move |_| {
                         effort_steps(selector.clone(), filled, total, filled_step, empty_step)
-                    }));
+                    })));
                 }
                 if let Some(ultracode) = &split.ultracode {
-                    menu = menu.item(row(ultracode).note("+ workflow"));
+                    entries.push(Some(row(ultracode).note("+ workflow")));
                 }
-                // The separator is a line of the menu that no key lands on, so
-                // the reset sits one entry further down than its row number.
-                let above = total + usize::from(split.ultracode.is_some());
-                let separated = above > 0 && split.reset.is_some();
                 if let Some(reset) = &split.reset {
-                    if separated {
-                        menu = menu.separator();
+                    if !entries.is_empty() {
+                        entries.push(None);
                     }
-                    menu = menu.item(row(reset).muted(true).note("model's own"));
+                    entries.push(Some(row(reset).muted(true).note("model's own")));
                 }
-                let rows = self.picker_rows(cx).len();
+                // The keys mark a row, and `MenuPanel` marks an entry: a
+                // separator is an entry no key lands on.
+                let mut entry_of_row = Vec::new();
+                let mut menu = Menu::new();
+                for (entry, item) in entries.into_iter().enumerate() {
+                    match item {
+                        Some(item) => {
+                            entry_of_row.push(entry);
+                            menu = menu.item(item);
+                        }
+                        None => menu = menu.separator(),
+                    }
+                }
                 let marked = self
-                    .marked_picker_row(rows)
-                    .map(|at| if separated && at >= above { at + 1 } else { at });
+                    .marked_picker_row(entry_of_row.len())
+                    .map(|at| entry_of_row[at]);
 
                 layer(
                     "effort-picker-menu",
