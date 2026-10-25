@@ -152,6 +152,12 @@ pub(crate) struct Snapshot {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Metrics {
     pub left: Pixels,
+    /// The window x where the code cell begins, the gutter's right edge.
+    pub code_left: Pixels,
+    /// The code cell's width.
+    pub code_width: Pixels,
+    /// The window x of the body's left edge.
+    pub body_left: Pixels,
     pub top: Pixels,
     pub advance: Pixels,
     pub line: Pixels,
@@ -175,6 +181,16 @@ pub struct CodeEditor {
     /// The text before an input method's composition began, while it runs.
     pub(crate) composing: Option<Snapshot>,
     pub(crate) metrics: Metrics,
+    /// How far the code column is scrolled right, from zero.
+    pub(crate) scroll_x: Pixels,
+    /// The most `scroll_x` can be, from the widest line and the column's width.
+    pub(crate) scroll_x_max: Pixels,
+    /// The primary head the view last followed sideways.
+    pub(crate) followed: Option<usize>,
+    /// The widest line's unscrolled width, text start included, by the buffer stamp it was found in.
+    pub(crate) widest: Option<(u64, Pixels)>,
+    /// The last press on the horizontal bar: the pointer along it and the thumb's start then.
+    pub(crate) bar_press: Option<(Pixels, Pixels)>,
     pub(crate) dragging: bool,
     /// The left press in progress, if any.
     pub(crate) pressed: Option<Press>,
@@ -272,6 +288,11 @@ impl CodeEditor {
             marked: None,
             composing: None,
             metrics: Metrics::default(),
+            scroll_x: Pixels::ZERO,
+            scroll_x_max: Pixels::ZERO,
+            followed: None,
+            widest: None,
+            bar_press: None,
             dragging: false,
             pressed: None,
             caret_on: true,

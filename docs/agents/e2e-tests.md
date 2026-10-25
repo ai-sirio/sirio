@@ -156,7 +156,9 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # The editor's hosting hooks on a real frame, on a private Xvfb with Mesa's
 # lavapipe: the host's per-line colour (and Ely's own lexer kept out), a git mark,
 # a diagnostic, the gutter, and the events a host hears, each from a real xdotool
-# gesture. --xvfb or --display :N, --out-dir DIR, --no-build,
+# gesture; and a line wider than the window scrolling sideways under a gutter
+# that stays put (the wheel, Shift and the wheel, a drag of the bar's thumb, End
+# and Home). --xvfb or --display :N, --out-dir DIR, --no-build,
 # --no-software-vulkan.
 Scripts/Tests/test-ely-editor-probe.sh --xvfb   # -> prints "ELY EDITOR PROBE OK"
 ```

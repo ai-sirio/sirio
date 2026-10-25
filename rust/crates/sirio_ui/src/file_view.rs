@@ -1829,8 +1829,7 @@ impl Render for FileView {
                         .py(px(5.0))
                         .rounded(theme.radii.control)
                         .flex()
-                        .flex_col()
-                        .gap(px(2.0))
+                        .items_center()
                         .text_size(theme.typography.footnote)
                         .when(is_disabled, |this| {
                             this.text_color(theme.ely.fg_subtle).cursor_not_allowed()
@@ -1846,18 +1845,13 @@ impl Render for FileView {
                                     });
                                 })
                         })
-                        .child(item.label)
-                        .when_some(note, |this, reason| {
-                            this.child(
-                                div()
-                                    .debug_selector(move || {
-                                        format!("file-context-item-{index}-reason")
-                                    })
-                                    .text_size(px(12.0))
-                                    .text_color(theme.ely.fg_subtle)
-                                    .child(reason),
-                            )
-                        }),
+                        // One line per row: the note waits behind the pointer.
+                        .when_some(note, |this, note| {
+                            this.tooltip(move |window, cx| {
+                                Tooltip::text(note.clone(), window, cx)
+                            })
+                        })
+                        .child(item.label),
                 );
             }
             let menu = menu.on_mouse_down_out(move |_, _, cx| {
