@@ -87,6 +87,10 @@ without guessing the request handle. The `plan` row now carries `id` and
 | `activity` | tool statuses `Completed`/`Failed`/`InProgress`; reasoning reaches the transcript | tools and reasoning |
 | `subagent` | the delegating task completes | task card |
 | `long_history` | 60 turns in order; the wheel scrolls the transcript; **a view scrolled back does not move when a turn arrives below** (pixel comparison of the transcript area, rail and scrollbar excluded) | tail, scrolled up, after a new turn, back at the tail |
+| `effort` | the chat settles on High and the agent heard a request for it; the list opens (through the debug-only `surface.chat.effort`) and choosing Low reaches the agent; after a relaunch the chat is on High again and the restarted agent is asked for it again | the list, Low |
+| `effort_light` | the same, in the light theme | the list, Low |
+| `effort_full` | on the fixture's `effort-full` mode the chat settles on High; the whole ladder (Default, Low, Medium, High, Extra high, Max, Ultracode) is drawn; choosing Default reaches the agent | the full list, Default in force |
+| `effort_full_light` | the same, in the light theme | the full list, Default |
 
 Then the identity lane: the five agents (Claude Code, Codex, OpenCode, Pi,
 Oh-My-Pi) × dark/light, as the probe with `ELY_PROBE_AGENT`.
