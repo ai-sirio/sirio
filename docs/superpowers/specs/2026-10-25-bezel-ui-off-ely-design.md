@@ -217,8 +217,8 @@ Two independent deliveries, so the effort feature is not tangled with the migrat
 changes (*Claude's call*):
 
 1. **`feat:` the effort list and the High default.** A small PR against `main`.
-   - If it is the cycle's first `feat:` to land, it moves the version from `0.35.1` to `0.36.0`.
-     #663, still open, would also do this; whichever lands second leaves the version alone.
+   - It is the 0.36.1 cycle's first `feat:` (v0.36.0 was tagged and #667 opened 0.36.1 while
+     it was built), so it moves the version from `0.36.1` to `0.37.0`.
    - Evidence: an E2E run (the Ely chat UI E2E, `Scripts/Tests/test-ely-chat-ui-e2e.py`, or the
      session-panel harness) that:
      - opens the list and captures it in light and dark;
