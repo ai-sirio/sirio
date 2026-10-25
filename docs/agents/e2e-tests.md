@@ -53,7 +53,7 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # Environment, the Context fold (asked on open, a plugin node, the CLAUDE.md row
 # opening a file tab), Connectors (reconnect, sign in), the Change request card, the
 # shared rate-limit pause and the open state across a relaunch. The trace scenarios
-# (trace_live, trace_cost, trace_interrupt, trace_death, trace_hang,
+# (trace_live, trace_cost, trace_request, trace_interrupt, trace_death, trace_hang,
 # trace_subagent_permission, trace_reveal, trace_tab, trace_idle, trace_keys) use
 # Scripts/Tests/stubs/trace/claude, the fixture's trace mode, whose scripted turns the
 # first word of a prompt picks (TRACE_STEP_MS paces them): agents and a nested agent, a

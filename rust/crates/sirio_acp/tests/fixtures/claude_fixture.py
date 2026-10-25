@@ -334,6 +334,13 @@ def trace_stream(event):
     })
 
 
+def requesting():
+    """The line the CLI writes as a main-thread API request goes out, ahead of the
+    first token (`message_start`) by however long the API takes to answer."""
+    send({"type": "system", "subtype": "status", "status": "requesting",
+          "session_id": SESSION_ID, "uuid": trace_uuid()})
+
+
 def message_start(message_id):
     trace_stream({"type": "message_start", "message": {
         "model": TRACE_MODEL, "id": message_id, "type": "message", "role": "assistant",
@@ -558,6 +565,18 @@ def script_second():
     trace_result(0.12, started)
 
 
+def script_request():
+    started = time.time()
+    # The request is out and the first token is not: the wait belongs to the call.
+    requesting()
+    pause(4)
+    message_start("msg_request_1")
+    text("The first token took a while. ")
+    pause()
+    message_end("end_turn", 20)
+    trace_result(0.04, started)
+
+
 def script_cancel():
     started = time.time()
     message_start("msg_cancel_1")
@@ -631,6 +650,7 @@ def script_subagent_permission(early):
 TRACE_SCRIPTS = {
     "subagents": script_subagents,
     "second": script_second,
+    "request": script_request,
     "cancel": script_cancel,
     "hang": script_hang,
     "die": script_die,

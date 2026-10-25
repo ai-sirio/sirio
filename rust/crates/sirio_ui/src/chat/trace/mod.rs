@@ -329,6 +329,16 @@ impl Turn {
                 }
                 changed
             }
+            TraceEvent::SpanModel { id, model } => {
+                let Some(span) = self.span_mut(&id) else {
+                    return false;
+                };
+                if span.model.as_deref() == Some(model.as_str()) {
+                    return false;
+                }
+                span.model = Some(model);
+                true
+            }
             TraceEvent::SpanUsage { id, tokens } => {
                 let Some(span) = self.span_mut(&id) else {
                     return false;
@@ -1934,6 +1944,32 @@ mod tests {
             tokens: None
         }));
         assert!(!store.apply(started("toolu_late", SpanKind::Tool)), "turn over");
+    }
+
+    #[test]
+    fn a_model_named_after_its_span_opened_shows_on_the_row() {
+        let (mut store, c) = open_turn();
+        let named = |id: &str, model: &str| TraceEvent::SpanModel {
+            id: id.into(),
+            model: model.into(),
+        };
+        store.apply(TraceEvent::SpanStarted {
+            id: "call-1".into(),
+            parent: None,
+            kind: SpanKind::Llm,
+            name: "Model call".into(),
+            detail: String::new(),
+            model: None,
+            at: c.at(0),
+        });
+        // No span of that id: nothing changed.
+        assert!(!store.apply(named("call-nobody", "claude-opus-5-5")));
+        assert!(store.apply(named("call-1", "claude-opus-5-5")));
+        assert_eq!(
+            row(&rows_of(&store, c.at(100)), "call-1").model.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert!(!store.apply(named("call-1", "claude-opus-5-5")), "the same model");
     }
 
     #[test]

@@ -38,7 +38,7 @@ set -euo pipefail
 #
 # The trace scenarios (spec 2026-10-21-chat-trace-waterfall-design.md §8) use another stub,
 # Scripts/Tests/stubs/trace/claude, the same fixture in its trace mode: the first word of
-# a prompt picks a scripted turn (subagents, second, cancel, hang, die, subperm,
+# a prompt picks a scripted turn (subagents, second, request, cancel, hang, die, subperm,
 # subperm_early) and TRACE_STEP_MS (400 by default) paces its lines, so a live state can be
 # read mid-turn. They are asserted on the card's rows in `sessionPanel`, on
 # `surface.trace.read` (the Trace tab) and on `firstVisibleEntry` and `lastVisibleEntry` of
@@ -48,6 +48,9 @@ set -euo pipefail
 #                      reveal of the permission (the list's top at it unpainted, the card between the
 #                      first and last row drawn painted), the failed and done calls, Done with $0.31
 #   trace_cost         a second turn's cost is the difference of the process's totals: $0.12
+#   trace_request      the CLI's `status: requesting` opens the main-thread model call, so the wait for
+#                      the first token is part of one running call (the Trace tab shows it while the
+#                      fixture waits), and the turn ends with that same call, done
 #   trace_interrupt    Stop ends the turn Interrupted, its cost and the next turn's are unknown
 #   trace_death        the CLI dying mid-call ends the turn Failed, every lane failed or interrupted
 #   trace_hang         a call that never reports ends interrupted with the turn
@@ -98,7 +101,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirio"
 CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
-  trace_live trace_cost trace_interrupt trace_death trace_hang trace_subagent_permission trace_reveal
+  trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission trace_reveal
   trace_tab trace_idle trace_keys)
 STATE_ONLY=0
 OUT_DIR=""
@@ -1154,6 +1157,23 @@ scenario_trace_cost() {
     're.match(r"^Done · .+ · \$0\.12$", S("trace")["summary"])' 30
   unfold_cards trace
   check_panel "the Cost number says \$0.12 too" 'R("trace", "trace/stat/cost")["detail"] == "$0.12"'
+  stop_app
+}
+
+scenario_trace_request() {
+  # The fixture holds the first token back for four steps: slow enough to open the tab in it.
+  trace_chat trace_request 2500
+  send_prompt request
+  wait_panel "the turn is live" 'S("trace") is not None and S("trace")["summary"].startswith("Live · ")' 30
+  unfold_cards trace
+  panel_ctl activate trace/open >/dev/null
+  wait_panel "the Trace tab is open" 'tab()["open"] == "1"' 20
+  check_panel "the request opened one running call under the root, before any token came" \
+    '[(s["parent"], s["state"], s["ended"]) for s in tab()["spans"] if s["kind"] == "llm" and s["id"].startswith("call-")] == [("root", "running", "0")] and len([s for s in tab()["spans"] if s["kind"] == "llm"]) == 1'
+  CALL=$(find_panel "the call's id" 'next(s["id"] for s in tab()["spans"] if s["kind"] == "llm")' 10)
+  wait_panel "the turn is Done" 'S("trace")["summary"].startswith("Done · ")' 40
+  check_panel "the turn still has that one call, the same id, ended and done: its first token opened no second" \
+    "[(s['id'], s['parent'], s['state'], s['ended']) for s in tab()['spans'] if s['kind'] == 'llm'] == [('$CALL', 'root', 'done', '1')]"
   stop_app
 }
 
