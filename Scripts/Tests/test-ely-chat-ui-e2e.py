@@ -10,7 +10,9 @@ Sirio. Rerunning the script reproduces the artifact.
 Scenarios (each its own instance): staged streaming with a FIFO queue,
 permission, listed-option question, plan approval, cancellation, agent death
 and recovery across a relaunch, authentication required, restore across a
-relaunch. After them, unless --no-identity, the five agents' marks as native
+relaunch, and the effort list (`effort`, `effort_light`: High asked of the agent
+at start, the list opened and a level chosen, High asked again after a
+relaunch). After them, unless --no-identity, the five agents' marks as native
 views with explicitly supplied identities (the example probe, not the app:
 the fixture run proves no provider identity).
 
@@ -24,7 +26,9 @@ picked -- so the fixture cannot ride that variable here.)
 Control methods used are the existing ones: `surface.chat.open` selects an
 already rendered chat (it does not create one -- the seeded database does),
 `.send`/`.compose` with `surfaceId,text`, `.permission` with
-`surfaceId,requestId,optionId`, `.stop`/`.read` with `surfaceId`. Every
+`surfaceId,requestId,optionId`, `.stop`/`.read` with `surfaceId`; the effort
+scenarios also use the debug-only `surface.chat.effort` with
+`surfaceId,action` (open, close or choose) and `value` for choose. Every
 parameter is a string.
 
 Artifacts under --out-dir: transcript.log, responses.jsonl (every control
@@ -356,6 +360,8 @@ class Instance:
             "composer": result["composerText"],
             "queued": [row["text"] for row in json.loads(result["queued"])],
             "transcript": json.loads(result["transcript"]),
+            # The level the chat is on, empty when the session offers no effort.
+            "effort": result.get("effort"),
         }
 
     def until(self, what: str, predicate, timeout: float = 40, quiet: bool = False) -> dict:
@@ -854,6 +860,88 @@ def long_history(run: Run) -> None:
     scenario.finish()
 
 
+def effort_act(chat: Instance, action: str, value: str | None = None) -> None:
+    """`surface.chat.effort`: what the effort chip's list does, by the same path as a click."""
+    params = {"surfaceId": chat.surface, "action": action}
+    if value is not None:
+        params["value"] = value
+    reply = chat.call("surface.chat.effort", **params)
+    if not reply.get("ok"):
+        raise Failure(f"{chat.scenario.name}: surface.chat.effort {action} {value or ''} failed: {reply}")
+
+
+def effort_requests(scenario: Scenario) -> list[str]:
+    """The levels the app asked the agent for, in order.
+
+    Read from the harness's record of what reached the fixture: the client-to-agent
+    `session/set_config_option` requests whose `configId` is `effort`.
+    """
+    asked: list[str] = []
+    if not scenario.traffic.exists():
+        return asked
+    for raw in scenario.traffic.read_text().splitlines():
+        try:
+            record = json.loads(raw)
+            message = json.loads(record["line"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if record.get("dir") != "to-agent" or message.get("method") != "session/set_config_option":
+            continue
+        params = message.get("params") or {}
+        if params.get("configId") == "effort":
+            asked.append(params.get("value"))
+    return asked
+
+
+def effort_asked(chat: Instance, what: str, enough) -> list[str]:
+    """The effort requests once `enough` accepts them: a chip moves before its request is written."""
+
+    def probe() -> list[str]:
+        asked = effort_requests(chat.scenario)
+        if not enough(asked):
+            raise Failure("not yet")
+        return asked
+
+    return chat.wait(what, probe, timeout=15)
+
+
+def effort_steps(run: Run, name: str, appearance: str) -> None:
+    """A chat asks for High, shows the effort list, takes a pick, and asks for High again once restarted."""
+    scenario = Scenario(run, name, "composer", appearance=appearance)
+    chat = scenario.instance
+    chat.start()
+    chat.send("hi")
+    chat.until("the turn completes on High", lambda s: s["status"] == "completed" and s["effort"] == "high")
+    asked = effort_requests(scenario)
+    if "high" not in asked:
+        raise Failure(f"{name}: the agent was never asked for effort high (asked: {asked})")
+    run.log(f"OK {name}: the agent was asked for effort high (asked: {asked})")
+    effort_act(chat, "open")
+    chat.frame("effort-list")
+    effort_act(chat, "choose", "low")
+    chat.until("the chat is on Low", lambda s: s["effort"] == "low")
+    asked = effort_asked(chat, "choosing Low reaches the agent", lambda asked: asked[-1:] == ["low"])
+    run.log(f"OK {name}: choosing Low reached the agent (asked: {asked})")
+    chat.frame("effort-low")
+    scenario.relaunch()
+    chat.until("a restored chat is back on High", lambda s: s["effort"] == "high")
+    restarted = effort_asked(
+        chat,
+        "the restarted agent is asked for High again",
+        lambda now: len(now) > len(asked) and now[-1] == "high",
+    )
+    run.log(f"OK {name}: the restarted agent was asked for High again (asked: {restarted})")
+    scenario.finish()
+
+
+def effort(run: Run) -> None:
+    effort_steps(run, "effort", "dark")
+
+
+def effort_light(run: Run) -> None:
+    effort_steps(run, "effort-light", "light")
+
+
 SCENARIOS = [
     staged_queue,
     permission,
@@ -867,6 +955,8 @@ SCENARIOS = [
     wide_content,
     subagent,
     long_history,
+    effort,
+    effort_light,
 ]
 
 

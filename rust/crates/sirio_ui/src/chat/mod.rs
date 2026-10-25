@@ -1078,6 +1078,20 @@ pub struct ChatControlSnapshot {
     /// `label`, `target`, `x`, `y` (window pixels, a few px into the label at
     /// its vertical middle) and `w` (the label's painted width).
     pub transcript_links: Vec<BTreeMap<String, String>>,
+    /// The effort level in force, by its wire value: what the chip names and the list
+    /// marks. `None` when the session advertised no effort, or no level is reported.
+    pub effort: Option<String>,
+}
+
+/// What the debug control verb does to the effort chip's list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EffortListAction {
+    /// Opens the list, as a press on the chip does when it is closed.
+    Open,
+    /// Closes it, as Esc does.
+    Close,
+    /// Picks the level with this wire value, by the path a press on its row takes.
+    Choose(String),
 }
 
 impl Entry {
@@ -3963,7 +3977,46 @@ impl Chat {
             first_visible_entry: self.list_state.logical_scroll_top().item_ix,
             last_visible_entry: self.last_visible_entry(),
             transcript_links: self.transcript_links.borrow().clone(),
+            effort: self
+                .effort
+                .as_ref()
+                .and_then(|effort| effort.current_value.clone()),
         }
+    }
+
+    /// What the debug control verb does to the effort list. It refuses what no press could
+    /// do: opening a list the session has no effort for, or choosing a level it does not offer.
+    pub fn effort_act(
+        &mut self,
+        action: EffortListAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        match action {
+            EffortListAction::Open => {
+                if !self.effort_picker_open {
+                    self.toggle_effort_picker(window, cx);
+                }
+                if !self.effort_picker_open {
+                    return Err("the session offers no effort".to_string());
+                }
+            }
+            EffortListAction::Close => {
+                if self.effort_picker_open {
+                    self.cancel(&Cancel, window, cx);
+                }
+            }
+            EffortListAction::Choose(value) => {
+                let offered = self.effort.as_ref().is_some_and(|effort| {
+                    effort.choices.iter().any(|choice| choice.value == value)
+                });
+                if !offered {
+                    return Err(format!("the session does not offer effort {value}"));
+                }
+                self.choose_picker_row(controls::PickerRow::Effort(value), window, cx);
+            }
+        }
+        Ok(())
     }
 
     /// The last transcript row the list drew: the last one from the top row down that the

@@ -1117,6 +1117,20 @@ pub mod request {
         request("surface.chat.panel", params)
     }
 
+    /// Debug-only `surface.chat.effort {surfaceId, action, value?}`: does to a
+    /// chat's effort list what the chip and its rows do. `action` is `open`,
+    /// `close` or `choose`; `choose` names the level's wire `value`.
+    pub fn chat_effort(surface_id: &str, action: &str, value: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::from([
+            ("surfaceId".to_string(), surface_id.to_string()),
+            ("action".to_string(), action.to_string()),
+        ]);
+        if let Some(value) = value {
+            params.insert("value".to_string(), value.to_string());
+        }
+        request("surface.chat.effort", params)
+    }
+
     pub fn system_ping() -> ControlRequest {
         request("system.ping", BTreeMap::new())
     }
