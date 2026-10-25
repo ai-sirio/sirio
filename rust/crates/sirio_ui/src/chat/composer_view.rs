@@ -166,6 +166,30 @@ pub(crate) fn effort_rows(choices: &[EffortChoice]) -> EffortRows {
     }
 }
 
+/// The level every chat starts on, when the agent offers it.
+pub(crate) const EFFORT_HIGH: &str = "high";
+
+/// The level Sirio should ask the agent for, or `None` when the session is
+/// where it should be.
+///
+/// A level the user chose wins when the agent offers it, and is asked for
+/// only if it is not the current one. Without one (or when this model does
+/// not offer it) every chat starts on High, when High is offered. An agent
+/// that offers no High keeps whatever it reports.
+pub(crate) fn effort_target(
+    current: Option<&str>,
+    choices: &[EffortChoice],
+    user_choice: Option<&str>,
+) -> Option<String> {
+    let offered = |value: &str| choices.iter().any(|choice| choice.value == value);
+    let wanted = match user_choice {
+        Some(value) if offered(value) => value,
+        _ if offered(EFFORT_HIGH) => EFFORT_HIGH,
+        _ => return None,
+    };
+    (current != Some(wanted)).then(|| wanted.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +322,65 @@ mod tests {
         let (text, paths) = assemble_prompt("@a.rs then @b.rs then @a.rs end", &accepted);
         assert_eq!(text, "then then end");
         assert_eq!(paths, vec!["a.rs".to_string(), "b.rs".to_string()]);
+    }
+
+    /// What Sirio asks a session's agent for, case by case. `L` is Claude's
+    /// own ladder, `T` the three levels an ACP agent offers, `X` and `M`
+    /// ladders with no `high` in them.
+    #[test]
+    fn effort_target_covers_every_case() {
+        fn ladder(values: &[&str]) -> Vec<EffortChoice> {
+            values
+                .iter()
+                .map(|value| EffortChoice {
+                    value: (*value).to_string(),
+                    name: (*value).to_string(),
+                })
+                .collect()
+        }
+        let l = ladder(&[
+            "default",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultracode",
+        ]);
+        let t = ladder(&["low", "medium", "high"]);
+        let x = ladder(&["xhigh"]);
+        let m = ladder(&["low", "max"]);
+
+        // (current, choices, user's choice, expected)
+        let cases = [
+            // a fresh session
+            (Some("default"), &l, None, Some("high")),
+            // already there
+            (Some("high"), &l, None, None),
+            // an ACP agent's own level
+            (Some("medium"), &t, None, Some("high")),
+            // no high offered
+            (Some("xhigh"), &x, None, None),
+            (Some("low"), &m, None, None),
+            // the user's level, offered
+            (Some("high"), &l, Some("low"), Some("low")),
+            // the user's level, already current
+            (Some("low"), &l, Some("low"), None),
+            // the user's level, not offered
+            (Some("default"), &t, Some("xhigh"), Some("high")),
+            // the user chose Default
+            (Some("high"), &l, Some("default"), Some("default")),
+            // the agent reported no current
+            (None, &t, None, Some("high")),
+        ];
+        for (current, choices, user_choice, expected) in cases {
+            let offered: Vec<&str> = choices.iter().map(|c| c.value.as_str()).collect();
+            assert_eq!(
+                effort_target(current, choices, user_choice).as_deref(),
+                expected,
+                "current {current:?}, offered {offered:?}, user choice {user_choice:?}"
+            );
+        }
     }
 }
 

@@ -38,6 +38,9 @@ Modes (argv[1], optional argv[2] is a scratch directory):
   ely-catalogue    Like `composer`, with every catalogue an agent can report: three
                    session modes, models with long names, four effort levels and
                    an 85% context fill. The native pass over the chat's popups.
+  effort-stubborn  Like `composer`, but an agent that keeps its own effort:
+                   `session/set_config_option` is answered with the effort
+                   still at "medium", whatever was asked for.
   auth-required    initialize advertises one login auth method, then every
                    session/new is rejected with wire code -32000
                    "Authentication required" — ACP's auth_required shape, so
@@ -52,6 +55,12 @@ Modes (argv[1], optional argv[2] is a scratch directory):
                    one request being refused, which is the shape that lands
                    the "Agent disconnected" banner. Every invocation starts
                    clean, so a Restart click reconnects and then sits idle.
+
+Every mode answers `session/set_config_option` with the options it advertised,
+the requested one set to the requested value. When the environment variable
+CHAT_FIXTURE_CONFIG_LOG names a file, the request's params are appended to it
+as one JSON line, before the answer goes out: the file is what a test reads to
+see what actually reached the agent.
 
 Wire shapes mirror the sirio_acp integration fixture (acp_fixture.py).
 """
@@ -138,6 +147,66 @@ def usage_update(used, size):
     notification({"sessionUpdate": "usage_update", "used": used, "size": size})
 
 
+def composer_config_options():
+    """The model and effort selectors a `composer` agent announces."""
+    return [
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "sonnet",
+            "options": [
+                {"value": "sonnet", "name": "Sonnet"},
+                {"value": "opus", "name": "Opus"},
+            ],
+        },
+        {
+            "id": "effort",
+            "name": "Reasoning effort",
+            "category": "effort",
+            "type": "select",
+            "currentValue": "medium",
+            "options": [
+                {"value": "low", "name": "Low"},
+                {"value": "medium", "name": "Medium"},
+                {"value": "high", "name": "High"},
+            ],
+        },
+    ]
+
+
+def catalogue_config_options():
+    """The selectors of a talkative agent: long labels are the point."""
+    return [
+        {
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": "sonnet",
+            "options": [
+                {"value": "opus", "name": "Opus Extended Reasoning Preview with a very long marketing name"},
+                {"value": "sonnet", "name": "Sonnet"},
+                {"value": "haiku", "name": "Haiku"},
+            ],
+        },
+        {
+            "id": "effort",
+            "name": "Reasoning effort",
+            "category": "effort",
+            "type": "select",
+            "currentValue": "medium",
+            "options": [
+                {"value": "low", "name": "Low"},
+                {"value": "medium", "name": "Medium"},
+                {"value": "high", "name": "High"},
+                {"value": "max", "name": "Maximum"},
+            ],
+        },
+    ]
+
+
 def advertise():
     """Advertise slash commands, model/effort config options, and an 85%
     context fill, the way a real agent announces its composer affordances."""
@@ -158,31 +227,7 @@ def advertise():
     notification(
         {
             "sessionUpdate": "config_option_update",
-            "configOptions": [
-                {
-                    "id": "model",
-                    "name": "Model",
-                    "category": "model",
-                    "type": "select",
-                    "currentValue": "sonnet",
-                    "options": [
-                        {"value": "sonnet", "name": "Sonnet"},
-                        {"value": "opus", "name": "Opus"},
-                    ],
-                },
-                {
-                    "id": "effort",
-                    "name": "Reasoning effort",
-                    "category": "effort",
-                    "type": "select",
-                    "currentValue": "medium",
-                    "options": [
-                        {"value": "low", "name": "Low"},
-                        {"value": "medium", "name": "Medium"},
-                        {"value": "high", "name": "High"},
-                    ],
-                },
-            ],
+            "configOptions": composer_config_options(),
         }
     )
     usage_update(170000, 200000)
@@ -193,36 +238,29 @@ def advertise_catalogue():
     notification(
         {
             "sessionUpdate": "config_option_update",
-            "configOptions": [
-                {
-                    "id": "model",
-                    "name": "Model",
-                    "category": "model",
-                    "type": "select",
-                    "currentValue": "sonnet",
-                    "options": [
-                        {"value": "opus", "name": "Opus Extended Reasoning Preview with a very long marketing name"},
-                        {"value": "sonnet", "name": "Sonnet"},
-                        {"value": "haiku", "name": "Haiku"},
-                    ],
-                },
-                {
-                    "id": "effort",
-                    "name": "Reasoning effort",
-                    "category": "effort",
-                    "type": "select",
-                    "currentValue": "medium",
-                    "options": [
-                        {"value": "low", "name": "Low"},
-                        {"value": "medium", "name": "Medium"},
-                        {"value": "high", "name": "High"},
-                        {"value": "max", "name": "Maximum"},
-                    ],
-                },
-            ],
+            "configOptions": catalogue_config_options(),
         }
     )
     usage_update(170000, 200000)
+
+
+def answer_set_config_option(request, mode):
+    """Log the request, then answer with the options the mode advertised and
+    the requested one set to the requested value. `effort-stubborn` is an
+    agent that keeps its own level: it answers with every option unchanged."""
+    params = request.get("params", {})
+    log_path = os.environ.get("CHAT_FIXTURE_CONFIG_LOG")
+    if log_path:
+        with open(log_path, "a", encoding="utf-8") as log:
+            log.write(json.dumps(params, separators=(",", ":")) + "\n")
+    options = (
+        catalogue_config_options() if mode == "ely-catalogue" else composer_config_options()
+    )
+    if mode != "effort-stubborn":
+        for option in options:
+            if option["id"] == params.get("configId"):
+                option["currentValue"] = params.get("value")
+    response(request["id"], {"configOptions": options})
 
 
 def rich_turn(request):
@@ -462,8 +500,10 @@ def main():
                 advertise_catalogue()
             else:
                 response(request["id"], {"sessionId": SESSION_ID})
-            if mode == "composer":
+            if mode in ("composer", "effort-stubborn"):
                 advertise()
+        elif method == "session/set_config_option":
+            answer_set_config_option(request, mode)
         elif method == "session/prompt":
             if mode == "staged":
                 # The first prompt is the go-gated rich turn; any later
@@ -479,7 +519,7 @@ def main():
             if mode == "plain":
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
-            if mode in ("composer", "ely-catalogue"):
+            if mode in ("composer", "ely-catalogue", "effort-stubborn"):
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
             if mode == "echo-blocks":

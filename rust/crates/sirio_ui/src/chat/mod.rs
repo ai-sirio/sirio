@@ -62,7 +62,7 @@ use bezel::ui::popover;
 pub use session_panel::{
     RowSnapshot, SectionSnapshot, SessionPanelAction, SessionPanelSnapshot,
 };
-use composer_view::{TokenPopup, assemble_prompt, mention_token, slash_token};
+use composer_view::{TokenPopup, assemble_prompt, effort_target, mention_token, slash_token};
 use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 use trace::{RevealTarget, TraceStore};
 
@@ -2330,6 +2330,16 @@ pub struct Chat {
     last_follow_at: Option<std::time::Instant>,
     /// Effort-level selector advertised by the session.
     effort: Option<EffortOption>,
+    /// The level the user last picked from the effort list. It holds for
+    /// this chat only: a new conversation clears it, a reconnect of the same
+    /// chat keeps it, and a model that offers the level keeps the chat on it.
+    effort_user_choice: Option<String>,
+    /// The ladder (the choices' values) and the level the agent reported when
+    /// Sirio last asked for one on its own account. An agent that answers
+    /// with the same report is not asked again, because each answer is itself
+    /// an effort report. It is cleared when a report brings a different
+    /// ladder.
+    effort_auto_attempt: Option<(Vec<String>, Option<String>)>,
     /// Test seam: paths handed to the attach control instead of the native
     /// file picker (never set outside `#[cfg(test)]`).
     #[cfg(test)]
@@ -2615,6 +2625,8 @@ impl Chat {
             following_edited_files: false,
             last_follow_at: None,
             effort: None,
+            effort_user_choice: None,
+            effort_auto_attempt: None,
             #[cfg(test)]
             attach_test_paths: Vec::new(),
             #[cfg(test)]
@@ -3218,7 +3230,20 @@ impl Chat {
                 // neither effort field, and the levels the others offer are
                 // each model's own. A chip opening on an empty picker would
                 // be a worse answer than no chip.
-                self.effort = (!effort.choices.is_empty()).then_some(effort);
+                let ladder: Vec<String> = effort
+                    .choices
+                    .iter()
+                    .map(|choice| choice.value.clone())
+                    .collect();
+                if self
+                    .effort_auto_attempt
+                    .as_ref()
+                    .is_some_and(|(attempted, _)| *attempted != ladder)
+                {
+                    self.effort_auto_attempt = None;
+                }
+                self.effort = (!ladder.is_empty()).then_some(effort);
+                self.ask_for_the_effort_target(ladder, cx);
             }
             AcpEvent::ContextUsage(usage) => {
                 self.context_usage = Some(usage);
@@ -5014,15 +5039,53 @@ impl Chat {
         self.has_completed_turn = false;
         self.transcript_selection = None;
         self.clear_persisted_transcript();
+        // The next conversation starts on High again, whatever this one
+        // chose, and its agent is asked afresh.
+        self.effort_user_choice = None;
+        self.effort_auto_attempt = None;
         self.start_connection(cx);
         cx.notify();
     }
 
     // --- Effort levels (F-CHAT-17) ---
 
-    /// Optimistic like `select_model`: the picker reflects the choice
-    /// immediately and reverts when the agent rejects it.
+    /// Asks the agent for the level this chat should be on, when it is not
+    /// on it: the user's own pick if the agent offers it, else High. Every
+    /// automatic request goes through `effort_auto_attempt`, so an agent that
+    /// answers with the report that prompted the request is asked once and
+    /// then left where it is.
+    fn ask_for_the_effort_target(&mut self, ladder: Vec<String>, cx: &mut Context<Self>) {
+        let Some(effort) = &self.effort else {
+            return;
+        };
+        let current = effort.current_value.clone();
+        let Some(target) = effort_target(
+            current.as_deref(),
+            &effort.choices,
+            self.effort_user_choice.as_deref(),
+        ) else {
+            return;
+        };
+        let attempt = (ladder, current);
+        if self.effort_auto_attempt.as_ref() == Some(&attempt) {
+            return;
+        }
+        self.effort_auto_attempt = Some(attempt);
+        self.select_effort_by_default(target, cx);
+    }
+
+    /// The user's pick from the effort list: it is also what the chat keeps
+    /// asking for until a new conversation. Optimistic like `select_model`:
+    /// the picker reflects the choice immediately and reverts when the agent
+    /// rejects it.
     fn select_effort(&mut self, value: String, cx: &mut Context<Self>) {
+        self.effort_user_choice = Some(value.clone());
+        self.select_effort_by_default(value, cx);
+    }
+
+    /// The same request as `select_effort`, for a level Sirio chose rather
+    /// than the user: it leaves the user's choice alone.
+    fn select_effort_by_default(&mut self, value: String, cx: &mut Context<Self>) {
         let Some(effort) = &mut self.effort else {
             return;
         };
@@ -13028,6 +13091,215 @@ two"
             effort_option(cx, "default").is_none(),
             "Default appears only where the agent offers a reset"
         );
+    }
+
+    /// `chat_view` on a fixture that appends every `session/set_config_option`
+    /// request it receives to `log`: what the chat asked for, as the agent
+    /// heard it, not as the chat's own state shows it. The variable reaches
+    /// the fixture alone, through `env`, so tests running side by side keep
+    /// to their own logs.
+    fn chat_view_logging_config<'a>(
+        cx: &'a mut TestAppContext,
+        mode: &str,
+        log: &Path,
+    ) -> (Entity<Chat>, &'a mut VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        let command = AgentCommand::new("env")
+            .arg(format!("CHAT_FIXTURE_CONFIG_LOG={}", log.display()))
+            .arg("python3")
+            .arg(CHAT_FIXTURE)
+            .arg(mode);
+        cx.add_window_view(|_, cx| {
+            Chat::from_test_command(LaunchSpec::Acp(command), std::env::temp_dir(), cx)
+        })
+    }
+
+    /// The `(configId, value)` of every request the fixture logged, oldest
+    /// first. A file the fixture has not created yet holds none.
+    fn config_requests(log: &Path) -> Vec<(String, String)> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .map(|params| {
+                let field = |name: &str| params[name].as_str().unwrap_or_default().to_string();
+                (field("configId"), field("value"))
+            })
+            .collect()
+    }
+
+    /// Gives the fixture's answers time to come back and be handled. A
+    /// request that is never repeated shows no sign of it, so a count taken
+    /// right after the last event proves nothing; this is the bounded wait
+    /// that makes "exactly once" mean it.
+    fn let_the_agent_answer(cx: &mut VisualTestContext) {
+        cx.cx.executor().allow_parking();
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            cx.cx.run_until_parked();
+        }
+    }
+
+    /// Picks `value` from the open effort list, the way a click does.
+    fn choose_effort_from_the_list(cx: &mut VisualTestContext, value: &str) {
+        refresh_frame(cx);
+        open_effort_picker(cx);
+        let row = effort_option(cx, value).unwrap_or_else(|| panic!("the {value} row is drawn"));
+        cx.simulate_click(row.center(), Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// A chat that has just connected to an agent sitting on Medium is moved
+    /// to High, and the agent is told so: the request is what the fixture
+    /// logged, not the chip's own say-so.
+    #[gpui::test]
+    async fn a_new_chat_starts_on_high_and_tells_the_agent(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("config.jsonl");
+        let (chat, cx) = chat_view_logging_config(cx, "composer", &log);
+
+        pump_chat_until(cx, &chat, |_| !config_requests(&log).is_empty());
+        pump_chat_until(cx, &chat, |chat| {
+            chat.effort
+                .as_ref()
+                .is_some_and(|effort| effort.current_value.as_deref() == Some("high"))
+        });
+        let_the_agent_answer(cx);
+
+        assert_eq!(
+            config_requests(&log),
+            vec![("effort".to_string(), "high".to_string())],
+            "one request for High, and no second one when the agent confirms it"
+        );
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("high"));
+    }
+
+    /// An agent that answers with the level it had is asked once, not until
+    /// it gives in.
+    #[gpui::test]
+    async fn an_agent_that_keeps_its_own_level_is_asked_once(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("config.jsonl");
+        let (chat, cx) = chat_view_logging_config(cx, "effort-stubborn", &log);
+
+        // Medium after a request is the agent's answer: the chip only reads
+        // High between the request and that answer.
+        pump_chat_until(cx, &chat, |chat| {
+            !config_requests(&log).is_empty()
+                && chat
+                    .effort
+                    .as_ref()
+                    .is_some_and(|effort| effort.current_value.as_deref() == Some("medium"))
+        });
+        let_the_agent_answer(cx);
+
+        assert_eq!(
+            config_requests(&log),
+            vec![("effort".to_string(), "high".to_string())],
+            "the agent was asked for High once and left alone after refusing"
+        );
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("medium"));
+    }
+
+    /// A level picked from the list holds for that chat only: a new
+    /// conversation starts on High again.
+    #[gpui::test]
+    async fn a_new_conversation_starts_on_high_again(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("config.jsonl");
+        let (chat, cx) = chat_view_logging_config(cx, "composer", &log);
+        pump_chat_until(cx, &chat, |chat| chat.effort.is_some());
+        let_the_agent_answer(cx);
+
+        choose_effort_from_the_list(cx, "low");
+        pump_chat_until(cx, &chat, |_| {
+            config_requests(&log).last().map(|(_, value)| value.as_str()) == Some("low")
+        });
+        let_the_agent_answer(cx);
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("low"));
+
+        chat.update(cx, |chat, cx| chat.new_conversation(cx));
+        pump_chat_until(cx, &chat, |chat| {
+            chat.effort
+                .as_ref()
+                .is_some_and(|effort| effort.current_value.as_deref() == Some("high"))
+        });
+        let_the_agent_answer(cx);
+
+        assert_eq!(
+            config_requests(&log).last(),
+            Some(&("effort".to_string(), "high".to_string())),
+            "the fresh agent was asked for High, not for the level the last chat chose"
+        );
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("high"));
+    }
+
+    /// Moving to a model that offers the level the user chose keeps it, even
+    /// though the agent reports its own default for the new model.
+    #[gpui::test]
+    async fn a_users_level_survives_a_model_switch_that_offers_it(cx: &mut TestAppContext) {
+        let (chat, cx) = effort_chat(cx, "high", CLAUDE_LADDER);
+        choose_effort_from_the_list(cx, "low");
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("low"));
+
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::Effort(EffortOption {
+                    option_id: "effort".into(),
+                    name: Some("Effort".into()),
+                    current_value: Some("default".into()),
+                    choices: ["low", "medium", "high"]
+                        .into_iter()
+                        .map(|value| EffortChoice {
+                            value: value.into(),
+                            name: value.into(),
+                        })
+                        .collect(),
+                }),
+                cx,
+            );
+        });
+        assert_eq!(
+            current_effort(&chat, cx).as_deref(),
+            Some("low"),
+            "Low is on the new model's list, so the user's choice stands"
+        );
+    }
+
+    /// An agent that refuses the level the user picked is asked for it once
+    /// more at most: each answer is itself an effort report, so a request
+    /// per report would never end.
+    #[gpui::test]
+    async fn a_refused_level_is_not_asked_for_forever(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("config.jsonl");
+        let (chat, cx) = chat_view_logging_config(cx, "effort-stubborn", &log);
+        pump_chat_until(cx, &chat, |chat| {
+            !config_requests(&log).is_empty()
+                && chat
+                    .effort
+                    .as_ref()
+                    .is_some_and(|effort| effort.current_value.as_deref() == Some("medium"))
+        });
+
+        choose_effort_from_the_list(cx, "low");
+        pump_chat_until(cx, &chat, |chat| {
+            config_requests(&log).len() >= 2
+                && chat
+                    .effort
+                    .as_ref()
+                    .is_some_and(|effort| effort.current_value.as_deref() == Some("medium"))
+        });
+        let_the_agent_answer(cx);
+
+        let requests = config_requests(&log);
+        assert!(
+            requests.len() <= 3,
+            "the refused level was asked for again and again: {requests:?}"
+        );
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("medium"));
     }
 
     /// A structured question is named by its own header, not by the asking
