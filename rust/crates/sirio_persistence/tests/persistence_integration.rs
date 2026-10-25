@@ -973,8 +973,8 @@ fn a_database_truncated_after_close_is_corrupt_and_untouched() {
     let page_size = {
         let connection = rusqlite::Connection::open(&path).expect("open seeded database");
         connection
-            .query_row("PRAGMA page_size", [], |row| row.get::<_, u64>(0))
-            .expect("read SQLite page size")
+            .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
+            .expect("read SQLite page size") as u64
     };
     assert!(
         original_len > page_size,

@@ -136,6 +136,6 @@ gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 
 [dev-dependencies]
 # For tests that hand-corrupt a database (e.g. bumping user_version).
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # For the headless window tests (session restore survival).
 gpui = { workspace = true, features = ["test-support"] }
