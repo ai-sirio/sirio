@@ -552,6 +552,15 @@ runs 120 tests, all passed (no unit test added; the probe is the proof).
   The colours are unchanged: the ruler and the plain guide use `border` at 60%
   opacity, the guide of the active block `border_strong`.
 
+### A text cursor over the code
+
+- `src/editor/line.rs`: a line's code column sets `CursorStyle::IBeam`. The
+  upstream editor sets no cursor style anywhere, so the pointer over the code
+  stayed the arrow, where Sirio's earlier editor showed a text cursor. The
+  gutter keeps the arrow, and the unfold chip, drawn over the code, keeps its
+  hand. `Scripts/Tests/test-ely-editor-probe.sh` (step 6b) reads the cursor X
+  shows over the text, the gutter digits and the git bar.
+
 ### Selecting without a scroll (Task 7a)
 
 - `src/editor/edit.rs`: `CodeEditor::select` keeps its behaviour, but its filter

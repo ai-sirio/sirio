@@ -20,8 +20,10 @@ set -euo pipefail
 # of line 7 (the breakpoint set stays empty), with a control run that does
 # toggle when breakpoints are on; SecondaryClick from a right click on line 3;
 # no PlatformClick from a plain click on line 3, but one from a Super-held
-# click on it at its own offset. Line 12, far wider than the window, scrolls
-# sideways: a wheel to the right (X button 7) and Shift with the wheel down
+# click on it at its own offset. The cursor X shows (XFixesGetCursorImage's
+# serial): over line 3's text it is neither the gutter digits' arrow nor the git
+# bar's hand, so the code shows a text cursor. Line 12, far wider than the
+# window, scrolls sideways: a wheel to the right (X button 7) and Shift with the wheel down
 # move what a pointer at one place over line 12 lands on further along that
 # same line (the rows stay where they were), the git bar still has no offset
 # while scrolled (the gutter stays put), a wheel to the left brings the line's
@@ -74,6 +76,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 for tool in python3 xwininfo xprop xdotool import identify magick; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
+python3 -c 'import ctypes.util, sys; sys.exit(not ctypes.util.find_library("Xfixes"))' \
+  || fail "libXfixes is required (it reads the pointer's cursor)"
 
 PROBE_PID=""
 XVFB_PID=""
@@ -200,6 +204,7 @@ row = lambda n: round(n * line_height + line_height / 2)
 # gutter.rs: slot [0, 2a), digits, chevron [4a, 6a), git bar at 6a (a 4px hit area).
 print(f"SLOT_X={round(advance)}")
 print(f"BAR_X={round(6 * advance + 2)}")
+print(f"DIGITS_X={round(3 * advance)}")
 # The text starts one advance past the gutter, so column c is centred at (columns + 1 + c + 0.5) advances.
 print(f"TEXT_X={round((columns + 1 + 12 + 0.5) * advance)}")
 print(f"ROW3={row(3)}")
@@ -257,6 +262,48 @@ while time.time() < end:
 print("EVENT: none arrived")
 sys.exit(1)
 '
+# The serial of the cursor X shows now (XFixesGetCursorImage), read on this run's display.
+CURSOR_PY='
+import ctypes, ctypes.util, sys
+class Image(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_short), ("y", ctypes.c_short),
+                ("width", ctypes.c_ushort), ("height", ctypes.c_ushort),
+                ("xhot", ctypes.c_ushort), ("yhot", ctypes.c_ushort),
+                ("cursor_serial", ctypes.c_ulong), ("pixels", ctypes.c_void_p),
+                ("atom", ctypes.c_ulong), ("name", ctypes.c_char_p)]
+x11 = ctypes.CDLL(ctypes.util.find_library("X11"))
+fixes = ctypes.CDLL(ctypes.util.find_library("Xfixes"))
+x11.XOpenDisplay.restype = ctypes.c_void_p
+x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+x11.XFree.argtypes = [ctypes.c_void_p]
+fixes.XFixesGetCursorImage.restype = ctypes.POINTER(Image)
+fixes.XFixesGetCursorImage.argtypes = [ctypes.c_void_p]
+display = x11.XOpenDisplay(sys.argv[1].encode())
+if not display:
+    sys.exit("cannot open display " + sys.argv[1])
+image = fixes.XFixesGetCursorImage(display)
+if not image:
+    sys.exit("no cursor image")
+print(image.contents.cursor_serial)
+x11.XFree(image)
+x11.XCloseDisplay(display)
+'
+cursor_serial() { python3 -c "$CURSOR_PY" "$DISPLAY_TARGET"; }
+# Waits up to 5 s for a cursor whose serial is none of the arguments, and prints it.
+# The cursor changes only with the frame after the pointer moves.
+cursor_serial_other_than() {
+  local serial known
+  for _ in $(seq 1 25); do
+    serial=$(cursor_serial)
+    known=0
+    for other in "$@"; do [ "$serial" = "$other" ] && known=1; done
+    [ "$known" -eq 1 ] || { echo "$serial"; return 0; }
+    sleep 0.2
+  done
+  return 1
+}
+
 echo "step 1: as drawn, with the highlighter's colour on line 3, and the lexer's colours kept out"
 # The control run keeps code's own lexer, which paints the brackets in Ely's punctuation colour.
 launch lexer-on ELY_PROBE_LEXER=on
@@ -326,6 +373,16 @@ xd keyup Super_L
 python3 -c "$EVENT_PY" "$LOG" '^event PlatformClick offset=(?:Some\()?(\d+)' "$before" "$LINE3_START" "$LINE3_END" 5 \
   || fail "the Super-held click on line 3 did not report PlatformClick inside line 3"
 
+echo "step 6b: the pointer over the code shows a text cursor: not the gutter digits' arrow, not the git bar's hand"
+xd mousemove --window "$WINDOW" "$DIGITS_X" "$ROW3"
+sleep 2
+digits=$(cursor_serial)
+xd mousemove --window "$WINDOW" "$BAR_X" "$ROW5"
+bar=$(cursor_serial_other_than "$digits") || fail "the pointer over line 5's git bar shows the digits' cursor: the control is not a hand"
+xd mousemove --window "$WINDOW" "$TEXT_X" "$ROW3"
+text=$(cursor_serial_other_than "$digits" "$bar") \
+  || fail "the pointer over line 3's text shows the gutter's arrow or the git bar's hand, not a text cursor"
+echo "CURSOR: text $text, gutter digits $digits, git bar $bar"
 echo "step 7: line 12, wider than the window, scrolls sideways under a gutter that stays put"
 # The offset a pointer at x y reports: it rests at a neutral spot first, so arriving fires a Pointer event.
 pointer_on() { # x y lo hi why
