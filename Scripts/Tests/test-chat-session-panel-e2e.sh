@@ -38,8 +38,8 @@ set -euo pipefail
 #
 # The trace scenarios (spec 2026-10-21-chat-trace-waterfall-design.md §8) use another stub,
 # Scripts/Tests/stubs/trace/claude, the same fixture in its trace mode: the first word of
-# a prompt picks a scripted turn (subagents, second, cancel, hang, die, subperm,
-# subperm_early) and TRACE_STEP_MS (400 by default) paces its lines, so a live state can be
+# a prompt picks a scripted turn (subagents, second, request, cancel, hang, die, subperm,
+# subperm_early, background, bgprompt) and TRACE_STEP_MS (400 by default) paces its lines, so a live state can be
 # read mid-turn. They are asserted on the card's rows in `sessionPanel`, on
 # `surface.trace.read` (the Trace tab) and on `firstVisibleEntry` and `lastVisibleEntry` of
 # `surface.chat.read`.
@@ -48,11 +48,22 @@ set -euo pipefail
 #                      reveal of the permission (the list's top at it unpainted, the card between the
 #                      first and last row drawn painted), the failed and done calls, Done with $0.31
 #   trace_cost         a second turn's cost is the difference of the process's totals: $0.12
+#   trace_request      the CLI's `status: requesting` opens the main-thread model call, so the wait for
+#                      the first token is part of one running call (the Trace tab shows it while the
+#                      fixture waits), and the turn ends with that same call, done
 #   trace_interrupt    Stop ends the turn Interrupted, its cost and the next turn's are unknown
 #   trace_death        the CLI dying mid-call ends the turn Failed, every lane failed or interrupted
 #   trace_hang         a call that never reports ends interrupted with the turn
 #   trace_subagent_permission  a subagent's request is a waiting lane and one Permission card, never a
 #                      tool row left pending, whether it comes after its call's line or before
+#   trace_background   two background agents (`is_backgrounded`) outlive the turn's `result`: the turn stays
+#                      Live with the agent lanes running and growing, its cost `≥ $1.00` (never an exact
+#                      figure while an agent runs) through the CLI-started turn after the first agent
+#                      ($0.20) and Done `≥ $1.20` once the second ends, then $1.30 after the CLI's own
+#                      reaction ($0.10); no CLI-started call is drawn under the root, both agents end done
+#   trace_background_prompt  a prompt written while a background agent runs: its turn is traced (a
+#                      root model call, no agent lane, an unknown cost: the agent's spend is in its
+#                      result) and the agent's lines and end stay out of it
 #   trace_reveal       a lane reveals its Agent row, the root the user's message
 #   trace_tab          the Trace tab: its tree, one per chat, kept across a worktree switch, never
 #                      restored, closed with its chat
@@ -111,7 +122,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirio"
 CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
-  trace_live trace_cost trace_interrupt trace_death trace_hang trace_subagent_permission trace_reveal
+  trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
+  trace_background trace_background_prompt trace_reveal
   trace_tab trace_idle trace_keys file_links)
 STATE_ONLY=0
 OUT_DIR=""
@@ -1214,6 +1226,86 @@ scenario_trace_cost() {
     're.match(r"^Done · .+ · \$0\.12$", S("trace")["summary"])' 30
   unfold_cards trace
   check_panel "the Cost number says \$0.12 too" 'R("trace", "trace/stat/cost")["detail"] == "$0.12"'
+  stop_app
+}
+
+scenario_trace_request() {
+  # The fixture holds the first token back for four steps: slow enough to open the tab in it.
+  trace_chat trace_request 2500
+  send_prompt request
+  wait_panel "the turn is live" 'S("trace") is not None and S("trace")["summary"].startswith("Live · ")' 30
+  unfold_cards trace
+  panel_ctl activate trace/open >/dev/null
+  wait_panel "the Trace tab is open" 'tab()["open"] == "1"' 20
+  check_panel "the request opened one running call under the root, before any token came" \
+    '[(s["parent"], s["state"], s["ended"]) for s in tab()["spans"] if s["kind"] == "llm" and s["id"].startswith("call-")] == [("root", "running", "0")] and len([s for s in tab()["spans"] if s["kind"] == "llm"]) == 1'
+  CALL=$(find_panel "the call's id" 'next(s["id"] for s in tab()["spans"] if s["kind"] == "llm")' 10)
+  wait_panel "the turn is Done" 'S("trace")["summary"].startswith("Done · ")' 40
+  check_panel "the turn still has that one call, the same id, ended and done: its first token opened no second" \
+    "[(s['id'], s['parent'], s['state'], s['ended']) for s in tab()['spans'] if s['kind'] == 'llm'] == [('$CALL', 'root', 'done', '1')]"
+  stop_app
+}
+
+# The root lane's own model calls: the main thread's, never a turn the CLI started on its own.
+ROOT_CALLS='len([s for s in tab()["spans"] if s["kind"] == "llm" and s["parent"] == "root"])'
+BG_COST='R("trace", "trace/stat/cost")["detail"]'
+# A background agent runs, with a model call and the tools it started under it.
+bg_agent_running() { # agent
+  echo "T('$1') is not None and T('$1')['kind'] == 'subagent' and T('$1')['state'] == 'running' and T('$1')['ended'] == '0' and T('$1_bash')['parent'] == '$1' and T('$1_read')['parent'] == '$1' and any(s['kind'] == 'llm' and s['parent'] == '$1' for s in tab()['spans'])"
+}
+
+scenario_trace_background() {
+  # The fixture holds each state for twenty steps (ten seconds here); a read is under a second.
+  trace_chat trace_background 500
+  send_prompt background
+  wait_panel "the turn is live" 'S("trace") is not None and S("trace")["summary"].startswith("Live · ")' 30
+  unfold_cards trace
+  panel_ctl activate trace/open >/dev/null
+  wait_panel "the Trace tab is open" 'tab()["open"] == "1"' 20
+  echo "step: the main thread's result has come; the agents work on"
+  wait_panel "both agents have children, drawn after the main thread's result" \
+    'T("toolu_bg_a_read") is not None and T("toolu_bg_b_read") is not None' 30
+  check_panel "Live, the cost at least \$1.00 and not exact; both agents running with a call and tools; the root lane has the main thread's two calls only" \
+    "S('trace')['summary'].startswith('Live · ') and $BG_COST == '≥ \$1.00' and $(bg_agent_running toolu_bg_a) and $(bg_agent_running toolu_bg_b) and $ROOT_CALLS == 2"
+  echo "step: agent A ends and the CLI reacts in a turn of its own (\$0.20) while B still runs"
+  wait_panel "agent A is done and ended" 'T("toolu_bg_a")["state"] == "done" and T("toolu_bg_a")["ended"] == "1"' 30
+  # The reaction's result comes about a second after A's end (two steps), and the
+  # fixture holds B for twenty: a read four seconds on is after the result and before B's end.
+  sleep 4
+  check_panel "still Live with B running, the cost still at least \$1.00 and never an exact figure, and A's reaction drew no call under the root" \
+    "S('trace')['summary'].startswith('Live · ') and T('toolu_bg_b')['state'] == 'running' and T('toolu_bg_b')['ended'] == '0' and $BG_COST == '≥ \$1.00' and $ROOT_CALLS == 2"
+  echo "step: agent B ends, the CLI's reaction to it has not come yet"
+  wait_panel "the last agent ended: the turn is Done, its cost still at least \$1.20" \
+    're.match(r"^Done · .+ · ≥ \$1\.20$", S("trace")["summary"])' 30
+  check_panel "both agents are done and ended" \
+    'all(T(a)["state"] == "done" and T(a)["ended"] == "1" for a in ("toolu_bg_a", "toolu_bg_b"))'
+  echo "step: the CLI's reaction to B"
+  wait_panel "the cost is final, \$1.30: the reaction turns' deltas are in it" \
+    're.match(r"^Done · .+ · \$1\.30$", S("trace")["summary"]) and R("trace", "trace/stat/cost")["detail"] == "$1.30"' 30
+  check_panel "the root lane still has the main thread's two calls and nothing the CLI started, and no span is left running" \
+    "$ROOT_CALLS == 2 and all(s['state'] != 'running' and s['ended'] == '1' for s in tab()['spans'])"
+  stop_app
+}
+
+scenario_trace_background_prompt() {
+  trace_chat trace_background_prompt 500
+  send_prompt bgprompt
+  wait_panel "the turn is Live after the main thread's result: its agent runs" \
+    'S("trace") is not None and S("trace")["summary"].startswith("Live · ") and c["status"] in ("idle", "completed")' 30
+  unfold_cards trace
+  echo "step: a second prompt while the agent runs"
+  send_prompt second
+  wait_panel "the second turn is Done, and its cost is unknown: the agent's spend is mixed into its result" \
+    'S("trace")["summary"].startswith("Done · ") and "$" not in S("trace")["summary"] and R("trace", "trace/stat/cost")["detail"] == "—"' 30
+  panel_ctl activate trace/open >/dev/null
+  wait_panel "the Trace tab is open on the second turn" 'tab()["open"] == "1" and tab()["turn"] == "2" and tab()["turns"] == "2"' 20
+  check_panel "the second turn has a root model call, and none of the agent's lines landed in it" \
+    "$ROOT_CALLS >= 1 and not any(s['kind'] == 'subagent' or s['id'].startswith('toolu_bp') for s in tab()['spans'])"
+  # The fixture ends the agent twenty steps (ten seconds) after the second turn's result.
+  echo "step: the agent ends; the second turn does not change"
+  sleep 15
+  check_panel "the second turn is as it was: Done, cost unknown, no agent span in it" \
+    "S('trace')['summary'].startswith('Done · ') and '\$' not in S('trace')['summary'] and $BG_COST == '—' and not any(s['kind'] == 'subagent' or s['id'].startswith('toolu_bp') for s in tab()['spans'])"
   stop_app
 }
 

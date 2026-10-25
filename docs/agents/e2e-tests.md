@@ -53,13 +53,16 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # Environment, the Context fold (asked on open, a plugin node, the CLAUDE.md row
 # opening a file tab), Connectors (reconnect, sign in), the Change request card, the
 # shared rate-limit pause and the open state across a relaunch. The trace scenarios
-# (trace_live, trace_cost, trace_interrupt, trace_death, trace_hang,
-# trace_subagent_permission, trace_reveal, trace_tab, trace_idle, trace_keys) use
+# (trace_live, trace_cost, trace_request, trace_interrupt, trace_death, trace_hang,
+# trace_subagent_permission, trace_background, trace_background_prompt, trace_reveal,
+# trace_tab, trace_idle, trace_keys) use
 # Scripts/Tests/stubs/trace/claude, the fixture's trace mode, whose scripted turns the
 # first word of a prompt picks (TRACE_STEP_MS paces them): agents and a nested agent, a
 # wait and its reveal, the cost of a second turn, Stop, a CLI that dies, a call that never
-# reports, a subagent's permission, the Trace tab across a worktree switch, a relaunch
-# and its chat's close, the frames the trace asks for (SIRIO_PERF_TRACE) and real X
+# reports, a subagent's permission, background agents that outlive the turn's result (the
+# turn stays Live, its cost "at least" until they end, the CLI-started turns after them
+# charged to it and never drawn, and a prompt written while one runs), the Trace tab across
+# a worktree switch, a relaunch and its chat's close, the frames the trace asks for (SIRIO_PERF_TRACE) and real X
 # clicks and keys on the tab. The file_links scenario uses Scripts/Tests/stubs/file-links/claude,
 # the fixture's file_links mode: one answer holding paths that exist in the worktree, ones that do
 # not, a version, a fenced path and a web link, then real X clicks and drags on it, asserted on
@@ -158,7 +161,9 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # The editor's hosting hooks on a real frame, on a private Xvfb with Mesa's
 # lavapipe: the host's per-line colour (and Ely's own lexer kept out), a git mark,
 # a diagnostic, the gutter, and the events a host hears, each from a real xdotool
-# gesture. --xvfb or --display :N, --out-dir DIR, --no-build,
+# gesture; and a line wider than the window scrolling sideways under a gutter
+# that stays put (the wheel, Shift and the wheel, a drag of the bar's thumb, End
+# and Home). --xvfb or --display :N, --out-dir DIR, --no-build,
 # --no-software-vulkan.
 Scripts/Tests/test-ely-editor-probe.sh --xvfb   # -> prints "ELY EDITOR PROBE OK"
 ```

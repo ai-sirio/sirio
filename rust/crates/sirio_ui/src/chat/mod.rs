@@ -3789,7 +3789,7 @@ impl Chat {
     /// The transport died, or a deadline ran out, with no `result` to end the
     /// turn: it ends failed, for the reason the transcript states.
     fn fail_trace_turn(&mut self, reason: &str, cx: &mut Context<Self>) {
-        if !self.trace.is_running() {
+        if !self.trace.has_open_turn() {
             return;
         }
         self.trace.fail_open_turn(reason, std::time::Instant::now());
