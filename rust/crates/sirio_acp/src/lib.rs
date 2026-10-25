@@ -1988,6 +1988,7 @@ fn run_connection(
                         }
                         Command::SetModel { config_id, value } => {
                             let event_tx = connection_events.clone();
+                            let last_effort_for_model = Arc::clone(&last_effort);
                             connection
                                 .send_request(SetSessionConfigOptionRequest::new(
                                     session.session_id.clone(),
@@ -2003,6 +2004,21 @@ fn run_connection(
                                                 let _ = event_tx
                                                     .send(AcpEvent::ModelCatalog(catalog))
                                                     .await;
+                                            }
+                                            // The answer to a model switch carries
+                                            // every option, the new model's effort
+                                            // ladder among them: an agent that
+                                            // resets its level on a model change
+                                            // says so only here.
+                                            if let Some(effort) =
+                                                effort_from_options(Some(&response.config_options))
+                                            {
+                                                if let Ok(mut guard) = last_effort_for_model.lock()
+                                                {
+                                                    *guard = Some(effort.clone());
+                                                }
+                                                let _ =
+                                                    event_tx.send(AcpEvent::Effort(effort)).await;
                                             }
                                         }
                                         Err(error) => {

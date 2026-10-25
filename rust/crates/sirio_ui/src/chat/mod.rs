@@ -13197,10 +13197,10 @@ two"
         })
     }
 
-    /// The `(configId, value)` of every effort request the fixture logged,
-    /// oldest first: a request for another option (the model) is not one.
-    /// A file the fixture has not created yet holds none.
-    fn config_requests(log: &Path) -> Vec<(String, String)> {
+    /// The `(configId, value)` of every option request the fixture logged,
+    /// oldest first, the model's included. A file the fixture has not
+    /// created yet holds none.
+    fn every_config_request(log: &Path) -> Vec<(String, String)> {
         std::fs::read_to_string(log)
             .unwrap_or_default()
             .lines()
@@ -13209,6 +13209,14 @@ two"
                 let field = |name: &str| params[name].as_str().unwrap_or_default().to_string();
                 (field("configId"), field("value"))
             })
+            .collect()
+    }
+
+    /// The effort requests among them, oldest first: a request for another
+    /// option (the model) is not one.
+    fn config_requests(log: &Path) -> Vec<(String, String)> {
+        every_config_request(log)
+            .into_iter()
             .filter(|(config_id, _)| config_id == "effort")
             .collect()
     }
@@ -13365,6 +13373,59 @@ two"
             Some("low"),
             "Low is on the new model's list, so the user's choice stands"
         );
+    }
+
+    /// A user's level holds across a model switch on the wire, not only in
+    /// the chip: the agent's answer to the switch reports the new model's
+    /// own level (a real agent resets on a model change, and the fixture
+    /// answers with its default, Medium), and the chat asks for the level
+    /// the user chose again, after the model request.
+    #[gpui::test]
+    async fn a_model_switch_keeps_the_users_level_on_the_wire(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("config.jsonl");
+        let (chat, cx) = chat_view_logging_config(cx, "composer", &log);
+        pump_chat_until(cx, &chat, |chat| {
+            !config_requests(&log).is_empty()
+                && chat
+                    .effort
+                    .as_ref()
+                    .is_some_and(|effort| effort.current_value.as_deref() == Some("high"))
+        });
+        let_the_agent_answer(cx);
+
+        choose_effort_from_the_list(cx, "low");
+        pump_chat_until(cx, &chat, |_| {
+            config_requests(&log).last().map(|(_, value)| value.as_str()) == Some("low")
+        });
+        let_the_agent_answer(cx);
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("low"));
+
+        chat.update(cx, |chat, cx| {
+            chat.select_model(
+                ModelOption {
+                    id: "opus".into(),
+                    name: "Opus".into(),
+                    description: None,
+                },
+                cx,
+            );
+        });
+        pump_chat_until(cx, &chat, |_| {
+            every_config_request(&log).iter().any(|(config_id, _)| config_id == "model")
+        });
+        let_the_agent_answer(cx);
+
+        let requests = every_config_request(&log);
+        let model_at = requests
+            .iter()
+            .position(|(config_id, _)| config_id == "model")
+            .expect("the model switch reached the agent");
+        assert!(
+            requests[model_at + 1..].contains(&("effort".to_string(), "low".to_string())),
+            "Low was asked for again after the model switch: {requests:?}"
+        );
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("low"));
     }
 
     /// An agent that refuses the level the user picked is not asked for it
