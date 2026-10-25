@@ -349,7 +349,15 @@ fn claude_answers_the_session_panel_requests() {
 /// renamed one would draw a waterfall with no agents and no error, so this says so on
 /// the day it does.
 ///
-/// It is the one conformance test that spends a turn (a real Haiku one, in which a
+/// A second prompt, in the same process, has the model start a `fork` agent in the
+/// background (`task_started` with `is_backgrounded: true`). The trace follows such an
+/// agent until the CLI says it ended, so this reads on past the turn's `result`: the
+/// agent's parented lines keep streaming, then `task_updated` carries a terminal
+/// `patch.status` and `task_notification` names the agent's `tool_use_id`. The CLI starts
+/// its own turn after that, which is why the read waits for the notification and not for
+/// the next `result`.
+///
+/// It is the one conformance test that spends turns (real Haiku ones, in which a
 /// subagent runs `ls`), so it is `#[ignore]`d and runs only on request, like the
 /// `hooks_live` tests, and stays off the release gate:
 ///
@@ -405,7 +413,7 @@ fn claude_streams_the_lines_the_trace_reads() {
             "--allowedTools",
             "Agent,Bash(ls:*)",
             "--max-turns",
-            "6",
+            "12",
         ])
         .current_dir(&scratch)
         .stdin(Stdio::piped())
@@ -450,6 +458,55 @@ fn claude_streams_the_lines_the_trace_reads() {
             result = Some(payload.clone());
         }
         messages.push(message);
+    }
+
+    // The background agent's turn, in the same process. What the trace reads of it starts
+    // here, so the checks below look only at the lines from `background_from` on. Skipped
+    // when the first turn failed: the checks on it say why.
+    let background_from = messages.len();
+    let mut background_started = None;
+    // The `task_id` that `task_started` gave it: `task_updated` names the agent by this only.
+    let mut background_task = None;
+    let mut background_ended = false;
+    if result.as_ref().is_some_and(|result| !result.is_error) {
+        let background_prompt = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text":
+                "Use the Agent tool exactly once, with subagent_type \"fork\", so that it runs \
+                 in the background: have it run the shell command ls and report the file \
+                 names. Do not run anything yourself."}]},
+        });
+        writeln!(stdin, "{background_prompt}").expect("the background prompt is written");
+        stdin.flush().expect("the background prompt is flushed");
+
+        // Past the turn's `result`, until the notification that names the agent, the CLI's
+        // death or the deadline: the CLI's own turn after it is not waited for.
+        let deadline = Instant::now() + Duration::from_secs(240);
+        while !background_ended {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Ok(line) = line_rx.recv_timeout(remaining) else {
+                break;
+            };
+            let Some(message) = CliMessage::parse(&line) else {
+                continue;
+            };
+            if let CliMessage::System(system) = &message {
+                match system.subtype.as_str() {
+                    "task_started"
+                        if background_started.is_none() && system.is_backgrounded == Some(true) =>
+                    {
+                        background_started = system.tool_use_id.clone();
+                        background_task = system.task_id.clone();
+                    }
+                    "task_notification" => {
+                        background_ended = background_started.is_some()
+                            && system.tool_use_id == background_started;
+                    }
+                    _ => {}
+                }
+            }
+            messages.push(message);
+        }
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -544,6 +601,74 @@ fn claude_streams_the_lines_the_trace_reads() {
             })
             .map(|value| value.to_string().chars().take(300).collect::<String>())
             .collect::<Vec<_>>()
+    );
+
+    // The background agent: the trace follows it past the turn's `result` until the CLI says
+    // it ended, and each of these is a line it reads.
+    let background = &messages[background_from..];
+    let background_kinds = || background.iter().map(kind_of).collect::<Vec<_>>();
+    let Some(background_agent) = background_started else {
+        panic!(
+            "no `task_started` with `is_backgrounded: true` for the `fork` agent: the trace could \
+             not tell a background agent from a foreground one; the kinds of the {} lines read \
+             were {:?}",
+            background.len(),
+            background_kinds()
+        );
+    };
+    let background_result = background
+        .iter()
+        .position(|message| matches!(message, CliMessage::Result(_)))
+        .unwrap_or_else(|| {
+            panic!(
+                "no `result` for the turn that started the background agent {background_agent}; \
+                 the kinds of the lines read were {:?}",
+                background_kinds()
+            )
+        });
+    assert!(
+        background[background_result..].iter().any(|message| match message {
+            CliMessage::Assistant(assistant) => {
+                assistant.parent_tool_use_id.as_deref() == Some(background_agent.as_str())
+            }
+            CliMessage::User(user) => {
+                user.parent_tool_use_id.as_deref() == Some(background_agent.as_str())
+            }
+            _ => false,
+        }),
+        "no line parented to the background agent {background_agent} after its turn's `result`: \
+         the agent's work after the main thread finished could not be traced"
+    );
+    assert!(
+        background_task.is_some(),
+        "the `task_started` of the background agent {background_agent} carried no `task_id`: \
+         the trace could not tell which agent a `task_updated` ends"
+    );
+    assert!(
+        background.iter().any(|message| matches!(
+            message,
+            CliMessage::System(system)
+                if system.subtype == "task_updated"
+                    && system.task_id == background_task
+                    && system
+                        .patch
+                        .as_ref()
+                        .and_then(|patch| patch.status.as_deref())
+                        .is_some_and(|status| {
+                            matches!(status, "completed" | "killed" | "stopped" | "failed")
+                        })
+        )),
+        "no `task_updated` naming task {background_task:?} (the background agent \
+         {background_agent}) with a terminal `patch.status`: its end was not announced, so its \
+         lane would end only at the notification"
+    );
+    assert!(
+        background_ended,
+        "no `task_notification` naming the background agent {background_agent} within the \
+         deadline: the trace would keep its turn live for ever; the kinds of the {} lines read \
+         were {:?}",
+        background.len(),
+        background_kinds()
     );
 }
 

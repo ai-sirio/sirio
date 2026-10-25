@@ -62,18 +62,28 @@ runs from the CLI's `status: requesting` line (the request going out) to `messag
 `sirio_ui::chat::trace::TraceStore` keeps 20 turns of at most 2 000 spans: past that a span is counted
 and not kept, the card's LLM calls, Tool calls and Errors read as at least (`1998+`) and a muted row
 says how many were left out (`3 spans past the 2000 cap not drawn`). An agent that runs in the
-background (`is_backgrounded`, or a `task_type` other than `local_agent`) is traced as its launch
+background as a subagent (`is_backgrounded` with a `task_type` of `local_agent`, or none) is traced
+until the CLI says it ended: its launch `tool_result` does not end the call, its parented lines keep
+feeding its lane, and it ends at the first terminal `task_updated` or `task_notification`. Its turn
+stays `Live` past the main thread's `result` until its last agent has ended, even behind a later
+turn. Any other background task (a `task_type` other than `local_agent`) is traced as its launch
 only: its `tool_result` ends the call at once, with no report, and what it writes after is not
-traced. A turn's cost is its
-`result`'s `total_cost_usd` less the previous one's in the same process, and unknown (a dash) for
-a resumed process's first turn, an interrupted turn and the turn after it. A subagent's permission
-opens no tool row of its own, only the one Permission card its lane's wait points at. The trace
-asks for frames only from one loop per painted card or tab (`trace_frame::frame_driver`, each frame
-counted as a `trace.frame` event in the performance trace). The loop runs at 30 frames a second at
-most while a span runs (`Turn::is_moving`: a model call streaming, a tool running or a subagent
-working, not one waiting for the user), ticks once a second while the turn only waits, which keeps its
-clock and its "now" line moving with the marks held still, and asks for nothing once the turn has
-ended or when nothing paints it. A folded card's title ticks once a second while it is painted.
+traced. The turns the CLI starts on its own once an agent completes are not drawn: their spend is
+added to the latest prompt-started turn, whose cost reads `≥ $x` while its agents run, drops the
+`≥` at the first of their results after the last agent ended, and still grows by later ones. A
+turn's cost is its `result`'s `total_cost_usd` less the previous one's in the same process, and
+unknown (a dash) for a resumed process's first turn, an interrupted turn and the turn after it; a
+prompt written while agents run leaves the old turn's cost at `≥` what was known and gives the new
+turn a dash, as does one written while a foreign agent (one a CLI-started turn launched) still runs
+or after an agent ended and no `result` has read its last spend. A subagent's permission opens no
+tool row of its own, only the one Permission card its lane's wait points at. The trace asks for
+frames only from one loop per painted card or tab (`trace_frame::frame_driver`, each frame counted
+as a `trace.frame` event in the performance trace).
+The loop runs at 30 frames a second at most while a span runs (`Turn::is_moving`: a model call
+streaming, a tool running or a subagent working, not one waiting for the user), ticks once a second
+while the turn only waits, which keeps its clock and its "now" line moving with the marks held
+still, and asks for nothing once the turn has ended or when nothing paints it. A folded card's title
+ticks once a second while it is painted.
 **The Trace tab** (`TabKind::Trace`, `sirio_ui::trace_tab`) is the full waterfall in the
 Secondary half, one per chat, opened by the card's last row. It holds a handle to the chat's
 trace, closes when its chat is released (`observe_release`, then `TraceTabEvent::Close`), and is

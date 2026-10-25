@@ -165,6 +165,23 @@ pub struct SystemPayload {
     /// running totals.
     #[serde(deserialize_with = "lenient")]
     pub usage: Option<TaskUsage>,
+    /// Present on `task_updated`: the fields of the task that changed.
+    #[serde(deserialize_with = "lenient")]
+    pub patch: Option<TaskPatch>,
+}
+
+/// What a `task_updated` line changes about a task. Each is optional: a
+/// patch of another field says nothing of these.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TaskPatch {
+    /// The task's new state, e.g. `completed`, `killed` or `failed` when it
+    /// is over.
+    #[serde(deserialize_with = "lenient")]
+    pub status: Option<String>,
+    /// When the task ended, in epoch milliseconds.
+    #[serde(deserialize_with = "lenient")]
+    pub end_time: Option<u64>,
 }
 
 /// A task's running totals, from a `task_progress` or `task_notification`.
