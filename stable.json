@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.35.0",
-  "notes": "A Claude chat can now show its agents' work as a timeline, the session\npanel opens with its cards folded, and dialogs and menus stay solid and\nreadable over a translucent window.\n\n**A trace of the agents' work**\n\nThe session panel of a Claude Code chat has a new card, *Trace*, between\nConnectors and Change request. It answers how the current turn is going:\nwhich agents are running, which one is waiting for you, what failed, how\nlong each step took and what the turn cost.\n\n- Folded, the card is one line: *Live*, *Waiting for you*, *Done*,\n  *Interrupted* or *Failed*, with the time and, when it is known, the cost.\n- Unfolded, it shows one lane per agent on a shared time axis, subagents\n  included. A failed call is red and a wait for your answer is amber.\n  Clicking a lane or a wait scrolls the transcript to that row.\n- A tab in the right half shows the whole turn as a tree beside its\n  timeline. You can step back through earlier turns or follow the latest\n  one, and move through it with the arrow keys; Enter shows the row in the\n  chat. There is one per chat, and it closes with its chat.\n- Nothing moves once the turn has ended, or while the card or tab is out of\n  sight.\n\nThe trace is for chats that talk to Claude Code directly. Other agents do\nnot report their subagents in a way Sirio can draw, so they have no Trace\ncard.\n\n**A quieter session panel**\n\nThe panel's cards now start folded, except Environment, so you open the ones\nyou need. The Change request card no longer asks `gh` or `glab` anything to\ndecide whether to appear, and a forge you are not signed in to reads *Not\nsigned in to <host>* instead of hiding the card.\n\n**Fixes**\n\n- With translucency on, dialogs, menus, popovers and tooltips were\n  see-through, and the text of some dialogs (*Bypass permissions?*, *Discard*,\n  the review, hand-off and merge confirmations) was black on a dark card. They\n  are now opaque, with text in the theme's colour, and the labels on coloured\n  buttons and badges keep their full strength.\n- When a subagent asked for a permission, the chat no longer leaves a tool row\n  stuck as running in the transcript.",
+  "version": "0.36.0",
+  "notes": "A file an agent names in a chat response now opens in the editor with a\nclick, the Trace follows background agents to their end, and the file\neditor scrolls sideways and shows a text cursor again.\n\n**File paths in a chat response are links**\n\nWhen an agent writes a path to a file in its answer, the path is now a link,\nand a click opens the file in Sirio's editor.\n\n- It works in the agent's prose, in `inline code` and in Markdown links,\n  for relative and absolute paths and `~/…`. A path that starts with `/`\n  but exists only inside the worktree is found there too.\n- A line number comes along: `path:42`, `path:42:7`, `path:42-50` and\n  `path#L42` open the file at that line. A Markdown file opened at a line\n  shows its source, since the preview has no lines.\n- An open tab is reused. Dragging across a path selects text and opens\n  nothing.\n- Only paths to files that exist become links, so versions, dates and\n  missing files stay plain text. Your own messages, tool cards and code\n  blocks are left as they were.\n\nLinks in an agent's answer are now limited to what is safe to follow. A web\nlink (`http`, `https`, `mailto`) still opens in the browser and a file that\nexists opens in the editor. Everything else is no longer clickable in a\nchat response: app schemes such as `vscode:` or `smb:`, `file://` links to\nfolders, relative links to files that do not exist, and `#anchors`. A local\npicture is shown only when it is an existing file of up to 10 MB; otherwise\nyou see its description. An agent's text can be steered by what it reads, so\nit no longer gets to hand a link straight to the system.\n\n**Background agents in the Trace**\n\nWhen Claude Code sends agents to work in the background, the Trace now\nfollows them until they finish, instead of stopping when the main thread\nanswers.\n\n- The turn stays *Live* while its agents run, and their lanes keep filling.\n- Its cost reads *≥ $x* until the last agent is done, then the exact\n  amount. The short turns Claude Code starts by itself after each agent are\n  counted in that cost and not drawn as turns of their own.\n- The wait for a model's first token is now drawn as part of its call, so\n  the timeline no longer shows gaps between a tool and the next model call.\n\n**Fixes**\n\n- The file editor scrolls sideways again, so the end of a long line can be\n  read: with a sideways wheel or touchpad swipe, Shift and the wheel, the bar\n  under the code, or End and Home. The line numbers stay in place.\n- The pointer over code in the file editor is a text cursor again, not an\n  arrow.\n- In the file editor's and the terminal's right-click menus each entry is\n  one line. Why an entry is unavailable now shows as a tooltip when you rest\n  the pointer on it.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.35.0/Sirio-0.35.0.dmg",
-      "sha256": "d84e1b9a8aa410ea090f0fccfda11446deb8425ee1f4a09a0e55682a8658b801",
-      "signature": "vzbUghx7waOZLi1VuH49DYhHlplFVh4h5/c3Oq8FI4bN2nR4XC2/jDrx58VvJD2j4PnmmmR4FsfmdrvXqkk+Dw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.36.0/Sirio-0.36.0.dmg",
+      "sha256": "eadb3b6e38e32314be46c68c38769f5d9a558c96242ae4722ddf5c952179eb80",
+      "signature": "ahk+5lb0ZJVEkCbaWJ3DWEJ2AT3fAqmwYWQR1ixvC0sMltFzBTE0Btvc5HW8sdvNpTs2Qf2Xo2xe3Pye/zAhCQ=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.35.0/Sirio-0.35.0-x86_64.AppImage",
-      "sha256": "8f1212d4fe8a6c97c3595b97cd45c344878bdbaf2e593a3c97f822d04cc19efe",
-      "signature": "uRR4tVXBX31/rXoDv4iay4enimJKJ76Fq2/s1f9nJqDajss2+jdP2rOC6FXw0cbcba6o3zmkVRyQENBHMXXOBQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.36.0/Sirio-0.36.0-x86_64.AppImage",
+      "sha256": "bcbac61dd97c88f07fd080857c93e45ebb2bcd18371354eecdc2cd4b3a87157d",
+      "signature": "zwXeAS8OiHp2bEnCKpR9+FJENSHe7QC8YZPnq8HCcZ6yXkVfqv2w6o3i1TRhSL6PDQmk2iUaquYE1mcJnpH3Aw=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.35.0/SirioSetup-0.35.0.exe",
-      "sha256": "69faf4e524e305a59b0cb99a2f752ef53074d5465d199b1839f44150095f3e57",
-      "signature": "mj4WIf7DxDNMsHPj8js8Ey8QSxAoe0Uo6vdyGaHtZmlBgMSFFxFPKuXYLz+Q9gvhMTb9UxRJnoL/RQQGK0jTBw=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.36.0/SirioSetup-0.36.0.exe",
+      "sha256": "12ecacac7ff79ccc36f9c3dcd0a95e5f1bfffafbb4bf57c0500e0cfdfa840da6",
+      "signature": "Har45QgvQCEblt0BhhGPBGQtJiITZTgQNTHtRP0sY9d08qwLVhQsB+wNuCvnM7kKMskDhIq6Ss22PDNEj03jCw=="
     }
   }
 }
