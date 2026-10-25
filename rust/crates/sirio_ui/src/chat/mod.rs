@@ -3984,8 +3984,11 @@ impl Chat {
         }
     }
 
-    /// What the debug control verb does to the effort list. It refuses what no press could
-    /// do: opening a list the session has no effort for, or choosing a level it does not offer.
+    /// What the debug control verb does to the effort list, through the same controller steps a
+    /// press takes but without needing the chip or a row to be drawn. `Open` works with or
+    /// without a drawn chip and is refused only when the session offers no effort. `Close` never
+    /// fails. `Choose` works with the list closed, and is refused only for a level the session
+    /// does not offer.
     pub fn effort_act(
         &mut self,
         action: EffortListAction,
