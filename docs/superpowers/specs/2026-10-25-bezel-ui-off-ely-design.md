@@ -1,6 +1,6 @@
 # Bezel's UI crates out of Sirio, and an effort list in place of the slider
 
-Date: 2026-10-25. Status: draft, awaiting Enzo's approval.
+Date: 2026-10-25. Status: approved by Enzo; revised the same day for his "Aspetto di Ely" decision.
 
 ## Intent
 
@@ -21,11 +21,20 @@ The scope was narrowed in conversation to **the UI library**, not the rendering 
     depend only on `bezel-theme` and the engine, never on `bezel`, so they do not keep the
     removed crates alive.
 
-Inside that scope:
+Inside that scope (Enzo's decision of 2026-10-25, taken after research showed that almost no Ely
+component draws like its bezel counterpart):
 
-- **Ely equivalent exists:** use Ely.
-- **No exact equivalent:** rebuild it in Sirio on Ely's primitives and palette, keeping today's
-  look (Enzo: "procedi").
+- **Ely has a component with the same role:** use it as Ely draws it. That surface takes Ely's
+  look, in line with the chat, the editor and the change-request surfaces that are already on
+  Ely. This covers text fields, tooltips, menus and popovers, buttons, badges, error and warning
+  strips, cards, the progress bar, icons, and the scrollbars that scroll a `ScrollHandle`.
+- **Ely has nothing for it:** rebuild it in Sirio on Ely's primitives and palette:
+  - animations: the frame clock, hover fades, reduced motion, pause when inactive;
+  - the loaders (cluster and bloom orbs, the gradient spinner);
+  - the sidebar tree's keys;
+  - the worktree combobox;
+  - the Settings rows and empty state;
+  - follow-to-bottom, and the scrollbars Sirio already draws itself.
 
 One deliberate, visible change rides along: the chat's effort **slider** becomes an effort
 **list**, and every new chat starts on **High**.
@@ -41,8 +50,10 @@ with one perimeter. The change-request surfaces already moved separately.
 2. No `bezel::` path remains in any Sirio crate, example or test. The remaining bezel crates are
    reached only as `bezel_theme`, `bezel_markdown` (crate `markdown` today) and `bezel_syntax`
    (crate `syntax` today).
-3. Apart from the effort control, nothing on screen changes. Light and dark, every base colour,
-   translucency on and off.
+3. A surface may change only to an Ely component's own look. Every visual change replaces one
+   bezel widget with one Ely component. It is captured before and after, in light and dark, and
+   Enzo sees it. Behaviour does not change: keys, focus, IME, paste, Ctrl+C, scroll following,
+   reduced motion and pause when inactive all work as they do today.
 4. The effort control is a list (design "C" below), and every new chat starts on High.
 5. The vendored `rust/vendor/bezel_ui` override, its `[patch.crates-io]` entry and its
    `vendor/README.md` section are gone. The one thing that override did (a text field with no
@@ -53,23 +64,30 @@ with one perimeter. The change-request surfaces already moved separately.
 - Replacing `bezel-gpui` (the engine) with Zed's `gpui`.
 - Replacing `bezel-theme`, `bezel-markdown` or `bezel-syntax`. That is a later project: Ely has no
   tree-sitter and no Markdown renderer.
-- Redesigning any surface other than the effort control. Where a rebuilt piece could be
-  "improved", it is not: same pixels first, improvements in their own change.
+- Redesigning. A surface takes the Ely component's default look; no new layouts and no
+  restyling beyond what the component draws. A piece rebuilt in Sirio keeps today's look.
 - Upstreaming anything to bezel or to Ely.
 
 ## Anti-goals (a failure even if it compiles)
 
-- A screen that looks different and nobody decided it should: an icon swapped for Ely's Lucide
-  equivalent, a scrollbar thumb of a different width, a settings card with a different radius.
+- A visual change that is not an Ely component's own look, or one nobody saw: a missing icon, a
+  clipped field, text on the wrong colour, a menu drawn off-screen.
+- The chat composer losing any of its keys because Ely's text field binds them itself:
+  - Enter to send and Shift+Enter for a newline;
+  - Up/Down for the history and the mention/slash popups;
+  - Cmd/Ctrl+V pasting an image first;
+  - Escape and Tab.
+
+  The same goes for the model search field's Enter and arrows.
 - A regression in behaviour the bezel pieces carried and nobody wrote down:
   - the scrollbar drag anchoring;
   - the chat list following new output;
   - reduced motion and "pause when inactive";
   - IME and paste in the composer;
   - the Ctrl+C rules in `docs/agents/architecture/text-selection.md`.
-- Moving Ely's known scrollbar defect (the drag anchors at the first `drag_move`, so the thumb
-  lags the pointer; seen in #659) onto the terminal, chat, CI log, trace, thought and file view
-  scrollbars, which today do not have it.
+- A scrollbar whose drag stops following the pointer. Research showed that bezel, Sirio's own
+  bars and Ely all anchor the drag at the first move past gpui's 2 px threshold. That behaviour
+  is today's, not an Ely defect, and it stays as it is.
 - Hiding the old slider behind a flag instead of removing it.
 
 ## The effort list (decided)
@@ -138,31 +156,33 @@ Measured on `975850c1`: 47 files. About 160 `bezel::ui` paths (93 of them
 
 **How to read this table:**
 
-- **Ely:** an Ely type covers it. The builder still checks that the drawn result matches.
-- **Sirio:** rebuilt in Sirio on Ely primitives and Sirio's palette, pixel-matched to today.
+- **Ely:** an Ely type with the same role replaces it, drawn as Ely draws it. The surface may
+  look different afterwards; that change is captured and shown to Enzo.
+- **Sirio:** Ely has nothing for it. Rebuilt in Sirio on Ely primitives and Sirio's palette,
+  keeping today's look.
 - **Rename:** the same type, reached through `bezel_theme` instead of `bezel::theme`.
 
 "Checked" means the Ely type was found in `rust/vendor/ely-gpui-component/src` during this design;
-it does not mean visual parity was proven.
+it says nothing about how the result looks.
 
 | bezel use | Where (main files) | Goes to | Notes |
 |---|---|---|---|
-| `ui::input::TextField`, `input::init`, `Shape::Grow`, `Copy`/`Cut`/`Paste`/`InsertNewline` | composer, settings pages, project forms, worktree picker, browser, session panel, `selectable_markdown`, `sirio/main.rs`, tests | **Ely** `forms::text::TextInput` (`multi_line(min,max)`, actions in `forms/text/actions.rs`), checked | 64 uses of `TextInput` already exist. The composer's transparent fill needs an Ely-side builder, logged in Ely's `LOCAL-CHANGES.md` (its line 108 already names the bezel override it replaces). Context menus dispatch Ely's actions instead. |
-| `ui::tooltip::Tooltip`, `with_keystroke` | `controls.rs`, `file_view.rs`, `open_list.rs`, `pane_launcher.rs`, agents page, chat, main | **Ely** `primitives::tooltip` (`text`, `with_meta`, `rich`), checked | The keystroke is shown through `with_meta` or `rich` with Ely's `typography::keys`; the builder checks it reads the same. |
-| `ui::popover` (`Popup`, `popover_card`, `anchored_menu_below`, `tracked_upper`), `ui::surface` (`popover`, `Surfaced`) | `tab_bar.rs`, `sidebar`, `loading.rs`, `transcript.rs`, `files.rs`, `controls.rs`, `composer_view.rs`, main | **Ely** `overlays::popover`, `layout::surface`, `menus`; anchoring helpers that Ely lacks → **Sirio** | Most menus already go through Ely's `layer`/`MenuPanel`. |
-| `ui::scroll` (`ScrollbarState`, `ScrollbarDrag`, `MIN_THUMB`, `FollowState`, `scrollbar`) | `sirio_terminal/scrollbar.rs`, `horizontal_scroll.rs`, `trace_tab.rs`, `file_view.rs`, `chat/list_scroll.rs`, `thought.rs`, `ci_log_tab.rs` | **Sirio**, drawn like today, on Ely's `layout::scroll` where it fits | Ely's `Scrollbar` takes a `ScrollHandle` and has the known drag-anchor lag. Sirio keeps its own drag maths and follow state, so behaviour does not regress. Whether Ely's bar is fixed in vendor or bypassed is the builder's call; either way it is recorded in `LOCAL-CHANGES.md` if vendor is touched. |
+| `ui::input::TextField`, `input::init`, `Shape::Grow`, `Copy`/`Cut`/`Paste`/`InsertNewline` | composer, settings pages, project forms, worktree picker, browser, session panel, `selectable_markdown`, `sirio/main.rs`, tests | **Ely** `forms::text::TextInput` (`multi_line(min,max)`, actions in `forms/text/actions.rs`), checked | 64 uses of `TextInput` already exist. Ely's field draws its own frame and caret, and binds Enter, Up/Down and paste under its fixed `ElyInput` key context. Vendor Ely is changed so that a host can keep those keys: the composer's Enter/Shift+Enter, history and popup arrows, image-first paste, Escape and Tab, and the model search field's Enter and arrows, behave as today. The change and the transparent fill builder (Ely's `LOCAL-CHANGES.md` line 108 already names the bezel override it replaces) are logged there. Ely's Copy/Cut/Paste/Newline actions are exported so context menus dispatch them. `TextInput::new` needs a `Window`, so constructions move to where one is at hand. |
+| `ui::tooltip::Tooltip`, `with_keystroke` | `controls.rs`, `file_view.rs`, `open_list.rs`, `pane_launcher.rs`, agents page, chat, main | **Ely** `primitives::tooltip` (`text`, `with_meta`, `rich`), checked | The keystroke is shown through `with_meta` or `rich` with Ely's `typography::keys`. Ely's tooltip is solid with a smaller radius; that look is accepted. |
+| `ui::popover` (`Popup`, `popover_card`, `anchored_menu_below`, `tracked_upper`), `ui::surface` (`popover`, `Surfaced`) | `tab_bar.rs`, `sidebar`, `loading.rs`, `transcript.rs`, `files.rs`, `controls.rs`, `composer_view.rs`, main | **Ely** `overlays::popover`, `layout::surface`, `menus`; anchoring and redaction helpers that Ely lacks (`anchored_menu_below`, `tracked_upper`, `redacted_rows`, `reap_popup`) → **Sirio** | Most menus already go through Ely's `layer`/`MenuPanel`. Popovers take Ely's solid fill and radius; bezel's glass goes. A popover still never shows through what is under it (translucency is never in the foreground). |
+| `ui::scroll` (`ScrollbarState`, `ScrollbarDrag`, `MIN_THUMB`, `FollowState`, `scrollbar`) | `sirio_terminal/scrollbar.rs`, `horizontal_scroll.rs`, `trace_tab.rs`, `file_view.rs`, `chat/list_scroll.rs`, `thought.rs`, `ci_log_tab.rs` | A bar over a gpui `ScrollHandle` → **Ely** `layout::scroll::Scrollbar`. A bar whose thumb Sirio computes itself (the terminal's scrollback, the chat list, the CI log) and `FollowState` → **Sirio**, with today's `thumb`/`offset_for_thumb`/`MIN_THUMB` maths | Ely's bar draws with its own colours and width; that look is accepted where it is used. All of them, Ely's included, anchor the drag at the first move past gpui's 2 px threshold, as today. Following new output is Sirio's and does not change. |
 | `motion::Painter` (frame lease), `Fade`, `hover_listener`/`hover_t`, `menu_in`, `AppExt` (reduced motion, pause when inactive) | 15 files: chat, composer, loading, list scroll, trace, CI log, thought, file view, tab bar, sidebar, files, `ely.rs`, main | **Sirio**: a small `sirio_ui` motion module | Ely's `motion` is a set of animated elements (`Transition`, `Spinner`, `Skeleton`, …) over gpui animations. It has no shared frame clock, repaint lease or app-level reduced-motion/pause switch. Same semantics as bezel-motion 0.1.4 (MIT); porting its code with attribution is allowed. |
 | `ui::loaders` (`orb` Cluster/Bloom, `mini_gradient_spinner`) | `loading.rs`, `orbit.rs` | **Sirio** | Ely has spinners and skeletons, not these shapes. Pixel-matched. |
 | `ui::tree` (`Row`, `step`, `Direction`, `init`) | `sidebar/mod.rs`, `sidebar/row.rs`, main | **Sirio** | Keyboard navigation over branch/leaf rows. Same keys, same behaviour. |
 | `ui::combobox` (`Combobox`, `ComboboxEvent`, `init`) | `worktree_picker.rs`, main | **Sirio** on Ely's `TextInput` + list (`ListBox`/`MenuPanel`) | Ely's `Select` is not a type-to-filter combobox. |
 | `widgets::Controls::slider`, `SliderDrag`, `slider_fraction` | chat `controls.rs` | **Removed** by the effort list | |
-| `widgets::Controls::progress_bar` | `loading.rs` | **Ely** `motion::progress::ProgressBar` if it matches, else **Sirio** | |
-| `widgets::Buttons::button`, `ButtonStyle` | settings pages, `turn_rail.rs`, `ely_tests.rs` | **Ely** `buttons::Button` + `ButtonVariant`, checked | Variants mapped so each button keeps its look. |
+| `widgets::Controls::progress_bar` | `loading.rs` | **Ely** `motion::progress::ProgressBar` | |
+| `widgets::Buttons::button`, `ButtonStyle` | settings pages, `turn_rail.rs`, `ely_tests.rs` | **Ely** `buttons::Button` + `ButtonVariant`, checked | Ghost → Ely's ghost variant, Prominent → its primary; each button takes Ely's look. |
 | `widgets::Scaffolding` (`page_header`, `page_subtitle`, `group_box`, `card_row`, `row_title`, `meta_line`) | settings: `agents_page`, `git_hosting_page`, `language_servers_page`, `settings.rs` | **Sirio**: settings scaffolding in `sirio_ui::settings` | Ely has no settings-page scaffolding. |
-| `widgets::Status` (`error_strip`, `warning_strip`, `step_output`) | settings pages, `tool_calls.rs` | strips → **Ely** `feedback::messages` (`Callout`/`InlineMessage`) if they match, else **Sirio**; `step_output` → **Sirio** | |
+| `widgets::Status` (`error_strip`, `warning_strip`, `step_output`) | settings pages, `tool_calls.rs` | strips → **Ely** `feedback::messages` (`Callout`/`InlineMessage`); `step_output` → **Sirio** | Error and warning text stays selectable. |
 | `widgets::Content` (`empty_state`, `badge_active`) | settings pages | `badge_active` → **Ely** `data_display::badge`; `empty_state` → **Sirio** | |
 | `widgets::Takeover`, `status_dot` | `chat/thought.rs`, chat | **Sirio** | `Takeover` is an `Option<bool>` ("auto until the user toggles"); `status_dot` is a 6 px round dot. |
-| `ui::icons` (`Assets` fallback, `icon()`, `TRASH_BIN_MINIMALISTIC`, `MAGNIFER`, `DOCUMENT`) | `ely.rs`, `sidebar/sessions.rs`, `git_hosting_page.rs`, `composer_view.rs` | **Sirio**: the three SVGs are copied into `rust/assets/icons/` with their licence (Solar Icons, CC BY 4.0) | Not swapped for Ely's Lucide icons, which would look different. The builder confirms no other `icons/…` path is served only by bezel's fallback before removing it from `AppAssets`. |
+| `ui::icons` (`Assets` fallback, `icon()`, `TRASH_BIN_MINIMALISTIC`, `MAGNIFER`, `DOCUMENT`) | `ely.rs`, `sidebar/sessions.rs`, `git_hosting_page.rs`, `composer_view.rs` | **Ely**: each icon becomes Ely's Lucide icon with the same meaning | Four paths are served only by bezel's `Assets` fallback in `ely.rs`'s `AppAssets`: `magnifer`, `document`, `trash-bin-minimalistic`, `danger-triangle`. Each is swapped (search, file, trash, alert) before the fallback goes. A path with no Lucide counterpart keeps its SVG, copied into `rust/assets/icons/` with its licence (Solar Icons, CC BY 4.0). |
 | `theme::Theme` (`of`, `dark`, `light`, `surface_radius`, `panel_radius`), `ink`, `HighlightKind`, `SyntaxPalette`, `Appearance`, `current_appearance`, `lock_appearance` | ~30 files, `sirio_syntax`, `sirio_terminal` | **Rename** to `bezel_theme::…` (same types) | Mechanical. `sirio_ui` and `sirio_terminal` take `bezel_theme` directly. |
 | `bezel::gpui` | 1 site | **Rename** to `gpui` | |
 | `bezel-editor` | `sirio/Cargo.toml`, `init` only | **Removed** | |
@@ -193,8 +213,8 @@ new crate edge is needed; `docs/agents/architecture/crates.md` line 67 is update
 
 ## Delivery
 
-Two independent deliveries, so the parity evidence of the migration is not muddied by the one
-intended visual change (*Claude's call*):
+Two independent deliveries, so the effort feature is not tangled with the migration's visual
+changes (*Claude's call*):
 
 1. **`feat:` the effort list and the High default.** A small PR against `main`.
    - If it is the cycle's first `feat:` to land, it moves the version from `0.35.1` to `0.36.0`.
@@ -209,16 +229,19 @@ intended visual change (*Claude's call*):
      It needs the lavapipe environment for the window captures.
 2. **`refactor:` bezel UI off Sirio.** One or more PRs. The split is the plan's call, for
    example rename + motion, then inputs and tooltips, then popovers and scroll, then settings
-   and the rebuilt pieces, then removal. Each PR leaves `main` building and looking the same.
+   and the rebuilt pieces, then removal. Each PR leaves `main` building, and changes only the
+   look of the surfaces it moves to Ely.
    - Evidence:
      - a `Scripts/visual-sweep.sh` / `Scripts/Tests/test-visual-sweep.sh` capture set taken
-       **before** the first PR and **after** each one, with the diffs listed (only the effort
-       control may differ, and only if delivery 1 has landed);
+       **before** the first PR and **after** each one, in light and dark, with every changed
+       region listed against the inventory row that changed it. Enzo reviews the set before the
+       PR is merged;
      - `Scripts/Tests/test-theme-sweep.sh`;
      - the E2Es for the touched areas (editor, markdown probes, chat session panel, open list);
      - the acceptance checks below.
 
-### How parity is captured (*Claude's calls*, settled after the builder check)
+### How the change is captured (*Claude's calls*, settled after the builder check; revised for
+"Aspetto di Ely")
 
 - **Settings.** `Scripts/visual-sweep.sh` cannot open Settings: the control socket has no method
   for it, and the script lists those pages as gaps. A `sirio_ui` probe example renders each
@@ -231,11 +254,14 @@ intended visual change (*Claude's call*):
   - macOS is checked by Enzo by hand, once, after the last refactor PR, on a build of that branch
     with translucency on and off. A short checklist of the surfaces to open comes with the PR.
     No macOS capture is automated: `macos-check.yml` draws nothing.
-- **What "no diff" means:**
+- **Which diffs are allowed:**
   - Captures are taken with reduced motion on and the clock-driven parts (caret, spinners, trace
     timers) masked by fixed rectangles listed beside the script.
-  - Outside the masks the gate is pixel equality per image. A non-zero diff is either fixed or
-    named in the PR as intended; only the effort control may be.
+  - Outside the masks, every changed region is attributed to an inventory row marked **Ely**. A
+    changed region in a surface the PR did not move to Ely, or in a piece rebuilt in **Sirio**, is
+    a defect and is fixed before the PR.
+  - Each PR carries a before/after page of its changed captures, light and dark side by side, for
+    Enzo to review.
   - Before the first refactor PR, two runs of the same build are diffed to prove the setup is
     deterministic; a setup that is not deterministic is fixed before it gates anything.
 - **Behaviour, not only pixels.** Before the PR that removes the piece behind it, each named
@@ -255,7 +281,8 @@ intended visual change (*Claude's call*):
 - `grep -rn 'bezel::' rust/crates` prints nothing.
 - `rust/vendor/bezel_ui` does not exist, and `rust/Cargo.toml` has no `bezel` or `bezel-editor`
   entry.
-- The before/after visual sweep shows no diff outside the effort control.
+- In the before/after visual sweep, every changed region traces to an inventory row marked
+  **Ely**, and Enzo has reviewed each PR's set.
 - The effort E2E artifact shows the list (light and dark) and a new chat on High, as the agent
   received it.
 - The Settings probe and the behaviour checks above print their `OK` lines on the last refactor
@@ -275,25 +302,28 @@ intended visual change (*Claude's call*):
   carries "+ workflow" instead.
 - Choosing a level closes the list.
 - A restored chat starts on High. A model switch keeps a chosen level if the new model has it.
-- Where Ely's version of a piece would look different, Sirio rebuilds the piece rather than
-  accepting the new look. This applies to scrollbars, loaders, settings scaffolding and icons.
+- Enzo decided (2026-10-25, "Aspetto di Ely") that a piece Ely has a component for takes Ely's
+  look. From that, my calls: icons become Ely's Lucide icons; bars over a `ScrollHandle` become
+  Ely's bar, while the bars Sirio computes itself stay Sirio's; Ghost/Prominent buttons map to
+  Ely's ghost/primary.
 - Motion becomes Sirio's own small module, ported from bezel-motion (MIT) with attribution.
 - Two deliveries: the effort feature first and separate, then the refactor.
 - Native Claude is told High at launch, so the chip names the CLI's real effort.
-- Settings parity comes from a probe example, not from a new control-socket method.
-- The parity gate is pixel equality outside masked, clock-driven regions, after a determinism
-  check.
+- Settings captures come from a probe example, not from a new control-socket method.
+- The capture gate: outside masked, clock-driven regions, every changed region traces to an
+  Ely row; a change anywhere else is a defect. This runs after a determinism check.
 - Behaviour checks come before the PR that removes the piece behind them.
 - macOS: one hand check by Enzo, after the last refactor PR, with and without translucency.
 
 ## Left to the builder
 
 - The exact split of the refactor into PRs, and their order.
-- Whether Ely's scrollbar drag lag is fixed in vendor (logged in `LOCAL-CHANGES.md`) or Sirio
-  keeps its own bar, as long as no scrollbar regresses.
+- How Ely's text field yields its keys to the host (an opt-out per binding, a host key context
+  that wins, or another hook), as long as it is logged in `LOCAL-CHANGES.md` and the composer
+  and model search keys behave as today.
 - Module names and placement inside `sirio_ui` for the rebuilt pieces.
-- For each "Ely … if it matches, else Sirio" row, the decision, made on a capture rather than
-  by eye.
+- For each scrollbar site, whether it scrolls a `ScrollHandle` (Ely's bar) or computes its own
+  thumb (Sirio's).
 
 ## Open questions
 
