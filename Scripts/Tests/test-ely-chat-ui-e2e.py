@@ -900,7 +900,7 @@ def effort_asked(chat: Instance, what: str, enough) -> list[str]:
     def probe() -> list[str]:
         asked = effort_requests(chat.scenario)
         if not enough(asked):
-            raise Failure("not yet")
+            raise Failure(f"asked so far: {asked}")
         return asked
 
     return chat.wait(what, probe, timeout=15)
@@ -913,9 +913,7 @@ def effort_steps(run: Run, name: str, appearance: str) -> None:
     chat.start()
     chat.send("hi")
     chat.until("the turn completes on High", lambda s: s["status"] == "completed" and s["effort"] == "high")
-    asked = effort_requests(scenario)
-    if "high" not in asked:
-        raise Failure(f"{name}: the agent was never asked for effort high (asked: {asked})")
+    asked = effort_asked(chat, "the agent is asked for effort high", lambda asked: "high" in asked)
     run.log(f"OK {name}: the agent was asked for effort high (asked: {asked})")
     effort_act(chat, "open")
     chat.frame("effort-list")
@@ -942,9 +940,7 @@ def effort_full_steps(run: Run, name: str, appearance: str) -> None:
     chat.start()
     chat.send("hi")
     chat.until("the turn completes on High", lambda s: s["status"] == "completed" and s["effort"] == "high")
-    asked = effort_requests(scenario)
-    if "high" not in asked:
-        raise Failure(f"{name}: the agent was never asked for effort high (asked: {asked})")
+    asked = effort_asked(chat, "the agent is asked for effort high", lambda asked: "high" in asked)
     run.log(f"OK {name}: the agent was asked for effort high (asked: {asked})")
     effort_act(chat, "open")
     chat.frame("effort-full-list")
