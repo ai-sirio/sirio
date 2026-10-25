@@ -15,6 +15,7 @@ mod moves;
 mod problems;
 mod row;
 mod search;
+mod sideways;
 mod state;
 mod status;
 mod syntax;
