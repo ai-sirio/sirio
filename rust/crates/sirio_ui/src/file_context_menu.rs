@@ -80,8 +80,9 @@ pub struct FileContextItem {
     pub label: &'static str,
     pub action: FileContextAction,
     pub route: FileContextRoute,
-    /// What the row is beyond its label. The render site shows the note for
-    /// both `Unavailable` and `Redirected`, and attaches a click handler for
+    /// What the row is beyond its label. The render site shows the note as
+    /// the row's tooltip for both `Unavailable` and `Redirected` — a row is
+    /// one line — and attaches a click handler for
     /// everything but `Unavailable` — dispatching `to` rather than `action`
     /// for a `Redirected` row.
     pub state: ItemState,
