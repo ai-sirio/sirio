@@ -183,12 +183,13 @@ pub enum Error {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer as _, SigningKey};
-    use rand_core::OsRng;
+    use getrandom::SysRng;
+    use rand_core::UnwrapErr;
 
     const FIXTURE: &[u8] = b"sirio release artifact bytes";
 
     fn key() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        SigningKey::generate(&mut UnwrapErr(SysRng))
     }
 
     fn b64(bytes: &[u8]) -> String {

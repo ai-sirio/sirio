@@ -706,7 +706,7 @@ fn unpack_zip_capped(
         let Some(name) = entry.enclosed_name() else {
             return Err(InstallError::UnsafeArchiveEntry {
                 agent: agent.into(),
-                entry: entry.name().to_string(),
+                entry: String::from_utf8_lossy(entry.name_raw()).into_owned(),
             });
         };
         let target =

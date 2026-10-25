@@ -16,7 +16,7 @@ sirio_env = { path = "../sirio_env" }
 flate2 = "1"
 ureq = "3.4"
 libc = "0.2"
-sha2 = "0.10"
+sha2 = "0.11"
 # Pinned: the renderer's name and version are part of every Mermaid cache key
 # (`MERMAID_RENDERER` in lib.rs), so a bump is deliberate and moves both.
 # Without default features: no CLI (clap) and no PNG output (resvg).

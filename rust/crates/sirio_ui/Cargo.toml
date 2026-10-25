@@ -42,7 +42,7 @@ sirio_lsp = { path = "../sirio_lsp" }
 sirio_persistence.workspace = true
 sirio_privacy.workspace = true
 sirio_usage = { path = "../sirio_usage" }
-base64 = "0.22.1"
+base64 = "0.23.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Same crates gpui uses, at the same versions, so a `RenderImage` can be
 # built here without a second copy of the types.
@@ -55,10 +55,10 @@ futures = "0.3"
 # resolved transitively at this version; promoted to a direct dependency.
 unicode-segmentation = "1.13"
 raw-window-handle = "0.6.2"
-wry = "0.56.1"
+wry = "0.57.1"
 # *Open on the forge* anchors a file of a GitHub pull request by the SHA-256
 # of its path. Already in the lock for sirio_release and three more.
-sha2 = "0.10"
+sha2 = "0.11"
 # Find seeds a regular-expression query with the text selected, escaped. The
 # same major Ely's `find_all` already uses.
 regex = "1"
@@ -93,10 +93,10 @@ windows-sys = { version = "0.61", features = [
 ] }
 # #369 follow-up: host chords pressed while the page holds Win32 focus never
 # reach gpui (WebView2 consumes its accelerators), so the surface forwards
-# them from `ICoreWebView2Controller::add_AcceleratorKeyPressed`. Same 0.38
+# them from `ICoreWebView2Controller::add_AcceleratorKeyPressed`. Same 0.39
 # line `wry` itself builds against — no new external dependency, only an edge
 # to the locked version.
-webview2-com = "0.38"
+webview2-com = "0.39"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # B-02 browser surface: WebKitGTK in a native X11 child window. GTK/WebKit

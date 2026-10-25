@@ -160,7 +160,11 @@ pub fn cache_key(kind: DiagramKind, source: &str, palette: &Palette) -> String {
     }
     hasher.update([0]);
     hasher.update(source.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// The per-user directory diagrams are cached in (design §3), read through

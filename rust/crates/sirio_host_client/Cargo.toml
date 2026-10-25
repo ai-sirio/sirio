@@ -10,7 +10,7 @@ sirio_ipc = { path = "../sirio_ipc" }
 sirio_host_protocol = { path = "../sirio_host_protocol" }
 serde_json = "1"
 serde = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 sirio_term_session = { path = "../sirio_term_session" }

@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signer as _, SigningKey};
-use rand_core::OsRng;
+use getrandom::SysRng;
+use rand_core::UnwrapErr;
 use sha2::{Digest, Sha256};
 use sirio_release::{
     AcceptedKeys, ChannelManifest, MANIFEST_SCHEMA, ManifestArtifact, artifact_url,
@@ -96,7 +97,7 @@ fn keygen(flags: &Flags) -> Result<(), String> {
     let out = PathBuf::from(flags.required("out")?);
     std::fs::create_dir_all(&out).map_err(|e| format!("create {}: {e}", out.display()))?;
 
-    let signing = SigningKey::generate(&mut OsRng);
+    let signing = SigningKey::generate(&mut UnwrapErr(SysRng));
     let seed = signing.to_bytes();
     let public = signing.verifying_key().to_bytes();
 
