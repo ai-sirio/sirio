@@ -79,6 +79,8 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # control socket (docs/testing/ely-agent-chat.md). The effort and effort_light scenarios (dark and
 # light) prove a chat asks its agent for High at start and again after a relaunch, and that the
 # effort list opens and takes a pick through the debug-only `surface.chat.effort`; they capture it.
+# effort_full and effort_full_light run the fixture's effort-full mode (Default, five levels,
+# Ultracode), capture the whole list (the notes, the separator) and choose Default from it.
 # --display :N (an Xvfb; export VK_DRIVER_FILES and VK_ICD_FILENAMES as lavapipe's lvp_icd.json)
 # takes the captures, --state-only omits them,
 # --only NAME[,NAME] runs some scenarios, --out-dir DIR keeps the artifact.

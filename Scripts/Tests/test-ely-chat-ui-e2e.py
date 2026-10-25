@@ -12,7 +12,8 @@ permission, listed-option question, plan approval, cancellation, agent death
 and recovery across a relaunch, authentication required, restore across a
 relaunch, and the effort list (`effort`, `effort_light`: High asked of the agent
 at start, the list opened and a level chosen, High asked again after a
-relaunch). After them, unless --no-identity, the five agents' marks as native
+relaunch; `effort_full`, `effort_full_light`: the whole ladder, Default and
+Ultracode included, drawn, and Default chosen from it). After them, unless --no-identity, the five agents' marks as native
 views with explicitly supplied identities (the example probe, not the app:
 the fixture run proves no provider identity).
 
@@ -934,12 +935,43 @@ def effort_steps(run: Run, name: str, appearance: str) -> None:
     scenario.finish()
 
 
+def effort_full_steps(run: Run, name: str, appearance: str) -> None:
+    """The whole ladder an agent can offer (Default, five levels, Ultracode) drawn, and Default chosen from it."""
+    scenario = Scenario(run, name, "effort-full", appearance=appearance)
+    chat = scenario.instance
+    chat.start()
+    chat.send("hi")
+    chat.until("the turn completes on High", lambda s: s["status"] == "completed" and s["effort"] == "high")
+    asked = effort_requests(scenario)
+    if "high" not in asked:
+        raise Failure(f"{name}: the agent was never asked for effort high (asked: {asked})")
+    run.log(f"OK {name}: the agent was asked for effort high (asked: {asked})")
+    effort_act(chat, "open")
+    chat.frame("effort-full-list")
+    effort_act(chat, "choose", "default")
+    chat.until("the chat is on Default", lambda s: s["effort"] == "default")
+    asked = effort_asked(chat, "choosing Default reaches the agent", lambda asked: asked[-1:] == ["default"])
+    run.log(f"OK {name}: choosing Default reached the agent (asked: {asked})")
+    # Open again: the list marks the level in force, here the row below the separator.
+    effort_act(chat, "open")
+    chat.frame("effort-full-default")
+    scenario.finish()
+
+
 def effort(run: Run) -> None:
     effort_steps(run, "effort", "dark")
 
 
 def effort_light(run: Run) -> None:
     effort_steps(run, "effort-light", "light")
+
+
+def effort_full(run: Run) -> None:
+    effort_full_steps(run, "effort-full", "dark")
+
+
+def effort_full_light(run: Run) -> None:
+    effort_full_steps(run, "effort-full-light", "light")
 
 
 SCENARIOS = [
@@ -957,6 +989,8 @@ SCENARIOS = [
     long_history,
     effort,
     effort_light,
+    effort_full,
+    effort_full_light,
 ]
 
 
