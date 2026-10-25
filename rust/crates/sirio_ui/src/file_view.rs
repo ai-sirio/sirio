@@ -349,6 +349,10 @@ pub struct FileView {
     /// still loading its content: revealing immediately addresses lines
     /// that do not exist yet, and does nothing at all.
     pending_reveal: Option<RevealTarget>,
+    /// A reveal that wants the source asked for while the file was still
+    /// loading: the load picks Preview for a Markdown file after the ask, so
+    /// the mode set at the ask would be overwritten. Taken by the load.
+    code_on_load: bool,
     /// The Preview's diagrams, by cache key (design §3).
     diagrams: Diagrams,
     /// The diagram settings the last frame saw. A change forgets every
@@ -527,7 +531,11 @@ impl FileView {
                 .background_spawn(async move { Editor::open(&path_for_task) })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                view.markdown_mode = Self::initial_markdown_mode(&editor);
+                view.markdown_mode = if std::mem::take(&mut view.code_on_load) {
+                    MarkdownMode::Code
+                } else {
+                    Self::initial_markdown_mode(&editor)
+                };
                 view.state = ViewState::Ready(editor);
                 view.load_task = None;
                 view.apply_pending_reveal(cx);
@@ -617,6 +625,7 @@ impl FileView {
             hover_seq: 0,
             hover_card: None,
             pending_reveal: None,
+            code_on_load: false,
             diagrams: Diagrams::default(),
             diagram_settings: None,
             diagram_generation: 0,
@@ -954,6 +963,19 @@ impl FileView {
     pub fn reveal(&mut self, target: RevealTarget, cx: &mut Context<Self>) {
         self.pending_reveal = Some(target);
         self.apply_pending_reveal(cx);
+    }
+
+    /// Like [`Self::reveal`], for a caller that pointed at a line: a Markdown
+    /// file is shown as source, because the line only exists there. A file
+    /// still loading is shown as source once it has loaded (`code_on_load`);
+    /// the reveal itself waits for the code editor, which a Markdown file
+    /// leaving Preview only gets on its next draw (`ensure_code_editor`
+    /// applies the held target then). A file that is not Markdown is not
+    /// changed by this.
+    pub fn reveal_in_code(&mut self, target: RevealTarget, cx: &mut Context<Self>) {
+        self.code_on_load = matches!(self.state, ViewState::Loading);
+        self.set_markdown_mode(MarkdownMode::Code, cx);
+        self.reveal(target, cx);
     }
 
     /// Asks where the symbol at `offset` is defined. `at` is where the

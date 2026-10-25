@@ -96,3 +96,17 @@ has the panel's design and `docs/superpowers/specs/2026-10-21-chat-trace-waterfa
 the folded cards, the Trace card and the tab; `claude_streams_the_lines_the_trace_reads`
 (`sirio_agents/tests/acp_conformance.rs`, opt-in because it spends a real turn, off the release
 gate) notices the day the CLI stops streaming the lines the trace reads.
+
+**What a response may make clickable or load** is an allowlist, enforced in one place:
+`sirio_ui::chat::file_links::link_file_paths`, run over an assistant entry's document whenever it is built
+(streamed chunk, restore). The text an agent writes can be prompt-injected, so a link, chip or picture in it
+survives only as a web URL (`http`, `https`, `mailto`, any case) or as a checked local file (an existing
+regular file, retargeted to a `file://` URL; a picture also non-empty and at most 10 MB, and read by its
+absolute path). Everything else (`smb:`, `vscode:`, `tel:`, a drive or UNC path, an unresolved path, an anchor)
+loses its mark and its text stays, a non-web bookmark or picture block becomes a paragraph, and a network or
+device path (`//host/…`, `\\host\…`, `\\?\`, `\\.\`) is never even looked up on disk. The disk is asked while
+the document is built (memoised per entry), never while it paints, and once at a click (`may_open_on_click`). A
+file link is taken in `MarkdownBody`'s capture phase before bezel's text can hand its URL to the system opener,
+so a change that touches either half (the link pass, or the capture handler) must keep the other's
+assumption: nothing but web URLs reaches `cx.open_url`.
+`Scripts/Tests/test-chat-session-panel-e2e.sh --only file_links` drives it with real clicks and drags.

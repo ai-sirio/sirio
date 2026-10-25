@@ -72,11 +72,24 @@ set -euo pipefail
 #                      or a third tab selected in its place, with the worktree parked or after the turn
 #   trace_keys         real X input on the Trace tab: a click on a row and Enter on the selected row
 #                      reveal its Agent row, a click on the Follow checkbox toggles it
+# The file_links scenario (spec 2026-10-24-chat-file-links-design.md §6) uses a third stub,
+# Scripts/Tests/stubs/file-links/claude, the fixture in its file_links mode: every prompt is
+# answered with one text holding paths that exist in the worktree, ones that do not, a
+# version, a fenced path and a web link. It is asserted on `transcriptLinks` of
+# `surface.chat.read` (the links of the last paint, with the pixel of each), on
+# `surface.editor.state`, on `surface tabs read` and on the browser stub's log.
+#   file_links         real X clicks and drags on a chat response: its file paths and the
+#                      web link are the links painted, a click opens the file (a Markdown
+#                      one in Preview, or in the source at its line when the path names
+#                      one), a second click reuses the tab, a Super+Shift click still goes
+#                      to the editor, a drag selects and opens nothing, and the web link
+#                      still reaches the browser stub
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
 # whatever the code does.
-# trace_keys needs a framed run at --window-size 2200x1000 (no --state-only): it clicks at pixels.
+# trace_keys and file_links need a framed run at --window-size 2200x1000 (no --state-only): they
+# click at pixels.
 #
 # Isolation: every Sirio starts under `env -i` with an allowlist (see launch()), the
 # stub agent CLIs first on PATH, a private HOME, XDG directories, database, socket,
@@ -111,7 +124,7 @@ CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
-  trace_tab trace_idle trace_keys)
+  trace_tab trace_idle trace_keys file_links)
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
@@ -138,10 +151,10 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys "
-# trace_keys sends real X clicks and keys at pixels of the 2200x1000 layout, so it needs a
-# framed run (no --state-only) at that window size.
-FRAMED_SCENARIOS=" trace_keys "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links "
+# trace_keys and file_links send real X clicks, keys and drags at pixels, so they need a
+# framed run (no --state-only) at the 2200x1000 window size.
+FRAMED_SCENARIOS=" trace_keys file_links "
 framed_run() { [ "$STATE_ONLY" -eq 0 ] && [ "$WINDOW_SIZE" = 2200x1000 ]; }
 SCENARIOS=()
 SKIPPED=()
@@ -206,7 +219,7 @@ command -v python3 >/dev/null || fail "python3 is required"
 command -v curl >/dev/null || fail "curl is required"
 echo "display: ${DISPLAY_TARGET:-none (--state-only)}; scenarios: ${SCENARIOS[*]}; appearance: ${APPEARANCE:-default}"
 for name in "${SKIPPED[@]:-}"; do
-  [ -z "$name" ] || [ -n "$ONLY" ] || echo "SKIP: scenario $name needs a framed run (a painted column; trace_keys also the 2200x1000 window and real X input)"
+  [ -z "$name" ] || [ -n "$ONLY" ] || echo "SKIP: scenario $name needs a framed run (a painted column; trace_keys and file_links also the 2200x1000 window and real X input)"
 done
 
 # ---- the user's mise config must not move ---------------------------------
@@ -362,17 +375,17 @@ STUB_EOF
   chmod +x "$CLI_STUBS/$name"
 done
 # Which claude shim the next launch puts first on the app's PATH: session-panel (the
-# column's own scenarios) or trace (the trace scenarios). A scenario picks its stub by
+# column's own scenarios), trace (the trace scenarios) or file-links (file_links). A scenario picks its stub by
 # naming it in SIRIO_E2E_CLAUDE_STUB through use_stub, and the run loop puts the default
 # back before the next scenario.
-use_stub() { # session-panel|trace
+use_stub() { # session-panel|trace|file-links
   SIRIO_E2E_CLAUDE_STUB=$1
   local stubs="$ROOT/Scripts/Tests/stubs/$SIRIO_E2E_CLAUDE_STUB" resolved
   APP_PATH="$stubs:$RUN_DIR/bin:/usr/local/bin:/usr/bin:/bin"
   resolved=$(PATH="$APP_PATH" command -v claude || true)
   [ "$resolved" = "$stubs/claude" ] || fail "claude resolves to '$resolved' under the app's PATH, not the $SIRIO_E2E_CLAUDE_STUB shim"
 }
-for stub in session-panel trace; do
+for stub in session-panel trace file-links; do
   use_stub "$stub"
   echo "OK: claude resolves to the $stub shim"
 done
@@ -534,6 +547,53 @@ elif command == "check":
         print(f"FAIL: {desc}: {expr}", file=sys.stderr)
         sys.exit(1)
     print(f"OK: {desc}")
+elif command in ("links-check", "link", "link-width"):
+    # The links `surface.chat.read` reports for the chat's last paint: rows with kind (file|web),
+    # label, target, the window pixel (x, y) a few pixels into the label at its vertical middle, and w,
+    # its painted width.
+    # links-check SURFACE SECONDS WEB_LABEL FILE_LABEL...: poll until the file links are exactly
+    #   FILE_LABEL... (in any order) and the web links exactly WEB_LABEL.
+    # link SURFACE KIND LABEL: poll until a link of that kind and label is reported, print "x y".
+    # link-width SURFACE KIND LABEL: the same link, print `w`, how many pixels wide its label painted.
+    surface = sys.argv[2]
+
+    def read_links():
+        result = rpc("surface.chat.read", {"surfaceId": surface})
+        if "transcriptLinks" not in result:
+            raise RuntimeError("surface.chat.read has no transcriptLinks, so the chat reports no link of its last paint")
+        return json.loads(result["transcriptLinks"] or "[]")
+
+    deadline = time.time() + (float(sys.argv[3]) if command == "links-check" else 15)
+    rows, error = [], None
+    while True:
+        try:
+            rows = read_links()
+            error = None
+            if command == "links-check":
+                files = sorted(r["label"] for r in rows if r["kind"] == "file")
+                web = sorted(r["label"] for r in rows if r["kind"] == "web")
+                if files == sorted(sys.argv[5:]) and web == [sys.argv[4]]:
+                    print("  links: " + json.dumps(rows, ensure_ascii=False), file=sys.stderr)
+                    print(f"OK: the file links are {sorted(sys.argv[5:])} and the web link is {sys.argv[4]!r}")
+                    sys.exit(0)
+            else:
+                row = next((r for r in rows if r["kind"] == sys.argv[3] and r["label"] == sys.argv[4]), None)
+                if row:
+                    print(int(float(row["w"])) if command == "link-width" else f"{int(float(row['x']))} {int(float(row['y']))}")
+                    sys.exit(0)
+        except SystemExit:
+            raise
+        except Exception as e:  # a read that fails is tried again until the time is up
+            error = e
+        if time.time() > deadline:
+            print("  links: " + json.dumps(rows, ensure_ascii=False), file=sys.stderr)
+            if command == "links-check":
+                print(f"FAIL: the links are not the file links {sorted(sys.argv[5:])} and the web link {sys.argv[4]!r}"
+                      + (f" ({error})" if error else ""), file=sys.stderr)
+            else:
+                print(f"FAIL: no {sys.argv[3]} link labelled {sys.argv[4]!r}" + (f" ({error})" if error else ""), file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
 elif command == "perf-window":
     # perf-window FILE SECONDS: how many trace.frame events the app recorded in the next
     # SECONDS, by wall clock (the file's header names the instant its own clock began),
@@ -1497,6 +1557,222 @@ scenario_trace_keys() {
   click_at "${FOLLOW_X:-1702}" "${FOLLOW_Y:-97}"
   wait_panel "the second click toggled Follow on" 'tab()["follow"] == "1"' 10
   stop_app
+}
+
+# A chat response's file links (spec 2026-10-24-chat-file-links-design.md §6), with real X
+# input at the pixels `transcriptLinks` reports for the last paint. Opening a file selects its
+# tab, which hides the chat, so each click is preceded by showing the chat tab again. The
+# files are written into the worktree before the app starts; the stub's one answer names
+# them, names one that is not there, a version, a fenced path and a web link.
+# A row of `transcriptLinks` also carries `w`, the label's painted width: the second drag ends
+# 14 px past the label's end (x already sits 4 px into the label, so x + w + 10), where plain
+# text follows it on the line.
+# The tabs: `surface tabs read` lists them (`count`, and `active` is the selected one's
+# position); `surface editor state` reads the active tab's file, so it only answers while a
+# file tab is selected. The steps that must open nothing therefore compare `count` and `active`
+# with what they were, the chat tab being the one selected.
+tabs_state() { # prints "COUNT ACTIVE"
+  reply surface tabs read | python3 -c 'import json, sys; t = json.load(sys.stdin)[0]; print(t["count"], t["active"])'
+}
+tab_count() { tabs_state | cut -d' ' -f1; }
+show_chat() {
+  local position
+  position=$(tab_positions chat)
+  [ -n "$position" ] || fail "no chat tab to show"
+  reply surface tabs select "$position" >/dev/null || fail "could not select the chat tab $position"
+  sleep 1.5
+}
+# The pixel of a link of KIND and LABEL in the chat's last paint.
+link_xy() { # kind label
+  local xy
+  xy=$(E2E link "$SURFACE" "$1" "$2") || fail "no $1 link '$2' to point at"
+  echo "  link: $1 '$2' at $xy" >&2
+  echo "$xy"
+}
+# A click on the link of KIND and LABEL, the chat shown first. The press and the release are
+# 0.3 s apart, as a hand's are: a web link's text only listens for the release in the frame
+# after the press, and this window paints in software, so an instant `click 1` outruns it.
+click_link() { # kind label [modifiers...]
+  local kind=$1 label=$2 xy
+  shift 2
+  show_chat
+  xy=$(link_xy "$kind" "$label")
+  if [ $# -gt 0 ]; then
+    DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool keydown "$@" mousemove ${xy% *} ${xy#* } mousedown 1 sleep 0.3 mouseup 1 keyup "$@" || fail "xdotool could not click at $xy with $*"
+  else
+    DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool mousemove ${xy% *} ${xy#* } mousedown 1 sleep 0.3 mouseup 1 || fail "xdotool could not click at $xy"
+  fi
+  sleep 1
+}
+# A drag from (X1, Y1) to (X2, Y2): a press, two moves, a release.
+drag_at() { # x1 y1 x2 y2
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove "$1" "$2" mousedown 1 sleep 0.3 \
+    mousemove $((($1 + $3) / 2)) "$4" sleep 0.3 mousemove "$3" "$4" sleep 0.3 mouseup 1 \
+    || fail "xdotool could not drag from $1,$2 to $3,$4"
+  sleep 1
+}
+# The byte offset of the start of line N of FILE.
+line_offset() { # file n
+  python3 -c 'import sys; print(sum(len(l) for l in open(sys.argv[1], "rb").readlines()[:int(sys.argv[2]) - 1]))' "$1" "$2"
+}
+# Polls the active file tab until it is PATH, in MODE (any mode when it is empty) and with
+# SELECTIONS, when given.
+expect_editor() { # desc path mode [selections]
+  local desc=$1 want_path=$2 want_mode=$3 want_selections=${4:-} out="" _
+  for _ in $(seq 1 50); do
+    out=$(reply surface editor state || true)
+    if printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)[0]
+ok = d.get("path") == sys.argv[1] and (not sys.argv[2] or d.get("mode") == sys.argv[2]) and d.get("state") == "loaded"
+ok = ok and (not sys.argv[3] or d.get("selections") == sys.argv[3])
+sys.exit(0 if ok else 1)' "$want_path" "$want_mode" "$want_selections" 2>/dev/null; then
+      echo "  read: $(printf '%s' "$out" | python3 -c 'import json, sys; d = json.load(sys.stdin)[0]; print({k: d.get(k) for k in ("path", "mode", "state", "selections")})')"
+      echo "OK: $desc"
+      return 0
+    fi
+    sleep 0.3
+  done
+  echo "  read: $(printf '%s' "$out" | cut -c1-400)" >&2
+  fail "$desc: the editor is not on $want_path in $want_mode${want_selections:+ with selections $want_selections}"
+}
+# Polls the active file tab until it is PATH and in the editor's missing-file state: `error`
+# with the message `This file does not exist: PATH` (`Editor::load_message`).
+expect_missing() { # desc path
+  local desc=$1 want_path=$2 out="" _
+  for _ in $(seq 1 50); do
+    out=$(reply surface editor state || true)
+    if printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)[0]
+sys.exit(0 if d.get("path") == sys.argv[1] and d.get("state") == "error" and d.get("error") == "This file does not exist: " + sys.argv[1] else 1)' "$want_path" 2>/dev/null; then
+      echo "OK: $desc"
+      return 0
+    fi
+    sleep 0.3
+  done
+  echo "  read: $(printf '%s' "$out" | cut -c1-400)" >&2
+  fail "$desc: the active tab is not $want_path in the missing-file state"
+}
+# The browser stub's log: how many calls it has recorded. gpui starts `xdg-open` without
+# waiting for it, so a check that nothing was recorded lets it run first.
+browser_calls() {
+  sleep 1
+  if [ -f "$RUN_DIR/browser.log" ]; then wc -l <"$RUN_DIR/browser.log"; else echo 0; fi
+}
+scenario_file_links() {
+  use_stub file-links
+  local docs_main="$LINKED/docs/NOME-FILE.md" docs_other="$LINKED/docs/ALTRO.md" main_rs="$LINKED/src/main.rs" readme="$LINKED/README.md"
+  mkdir -p "$LINKED/docs"
+  python3 - "$docs_main" "$docs_other" "$main_rs" "$readme" <<'PY'
+import sys
+docs_main, docs_other, main_rs, readme = sys.argv[1:]
+for path in (docs_main, docs_other):
+    open(path, "w").write("".join(f"Riga {n} di {path.rsplit('/', 1)[1]}\n" for n in range(1, 61)))
+open(main_rs, "w").write("".join(f"// riga {n}\n" if n != 1 else "fn main() {}\n" for n in range(1, 61)))
+open(readme, "w").write("# Widgets\n\nIl file che il progetto ha già.\n")
+PY
+  # What opens a URL is gpui's `xdg-open`, started in `sirio_env::for_child`'s PATH: the login
+  # shell's (`$SHELL -lc`, run in this private HOME with the launch PATH, which it normally
+  # extends) before the launch's. The harness's `xdg-open` stub leads both, and this private
+  # `.bash_profile` guarantees that even if a system profile prepended directories, so any `xdg-open`
+  # the app runs (a file:// as much as the web link) lands in $RUN_DIR/browser.log and never
+  # starts a real browser on the display.
+  mkdir -p "$RUN_DIR/file_links-home"
+  printf 'export PATH="%s/bin:$PATH"\n' "$RUN_DIR" >"$RUN_DIR/file_links-home/.bash_profile"
+  launch file_links
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  send_prompt "mostrami i file"
+  wait_panel "the turn is over" 'c["status"] == "completed"' 40
+  echo "step: the links of the response"
+  E2E links-check "$SURFACE" 30 sito '/docs/NOME-FILE.md' 'src/main.rs:42' 'README.md' 'docs/NOME-FILE.md:30' 'docs/ALTRO.md:10' \
+    || fail "the response's links are not the expected ones"
+  capture file-links-response
+  local before browser xy line _
+  before=$(tab_count)
+  [ "$before" = 1 ] || fail "the chat is not the only tab: $(tab_count) tabs"
+
+  echo "step: a click on /docs/NOME-FILE.md opens the Markdown file in Preview"
+  click_link file '/docs/NOME-FILE.md'
+  expect_editor "/docs/NOME-FILE.md opened in Preview" "$docs_main" preview
+  [ "$(tab_count)" = $((before + 1)) ] || fail "the click did not open exactly one more tab: $(tab_count) tabs, was $before"
+  echo "OK: one more tab"
+
+  echo "step: a click on src/main.rs:42 opens the file in code at its line 42"
+  click_link file 'src/main.rs:42'
+  expect_editor "src/main.rs:42 opened in code at line 42" "$main_rs" code "$(line_offset "$main_rs" 42)..$(line_offset "$main_rs" 42)"
+  local after_main
+  after_main=$(tab_count)
+  [ "$after_main" = $((before + 2)) ] || fail "src/main.rs:42 did not open exactly one more tab: $after_main tabs"
+
+  echo "step: a click on docs/NOME-FILE.md:30 reuses the tab of step 2, in code at line 30"
+  click_link file 'docs/NOME-FILE.md:30'
+  expect_editor "docs/NOME-FILE.md:30 switched its open tab to code at line 30" "$docs_main" code "$(line_offset "$docs_main" 30)..$(line_offset "$docs_main" 30)"
+  [ "$(tab_count)" = "$after_main" ] || fail "the second click on the Markdown file opened a tab: $(tab_count) tabs, was $after_main"
+  echo "OK: the tab was reused"
+
+  echo "step: a click on docs/ALTRO.md:10, never opened before, opens it in code at line 10"
+  click_link file 'docs/ALTRO.md:10'
+  expect_editor "docs/ALTRO.md:10 opened in code at line 10, not in Preview" "$docs_other" code "$(line_offset "$docs_other" 10)..$(line_offset "$docs_other" 10)"
+  [ "$(tab_count)" = $((after_main + 1)) ] || fail "docs/ALTRO.md:10 did not open exactly one more tab: $(tab_count) tabs"
+
+  echo "step: a click on docs/ALTRO.md:10 after the file was deleted opens a tab that says it is missing"
+  # The tab of step 5 is the selected one: closing it and deleting the file leaves a link
+  # (built while the file existed) to a file that is gone.
+  local altro_tab
+  altro_tab=$(tabs_state | cut -d' ' -f2)
+  reply surface tabs close "$altro_tab" >/dev/null || fail "could not close the tab $altro_tab of docs/ALTRO.md"
+  rm -f "$docs_other"
+  click_link file 'docs/ALTRO.md:10'
+  expect_missing "the click on the vanished docs/ALTRO.md:10 opened its tab as missing" "$docs_other"
+  [ "$(tab_count)" = $((after_main + 1)) ] || fail "the vanished file did not open exactly one tab: $(tab_count) tabs"
+
+  echo "step: Super+Shift+click on README.md still opens the editor, not the browser"
+  browser=$(browser_calls)
+  click_link file 'README.md' super shift
+  expect_editor "README.md opened in the editor" "$readme" ""
+  [ "$(browser_calls)" = "$browser" ] || fail "Super+Shift+click on README.md called the browser: $(tail -n 3 "$RUN_DIR/browser.log")"
+  echo "OK: the browser stub recorded no call"
+
+  echo "step: a drag inside src/main.rs:42 selects and opens nothing"
+  show_chat
+  local count_active
+  count_active=$(tabs_state)
+  xy=$(link_xy file 'src/main.rs:42')
+  drag_at "${xy% *}" "${xy#* }" $((${xy% *} + 17)) "${xy#* }"
+  [ "$(tabs_state)" = "$count_active" ] || fail "a drag inside src/main.rs:42 changed the tabs: '$(tabs_state)', was '$count_active'"
+  [ "$(browser_calls)" = "$browser" ] || fail "a drag inside src/main.rs:42 called the browser: $(tail -n 3 "$RUN_DIR/browser.log")"
+  echo "OK: nothing opened (tabs '$count_active')"
+
+  echo "step: a drag from inside src/main.rs:42 to just past its end opens nothing either"
+  xy=$(link_xy file 'src/main.rs:42')
+  local width
+  width=$(E2E link-width "$SURFACE" file 'src/main.rs:42') || fail "no painted width for src/main.rs:42"
+  [ "$width" -gt 20 ] || fail "src/main.rs:42 reports a painted width of $width px"
+  drag_at "${xy% *}" "${xy#* }" $((${xy% *} + width + 10)) "${xy#* }"
+  [ "$(tabs_state)" = "$count_active" ] || fail "a drag across src/main.rs:42 changed the tabs: '$(tabs_state)', was '$count_active'"
+  [ "$(browser_calls)" = "$browser" ] || fail "a drag across src/main.rs:42 called the browser: $(tail -n 3 "$RUN_DIR/browser.log")"
+  echo "OK: nothing opened (tabs '$count_active')"
+  capture file-links-drag
+
+  echo "step: a click on the web link still reaches the browser"
+  click_link web sito
+  [ "$(tabs_state)" = "$count_active" ] || fail "the web link opened a tab: '$(tabs_state)', was '$count_active'"
+  sleep 1
+  line=""
+  for _ in $(seq 1 50); do
+    line=$(grep -Fx 'xdg-open https://example.com/docs/NOME-FILE.md' "$RUN_DIR/browser.log" 2>/dev/null | head -n 1 || true)
+    [ -n "$line" ] && break
+    sleep 0.3
+  done
+  [ -n "$line" ] || fail "the harness's xdg-open stub never recorded 'xdg-open https://example.com/docs/NOME-FILE.md' (it recorded: $(cat "$RUN_DIR/browser.log" 2>/dev/null || echo nothing))"
+  echo "OK: the xdg-open stub recorded: $line"
+  echo "OK: file_links: the response's paths open their files, a drag opens nothing, and the web link reaches the browser"
+  stop_app
+  # The fixture worktree is shared with the scenarios that run after this one.
+  rm -rf "$LINKED/docs" "$LINKED/README.md"
+  printf 'fn main() {}\n' >"$main_rs"
 }
 
 ran=0
