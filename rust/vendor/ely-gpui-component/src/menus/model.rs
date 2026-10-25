@@ -1,6 +1,6 @@
 use std::{ops::Range, rc::Rc};
 
-use gpui::{App, SharedString, Window};
+use gpui::{AnyElement, App, SharedString, Window};
 
 use crate::{compat::fuzzy, forms::Run, primitives::IconName};
 
@@ -27,6 +27,8 @@ pub struct MenuItem {
     pub(super) note_selector: Option<SharedString>,
     pub(super) selector: Option<SharedString>,
     pub(super) tooltip: Option<SharedString>,
+    pub(super) trailing: Option<Rc<dyn Fn(&App) -> AnyElement>>,
+    pub(super) muted: bool,
 }
 
 impl MenuItem {
@@ -43,6 +45,8 @@ impl MenuItem {
             note_selector: None,
             selector: None,
             tooltip: None,
+            trailing: None,
+            muted: false,
         }
     }
 
@@ -89,6 +93,20 @@ impl MenuItem {
     /// A quiet tag at the row's end, such as which choice is recommended.
     pub fn note(mut self, note: impl Into<SharedString>) -> Self {
         self.note = Some(note.into());
+        self
+    }
+
+    /// An element the host draws at the row's end, after the note and before the keys, such as a
+    /// level indicator. It is built each time the row is drawn.
+    pub fn trailing(mut self, element: impl Fn(&App) -> AnyElement + 'static) -> Self {
+        self.trailing = Some(Rc::new(element));
+        self
+    }
+
+    /// The label in the muted tone, for a row that reads quieter than its neighbours. It stays
+    /// clickable, unlike a disabled one.
+    pub fn muted(mut self, muted: bool) -> Self {
+        self.muted = muted;
         self
     }
 

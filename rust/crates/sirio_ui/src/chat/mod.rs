@@ -7,12 +7,12 @@
 use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
-    DragMoveEvent, Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle,
-    Focusable, FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
+    FollowMode, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
     KeyBinding, KeyDownEvent, LayoutId, ListAlignment, ListSizingBehavior, ListState, MouseButton,
-    Hsla, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, ScrollHandle,
-    SharedString, StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px,
-    quad, relative, transparent_black,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, ScrollHandle, SharedString,
+    StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px, quad, relative,
+    transparent_black,
 };
 use sirio_acp::{
     AcpEvent, AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage,
@@ -59,7 +59,6 @@ mod transcript;
 mod turn_rail;
 use bezel::ui::input::TextField;
 use bezel::ui::popover;
-use bezel::ui::widgets::{Controls, SliderDrag, slider_fraction};
 pub use session_panel::{
     RowSnapshot, SectionSnapshot, SessionPanelAction, SessionPanelSnapshot,
 };
@@ -2197,9 +2196,9 @@ pub struct Chat {
     /// Bypass permissions, picked and not yet confirmed (`bypass.rs`).
     bypass_ask: Option<AgentMode>,
     context_popover_open: bool,
-    /// The effort selector, anchored to the effort chip. Its own popover
-    /// rather than a section of the model picker: effort is a scale, and a
-    /// scale is picked with a slider, not with a row per rung.
+    /// The effort list, anchored to the effort chip. Its own popover rather
+    /// than a section of the model picker: effort is a scale of the agent's
+    /// own levels, not one more model.
     effort_picker_open: bool,
     mode_picker_focus: FocusHandle,
     context_popover_focus: FocusHandle,
@@ -2867,6 +2866,10 @@ impl Chat {
             KeyBinding::new("down", PickerNext, Some("ChatThinkingPicker")),
             KeyBinding::new("enter", PickerChoose, Some("ChatThinkingPicker")),
             KeyBinding::new("return", PickerChoose, Some("ChatThinkingPicker")),
+            KeyBinding::new("up", PickerPrevious, Some("ChatEffortPicker")),
+            KeyBinding::new("down", PickerNext, Some("ChatEffortPicker")),
+            KeyBinding::new("enter", PickerChoose, Some("ChatEffortPicker")),
+            KeyBinding::new("return", PickerChoose, Some("ChatEffortPicker")),
             KeyBinding::new("up", PickerPrevious, Some("ChatOverflowMenu")),
             KeyBinding::new("down", PickerNext, Some("ChatOverflowMenu")),
             KeyBinding::new("enter", PickerChoose, Some("ChatOverflowMenu")),
@@ -4385,7 +4388,7 @@ impl Chat {
         cx.notify();
     }
 
-    /// Opens the effort slider anchored to the effort chip. A no-op when the
+    /// Opens the effort list anchored to the effort chip. A no-op when the
     /// session advertised no effort at all — the chip is not drawn in that
     /// case, so nothing can reach this.
     fn toggle_effort_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4397,6 +4400,7 @@ impl Chat {
         self.context_popover_open = false;
         self.effort_picker_open = !self.effort_picker_open;
         if self.effort_picker_open {
+            self.start_picker_cursor(cx);
             let focus = self.effort_picker_focus.clone();
             window.focus(&focus, cx);
             window.on_next_frame(move |window, _| {
@@ -12776,110 +12780,6 @@ two"
         );
     }
 
-    /// #233 again, on the control that replaced the chips: the choice count
-    /// is agent-reported (Claude Code advertises seven with Ultracode), and
-    /// a row of one chip per level overflowed a fixed-width popup. A track
-    /// cannot: every stop is a share of a width that is already the
-    /// picker's, so the levels grow denser instead of wider. This pins that
-    /// -- and that the shares tile the track exactly once, with no gap for a
-    /// click to fall through and no overlap for two stops to fight over.
-    #[gpui::test]
-    async fn every_effort_stop_stays_inside_the_track(cx: &mut TestAppContext) {
-        cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
-        let (_chat, cx) = cx.add_window_view(|_, cx| {
-            let mut chat = Chat::from_test_command(
-                LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
-                std::env::temp_dir(),
-                cx,
-            );
-            chat.has_completed_turn = true;
-            chat.available_models = vec![ModelOption {
-                id: "opus".into(),
-                name: "Opus".into(),
-                description: None,
-            }];
-            chat.effort = Some(EffortOption {
-                option_id: "effort".into(),
-                name: Some("Effort".into()),
-                current_value: Some("medium".into()),
-                choices: [
-                    ("default", "Default"),
-                    ("low", "Low"),
-                    ("medium", "Medium"),
-                    ("high", "High"),
-                    ("xhigh", "Xhigh"),
-                    ("max", "Max"),
-                ]
-                .iter()
-                .map(|(value, name)| EffortChoice {
-                    value: (*value).into(),
-                    name: (*name).into(),
-                })
-                .collect(),
-            });
-            chat
-        });
-        cx.update(|window, _| window.refresh());
-
-        let chip = cx
-            .debug_bounds("effort-chip")
-            .expect("effort chip is rendered");
-        cx.simulate_click(chip.center(), Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            window.simulate_next_frame(cx);
-            window.simulate_next_frame(cx);
-        });
-
-        let track = cx
-            .debug_bounds("effort-slider")
-            .expect("the slider track is rendered");
-        // The reset is not a stop: it is an action below the track.
-        assert!(
-            cx.debug_bounds("effort-stop-default").is_none(),
-            "the reset must not take a place on the scale"
-        );
-        assert!(
-            cx.debug_bounds("effort-reset").is_some(),
-            "an agent that offers a default gets the reset row"
-        );
-
-        let mut edge = f32::from(track.left());
-        for (selector, name) in [
-            ("effort-stop-low", "Low"),
-            ("effort-stop-medium", "Medium"),
-            ("effort-stop-high", "High"),
-            ("effort-stop-xhigh", "Xhigh"),
-            ("effort-stop-max", "Max"),
-        ] {
-            let bounds = cx
-                .debug_bounds(selector)
-                .unwrap_or_else(|| panic!("effort stop {name} ({selector}) is rendered"));
-            assert!(
-                bounds.right() <= track.right() && bounds.left() >= track.left(),
-                "effort stop {name} ({selector}) leaves the track: \
-                 stop [{}, {}] vs track [{}, {}]",
-                bounds.left(),
-                bounds.right(),
-                track.left(),
-                track.right(),
-            );
-            assert!(
-                (f32::from(bounds.left()) - edge).abs() < 1.0,
-                "effort stop {name} ({selector}) starts at {}px, but the \
-                 previous stop ended at {edge}px -- a gap or an overlap",
-                f32::from(bounds.left()),
-            );
-            edge = f32::from(bounds.right());
-        }
-        assert!(
-            (edge - f32::from(track.right())).abs() < 1.0,
-            "the stops stop short of the track's end: {edge}px of {}px",
-            f32::from(track.right())
-        );
-    }
-
     /// A chat holding an effort selector and nothing else it needs: no
     /// subprocess, so the levels under test are exactly the ones written
     /// here rather than whatever a fixture happens to advertise.
@@ -12940,7 +12840,9 @@ two"
         })
     }
 
-    const FULL_LADDER: [(&str, &str); 7] = [
+    /// Claude Code's own ladder, the longest one a session offers: the reset
+    /// first, the levels, then Ultracode.
+    const CLAUDE_LADDER: &[(&str, &str)] = &[
         ("default", "Default"),
         ("low", "Low"),
         ("medium", "Medium"),
@@ -12950,137 +12852,189 @@ two"
         ("ultracode", "Ultracode"),
     ];
 
-    /// Dragging the knob lands on a level, not between two.
-    ///
-    /// The track is continuous and the levels are not, so every pixel has to
-    /// answer with one of them -- and the one it answers with is the nearest,
-    /// not the last one the pointer passed.
+    /// The bounds of `value`'s row in the open effort list.
+    fn effort_option(cx: &mut VisualTestContext, value: &str) -> Option<Bounds<Pixels>> {
+        let selector: &'static str = Box::leak(format!("effort-option-{value}").into_boxed_str());
+        cx.debug_bounds(selector)
+    }
+
+    /// Whether `value`'s row drew its stepped bar at `filled` of `total`
+    /// steps: the bar names its own state in its selector.
+    fn effort_steps_drawn(
+        cx: &mut VisualTestContext,
+        value: &str,
+        filled: usize,
+        total: usize,
+    ) -> bool {
+        let selector: &'static str =
+            Box::leak(format!("effort-steps-{value}-{filled}-{total}").into_boxed_str());
+        cx.debug_bounds(selector).is_some()
+    }
+
+    /// Every level the session offers is a row, each with the step it stands
+    /// on out of the levels there are. Ultracode is no step further up the
+    /// scale, so it has a note where the bar would be, and the reset is the
+    /// last row, below the rest.
     #[gpui::test]
-    async fn dragging_the_knob_settles_on_the_nearest_level(cx: &mut TestAppContext) {
-        let (chat, cx) = effort_chat(cx, "low", &FULL_LADDER);
+    async fn the_effort_list_offers_every_level_with_its_step_and_the_default_last(
+        cx: &mut TestAppContext,
+    ) {
+        let (_chat, cx) = effort_chat(cx, "high", CLAUDE_LADDER);
         open_effort_picker(cx);
 
-        let track = cx
-            .debug_bounds("effort-slider")
-            .expect("the slider track is drawn");
-        let y = track.center().y;
-        let left = track.left();
-        let width = f32::from(track.size.width);
-
-        // The pointer has to arrive before it can press: gpui arms a drag
-        // only on the hitbox that was topmost at mouse-down, and which one
-        // that is comes from the hit test of the last painted frame.
-        cx.simulate_mouse_move(point(left + px(1.0), y), None, Modifiers::none());
-        refresh_frame(cx);
-        cx.simulate_mouse_down(
-            point(left + px(1.0), y),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        // The first move past the threshold is the one that *arms* the drag,
-        // and gpui stops it there — no listener sees it. The knob starts
-        // moving on the move after that.
-        cx.simulate_mouse_move(
-            point(left + px(8.0), y),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        // Six stops: the rungs sit a fifth of the track apart. Just past the
-        // fourth is still the fourth.
-        cx.simulate_mouse_move(
-            point(left + px(width * 0.61), y),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        cx.run_until_parked();
-        assert_eq!(
-            current_effort(&chat, cx).as_deref(),
-            Some("xhigh"),
-            "0.61 of the track is nearer the fourth rung than the fifth"
+        for (value, _) in CLAUDE_LADDER {
+            assert!(
+                effort_option(cx, value).is_some(),
+                "the list has a row for {value}"
+            );
+        }
+        for (value, filled) in [
+            ("low", 1),
+            ("medium", 2),
+            ("high", 3),
+            ("xhigh", 4),
+            ("max", 5),
+        ] {
+            assert!(
+                effort_steps_drawn(cx, value, filled, 5),
+                "{value} is step {filled} of the five levels"
+            );
+        }
+        for value in ["ultracode", "default"] {
+            for filled in 0..=7 {
+                for total in 0..=7 {
+                    assert!(
+                        !effort_steps_drawn(cx, value, filled, total),
+                        "{value} is not a step on the scale, yet it drew {filled} of {total}"
+                    );
+                }
+            }
+        }
+        assert!(
+            cx.debug_bounds("effort-note-ultracode").is_some(),
+            "Ultracode says what it adds where the other rows have their bar"
         );
 
-        cx.simulate_mouse_move(
-            point(left + px(width), y),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        cx.simulate_mouse_up(
-            point(left + px(width), y),
-            MouseButton::Left,
-            Modifiers::none(),
-        );
-        cx.run_until_parked();
-        assert_eq!(
-            current_effort(&chat, cx).as_deref(),
-            Some("ultracode"),
-            "the far end of the track is the last level offered"
+        let ultracode = effort_option(cx, "ultracode").expect("the Ultracode row is drawn");
+        let reset = effort_option(cx, "default").expect("the reset row is drawn");
+        assert!(
+            reset.top() >= ultracode.bottom(),
+            "the reset comes last: reset top {:?} vs Ultracode bottom {:?}",
+            reset.top(),
+            ultracode.bottom()
         );
     }
 
-    /// The reset is an action, not a rung: it answers and closes, where the
-    /// track stays open because moving a knob is something you do more than
-    /// once.
+    /// A press on a row picks its level and closes the list, where the slider
+    /// stayed open because moving a knob is something you do more than once.
     #[gpui::test]
-    async fn the_reset_leaves_the_track_and_closes_the_picker(cx: &mut TestAppContext) {
-        let (chat, cx) = effort_chat(cx, "max", &FULL_LADDER);
+    async fn choosing_an_effort_row_selects_it_and_closes_the_list(cx: &mut TestAppContext) {
+        let (chat, cx) = effort_chat(cx, "high", CLAUDE_LADDER);
         open_effort_picker(cx);
 
-        let reset = cx
-            .debug_bounds("effort-reset")
-            .expect("the reset row is drawn");
+        let low = effort_option(cx, "low").expect("the Low row is drawn");
+        cx.simulate_click(low.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("low"));
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds("effort-picker").is_none(),
+            "choosing a level closes the list it was chosen from"
+        );
+        // The effort lives in its own labelled pill beside the model's.
+        assert!(
+            cx.debug_bounds("model-effort-label").is_some(),
+            "the effort pill shows the selected effort"
+        );
+        assert_effort_is_a_peer_of_the_model(cx);
+    }
+
+    /// The reset is a row like the others: it answers with its own value and
+    /// closes the list.
+    #[gpui::test]
+    async fn choosing_default_reports_the_reset(cx: &mut TestAppContext) {
+        let (chat, cx) = effort_chat(cx, "max", CLAUDE_LADDER);
+        open_effort_picker(cx);
+
+        let reset = effort_option(cx, "default").expect("the reset row is drawn");
         cx.simulate_click(reset.center(), Modifiers::none());
         cx.run_until_parked();
         assert_eq!(current_effort(&chat, cx).as_deref(), Some("default"));
         refresh_frame(cx);
         assert!(
             cx.debug_bounds("effort-picker").is_none(),
-            "the reset closes the picker it answered from"
+            "the reset closes the list it answered from"
         );
     }
 
-    /// A session on its model's own default is not a session at the bottom
-    /// of the scale -- on most models "default" resolves to High. The track
-    /// has no point to fill, so the value says so instead of pointing at Low.
+    /// The list opens with the keys on the level in force, the arrows move
+    /// them, Enter picks and Escape leaves the choice as it was.
     #[gpui::test]
-    async fn a_session_on_the_models_default_is_not_at_the_foot_of_the_track(
-        cx: &mut TestAppContext,
-    ) {
-        let (_chat, cx) = effort_chat(cx, "default", &FULL_LADDER);
+    async fn the_effort_list_answers_the_keys(cx: &mut TestAppContext) {
+        let (chat, cx) = effort_chat(cx, "high", CLAUDE_LADDER);
         open_effort_picker(cx);
 
-        assert!(
-            cx.debug_bounds("effort-current-unset").is_some(),
-            "a session on the model's default marks the value as unchosen"
+        let (high, marked) = chat.read_with(&cx.cx, |chat, app| {
+            let rows = chat.picker_rows(app);
+            (
+                rows.iter().position(
+                    |row| matches!(row, controls::PickerRow::Effort(value) if value == "high"),
+                ),
+                chat.marked_picker_row(rows.len()),
+            )
+        });
+        assert!(high.is_some(), "High is one of the list's rows");
+        assert_eq!(marked, high, "the list opens with its mark on High");
+
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        assert_eq!(
+            current_effort(&chat, cx).as_deref(),
+            Some("xhigh"),
+            "down moves the mark one level up the list and enter picks it"
         );
+        refresh_frame(cx);
         assert!(
-            cx.debug_bounds("effort-current").is_none(),
-            "nothing on the scale is selected, so nothing reads as selected"
+            cx.debug_bounds("effort-picker").is_none(),
+            "enter closes the list"
+        );
+
+        open_effort_picker(cx);
+        assert!(cx.debug_bounds("effort-picker").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        refresh_frame(cx);
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("xhigh"));
+        assert!(
+            cx.debug_bounds("effort-picker").is_none(),
+            "escape closes the list without choosing"
         );
     }
 
-    /// A model that offers one level is not a range. The chip still names
-    /// it; the track would be a knob with nowhere to go.
+    /// A model that offers one level still draws a bar, one step of one, and
+    /// the level is a row like any other.
     #[gpui::test]
-    async fn a_single_level_draws_no_track(cx: &mut TestAppContext) {
-        let (chat, cx) = effort_chat(cx, "default", &[("default", "Default"), ("high", "High")]);
+    async fn a_single_level_has_one_full_step(cx: &mut TestAppContext) {
+        let (_chat, cx) = effort_chat(cx, "xhigh", &[("xhigh", "Extra high")]);
         open_effort_picker(cx);
 
         assert!(
-            cx.debug_bounds("effort-picker").is_some(),
-            "the picker still opens: the reset is still an answer"
+            effort_steps_drawn(cx, "xhigh", 1, 1),
+            "the only level is the whole scale"
         );
+    }
+
+    /// The slider is retired, not hidden behind the list.
+    #[gpui::test]
+    async fn the_slider_is_gone(cx: &mut TestAppContext) {
+        let (_chat, cx) = effort_chat(cx, "high", CLAUDE_LADDER);
+        open_effort_picker(cx);
+
+        assert!(cx.debug_bounds("effort-picker").is_some());
         assert!(
             cx.debug_bounds("effort-slider").is_none(),
-            "one level is not a scale, so there is no track to drag"
+            "the list replaces the track"
         );
-        // And it stays reachable: a level nothing can select is a level the
-        // session may as well not have been offered.
-        let stop = cx
-            .debug_bounds("effort-stop-high")
-            .expect("the one level is still offered, as a row");
-        cx.simulate_click(stop.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert_eq!(current_effort(&chat, cx).as_deref(), Some("high"));
     }
 
     /// A structured question is named by its own header, not by the asking
@@ -15261,73 +15215,6 @@ two"
             1,
             "a second location inside the throttle window does not refollow"
         );
-    }
-
-    /// F-CHAT-17: the slider carries the agent's advertised effort levels,
-    /// the session's current one included, and picking one updates both the
-    /// selection and the label on the chip.
-    ///
-    /// The levels used to be rows inside the model picker -- two controls
-    /// for one value, one of them reachable only by opening the other.
-    #[gpui::test]
-    async fn the_effort_slider_offers_every_level_and_moves_the_selection(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["composer"]);
-        pump_chat_until(cx, &chat, |chat| {
-            chat.effort.is_some() && !chat.available_models.is_empty() && !chat.streaming
-        });
-        refresh_frame(cx);
-
-        // Complete a turn so the picker chip becomes interactive.
-        focus_and_type(cx, "hi");
-        cx.simulate_keystrokes("enter");
-        pump_chat_until(cx, &chat, |chat| chat.has_completed_turn);
-        refresh_frame(cx);
-
-        let chip = cx
-            .debug_bounds("effort-chip")
-            .expect("the effort chip is drawn");
-        cx.simulate_click(chip.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("effort-picker").is_some());
-        for stop in ["effort-stop-low", "effort-stop-medium", "effort-stop-high"] {
-            assert!(
-                cx.debug_bounds(stop).is_some(),
-                "every advertised level is a stop on the track: {stop}"
-            );
-        }
-        // This agent advertises no reset, so the track is all there is.
-        assert!(
-            cx.debug_bounds("effort-reset").is_none(),
-            "an agent that offers no default gets no reset row"
-        );
-        assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| {
-                chat.effort.as_ref().and_then(|e| e.current_value.clone())
-            }),
-            Some("medium".to_string()),
-            "the fixture reported the current effort"
-        );
-
-        let high = cx
-            .debug_bounds("effort-stop-high")
-            .expect("the high stop is drawn");
-        cx.simulate_click(high.center(), Modifiers::none());
-        cx.run_until_parked();
-        assert_eq!(
-            chat.read_with(&cx.cx, |chat, _| {
-                chat.effort.as_ref().and_then(|e| e.current_value.clone())
-            }),
-            Some("high".to_string()),
-            "choosing an effort updates the selection"
-        );
-        refresh_frame(cx);
-        // The effort no longer lives inside the model chip -- it is its own
-        // labelled pill beside it, so the old wording here would be wrong.
-        assert!(
-            cx.debug_bounds("model-effort-label").is_some(),
-            "the effort pill shows the selected effort"
-        );
-        assert_effort_is_a_peer_of_the_model(cx);
     }
 
     /// The effort pill sits beside the model pill, not inside it.

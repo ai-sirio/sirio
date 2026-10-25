@@ -123,58 +123,46 @@ pub(crate) fn status_pill_content(
 
 /// The value the native transport spells the reset with. It is not a rung on
 /// a magnitude axis — on most models "default" resolves to High, well above
-/// Low — so it never becomes a stop on the track; it rides below it as its
-/// own action. An agent that offers no such choice simply gets no reset row.
+/// Low — so it is not one of the levels the list steps through; it rides
+/// below them as a row of its own. An agent that offers no such choice simply
+/// gets no reset row.
 pub(crate) const EFFORT_RESET: &str = "default";
 
-/// The slider's stops: the levels the session offers, in the order it
-/// offered them, with the reset left out.
-pub(crate) fn effort_stops(choices: &[EffortChoice]) -> Vec<&EffortChoice> {
-    choices
-        .iter()
-        .filter(|choice| choice.value != EFFORT_RESET)
-        .collect()
+/// The value the native transport spells Ultracode with: the same string as
+/// `sirio_claude::catalog::EFFORT_ULTRACODE`, which `sirio_ui` does not
+/// depend on. It is Extra high plus orchestration, not one step further up
+/// the scale, so the list gives it a note in place of a step.
+pub(crate) const EFFORT_ULTRACODE: &str = "ultracode";
+
+/// The effort choices the list draws, split by what each row is.
+#[derive(Clone, Debug)]
+pub(crate) struct EffortRows {
+    /// The levels, in the order the agent offered them, without the reset
+    /// and Ultracode. Each is a step on the scale.
+    pub levels: Vec<EffortChoice>,
+    pub ultracode: Option<EffortChoice>,
+    pub reset: Option<EffortChoice>,
 }
 
-/// Where stop `index` sits on the track. The first stop is the left edge and
-/// the last the right one, so a two-stop slider is a switch between its ends
-/// rather than a knob that never reaches them.
-pub(crate) fn effort_fraction_for_stop(stops: usize, index: usize) -> f32 {
-    if stops < 2 {
-        return 0.0;
+impl EffortRows {
+    /// Every row, in the order the list draws them: the levels, Ultracode,
+    /// then the reset below its separator.
+    pub(crate) fn in_order(&self) -> impl Iterator<Item = &EffortChoice> {
+        self.levels.iter().chain(&self.ultracode).chain(&self.reset)
     }
-    (index.min(stops - 1) as f32) / ((stops - 1) as f32)
 }
 
-/// Which stop a point on the track belongs to: the nearest one. A drag that
-/// comes to rest between two rungs picks the one it is closest to, rather
-/// than the last one it passed — the levels are discrete, so every pixel of
-/// the track has to answer with one of them.
-pub(crate) fn effort_stop_for_fraction(stops: usize, fraction: f32) -> usize {
-    if stops < 2 {
-        return 0;
-    }
-    let steps = (stops - 1) as f32;
-    let scaled = (fraction.clamp(0.0, 1.0) * steps).round();
-    (scaled as usize).min(stops - 1)
-}
-
-/// How wide stop `index`'s share of the track is, as a fraction of the whole.
-///
-/// Not `1/stops`: a stop owns the pixels nearer to it than to its
-/// neighbours, and the two ends have a neighbour on one side only, so they
-/// own half as much track as the stops between them. Equal shares would make
-/// the ends twice as easy to hit as they should be and put every boundary
-/// half a step off.
-pub(crate) fn effort_stop_share(stops: usize, index: usize) -> f32 {
-    if stops < 2 {
-        return 1.0;
-    }
-    let step = 1.0 / ((stops - 1) as f32);
-    if index == 0 || index == stops - 1 {
-        step / 2.0
-    } else {
-        step
+/// Splits the session's choices into the list's rows.
+pub(crate) fn effort_rows(choices: &[EffortChoice]) -> EffortRows {
+    let find = |value: &str| choices.iter().find(|choice| choice.value == value).cloned();
+    EffortRows {
+        levels: choices
+            .iter()
+            .filter(|choice| choice.value != EFFORT_RESET && choice.value != EFFORT_ULTRACODE)
+            .cloned()
+            .collect(),
+        ultracode: find(EFFORT_ULTRACODE),
+        reset: find(EFFORT_RESET),
     }
 }
 
@@ -200,91 +188,6 @@ mod tests {
             ],
             config_option_id: None,
         }
-    }
-
-    fn choices(values: &[&str]) -> Vec<EffortChoice> {
-        values
-            .iter()
-            .map(|value| EffortChoice {
-                value: (*value).into(),
-                name: (*value).into(),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_reset_is_not_a_stop_on_the_track() {
-        let offered = choices(&[
-            "default",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max",
-            "ultracode",
-        ]);
-        let stops = effort_stops(&offered);
-        assert_eq!(
-            stops
-                .iter()
-                .map(|choice| choice.value.as_str())
-                .collect::<Vec<_>>(),
-            ["low", "medium", "high", "xhigh", "max", "ultracode"]
-        );
-    }
-
-    #[test]
-    fn an_agent_that_offers_no_reset_keeps_every_choice_as_a_stop() {
-        // Only Claude's own transport spells a reset; an ACP agent may offer
-        // nothing but levels, and none of them is silently eaten.
-        let offered = choices(&["low", "high"]);
-        assert_eq!(effort_stops(&offered).len(), 2);
-    }
-
-    #[test]
-    fn every_stop_survives_the_round_trip_through_the_track() {
-        for stops in 2..9 {
-            for index in 0..stops {
-                let fraction = effort_fraction_for_stop(stops, index);
-                assert_eq!(
-                    effort_stop_for_fraction(stops, fraction),
-                    index,
-                    "stop {index} of {stops} came back as something else"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_drag_that_rests_between_two_rungs_takes_the_nearer_one() {
-        // Six stops: the rungs sit at 0.0, 0.2, 0.4, 0.6, 0.8, 1.0.
-        assert_eq!(effort_stop_for_fraction(6, 0.09), 0);
-        assert_eq!(effort_stop_for_fraction(6, 0.11), 1);
-        assert_eq!(effort_stop_for_fraction(6, 0.71), 4);
-        assert_eq!(effort_stop_for_fraction(6, 0.79), 4);
-    }
-
-    #[test]
-    fn the_end_stops_own_half_the_track_the_middle_ones_do() {
-        let stops = 5;
-        let middle = effort_stop_share(stops, 2);
-        assert!((middle - 0.25).abs() < f32::EPSILON);
-        assert!((effort_stop_share(stops, 0) - middle / 2.0).abs() < f32::EPSILON);
-        assert!((effort_stop_share(stops, 4) - middle / 2.0).abs() < f32::EPSILON);
-        // The shares cover the track exactly once.
-        let total: f32 = (0..stops)
-            .map(|index| effort_stop_share(stops, index))
-            .sum();
-        assert!((total - 1.0).abs() < 1e-5, "shares summed to {total}");
-    }
-
-    #[test]
-    fn a_single_stop_is_not_a_slider() {
-        // One level to offer is not a range; the caller draws no track, and
-        // the maths still answers rather than dividing by zero.
-        assert_eq!(effort_fraction_for_stop(1, 0), 0.0);
-        assert_eq!(effort_stop_for_fraction(1, 0.9), 0);
-        assert_eq!(effort_stop_for_fraction(0, 0.5), 0);
     }
 
     #[test]
