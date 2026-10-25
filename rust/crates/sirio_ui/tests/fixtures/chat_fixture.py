@@ -41,6 +41,9 @@ Modes (argv[1], optional argv[2] is a scratch directory):
   effort-stubborn  Like `composer`, but an agent that keeps its own effort:
                    `session/set_config_option` is answered with the effort
                    still at "medium", whatever was asked for.
+  effort-error     Like `composer`, but an agent that refuses a change of
+                   effort outright: `session/set_config_option` is answered
+                   with a JSON-RPC error (the request is still logged).
   auth-required    initialize advertises one login auth method, then every
                    session/new is rejected with wire code -32000
                    "Authentication required" — ACP's auth_required shape, so
@@ -56,8 +59,10 @@ Modes (argv[1], optional argv[2] is a scratch directory):
                    the "Agent disconnected" banner. Every invocation starts
                    clean, so a Restart click reconnects and then sits idle.
 
-Every mode answers `session/set_config_option` with the options it advertised,
-the requested one set to the requested value. When the environment variable
+Every mode answers `session/set_config_option` with the options it advertised
+(`ely-catalogue` its own, every other mode `composer`'s, advertised or not), the
+requested one set to the requested value; `effort-stubborn` and `effort-error`
+answer as their entries above say. When the environment variable
 CHAT_FIXTURE_CONFIG_LOG names a file, the request's params are appended to it
 as one JSON line, before the answer goes out: the file is what a test reads to
 see what actually reached the agent.
@@ -72,6 +77,9 @@ import time
 
 
 SESSION_ID = "chat-fixture-session"
+
+# The modes that advertise composer's commands, options and context fill.
+COMPOSER_LIKE = ("composer", "effort-stubborn", "effort-error")
 
 
 def send(message):
@@ -247,12 +255,16 @@ def advertise_catalogue():
 def answer_set_config_option(request, mode):
     """Log the request, then answer with the options the mode advertised and
     the requested one set to the requested value. `effort-stubborn` is an
-    agent that keeps its own level: it answers with every option unchanged."""
+    agent that keeps its own level: it answers with every option unchanged.
+    `effort-error` refuses with a JSON-RPC error, after logging the request."""
     params = request.get("params", {})
     log_path = os.environ.get("CHAT_FIXTURE_CONFIG_LOG")
     if log_path:
         with open(log_path, "a", encoding="utf-8") as log:
             log.write(json.dumps(params, separators=(",", ":")) + "\n")
+    if mode == "effort-error":
+        error(request["id"], "effort cannot be changed")
+        return
     options = (
         catalogue_config_options() if mode == "ely-catalogue" else composer_config_options()
     )
@@ -500,7 +512,7 @@ def main():
                 advertise_catalogue()
             else:
                 response(request["id"], {"sessionId": SESSION_ID})
-            if mode in ("composer", "effort-stubborn"):
+            if mode in COMPOSER_LIKE:
                 advertise()
         elif method == "session/set_config_option":
             answer_set_config_option(request, mode)
@@ -519,7 +531,7 @@ def main():
             if mode == "plain":
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
-            if mode in ("composer", "ely-catalogue", "effort-stubborn"):
+            if mode in COMPOSER_LIKE or mode == "ely-catalogue":
                 message_chunk("reply ")
                 response(request["id"], {"stopReason": "end_turn"})
             if mode == "echo-blocks":
