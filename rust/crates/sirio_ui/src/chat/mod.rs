@@ -13582,6 +13582,114 @@ two"
         }
     }
 
+    /// The fake `claude` the native transport's chats run against.
+    const CLAUDE_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../sirio_acp/tests/fixtures/claude_fixture.py"
+    );
+
+    /// A chat on the fake `claude` in `mode`, which appends every control
+    /// request it receives to `log`: what the CLI was told, not what the
+    /// chat's own state shows. The path goes by launch argument, so tests
+    /// running side by side keep to their own logs.
+    fn claude_chat_logging_controls<'a>(
+        cx: &'a mut TestAppContext,
+        mode: &str,
+        log: &Path,
+    ) -> (Entity<Chat>, &'a mut VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(bezel::ui::input::init);
+        cx.update(init);
+        // The CLI's worker thread wakes the chat's event task, which the
+        // test scheduler refuses unless it is told real threads are in play.
+        cx.executor().allow_parking();
+        let launch = sirio_acp::ClaudeLaunch::fixture(
+            "python3",
+            vec![
+                CLAUDE_FIXTURE.to_string(),
+                mode.to_string(),
+                format!("--fixture-control-log={}", log.display()),
+            ],
+        );
+        cx.add_window_view(|_, cx| {
+            Chat::from_test_command(LaunchSpec::Claude(launch), std::env::temp_dir(), cx)
+        })
+    }
+
+    /// The `effortLevel` of every settings change the fake CLI logged that
+    /// names one, oldest first. Fast mode and the thinking display are other
+    /// requests (or other keys), so they are not here.
+    fn native_effort_requests(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|request| request["subtype"] == "apply_flag_settings")
+            .filter_map(|request| {
+                request["settings"]
+                    .get("effortLevel")
+                    .map(|level| level.as_str().unwrap_or("null").to_string())
+            })
+            .collect()
+    }
+
+    /// A chat on Claude Code starts on High like any other: the CLI is told
+    /// `effortLevel: "high"` once, on the wire, and the chip settles on it.
+    #[gpui::test]
+    async fn a_native_claude_chat_starts_on_high(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("control.jsonl");
+        let (chat, cx) = claude_chat_logging_controls(cx, "effort_ladder", &log);
+
+        pump_chat_until(cx, &chat, |_| !native_effort_requests(&log).is_empty());
+        let_the_agent_answer(cx);
+
+        assert_eq!(
+            native_effort_requests(&log),
+            vec!["high".to_string()],
+            "the CLI heard one request for High, and no second one after it answered"
+        );
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("high"));
+    }
+
+    /// A CLI that refuses the level leaves the session where it was, so the
+    /// chip goes back to what the session is on rather than naming a level it
+    /// never took, and the chat does not ask again.
+    #[gpui::test]
+    async fn a_refused_native_effort_reverts_the_chip(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("control.jsonl");
+        let (chat, cx) = claude_chat_logging_controls(cx, "effort_refused", &log);
+
+        // The chip reads High between the request and the refusal; Default
+        // after it is the session's own level coming back.
+        pump_chat_until(cx, &chat, |_| !native_effort_requests(&log).is_empty());
+        pump_chat_until(cx, &chat, |chat| {
+            chat.effort
+                .as_ref()
+                .is_some_and(|effort| effort.current_value.as_deref() == Some("default"))
+        });
+        let_the_agent_answer(cx);
+
+        assert_eq!(
+            native_effort_requests(&log),
+            vec!["high".to_string()],
+            "asked once, and left alone after the refusal"
+        );
+        assert_eq!(current_effort(&chat, cx).as_deref(), Some("default"));
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(chat.client.is_some(), "the refusal did not end the session");
+            assert!(
+                !chat
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Error { .. })),
+                "the refusal is no error card: {:?}",
+                chat.entries
+            );
+        });
+    }
+
     /// A structured question is named by its own header, not by the asking
     /// tool (the native transport's title for every question is the
     /// constant `Question`), and its options keep their descriptions; a

@@ -559,6 +559,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let mut pending_model: HashMap<String, String> = HashMap::new();
     let mut pending_fast_mode: HashMap<String, bool> = HashMap::new();
     let mut pending_thinking: HashMap<String, Option<String>> = HashMap::new();
+    // The effort changes the CLI has not answered yet, by request id, each
+    // with the level it asked for.
+    let mut pending_effort: HashMap<String, String> = HashMap::new();
     let mut pending_rewinds: HashMap<String, mpsc::SyncSender<Result<RewindOutcome, String>>> =
         HashMap::new();
     let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
@@ -658,6 +661,10 @@ async fn session(context: SessionContext) -> SessionOutcome {
     for event in catalogue_events(&catalog, &selected_model, &mut selected_effort) {
         let _ = event_tx.send(event).await;
     }
+    // The level the CLI last accepted, which `selected_effort` is only a
+    // guess ahead of while a change is in flight: the chip moves on the
+    // click, and goes back here if the CLI refuses it.
+    let mut confirmed_effort = selected_effort.clone();
 
     // The session proper: read lines and serve commands until one side
     // stops.
@@ -745,6 +752,35 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     })
                                     .await;
                             }
+                            if let Some(requested) = pending_effort.remove(&envelope.request_id) {
+                                let accepted = envelope.error.is_none();
+                                if accepted {
+                                    confirmed_effort = requested;
+                                }
+                                // Only the last answer to arrive speaks for
+                                // the session: while another change is in
+                                // flight, the chip is on that one's level.
+                                if pending_effort.is_empty() {
+                                    let announced = std::mem::replace(
+                                        &mut selected_effort,
+                                        confirmed_effort.clone(),
+                                    );
+                                    // An accepted change is what the chip
+                                    // already says. A refusal leaves the
+                                    // session where it was, so the selector
+                                    // is announced again with that level.
+                                    if !accepted || announced != selected_effort {
+                                        let _ = event_tx
+                                            .send(effort_event(
+                                                &catalog,
+                                                &selected_model,
+                                                &mut selected_effort,
+                                            ))
+                                            .await;
+                                        confirmed_effort = selected_effort.clone();
+                                    }
+                                }
+                            }
                             if let Some(model) = pending_model.remove(&envelope.request_id) {
                                 match &envelope.error {
                                     // The wire confirms by echoing; a refusal
@@ -771,6 +807,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                                 &mut selected_effort,
                                             ))
                                             .await;
+                                        confirmed_effort = selected_effort.clone();
                                     }
                                     Some(error) => {
                                         let _ = event_tx
@@ -1127,6 +1164,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         selected_effort =
                             level.clone().unwrap_or_else(|| EFFORT_DEFAULT.to_string());
                         let id = next_request_id();
+                        pending_effort.insert(id.clone(), selected_effort.clone());
                         if write_line(
                             &mut stdin,
                             &ControlRequest::set_effort(&id, level.as_deref()),
