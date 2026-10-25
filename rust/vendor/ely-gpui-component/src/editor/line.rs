@@ -187,8 +187,9 @@ impl CodeEditor {
             window,
         );
         // Text sits where laid out; rulers and guides on the grid.
-        let x = |column: usize| advance + measured.x(column);
-        let grid = |column: usize| advance * (column + 1) as f32;
+        let scrolled = self.scroll_x;
+        let x = |column: usize| advance + measured.x(column) - scrolled;
+        let grid = |column: usize| advance * (column + 1) as f32 - scrolled;
         let focused = self.focus.is_focused(window);
         let primary = self.primary();
         let current = primary.is_empty() && self.buffer.line_of(primary.head) == line;
@@ -354,9 +355,15 @@ impl CodeEditor {
                 canvas(
                     move |bounds, _, cx| {
                         let origin = bounds.origin.x + left;
-                        entity.update(cx, |editor, _| {
+                        entity.update(cx, |editor, cx| {
                             if editor.metrics.left != origin {
                                 editor.metrics.left = origin;
+                            }
+                            editor.metrics.code_left = bounds.origin.x;
+                            // The first frame that learns the width draws once more, with the scroll it allows.
+                            if editor.metrics.code_width != bounds.size.width {
+                                editor.metrics.code_width = bounds.size.width;
+                                cx.notify();
                             }
                         });
                     },

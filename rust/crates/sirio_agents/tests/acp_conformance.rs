@@ -341,7 +341,8 @@ fn claude_answers_the_session_panel_requests() {
 /// The lines the trace waterfall is built from, on the `claude` of this machine.
 ///
 /// The trace reads what the CLI streams as a turn runs: the main thread's model
-/// calls (`message_start`), a subagent's start (`task_started` naming the `Agent`
+/// calls (`status: requesting` as the request goes out, `message_start` as the first
+/// token comes and names the model), a subagent's start (`task_started` naming the `Agent`
 /// call), its own lines (an `assistant` line that carries the `Agent` call's id as its
 /// parent) and the CLI's own clock for it (`totalDurationMs` in the `Agent` call's
 /// result). None of it is a published contract, and `claude` self-updates: a CLI that
@@ -473,16 +474,33 @@ fn claude_streams_the_lines_the_trace_reads() {
         );
     }
 
-    let main_message_start = messages.iter().any(|message| match message {
+    let main_message_start = messages.iter().position(|message| match message {
         CliMessage::StreamEvent(event) => {
             event.parent_tool_use_id.is_none()
                 && matches!(event.lifecycle(), Some(MessageLifecycle::Start { .. }))
         }
         _ => false,
     });
+    let Some(main_message_start) = main_message_start else {
+        panic!("no `message_start` on the main thread: the trace could not name a model call");
+    };
+
+    // A main-thread call starts when its request goes out: `status: requesting` (a
+    // subagent's requests send none). `message_start` is the API's first token, seconds
+    // later, and a CLI that stopped sending the line would draw every call late.
+    let main_request = messages.iter().position(|message| {
+        matches!(
+            message,
+            CliMessage::System(system)
+                if system.subtype == "status" && system.status.as_deref() == Some("requesting")
+        )
+    });
     assert!(
-        main_message_start,
-        "no `message_start` on the main thread: the trace could not time a model call"
+        main_request.is_some_and(|request| request < main_message_start),
+        "no `system` line with subtype `status` and status `requesting` ahead of the first \
+         main-thread `message_start` (the request was at line {main_request:?}, the first token \
+         at line {main_message_start}): the trace could not start a model call when its \
+         request goes out"
     );
 
     let started_agent = messages.iter().find_map(|message| match message {

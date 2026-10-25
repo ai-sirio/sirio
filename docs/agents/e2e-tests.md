@@ -53,7 +53,7 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # Environment, the Context fold (asked on open, a plugin node, the CLAUDE.md row
 # opening a file tab), Connectors (reconnect, sign in), the Change request card, the
 # shared rate-limit pause and the open state across a relaunch. The trace scenarios
-# (trace_live, trace_cost, trace_interrupt, trace_death, trace_hang,
+# (trace_live, trace_cost, trace_request, trace_interrupt, trace_death, trace_hang,
 # trace_subagent_permission, trace_reveal, trace_tab, trace_idle, trace_keys) use
 # Scripts/Tests/stubs/trace/claude, the fixture's trace mode, whose scripted turns the
 # first word of a prompt picks (TRACE_STEP_MS paces them): agents and a nested agent, a
@@ -152,9 +152,11 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 
 # The editor's hosting hooks on a real frame, on a private Xvfb with Mesa's
 # lavapipe: the host's per-line colour (and Ely's own lexer kept out), a git mark,
-# a diagnostic, the gutter, the events a host hears, each from a real xdotool
-# gesture, and the text cursor over the code (read from X with XFixes, so it
-# needs libXfixes). --xvfb or --display :N, --out-dir DIR, --no-build,
+# a diagnostic, the gutter, and the events a host hears, each from a real xdotool
+# gesture; the text cursor over the code (read from X with XFixes, so it needs
+# libXfixes); and a line wider than the window scrolling sideways under a gutter
+# that stays put (the wheel, Shift and the wheel, a drag of the bar's thumb, End
+# and Home). --xvfb or --display :N, --out-dir DIR, --no-build,
 # --no-software-vulkan.
 Scripts/Tests/test-ely-editor-probe.sh --xvfb   # -> prints "ELY EDITOR PROBE OK"
 ```

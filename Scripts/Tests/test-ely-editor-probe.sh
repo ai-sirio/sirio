@@ -20,9 +20,15 @@ set -euo pipefail
 # of line 7 (the breakpoint set stays empty), with a control run that does
 # toggle when breakpoints are on; SecondaryClick from a right click on line 3;
 # no PlatformClick from a plain click on line 3, but one from a Super-held
-# click on it at its own offset. And the cursor X shows (XFixesGetCursorImage's
+# click on it at its own offset. The cursor X shows (XFixesGetCursorImage's
 # serial): over line 3's text it is neither the gutter digits' arrow nor the git
-# bar's hand, so the code shows a text cursor. Not covered here: `reset`, the view options'
+# bar's hand, so the code shows a text cursor. Line 12, far wider than the
+# window, scrolls sideways: a wheel to the right (X button 7) and Shift with the wheel down
+# move what a pointer at one place over line 12 lands on further along that
+# same line (the rows stay where they were), the git bar still has no offset
+# while scrolled (the gutter stays put), a wheel to the left brings the line's
+# start back, and End then Home move the view with the caret, so the line's
+# tail and then its start sit under the pointer. Not covered here: `reset`, the view options'
 # effect on the frame, and a pointer past the last row (see docs/testing/).
 #
 # The artifact: --out-dir DIR (default ${SIRIO_E2E_TMP:-$HOME/.cache/sirio-e2e}/ely-editor-probe)
@@ -181,9 +187,13 @@ xd() { DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool "$@"; }
 # The targets, from the geometry the probe printed (see its header).
 # Prints KEY=VALUE lines for eval: the pixel targets and the byte range of line 3.
 targets() {
-  python3 - "$LOG" <<'PY'
+  local width height
+  width=$(xwininfo -display "$DISPLAY_TARGET" -id "$WINDOW" | awk '/Width:/ {print $2}')
+  height=$(xwininfo -display "$DISPLAY_TARGET" -id "$WINDOW" | awk '/Height:/ {print $2}')
+  python3 - "$LOG" "$width" "$height" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
+window_width = int(sys.argv[2])
 geometry = re.search(r"^geometry advance=([\d.]+) line_height=([\d.]+) digits=(\d+) gutter_columns=(\d+)$", text, re.M)
 line3 = re.search(r"^line 3 bytes (\d+)\.\.(\d+)$", text, re.M)
 if not (geometry and line3):
@@ -202,6 +212,21 @@ print(f"ROW5={row(5)}")
 print(f"ROW7={row(7)}")
 print(f"LINE3_START={line3.group(1)}")
 print(f"LINE3_END={line3.group(2)}")
+wide = re.search(r"^line 12 bytes (\d+)\.\.(\d+)$", text, re.M)
+if not wide:
+    sys.exit("the probe printed no line 12")
+print(f"ROW12={row(12)}")
+print(f"WIDE_START={wide.group(1)}")
+print(f"WIDE_END={wide.group(2)}")
+# Column 20 of line 12, unscrolled; and six advances short of the minimap (12 advances, view.rs) at the right edge.
+print(f"SAMPLE_X={round((columns + 1 + 20 + 0.5) * advance)}")
+print(f"RIGHT_X={round(window_width - (12 + 6) * advance)}")
+# The horizontal bar's thumb starts at the code cell's left edge (the gutter's right) while
+# unscrolled and is far longer than 40 px here; its 6 px stroke sits 9..3 px above the window's
+# bottom (the body ends there: no banner, no status row), drawn 588..594 on this Xvfb.
+height = int(sys.argv[3])
+print(f"THUMB_X={round(columns * advance + 40)}")
+print(f"THUMB_Y={height - 9}")
 hues = re.search(r"^hues keyword=(#[0-9A-Fa-f]{6}) punctuation=(#[0-9A-Fa-f]{6})$", text, re.M)
 if not hues:
     sys.exit("the probe printed no hues")
@@ -358,9 +383,73 @@ xd mousemove --window "$WINDOW" "$TEXT_X" "$ROW3"
 text=$(cursor_serial_other_than "$digits" "$bar") \
   || fail "the pointer over line 3's text shows the gutter's arrow or the git bar's hand, not a text cursor"
 echo "CURSOR: text $text, gutter digits $digits, git bar $bar"
+echo "step 7: line 12, wider than the window, scrolls sideways under a gutter that stays put"
+# The offset a pointer at x y reports: it rests at a neutral spot first, so arriving fires a Pointer event.
+pointer_on() { # x y lo hi why
+  xd mousemove --window "$WINDOW" 600 580
+  sleep 0.5
+  local before
+  before=$(grep -c '^event Pointer offset=Some' "$LOG" || true)
+  xd mousemove --window "$WINDOW" "$1" "$2"
+  python3 -c "$EVENT_PY" "$LOG" '^event Pointer offset=Some\((\d+)\)' "$before" "$3" "$4" 5 || fail "$5"
+}
+pointer_on "$SAMPLE_X" "$ROW12" $((WIDE_START + 19)) $((WIDE_START + 22)) \
+  "unscrolled, the pointer at column 20 of line 12 did not land on it"
+xd mousemove --window "$WINDOW" "$SAMPLE_X" "$ROW12" click --repeat 8 --delay 80 7
+capture wheel-right
+pointer_on "$SAMPLE_X" "$ROW12" $((WIDE_START + 30)) "$WIDE_END" \
+  "a wheel to the right did not move line 12 sideways (or moved the rows instead)"
+before=$(grep -c '^event Pointer offset=None$' "$LOG" || true)
+xd mousemove --window "$WINDOW" "$BAR_X" "$ROW5"
+for _ in $(seq 1 25); do
+  [ "$(grep -c '^event Pointer offset=None$' "$LOG" || true)" -gt "$before" ] && break
+  sleep 0.2
+done
+[ "$(grep -c '^event Pointer offset=None$' "$LOG" || true)" -gt "$before" ] \
+  || fail "scrolled sideways, the pointer over line 5's git bar reported an offset: the gutter moved with the code"
+echo "GUTTER: scrolled sideways, the git bar still has no offset"
+xd mousemove --window "$WINDOW" "$SAMPLE_X" "$ROW12" click --repeat 40 --delay 30 6
+pointer_on "$SAMPLE_X" "$ROW12" $((WIDE_START + 19)) $((WIDE_START + 22)) \
+  "a wheel to the left did not bring line 12's start back"
+xd mousemove --window "$WINDOW" "$SAMPLE_X" "$ROW12"
+xd keydown Shift_L
+xd click --repeat 8 --delay 80 5
+xd keyup Shift_L
+pointer_on "$SAMPLE_X" "$ROW12" $((WIDE_START + 30)) "$WIDE_END" \
+  "Shift with the wheel down did not move line 12 sideways"
+xd mousemove --window "$WINDOW" "$SAMPLE_X" "$ROW12" click --repeat 40 --delay 30 6
+echo "WHEEL: the wheel sideways and Shift with the wheel move line 12, and the rows stay"
+# A real drag of the bar's thumb: press, two moves (gpui starts a drag on the first), release.
+xd mousemove --window "$WINDOW" "$THUMB_X" "$THUMB_Y"
+sleep 0.3
+xd mousedown 1
+sleep 0.3
+xd mousemove --window "$WINDOW" $((THUMB_X + 20)) "$THUMB_Y"
+sleep 0.3
+xd mousemove --window "$WINDOW" $((THUMB_X + 300)) "$THUMB_Y"
+capture bar-dragging
+xd mouseup 1
+capture bar-dragged
+pointer_on "$SAMPLE_X" "$ROW12" $((WIDE_START + 30)) "$WIDE_END" \
+  "a drag of the horizontal bar's thumb did not move line 12 sideways"
+echo "BAR: a drag of the thumb moves line 12"
+xd mousemove --window "$WINDOW" "$SAMPLE_X" "$ROW12" click --repeat 40 --delay 30 6
+pointer_on "$SAMPLE_X" "$ROW12" $((WIDE_START + 19)) $((WIDE_START + 22)) \
+  "a wheel to the left did not bring line 12's start back after the drag"
+# The caret goes to line 12 with a click; End and Home are real keys at the window that has X focus.
+xd mousemove --window "$WINDOW" "$SAMPLE_X" "$ROW12" click 1
+xd windowfocus --sync "$WINDOW"
+xd key End
+capture end-of-line
+pointer_on "$RIGHT_X" "$ROW12" $((WIDE_END - 40)) "$WIDE_END" \
+  "End left the view where it was: line 12's tail is not under the pointer near the right edge"
+xd key Home
+pointer_on "$SAMPLE_X" "$ROW12" $((WIDE_START + 19)) $((WIDE_START + 25)) \
+  "Home did not bring the view back to line 12's start"
+echo "CARET: End and Home move the view with the caret"
 stop
 
-echo "step 7: control: with breakpoints on, the click in line 7's slot toggles line 7"
+echo "step 8: control: with breakpoints on, the click in line 7's slot toggles line 7"
 launch breakpoints-on ELY_PROBE_BREAKPOINTS=on
 eval "$(targets)"
 xd mousemove --window "$WINDOW" "$SLOT_X" "$ROW7" click 1

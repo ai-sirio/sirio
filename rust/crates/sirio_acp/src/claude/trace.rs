@@ -9,8 +9,11 @@
 //! `claude` 2.1.306, spec §3 and §12):
 //! - no line carries a timestamp, so every edge is the `at` the worker
 //!   stamped;
-//! - the main thread streams: a model call is `message_start` to
-//!   `message_stop`;
+//! - the main thread streams: a model call runs from the request
+//!   (`status: requesting`, the CLI sending it) to `message_stop`.
+//!   `message_start` is only its first token and names its model, so the
+//!   wait for that token, a second or three, is part of the call. A CLI
+//!   that sends no `requesting` falls back to `message_start` as the start;
 //! - a subagent does not stream. Its `assistant` lines arrive whole, so a
 //!   call runs from the agent's previous edge to the line, and its last
 //!   call, the report, sends no line at all: the gap before the `Agent`
@@ -93,6 +96,10 @@ pub(crate) struct TraceFold {
     baseline_tokens: Option<TokenCount>,
     /// The main thread's open model call. `message_stop` names none.
     main_call: Option<String>,
+    /// The Messages API id of `main_call`, once its `message_start` came.
+    main_message: Option<String>,
+    /// `main_call` was opened by a request and its first token has not come.
+    main_waiting: bool,
     /// Model calls seen this turn, so a second line of one is not a call.
     seen_calls: HashSet<String>,
     spans: HashMap<String, Span>,
@@ -127,6 +134,8 @@ impl TraceFold {
                 output: 0,
             }),
             main_call: None,
+            main_message: None,
+            main_waiting: false,
             seen_calls: HashSet::new(),
             spans: HashMap::new(),
             tasks: HashMap::new(),
@@ -157,6 +166,7 @@ impl TraceFold {
         // starting clean keeps it from marking this one.
         self.interrupted_this_turn = false;
         self.interrupted_call = None;
+        self.forget_main_call();
         vec![TraceEvent::TurnStarted { at }]
     }
 
@@ -228,15 +238,29 @@ impl TraceFold {
         }
         match event.lifecycle() {
             Some(MessageLifecycle::Start { id, model, .. }) => {
-                if id.is_some() && self.main_call == id {
+                if id.is_some() && (self.main_message == id || self.main_call == id) {
                     return Vec::new();
                 }
                 let mut events = Vec::new();
+                // The request opened this call: its first token only names
+                // the model.
+                if self.main_waiting {
+                    self.main_waiting = false;
+                    if let Some(id) = &id {
+                        self.seen_calls.insert(id.clone());
+                    }
+                    self.main_message = id;
+                    if let (Some(call), Some(model)) = (self.main_call.clone(), model) {
+                        events.push(TraceEvent::SpanModel { id: call, model });
+                    }
+                    return events;
+                }
                 // A `message_start` before the last call's `message_stop`
                 // means the stop never came: that call is over.
                 if let Some(open) = self.main_call.take() {
                     events.push(ended(open, SpanOutcome::Done, at, None));
                 }
+                self.main_message = None;
                 // A missing id drops the call's name, never the call: the fold
                 // names it, and its delta and stop still find it.
                 let id = id.unwrap_or_else(|| format!("call-{}", self.next_sequence()));
@@ -255,21 +279,24 @@ impl TraceFold {
                 })
                 .into_iter()
                 .collect(),
-            Some(MessageLifecycle::Stop) => self
-                .main_call
-                .take()
-                .map(|id| {
-                    // The CLI stops the call within milliseconds of an
-                    // interrupt: a call the user cut short did not finish.
-                    let outcome = if self.interrupted_call.as_ref() == Some(&id) {
-                        SpanOutcome::Interrupted
-                    } else {
-                        SpanOutcome::Done
-                    };
-                    ended(id, outcome, at, None)
-                })
-                .into_iter()
-                .collect(),
+            Some(MessageLifecycle::Stop) => {
+                self.main_message = None;
+                self.main_waiting = false;
+                self.main_call
+                    .take()
+                    .map(|id| {
+                        // The CLI stops the call within milliseconds of an
+                        // interrupt: a call the user cut short did not finish.
+                        let outcome = if self.interrupted_call.as_ref() == Some(&id) {
+                            SpanOutcome::Interrupted
+                        } else {
+                            SpanOutcome::Done
+                        };
+                        ended(id, outcome, at, None)
+                    })
+                    .into_iter()
+                    .collect()
+            }
             None => Vec::new(),
         }
     }
@@ -542,10 +569,32 @@ impl TraceFold {
                     activity,
                 }]
             }
+            "status" if system.status.as_deref() == Some("requesting") => self.requested(at),
             // `task_updated` and `task_notification` only confirm an end the
             // `Agent` result already carries.
             _ => Vec::new(),
         }
+    }
+
+    /// The CLI sent a main-thread API request: the model call starts now,
+    /// and `message_start` will only name it. Any other `status` line is a
+    /// permission mode and falls through to the ignored subtypes.
+    fn requested(&mut self, at: Instant) -> Vec<TraceEvent> {
+        // A second request before any token is the same answer again.
+        if self.main_waiting {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        // The open call was streaming and its stop never came.
+        if let Some(open) = self.main_call.take() {
+            events.push(ended(open, SpanOutcome::Done, at, None));
+        }
+        let id = format!("call-{}", self.next_sequence());
+        self.main_call = Some(id.clone());
+        self.main_message = None;
+        self.main_waiting = true;
+        events.push(call_started(id, None, None, at));
+        events
     }
 
     fn result(&mut self, result: &ResultPayload, at: Instant) -> Vec<TraceEvent> {
@@ -641,9 +690,18 @@ impl TraceFold {
         self.tasks.clear();
         self.backgrounded.clear();
         self.waits.clear();
-        self.main_call = None;
+        self.forget_main_call();
         self.interrupted_call = None;
         self.seen_calls.clear();
+    }
+
+    /// No main-thread call is open. The turn that ends, or starts, owns
+    /// none: a request the CLI made outside any turn must not read as the
+    /// retry of the next turn's.
+    fn forget_main_call(&mut self) {
+        self.main_call = None;
+        self.main_message = None;
+        self.main_waiting = false;
     }
 
     fn is_agent(&self, id: &str) -> bool {
@@ -2648,5 +2706,260 @@ mod tests {
         for subtype in ["task_progress_v2", "task_updated", "task_notification", "init"] {
             assert_eq!(fold.line(&line(subtype), clock.at(300)), Vec::new(), "{subtype}");
         }
+    }
+
+    /// The line the CLI writes when it sends a main-thread API request.
+    fn requesting() -> CliMessage {
+        msg(json!({
+            "type": "system", "subtype": "status", "status": "requesting",
+            "session_id": "f336cf12-ec43-4857-b267-6c76fb060431",
+            "uuid": "6f1f0c0e-2b7e-4e7a-9a53-0d6d3c2c8a11"
+        }))
+    }
+
+    /// `message_start` of the call `id`, with the model and no more.
+    fn message_start_of(id: &str) -> CliMessage {
+        msg(json!({
+            "type": "stream_event",
+            "event": {"type": "message_start", "message": {
+                "id": id, "model": HAIKU, "usage": {"input_tokens": 2, "output_tokens": 6}
+            }},
+            "parent_tool_use_id": null
+        }))
+    }
+
+    /// The call a `requesting` opened: asserts it is the one main-thread
+    /// call, with no model yet, started at `at`, and returns its id.
+    fn requested(fold: &mut TraceFold, at: Instant) -> String {
+        let events = fold.line(&requesting(), at);
+        let [
+            TraceEvent::SpanStarted {
+                id,
+                parent,
+                kind,
+                name,
+                detail,
+                model,
+                at: started,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("a request opens exactly one span: {events:?}");
+        };
+        assert!(id.starts_with("call-"), "{id}");
+        assert_eq!(*parent, None);
+        assert_eq!(*kind, SpanKind::Llm);
+        assert_eq!(name, "Model call");
+        assert_eq!(detail, "");
+        assert_eq!(*model, None);
+        assert_eq!(*started, at);
+        id.clone()
+    }
+
+    #[test]
+    fn a_request_opens_the_main_thread_call_at_its_own_instant() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        requested(&mut fold, clock.at(100));
+    }
+
+    #[test]
+    fn message_start_after_a_request_names_the_model_of_the_open_call() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let call = requested(&mut fold, clock.at(100));
+        // The first token, 800 ms later: no second span, nothing ended.
+        assert_eq!(
+            fold.line(&parse(MESSAGE_START), clock.at(900)),
+            vec![TraceEvent::SpanModel {
+                id: call.clone(),
+                model: HAIKU.into()
+            }]
+        );
+        assert_eq!(
+            fold.line(&parse(MESSAGE_DELTA), clock.at(2_700)),
+            vec![usage(&call, 39_278, 632)]
+        );
+        assert_eq!(
+            fold.line(&message_stop(), clock.at(2_710)),
+            vec![span_ended(&call, SpanOutcome::Done, clock.at(2_710), None)]
+        );
+    }
+
+    #[test]
+    fn the_wait_for_the_first_token_is_part_of_the_next_call() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let first = requested(&mut fold, clock.at(100));
+        fold.line(&message_start_of("msg_one"), clock.at(900));
+        fold.line(
+            &assistant(
+                None,
+                "msg_one",
+                vec![tool_use(
+                    "toolu_R",
+                    "Read",
+                    json!({"file_path": "/repo/a.rs"}),
+                )],
+            ),
+            clock.at(1_000),
+        );
+        fold.line(&message_stop(), clock.at(1_010));
+        fold.line(
+            &tool_result(None, "toolu_R", false, "text"),
+            clock.at(1_200),
+        );
+        // The request goes out at 1 210; the first token is 2 s behind it.
+        let second = requested(&mut fold, clock.at(1_210));
+        assert_ne!(first, second);
+        assert_eq!(
+            fold.line(&message_start_of("msg_two"), clock.at(3_200)),
+            vec![TraceEvent::SpanModel {
+                id: second,
+                model: HAIKU.into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_status_line_that_is_not_a_request_opens_nothing() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        for line in [
+            json!({"type": "system", "subtype": "status", "status": null,
+                   "permissionMode": "plan"}),
+            json!({"type": "system", "subtype": "status", "permissionMode": "default"}),
+        ] {
+            assert_eq!(fold.line(&msg(line), clock.at(100)), Vec::new());
+        }
+        // Nothing was opened, so the first token still opens its own call.
+        let started = fold.line(&parse(MESSAGE_START), clock.at(200));
+        assert_eq!(started.len(), 1, "{started:?}");
+        assert!(matches!(started[0], TraceEvent::SpanStarted { .. }));
+    }
+
+    #[test]
+    fn a_second_request_for_the_same_answer_is_still_one_call() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let call = requested(&mut fold, clock.at(100));
+        // A retry before any token arrived.
+        assert_eq!(fold.line(&requesting(), clock.at(5_000)), Vec::new());
+        assert_eq!(
+            fold.line(&parse(MESSAGE_START), clock.at(6_000)),
+            vec![TraceEvent::SpanModel {
+                id: call.clone(),
+                model: HAIKU.into()
+            }]
+        );
+        assert_eq!(
+            fold.line(&message_stop(), clock.at(7_000)),
+            vec![span_ended(&call, SpanOutcome::Done, clock.at(7_000), None)]
+        );
+    }
+
+    #[test]
+    fn a_request_while_a_call_streams_ends_that_call_and_opens_the_next() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let first = requested(&mut fold, clock.at(100));
+        fold.line(&parse(MESSAGE_START), clock.at(900));
+        // The stop never came.
+        let events = fold.line(&requesting(), clock.at(4_000));
+        let [ended_first, TraceEvent::SpanStarted { id: second, at, .. }] = events.as_slice()
+        else {
+            panic!("the open call ends and the next opens: {events:?}");
+        };
+        assert_eq!(
+            *ended_first,
+            span_ended(&first, SpanOutcome::Done, clock.at(4_000), None)
+        );
+        assert_ne!(*second, first);
+        assert!(second.starts_with("call-"));
+        assert_eq!(*at, clock.at(4_000));
+    }
+
+    #[test]
+    fn an_interrupt_while_a_call_waits_ends_it_interrupted_at_its_stop() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let call = requested(&mut fold, clock.at(100));
+        fold.interrupt_sent();
+        assert_eq!(
+            fold.line(&message_stop(), clock.at(900)),
+            vec![span_ended(
+                &call,
+                SpanOutcome::Interrupted,
+                clock.at(900),
+                None
+            )]
+        );
+    }
+
+    #[test]
+    fn an_interrupt_while_a_call_waits_leaves_it_to_the_store_when_no_stop_comes() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        requested(&mut fold, clock.at(100));
+        fold.interrupt_sent();
+        let end = fold.line(&parse(RESULT_INTERRUPTED), clock.at(900));
+        assert_eq!(end.len(), 1, "{end:?}");
+        assert_eq!(turn_end_outcome(&end[0]), TurnOutcome::Interrupted);
+    }
+
+    #[test]
+    fn a_repeated_message_start_of_the_bound_call_changes_nothing() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let call = requested(&mut fold, clock.at(100));
+        assert_eq!(fold.line(&parse(MESSAGE_START), clock.at(900)).len(), 1);
+        assert_eq!(fold.line(&parse(MESSAGE_START), clock.at(910)), Vec::new());
+        // Still open: the stop ends it, Done.
+        assert_eq!(
+            fold.line(&message_stop(), clock.at(2_000)),
+            vec![span_ended(&call, SpanOutcome::Done, clock.at(2_000), None)]
+        );
+    }
+
+    #[test]
+    fn a_request_the_turn_abandoned_does_not_swallow_the_next_turns() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let first = requested(&mut fold, clock.at(100));
+        // The turn ends with the request unanswered.
+        let end = fold.line(&result_line(Some(0.01), (1, 1, 0, 0)), clock.at(500));
+        assert_eq!(end.len(), 1, "{end:?}");
+        fold.prompt_sent(clock.at(1_000));
+        let second = requested(&mut fold, clock.at(1_100));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn a_message_start_without_an_id_after_a_request_still_binds() {
+        let clock = Clock::new();
+        let mut fold = TraceFold::new(false);
+        fold.prompt_sent(clock.at(0));
+        let call = requested(&mut fold, clock.at(100));
+        assert_eq!(
+            fold.line(&message_start_without_id(), clock.at(900)),
+            vec![TraceEvent::SpanModel {
+                id: call.clone(),
+                model: HAIKU.into()
+            }]
+        );
+        assert_eq!(
+            fold.line(&message_stop(), clock.at(1_000)),
+            vec![span_ended(&call, SpanOutcome::Done, clock.at(1_000), None)]
+        );
     }
 }

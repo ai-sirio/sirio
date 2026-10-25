@@ -16,9 +16,10 @@ project's life:
   names one server per language; naming it is not shipping it, and a command
   that is not installed resolves to `LspError::NotInstalled`. Nothing is
   *volunteered* about that — no card, ever, or there would be one on almost
-  every file. The context menu is the exception, because it is asked: it
-  names the missing program (`jdtls is not on PATH`) rather than describing
-  Sirio. The name reaches it through `lsp::Dead::NotInstalled` and
+  every file. The context menu is the exception, because it is asked: the
+  row's hover tooltip names the missing program (`jdtls is not on PATH`)
+  rather than describing Sirio. Menu rows are one line; no reason is drawn
+  under a label. The name reaches it through `lsp::Dead::NotInstalled` and
   `FileContextFacts::missing_language_server`, and the failure path pushes the
   facts a second time because the tab computed its own before anyone had
   looked.

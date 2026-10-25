@@ -33,6 +33,9 @@ set -eEuo pipefail
 #                     line (the reveal)
 #   link              a platform click on a Markdown link's label opens its target
 #   context           the menu's Copy, run by a right press, reaches the clipboard
+#   context_rows      a real right press opens the menu with one line per row; the pointer
+#                     resting on a disabled row (Cut, no selection) draws its reason as a
+#                     tooltip beside the pointer, and nowhere else; captured
 #   breadcrumb        the row over src/shapes.rs names the file's path and the symbols the
 #                     fake server's outline puts around the caret (impl Foo > bar): none
 #                     before the first symbol, a shallower symbol closes the deeper ones,
@@ -1370,6 +1373,52 @@ scenario_context() {
   expect_state dirty false
   echo "OK: the menu's Copy reached the clipboard: the paste read line_2"
   # Send to agent is `scenario_send_to_agent`.
+}
+
+# A real right press at MENU_POINT in a window of CLICK_WINDOW opens the menu with
+# its corner there. For a file with no selection its first four rows are
+# disabled; MENU_DISABLED_ROW is inside Cut, and MENU_TOOLTIP is the area below
+# and right of it where the tooltip draws, clear of the menu and of the caret.
+# findme.txt has no language server: the code under the menu still takes the
+# pointer, and a server's hover card would draw in that same area.
+MENU_POINT=(900 400)
+MENU_DISABLED_ROW=(960 462)
+MENU_TOOLTIP=(240x60+970+472)
+# How many pixels of AREA (WxH+X+Y) differ between two captures.
+crop_pixels_differ() { # capture capture area
+  local diff
+  diff="$(magick "$OUT_DIR/frames/$1.png" "$OUT_DIR/frames/$2.png" -crop "$3" +repage \
+    -compose difference -composite -threshold 0 -format '%[fx:int(mean*w*h)]' info: 2>/dev/null)" \
+    || fail "$SCENARIO: could not compare $1.png and $2.png over $3"
+  printf '%s' "$diff"
+}
+scenario_context_rows() {
+  open_file "$WT/findme.txt"
+  expect_state state loaded
+  ctl surface editor select --ranges=0..0 >/dev/null
+  focus_window
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$(find_window)" "${MENU_POINT[@]}" click 3
+  # The pointer leaves the menu's corner for a spot beside it, so the first capture
+  # has no tooltip: the menu, one line per row.
+  move_to 850 300
+  capture context-menu-rows
+  # Resting on Cut, past gpui's 500 ms tooltip delay: its reason draws beside the
+  # pointer. A disabled row has no hover colour, so the area can change only by
+  # the tooltip.
+  move_to "${MENU_DISABLED_ROW[@]}"
+  capture context-menu-tooltip
+  if [ "$STATE_ONLY" -eq 0 ]; then
+    local changed
+    changed="$(crop_pixels_differ context-menu-rows context-menu-tooltip "${MENU_TOOLTIP[0]}")"
+    [ "$changed" -gt 0 ] \
+      || fail "$SCENARIO: resting on the disabled Cut drew nothing at ${MENU_TOOLTIP[0]}: no tooltip"
+    echo "OK: the disabled row's reason drew as a tooltip ($changed pixels)"
+  fi
+  # A press outside the menu closes it, in the code left of its corner; the
+  # pointer then leaves the code, so no later scenario's file is hovered.
+  click_at 850 400
+  move_to 700 15
+  echo "OK: one line per row is in context-menu-rows.png, the tooltip in context-menu-tooltip.png"
 }
 
 # The composer of the workspace's chat, asked over the control socket as the chat
@@ -4339,6 +4388,7 @@ scenario hover scenario_hover
 scenario definition scenario_definition
 scenario link scenario_link
 scenario context scenario_context
+scenario context_rows scenario_context_rows
 scenario breadcrumb scenario_breadcrumb
 scenario snapshot scenario_snapshot
 scenario git_marks scenario_git_marks
