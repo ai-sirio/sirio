@@ -15,6 +15,7 @@ use std::{
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 
 use anyhow::{Context as _, Result};
+use bezel::ui::tooltip::Tooltip;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Corners, Element, ElementId, EventEmitter, Font,
@@ -4585,8 +4586,7 @@ impl gpui::Render for TerminalView {
                         .py(px(5.0))
                         .rounded(theme.radii.control)
                         .flex()
-                        .flex_col()
-                        .gap(px(2.0))
+                        .items_center()
                         .text_size(theme.typography.footnote)
                         .when(is_disabled, |this| {
                             this.text_color(theme.ely.fg_subtle).cursor_not_allowed()
@@ -4600,18 +4600,11 @@ impl gpui::Render for TerminalView {
                                     });
                                 })
                         })
-                        .child(item.label)
+                        // One line per row: the reason waits behind the pointer.
                         .when_some(disabled_reason, |this, reason| {
-                            this.child(
-                                div()
-                                    .debug_selector(move || {
-                                        format!("terminal-context-item-{index}-reason")
-                                    })
-                                    .text_size(px(12.0))
-                                    .text_color(theme.ely.fg_subtle)
-                                    .child(reason),
-                            )
-                        }),
+                            this.tooltip(move |window, cx| Tooltip::text(reason.clone(), window, cx))
+                        })
+                        .child(item.label),
                 );
             }
             let menu = menu.on_mouse_down_out(move |_, _, cx| {
@@ -10339,12 +10332,13 @@ mod view_tests {
     /// was always clickable even when the action made no sense. This forces
     /// the pane's own live prepainted size below the real split minimum
     /// (mirroring `main.rs`'s `MIN_SPLIT_PANE_SIZE`) and checks both halves
-    /// of the fix in one drive: the disabled item shows its reason text and
-    /// a click at its own drawn position does not fire an event, while an
-    /// unrelated, still-available item in the very same open menu still
+    /// of the fix in one drive: the disabled item stays one line, as tall as
+    /// an available one (its reason is a hover tooltip, not a second line),
+    /// and a click at its own drawn position does not fire an event, while
+    /// an unrelated, still-available item in the very same open menu still
     /// works normally.
     #[gpui::test]
-    async fn a_too_narrow_pane_disables_split_left_with_a_visible_reason(
+    async fn a_too_narrow_pane_disables_split_left_on_a_single_line(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.set_global(Theme::light());
@@ -10385,14 +10379,16 @@ mod view_tests {
         let click = point(px(40.0), px(40.0));
         cx.simulate_mouse_down(click, MouseButton::Right, Modifiers::none());
 
-        let reason_bounds = cx
-            .debug_bounds("terminal-context-item-6-reason")
-            .expect("Split Left's disabled reason must be drawn");
-        assert!(reason_bounds.size.width > px(0.0));
-
         let split_left = cx
             .debug_bounds("terminal-context-item-6")
             .expect("Split Left item must still be drawn (disabled, not absent)");
+        let available = cx
+            .debug_bounds("terminal-context-item-4")
+            .expect("Copy Pane ID item must be drawn");
+        assert_eq!(
+            split_left.size.height, available.size.height,
+            "a disabled row is one line, like an available one"
+        );
         cx.simulate_click(split_left.center(), Modifiers::none());
         assert!(
             events.borrow().is_empty(),

@@ -484,6 +484,8 @@ transcript plus PID-matched captures, dark and light. Extend
 - **Background tasks** (`is_backgrounded`, or any `task_type` other than
   `local_agent`): in this version, only the tool call that started them is
   traced. Work after its `tool_result` is not.
+  *Amended by `2026-10-23-trace-background-agents-design.md`: a background
+  `local_agent` is now traced until its end.*
 - **The turn's state:**
   - a user's cancel is *Interrupted*, whatever `is_error` says;
   - a lost connection is *Failed*;

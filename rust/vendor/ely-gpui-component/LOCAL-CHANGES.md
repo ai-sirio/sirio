@@ -737,6 +737,47 @@ scenarios, with the fake language server `Scripts/Tests/fake_lsp.py`); the
 performance record is `docs/perf/2026-10-ely-code-editor.md`. Linux X11 only:
 macOS and Windows keys and a real input method are not covered.
 
+### Sideways scroll
+
+Neither upstream `e17e31a6` nor upstream `main` scrolls the code sideways: the
+rows come from a vertical-only `uniform_list`, each code cell is
+`overflow_hidden` with its text placed at `x(0)`, so a line wider than the
+column was clipped, and gpui turned a horizontal wheel delta into a vertical
+one. Sirio adds the scroll here, in `src/editor/`:
+
+- `state.rs`: `CodeEditor` holds `scroll_x` (how far the code column is
+  scrolled right, from zero), `scroll_x_max`, `followed` (the primary head the
+  view last followed sideways) and `widest` (the widest line's unscrolled width,
+  by buffer stamp). `Metrics` gains `code_left`, `code_width` and `body_left`,
+  which the rows' and the body's canvases record.
+- `line.rs`: `line_row`'s `x` and `grid` subtract `scroll_x`, so selections,
+  carets, guides, rulers, whitespace dots, the fold marker and the text move
+  together, and so does `metrics.left`, which keeps hit testing and the input
+  method's placement right. The gutter is outside the code cell and stays put.
+  The same canvas records `code_left` and `code_width` and repaints once when the
+  width changes.
+- `view.rs`: the list stays vertical, wrapped in `on_axis`, and the body takes
+  the horizontal wheel delta itself (Shift and wheel arrives as one on Linux).
+  `scroll_sideways` finds the widest line by byte count, measures only that one,
+  sets `scroll_x_max` and re-clamps `scroll_x` on every render. When the primary
+  head has moved it also asks `sideways::follow` where to scroll; a head that did
+  not move never does, so a wheel scroll does not snap back. `offset_over_code`
+  tests the gutter against `code_left`. The sticky header shifts with the code.
+  `horizontal_bar` draws a bar over the code column's bottom edge (the
+  `Scrollbar` of `layout/scroll.rs`, driven by `scroll_x`), only when a line is
+  wider than the column; a press on it reaches neither the caret nor the
+  selection. Its track has the debug selector `code-editor-hbar`. Unlike
+  `Scrollbar`, which anchors a drag at its first drag move (gpui spends the
+  first move past the threshold starting the drag, so the thumb lagged the
+  pointer by that much), the thumb follows the pointer from the press, kept on
+  the editor as `bar_press` because the frame after the press rebuilds the bar.
+- `row.rs`: deleted-hunk and ghost rows clip and shift by `scroll_x`; lens and
+  chat rows do not move.
+- `sideways.rs`: `follow`, the policy that keeps the caret in view.
+- `ime.rs`: `measured` is `pub(super)`.
+
+A sync with upstream must keep `scroll_x` in `x` and `grid`.
+
 ## Trace card (chat trace waterfall, Task 6)
 
 - `src/typography/effects.rs`: `ShimmerText::phase(f32)` draws the band at the
