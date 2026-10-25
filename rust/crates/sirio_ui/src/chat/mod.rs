@@ -13424,9 +13424,13 @@ two"
             .iter()
             .position(|(config_id, _)| config_id == "model")
             .expect("the model switch reached the agent");
-        assert!(
-            requests[model_at + 1..].contains(&("effort".to_string(), "low".to_string())),
-            "Low was asked for again after the model switch: {requests:?}"
+        assert_eq!(
+            requests[model_at..],
+            [
+                ("model".to_string(), "opus".to_string()),
+                ("effort".to_string(), "low".to_string()),
+            ],
+            "the model request is followed by one request for Low, and nothing else: {requests:?}"
         );
         assert_eq!(current_effort(&chat, cx).as_deref(), Some("low"));
     }
