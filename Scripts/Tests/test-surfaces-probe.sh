@@ -37,7 +37,8 @@ set -euo pipefail
 # frames/<frame>-<appearance>.png (plus -p<N> pages). Rerunning the script reproduces it.
 #
 # Environment: SURFACES_MAX_PAGES=N sets the page cap (default 8). Setting it below a page count
-# the frames really have shows the cap's FAIL line (General has 3 pages: N=2 fails on it).
+# the frames really have shows the cap's FAIL line (N=2 fails on the first 3-page frame, AI
+# Providers). N must be at least 2: the cap is checked once a second page has been taken.
 #
 # Usage: Scripts/Tests/test-surfaces-probe.sh [--xvfb | --display :N] [--appearance dark|light]
 #          [--no-software-vulkan] [--out-dir DIR] [--no-build]
@@ -76,7 +77,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$MAX_PAGES" in
-  ''|*[!0-9]*|0) echo "SURFACES_MAX_PAGES must be a whole number of at least 1, not '$MAX_PAGES'" >&2; exit 2 ;;
+  ''|*[!0-9]*|0|1) echo "SURFACES_MAX_PAGES must be a whole number of at least 2 (the cap is checked after a second page), not '$MAX_PAGES'" >&2; exit 2 ;;
 esac
 [ -n "$OUT_DIR" ] || OUT_DIR="$ROOT/artifacts/surfaces-probe-$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$OUT_DIR/frames" "$OUT_DIR/work"
