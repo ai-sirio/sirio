@@ -493,7 +493,7 @@ actions!(file_view, [Find, Replace, ToggleDrawer, SearchInWorktree]);
 /// `FileEditor` context so they reach neither a terminal nor a chat.
 pub fn init(cx: &mut App) {
     // `ctrl-h` on a platform with no `cmd-alt-f`: it is Backspace only inside
-    // bezel's macOS text fields, which are not in this context.
+    // Ely's macOS text fields (their `ElyInput` bindings), which are not in this context.
     let replace = if cfg!(target_os = "macos") {
         "cmd-alt-f"
     } else {

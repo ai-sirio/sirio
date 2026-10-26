@@ -9630,10 +9630,17 @@ two"
         expect: &'static str,
     }
 
-    /// Chords bezel's field answered and a composer on Ely's must still answer, on the platform
-    /// that has them: Ctrl+Delete deletes the next word, and Ctrl+A is still select-all.
-    #[cfg(not(target_os = "macos"))]
-    const CHORDS: &[Chord] = &[
+    /// Chords bezel's field answered and a composer on Ely's must still answer, on Windows and
+    /// Linux: Ctrl+Delete deletes the next word, Ctrl+Backspace the one before the caret (a
+    /// word is its letters and digits, `world.` goes whole), and Ctrl+A is still select-all.
+    const OTHER_CHORDS: &[Chord] = &[
+        Chord {
+            draft: "Hello world.",
+            home: false,
+            keys: &["ctrl-backspace"],
+            then: "",
+            expect: "Hello ",
+        },
         Chord {
             draft: "one two three",
             home: true,
@@ -9650,10 +9657,17 @@ two"
         },
     ];
 
-    /// On macOS: Cmd+Backspace deletes to the line's start, Option+Delete the next word, Ctrl+K to
-    /// the line's end, and Ctrl+A is the emacs line start (select-all is Cmd+A).
-    #[cfg(target_os = "macos")]
-    const CHORDS: &[Chord] = &[
+    /// On macOS: Cmd+Backspace deletes to the line's start, Option+Backspace the word before the
+    /// caret, Option+Delete the next word, Ctrl+K to the line's end, and Ctrl+A is the emacs line
+    /// start (select-all is Cmd+A).
+    const MAC_CHORDS: &[Chord] = &[
+        Chord {
+            draft: "Hello world.",
+            home: false,
+            keys: &["alt-backspace"],
+            then: "",
+            expect: "Hello ",
+        },
         Chord {
             draft: "one two",
             home: false,
@@ -9684,8 +9698,12 @@ two"
         },
     ];
 
+    /// The running platform's table. Both compile everywhere; the macOS one runs only on a Mac,
+    /// in the release gate.
+    const CHORDS: &[Chord] = if cfg!(target_os = "macos") { MAC_CHORDS } else { OTHER_CHORDS };
+
     /// Goal 3, keys work as they do today: the editing chords of bezel's field that Ely's did not
-    /// have. The table is the running platform's; the macOS one runs only in the release gate.
+    /// have, and the word they delete by.
     #[gpui::test]
     async fn the_composer_answers_the_editing_chords_of_its_platform(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["plain"]);

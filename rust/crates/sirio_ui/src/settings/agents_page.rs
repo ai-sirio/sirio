@@ -604,8 +604,9 @@ mod tests {
                 cx.refresh_windows();
             });
             cx.run_until_parked();
+            // The wrapper holds the field and nothing else, so its bounds are the frame's.
             let frame = cx
-                .debug_bounds("input-root")
+                .debug_bounds("agent-search-field")
                 .expect("the search field's frame is drawn");
             let row = cx.update(|window, cx| {
                 window
@@ -627,7 +628,7 @@ mod tests {
         }
     }
 
-    /// F-SET-16: typing in the Agents screen's bezel search field narrows
+    /// F-SET-16: typing in the Agents screen's search field narrows
     /// the drawn rows to the matching agent, and clearing it restores every
     /// row — the same contract `sidebar.rs`'s project filter already has.
     /// Filtering must not renumber surviving rows: ids stay keyed to the

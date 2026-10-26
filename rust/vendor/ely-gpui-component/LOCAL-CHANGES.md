@@ -244,9 +244,7 @@ too, as do the settings, the forms, the browser's address bar and the composer.
   handlers (`bezel_ui/src/input.rs`), exported beside `Copy`/`Cut`/`Paste`:
   - `DeleteToLineStart` and `DeleteToLineEnd` delete from the caret to the start or end of the
     logical line, the one between newlines, never a soft-wrapped row;
-  - `DeleteWordRight` deletes to the end of the word after the caret. The word is Ely's
-    (`edit::next_word`), the unit `WordRight` and `DeleteWordLeft` already use, where bezel's
-    skipped punctuation (they differ only when the caret is on punctuation);
+  - `DeleteWordRight` deletes to the end of the word after the caret, by the word unit below;
   - a non-empty selection is what each deletes, and nothing more. Each is one undo step
     (`replace(.., "", false, ..)`, as `DeleteWordLeft`), where bezel coalesced a run of
     adjacent deletes and Ely has never coalesced deletes.
@@ -264,17 +262,33 @@ too, as do the settings, the forms, the browser's address bar and the composer.
   host's identifier. A one-line field's context is `ElyInput` as before, and the host's
   identifier is still on the node, so a host binding outranks Ely's as it did (the key context
   string is built when `multi_line` or `host_context` is called, not on every frame).
-- A sync with upstream must keep the three actions and their bindings, `MULTI_LINE_CONTEXT` and the
-  `refresh_context` that composes the context.
+- The word unit is bezel's: `edit::words` keeps a segment only if it has a letter or a digit in it
+  (`is_word`, bezel's own test), where upstream kept any non-whitespace segment, so a run of
+  punctuation was a word of its own. Word motion and deletion (`WordLeft`, `WordRight`, their
+  `Select` variants, `DeleteWordLeft`, `DeleteWordRight`) all go through it and move together:
+  Option+Backspace on `Hello world.` deletes `world.` as it did under bezel and does in macOS's
+  native fields, not `.`. Only `TextInput` uses `edit::words`; the code editor has its own
+  (`editor/buffer.rs`) and is untouched. Double-click selection (`edit::word_at`) segments the text
+  by itself and does not use it, so it is as it was (bezel's field had no double-click selection).
+  Upstream's `words_skip_spaces_and_punctuation_stops` pinned the old unit and is changed with it:
+  going back from `new` in `hello  brave, new` now lands on `brave`, not on the comma.
+- On macOS `ctrl-k` is now `DeleteToLineEnd` in a field that was already Ely's on main too (the
+  change-request panel and tab fields, the editor-page fields, the drawer search, `file_view`'s
+  find and status-action fields), where it used to reach the shell's `readline_safe` palette
+  fallback (`main.rs`, a raw key-down check that runs after bindings). `ctrl-shift-p` still opens the
+  palette everywhere, and native macOS fields behave this way too.
+- A sync with upstream must keep the three actions and their bindings, `MULTI_LINE_CONTEXT`, the
+  `refresh_context` that composes the context, and `is_word` in `edit::words`.
 
-Proof: `sirio_ui::ely_ui::tests` dispatches each action and checks text, caret, selection and undo
+Proof: `forms::text::edit::tests::a_word_is_a_run_with_a_letter_or_digit_in_it` (the word unit, both
+directions); `sirio_ui::ely_ui::tests` dispatches each action and checks text, caret, selection and undo
 (`the_delete_to_line_and_word_actions_delete_what_bezels_did`,
 `a_delete_to_line_end_is_one_undo_step`), checks the multi-line context
 (`only_a_multi_line_field_names_the_multi_line_context`,
 `a_host_binding_still_wins_in_a_multi_line_field`,
 `ctrl_n_and_ctrl_p_do_not_move_a_single_line_field_the_way_down_and_up_do`), and the chat's tests
 press the running platform's chords in the composer
-(`the_composer_answers_the_editing_chords_of_its_platform`,
+(`the_composer_answers_the_editing_chords_of_its_platform`, with the word unit,
 `the_composer_moves_the_caret_a_row_with_its_platforms_keys`). The macOS chords' tests run only in
 the release gate: `macos-check.yml` does not run the test suite and this was written on Linux.
 

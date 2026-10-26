@@ -16,9 +16,16 @@ pub(crate) fn next_grapheme(text: &str, offset: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+/// A word-bound segment counts as a word if it has any alphanumeric content; whitespace and
+/// punctuation runs are what word motion and deletion skip over. Bezel's text field moved and
+/// deleted by this unit (and so do macOS's native fields).
+fn is_word(segment: &str) -> bool {
+    segment.chars().any(char::is_alphanumeric)
+}
+
 fn words(text: &str) -> impl DoubleEndedIterator<Item = (usize, &str)> {
     text.split_word_bound_indices()
-        .filter(|(_, word)| !word.trim().is_empty())
+        .filter(|(_, word)| is_word(word))
 }
 
 /// Start of the word before `offset`.
@@ -156,14 +163,44 @@ mod tests {
         assert_eq!(prev_grapheme(text, 0), 0);
     }
 
+    /// Spaces and punctuation are skipped, not stopped at: the comma is no word, so going back
+    /// from `new` lands on the start of `brave` (Ely's upstream expected the comma here; this is
+    /// bezel's unit, see `LOCAL-CHANGES.md`). Double-click selection (`word_at`) is segmentation
+    /// of its own and stays as it was.
     #[test]
     fn words_skip_spaces_and_punctuation_stops() {
         let text = "hello  brave, new";
         assert_eq!(next_word(text, 0), 5);
         assert_eq!(next_word(text, 5), 12);
+        assert_eq!(next_word(text, 12), 17);
         assert_eq!(prev_word(text, 17), 14);
-        assert_eq!(prev_word(text, 14), 12);
+        assert_eq!(prev_word(text, 14), 7);
         assert_eq!(word_at(text, 8), 7..12);
+    }
+
+    /// The unit bezel's field moved and deleted by: a word is a run with a letter or a digit in it,
+    /// and a run of punctuation is skipped like a space. Each case reads: the text, an offset,
+    /// the start of the word before it, the end of the word after it. The first three are what
+    /// Option+Backspace deleted from the end of the text, `world.` and not `.`.
+    #[test]
+    fn a_word_is_a_run_with_a_letter_or_digit_in_it() {
+        let cases = [
+            ("Hello world.", 12, 6, 12),
+            ("Hello world.", 11, 6, 12),
+            ("Hello world.", 6, 0, 11),
+            ("cd ~/Projects/", 14, 5, 14),
+            ("cd ~/Projects/", 2, 0, 13),
+            ("call(x)", 7, 5, 7),
+            ("call(x)", 4, 0, 6),
+            ("foo, bar", 3, 0, 8),
+            ("foo, bar", 8, 5, 8),
+            ("a (b) c", 2, 0, 4),
+            ("a (b) c", 7, 6, 7),
+        ];
+        for (text, at, before, after) in cases {
+            assert_eq!(prev_word(text, at), before, "the word before {at} in {text:?}");
+            assert_eq!(next_word(text, at), after, "the word after {at} in {text:?}");
+        }
     }
 
     #[test]
