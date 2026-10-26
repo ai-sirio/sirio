@@ -1381,12 +1381,16 @@ def unfocused_spinner(run: Run) -> str | None:
         try:
             first_ticks, started = cpu_ticks(chat.process.pid), time.monotonic()
             time.sleep(seconds)
-            used = cpu_ticks(chat.process.pid) - first_ticks
+            used, elapsed = cpu_ticks(chat.process.pid) - first_ticks, time.monotonic() - started
         except FileNotFoundError:
             raise Failure("unfocused_spinner: Sirio exited during the CPU sample") from None
+        # A Sirio that died during the sample is a zombie until it is polled: its stat stays
+        # readable and its ticks stop, which would read as a near-zero figure under any ceiling.
+        if chat.process.poll() is not None:
+            raise Failure("unfocused_spinner: Sirio exited during the CPU sample")
         if x_focused(run) != int(thief_window, 16):
             raise Failure("unfocused_spinner: the second window lost the focus during the CPU sample")
-        percent = 100.0 * used / os.sysconf("SC_CLK_TCK") / (time.monotonic() - started)
+        percent = 100.0 * used / os.sysconf("SC_CLK_TCK") / elapsed
         load = " ".join(f"{value:.2f}" for value in os.getloadavg())
         run.log(f"unfocused-spinner CPU {percent:.1f}% of one core over {seconds} s (load average {load})")
         if run.cpu_ceiling is not None and percent > run.cpu_ceiling:
