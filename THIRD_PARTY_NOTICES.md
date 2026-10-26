@@ -174,12 +174,18 @@ licences, as listed by the nerd-fonts project for this font:
 ## bezel-ui and bezel-motion (ported code)
 
 Code ported into Sirio from [`bezel-ui`](https://crates.io/crates/bezel-ui) and
-[`bezel-motion`](https://crates.io/crates/bezel-motion) 0.1.4 — the frame clock,
-the hover fades, the cubic-bezier curves and the loaders' phase maths in
-`rust/crates/sirio_ui/src/motion/` — carries a header naming the crate it came
-from. Both crates are by clearloop
-([crabtalk/bezel](https://github.com/crabtalk/bezel)) and are licensed under the
-MIT licence below, copied from `rust/vendor/bezel_ui/LICENSE`. The second
+[`bezel-motion`](https://crates.io/crates/bezel-motion) 0.1.4 carries a header
+naming the crate it came from. In `rust/crates/sirio_ui/src/` that is:
+
+- `motion/`: the frame clock, the hover fades, the cubic-bezier curves and the
+  loaders' phase maths;
+- `loading.rs`: the orbs, the mini spinner and the redacted skeleton rows;
+- `popup.rs`: the popup and filter state and the menu's close lifecycle;
+- `chat/thought.rs`: `Takeover`;
+- `sidebar/tree_keys.rs`: the tree's arrow-key bindings and cursor step.
+
+Both crates are by clearloop ([crabtalk/bezel](https://github.com/crabtalk/bezel))
+and are licensed under the MIT licence below, copied from `rust/vendor/bezel_ui/LICENSE`. The second
 copyright line is bezel-ui's own, for the portions it extracted from
 zeronsh/comet; `bezel-motion`'s manifest names the same MIT licence and the same
 author.

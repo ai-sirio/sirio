@@ -2305,8 +2305,8 @@ impl Sidebar {
     }
 
     /// The one place a row's `expanded` flag is written. Only a project
-    /// discloses: `tree_row` makes a worktree a leaf, because its tabs are
-    /// pills inside the row rather than children under it.
+    /// discloses: a worktree is a leaf, because its tabs are pills inside the
+    /// row rather than children under it.
     fn set_row_expanded(&mut self, id: usize, kind: RowKind, expanded: bool) {
         if kind != RowKind::Project {
             return;

@@ -2310,7 +2310,7 @@ pub struct Chat {
     /// change resets both.
     last_slash_token: Option<String>,
     /// Ranked views over `available_commands` and `mention_candidates`, with
-    /// the keyboard's active row — bezel's own picker state.
+    /// the keyboard's active row (`crate::popup::Filter`).
     slash_filter: Filter,
     mention_filter: Filter,
     /// File-mention candidates for the current `@token`.

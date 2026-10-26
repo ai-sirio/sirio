@@ -3,11 +3,12 @@
 //! once, and the one-step cursor move the up and down arrows make.
 //!
 //! The sidebar cannot hand the move to a library, because applying it means
-//! touching its own cursor and expansion state. What lives here is the
-//! binding, and the answer to "where does the cursor go".
+//! touching its own cursor and the pill a row has selected. What lives here is
+//! the binding, and the answer to "where does the cursor go".
 
 use gpui::{App, KeyBinding, actions};
 
+// Left and right keep a tree's names; the sidebar uses them to walk a row's pills.
 actions!(sirio_tree, [SelectPrevious, SelectNext, Collapse, Expand]);
 
 /// The key context a tree claims.
