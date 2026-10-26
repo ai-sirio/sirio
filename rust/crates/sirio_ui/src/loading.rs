@@ -14,7 +14,6 @@
 
 use std::time::Duration;
 
-use bezel::motion;
 use bezel::motion::Painter;
 use bezel::ui::loaders;
 use bezel::ui::popover;
@@ -24,6 +23,8 @@ use gpui::{
     div, px,
 };
 use sirio_theme::Theme;
+
+use crate::motion;
 
 /// The glyph slot in an Activity-derived reasoning header.
 pub const THINKING_GLYPH: f32 = 14.0;

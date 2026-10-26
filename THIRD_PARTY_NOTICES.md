@@ -171,6 +171,42 @@ licences, as listed by the nerd-fonts project for this font:
 | Power Symbols IEC | https://github.com/jloughry/Unicode | MIT |
 | Weather Icons | https://github.com/erikflowers/weather-icons | OFL 1.1 |
 
+## bezel-ui and bezel-motion (ported code)
+
+Code ported into Sirio from [`bezel-ui`](https://crates.io/crates/bezel-ui) and
+[`bezel-motion`](https://crates.io/crates/bezel-motion) 0.1.4 — the frame clock,
+the hover fades, the cubic-bezier curves and the loaders' phase maths in
+`rust/crates/sirio_ui/src/motion/` — carries a header naming the crate it came
+from. Both crates are by clearloop
+([crabtalk/bezel](https://github.com/crabtalk/bezel)) and are licensed under the
+MIT licence below, copied from `rust/vendor/bezel_ui/LICENSE`. The second
+copyright line is bezel-ui's own, for the portions it extracted from
+zeronsh/comet; `bezel-motion`'s manifest names the same MIT licence and the same
+author.
+
+> MIT License
+>
+> Copyright (c) 2026 clearloop
+> Copyright (c) 2026 Wing (portions extracted from zeronsh/comet)
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.
+
 ## Trademark notice
 
 The agent marks (Anthropic, OpenAI, Google, xAI, OpenCode, Pi, Oh-My-Pi)

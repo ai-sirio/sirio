@@ -41,6 +41,7 @@ pub mod loading;
 pub mod markdown_preview;
 mod selectable_markdown;
 pub mod modal;
+pub mod motion;
 pub mod orbit;
 pub mod outline;
 pub mod pane_launcher;

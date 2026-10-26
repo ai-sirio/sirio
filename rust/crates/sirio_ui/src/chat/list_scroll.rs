@@ -16,7 +16,7 @@
 
 use std::{cell::Cell, rc::Rc};
 
-use bezel::motion::Painter;
+use crate::motion::Painter;
 use bezel_theme::ink;
 use bezel::ui::scroll::{self, MIN_THUMB, ScrollbarDrag};
 use gpui::{

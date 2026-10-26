@@ -2610,7 +2610,7 @@ impl Chat {
             agent_session_id: None,
             context_usage: None,
             list_state,
-            transcript_bar: list_scroll::ListScrollbarState::new(bezel::motion::Painter::of(cx)),
+            transcript_bar: list_scroll::ListScrollbarState::new(crate::motion::Painter::of(cx)),
             transcript_selection: None,
             transcript_dragging: false,
             transcript_press: None,
@@ -9268,8 +9268,7 @@ two"
     /// the reveal lands whole on the next frame instead of 150ms of wall
     /// time later.
     fn hover_turn_rail(cx: &mut VisualTestContext) {
-        use bezel::motion::AppExt as _;
-        cx.update(|_, cx| cx.set_reduced_motion(true));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let strip = cx
             .debug_bounds("turn-rail")
             .expect("the rail's strip is laid out");
