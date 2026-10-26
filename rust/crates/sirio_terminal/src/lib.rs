@@ -15,7 +15,6 @@ use std::{
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 
 use anyhow::{Context as _, Result};
-use bezel::ui::tooltip::Tooltip;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Corners, Element, ElementId, EventEmitter, Font,
@@ -4602,7 +4601,7 @@ impl gpui::Render for TerminalView {
                         })
                         // One line per row: the reason waits behind the pointer.
                         .when_some(disabled_reason, |this, reason| {
-                            this.tooltip(move |window, cx| Tooltip::text(reason.clone(), window, cx))
+                            this.tooltip(sirio_ui::controls::tooltip(reason))
                         })
                         .child(item.label),
                 );

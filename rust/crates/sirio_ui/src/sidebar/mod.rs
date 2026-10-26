@@ -3632,7 +3632,7 @@ fn header_icon_button(
         .justify_center()
         .cursor_pointer()
         .hover(|style| style.bg(theme.ely.hover).rounded(theme.radii.control))
-        .tooltip(move |window, cx| crate::controls::sidebar_tooltip(tooltip, window, cx))
+        .tooltip(crate::controls::tooltip(tooltip))
         .child(
             div()
                 .debug_selector(move || format!("{id}-icon"))

@@ -112,7 +112,7 @@ impl Chat {
         // pane has to cut.
         let mode_tooltip = SharedString::from(label.to_string());
         let status_pill = status_pill
-            .tooltip(move |window, cx| Tooltip::text(mode_tooltip.clone(), window, cx))
+            .tooltip(crate::controls::tooltip(mode_tooltip))
             .when(mode_selectable, |this| {
                 this.hover(|style| style.bg(bezel_theme.element_hover))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -164,7 +164,7 @@ impl Chat {
             div()
                 .id("model-chip")
                 .debug_selector(|| "model-chip".into())
-                .tooltip(move |window, cx| Tooltip::text(model_tooltip.clone(), window, cx))
+                .tooltip(crate::controls::tooltip(model_tooltip))
                 .flex()
                 .items_center()
                 .gap(px(6.0))
@@ -339,7 +339,7 @@ impl Chat {
                     })
                     .when_some(blocked, |chip, reason| {
                         let reason = SharedString::from(reason);
-                        chip.tooltip(move |window, cx| Tooltip::text(reason.clone(), window, cx))
+                        chip.tooltip(crate::controls::tooltip(reason))
                     })
                     .child(div().text_color(label_colour).child("Fast"))
             });
@@ -363,17 +363,11 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .text_size(typography.ui_size)
                 .text_color(theme.ely.fg_subtle)
-                .tooltip(move |window, cx| {
-                    Tooltip::text(
-                        SharedString::from(if running == 1 {
-                            "1 background task running".to_string()
-                        } else {
-                            format!("{running} background tasks running")
-                        }),
-                        window,
-                        cx,
-                    )
-                })
+                .tooltip(crate::controls::tooltip(if running == 1 {
+                    "1 background task running".to_string()
+                } else {
+                    format!("{running} background tasks running")
+                }))
                 .child(format!("⌁ {running}"))
         });
 

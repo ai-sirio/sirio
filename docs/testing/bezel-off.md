@@ -499,7 +499,158 @@ or orb turn; the `unfocused_spinner` row above is what does.
 
 ### PR C: text fields and tooltips on Ely (`refactor/bezel-off-c`)
 
-To be filled in by Task 10.
+PR C draws every text field and every tooltip with Ely, and changes pixels on purpose: 22 of the 94
+frames, all attributed in `docs/testing/bezel-off/pr-c-allow.tsv`. Nothing else in the set moved.
+
+**Base and head.** The "before" set is `artifacts/bezel-off/pr-b/after`, PR B's after set, captured
+at `04fa408c`. PR C's git base is `10243f3a`, and `git diff 04fa408c 10243f3a -- rust/` is two
+comments (the doc of `init_motion` in `sirio/src/main.rs` and one in `sirio_terminal/src/scrollbar.rs`),
+so the "before" frames are the frames of PR C's base and the base was not captured again. The "after"
+set was captured on the working tree of PR C's last commit, `refactor: draw tooltips with Ely`: its
+`rust/` diff against `c90f6b71` (the commit before it) is what the tree held while the capture ran.
+PR C is eight commits on `10243f3a`: Ely's text field learns to be hosted (`57d96855`, `379af0eb`,
+`7620843c`), every field on Ely (`4f07a14a`), the editing chords, the framed field's height and Ely's
+word unit (`5a2e910b`, `dd88109d`, `c90f6b71`) and the tooltips.
+
+**What PR C moved.**
+
+| Task | Where | What |
+| --- | --- | --- |
+| 8 | Ely `forms/text`, `menus` (vendored) | `TextInput::detached` (no `Window`), `host_context` (a host's keys beat Ely's), `reset_text`, the wheel scrolls a multi-line field without the caret pulling it back, `menus::row_frame`. Logged in `rust/vendor/ely-gpui-component/LOCAL-CHANGES.md`. |
+| 9 | the composer, the model search, the clone and create forms, the Agents search, the git-hosting token fields, the browser address bar | `TextInput` drawn by Ely's `forms::Input` (or raw, in the composer, which has no frame of its own). Enter in a form or the address bar is `InputEvent::Submit`. |
+| 9 | `combobox.rs` | The worktree combobox, ported from bezel-ui 0.1.4 (MIT) onto Ely's input, panel and rows; `worktree_picker.rs` changes only its import. |
+| 9 | Ely `forms/text` (vendored) | The editing chords bezel's field bound (delete to the line's start and end, delete the word on the right, the macOS emacs set, Ctrl+N and Ctrl+P in a multi-line field), bezel's word unit for every word motion and delete, and a one-line `Input` that is at least its control height and grows with its text. Logged in `LOCAL-CHANGES.md`. |
+| 10 | `controls::tooltip`, `controls::tooltip_with_meta` | Ely's `Tooltip::text` and `with_meta`. The 14 sites that drew bezel's `Tooltip` (the pane launcher's unavailable items, the chat's mode, model, Fast and background-task chips, the file view's context-menu notes and Markdown mode icons, the Agents path, the open list, the composer's slash rows, the sidebar's and the files panel's icon buttons, the terminal's context menu, and "Hide Pane" in `main.rs`) call it; `sidebar_tooltip` and `TooltipBuilder` are gone. |
+| 10 | `sirio_terminal` | Its `bezel` dependency was for this tooltip alone and is dropped (`Cargo.lock` loses that one edge). `examples/terminal_demo.rs` now calls `sirio_ui::ely::init`, because Ely's tooltip reads Ely's theme global. |
+
+**Reproduce.**
+
+```bash
+# The before set is PR B's after set, already on disk (see above). The after set:
+TMPDIR=$HOME/.cache/sirio-e2e-tmp Scripts/bezel-off-captures.sh --xvfb --out-dir artifacts/bezel-off/pr-c/after
+
+# The diff, with this PR's attribution file.
+Scripts/capture-diff.py artifacts/bezel-off/pr-b/after/frames artifacts/bezel-off/pr-c/after/frames \
+  --out artifacts/bezel-off/pr-c/diff --masks Scripts/capture-masks.tsv \
+  --allow docs/testing/bezel-off/pr-c-allow.tsv
+
+# The same pair with no masks, and the masks plus this PR's rows as the allow table.
+cat Scripts/capture-masks.tsv docs/testing/bezel-off/pr-c-allow.tsv > artifacts/bezel-off/pr-c/allow-unmasked.tsv
+Scripts/capture-diff.py artifacts/bezel-off/pr-b/after/frames artifacts/bezel-off/pr-c/after/frames \
+  --out artifacts/bezel-off/pr-c/diff-unmasked --allow artifacts/bezel-off/pr-c/allow-unmasked.tsv
+
+# The theme sweep (Xvfb :N is any free display, 1920x1080x24; lavapipe as for the captures). The
+# out-dir is absolute: a relative one fails with "app exited before creating its private control socket".
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json \
+  TMPDIR=$HOME/.cache/sirio-e2e-tmp Scripts/Tests/test-theme-sweep.sh --display :N \
+  --out-dir "$PWD/artifacts/bezel-off/pr-c/theme-sweep"
+
+(cd rust && cargo build --workspace --all-targets && cargo nextest run -p sirio_ui && cargo nextest run -p sirio \
+  && cargo nextest run -p sirio_terminal)
+```
+
+**The result.** `bezel-off-captures.sh` printed `CAPTURES OK: artifacts/bezel-off/pr-c/after (94
+frames)` (the chat E2E, the sweep, the Changes E2E and both surfaces probes passed, among them the
+probe's tooltip check: the hover must add at least 150 pixels near the box). The masked diff printed
+`compared 94 frames present on both sides (94 before, 94 after), tolerance 1` and
+`CAPTURE DIFF OK (22 changed, all attributed)`. The theme sweep printed `THEME SWEEP OK: <checkout>/artifacts/bezel-off/pr-c/theme-sweep` (the 9 base colours, dark and light: 18 runs of `visual-sweep.sh`). The artifacts are under
+`artifacts/bezel-off/pr-c/` (gitignored): `after/`, `diff/`, `diff-unmasked/`, `crops/`,
+`hide-pane-tooltip/` and `theme-sweep/`.
+
+| Check | Result |
+| --- | --- |
+| `cargo build --workspace --all-targets` | exit 0; the same 135 warning lines, at the same files, as on `c90f6b71` |
+| `cargo nextest run -p sirio_ui` | 1414 run, 1414 passed, 0 skipped; the sorted `cargo nextest list` is identical to `c90f6b71`'s |
+| `cargo nextest run -p sirio` | 531 run, 531 passed; the list is identical |
+| `cargo nextest run -p sirio_terminal` | 143 run, 143 passed, 1 skipped; the list is identical |
+| `cargo nextest run -p sirio_ui tooltip` | 1 test (`trace_tab::tests::the_tooltip_names_kind_name_start_duration_model_tokens_and_status`), as on `c90f6b71` |
+| `cargo nextest run -p sirio_terminal tooltip` | 0 tests, as on `c90f6b71`: no test of that crate has the word in its name, so the filter proves nothing for the terminal's disabled-row tooltip (`a_too_narrow_pane_disables_split_left_on_a_single_line` drives that row, by click) |
+
+No test was added, removed or renamed by the tooltip commit. No test hovers a control to read its
+tooltip: what shows a tooltip drawn is the probe's `tooltip` frame, and `tooltip_with_meta` is a
+pass-through that only the hand capture under `hide-pane-tooltip/` has drawn.
+
+**Every changed frame** (`artifacts/bezel-off/pr-c/diff/changed.tsv`).
+
+| Frames | Pixels | bbox (x,y,w,h) | Allow row | What |
+| --- | --- | --- | --- | --- |
+| `chat-ui-default/identity/{claude,codex,omp,opencode,pi}-{dark,light}` (10) | 36 each | 43,562,2,18 | `ui::input::TextField` | The empty composer's caret: bezel's field drew a 2 px bar (`#939393`), Ely's draws a 1 px bar (`#878787`) at the same x, y and height. |
+| `chat-ui-default/scenarios/effort/frames/effort-low`, `effort-light/frames/effort-low`, `wide-content/frames/wide-content-diff`, `wide-content-expanded`; `sweep-{dark,light}/chat`, `sweep-{dark,light}/empty-workspace` (8) | 36 each | 349,650,2,18 | `ui::input::TextField` | The same caret. Outside it nothing differs by more than the tolerance, so the composer did not move. |
+| `surfaces-dark/settings-git-hosting-accounts-dark` | 34919 | 475,224,720,307 | `ui::input::TextField` | Both token fields (github.com on `gh`, the self-hosted GitLab) are Ely's framed input: 28 px high where bezel's was 34 px, with a 14.5 px placeholder where it was 13 px. The rows under each move up, so the changed pixels run from the first field to the card's bottom edge. |
+| `surfaces-light/settings-git-hosting-accounts-light` | 34878 | 475,224,720,307 | `ui::input::TextField` | The same. |
+| `surfaces-dark/tooltip-dark` | 6254 | 255,210,107,79 | `ui::tooltip::Tooltip` | The probe's tooltip: a solid fill with a smaller radius and a floating shadow where bezel's was a translucent popover card, 13 px text where it was 12 px, and 18 px below the pointer (Ely's `cursor_offset`) where bezel's sat at the pointer and covered the target's lower edge. The box is the union of both footprints with their shadows. |
+| `surfaces-light/tooltip-light` | 8480 | 243,205,132,86 | `ui::tooltip::Tooltip` | The same. In light the fill is `tooltip_bg`, 236 against the page's 232, so the shadow is what draws the tooltip's edge. |
+
+The 20 text-field frames are the 20 frames `artifacts/bezel-off/pr-c/task-9-r1-diff/changed.tsv` listed
+for Task 9's last fix round (the same frames, pixel counts and boxes); the tooltip frames are the 2 new
+ones. `crops/` has the before and after of the git-hosting rows and of the tooltip in both appearances.
+
+**Changes no capture shows.** None is in the 94 frames, and each is on the list of what Enzo should
+see. Most are Ely's own look or a key that works as bezel's field did. Three are not parity with `main`
+and are behaviour changes: the word unit in the fields that were already Ely's, Ctrl+K on macOS in those
+same fields, and Shift+Enter and Alt+Enter in the one-line forms and the address bar. One is a gap in
+what is verified: the macOS-only chord tests.
+
+- The clone and create forms, the browser address bar, the model search and the combobox query take Ely's
+  framed field: 28 px high where bezel's was about 34 px, its text at Ely's Base size (14.5 px at the
+  default) where it was 13 px.
+- Framed fields now grow with the interface font from size 15: the frame is at least its control height
+  (28 px), and as tall as its line plus its border above that, so the caret and the selection stay
+  inside it. Nothing in the captures runs at those sizes; one test (`the_agents_search_keeps_its_row_inside_its_frame_at_every_interface_size`) does.
+- The worktree combobox is rebuilt on Ely's panel and rows: "No matches" inherits the card's text size
+  (it was 13 px), the chevron is Ely's `ChevronDown` (bezel's was a 14 px alt-arrow), and a row has no hover fade.
+- The editing chords are restored in every field, the composer included. On macOS: Cmd+Backspace
+  (delete to the line's start), Option+Delete (the word on the right), Ctrl+K (to the line's end), the emacs set
+  (Ctrl+A, E, B, F, H, D) and Ctrl+N and Ctrl+P as Down and Up in a multi-line field. On Linux and Windows:
+  Ctrl+Delete (the word on the right).
+- Word motion and deletion use bezel's word unit (a run with a letter or a digit in it) in every Ely text
+  field, including the ones that were already Ely's before this PR (the change-request panel and tab, the
+  editor page, the drawer search, the file view's find fields). Going back a word from the end of
+  `Hello world.` lands before `world`, not between `world` and the dot.
+- On macOS, Ctrl+K inside the fields that were already Ely's no longer reaches the palette's fallback: it
+  deletes to the line's end, as in a native field. Ctrl+Shift+P still opens the palette everywhere.
+- Shift+Enter and Alt+Enter no longer submit the one-line forms and the address bar (the old handler
+  answered the Enter key with any modifier): Shift+Enter is Ely's newline, which a one-line field ignores.
+  Enter, and Ctrl+Enter (Cmd+Enter on macOS), still submit.
+- The macOS-only chord tests (the macOS table of `the_composer_answers_the_editing_chords_of_its_platform`,
+  the Ctrl+N and Ctrl+P row test and the one-line guard) first run in the release gate: they never run on
+  Linux, and `macos-check.yml` builds and links the app but runs no test suite. The macOS bindings were
+  exercised on Linux only by forcing them on for one run.
+- The tooltips differ from bezel's in ways the probe's one tooltip does not draw:
+  - "Hide Pane" shows its chord, `Ctrl+Shift+B` (the label its binding uses), through `tooltip_with_meta`.
+    bezel's `with_keystroke` drew it in 11 px faint text after the title, in the popover card; Ely's draws
+    it at the title's size at 60% opacity. One hand capture of it, from a temporary edit of the probe that
+    is not in the commit, is under `artifacts/bezel-off/pr-c/hide-pane-tooltip/`.
+  - The sidebar's and the files panel's icon-button tooltips were a popover card with 12 px type scaled by
+    the sidebar's compact typography and 8 px by 5 px of padding. They are Ely's tooltip now: text at the
+    interface size (13 px at the default, so it follows the user's font size), 8 px by 4 px of padding.
+  - A tooltip has a maximum width of 256 px and wraps beyond it (the Agents path and a slash command's
+    description are the long ones); bezel's had none.
+  - A tooltip fades in and rises 4 px. `SIRIO_REDUCED_MOTION` (debug builds) holds that at rest in the
+    captures; the animation follows the reduced-motion flag of the rest of Ely's motion.
+  - A tooltip sits 18 px below the pointer in every surface, as in the probe.
+
+**What the masks hide here.** `CAPTURE DIFF OK` says nothing about pixels inside a mask, and PR C
+migrated the Agents search field, which lies inside a standing mask (the Agents toolbar's, x 668..1022,
+y 54..94). So the same pair was compared with no `--masks` and the mask table plus this PR's rows as
+`--allow` (`artifacts/bezel-off/pr-c/diff-unmasked/`): `CAPTURE DIFF OK (66 changed, all attributed)`.
+The 22 frames above, and 44 more that differ only inside mask rectangles whose `why` is a clock or a
+run-to-run accident: the status bar's usage meter and path, message times, the turn duration, the
+cancelled line, the crash addresses, the session dots (`restore/before-restart`), and one frame where
+the scrollbar-thumb mask holds 100 changed pixels (`long-history/frames/scrolled-up-after-new-turn`, the
+track's y 495..526: the accident the mask names, in a bar PR C does not touch).
+
+The Agents toolbar is the new case. `surfaces-dark/settings-agents-dark` changes 7825 pixels in
+684,56,333,34 and `surfaces-light/settings-agents-light` 8328 in 683,56,333,34: the search field and
+the `Refreshed HH:MM:SS` stamp, which is the clock. The field alone is x 683..904 (7436 pixels in dark,
+7466 in light) and the stamp's digits are the rest (389 and 862). In this pair the stamps have the same
+width, so the field did not drift sideways. By eye (`crops/agents-search-{dark,light}-{before,after,stack}.png`
+and `crops/agents-{dark,light}-stack.png`): the field is 28 px high where it was 34 px, its radius is
+smaller, its placeholder is 14.5 px where it was 13 px, and in light the fill is the card's grey with a
+border where bezel's was white. That is Ely's framed input; it is the one text-field change a capture reaches
+only without the mask.
+
+Enzo's verdict: pending.
 
 ### PR D: menus, popovers, scrollbars and icons on Ely (`refactor/bezel-off-d`)
 

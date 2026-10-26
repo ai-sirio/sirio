@@ -18,7 +18,7 @@
 //!   waku value.
 
 use bezel_theme::Theme as BezelTheme;
-use bezel::ui::tooltip::Tooltip;
+use ely_gpui_component::primitives::Tooltip;
 use gpui::{
     App, ClickEvent, CursorStyle, Div, FontWeight, Hsla, Window, div, prelude::*, px, text,
 };
@@ -28,42 +28,24 @@ use std::rc::Rc;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
-/// A sidebar hover label, built on Bezel's popover surface with the same
-/// compact font adjustment as its originating panel.
-pub(crate) fn sidebar_tooltip(
-    text: impl Into<gpui::SharedString>,
-    _window: &mut Window,
-    cx: &mut App,
-) -> gpui::AnyView {
-    cx.new(|_| SidebarTooltip(text.into())).into()
-}
-
-struct SidebarTooltip(gpui::SharedString);
-
-impl gpui::Render for SidebarTooltip {
-    fn render(&mut self, _window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-        use bezel::ui::surface::Surfaced as _;
-
-        let theme = Theme::get(cx).with_sidebar_typography();
-        let bezel = theme.to_bezel_theme();
-        bezel::ui::popover::popover_card(&bezel)
-            .px(px(8.0))
-            .py(px(5.0))
-            .text_size(theme.typography.scaled(12.0))
-            .text_color(theme.ely.fg)
-            .child(self.0.clone())
-            .surface(&bezel, bezel.popover_surface)
-    }
-}
-
 /// A plain-text hover label for `.tooltip(..)`: the one place the app's tooltip
 /// look is chosen, so a surface asks for `controls::tooltip("text")` instead of
 /// naming a tooltip library.
 pub fn tooltip(
     text: impl Into<gpui::SharedString>,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
-    let text = text.into();
-    move |window, cx| Tooltip::text(text.clone(), window, cx)
+    let text: gpui::SharedString = text.into();
+    Tooltip::text(text)
+}
+
+/// [`tooltip`] with a quiet trailing hint, such as the chord that does the same
+/// thing.
+pub fn tooltip_with_meta(
+    title: impl Into<gpui::SharedString>,
+    meta: impl Into<gpui::SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let (title, meta): (gpui::SharedString, gpui::SharedString) = (title.into(), meta.into());
+    Tooltip::with_meta(title, meta)
 }
 
 /// A segmented control's selection callback.
@@ -261,19 +243,15 @@ pub fn segmented_icons(
     theme: Theme,
     callback: impl Fn(usize, &mut App) + 'static,
 ) -> impl IntoElement {
-    segmented_icons_with_tooltip(id, options, selected, theme, Tooltip::text, callback)
+    segmented_icons_with_tooltip(id, options, selected, theme, callback)
 }
 
-pub(crate) type TooltipBuilder = fn(&'static str, &mut Window, &mut App) -> gpui::AnyView;
-
-/// Allows an embedded surface to choose its tooltip typography separately
-/// from the same control in a full-width tab.
+/// The body of [`segmented_icons`]: every option's hover label is [`tooltip`].
 pub(crate) fn segmented_icons_with_tooltip(
     id: &'static str,
     options: &[(Icon, &'static str)],
     selected: usize,
     theme: Theme,
-    tooltip_builder: TooltipBuilder,
     callback: impl Fn(usize, &mut App) + 'static,
 ) -> impl IntoElement {
     let callback: SegmentCallback = Rc::new(callback);
@@ -286,7 +264,7 @@ pub(crate) fn segmented_icons_with_tooltip(
         .bg(theme.ely.surface)
         .p(px(2.0));
 
-    for (index, (icon, tooltip)) in options.iter().copied().enumerate() {
+    for (index, (icon, hint)) in options.iter().copied().enumerate() {
         let callback = callback.clone();
         let active = index == selected;
         control = control.child(
@@ -309,7 +287,7 @@ pub(crate) fn segmented_icons_with_tooltip(
                 .text_color(if active { theme.ely.fg } else { theme.ely.fg_muted })
                 .when(active, |this| this.bg(theme.ely.active))
                 .hover(|style| style.bg(theme.ely.hover))
-                .tooltip(move |window, cx| tooltip_builder(tooltip, window, cx))
+                .tooltip(tooltip(hint))
                 .on_click(move |_, _, cx| callback(index, cx))
                 .child(IconElement::new(icon, IconSize::Small)),
         );

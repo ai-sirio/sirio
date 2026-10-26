@@ -64,7 +64,7 @@ sirio_term_session
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)
 sirio_acp        (-> sirio_persistence, sirio_claude)
-sirio_terminal    (-> sirio_project, sirio_theme, sirio_ui, sirio_host_client, sirio_host_protocol, sirio_term_session, and `bezel` directly for its scrollbar)
+sirio_terminal    (-> sirio_project, sirio_theme, sirio_ui, sirio_host_client, sirio_host_protocol, sirio_term_session, and `bezel-theme` directly for its scrollbar's colour)
 sirio_control    (-> sirio_acp, sirio_persistence, sirio_ipc, sirio_host_client, sirio_host_protocol)
 sirio_host       (-> sirio_ipc, sirio_host_protocol, sirio_term_session; the `sirio-host` binary)
 sirio_host_client (-> sirio_ipc, sirio_host_protocol)

@@ -4,7 +4,6 @@
 //! session, same scope as `Sidebar`'s fixture model: the connection lifecycle
 //! and view model live here so the transcript renderer stays deterministic.
 
-use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
     Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,

@@ -867,7 +867,7 @@ impl Chat {
                         .id(SharedString::from(format!("slash-option-{name}")))
                         .debug_selector(move || format!("slash-option-{name_for_id}"))
                         .when_some(tooltip, |this, text| {
-                            this.tooltip(move |window, cx| Tooltip::text(text.clone(), window, cx))
+                            this.tooltip(crate::controls::tooltip(text))
                         })
                         .on_click(move |_, _, cx| {
                             row_entity.update(cx, |chat, cx| {

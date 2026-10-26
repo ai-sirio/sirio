@@ -7,7 +7,6 @@
 use crate::text_selection::selectable_text;
 use super::*;
 use bezel::ui::icons;
-use bezel::ui::tooltip::Tooltip;
 use bezel::ui::widgets::{
     ButtonStyle, Buttons as _, Content as _, Scaffolding as _, Status as _, card_row_hover,
     status_dot,
@@ -107,7 +106,7 @@ impl Settings {
                             div()
                                 .id(("settings-agent-path", index))
                                 .debug_selector(move || format!("settings-agent-path-{index}"))
-                                .tooltip(move |window, cx| Tooltip::text(full.clone(), window, cx))
+                                .tooltip(crate::controls::tooltip(full))
                                 .font_family(bezel_theme.font_mono.clone())
                                 .text_size(px(11.0))
                                 .max_w(px(PATH_FRAGMENT_MAX_WIDTH))

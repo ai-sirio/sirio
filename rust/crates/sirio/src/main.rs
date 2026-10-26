@@ -22051,14 +22051,10 @@ impl SirioWorkspace {
             .rounded(theme.radii.control)
             .text_color(theme.ely.fg_subtle)
             .hover(|style| style.bg(theme.ely.hover))
-            .tooltip(|window, cx| {
-                bezel::ui::tooltip::Tooltip::with_keystroke(
-                    "Hide Pane",
-                    window_shortcut_hint(WindowCommand::ToggleSecondaryPane),
-                    window,
-                    cx,
-                )
-            })
+            .tooltip(sirio_ui::controls::tooltip_with_meta(
+                "Hide Pane",
+                window_shortcut_hint(WindowCommand::ToggleSecondaryPane),
+            ))
             .on_click(move |_, _, cx| {
                 entity.update(cx, |workspace, cx| {
                     workspace.set_secondary_pane_hidden(true, cx);

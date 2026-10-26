@@ -24,7 +24,6 @@
 
 use bezel::motion::Painter;
 use bezel::ui::scroll::{self, ScrollbarState};
-use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, HighlightStyle, KeyBinding, MouseButton,
     MouseDownEvent, Pixels, Point, Render, ScrollHandle, SharedString, Subscription, Task,
@@ -1866,9 +1865,7 @@ impl Render for FileView {
                         })
                         // One line per row: the note waits behind the pointer.
                         .when_some(note, |this, note| {
-                            this.tooltip(move |window, cx| {
-                                Tooltip::text(note.clone(), window, cx)
-                            })
+                            this.tooltip(crate::controls::tooltip(note))
                         })
                         .child(item.label),
                 );
@@ -2115,7 +2112,7 @@ fn render_mode_option(
         .text_color(if active { theme.ely.fg } else { theme.ely.fg_subtle })
         .when(active, |this| this.bg(theme.ely.active))
         .hover(|style| style.bg(theme.ely.hover))
-        .tooltip(move |window, cx| Tooltip::text(tooltip, window, cx))
+        .tooltip(crate::controls::tooltip(tooltip))
         .on_click(move |_, _, cx| {
             entity.update(cx, |view, cx| view.set_markdown_mode(mode, cx));
         })
