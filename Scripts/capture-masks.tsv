@@ -1,0 +1,60 @@
+# Regions a clock (or a run-to-run accident) drives, painted black on both sides before
+# Scripts/capture-diff.py compares them. Format and meaning: docs/testing/bezel-off.md.
+# frame_glob<TAB>x<TAB>y<TAB>w<TAB>h<TAB>why
+#
+# Status bar, every main-window frame (1470x833): the usage meter on the left, the path on the right.
+sweep-*/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
+changes-*/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
+chat-ui-default/scenarios/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
+sweep-*/*	1140	802	330	22	status bar path: the mktemp-random directory name of the fixture (not a clock)
+changes-*/*	1040	802	430	22	status bar path: the mktemp-random directory name of the fixture (not a clock)
+chat-ui-default/scenarios/*	955	802	515	22	status bar path: the mktemp-random directory name of the fixture (not a clock)
+#
+# Chat transcript: the time between turns, centred in the transcript column (HH:MM wall clock).
+chat-ui-default/scenarios/activity/frames/*	689	398	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/cancel/frames/after-cancel	689	479	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/death-recovery/frames/recovered	689	287	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort/frames/*	689	287	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort-full/frames/*	689	287	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort-full-light/frames/*	689	287	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort-light/frames/*	689	287	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/back-at-the-tail	689	173	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/back-at-the-tail	689	365	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/back-at-the-tail	689	557	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up	689	245	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up	689	437	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up-after-new-turn	689	245	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up-after-new-turn	689	437	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/tail	689	173	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/tail	689	365	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/tail	689	557	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/permission/frames/permission-answered	689	326	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/plan/frames/plan-approved	689	417	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/question-options/frames/question-answered	689	445	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/restore/frames/*	689	300	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	689	173	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	689	365	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	689	557	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/subagent/frames/*	689	236	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/wide-content/frames/wide-content	689	557	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/wide-content/frames/wide-content-expanded	689	557	52	17	message time (HH:MM wall clock)
+#
+# Chat transcript: other clocks and run-to-run accidents.
+chat-ui-default/scenarios/cancel/frames/after-cancel	655	287	120	17	message time before the word cancelled (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	1000	133	50	17	turn duration in ms (elapsed wall-clock time)
+chat-ui-default/scenarios/death-recovery/frames/agent-died	547	482	400	45	crash report of the dead fixture agent: process addresses that ASLR moves on every start (not a clock)
+chat-ui-default/scenarios/*	240	194	32	26	sidebar session dots: the green connected indicators appear in some runs and not in others (a timing race of the fixture session, not a clock)
+#
+# The probe window of the identity lane (820x700): the time of its one message.
+chat-ui-default/identity/*	385	209	52	18	message time (HH:MM wall clock) in the identity probe window
+#
+# One-pixel text rasterization noise, found by diffing three runs of one build: a glyph pixel comes out
+# 1/255 apart in one channel, the same way in every frame of one app process and differently between
+# processes. Each line masks one observed pixel and no more. The set has not settled (a third run found a
+# new pixel), so a later run can show another one: that is a mask to add here, not a change to look for.
+changes-*/error	855	95	1	2	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)
+changes-*/error	1226	177	1	1	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)
+changes-*/local-*	1226	177	1	1	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)
+chat-ui-default/scenarios/activity/frames/*	372	202	1	1	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)
+chat-ui-default/scenarios/effort-full*/frames/*	580	659	1	1	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)
+chat-ui-default/scenarios/effort-full*/frames/*	577	636	1	1	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)

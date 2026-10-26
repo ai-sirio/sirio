@@ -28265,6 +28265,12 @@ fn main() {
         native_perf::init(cx);
         // Must land before `Theme::init`: Theme caches resolved font names.
         register_fonts(cx);
+        // The debug switch the capture set uses to make animation deterministic: gpui
+        // snaps every animated element to its rest state. It lands before `ely::init`,
+        // which copies the flag into Ely's theme (compiled out of release builds).
+        if cfg!(debug_assertions) && std::env::var_os("SIRIO_REDUCED_MOTION").is_some() {
+            cx.set_reduce_motion(true);
+        }
         Theme::init(cx);
         sirio_ui::ely::init(cx);
         init_motion(cx);

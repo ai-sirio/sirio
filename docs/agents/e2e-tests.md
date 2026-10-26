@@ -178,4 +178,24 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # and Home). --xvfb or --display :N, --out-dir DIR, --no-build,
 # --no-software-vulkan.
 Scripts/Tests/test-ely-editor-probe.sh --xvfb   # -> prints "ELY EDITOR PROBE OK"
+
+# The contract of Scripts/capture-diff.py, the pixel diff of two capture sets (synthetic 64x64
+# PNGs made with ImageMagick; no display, no build): identical trees, one changed pixel (and one
+# that differs by 1/255 in one channel), a mask rectangle one pixel short or one pixel off, an
+# allow rectangle that covers half the change or belongs to another frame, a frame only on one
+# side, a size change, a malformed table, a tree with no frame, a file that is not an image, and
+# what changed.tsv and index.html list. Needs `magick` and python3.
+Scripts/Tests/test-capture-diff.sh   # -> prints "CAPTURE DIFF CONTRACT OK"
+
+# The capture set a bezel-off PR is judged by (docs/testing/bezel-off.md): the frames of
+# visual-sweep.sh (dark, light), the surfaces probe (once Scripts/Tests/test-surfaces-probe.sh
+# exists), test-changes-e2e.sh (dark, light) and test-ely-chat-ui-e2e.py (its default only), taken
+# from the tree it runs in, on lavapipe, with SIRIO_REDUCED_MOTION=1 (a debug-only switch that
+# makes gpui snap every animation to its rest state). --out-dir DIR keeps captures.log,
+# runs/<source>/ (each source's own artifact) and frames/<source>-<appearance>/ (the PNG set);
+# --xvfb starts a private 1600x1000 Xvfb, --display :N uses one (the same one for the base and the
+# PR runs). Scripts/capture-diff.py BEFORE/frames AFTER/frames --out DIR [--masks TSV]
+# [--allow TSV] compares two sets (Scripts/capture-masks.tsv names the regions a clock drives)
+# and prints CAPTURE DIFF IDENTICAL, CAPTURE DIFF OK (...) or CAPTURE DIFF FAILED (...).
+Scripts/bezel-off-captures.sh --out-dir DIR --xvfb   # -> prints "CAPTURES OK: DIR (<n> frames)"
 ```
