@@ -32,9 +32,10 @@ LVP_ICD="${SIRIO_CAPTURE_VK_ICD:-/usr/share/vulkan/icd.d/lvp_icd.json}"
 
 # Frames that cannot be made deterministic with a mask are dropped from the set, one entry each,
 # "frame name (its path under frames/, no .png)|why". Each prints a NOTE line; none is silent.
-# The chat E2E's two behaviour scenarios (composer_keys, reduced_motion) are
+# The chat E2E's three behaviour scenarios (composer_keys, reduced_motion, unfocused_spinner) are
 # here for their frames only: the scenarios themselves run in every capture, but they are checks
-# with their own pass or fail, and their frames postdate the determinism runs. Scenario
+# with their own pass or fail, and their frames postdate the determinism runs; the unfocused
+# spinner's differ by design (it unsets SIRIO_REDUCED_MOTION, so the animations move). Scenario
 # directories are named by the Scenario(...) call (composer-keys), not by the function.
 DROPPED=(
   "chat-ui-default/scenarios/composer-keys/frames/before-slash|composer_keys postdates the determinism runs (real keys, a live caret)"
@@ -43,6 +44,9 @@ DROPPED=(
   "chat-ui-default/scenarios/reduced-motion/frames/still-1|reduced_motion postdates the determinism runs (a burst taken 250 ms apart)"
   "chat-ui-default/scenarios/reduced-motion/frames/still-2|reduced_motion postdates the determinism runs (a burst taken 250 ms apart)"
   "chat-ui-default/scenarios/reduced-motion/frames/still-3|reduced_motion postdates the determinism runs (a burst taken 250 ms apart)"
+  "chat-ui-default/scenarios/unfocused-spinner/frames/spin-1|unfocused_spinner differs by design: it unsets SIRIO_REDUCED_MOTION, so the orb and the bloom turn"
+  "chat-ui-default/scenarios/unfocused-spinner/frames/spin-2|unfocused_spinner differs by design: it unsets SIRIO_REDUCED_MOTION, so the orb and the bloom turn"
+  "chat-ui-default/scenarios/unfocused-spinner/frames/spin-3|unfocused_spinner differs by design: it unsets SIRIO_REDUCED_MOTION, so the orb and the bloom turn"
 )
 
 die() { echo "FAIL: $*" >&2; exit 1; }

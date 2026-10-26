@@ -207,8 +207,8 @@ difference of one level is not one (the tolerance takes it).
 
 Frames say what a surface looks like; these say what it does. Each passes on the tree before the
 PRs that move a surface off bezel, and a PR that touches the behaviour must still pass it. The
-checks written for this page (the thumb drag, `composer_keys`, `reduced_motion` and the five gpui
-tests of Enter, the model search and Ctrl+C) were each shown to fail by breaking the behaviour they
+checks written for this page (the thumb drag, `composer_keys`, `reduced_motion`, `unfocused_spinner`
+and the five gpui tests of Enter, the model search and Ctrl+C) were each shown to fail by breaking the behaviour they
 name, so a green run of them means something; the others are existing checks, named here so the
 PRs know which ones gate them, and were not mutated for it.
 
@@ -218,6 +218,7 @@ PRs know which ones gate them, and were not mutated for it.
 | The transcript follows its tail, a scrolled-back view does not jump when a turn arrives | `Scripts/Tests/test-ely-chat-ui-e2e.py`, scenario `long_history` |
 | The composer's keys as X delivers them: Return sends, Shift+Return is a newline, Up and Down move the caret with no popup open, the slash popup takes Down and Tab and closes on Escape | the same script, scenario `composer_keys` (fixture `composer`: `plain` advertises no slash commands) |
 | Reduced motion holds the thinking orb and the transcript still | the same script, scenario `reduced_motion` |
+| A running turn's sidebar status bloom keeps turning while another window holds the X focus (bezel's pause-when-inactive stays off), and what that costs in CPU | the same script, scenario `unfocused_spinner`, with `--cpu-ceiling` |
 | Input methods: Enter while a completion or a composition is open | `cargo nextest run -p sirio_ui ely_composer_enter_respects_completion_and_ime` |
 | Paste into the composer (an image attaches and is sent; the right-click menu's Cut, Copy and Paste) | `pasting_an_image_into_the_composer_attaches_it_and_sends_it_to_the_agent`, `composer_right_click_menu_offers_cut_copy_paste_on_the_field` |
 | The composer's keys in gpui: Enter, Shift+Enter, the model search, the `@` popup | `enter_sends_and_shift_return_inserts_a_newline`, `model_search_is_a_text_field_that_never_touches_the_draft`, `at_mention_popup_lists_files_and_inserts_a_mention_token` |
@@ -243,6 +244,40 @@ starts) then 1 px (the move whose event is the first drag event, where every bar
 grab), then 120 px in six steps. The thumb must have moved as far as the pointer did after its
 second move, within 4 px, and a second drag of +2000 px (the pointer stops at the screen's edge,
 past the track's end) must leave it flush with the track's end.
+
+### The unfocused spinner and its CPU base
+
+`unfocused_spinner` opens a turn, gives a second window (`surfaces_probe --frame tooltip`) the X
+focus, raises Sirio's window back on top without handing the focus back (it asserts
+`xdotool getwindowfocus` is the second window before and after the raise), and takes three frames
+250 ms apart. At least one pair must differ in the sidebar row's status bloom.
+
+It judges the bloom and not the transcript on purpose. The transcript's thinking row carries Ely's
+`ShimmerText`, a gpui animation that asks for its own frames and never reads the pause, and every
+repaint of the chat view samples the orb's live phase, so the transcript moves whether or not
+bezel's `set_pause_when_inactive(false)` is in force. With the pause turned on the transcript still
+differed in three of three runs: that check could not fail. The row's bloom is drawn through bezel's
+clock alone (a `Painter` lease taken by the row's own cached view, and gpui replays a cached view
+until it is notified), and leases are refused while no window of the app is active and the pause is
+on, so it freezes exactly then. The tab strip's working mark is not such a region: it keeps moving
+with the pause on. Shown red by changing `main.rs`'s `cx.set_pause_when_inactive(false)` to `true`
+(`sirio` rebuilt): the bloom's region was identical in all three frames in 5 of 5 runs, and 100 to
+141 differing pixels with it off in 5 of 5.
+
+The scenario prints `unfocused-spinner CPU <x>% of one core over 10 s (load average ...)`: the
+utime plus stime of Sirio's process while the second window holds the focus. Mesa's software
+Vulkan renders in that process's own threads, so it reads above 100%. A PR that moves the spinner
+or the redraw path passes `--cpu-ceiling` and fails above it.
+
+**Base: 329.7% of one core**, load average 4.09 4.47 4.92 when the sample ended (this machine has
+8 cores, and the run itself is most of that load), taken with
+`Scripts/Tests/test-ely-chat-ui-e2e.py --display :N --only composer_keys,reduced_motion,unfocused_spinner,long_history`
+on the tree of the commit that adds the scenario (Sirio 0.37.0, parent `fb6f0e79`). Five other runs with the pause
+off read 320.2% to 325.6% at load averages of 4.9 to 6.4, and three with it on 321.3% to 330.0% at
+7.1 to 8.5: the figure does not depend on the pause. **The ceiling a later PR passes is
+`base × 1.25 + 1` = 413.1%** (`--cpu-ceiling 413`; a ceiling of 100 fails the run, a ceiling of 413
+passes it). The figure includes the thinking row's shimmer, which animates whatever the pause says,
+so it is a rendering-cost base and not a measure of the pause.
 
 ## Per PR
 

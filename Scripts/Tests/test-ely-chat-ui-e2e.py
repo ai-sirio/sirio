@@ -13,10 +13,12 @@ and recovery across a relaunch, authentication required, restore across a
 relaunch, and the effort list (`effort`, `effort_light`: High asked of the agent
 at start, the list opened and a level chosen, High asked again after a
 relaunch; `effort_full`, `effort_full_light`: the whole ladder, Default and
-Ultracode included, drawn, and Default chosen from it). Two more need a display and
-real X input, and are skipped under --state-only: `composer_keys` (the composer's keys
-through xdotool: Return, Shift+Return, Up and Down, the slash popup) and `reduced_motion`
-(SIRIO_REDUCED_MOTION=1 holds the thinking orb still). After them, unless --no-identity, the five agents' marks as native
+Ultracode included, drawn, and Default chosen from it). Three more need a display and
+real X input or windows, and are skipped under --state-only: `composer_keys` (the composer's
+keys through xdotool: Return, Shift+Return, Up and Down, the slash popup), `reduced_motion`
+(SIRIO_REDUCED_MOTION=1 holds the thinking orb still) and `unfocused_spinner` (the sidebar
+row's status bloom keeps turning while another window holds the focus, and what that costs in
+CPU). After them, unless --no-identity, the five agents' marks as native
 views with explicitly supplied identities (the example probe, not the app:
 the fixture run proves no provider identity).
 
@@ -41,10 +43,15 @@ agent-traffic.jsonl (the fixture's stdin/stdout), exit-status and frames/*.png.
 
 Usage: Scripts/Tests/test-ely-chat-ui-e2e.py --out-dir PATH [--state-only]
            [--display :N] [--no-build] [--no-identity] [--window-size WxH]
-           [--sirio-bin PATH] [--only NAME[,NAME]]
+           [--sirio-bin PATH] [--only NAME[,NAME]] [--cpu-ceiling PCT]
+           [--focus-thief-bin PATH]
 
 --sirio-bin runs the same scenarios against another build (the baseline, to
 compare); --only runs the named scenarios (function names, e.g. long_history).
+--cpu-ceiling PCT fails `unfocused_spinner` when Sirio uses more than PCT of one core while
+it spins unfocused (the figure is logged either way). --focus-thief-bin is the window that
+takes the focus from Sirio there: the surfaces probe, `surfaces_probe --frame tooltip`, built
+with the other examples unless --no-build (this machine has no xterm or xmessage to use).
 
 --state-only exercises state and omits frames. Without it a display is
 required, with xwininfo, xprop, import and identify on PATH (and xdotool for
@@ -74,6 +81,7 @@ TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "rust" / "target"))
 BIN = TARGET / "debug" / "sirio"
 SEED = TARGET / "debug" / "examples" / "ely_chat_seed"
 PROBE = TARGET / "debug" / "examples" / "ely_chat_probe"
+FOCUS_THIEF = TARGET / "debug" / "examples" / "surfaces_probe"
 FIXTURE = ROOT / "rust" / "crates" / "sirio_ui" / "tests" / "fixtures" / "chat_fixture.py"
 AGENTS = ["claude", "codex", "opencode", "pi", "omp"]
 
@@ -167,6 +175,8 @@ class Run:
         self.display: str = arguments.display or os.environ.get("DISPLAY", "")
         self.window_size: str | None = arguments.window_size
         self.sirio_bin = Path(arguments.sirio_bin) if arguments.sirio_bin else BIN
+        self.cpu_ceiling: float | None = getattr(arguments, "cpu_ceiling", None)
+        self.focus_thief = Path(getattr(arguments, "focus_thief_bin", None) or FOCUS_THIEF)
         # A command that launches Sirio (`gdb -batch -x sample.py --args`, say).
         self.launcher: list[str] = list(getattr(arguments, "launcher", None) or [])
         self.out.mkdir(parents=True, exist_ok=True)
@@ -311,7 +321,13 @@ class Instance:
             GPUI_X11_SCALE_FACTOR="1",
         )
         env.pop("SIRIO_ACP_PROGRAM", None)
-        env.update(scenario.env)
+        # The scenario's own variables last: a value of None removes the variable, such as the
+        # SIRIO_REDUCED_MOTION that Scripts/bezel-off-captures.sh exports for every source.
+        for name, value in scenario.env.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
         if self.run.state_only:
             env.pop("DISPLAY", None)
         else:
@@ -433,12 +449,12 @@ class Scenario:
         *,
         appearance: str = "dark",
         ui_size: int = 13,
-        env: dict[str, str] | None = None,
+        env: dict[str, str | None] | None = None,
     ) -> None:
         self.run = run
         self.name = name
-        # Merged into the instance's environment.
-        self.env: dict[str, str] = dict(env or {})
+        # Merged into the instance's environment; None unsets a variable.
+        self.env: dict[str, str | None] = dict(env or {})
         self.dir = run.work / name
         self.dir.mkdir(parents=True)
         # Where this scenario's artifacts end up; frames are captured straight into it.
@@ -998,6 +1014,11 @@ def effort_full_light(run: Run) -> None:
 # needs masking; a build that draws one must mask it here, or `reduced_motion` breaks every time a
 # second ticks over.
 TRANSCRIPT_REGION = (0.228, 0.12, 0.52, 0.635)
+# The sidebar row's status bloom, the ring glyph that stands where the row's status word was, in
+# pixels of the default 1470x833 window (the sidebar is a fixed-width column, so it does not move
+# with the window's size): the 14 px glyph centred at (265, 199), with a margin. `unfocused_spinner`
+# judges this and not the transcript, see there.
+SIDEBAR_BLOOM = "32x30+250+184"
 # The slash popup's box: the three command rows hung above the composer card, which starts below.
 POPUP_REGION = (0.231, 0.606, 0.204, 0.148)
 # Where a click lands in the composer card, in window pixels from the bottom edge and as a
@@ -1005,16 +1026,11 @@ POPUP_REGION = (0.231, 0.606, 0.204, 0.148)
 COMPOSER_CLICK = (0.487, 150)
 
 
-def region_difference(run: Run, before: Path, after: Path, region: tuple[float, float, float, float], tolerance: int = 0) -> int:
-    """Pixels of `region` (fractions of the frame) whose largest channel differs by more than
+def crop_difference(run: Run, before: Path, after: Path, crop: str, tolerance: int = 0) -> int:
+    """Pixels inside `crop` (an ImageMagick `WxH+X+Y`) whose largest channel differs by more than
     `tolerance` levels between two frames. Counted from a difference image, not from `compare`:
     its AE comes back fractional and counts a faint fill (the popup's, 7 levels off the page's)
     as a few text pixels. `Scripts/capture-diff.py` has the same rule."""
-    width, height = (int(v) for v in subprocess.run(
-        ["identify", "-format", "%w %h", str(before)], capture_output=True, text=True, check=True
-    ).stdout.split())
-    x, y, w, h = region
-    crop = f"{int(width * w)}x{int(height * h)}+{int(width * x)}+{int(height * y)}"
     cuts = []
     for index, frame in enumerate((before, after)):
         cut = run.work / f"region-{index}.png"
@@ -1031,6 +1047,16 @@ def region_difference(run: Run, before: Path, after: Path, region: tuple[float, 
         capture_output=True, text=True, check=True,
     )
     return int(counted.stdout.strip())
+
+
+def region_difference(run: Run, before: Path, after: Path, region: tuple[float, float, float, float], tolerance: int = 0) -> int:
+    """`crop_difference` over `region`, as fractions of the frame (x, y, width, height)."""
+    width, height = (int(v) for v in subprocess.run(
+        ["identify", "-format", "%w %h", str(before)], capture_output=True, text=True, check=True
+    ).stdout.split())
+    x, y, w, h = region
+    crop = f"{int(width * w)}x{int(height * h)}+{int(width * x)}+{int(height * y)}"
+    return crop_difference(run, before, after, crop, tolerance)
 
 
 def needs_display(run: Run, name: str) -> bool:
@@ -1228,6 +1254,120 @@ def reduced_motion(run: Run) -> str | None:
     return None
 
 
+def cpu_ticks(pid: int) -> int:
+    """utime + stime of the process, in clock ticks (`proc(5)`: fields 14 and 15)."""
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    return int(fields[11]) + int(fields[12])
+
+
+def unfocused_spinner(run: Run) -> str | None:
+    """A running turn's status bloom in the sidebar keeps turning while another window holds the
+    X input focus: `sirio` turns bezel's pause-when-inactive off. A second window (the surfaces
+    probe) takes the focus; frames and CPU are sampled while it holds it.
+
+    The frames are judged on the sidebar row's bloom and NOT on the transcript. The transcript's
+    thinking row carries Ely's `ShimmerText`, a gpui animation that asks for its own frames and
+    never reads the pause, and every repaint of the chat view samples the orb's live phase, so
+    the transcript moves whether or not the pause is on (it did, with the pause turned on: the
+    check could not fail). The row's bloom is drawn through bezel's clock alone, a `Painter`
+    lease taken by the row's own cached view: gpui replays a cached view until it is notified,
+    so nothing but that lease repaints it. Leases are refused while no window of the app is
+    active and the pause is on (`bezel-motion`, `lease`), so the region freezes exactly then.
+    The tab strip's working mark is not such a region: it keeps moving with the pause on.
+
+    SIRIO_REDUCED_MOTION is removed from the environment: the capture script exports it for every
+    source, and it would hold the bloom still.
+    """
+    if needs_display(run, "unfocused_spinner"):
+        return "skipped"
+    thief_bin = run.focus_thief
+    if not thief_bin.exists():
+        raise Failure(f"{thief_bin} is missing: cargo build -p sirio_ui --example surfaces_probe (or --focus-thief-bin)")
+    scenario = Scenario(run, "unfocused-spinner", "cancel", env={"SIRIO_REDUCED_MOTION": None})
+    chat = scenario.instance
+    chat.start()
+    chat.until("the chat has finished connecting", lambda s: s["status"] != "connecting", quiet=True)
+    window = sirio_window(run, chat)
+    x_focus(run, window)
+    before_thief = x_focused(run)
+    run.log(f"unfocused_spinner: before the second window, getwindowfocus is {before_thief} (Sirio's window {window} is {int(window, 16)})")
+    if before_thief != int(window, 16):
+        raise Failure("unfocused_spinner: Sirio's window did not take the X focus")
+    # A click in the composer and a prompt typed there: the composer keeps the focus, so its caret
+    # blink is part of what the CPU figure samples.
+    click_composer(run, window)
+    x_type(run, "go on")
+    chat.until("the composer holds the prompt", lambda s: s["composer"] == "go on", timeout=10, quiet=True)
+    x_key(run, "Return")
+    chat.until("a partial reply streams", lambda s: s["status"] == "streaming" and "partial" in "".join(texts(s, "assistant")))
+
+    # The second window: an absolute path and no PATH, so its pid is the probe's own.
+    thief_env = {name: value for name, value in os.environ.items() if name not in ("PATH", "WAYLAND_DISPLAY")}
+    thief_env["DISPLAY"] = run.display
+    thief_log = open(scenario.dir / "focus-thief.log", "wb")
+    thief = subprocess.Popen(
+        [str(thief_bin.resolve()), "--frame", "tooltip"], env=thief_env, stdout=thief_log, stderr=subprocess.STDOUT
+    )
+    try:
+        thief_window = None
+        for _ in range(60):
+            if thief.poll() is not None:
+                raise Failure(f"unfocused_spinner: the second window exited ({thief.returncode}); see focus-thief.log")
+            thief_window = run.window_for(thief.pid)
+            if thief_window:
+                break
+            time.sleep(0.5)
+        if not thief_window:
+            raise Failure(f"unfocused_spinner: no window for the second process {thief.pid}")
+        time.sleep(1)
+        x_focus(run, thief_window)
+        focused = x_focused(run)
+        run.log(f"unfocused_spinner: after focusing the second window, getwindowfocus is {focused} (second window {thief_window} is {int(thief_window, 16)})")
+        if focused != int(thief_window, 16):
+            raise Failure("unfocused_spinner: the second window did not take the X focus from Sirio")
+        # The second window is mapped over Sirio's (an X capture of a covered window returns the
+        # covering pixels), so Sirio goes back on top. Raising is not focusing: it must not have
+        # handed the focus back.
+        x_run(run, "windowraise", window)
+        time.sleep(0.5)
+        focused_after_raise = x_focused(run)
+        run.log(f"unfocused_spinner: after raising Sirio's window, getwindowfocus is {focused_after_raise}")
+        if focused_after_raise != int(thief_window, 16):
+            raise Failure("unfocused_spinner: raising Sirio's window handed the focus back to it")
+        time.sleep(1.5)
+
+        frames = burst(run, chat, "spin")
+        differences = [
+            crop_difference(run, frames[a], frames[b], SIDEBAR_BLOOM)
+            for a, b in ((0, 1), (1, 2), (0, 2))
+        ]
+        run.log(f"unfocused_spinner: sidebar bloom pixels differing between frames 1-2, 2-3, 1-3: {differences}")
+        if not any(differences):
+            raise Failure("unfocused_spinner: the sidebar's status bloom did not turn while Sirio was unfocused (three identical frames)")
+        if x_focused(run) != int(thief_window, 16):
+            raise Failure("unfocused_spinner: the second window lost the focus during the frames")
+
+        seconds = 10
+        first_ticks, started = cpu_ticks(chat.process.pid), time.monotonic()
+        time.sleep(seconds)
+        used = cpu_ticks(chat.process.pid) - first_ticks
+        percent = 100.0 * used / os.sysconf("SC_CLK_TCK") / (time.monotonic() - started)
+        load = " ".join(f"{value:.2f}" for value in os.getloadavg())
+        run.log(f"unfocused-spinner CPU {percent:.1f}% of one core over {seconds} s (load average {load})")
+        if run.cpu_ceiling is not None and percent > run.cpu_ceiling:
+            raise Failure(f"unfocused_spinner: {percent:.1f}% of one core is above the ceiling {run.cpu_ceiling}%")
+    finally:
+        thief.terminate()
+        try:
+            thief.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            thief.kill()
+    chat.call("surface.chat.stop", surfaceId=chat.surface)
+    chat.until("the turn stops", lambda s: s["status"] != "streaming", quiet=True)
+    scenario.finish()
+    return None
+
+
 SCENARIOS = [
     staged_queue,
     permission,
@@ -1247,6 +1387,7 @@ SCENARIOS = [
     effort_full_light,
     composer_keys,
     reduced_motion,
+    unfocused_spinner,
 ]
 
 
@@ -1276,7 +1417,7 @@ def stop_hosts(run: Run) -> None:
 
 
 def build(run: Run) -> None:
-    run.log("building sirio, ely_chat_seed and the probe")
+    run.log("building sirio, ely_chat_seed, the probe and the focus-stealing window")
     subprocess.run(
         ["cargo", "build", "--quiet", "-p", "sirio", "--bin", "sirio"], cwd=ROOT / "rust", check=True
     )
@@ -1286,7 +1427,7 @@ def build(run: Run) -> None:
         check=True,
     )
     subprocess.run(
-        ["cargo", "build", "--quiet", "-p", "sirio_ui", "--example", "ely_chat_probe"],
+        ["cargo", "build", "--quiet", "-p", "sirio_ui", "--example", "ely_chat_probe", "--example", "surfaces_probe"],
         cwd=ROOT / "rust",
         check=True,
     )
@@ -1302,6 +1443,8 @@ def main() -> int:
     parser.add_argument("--window-size")
     parser.add_argument("--sirio-bin")
     parser.add_argument("--only")
+    parser.add_argument("--cpu-ceiling", type=float)
+    parser.add_argument("--focus-thief-bin")
     arguments = parser.parse_args()
     run = Run(arguments)
     try:

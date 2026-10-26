@@ -81,12 +81,17 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # effort list opens and takes a pick through the debug-only `surface.chat.effort`; they capture it.
 # effort_full and effort_full_light run the fixture's effort-full mode (Default, five levels,
 # Ultracode), capture the whole list (the notes, the separator) and choose Default from it.
-# Two scenarios need a display and are skipped under --state-only (`SKIP <name>: needs a
+# Three scenarios need a display and are skipped under --state-only (`SKIP <name>: needs a
 # display`, recorded as `skipped` in summary.json): composer_keys types through xdotool (Return,
 # Shift+Return, Up and Down moving the caret, the slash popup taken with Down and Tab, closed by
 # Escape, proved by a frame diff of its box against the frame before the `/`; its fixture is
 # `composer`, because `plain` advertises no slash commands) and reduced_motion
-# (SIRIO_REDUCED_MOTION=1: the transcript is pixel-identical in three frames 250 ms apart).
+# (SIRIO_REDUCED_MOTION=1: the transcript is pixel-identical in three frames 250 ms apart) and
+# unfocused_spinner (a second window, `surfaces_probe --frame tooltip`, takes the X focus, and the
+# sidebar row's status bloom, which only bezel's animation clock repaints, must still turn in three
+# frames 250 ms apart; it logs `unfocused-spinner CPU <x>%` of one core over 10 s, and --cpu-ceiling
+# PCT fails above PCT; --focus-thief-bin PATH names the second window's binary, by default the
+# surfaces_probe example, built with the others unless --no-build).
 # --display :N (an Xvfb; export VK_DRIVER_FILES and VK_ICD_FILENAMES as lavapipe's lvp_icd.json)
 # takes the captures, --state-only omits them,
 # --only NAME[,NAME] runs some scenarios, --out-dir DIR keeps the artifact.
