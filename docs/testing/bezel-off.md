@@ -500,7 +500,8 @@ or orb turn; the `unfocused_spinner` row above is what does.
 ### PR C: text fields and tooltips on Ely (`refactor/bezel-off-c`)
 
 PR C draws every text field and every tooltip with Ely, and changes pixels on purpose: 22 of the 94
-frames, all attributed in `docs/testing/bezel-off/pr-c-allow.tsv`. Nothing else in the set moved.
+frames, all attributed in `docs/testing/bezel-off/pr-c-allow.tsv`. Nothing else moved outside the
+masks; what moved inside them is under "What the masks hide here" below.
 
 **Base and head.** The "before" set is `artifacts/bezel-off/pr-b/after`, PR B's after set, captured
 at `04fa408c`. PR C's git base is `10243f3a`, and `git diff 04fa408c 10243f3a -- rust/` is two
@@ -612,6 +613,11 @@ what is verified: the macOS-only chord tests.
 - Shift+Enter and Alt+Enter no longer submit the one-line forms and the address bar (the old handler
   answered the Enter key with any modifier): Shift+Enter is Ely's newline, which a one-line field ignores.
   Enter, and Ctrl+Enter (Cmd+Enter on macOS), still submit.
+- A double-click in a field that was bezel's now selects what is under the pointer (a word, a run of
+  punctuation or a space): Ely's field selects on a double-click, bezel's did not.
+- Each delete in an Ely field is its own undo step, where bezel's joined a delete onto a run of
+  backspaces before it, and a delete that removes nothing records no step.
+- The model picker's search head is 6 px shorter, since its field is 28 px where it was about 34 px.
 - The macOS-only chord tests (the macOS table of `the_composer_answers_the_editing_chords_of_its_platform`,
   the Ctrl+N and Ctrl+P row test and the one-line guard) first run in the release gate: they never run on
   Linux, and `macos-check.yml` builds and links the app but runs no test suite. The macOS bindings were
@@ -635,7 +641,8 @@ migrated the Agents search field, which lies inside a standing mask (the Agents 
 y 54..94). So the same pair was compared with no `--masks` and the mask table plus this PR's rows as
 `--allow` (`artifacts/bezel-off/pr-c/diff-unmasked/`): `CAPTURE DIFF OK (66 changed, all attributed)`.
 The 22 frames above, and 44 more that differ only inside mask rectangles whose `why` is a clock or a
-run-to-run accident: the status bar's usage meter and path, message times, the turn duration, the
+run-to-run accident: the status bar's usage meter and path, message times, the Agents toolbar's clock
+(the two frames below), the turn duration, the
 cancelled line, the crash addresses, the session dots (`restore/before-restart`), and one frame where
 the scrollbar-thumb mask holds 100 changed pixels (`long-history/frames/scrolled-up-after-new-turn`, the
 track's y 495..526: the accident the mask names, in a bar PR C does not touch).
