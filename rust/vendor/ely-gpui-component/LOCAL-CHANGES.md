@@ -278,6 +278,24 @@ press the running platform's chords in the composer
 `the_composer_moves_the_caret_a_row_with_its_platforms_keys`). The macOS chords' tests run only in
 the release gate: `macos-check.yml` does not run the test suite and this was written on Linux.
 
+### A one-line `Input` grows with its text (bezel UI off)
+
+- `src/forms/input.rs`: the frame of a one-line `Input` (and of `PasswordInput` and `SearchInput`,
+  which build on it) is `min_h(control height)` where it was `h(control height)`. Sirio's interface
+  size is a setting from 12 to 18 and Ely's text follows it through the metrics (`ely.rs` in
+  `sirio_ui`), while the control height is a fixed 28 px at the default density: from interface
+  size 15 the field's line (about 1.6 times the text) is taller than the frame's inner 26 px, so
+  the line, the caret and the selection crossed the border. The frame is now at least its control
+  height and as tall as its line plus its border beyond that. At the default size nothing moves
+  (a 23 px line and a 2 px border are under 28 px). Every `Input` in Sirio gets this: the
+  settings (the Agents search, the git-hosting tokens, the editor page), the change-request
+  fields, the project forms, the address bar, the model search and the combobox query.
+- A sync with upstream must keep `min_h` there.
+
+Proof: `settings::agents_page::tests::the_agents_search_keeps_its_row_inside_its_frame_at_every_interface_size`
+checks the field's row against its frame at every interface size from 12 to 18, and
+`the_project_name_field_tracks_font_preferences_and_keeps_native_editing` checks the project form's field.
+
 ## Final compatibility evidence
 
 Seen on Linux x86_64 (Arch, kernel 7.2.3) with rustc 1.98.1, cargo 1.98.1 and

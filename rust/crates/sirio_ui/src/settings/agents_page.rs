@@ -582,6 +582,51 @@ mod tests {
         }
     }
 
+    /// The interface size is a setting (12 to 18) and Ely's text follows it while its frame is a
+    /// control height: the field's row, its caret and selection rects included, must lie inside
+    /// the frame's border at every size, or the text is clipped or crosses the border.
+    #[gpui::test]
+    async fn the_agents_search_keeps_its_row_inside_its_frame_at_every_interface_size(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(Vec::new())
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        for size in 12..=18 {
+            cx.update(|_, cx| {
+                Theme::set_interface_font_size(size, cx);
+                cx.refresh_windows();
+            });
+            cx.run_until_parked();
+            let frame = cx
+                .debug_bounds("input-root")
+                .expect("the search field's frame is drawn");
+            let row = cx.update(|window, cx| {
+                window
+                    .root::<Settings>()
+                    .flatten()
+                    .expect("settings root")
+                    .read(cx)
+                    .agent_search_field
+                    .read(cx)
+                    .bounds_for(0)
+                    .expect("the field has been laid out")
+            });
+            let border = gpui::px(1.0);
+            assert!(
+                row.top() >= frame.top() + border && row.bottom() <= frame.bottom() - border,
+                "at interface size {size} the field's row {row:?} must lie inside its frame \
+                 {frame:?} less its border"
+            );
+        }
+    }
+
     /// F-SET-16: typing in the Agents screen's bezel search field narrows
     /// the drawn rows to the matching agent, and clearing it restores every
     /// row — the same contract `sidebar.rs`'s project filter already has.

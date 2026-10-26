@@ -98,7 +98,10 @@ impl RenderOnce for Input {
                 if multi {
                     frame.items_start().py_1p5()
                 } else {
-                    frame.items_center().h(theme.control_height(self.size))
+                    // At least the control height, and as tall as its line and border when the
+                    // text outgrows that (a larger interface size): a fixed height would let
+                    // the line, the caret and the selection cross the border.
+                    frame.items_center().min_h(theme.control_height(self.size))
                 }
             })
             .rounded(theme.radius(Radius::Md))

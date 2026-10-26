@@ -5,7 +5,6 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
 
 use ely_gpui_component::forms::{Input, InputEvent, TextInput};
-use ely_gpui_component::theme::ControlSize;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Render, Task, Window,
     div, prelude::*, px,
@@ -346,7 +345,7 @@ impl Render for CloneForm {
                             .debug_selector(|| "clone-url-field-text".to_owned())
                             .w_full()
                             .min_w_0()
-                            .child(Input::new(&url_field).size(field_size(cx))),
+                            .child(Input::new(&url_field)),
                     ),
             )
             .child(form_label("Destination", &theme))
@@ -629,7 +628,7 @@ impl Render for CreateForm {
                             .debug_selector(|| "create-name-field-text".to_owned())
                             .w_full()
                             .min_w_0()
-                            .child(Input::new(&name_field).size(field_size(cx))),
+                            .child(Input::new(&name_field)),
                     ),
             )
             .child(form_label("Parent location", &theme))
@@ -758,16 +757,6 @@ fn form_label(label: &'static str, theme: &Theme) -> impl IntoElement {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.ely.fg)
         .child(label)
-}
-
-/// The size of a form's text field. Ely's control height does not follow the interface font
-/// size, so a larger font steps up to the next size and the field keeps room for its text.
-fn field_size(cx: &App) -> ControlSize {
-    if Theme::get(cx).typography.ui_size > px(13.0) {
-        ControlSize::Lg
-    } else {
-        ControlSize::Md
-    }
 }
 
 fn ensure_theme(cx: &mut Context<impl Sized>) {
