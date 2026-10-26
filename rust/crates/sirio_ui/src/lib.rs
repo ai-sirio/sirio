@@ -46,6 +46,9 @@ pub mod outline;
 pub mod pane_launcher;
 pub mod project_forms;
 pub mod project_identity;
+// Views the example probes draw; reaches `pub(crate)` scrollbars. Not application code.
+#[doc(hidden)]
+pub mod probes;
 pub mod right_panel;
 pub mod row_reorder;
 pub mod settings;

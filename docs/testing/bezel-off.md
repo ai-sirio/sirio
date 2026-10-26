@@ -12,6 +12,7 @@ The tools:
 | `Scripts/capture-diff.py` | Compares two sets of frames (a pixel counts as changed when a channel differs by more than `--tolerance`, default 1 level) and writes `changed.tsv` and a static `index.html`. |
 | `Scripts/capture-masks.tsv` | The regions a clock drives, painted black before two sets are compared. |
 | `Scripts/Tests/test-surfaces-probe.sh` | Captures the frames the app's own E2E tests do not reach, from `sirio_ui`'s `surfaces_probe` example: the eight Settings pages, Git Hosting again with a forge source (`settings-git-hosting-accounts`), a tab context menu and a tooltip (`SURFACES PROBE OK (<n> frames, <g> gaps)`). `Scripts/bezel-off-captures.sh` runs it once per appearance. |
+| `Scripts/Tests/test-scroll-drag-probe.sh` | Drags the thumb of each of the three scrollbars the app draws, in the `scroll_drag_probe` example, with a real pointer, and checks it follows (`SCROLL DRAG PROBE OK (3 bars)`). |
 | `Scripts/Tests/test-capture-diff.sh` | The contract of `capture-diff.py` on synthetic images (`CAPTURE DIFF CONTRACT OK`). |
 | `SIRIO_REDUCED_MOTION=1` | A debug-only switch (a no-op in release builds) that makes gpui snap every animation to its rest state. The capture script exports it. |
 
@@ -201,6 +202,47 @@ line per rectangle; the table says what each category is and what it blinds.
 No caret, spinner, orb or trace-timer mask was needed: with `SIRIO_REDUCED_MOTION=1` those draw
 their rest state. A mask is for a clock or a run-to-run accident, sized to the whole element; a
 difference of one level is not one (the tolerance takes it).
+
+## Behaviour checks
+
+Frames say what a surface looks like; these say what it does. Each passes on the tree before the
+PRs that move a surface off bezel, and a PR that touches the behaviour must still pass it. The
+checks written for this page (the thumb drag, `composer_keys`, `reduced_motion` and the five gpui
+tests of Enter, the model search and Ctrl+C) were each shown to fail by breaking the behaviour they
+name, so a green run of them means something; the others are existing checks, named here so the
+PRs know which ones gate them, and were not mutated for it.
+
+| Behaviour | Check |
+| --- | --- |
+| Dragging a scrollbar thumb: the thumb follows the pointer, and a long drag stops at the track's end (file view, transcript list, horizontal bar) | `Scripts/Tests/test-scroll-drag-probe.sh --xvfb` |
+| The transcript follows its tail, a scrolled-back view does not jump when a turn arrives | `Scripts/Tests/test-ely-chat-ui-e2e.py`, scenario `long_history` |
+| The composer's keys as X delivers them: Return sends, Shift+Return is a newline, Up and Down move the caret with no popup open, the slash popup takes Down and Tab and closes on Escape | the same script, scenario `composer_keys` (fixture `composer`: `plain` advertises no slash commands) |
+| Reduced motion holds the thinking orb and the transcript still | the same script, scenario `reduced_motion` |
+| Input methods: Enter while a completion or a composition is open | `cargo nextest run -p sirio_ui ely_composer_enter_respects_completion_and_ime` |
+| Paste into the composer (an image attaches and is sent; the right-click menu's Cut, Copy and Paste) | `pasting_an_image_into_the_composer_attaches_it_and_sends_it_to_the_agent`, `composer_right_click_menu_offers_cut_copy_paste_on_the_field` |
+| The composer's keys in gpui: Enter, Shift+Enter, the model search, the `@` popup | `enter_sends_and_shift_return_inserts_a_newline`, `model_search_is_a_text_field_that_never_touches_the_draft`, `at_mention_popup_lists_files_and_inserts_a_mention_token` |
+| Enter in a text field does its form's job: the clone URL, the new project's name, the address bar | `pressing_enter_in_the_clone_url_field_starts_the_clone`, `pressing_enter_in_the_create_name_field_creates_the_folder`, `pressing_enter_in_the_address_bar_navigates` |
+| The model search keeps answering Down and Enter while its field has the focus | `the_model_search_answers_down_and_enter_while_its_field_has_focus` |
+| Ctrl+C (Cmd+C on macOS) in the composer copies the field's selection, not the transcript's | `ctrl_c_in_the_composer_copies_its_selection_and_not_the_transcript` |
+| Ctrl+C elsewhere: copies a selection, is never swallowed, and a terminal's stays SIGINT | `Scripts/Tests/test-text-selection-e2e.sh` |
+| The terminal's scrollbar follows the viewport, and dragging it scrolls the terminal | `cargo nextest run -p sirio_terminal the_scrollbar_follows_the_viewport_and_dragging_it_scrolls_the_terminal` (needs Zig 0.15.2) |
+| A live thought opens while streaming, folds when it settles, and obeys a press | `a_live_thought_opens_while_streaming_folds_on_settle_and_obeys_a_press` |
+
+The gpui tests are the ones that run the real keymap in a drawn frame, which is why IME and paste
+stay gpui tests: Xvfb here has no input method and no clipboard tool. The five new tests also
+install Ely's bindings (`chat::init` and `ely::init`), so a replacement field that binds the
+same keys is caught by them when it lands.
+
+### The thumb drag
+
+`test-scroll-drag-probe.sh` finds each thumb in the capture as the run of pixels in the bar's
+centre line that differ from that line's most common colour, so it does not depend on what draws
+the bar. A 900x600 window of three 300x600 panes (`sirio_ui::probes::scroll_drag_view`); the
+pointer presses a thumb's centre, moves 3 px (past gpui's 2 px threshold, where the drag
+starts) then 1 px (the move whose event is the first drag event, where every bar anchors its
+grab), then 120 px in six steps. The thumb must have moved as far as the pointer did after its
+second move, within 4 px, and a second drag of +2000 px (the pointer stops at the screen's edge,
+past the track's end) must leave it flush with the track's end.
 
 ## Per PR
 

@@ -13,7 +13,10 @@ and recovery across a relaunch, authentication required, restore across a
 relaunch, and the effort list (`effort`, `effort_light`: High asked of the agent
 at start, the list opened and a level chosen, High asked again after a
 relaunch; `effort_full`, `effort_full_light`: the whole ladder, Default and
-Ultracode included, drawn, and Default chosen from it). After them, unless --no-identity, the five agents' marks as native
+Ultracode included, drawn, and Default chosen from it). Two more need a display and
+real X input, and are skipped under --state-only: `composer_keys` (the composer's keys
+through xdotool: Return, Shift+Return, Up and Down, the slash popup) and `reduced_motion`
+(SIRIO_REDUCED_MOTION=1 holds the thinking orb still). After them, unless --no-identity, the five agents' marks as native
 views with explicitly supplied identities (the example probe, not the app:
 the fixture run proves no provider identity).
 
@@ -242,13 +245,17 @@ class Run:
         subprocess.run(["xdotool", "windowsize", window, width, height], env=env, check=True)
         time.sleep(1)
 
-    def capture(self, pid: int, destination: Path) -> None:
+    def capture(
+        self, pid: int, destination: Path, settle: float = 1.5, window: str | None = None
+    ) -> None:
+        """One frame of the pid's window. `settle` is the wait before it; a burst of frames a
+        few hundred milliseconds apart passes 0 and the window it found once."""
         if self.state_only:
             return
-        time.sleep(1.5)
-        window = None
+        if settle:
+            time.sleep(settle)
         for _ in range(20):
-            window = self.window_for(pid)
+            window = window or self.window_for(pid)
             if window:
                 break
             time.sleep(0.5)
@@ -304,6 +311,7 @@ class Instance:
             GPUI_X11_SCALE_FACTOR="1",
         )
         env.pop("SIRIO_ACP_PROGRAM", None)
+        env.update(scenario.env)
         if self.run.state_only:
             env.pop("DISPLAY", None)
         else:
@@ -417,9 +425,20 @@ class Instance:
 
 
 class Scenario:
-    def __init__(self, run: Run, name: str, mode: str, *, appearance: str = "dark", ui_size: int = 13) -> None:
+    def __init__(
+        self,
+        run: Run,
+        name: str,
+        mode: str,
+        *,
+        appearance: str = "dark",
+        ui_size: int = 13,
+        env: dict[str, str] | None = None,
+    ) -> None:
         self.run = run
         self.name = name
+        # Merged into the instance's environment.
+        self.env: dict[str, str] = dict(env or {})
         self.dir = run.work / name
         self.dir.mkdir(parents=True)
         # Where this scenario's artifacts end up; frames are captured straight into it.
@@ -970,6 +989,245 @@ def effort_full_light(run: Run) -> None:
     effort_full_steps(run, "effort-full-light", "light")
 
 
+# --- real X input, and the scenarios that need it ----------------------------------
+
+
+# Fractions of a frame (x, y, width, height). The transcript column from the top of the list down
+# to just above the composer card, with the thinking orb at its foot. The thinking row carries no
+# elapsed-seconds label in this build (none appeared in 15 s of a turn), so nothing in the region
+# needs masking; a build that draws one must mask it here, or `reduced_motion` breaks every time a
+# second ticks over.
+TRANSCRIPT_REGION = (0.228, 0.12, 0.52, 0.635)
+# The slash popup's box: the three command rows hung above the composer card, which starts below.
+POPUP_REGION = (0.231, 0.606, 0.204, 0.148)
+# Where a click lands in the composer card, in window pixels from the bottom edge and as a
+# fraction of the width: the card's text area, in the chat column.
+COMPOSER_CLICK = (0.487, 150)
+
+
+def region_difference(run: Run, before: Path, after: Path, region: tuple[float, float, float, float], tolerance: int = 0) -> int:
+    """Pixels of `region` (fractions of the frame) whose largest channel differs by more than
+    `tolerance` levels between two frames. Counted from a difference image, not from `compare`:
+    its AE comes back fractional and counts a faint fill (the popup's, 7 levels off the page's)
+    as a few text pixels. `Scripts/capture-diff.py` has the same rule."""
+    width, height = (int(v) for v in subprocess.run(
+        ["identify", "-format", "%w %h", str(before)], capture_output=True, text=True, check=True
+    ).stdout.split())
+    x, y, w, h = region
+    crop = f"{int(width * w)}x{int(height * h)}+{int(width * x)}+{int(height * y)}"
+    cuts = []
+    for index, frame in enumerate((before, after)):
+        cut = run.work / f"region-{index}.png"
+        subprocess.run(["magick", str(frame), "-crop", crop, "+repage", str(cut)], check=True)
+        cuts.append(cut)
+    # A level is 100/255 of a percent; half a level above the tolerance rounds to "more than".
+    threshold = (tolerance + 0.5) / 255 * 100
+    counted = subprocess.run(
+        [
+            "magick", *map(str, cuts), "-compose", "Difference", "-composite", "-channel", "RGB",
+            "-separate", "-evaluate-sequence", "Max", "-threshold", f"{threshold}%",
+            "-format", "%[fx:round(mean*w*h)]", "info:",
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    return int(counted.stdout.strip())
+
+
+def needs_display(run: Run, name: str) -> bool:
+    """Whether the scenario has to be skipped: it needs a display and xdotool."""
+    if run.state_only:
+        run.log(f"SKIP {name}: needs a display")
+        return True
+    if shutil.which("xdotool") is None:
+        raise Failure(f"xdotool is required for {name} (or use --state-only)")
+    return False
+
+
+def x_run(run: Run, *arguments: str) -> str:
+    return subprocess.run(
+        ["xdotool", *arguments],
+        env=dict(os.environ, DISPLAY=run.display),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    ).stdout.strip()
+
+
+def x_focus(run: Run, window: str) -> None:
+    """Give the window the X input focus, as a window manager would on a click on it."""
+    x_run(run, "windowfocus", "--sync", window)
+
+
+def x_focused(run: Run) -> int:
+    """The window holding the X input focus: xdotool prints it in decimal, xwininfo in hex."""
+    return int(x_run(run, "getwindowfocus"))
+
+
+def x_type(run: Run, text: str) -> None:
+    x_run(run, "type", "--delay", "40", "--clearmodifiers", text)
+
+
+def x_key(run: Run, *keys: str) -> None:
+    x_run(run, "key", "--clearmodifiers", *keys)
+
+
+def sirio_window(run: Run, chat: Instance) -> str:
+    window = run.window_for(chat.process.pid)
+    if not window:
+        raise Failure(f"{chat.scenario.name}: no window for pid {chat.process.pid}")
+    return window
+
+
+def click_composer(run: Run, window: str) -> None:
+    geometry = subprocess.run(
+        ["xwininfo", "-display", run.display, "-id", window], capture_output=True, text=True
+    ).stdout
+    width = int(re.search(r"Width:\s*(\d+)", geometry).group(1))
+    height = int(re.search(r"Height:\s*(\d+)", geometry).group(1))
+    x_run(
+        run, "mousemove", "--window", window, str(int(width * COMPOSER_CLICK[0])),
+        str(height - COMPOSER_CLICK[1]), "click", "1",
+    )
+
+
+def burst(run: Run, chat: Instance, prefix: str, count: int = 3, gap: float = 0.25) -> list[Path]:
+    """`count` frames of the chat's window about `gap` seconds apart (the capture itself takes a
+    little too): the window is found once and nothing waits before a frame."""
+    window = sirio_window(run, chat)
+    frames = []
+    for number in range(1, count + 1):
+        if number > 1:
+            time.sleep(gap)
+        destination = chat.scenario.out / "frames" / f"{prefix}-{number}.png"
+        run.capture(chat.process.pid, destination, settle=0, window=window)
+        frames.append(destination)
+    return frames
+
+
+def composer_keys(run: Run) -> str | None:
+    """The composer's keys, typed through X as a hand would: the gpui tests drive the keymap, this
+    drives the whole path from the server's key event to the draft.
+
+    Its fixture is `composer`, not `plain`: only the modes that advertise a session's configuration
+    (`COMPOSER_LIKE` in chat_fixture.py) also advertise slash commands, and `plain` has none, so the
+    slash popup the last two steps need could never open there. `composer` answers a prompt the same
+    way (`reply `).
+    """
+    if needs_display(run, "composer_keys"):
+        return "skipped"
+    scenario = Scenario(run, "composer-keys", "composer")
+    chat = scenario.instance
+    chat.start()
+    chat.until("the chat has finished connecting", lambda s: s["status"] != "connecting", quiet=True)
+    window = sirio_window(run, chat)
+    # No window manager here: nothing hands the keys to Sirio but this.
+    x_focus(run, window)
+    if x_focused(run) != int(window, 16):
+        raise Failure(f"composer_keys: Sirio's window {window} did not take the X focus")
+    click_composer(run, window)
+
+    def clear_draft() -> None:
+        x_key(run, "ctrl+a")
+        x_key(run, "BackSpace")
+        chat.until("the draft is empty", lambda s: s["composer"] == "", timeout=10, quiet=True)
+
+    # 1. Return sends.
+    x_type(run, "first")
+    chat.until("the composer holds what was typed", lambda s: s["composer"] == "first", timeout=10)
+    x_key(run, "Return")
+    chat.until(
+        "Return sent it: the user rows end with 'first' and the composer is empty",
+        lambda s: texts(s, "user")[-1:] == ["first"] and s["composer"] == "",
+        timeout=15,
+    )
+    chat.until("the turn completes", lambda s: s["status"] == "completed")
+
+    # 2. Shift+Return is a newline, not a send; with no popup open Up and Down move the caret.
+    x_type(run, "a")
+    x_key(run, "shift+Return")
+    x_type(run, "b")
+    state = chat.until("Shift+Return made a newline in the draft", lambda s: s["composer"] == "a\nb", timeout=10)
+    if texts(state, "user") != ["first"] or state["status"] != "completed":
+        raise Failure(f"composer_keys: Shift+Return sent something: {texts(state, 'user')} / {state['status']}")
+    x_key(run, "Up")
+    x_type(run, "x")
+    x_key(run, "Down")
+    x_type(run, "y")
+    state = chat.until("Up and Down moved the caret, so the draft reads 'ax\\nby'", lambda s: s["composer"] == "ax\nby", timeout=10)
+    if texts(state, "user") != ["first"]:
+        raise Failure(f"composer_keys: moving the caret sent something: {texts(state, 'user')}")
+
+    # 3. The slash popup: Down takes the second row, Tab accepts it. The frame before the `/` and
+    # the one with the popup open differ in the popup's box (a popup that never drew would make
+    # step 4's comparison empty).
+    clear_draft()
+    chat.frame("before-slash")
+    x_type(run, "/")
+    chat.until("the draft is '/'", lambda s: s["composer"] == "/", timeout=10)
+    chat.frame("slash-popup")
+    frames = scenario.out / "frames"
+    opened = region_difference(run, frames / "before-slash.png", frames / "slash-popup.png", POPUP_REGION)
+    run.log(f"composer_keys: the popup's box changed by {opened} pixels when '/' was typed")
+    if opened < 5000:
+        raise Failure(f"composer_keys: the slash popup did not draw ({opened} pixels of its box changed)")
+    x_key(run, "Down")
+    x_key(run, "Tab")
+    chat.until("Down and Tab took the second row", lambda s: s["composer"] == "/create-plan ", timeout=10)
+
+    # 4. Escape closes the popup without sending anything: its box is back to what it was before
+    # the `/`.
+    clear_draft()
+    x_type(run, "/")
+    chat.until("the draft is '/' again", lambda s: s["composer"] == "/", timeout=10, quiet=True)
+    x_key(run, "Escape")
+    state = chat.until("Escape left the draft alone", lambda s: s["composer"] == "/", timeout=10)
+    chat.frame("slash-dismissed")
+    gone = region_difference(run, frames / "before-slash.png", frames / "slash-dismissed.png", POPUP_REGION)
+    run.log(f"composer_keys: after Escape the popup's box differs from before the '/' by {gone} pixels")
+    if gone != 0:
+        raise Failure(f"composer_keys: Escape left the slash popup drawn ({gone} pixels of its box differ)")
+    state = chat.read()
+    if texts(state, "user") != ["first"] or state["status"] != "completed":
+        raise Failure(f"composer_keys: Escape sent or stopped something: {texts(state, 'user')} / {state['status']}")
+    scenario.finish()
+    return None
+
+
+def open_turn(run: Run, scenario: Scenario) -> Instance:
+    """A chat whose turn stays open: the `cancel` fixture streams `partial ` and then waits."""
+    chat = scenario.instance
+    chat.start()
+    chat.send("go on")
+    chat.until("a partial reply streams", lambda s: s["status"] == "streaming" and "partial" in "".join(texts(s, "assistant")))
+    return chat
+
+
+def reduced_motion(run: Run) -> str | None:
+    """With SIRIO_REDUCED_MOTION=1 an open turn draws nothing that moves: three frames a quarter of
+    a second apart are pixel-identical in the transcript region, thinking orb and all."""
+    if needs_display(run, "reduced_motion"):
+        return "skipped"
+    scenario = Scenario(run, "reduced-motion", "cancel", env={"SIRIO_REDUCED_MOTION": "1"})
+    chat = open_turn(run, scenario)
+    time.sleep(1.5)
+    frames = burst(run, chat, "still")
+    state = chat.read()
+    if state["status"] != "streaming":
+        raise Failure(f"reduced_motion: the turn did not stay open ({state['status']})")
+    differences = [
+        region_difference(run, frames[a], frames[b], TRANSCRIPT_REGION)
+        for a, b in ((0, 1), (1, 2), (0, 2))
+    ]
+    run.log(f"reduced_motion: transcript pixels differing between frames 1-2, 2-3, 1-3: {differences}")
+    if any(differences):
+        raise Failure(f"reduced_motion: the transcript moved with reduced motion on ({differences} pixels)")
+    chat.call("surface.chat.stop", surfaceId=chat.surface)
+    chat.until("the turn stops", lambda s: s["status"] != "streaming", quiet=True)
+    scenario.finish()
+    return None
+
+
 SCENARIOS = [
     staged_queue,
     permission,
@@ -987,6 +1245,8 @@ SCENARIOS = [
     effort_light,
     effort_full,
     effort_full_light,
+    composer_keys,
+    reduced_motion,
 ]
 
 
@@ -1059,8 +1319,8 @@ def main() -> int:
             if chosen and name not in chosen:
                 continue
             run.log(f"== scenario {name}")
-            scenario(run)
-            run.results[name] = "passed"
+            # A scenario that cannot run here (no display) returns "skipped".
+            run.results[name] = scenario(run) or "passed"
         if not arguments.no_identity and not arguments.only:
             run.log("== identities")
             identities(run)

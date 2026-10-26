@@ -48,7 +48,7 @@ mod controls;
 mod file_links;
 use file_links::file_link_target;
 mod history;
-mod list_scroll;
+pub(crate) mod list_scroll;
 mod menus;
 mod question_dock;
 mod session_panel;
@@ -12925,6 +12925,111 @@ two"
         assert_eq!(
             chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
             "draft stays"
+        );
+    }
+
+    /// The model picker's search field holds the focus while the picker is open, and it is still
+    /// the picker's arrow keys and Enter that move and choose: the field takes typing and
+    /// Backspace and nothing else. A field that bound `down` or `enter` for itself would turn the
+    /// list into something the keyboard can no longer drive.
+    #[gpui::test]
+    async fn the_model_search_answers_down_and_enter_while_its_field_has_focus(
+        cx: &mut TestAppContext,
+    ) {
+        // `offline_chat_view` runs `chat::init`, which installs Ely's bindings (`ely::init`):
+        // they are live as they are in the app, and a replacement field may bind keys.
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, _| {
+            configure_test_chat(chat);
+            chat.available_models = ["first", "second", "third"]
+                .into_iter()
+                .map(|id| ModelOption {
+                    id: id.into(),
+                    name: id.into(),
+                    description: None,
+                })
+                .collect();
+            chat.selected_model = Some("first".into());
+        });
+        refresh_frame(cx);
+        let chip = cx.debug_bounds("model-chip").expect("model chip");
+        cx.simulate_click(chip.center(), Modifiers::none());
+        refresh_frame(cx);
+        refresh_frame(cx);
+        assert!(cx.debug_bounds("model-picker").is_some(), "the picker is open");
+        let field_focused = cx.update(|window, cx| {
+            chat.read(cx)
+                .model_search_field
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        });
+        assert!(
+            field_focused,
+            "the search field holds the focus, so the keys below reach it first"
+        );
+
+        cx.simulate_keystrokes("down");
+        refresh_frame(cx);
+        cx.simulate_keystrokes("enter");
+        refresh_frame(cx);
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.selected_model.clone()),
+            Some("second".to_string()),
+            "Down moved the mark to the second model and Enter chose it"
+        );
+        assert!(
+            cx.debug_bounds("model-picker").is_none(),
+            "choosing a model closes the picker"
+        );
+    }
+
+    /// Ctrl+C (Cmd+C on macOS) in the composer copies what the field has selected. The
+    /// transcript's own copy is bound to the same chord in its own context, and a selection held
+    /// there must not take the clipboard: the clipboard starts on a sentinel, the transcript holds
+    /// a selection of other text, and only the field's text may land.
+    #[gpui::test]
+    async fn ctrl_c_in_the_composer_copies_its_selection_and_not_the_transcript(
+        cx: &mut TestAppContext,
+    ) {
+        // `chat_view` runs `chat::init`, which installs Ely's bindings (`ely::init`).
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        chat.update(cx, |chat, _| {
+            configure_test_chat(chat);
+            chat.push_entry(Entry::User {
+                text: "transcript words".into(),
+                at: None,
+            });
+        });
+        refresh_frame(cx);
+
+        focus_and_type(cx, "hello");
+        cx.simulate_keystrokes("secondary-a");
+        cx.run_until_parked();
+        // After the field is focused: a press on the composer is also a press away from the
+        // transcript, which clears its selection.
+        chat.update(cx, |chat, _| {
+            let ranges = chat.transcript_entry_ranges();
+            chat.transcript_selection = Some(TranscriptSelection {
+                anchor: ranges[0].start,
+                head: ranges[0].end,
+            });
+            assert!(
+                chat.selected_transcript_text()
+                    .is_some_and(|text| text.contains("transcript words")),
+                "the transcript holds a selection of its own that a wrong copy would write"
+            );
+        });
+        cx.cx
+            .write_to_clipboard(ClipboardItem::new_string("sentinel".into()));
+
+        cx.simulate_keystrokes("secondary-c");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("hello".into()),
+            "Ctrl+C in the composer copies the field's selection, not the transcript's"
         );
     }
 

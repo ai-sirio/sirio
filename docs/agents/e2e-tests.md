@@ -81,6 +81,12 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # effort list opens and takes a pick through the debug-only `surface.chat.effort`; they capture it.
 # effort_full and effort_full_light run the fixture's effort-full mode (Default, five levels,
 # Ultracode), capture the whole list (the notes, the separator) and choose Default from it.
+# Two scenarios need a display and are skipped under --state-only (`SKIP <name>: needs a
+# display`, recorded as `skipped` in summary.json): composer_keys types through xdotool (Return,
+# Shift+Return, Up and Down moving the caret, the slash popup taken with Down and Tab, closed by
+# Escape, proved by a frame diff of its box against the frame before the `/`; its fixture is
+# `composer`, because `plain` advertises no slash commands) and reduced_motion
+# (SIRIO_REDUCED_MOTION=1: the transcript is pixel-identical in three frames 250 ms apart).
 # --display :N (an Xvfb; export VK_DRIVER_FILES and VK_ICD_FILENAMES as lavapipe's lvp_icd.json)
 # takes the captures, --state-only omits them,
 # --only NAME[,NAME] runs some scenarios, --out-dir DIR keeps the artifact.
@@ -160,6 +166,16 @@ Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SE
 # (docs/testing/bezel-off.md). --xvfb | --display :N, --out-dir DIR,
 # --appearance dark|light (without it both), --no-build.
 Scripts/Tests/test-surfaces-probe.sh --xvfb   # -> prints "SURFACES PROBE OK (<n> frames, <g> gaps)"
+
+# Dragging a scrollbar thumb, for the three bars the app draws (file_view::scrollbar, the
+# transcript's list_scrollbar, horizontal_scroll::bar), side by side in the `scroll_drag_probe`
+# example on a private Xvfb with lavapipe: a real xdotool press at each thumb's centre, 3 px, 1
+# px, then 120 px of travel; the thumb must have moved as far as the pointer did (4 px tolerance)
+# and a second drag of +2000 px must leave it flush with the track's end. This is the "before"
+# behaviour of every PR that changes what draws a bar (docs/testing/bezel-off.md).
+# --xvfb | --display :N, --out-dir DIR, --no-build, --no-software-vulkan;
+# SCROLL_DRAG_PROBE_SKEW=40 expects 40 px too much travel, and the run must fail.
+Scripts/Tests/test-scroll-drag-probe.sh --xvfb   # -> prints "SCROLL DRAG PROBE OK (3 bars)"
 
 # The horizontal bar bezel-markdown draws under a fence or a table wider than
 # its column (the vendored change of rust/vendor/README.md): a real xdotool

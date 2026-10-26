@@ -3373,6 +3373,73 @@ mod tests {
         );
     }
 
+    /// Enter in the address bar navigates to what the field holds, normalised. The key is the
+    /// field wrapper's own `on_key_down`, not a binding of the field, so a field that takes
+    /// Enter for itself (a replacement for bezel's) silently ends navigation. There is no
+    /// webview here: the browser state is what navigates.
+    #[gpui::test]
+    async fn pressing_enter_in_the_address_bar_navigates(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            Theme::init(cx);
+            bezel::ui::input::init(cx);
+            // Ely's bindings are live, as they are in the app: a replacement field may bind keys.
+            sirio_ui::ely::init(cx);
+        });
+        let window = cx.open_window(gpui::size(px(800.0), px(200.0)), |_, cx| {
+            let state = BrowserState::new("https://example.com").expect("valid URL");
+            let address_field = cx.new(|cx| {
+                let mut field = TextField::new(cx);
+                field.set_content(state.address(), cx);
+                field
+            });
+            BrowserSurface {
+                state,
+                address_field,
+                address_focused: false,
+                webview: Rc::new(RefCell::new(None)),
+                _web_context: None,
+                webview_scale_correction: Rc::new(Cell::new(None)),
+                webview_visible: initial_native_visibility(),
+                overlay_obscured: Rc::new(Cell::new(false)),
+                web_events: Rc::new(RefCell::new(Vec::new())),
+                events: Vec::new(),
+                pump_task: None,
+                startup_failure: None,
+            }
+        });
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let surface = cx.update(|window, _| {
+            window
+                .root::<BrowserSurface>()
+                .flatten()
+                .expect("surface root")
+        });
+        cx.run_until_parked();
+
+        let address = cx
+            .debug_bounds("browser-address-field")
+            .expect("the address field is drawn");
+        cx.simulate_click(address.center(), gpui::Modifiers::none());
+        // The field starts on the page's own address: replace it. Select-all is the chord
+        // `input::init` binds per platform, the one Ctrl+A or Cmd+A reaches.
+        cx.simulate_keystrokes("secondary-a");
+        cx.simulate_input("example.org");
+        cx.run_until_parked();
+        assert_eq!(
+            surface.read_with(&cx.cx, |surface, _| surface.state().address().to_owned()),
+            "https://example.com",
+            "typing an address navigates nowhere"
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(
+            surface.read_with(&cx.cx, |surface, _| surface.state().address().to_owned()),
+            "https://example.org",
+            "Enter navigates to the typed address, normalised to https"
+        );
+    }
+
     /// #368: a pending surface explains a missing runtime immediately, so
     /// the deferred build is never even scheduled; otherwise it preserves
     /// the invalid-URL fallback error for the later build to keep.
