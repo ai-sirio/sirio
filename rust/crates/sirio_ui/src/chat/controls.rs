@@ -468,7 +468,8 @@ impl Chat {
             .map(|effort| {
                 let split = effort_rows(&effort.choices);
                 let current = effort.current_value.as_deref().unwrap_or(EFFORT_RESET);
-                let (filled_step, empty_step) = (theme.ely.fg_muted, theme.ely.border);
+                let (filled_step, empty_step) =
+                    (theme.ely.fg_muted, theme.ely.fg_muted.opacity(0.3));
                 let row = |choice: &EffortChoice| {
                     let value = choice.value.clone();
                     let note_selector =
