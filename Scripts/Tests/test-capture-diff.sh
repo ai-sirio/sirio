@@ -182,6 +182,69 @@ run_diff "$B" "$A" --out "$O"
 CASE="alpha, opaque against 130"; expect_code 1
 expect_cell a pixels 1
 
+# a change of 2 levels in the red or the green channel of an RGB frame is a change (the other
+# single-channel cases above move blue)
+new_case red-only
+base "$B/a.png"; tweak '#356699' 10,10 "$A/a.png"
+run_diff "$B" "$A" --out "$O"
+expect_code 1
+expect_cell a pixels 1
+new_case green-only
+base "$B/a.png"; tweak '#336899' 10,10 "$A/a.png"
+run_diff "$B" "$A" --out "$O"
+expect_code 1
+expect_cell a pixels 1
+
+# ImageMagick's PNG encoder stores a neutral picture as a one-channel grayscale file, and the
+# `import` of a neutral window is written that way. Such a frame is still compared in every
+# channel: green and blue of an RGB picture against a gray one are not skipped, with no mask
+# anywhere near, at the default tolerance.
+gray_png() { # color file: a plain PNG: that ImageMagick really writes as Gray (else the case proves nothing)
+  magick -size 64x64 xc:"$1" "PNG:$2"
+  [ "$(identify -format '%[colorspace]' "$2")" = Gray ] || fail "$2 was not written as Gray"
+}
+rgb_with() { # color point file: the #808080 picture with one pixel in another color, as RGB
+  magick -size 64x64 xc:'#808080' -fill "$1" +antialias -draw "point $2" "PNG24:$3"
+}
+for channel in "red #828080" "green #808280" "blue #808082"; do
+  set -- $channel
+  new_case "gray-before-$1"
+  gray_png '#808080' "$B/a.png"; rgb_with "$2" 10,10 "$A/a.png"
+  run_diff "$B" "$A" --out "$O"
+  expect_code 1
+  expect_cell a pixels 1
+  expect_cell a bbox 10,10,1,1
+  new_case "gray-after-$1"
+  rgb_with "$2" 10,10 "$B/a.png"; gray_png '#808080' "$A/a.png"
+  run_diff "$B" "$A" --out "$O"
+  expect_code 1
+  expect_cell a pixels 1
+done
+new_case gray-and-gray
+gray_png '#808080' "$B/a.png"
+magick -size 64x64 xc:'#808080' -fill '#838383' +antialias -draw "point 10,10" "PNG:$A/a.png"
+[ "$(identify -format '%[colorspace]' "$A/a.png")" = Gray ] || fail "$A/a.png was not written as Gray"
+run_diff "$B" "$A" --out "$O"
+expect_code 1
+expect_cell a pixels 1
+new_case gray-same
+gray_png '#808080' "$B/a.png"; rgb_with '#808080' 10,10 "$A/a.png"
+run_diff "$B" "$A" --out "$O"
+expect_code 0
+expect_out "CAPTURE DIFF IDENTICAL"
+
+# a mask glob's * crosses /: it reaches a frame in a subdirectory, and a prefix keeps it off the
+# frames of another source
+new_case glob-slash
+mkdir -p "$B/src-a/sub" "$A/src-a/sub" "$B/src-b/sub" "$A/src-b/sub"
+base "$B/src-a/sub/deep.png"; pixels 10,10 "$A/src-a/sub/deep.png"
+base "$B/src-b/sub/deep.png"; pixels 10,10 "$A/src-b/sub/deep.png"
+mask_line 'src-a/*' 8 8 5 5 "a mask for one source" > "$WORK/mask.tsv"
+run_diff "$B" "$A" --out "$O" --masks "$WORK/mask.tsv"
+expect_code 1
+expect_rows 1
+expect_cell src-b/sub/deep status changed
+
 # the tolerance applies after the masks, and an allow rectangle attributes what it counts
 new_case two-steps-allowed
 base "$B/a.png"; tweak '#33669b' 10,10 "$A/a.png"
@@ -367,6 +430,16 @@ new_case not-an-image
 echo "one" > "$B/a.png"; echo "two" > "$A/a.png"
 run_diff "$B" "$A" --out "$O"
 expect_code 2
+expect_no_out "CAPTURE DIFF IDENTICAL"
+
+# an unwritable OUT is an error of the tool, not a traceback and not a verdict
+new_case unwritable-out
+base "$B/a.png"; base "$A/a.png"
+: > "$WORK/a-file"
+run_diff "$B" "$A" --out "$WORK/a-file/out"
+expect_code 2
+expect_out "capture-diff:"
+expect_no_out "Traceback"
 expect_no_out "CAPTURE DIFF IDENTICAL"
 
 echo "CAPTURE DIFF CONTRACT OK"

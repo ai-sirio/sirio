@@ -50,8 +50,9 @@ done
 if [ "$START_XVFB" -eq 1 ] && [ -n "$DISPLAY_TARGET" ]; then die "pass --xvfb or --display :N, not both"; fi
 if [ "$START_XVFB" -eq 0 ] && [ -z "$DISPLAY_TARGET" ]; then die "no display: pass --xvfb or --display :N"; fi
 
-# Scratch never goes to /tmp (a small tmpfs); control sockets must stay under 108 bytes.
-export TMPDIR="${SIRIO_CAPTURE_TMPDIR:-$HOME/.cache/sirio-e2e-tmp}"
+# Scratch never goes to /tmp (a small tmpfs); control sockets must stay under 108 bytes. The path
+# is fixed, not an option; the length check is for a $HOME that is unusually long.
+export TMPDIR="$HOME/.cache/sirio-e2e-tmp"
 mkdir -p "$TMPDIR"
 [ "${#TMPDIR}" -le 60 ] || die "TMPDIR '$TMPDIR' is too long: a control socket path must stay under 108 bytes"
 export SIRIO_REDUCED_MOTION=1
@@ -73,16 +74,38 @@ XVFB_PID=""
 cleanup() { [ -z "$XVFB_PID" ] || kill "$XVFB_PID" 2>/dev/null || true; }
 trap cleanup EXIT
 
-if [ "$START_XVFB" -eq 1 ]; then
+# start_xvfb: a private Xvfb on the first free display from :90 to :99. Two runs started together
+# (the base and the head) can both see :90 free. Xvfb refuses a display whose lock file exists, so
+# the loser exits, but the xdpyinfo that waits for readiness may already have answered from the
+# winner's server. The lock file holds the pid of the server that owns the display, so a display is
+# ours only if that pid is our Xvfb; otherwise this one is given up and the next number is tried.
+start_xvfb() {
+  local n lock_pid ready
   command -v Xvfb >/dev/null || die "Xvfb is required for --xvfb"
   for n in $(seq 90 99); do
-    [ -e "/tmp/.X11-unix/X$n" ] || [ -e "/tmp/.X$n-lock" ] || { DISPLAY_TARGET=":$n"; break; }
+    if [ -e "/tmp/.X11-unix/X$n" ] || [ -e "/tmp/.X$n-lock" ]; then continue; fi
+    Xvfb ":$n" -screen 0 "$XVFB_GEOMETRY" -nolisten tcp >"$OUT_DIR/xvfb.log" 2>&1 &
+    XVFB_PID=$!
+    ready=0
+    for _ in $(seq 1 50); do
+      kill -0 "$XVFB_PID" 2>/dev/null || break
+      if timeout 2 xdpyinfo -display ":$n" >/dev/null 2>&1; then ready=1; break; fi
+      sleep 0.1
+    done
+    lock_pid="$(tr -d ' \n' <"/tmp/.X$n-lock" 2>/dev/null || true)"
+    if [ "$ready" -eq 1 ] && kill -0 "$XVFB_PID" 2>/dev/null && [ -n "$lock_pid" ] \
+      && [ "$((10#$lock_pid))" -eq "$XVFB_PID" ]; then
+      DISPLAY_TARGET=":$n"
+      return 0
+    fi
+    kill "$XVFB_PID" 2>/dev/null || true
+    wait "$XVFB_PID" 2>/dev/null || true
+    XVFB_PID=""
+    echo "NOTE display :$n was taken by another run; trying the next one"
   done
-  [ -n "$DISPLAY_TARGET" ] || die "no free display between :90 and :99"
-  Xvfb "$DISPLAY_TARGET" -screen 0 "$XVFB_GEOMETRY" -nolisten tcp >"$OUT_DIR/xvfb.log" 2>&1 &
-  XVFB_PID=$!
-  for _ in $(seq 1 50); do timeout 2 xdpyinfo -display "$DISPLAY_TARGET" >/dev/null 2>&1 && break; sleep 0.1; done
-fi
+  die "no free display between :90 and :99"
+}
+if [ "$START_XVFB" -eq 1 ]; then start_xvfb; fi
 command -v xdpyinfo >/dev/null || die "xdpyinfo is required"
 timeout 3 xdpyinfo -display "$DISPLAY_TARGET" >/dev/null 2>&1 || die "no usable X display '$DISPLAY_TARGET'"
 DIMENSIONS="$(xdpyinfo -display "$DISPLAY_TARGET" | awk '/dimensions:/ { print $2 }')"
@@ -108,7 +131,8 @@ run_source() {
   echo "ok: $name: $(tail -n 1 "$RUNS/$name.console.log")"
 }
 
-# keep_flat RUN DEST: RUN's frames/*.png, as FRAMES/DEST/<name>.png.
+# keep_flat RUN DEST: RUN's frames/*.png, as FRAMES/DEST/<name>.png. A source that gives no frame
+# at all has failed, whatever else it printed.
 keep_flat() {
   local count=0 frame
   mkdir -p "$FRAMES/$2"
@@ -122,11 +146,16 @@ keep_flat() {
 }
 
 # keep_tree RUN DEST PATTERN...: files under RUN matching each glob, keeping their path under RUN
-# (the chat E2E's scenarios reuse frame names, so flattening them would collide).
+# (the chat E2E's scenarios reuse frame names, so flattening them would collide). Each pattern is
+# counted on its own: a lane that gave nothing (the chat E2E's identity lane) while another did
+# would otherwise leave the set short without a word. A pattern with no frame fails the script,
+# unless the source printed a GAP, NOTE or SKIP line about that lane (its first path segment, the
+# first 7 letters of it, so `identity` finds "SKIP identities: ..."), which is then echoed.
 keep_tree() {
-  local run="$1" dest="$2" count=0 pattern frame rel
+  local run="$1" dest="$2" pattern frame rel lane count total=0
   shift 2
   for pattern in "$@"; do
+    count=0
     for frame in "$RUNS/$run"/$pattern; do
       [ -f "$frame" ] || continue
       rel="${frame#"$RUNS/$run"/}"
@@ -134,9 +163,18 @@ keep_tree() {
       cp "$frame" "$FRAMES/$dest/$rel"
       count=$((count + 1))
     done
+    if [ "$count" -eq 0 ]; then
+      lane="${pattern%%/*}"
+      if grep -Eiq "^(GAP|NOTE|SKIP)[: ].*${lane:0:7}" "$RUNS/$run.console.log"; then
+        echo "NOTE source $run gave no frame for $pattern; its own line says why: $(grep -Ei "^(GAP|NOTE|SKIP)[: ].*${lane:0:7}" "$RUNS/$run.console.log" | head -n 1)"
+      else
+        die "source $run produced no frame matching $pattern, and printed no GAP, NOTE or SKIP line about it"
+      fi
+    fi
+    echo "kept $count frames: frames/$dest ($pattern)"
+    total=$((total + count))
   done
-  [ "$count" -gt 0 ] || die "source $run produced no frame matching: $*"
-  echo "kept $count frames: frames/$dest"
+  [ "$total" -gt 0 ] || die "source $run produced no frame matching: $*"
 }
 
 for appearance in dark light; do

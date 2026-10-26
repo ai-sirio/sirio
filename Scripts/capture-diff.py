@@ -40,11 +40,13 @@ CAPTURE DIFF OK (...)). Exit 1: the diff found something unattributed (CAPTURE D
 Exit 2: the tool could not do its job (a missing tree, a malformed table, an unreadable image, a
 tolerance outside 0..255, no frame at all).
 
-How a pixel is counted (the pipeline, and why): `magick \( \( A -alpha off \) \( B -alpha off \)
--compose difference -composite -separate \) \( \( A -alpha extract \) \( B -alpha extract \)
--compose difference -composite \) -evaluate-sequence max` gives, per pixel, the largest |A - B| over R, G, B and alpha,
-and written as 8-bit gray it is one byte per pixel holding exactly that number of levels, so
-"changed" is `byte > N` and nothing else. `magick compare -fuzz` is not used for the count: its
+How a pixel is counted (the pipeline, and why): `magick \( \( A -colorspace sRGB -alpha off \)
+\( B -colorspace sRGB -alpha off \) -compose difference -composite -separate \) \( \( A -colorspace
+sRGB -alpha extract \) \( B -colorspace sRGB -alpha extract \) -compose difference -composite \)
+-evaluate-sequence max` gives, per pixel, the largest |A - B| over R, G, B and alpha (a grayscale
+PNG, which ImageMagick's encoder writes for a neutral window, is first widened to sRGB, so it is
+compared in every channel too), and written as 8-bit gray it is one byte per pixel holding
+exactly that number of levels, so "changed" is `byte > N` and nothing else. `magick compare -fuzz` is not used for the count: its
 fuzz is a colour distance (the root of the summed squared channel differences, scaled), which is
 not "no channel is more than N levels apart", and the AE figure `compare` prints is not a pixel
 count on ImageMagick 7.1 HDRI (a one-pixel change printed 0.6, a change of 1/255 in one channel
@@ -186,9 +188,14 @@ def channel_deltas(before: Path, after: Path, width: int, height: int) -> bytes:
             "magick",
             # Each image sits in its own parentheses: an operator such as -alpha acts on every
             # image read so far, so `A -alpha extract B -alpha extract` would extract A twice.
-            "(", "(", str(before), "-alpha", "off", ")", "(", str(after), "-alpha", "off", ")",
+            # Each is first made sRGB (a no-op for an RGB PNG, an exact copy of the gray into R, G
+            # and B for a one-channel PNG): `-separate` of a gray BEFORE would otherwise leave one
+            # channel, and a change in AFTER's green or blue would never be compared.
+            "(", "(", str(before), "-colorspace", "sRGB", "-alpha", "off", ")",
+            "(", str(after), "-colorspace", "sRGB", "-alpha", "off", ")",
             "-compose", "difference", "-composite", "-separate", ")",
-            "(", "(", str(before), "-alpha", "extract", ")", "(", str(after), "-alpha", "extract", ")",
+            "(", "(", str(before), "-colorspace", "sRGB", "-alpha", "extract", ")",
+            "(", str(after), "-colorspace", "sRGB", "-alpha", "extract", ")",
             "-compose", "difference", "-composite", ")",
             "-evaluate-sequence", "max", "-set", "colorspace", "Gray", "-depth", "8", "gray:-",
         ]
@@ -250,7 +257,7 @@ def compare_frame(
     counted.write_bytes(data)
     run(
         [
-            "magick", str(right), "-alpha", "off", "-fill", "white", "-colorize", "60%",
+            "magick", str(right), "-colorspace", "sRGB", "-alpha", "off", "-fill", "white", "-colorize", "60%",
             "(", "-size", f"{width}x{height}", "-depth", "8", f"gray:{counted}",
             "-fill", "red", "-opaque", "white", "-transparent", "black", ")",
             "-composite", f"PNG24:{diff}",
@@ -469,4 +476,7 @@ if __name__ == "__main__":
         sys.exit(main())
     except Fatal as error:
         print(f"capture-diff: {error}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as error:  # an unreadable file, a full disk: undecidable, never a verdict
+        print(f"capture-diff: {type(error).__name__}: {error}", file=sys.stderr)
         sys.exit(2)

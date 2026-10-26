@@ -12,14 +12,15 @@ The tools:
 | `Scripts/capture-diff.py` | Compares two sets of frames (a pixel counts as changed when a channel differs by more than `--tolerance`, default 1 level) and writes `changed.tsv` and a static `index.html`. |
 | `Scripts/capture-masks.tsv` | The regions a clock drives, painted black before two sets are compared. |
 | `Scripts/Tests/test-capture-diff.sh` | The contract of `capture-diff.py` on synthetic images (`CAPTURE DIFF CONTRACT OK`). |
-| `SIRIO_REDUCED_MOTION=1` | A debug-only switch (compiled out of release builds) that makes gpui snap every animation to its rest state. The capture script exports it. |
+| `SIRIO_REDUCED_MOTION=1` | A debug-only switch (a no-op in release builds) that makes gpui snap every animation to its rest state. The capture script exports it. |
 
 ## Reproduce
 
 Everything below runs with scratch under `$HOME/.cache/sirio-e2e-tmp` (the capture script
 exports it; `/tmp` is a small tmpfs and control sockets must stay under 108 bytes). It needs
 Xvfb, ImageMagick 7 (`magick`, `import`, `identify`), `xdotool`, `xwininfo`, Zig 0.15.2 on PATH and
-Mesa's lavapipe at `/usr/share/vulkan/icd.d/lvp_icd.json`.
+Mesa's lavapipe at `/usr/share/vulkan/icd.d/lvp_icd.json` (`SIRIO_CAPTURE_VK_ICD=FILE` names another
+ICD file, for a distro that installs it elsewhere, such as `lvp_icd.x86_64.json`).
 
 ```bash
 # The base: a worktree of the commit the PR branches from. The script builds into that
@@ -99,8 +100,11 @@ level apart in one channel from one app process to the next. The pixel is the sa
 of one process and differs between processes, and the set of such pixels did not settle over five
 runs (two of them found a pixel the earlier ones had not), so masking them one by one cannot end.
 
-What it cannot hide: any difference of two levels or more in any channel, in any frame; in practice
-a change of colour, shape or position that a person can see moves some pixel that far. It does hide a real change
+What it cannot hide: a difference of two levels or more in any channel (R, G, B or alpha) of any
+pixel outside a mask, in any frame; every frame is read as sRGB first, so a frame that
+ImageMagick stored as a one-channel grayscale PNG (it does for a neutral picture) is compared in
+green and blue too. In practice a change of colour, shape or position that a person can see moves
+some pixel that far. It does hide a real change
 of exactly one level, so a PR that means to change a colour by one level must say so and be
 checked with `--tolerance 0`.
 
@@ -138,7 +142,7 @@ reviewer sees the rectangle and the change together.
 `Scripts/capture-masks.tsv` was derived from runs of one build (60 frames each: 5 + 5 sweep,
 4 + 4 Changes, 42 chat); two runs made after it was fitted found the cancelled line sized to the
 digits two runs happened to differ in, the session dots, and the status bar path longer than
-the mask (a `TMPDIR` change); all three are in the table now. One
+the mask (a `TMPDIR` change), and a later run found the scrollbar thumb; all four are in the table now. One
 line per rectangle; the table says what each category is and what it blinds.
 
 | Category | Frames | What moves | What the mask blinds |
@@ -151,6 +155,7 @@ line per rectangle; the table says what each category is and what it blinds.
 | Crash addresses | `scenarios/death-recovery/frames/agent-died` | The dead fixture agent's crash report prints process addresses that ASLR moves on every start (not a clock). | 400 x 45 px of the error text. |
 | Identity time | `chat-ui-default/identity/*` | The same `HH:MM` in the identity probe's own window (820x700). | 52 x 18 px. |
 | Sidebar session dots | `chat-ui-default/scenarios/*` | The green connected indicators on the session's sidebar row show in some runs and not in others: a timing race of the fixture session, not a clock (seen in `activity` and `death-recovery/recovered`). | 32 x 26 px at the right end of the session's sidebar row. |
+| Scrollbar thumb | `scenarios/long-history/frames/scrolled-up*` | After a turn completes the transcript scrollbar's thumb follows the transcript's estimated total height, so it sits about 7 px higher in some runs while the visible content is identical (a run-to-run accident, not a clock; found on held-out run 7). | The track column only: 10 x 540 px at x 1133, y 77. |
 
 No caret, spinner, orb or trace-timer mask was needed: with `SIRIO_REDUCED_MOTION=1` those draw
 their rest state. A mask is for a clock or a run-to-run accident, sized to the whole element; a

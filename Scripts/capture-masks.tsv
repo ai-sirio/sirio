@@ -44,6 +44,7 @@ chat-ui-default/scenarios/cancel/frames/after-cancel	655	287	120	17	message time
 chat-ui-default/scenarios/staged-queue/frames/queue-drained	1000	133	50	17	turn duration in ms (elapsed wall-clock time)
 chat-ui-default/scenarios/death-recovery/frames/agent-died	547	482	400	45	crash report of the dead fixture agent: process addresses that ASLR moves on every start (not a clock)
 chat-ui-default/scenarios/*	240	194	32	26	sidebar session dots: the green connected indicators appear in some runs and not in others (a timing race of the fixture session, not a clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up*	1133	77	10	540	transcript scrollbar thumb: once a turn completes it follows the transcript's estimated total height, so it sits about 7 px higher in some runs while the visible content is identical (a run-to-run accident, not a clock; found on held-out run 7). The track column only
 #
 # The probe window of the identity lane (820x700): the time of its one message.
 chat-ui-default/identity/*	385	209	52	18	message time (HH:MM wall clock) in the identity probe window
