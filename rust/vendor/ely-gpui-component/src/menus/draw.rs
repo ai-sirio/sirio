@@ -16,6 +16,35 @@ use crate::{
     typography::KbdCombo,
 };
 
+/// The frame of a menu row: its height, padding, gap and radius, its text colour (the disabled
+/// one when `disabled`), the hover wash when `current` and a pointer when it can be pressed.
+/// What a row holds is the caller's, so a host's own list can wear the same frame as Ely's menus.
+pub fn row_frame(
+    id: impl Into<ElementId>,
+    current: bool,
+    disabled: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let colors = &theme.colors;
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .items_center()
+        .gap_2()
+        .h(theme.control_height(ControlSize::Md))
+        .px_2()
+        .rounded(theme.radius(Radius::Md))
+        .text_color(if disabled {
+            colors.fg_disabled
+        } else {
+            colors.fg
+        })
+        .when(current && !disabled, |row| row.bg(colors.hover))
+        .when(!disabled, |row| row.cursor_pointer())
+}
+
 pub(super) fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Stateful<Div> {
     let theme = cx.theme();
     let colors = &theme.colors;
@@ -29,18 +58,7 @@ pub(super) fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Statef
         Kind::Radio(true) => (Some(IconName::Dot), fg),
         _ => (item.icon, if item.disabled { fg } else { colors.fg_muted }),
     };
-    div()
-        .id(("row", ix))
-        .relative()
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(theme.control_height(ControlSize::Md))
-        .px_2()
-        .rounded(theme.radius(Radius::Md))
-        .text_color(fg)
-        .when(current && !item.disabled, |row| row.bg(colors.hover))
-        .when(!item.disabled, |row| row.cursor_pointer())
+    row_frame(("row", ix), current, item.disabled, cx)
         .child(
             div()
                 .flex()

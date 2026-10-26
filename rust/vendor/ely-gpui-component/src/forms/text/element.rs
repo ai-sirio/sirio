@@ -257,7 +257,11 @@ impl Element for TextElement {
                 size(caret_width, line_height),
             )
         });
-        self.input.update(cx, |input, _| input.scroll = scroll);
+        self.input.update(cx, |input, _| {
+            input.scroll = scroll;
+            // The wheel's hold ends when the caret has moved.
+            input.wheeled = input.wheeled.filter(|at| *at == caret_at);
+        });
         Prepaint {
             lines,
             selections,
@@ -321,7 +325,16 @@ impl Element for TextElement {
     }
 }
 
-/// Scroll that keeps the caret inside the box, clamped to the text.
+/// The height of all the laid-out lines.
+pub(super) fn content_height(lines: &[(usize, WrappedLine)], line_height: Pixels) -> Pixels {
+    lines.iter().fold(Pixels::ZERO, |sum, (_, line)| {
+        sum + line.size(line_height).height
+    })
+}
+
+/// Scroll that keeps the caret inside the box, clamped to the text. After the wheel scrolled a
+/// multi-line field the caret is not followed until it moves (`TextInput::wheeled`), or the
+/// view would be pulled back to it at the next frame.
 fn keep_in_view(
     input: &TextInput,
     lines: &[(usize, WrappedLine)],
@@ -332,14 +345,14 @@ fn keep_in_view(
 ) -> Point<Pixels> {
     let mut scroll = input.scroll;
     if input.is_multi_line() {
-        let content = lines.iter().fold(Pixels::ZERO, |sum, (_, line)| {
-            sum + line.size(line_height).height
-        });
+        let content = content_height(lines, line_height);
         let view = bounds.size.height;
-        if caret.y < scroll.y {
-            scroll.y = caret.y;
-        } else if caret.y + line_height > scroll.y + view {
-            scroll.y = caret.y + line_height - view;
+        if input.wheeled != Some(caret) {
+            if caret.y < scroll.y {
+                scroll.y = caret.y;
+            } else if caret.y + line_height > scroll.y + view {
+                scroll.y = caret.y + line_height - view;
+            }
         }
         scroll.y = scroll
             .y

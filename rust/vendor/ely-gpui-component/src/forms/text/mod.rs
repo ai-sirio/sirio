@@ -12,6 +12,7 @@ use gpui::{
     Subscription, Task, Window, WrappedLine,
 };
 
+pub use actions::{Copy, Cut, Newline, Paste, SelectAll};
 pub(crate) use actions::{Backspace, Down, Enter, Redo, Submit, Undo, Up, bind_keys};
 pub use edit::History;
 use edit::Snapshot;
@@ -62,17 +63,23 @@ pub struct TextInput {
     max_len: Option<usize>,
     highlighter: Option<Highlighter>,
     disabled: bool,
+    /// A host's own key context, added to `ElyInput` on the root: see [`Self::host_context`].
+    host_context: Option<SharedString>,
     history: History<Snapshot>,
     /// The selection the last edit replaced.
     edited_from: Range<usize>,
     pub(crate) layout: Option<Layout>,
     pub(crate) scroll: Point<Pixels>,
+    /// Where the caret lay, in the laid-out text, when the wheel last scrolled the view: while
+    /// it lies there still the view stays where the wheel left it instead of following it.
+    pub(crate) wheeled: Option<Point<Pixels>>,
     selecting: bool,
     caret_on: bool,
     /// Blink runs only while focused, or unseen carets redraw forever.
     focused: bool,
     blink_epoch: u64,
     _blink: Option<Task<()>>,
+    /// Focus and blur, made by [`Self::attach`]; empty until then in a detached field.
     _subscriptions: Vec<Subscription>,
 }
 
@@ -86,23 +93,18 @@ impl Focusable for TextInput {
 
 impl TextInput {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus = cx.focus_handle().tab_stop(true);
-        let subscriptions = vec![
-            cx.on_focus(&focus, window, |input, _, cx| {
-                input.focused = true;
-                input.restart_blink(cx);
-                cx.emit(InputEvent::Focus);
-            }),
-            cx.on_blur(&focus, window, |input, _, cx| {
-                input.focused = false;
-                input.selecting = false;
-                input._blink = None;
-                cx.emit(InputEvent::Blur);
-                cx.notify();
-            }),
-        ];
+        let mut input = Self::detached(cx);
+        input.attach(window, cx);
+        input
+    }
+
+    /// `new` for an owner that has no `Window` yet. The focus and blur subscriptions are made at
+    /// the first `render`, and if the handle is already focused by then the field takes the
+    /// focused state, emits one `InputEvent::Focus` and starts its blink. The caret paints from
+    /// the handle's own focus either way.
+    pub fn detached(cx: &mut Context<Self>) -> Self {
         Self {
-            focus,
+            focus: cx.focus_handle().tab_stop(true),
             text: String::new(),
             placeholder: SharedString::default(),
             selection: 0..0,
@@ -116,17 +118,66 @@ impl TextInput {
             max_len: None,
             highlighter: None,
             disabled: false,
+            host_context: None,
             history: History::default(),
             edited_from: 0..0,
             layout: None,
             scroll: Point::default(),
+            wheeled: None,
             selecting: false,
             caret_on: true,
             focused: false,
             blink_epoch: 0,
             _blink: None,
-            _subscriptions: subscriptions,
+            _subscriptions: Vec::new(),
         }
+    }
+
+    /// Follows the handle's focus and blur. The one place both are subscribed: `new` calls it,
+    /// and a detached field's first `render` does.
+    fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._subscriptions = vec![
+            cx.on_focus(&self.focus, window, |input, _, cx| input.gained_focus(cx)),
+            cx.on_blur(&self.focus, window, |input, _, cx| {
+                input.focused = false;
+                input.selecting = false;
+                input._blink = None;
+                cx.emit(InputEvent::Blur);
+                cx.notify();
+            }),
+        ];
+    }
+
+    fn gained_focus(&mut self, cx: &mut Context<Self>) {
+        self.focused = true;
+        self.restart_blink(cx);
+        cx.emit(InputEvent::Focus);
+    }
+
+    /// A detached field attaches at its first frame, which may find the handle focused already:
+    /// the focus listener `attach` makes sees only the changes after it.
+    fn first_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self._subscriptions.is_empty() {
+            return;
+        }
+        self.attach(window, cx);
+        if self.focus.is_focused(window) {
+            self.gained_focus(cx);
+        }
+    }
+
+    /// Adds `context` to the root's key context, which becomes the one node `"ElyInput <context>"`,
+    /// so a host can bind keys of its own in its context while the field has focus.
+    ///
+    /// The ordering rule: at the same depth GPUI ranks bindings by registration, the later first,
+    /// so the host's bindings must be registered after `ely_gpui_component::init_chat` (or
+    /// `init_editor`, which runs it), which binds Ely's own. Then a host binding in `context`
+    /// outranks Ely's for the same key, and a handler that calls `cx.propagate()` hands the key
+    /// on to Ely's. A later init must not flip this: `init_chat` returns early once Ely's theme
+    /// is installed, so a second call binds nothing again and Ely's keys stay below the host's.
+    pub fn host_context(mut self, context: impl Into<SharedString>) -> Self {
+        self.host_context = Some(context.into());
+        self
     }
 
     /// Several lines: grows from `min` rows to `max`, then scrolls.
@@ -224,6 +275,13 @@ impl TextInput {
         cx.notify();
     }
 
+    /// `set_text` and a fresh undo history, for an owner that clears or refills the field on its
+    /// own account (a prompt sent): an undo must not bring back what it replaced.
+    pub fn reset_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.history = History::default();
+        self.set_text(text, cx);
+    }
+
     /// Replaces all text and puts the caret at its end. Not an undo step.
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         let text = self.admit(&text.into(), 0);
@@ -235,6 +293,7 @@ impl TextInput {
         self.text = text;
         self.marked = None;
         self.composing = None;
+        self.wheeled = None;
         cx.emit(InputEvent::Changed);
         cx.notify();
     }

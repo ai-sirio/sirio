@@ -43,4 +43,4 @@ pub use structure::{
 pub(crate) use text::{
     Backspace, Down, Enter, Redo, Submit, Undo, Up, bind_keys, from_utf16, to_utf16,
 };
-pub use text::{Highlight, History, InputEvent, TextInput};
+pub use text::{Copy, Cut, Highlight, History, InputEvent, Newline, Paste, SelectAll, TextInput};

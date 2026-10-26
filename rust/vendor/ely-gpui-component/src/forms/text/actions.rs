@@ -1,13 +1,13 @@
 use gpui::{
     App, ClipboardItem, Context, CursorStyle, InteractiveElement, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Render, Styled, Window, actions,
-    div,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, ScrollWheelEvent,
+    Styled, Window, actions, div, prelude::FluentBuilder,
 };
 
 use super::{
     InputEvent, TextInput,
     edit::{self, next_grapheme, prev_grapheme},
-    element::TextElement,
+    element::{TextElement, content_height},
 };
 use crate::forms::structure::FORM_CONTEXT;
 
@@ -353,13 +353,38 @@ impl TextInput {
     fn mouse_up(&mut self, _: &gpui::MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.selecting = false;
     }
+
+    /// The wheel scrolls a multi-line field within the rows it has laid out. It does not move the
+    /// caret, so the view stays where the wheel left it until the caret moves: see `wheeled`.
+    fn scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let overflow = (content_height(&layout.lines, layout.line_height)
+            - layout.bounds.size.height)
+            .max(Pixels::ZERO);
+        let delta = event.delta.pixel_delta(window.line_height());
+        self.scroll.y = (self.scroll.y - delta.y).clamp(Pixels::ZERO, overflow);
+        self.wheeled = self.position_for(self.display_offset(self.cursor()));
+        cx.notify();
+    }
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.first_frame(window, cx);
+        let hosted = self
+            .host_context
+            .as_ref()
+            .map(|host| format!("{CONTEXT} {host}"));
         div()
             .id("ely-text-input")
-            .key_context(CONTEXT)
+            .key_context(hosted.as_deref().unwrap_or(CONTEXT))
             .track_focus(&self.focus)
             .cursor(if self.disabled {
                 CursorStyle::OperationNotAllowed
@@ -399,6 +424,9 @@ impl Render for TextInput {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .when(self.rows.is_some(), |root| {
+                root.on_scroll_wheel(cx.listener(Self::scroll_wheel))
+            })
             .child(TextElement::new(cx.entity()))
     }
 }
