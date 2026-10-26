@@ -385,7 +385,8 @@ the turn duration, the cancelled line and the crash addresses (1 each), and the 
 scrollbar-thumb mask holds no changed pixel in any frame, so the transcript bar is identical. The one
 frame where the session-dots mask holds a change is `restore/before-restart`; by eye, the base frame
 draws two green connected dots (the `main` row and the corner of the Ely chat tab) and the head frame
-draws none, and nothing else in that crop moves: the fixture-session race the mask names. The renamed
+draws none, and the only other change in that crop is the row's star moving right into the dot's
+place, inside the mask too: the fixture-session race the mask names. The renamed
 paths resolve to the same crate (the lock has one `bezel-theme`, 0.1.4), so no draw call changed.
 
 ### PR B: the pieces Ely lacks, rebuilt in Sirio (`refactor/bezel-off-b`)
@@ -399,7 +400,8 @@ listed in the "bezel-ui and bezel-motion (ported code)" section of `THIRD_PARTY_
 A's head `dfe14a3b` changed only documentation and a manifest comment after it (`git diff --stat
 7ea323c3 dfe14a3b`: `docs/testing/bezel-off.md`, `rust/crates/sirio_terminal/Cargo.toml` +1,
 `rust/vendor/README.md`), so `7ea323c3`'s pixels are the pixels of PR B's base. The "after" set was
-captured at `04fa408c`, the head of PR B's code (the commits after it change this page only).
+captured at `04fa408c`, the head of PR B's code (the commits after it change only documentation: this page and
+`docs/agents/e2e-tests.md`).
 
 **What PR B moved into `sirio_ui`.**
 
@@ -486,8 +488,9 @@ and the crash addresses (1 each) and the session dots (1). The scrollbar-thumb m
 pixel in any frame: the four `long-history` frames differ only under the status bar and message-time
 masks, so the transcript bar is identical. The frame where the session-dots mask holds a change is
 `chat-ui-default/scenarios/activity/frames/tools-and-reasoning`; by eye, the base draws two green
-connected dots (the `main` row and the corner of the tab icon) and the head none, and nothing else in
-that crop moves: the fixture-session race the mask names. The captures run with
+connected dots (the `main` row and the corner of the tab icon) and the head none, and the only other
+change in that crop is the row's star moving right into the dot's place, inside the mask too: the
+fixture-session race the mask names. The captures run with
 `SIRIO_REDUCED_MOTION=1`, which holds every animation at rest, so they cannot see the running bloom
 or orb turn; the `unfocused_spinner` row above is what does.
 

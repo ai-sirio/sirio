@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn a_track_too_short_to_hold_a_thumb_means_no_thumb() {
-        // bezel refuses a bar that would be all thumb and no travel.
+        // `sirio_ui::scroll::thumb` refuses a bar that would be all thumb and no travel.
         assert_eq!(thumb_range(metrics(100, 0, 24), px(20.0)), None);
     }
 

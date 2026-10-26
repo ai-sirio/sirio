@@ -1354,10 +1354,10 @@ def unfocused_spinner(run: Run) -> str | None:
         run.log(f"unfocused_spinner: sidebar bloom pixels differing between frames 1-2, 2-3, 1-3: {differences}")
         if not any(differences):
             # Three identical crops have two causes the message has to tell apart: the bloom froze
-            # because the pause is on, or the crop holds no bloom because the row moved (the
-            # rectangle is pixels of the default window). Give Sirio the focus back, with the
-            # second window still mapped, and look at the same crop again: only on this path, so a
-            # green run takes no extra frames.
+            # because the clock stops while Sirio is inactive, or the crop holds no bloom because the
+            # row moved (the rectangle is pixels of the default window). Give Sirio the focus back,
+            # with the second window still mapped, and look at the same crop again: only on this
+            # path, so a green run takes no extra frames.
             x_focus(run, window)
             refocused = x_focused(run)
             run.log(f"unfocused_spinner: control, getwindowfocus is {refocused} after focusing Sirio again")
