@@ -91,7 +91,9 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # sidebar row's status bloom, which only bezel's animation clock repaints, must still turn in three
 # frames 250 ms apart; it logs `unfocused-spinner CPU <x>%` of one core over 10 s, and --cpu-ceiling
 # PCT fails above PCT; --focus-thief-bin PATH names the second window's binary, by default the
-# surfaces_probe example, built with the others unless --no-build).
+# surfaces_probe example, built with the others unless --no-build; the CPU base and the ceiling
+# formula `base × 1.25 + 1` are in docs/testing/bezel-off.md, "The unfocused spinner and its CPU
+# base").
 # --display :N (an Xvfb; export VK_DRIVER_FILES and VK_ICD_FILENAMES as lavapipe's lvp_icd.json)
 # takes the captures, --state-only omits them,
 # --only NAME[,NAME] runs some scenarios, --out-dir DIR keeps the artifact.

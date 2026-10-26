@@ -51,7 +51,8 @@ compare); --only runs the named scenarios (function names, e.g. long_history).
 --cpu-ceiling PCT fails `unfocused_spinner` when Sirio uses more than PCT of one core while
 it spins unfocused (the figure is logged either way). --focus-thief-bin is the window that
 takes the focus from Sirio there: the surfaces probe, `surfaces_probe --frame tooltip`, built
-with the other examples unless --no-build (this machine has no xterm or xmessage to use).
+with the other examples unless --no-build. It is a Sirio example so that no extra tool (an xterm,
+an xmessage) has to be installed for the scenario.
 
 --state-only exercises state and omits frames. Without it a display is
 required, with xwininfo, xprop, import and identify on PATH (and xdotool for
@@ -196,7 +197,7 @@ class Run:
             return
         if not self.display:
             raise Failure("no display for the capture lane: pass --display :N, or --state-only")
-        for tool in ("import", "identify", "xwininfo", "xprop"):
+        for tool in ("import", "identify", "magick", "xwininfo", "xprop"):
             if shutil.which(tool) is None:
                 raise Failure(f"{tool} is required for captures and is not on PATH (or use --state-only)")
         probe = subprocess.run(
@@ -1206,6 +1207,13 @@ def composer_keys(run: Run) -> str | None:
     clear_draft()
     x_type(run, "/")
     chat.until("the draft is '/' again", lambda s: s["composer"] == "/", timeout=10, quiet=True)
+    # The popup has to be open again before Escape closes it: otherwise the comparison below would
+    # pass on a popup that never reopened.
+    chat.frame("slash-reopened")
+    reopened = region_difference(run, frames / "before-slash.png", frames / "slash-reopened.png", POPUP_REGION)
+    run.log(f"composer_keys: the popup's box changed by {reopened} pixels when '/' was typed again")
+    if reopened < 5000:
+        raise Failure(f"composer_keys: the slash popup did not reopen ({reopened} pixels of its box changed)")
     x_key(run, "Escape")
     state = chat.until("Escape left the draft alone", lambda s: s["composer"] == "/", timeout=10)
     chat.frame("slash-dismissed")
@@ -1343,14 +1351,41 @@ def unfocused_spinner(run: Run) -> str | None:
         ]
         run.log(f"unfocused_spinner: sidebar bloom pixels differing between frames 1-2, 2-3, 1-3: {differences}")
         if not any(differences):
-            raise Failure("unfocused_spinner: the sidebar's status bloom did not turn while Sirio was unfocused (three identical frames)")
+            # Three identical crops have two causes the message has to tell apart: the bloom froze
+            # because the pause is on, or the crop holds no bloom because the row moved (the
+            # rectangle is pixels of the default window). Give Sirio the focus back, with the
+            # second window still mapped, and look at the same crop again: only on this path, so a
+            # green run takes no extra frames.
+            x_focus(run, window)
+            refocused = x_focused(run)
+            run.log(f"unfocused_spinner: control, getwindowfocus is {refocused} after focusing Sirio again")
+            if refocused != int(window, 16):
+                raise Failure("unfocused_spinner: the control could not give Sirio the X focus back")
+            time.sleep(1)
+            control = burst(run, chat, "focused-control")
+            moved = [crop_difference(run, control[a], control[b], SIDEBAR_BLOOM) for a, b in ((0, 1), (1, 2), (0, 2))]
+            run.log(f"unfocused_spinner: control, sidebar bloom pixels differing with Sirio focused: {moved}")
+            if any(moved):
+                raise Failure(
+                    "unfocused_spinner: the sidebar's status bloom froze while Sirio was unfocused and moved "
+                    "again once it was focused: bezel's pause-when-inactive is on (three identical frames)"
+                )
+            raise Failure(
+                f"unfocused_spinner: SIDEBAR_BLOOM {SIDEBAR_BLOOM} holds nothing that moves even with "
+                "Sirio focused; the row moved, update the rectangle"
+            )
         if x_focused(run) != int(thief_window, 16):
             raise Failure("unfocused_spinner: the second window lost the focus during the frames")
 
         seconds = 10
-        first_ticks, started = cpu_ticks(chat.process.pid), time.monotonic()
-        time.sleep(seconds)
-        used = cpu_ticks(chat.process.pid) - first_ticks
+        try:
+            first_ticks, started = cpu_ticks(chat.process.pid), time.monotonic()
+            time.sleep(seconds)
+            used = cpu_ticks(chat.process.pid) - first_ticks
+        except FileNotFoundError:
+            raise Failure("unfocused_spinner: Sirio exited during the CPU sample") from None
+        if x_focused(run) != int(thief_window, 16):
+            raise Failure("unfocused_spinner: the second window lost the focus during the CPU sample")
         percent = 100.0 * used / os.sysconf("SC_CLK_TCK") / (time.monotonic() - started)
         load = " ".join(f"{value:.2f}" for value in os.getloadavg())
         run.log(f"unfocused-spinner CPU {percent:.1f}% of one core over {seconds} s (load average {load})")
@@ -1362,6 +1397,8 @@ def unfocused_spinner(run: Run) -> str | None:
             thief.wait(timeout=10)
         except subprocess.TimeoutExpired:
             thief.kill()
+            thief.wait()
+        thief_log.close()
     chat.call("surface.chat.stop", surfaceId=chat.surface)
     chat.until("the turn stops", lambda s: s["status"] != "streaming", quiet=True)
     scenario.finish()

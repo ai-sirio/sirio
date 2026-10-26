@@ -19,6 +19,8 @@ set -euo pipefail
 #
 # The layout is the probe's contract: a 900x600 window, three panes of 300x600 from the left, a
 # vertical bar at the right edge of panes 1 and 2, a horizontal one along the bottom of pane 3.
+# The probe's appearance is dark, pinned (the desktop's colour scheme does not reach it), and
+# probe.log says so.
 #
 # The artifact: --out-dir DIR (default artifacts/scroll-drag-probe-<stamp>-<pid>) keeps
 # transcript.log, probe.log and frames/*.png (the window before the first drag and, per bar, while
@@ -46,7 +48,7 @@ while [ $# -gt 0 ]; do
     --no-software-vulkan) SOFTWARE_VULKAN=0; shift ;;
     --out-dir) OUT_DIR="$2"; shift 2 ;;
     --no-build) BUILD=0; shift ;;
-    -h|--help) sed -n '3,32p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '3,34p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -115,6 +117,7 @@ env = dict(os.environ, DISPLAY=display)
 WINDOW_W, WINDOW_H, PANE_W, TRACK = 900, 600, 300, 10
 TOLERANCE = 4
 MIN_THUMB = 25
+MIN_POINTER_TRAVEL = 100
 
 
 def fail(message):
@@ -278,6 +281,10 @@ for bar in bars:
     run("xdotool", "mouseup", "1")
     travel, expected = moved[0] - thumb[0], (pointer - anchored) + skew
     print(f"bar {bar.number}: pointer moved {pointer - anchored} px after its second move, thumb {travel} px (expected {expected}, tolerance {TOLERANCE})", flush=True)
+    # xdotool failures are not fatal in run(): a pointer that never moved would make the expected
+    # travel 0 and the thumb's 0 agree. The six steps ask for 120 px.
+    if pointer - anchored < MIN_POINTER_TRAVEL:
+        fail(f"bar {bar.number}: the pointer travelled {pointer - anchored} px after the anchoring move, not the {MIN_POINTER_TRAVEL} or more it was asked for")
     if abs(travel - expected) > TOLERANCE:
         fail(f"bar {bar.number}: the thumb moved {travel} px for {expected} px of pointer travel")
     time.sleep(0.5)
@@ -297,5 +304,7 @@ for bar in bars:
 
 print("drag checks passed for 3 bars")
 PY
+grep -q '^appearance: dark$' "$OUT_DIR/probe.log" || fail "the probe did not log its pinned appearance (see $OUT_DIR/probe.log)"
+echo "appearance: dark (from probe.log)"
 echo "frames: $OUT_DIR/frames"
 echo "SCROLL DRAG PROBE OK (3 bars)"

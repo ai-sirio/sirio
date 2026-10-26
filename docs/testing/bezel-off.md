@@ -261,8 +261,16 @@ clock alone (a `Painter` lease taken by the row's own cached view, and gpui repl
 until it is notified), and leases are refused while no window of the app is active and the pause is
 on, so it freezes exactly then. The tab strip's working mark is not such a region: it keeps moving
 with the pause on. Shown red by changing `main.rs`'s `cx.set_pause_when_inactive(false)` to `true`
-(`sirio` rebuilt): the bloom's region was identical in all three frames in 5 of 5 runs, and 100 to
-141 differing pixels with it off in 5 of 5.
+(`sirio` rebuilt): the bloom's region was identical in all three frames in 5 of 5 runs, and 40 to
+141 differing pixels per pair with it off in every run.
+
+The rectangle (`SIDEBAR_BLOOM`, in pixels of the default window) has a control on the failure path
+only: when the three crops are identical the scenario gives Sirio the focus back and looks at the
+same crop again. If it moves, the failure says the bloom froze while unfocused, so the pause is on;
+if it still does not, the failure says `SIDEBAR_BLOOM <rect> holds nothing that moves even with Sirio
+focused; the row moved, update the rectangle`. A PR that restyles the sidebar row or its status
+bloom re-runs the `set_pause_when_inactive(true)` mutation too, to be sure the new rectangle still
+discriminates.
 
 The scenario prints `unfocused-spinner CPU <x>% of one core over 10 s (load average ...)`: the
 utime plus stime of Sirio's process while the second window holds the focus. Mesa's software
@@ -275,8 +283,8 @@ or the redraw path passes `--cpu-ceiling` and fails above it.
 on the tree of the commit that adds the scenario (Sirio 0.37.0, parent `fb6f0e79`). Five other runs with the pause
 off read 320.2% to 325.6% at load averages of 4.9 to 6.4, and three with it on 321.3% to 330.0% at
 7.1 to 8.5: the figure does not depend on the pause. **The ceiling a later PR passes is
-`base × 1.25 + 1` = 413.1%** (`--cpu-ceiling 413`; a ceiling of 100 fails the run, a ceiling of 413
-passes it). The figure includes the thinking row's shimmer, which animates whatever the pause says,
+`base × 1.25 + 1` = 413.1%** (`--cpu-ceiling 413.1`; a ceiling of 100 fails the run, a ceiling of
+413.1 passes it). The figure includes the thinking row's shimmer, which animates whatever the pause says,
 so it is a rendering-cost base and not a measure of the pause.
 
 ## Per PR

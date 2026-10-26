@@ -40,6 +40,7 @@ LVP_ICD="${SIRIO_CAPTURE_VK_ICD:-/usr/share/vulkan/icd.d/lvp_icd.json}"
 DROPPED=(
   "chat-ui-default/scenarios/composer-keys/frames/before-slash|composer_keys postdates the determinism runs (real keys, a live caret)"
   "chat-ui-default/scenarios/composer-keys/frames/slash-popup|composer_keys postdates the determinism runs (real keys, a live caret)"
+  "chat-ui-default/scenarios/composer-keys/frames/slash-reopened|composer_keys postdates the determinism runs (real keys, a live caret)"
   "chat-ui-default/scenarios/composer-keys/frames/slash-dismissed|composer_keys postdates the determinism runs (real keys, a live caret)"
   "chat-ui-default/scenarios/reduced-motion/frames/still-1|reduced_motion postdates the determinism runs (a burst taken 250 ms apart)"
   "chat-ui-default/scenarios/reduced-motion/frames/still-2|reduced_motion postdates the determinism runs (a burst taken 250 ms apart)"

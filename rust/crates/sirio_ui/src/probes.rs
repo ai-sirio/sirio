@@ -108,8 +108,12 @@ impl Render for ScrollDragProbe {
                 .pr(px(BAR_CLEARANCE))
                 .children((0..ROWS).map(|ix| row(format!("pane 1 row {ix:04} scroll handle body")))),
         );
-        // `file_view::scrollbar` already tags a full-pane overlay with its id.
-        let plain = plain.child(file_view::scrollbar("probe-bar-1", &self.handle, &self.bar));
+        // `file_view::scrollbar` tags its own full-pane overlay with the id it is given; that is
+        // not the selector the probe promises, which every bar gets the same way, from the probe.
+        let plain = plain.child(bar_overlay(
+            1,
+            file_view::scrollbar("probe-file-bar", &self.handle, &self.bar),
+        ));
 
         let listed = pane()
             .child(

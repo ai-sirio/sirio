@@ -8,13 +8,13 @@
 //! the left edge, a vertical bar at the right edge of panes 1 and 2 and a horizontal bar along
 //! the bottom of pane 3, each 10 px thick.
 //!
-//! Env: `SIRIO_REDUCED_MOTION` (a debug build snaps every animation to its rest state, as in
-//! `sirio`'s `main`).
+//! The appearance is dark, pinned. Env: `SIRIO_REDUCED_MOTION` (a debug build snaps every
+//! animation to its rest state, as in `sirio`'s `main`).
 use gpui::{
     AnyView, App, Bounds, Context, Render, Window, WindowBounds, WindowOptions, prelude::*, px,
     size,
 };
-use sirio_theme::Theme;
+use sirio_theme::{Theme, ThemeMode};
 
 const WINDOW_WIDTH: f32 = 900.0;
 const WINDOW_HEIGHT: f32 = 600.0;
@@ -44,6 +44,10 @@ fn main() {
             }
             sirio_theme::register_ui_fonts(cx).expect("Sirio fonts");
             Theme::init(cx);
+            // Dark, whatever the desktop's colour scheme says: `Theme::init` follows the portal
+            // on Linux, and the frames must not depend on the host. Said in probe.log.
+            Theme::set_mode(ThemeMode::Dark, cx);
+            println!("appearance: dark");
             sirio_ui::ely::init(cx);
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
             cx.open_window(
