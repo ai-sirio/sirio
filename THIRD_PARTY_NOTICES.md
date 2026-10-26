@@ -181,6 +181,7 @@ naming the crate it came from. In `rust/crates/sirio_ui/src/` that is:
   loaders' phase maths;
 - `loading.rs`: the orbs, the mini spinner and the redacted skeleton rows;
 - `popup.rs`: the popup and filter state and the menu's close lifecycle;
+- `scroll.rs`: the scrollbar's thumb maths, its drag payload and the follow-the-tail state;
 - `chat/thought.rs`: `Takeover`;
 - `sidebar/tree_keys.rs`: the tree's arrow-key bindings and cursor step.
 

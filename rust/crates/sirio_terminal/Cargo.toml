@@ -15,8 +15,9 @@ gpui.workspace = true
 gpui_platform = { workspace = true, features = ["font-kit"] }
 sirio_theme.workspace = true
 sirio_project.workspace = true
-# The scrollbar's geometry (`scroll::thumb`, `scroll::offset_for_thumb`) and its
-# drag payload are bezel's own, the same ones the chat and file view bars use.
+# Still here for `ui::tooltip::Tooltip` (`lib.rs`), the one bezel item this crate
+# reaches; the scrollbar's geometry and drag payload are `sirio_ui::scroll`'s.
+# It goes when that tooltip moves to Ely (PR C, docs/testing/bezel-off.md).
 bezel.workspace = true
 # The bar's `ink` colour, reached by the theme crate's own name.
 bezel_theme.workspace = true

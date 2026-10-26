@@ -11,9 +11,11 @@ use std::time::Duration;
 
 use bezel::motion::Painter;
 use bezel::ui::scroll;
-use bezel::ui::scroll::{FollowState, ScrollbarState};
+use bezel::ui::scroll::ScrollbarState;
 use gpui::{AnyElement, ScrollHandle, div, linear_color_stop, linear_gradient, prelude::*, px};
 use sirio_theme::Theme;
+
+use crate::scroll::FollowState;
 
 #[cfg(test)]
 use crate::loading;
@@ -80,14 +82,14 @@ impl ThoughtScroll {
     }
 
     fn follow_element(&self) -> AnyElement {
-        let follow = scroll::follow(&self.scroll, &self.follow);
+        let follow = crate::scroll::follow(&self.scroll, &self.follow);
         if !sirio_perf::enabled() {
             return follow;
         }
-        // Observe Bezel's actual prepaint correction, not a prediction made
-        // from the previous layout. Bezel 0.1.4 requests an animation frame
-        // in the same branch that changes this offset. Do not add a callback
-        // or a notification of our own to observe it.
+        // Observe `scroll::follow`'s actual prepaint correction, not a
+        // prediction made from the previous layout. It requests an animation
+        // frame in the same branch that changes this offset. Do not add a
+        // callback or a notification of our own to observe it.
         let before = std::rc::Rc::new(std::cell::Cell::new(None));
         let capture = before.clone();
         let before_scroll = self.scroll.clone();

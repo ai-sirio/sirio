@@ -1,14 +1,14 @@
-//! bezel's scrollbar, for the transcript's virtualized list.
+//! The scrollbar for the transcript's virtualized list.
 //!
 //! `bezel::ui::scroll::scrollbar` reads a gpui `ScrollHandle`, and the
 //! transcript is a `gpui::list` — it has no handle, but it answers the same
 //! three numbers (viewport, overflow, offset) through its own
 //! `*_for_scrollbar` hooks. This is that bar with the hooks in place of the
 //! handle: the geometry (`scroll::thumb`, `scroll::offset_for_thumb`,
-//! `MIN_THUMB`) and the drag payload (`ScrollbarDrag`) are bezel's own, so
-//! this bar and the thought bodies' agree to the pixel, and the paint is
-//! [`ink`] for the same reason bezel's is — a scrollbar is a neutral overlay,
-//! not a toned surface.
+//! `MIN_THUMB`) and the drag payload (`ScrollbarDrag`) are
+//! [`crate::scroll`]'s, ported from bezel's, so this bar and the thought
+//! bodies' agree to the pixel, and the paint is [`ink`] for the same reason
+//! bezel's is — a scrollbar is a neutral overlay, not a toned surface.
 //!
 //! The list freezes its content height for the length of a thumb drag
 //! (`scrollbar_drag_started` / `_ended`), so rows measured mid-drag do not
@@ -17,8 +17,8 @@
 use std::{cell::Cell, rc::Rc};
 
 use crate::motion::Painter;
+use crate::scroll::{self, MIN_THUMB, ScrollbarDrag};
 use bezel_theme::ink;
-use bezel::ui::scroll::{self, MIN_THUMB, ScrollbarDrag};
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Empty, FollowMode, ListState, MouseButton, Pixels,
     SharedString, Window, canvas, div, point, prelude::*, px,
@@ -27,12 +27,11 @@ use gpui::{
 use super::Chat;
 
 impl Chat {
-    /// The "jump to latest" affordance bezel's `FollowState::following`
-    /// exists to drive, for a list: nothing while the transcript follows
-    /// its tail, a disc floating over the list's bottom edge once the reader
-    /// scrolls away. Laid inside the transcript container (which is
-    /// `relative`), so it is centred on the prose column rather than the
-    /// pane.
+    /// The "jump to latest" affordance, for a list: nothing while the
+    /// transcript follows its tail, a disc floating over the list's bottom
+    /// edge once the reader scrolls away. Laid inside the transcript
+    /// container (which is `relative`), so it is centred on the prose column
+    /// rather than the pane.
     ///
     /// A click asks the list to follow again — `set_follow_mode(Tail)` both
     /// scrolls to the end and re-pins, the same contract the scroll handler

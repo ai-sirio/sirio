@@ -2473,11 +2473,11 @@ fn render_content(
 /// for one more frame. Self-limiting: once the bar is up it is not here.
 pub(crate) fn scrollbar(id: &'static str, handle: &ScrollHandle, state: &ScrollbarState) -> AnyElement {
     let has_overflow = |handle: &ScrollHandle| {
-        scroll::thumb(
+        crate::scroll::thumb(
             handle.bounds().size.height,
             handle.max_offset().y,
             handle.offset().y,
-            scroll::MIN_THUMB,
+            crate::scroll::MIN_THUMB,
         )
         .is_some()
     };
@@ -2519,11 +2519,11 @@ pub(crate) fn horizontal_scrollbar<V: 'static>(
     entity: gpui::Entity<V>,
 ) -> AnyElement {
     let has_overflow = |handle: &ScrollHandle| {
-        scroll::thumb(
+        crate::scroll::thumb(
             handle.bounds().size.width,
             handle.max_offset().x,
             handle.offset().x,
-            scroll::MIN_THUMB,
+            crate::scroll::MIN_THUMB,
         )
         .is_some()
     };

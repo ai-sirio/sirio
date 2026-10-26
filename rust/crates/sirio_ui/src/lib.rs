@@ -53,6 +53,7 @@ pub mod project_identity;
 pub mod probes;
 pub mod right_panel;
 pub mod row_reorder;
+pub mod scroll;
 pub mod settings;
 pub mod sidebar;
 pub mod status;

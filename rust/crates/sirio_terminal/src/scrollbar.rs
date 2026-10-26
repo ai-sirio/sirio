@@ -1,21 +1,21 @@
 //! The terminal's vertical scrollbar: where the thumb sits for a given
 //! viewport position, and which row a dragged thumb asks for.
 //!
-//! Geometry is bezel's (`scroll::thumb`, `scroll::offset_for_thumb`), the same
-//! functions the chat transcript and the file view draw their bars with. What
-//! is different here is the unit: libghostty counts *rows* from the top of the
-//! scrollback (offset 0 is the oldest line), while bezel counts pixels and
+//! Geometry is `sirio_ui::scroll`'s (`thumb`, `offset_for_thumb`), the same
+//! functions the chat transcript and the horizontal bar draw their bars with.
+//! What is different here is the unit: libghostty counts *rows* from the top of
+//! the scrollback (offset 0 is the oldest line), while gpui counts pixels and
 //! calls scrolling down *negative*. This module is the one place that
 //! translation happens.
 
 use bezel_theme::ink;
-use bezel::ui::scroll::{self, MIN_THUMB, ScrollbarDrag};
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, DragMoveEvent, Empty, InteractiveElement,
     IntoElement, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement, Pixels, SharedString,
     StatefulInteractiveElement, Styled, Window, canvas, div, px,
 };
 use parking_lot::Mutex;
+use sirio_ui::scroll::{self, MIN_THUMB, ScrollbarDrag};
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -60,7 +60,7 @@ pub(crate) fn thumb_range(metrics: ScrollMetrics, track: Pixels) -> Option<Range
     let per_row = pixels_per_row(metrics, track)?;
     let scrollable = metrics.scrollable_rows();
     let max_offset = per_row * scrollable as f32;
-    // bezel counts scrolling down as negative; libghostty counts from the top.
+    // gpui counts scrolling down as negative; libghostty counts from the top.
     let offset = -(per_row * metrics.offset.min(scrollable) as f32);
     scroll::thumb(track, max_offset, offset, MIN_THUMB)
 }
