@@ -45,6 +45,7 @@ pub mod motion;
 pub mod orbit;
 pub mod outline;
 pub mod pane_launcher;
+pub mod popup;
 pub mod project_forms;
 pub mod project_identity;
 // Views the example probes draw; reaches `pub(crate)` scrollbars. Not application code.

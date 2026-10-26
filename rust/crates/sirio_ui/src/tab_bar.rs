@@ -1,7 +1,7 @@
 //! The centre-pane tab strip and its new-tab menu.
 
 use bezel::motion::{Fade, Painter};
-use bezel::ui::popover::{self, Popup};
+use bezel::ui::popover;
 use gpui::{
     Anchor, App, Bounds, Context, FocusHandle, KeyBinding, Pixels, Render, Window, actions,
     canvas, div, point, prelude::*, px, text,
@@ -12,6 +12,7 @@ use sirio_theme::Theme;
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::popup::{Popup, reap_popup};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 const HEIGHT: f32 = 34.0;
@@ -335,7 +336,7 @@ impl TabBar {
         if closing || self.chat_picker_open {
             self.chat_picker_open = false;
             if closing {
-                popover::reap_popup(cx, |tab_bar| &mut tab_bar.menu_open);
+                reap_popup(cx, |tab_bar| &mut tab_bar.menu_open);
             }
             cx.notify();
         }

@@ -15,8 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use bezel::motion::{Fade, Painter};
-use bezel::ui::popover::{self, Popup};
-use bezel::ui::tree;
+use bezel::ui::popover;
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render, Rgba,
@@ -32,6 +31,7 @@ use sirio_theme::{AgentBrandColor, Theme, Typography};
 
 use crate::caret;
 use crate::loading;
+use crate::popup::{Popup, reap_popup};
 use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
 use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconValue};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
@@ -49,6 +49,7 @@ mod fade;
 mod row;
 mod section;
 mod sessions;
+pub mod tree_keys;
 
 pub use sessions::{ClosedSession, SessionList, SessionRow, SessionTarget};
 pub use sirio_persistence::SidebarView;
@@ -1458,7 +1459,7 @@ impl Sidebar {
 
     fn close_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.context_menu.begin_close() {
-            popover::reap_popup(cx, |sidebar| &mut sidebar.context_menu);
+            reap_popup(cx, |sidebar| &mut sidebar.context_menu);
             cx.notify();
         }
     }
@@ -1735,7 +1736,7 @@ impl Sidebar {
 
     fn close_add_project_menu(&mut self, cx: &mut Context<Self>) {
         if self.add_project_menu.begin_close() {
-            popover::reap_popup(cx, |sidebar| &mut sidebar.add_project_menu);
+            reap_popup(cx, |sidebar| &mut sidebar.add_project_menu);
             cx.notify();
         }
     }
@@ -2035,7 +2036,7 @@ impl Sidebar {
         )
     }
 
-    fn tree_step(&mut self, direction: tree::Direction, cx: &mut Context<Self>) {
+    fn tree_step(&mut self, direction: tree_keys::Direction, cx: &mut Context<Self>) {
         let rows = self.visible_rows();
         self.pill_cursor = None;
         if rows.is_empty() {
@@ -2044,27 +2045,11 @@ impl Sidebar {
         }
 
         let cursor = self.tree_cursor.min(rows.len() - 1);
-        let shape = rows.iter().map(Self::tree_row).collect::<Vec<_>>();
-        match tree::step(&shape, cursor, direction) {
-            Some(tree::Move::To(index)) => {
-                self.tree_cursor = index;
-            }
-            Some(tree::Move::Expand(index)) => {
-                self.set_row_expanded(rows[index].id, rows[index].kind, true);
-                self.tree_cursor = index;
-            }
-            Some(tree::Move::Collapse(index)) => {
-                self.set_row_expanded(rows[index].id, rows[index].kind, false);
-                self.tree_cursor = index;
-            }
-            None => {
-                self.tree_cursor = cursor;
-            }
-        }
+        self.tree_cursor = tree_keys::step(rows.len(), cursor, direction).unwrap_or(cursor);
         cx.notify();
     }
 
-    fn pill_step(&mut self, direction: tree::Direction, cx: &mut Context<Self>) {
+    fn pill_step(&mut self, direction: tree_keys::Direction, cx: &mut Context<Self>) {
         let rows = self.visible_rows();
         let Some(row) = rows.get(self.tree_cursor) else {
             self.pill_cursor = None;
@@ -2072,17 +2057,17 @@ impl Sidebar {
         };
         let pill_count = row.pills.len();
         match direction {
-            tree::Direction::Left => {
+            tree_keys::Direction::Left => {
                 self.pill_cursor = self.pill_cursor.and_then(|index| index.checked_sub(1));
             }
-            tree::Direction::Right => {
+            tree_keys::Direction::Right => {
                 self.pill_cursor = match self.pill_cursor {
                     None if pill_count > 0 => Some(0),
                     Some(index) if index + 1 < pill_count => Some(index + 1),
                     cursor => cursor,
                 };
             }
-            tree::Direction::Up | tree::Direction::Down => return,
+            tree_keys::Direction::Up | tree_keys::Direction::Down => return,
         }
         cx.notify();
     }
@@ -2624,7 +2609,7 @@ impl Sidebar {
 
     fn close_worktree_close_menu(&mut self, cx: &mut Context<Self>) {
         if self.worktree_close_menu.begin_close() {
-            popover::reap_popup(cx, |sidebar| &mut sidebar.worktree_close_menu);
+            reap_popup(cx, |sidebar| &mut sidebar.worktree_close_menu);
             cx.notify();
         }
     }
@@ -4211,7 +4196,7 @@ impl Render for Sidebar {
                 div()
                     .id("sidebar-tree")
                     .debug_selector(|| "sidebar-tree".to_owned())
-                    .key_context(tree::KEY_CONTEXT)
+                    .key_context(tree_keys::KEY_CONTEXT)
                     .track_focus(&tree_focus)
                     .on_key_down(cx.listener(|sidebar, event: &KeyDownEvent, _, cx| {
                         if event.keystroke.key != "backspace" {
@@ -4230,17 +4215,17 @@ impl Render for Sidebar {
                         };
                         cx.emit(SidebarEvent::CloseTab(tab_id));
                     }))
-                    .on_action(cx.listener(|sidebar, _: &tree::SelectPrevious, _, cx| {
-                        sidebar.tree_step(tree::Direction::Up, cx);
+                    .on_action(cx.listener(|sidebar, _: &tree_keys::SelectPrevious, _, cx| {
+                        sidebar.tree_step(tree_keys::Direction::Up, cx);
                     }))
-                    .on_action(cx.listener(|sidebar, _: &tree::SelectNext, _, cx| {
-                        sidebar.tree_step(tree::Direction::Down, cx);
+                    .on_action(cx.listener(|sidebar, _: &tree_keys::SelectNext, _, cx| {
+                        sidebar.tree_step(tree_keys::Direction::Down, cx);
                     }))
-                    .on_action(cx.listener(|sidebar, _: &tree::Collapse, _, cx| {
-                        sidebar.pill_step(tree::Direction::Left, cx);
+                    .on_action(cx.listener(|sidebar, _: &tree_keys::Collapse, _, cx| {
+                        sidebar.pill_step(tree_keys::Direction::Left, cx);
                     }))
-                    .on_action(cx.listener(|sidebar, _: &tree::Expand, _, cx| {
-                        sidebar.pill_step(tree::Direction::Right, cx);
+                    .on_action(cx.listener(|sidebar, _: &tree_keys::Expand, _, cx| {
+                        sidebar.pill_step(tree_keys::Direction::Right, cx);
                     }))
                     .mt(px(11.0))
                     .flex_1()
@@ -4258,7 +4243,10 @@ impl Render for Sidebar {
                         reorder_drop_entity.update(cx, |sidebar, cx| sidebar.confirm_reorder(cx));
                     })
                     .child(
-                        tree::tree()
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
                             .flex_none()
                             .gap(px(ROW_V_GAP))
                             .children(rendered_rows),
@@ -4287,12 +4275,12 @@ impl Render for Sidebar {
                     div()
                         .id("sidebar-sessions")
                         .debug_selector(|| "sidebar-sessions".to_owned())
-                        .key_context(tree::KEY_CONTEXT)
+                        .key_context(tree_keys::KEY_CONTEXT)
                         .track_focus(&tree_focus)
-                        .on_action(cx.listener(|this, _: &tree::SelectPrevious, _, cx| {
+                        .on_action(cx.listener(|this, _: &tree_keys::SelectPrevious, _, cx| {
                             this.session_step(false, cx);
                         }))
-                        .on_action(cx.listener(|this, _: &tree::SelectNext, _, cx| {
+                        .on_action(cx.listener(|this, _: &tree_keys::SelectNext, _, cx| {
                             this.session_step(true, cx);
                         }))
                         .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
@@ -4706,7 +4694,7 @@ mod tests {
     #[gpui::test]
     async fn arrow_keys_walk_the_pills_of_the_cursor_row(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::tree::init);
+        cx.update(tree_keys::init);
         let window = cx.add_window(|_window, cx| tests_support::sidebar_with_one_project(cx));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -8180,7 +8168,7 @@ mod tests {
     #[gpui::test]
     async fn arrows_and_enter_walk_open_then_closed_sessions(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::tree::init);
+        cx.update(tree_keys::init);
         let window = cx.add_window(|_window, cx| {
             let mut sidebar = sessions_fixture(cx);
             let archived = vec![closed(&sidebar, "old-chat", 10)];
@@ -8229,7 +8217,7 @@ mod tests {
     #[gpui::test]
     async fn keyboard_activation_disarms_pending_closed_delete(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::tree::init);
+        cx.update(tree_keys::init);
         let window = cx.add_window(|_window, cx| {
             let mut sidebar = sessions_fixture(cx);
             let archived = vec![closed(&sidebar, "old-chat", 10)];

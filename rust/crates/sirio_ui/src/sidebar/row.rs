@@ -236,20 +236,6 @@ impl Sidebar {
             - ROW_TITLE_LINE_HEIGHT
     }
 
-    /// The structural row handed to bezel. Sirio keeps the data and content;
-    /// bezel owns branch/leaf identity, indentation, disclosure and chrome.
-    /// The bezel tree shape of one row. Projects retain their disclosure;
-    /// worktrees are leaves because their tabs are pills inside the row.
-    pub(super) fn tree_row(row: &SidebarRow) -> tree::Row {
-        match row.kind {
-            RowKind::Project => tree::Row::branch(0, row.expanded),
-            RowKind::Worktree => tree::Row::leaf(0),
-        }
-    }
-
-    /// Apply one of bezel's standard tree directions to the currently
-    /// visible, depth-annotated rows. Expansion remains Sirio state; bezel
-    /// reports only the intent.
     /// The tint of a pill's glyph.
     ///
     /// A branded agent mark is drawn in its brand. A pill with no agent — an

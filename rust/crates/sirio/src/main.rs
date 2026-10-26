@@ -28276,7 +28276,7 @@ fn main() {
         init_motion(cx);
         bezel::ui::input::init(cx);
         bezel::ui::combobox::init(cx);
-        bezel::ui::tree::init(cx);
+        sirio_ui::sidebar::tree_keys::init(cx);
         sirio_ui::chat::init(cx);
         sirio_ui::text_selection::init(cx);
         sirio_ui::file_view::init(cx);
