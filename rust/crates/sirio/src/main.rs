@@ -22293,7 +22293,7 @@ impl SirioWorkspace {
         // The app installs this at startup; isolated shell render fixtures set
         // only Sirio's global, so make the same registry invariant explicit
         // before a bezel surface reaches its paint phase.
-        if cx.try_global::<bezel::theme::Theme>().is_none() {
+        if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
         let action_entity = entity.clone();

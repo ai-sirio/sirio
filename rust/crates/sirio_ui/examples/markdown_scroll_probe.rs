@@ -43,10 +43,10 @@ const TABLE: &str = "| Alpha | Bravo | Charlie | Delta | Echo | Foxtrot | Golf |
 type Bounds4 = (i64, i64, i64, i64);
 
 struct Probe {
-    doc_a: markdown::Doc,
-    doc_b: markdown::Doc,
-    layouts_a: markdown::BlockLayouts,
-    layouts_b: markdown::BlockLayouts,
+    doc_a: bezel_markdown::Doc,
+    doc_b: bezel_markdown::Doc,
+    layouts_a: bezel_markdown::BlockLayouts,
+    layouts_b: bezel_markdown::BlockLayouts,
     printed: Rc<RefCell<Vec<(char, usize, Bounds4)>>>,
 }
 
@@ -63,16 +63,16 @@ fn rounded(bounds: Bounds<gpui::Pixels>) -> Bounds4 {
 impl Render for Probe {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *sirio_theme::Theme::get(cx);
-        let render = |doc: &markdown::Doc,
-                      layouts: &markdown::BlockLayouts,
+        let render = |doc: &bezel_markdown::Doc,
+                      layouts: &bezel_markdown::BlockLayouts,
                       window: &mut Window,
                       cx: &mut Context<Self>| {
-            markdown::render_with_selection(
+            bezel_markdown::render_with_selection(
                 doc,
                 None,
                 Some(layouts),
                 None,
-                markdown::Caption::Shown,
+                bezel_markdown::Caption::Shown,
                 window,
                 cx,
             )
@@ -168,10 +168,10 @@ fn main() {
                 |window, cx| {
                     window.set_window_title("Markdown Scroll Probe");
                     cx.new(|_| Probe {
-                        doc_a: markdown::parse(&format!("{JSON}\n\n{TABLE}")),
-                        doc_b: markdown::parse(JSON),
-                        layouts_a: markdown::BlockLayouts::default(),
-                        layouts_b: markdown::BlockLayouts::default(),
+                        doc_a: bezel_markdown::parse(&format!("{JSON}\n\n{TABLE}")),
+                        doc_b: bezel_markdown::parse(JSON),
+                        layouts_a: bezel_markdown::BlockLayouts::default(),
+                        layouts_b: bezel_markdown::BlockLayouts::default(),
                         printed: Rc::new(RefCell::new(Vec::new())),
                     })
                 },

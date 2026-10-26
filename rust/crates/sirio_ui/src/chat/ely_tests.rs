@@ -20,7 +20,7 @@ impl Render for ThemeProbe {
                         "ely-theme-probe",
                         "Ely",
                     ))
-                    .child(bezel::theme::Theme::of(cx).button(
+                    .child(bezel_theme::Theme::of(cx).button(
                         "Bezel",
                         ButtonStyle::Prominent,
                         None,
@@ -111,7 +111,7 @@ async fn ely_theme_change_preserves_chat_state_and_bezel_palette(cx: &mut TestAp
     cx.update(|_, cx| {
         let resolved = *Theme::get(cx);
         let expected = resolved.to_bezel_theme();
-        let bezel = bezel::theme::Theme::of(cx);
+        let bezel = bezel_theme::Theme::of(cx);
         assert_eq!(bezel.text, expected.text);
         assert_eq!(bezel.surface, expected.surface);
         assert_eq!(bezel.border, expected.border);

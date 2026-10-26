@@ -4,7 +4,7 @@
 //! same dialect: `tree-sitter-lua` writes `@field` and `@repeat`,
 //! `tree-sitter-c` writes `@delimiter`, `tree-sitter-md` still writes the
 //! pre-2023 `@text.title`. bezel's
-//! [`kind_of`](syntax::lang::kind_of) knows the nvim-treesitter names and
+//! [`kind_of`](bezel_syntax::lang::kind_of) knows the nvim-treesitter names and
 //! answers `HighlightKind::Variable` — the plain text colour — to everything
 //! else.
 //!

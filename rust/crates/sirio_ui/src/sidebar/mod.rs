@@ -3248,7 +3248,7 @@ impl Sidebar {
         agents: &[(&'static str, &'static str)],
         entity: gpui::Entity<Self>,
         theme: Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         painter: Painter,
     ) -> impl IntoElement {
         let on_choose = |action: SidebarContextAction| {
@@ -3664,7 +3664,7 @@ impl Render for Sidebar {
         // Production installs bezel alongside Sirio's theme. Some isolated
         // sidebar fixtures set only the Sirio global, so establish the same
         // invariant lazily before the tree or a popup reads bezel's palette.
-        if cx.try_global::<bezel::theme::Theme>().is_none() {
+        if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
         let rows = self.visible_rows();

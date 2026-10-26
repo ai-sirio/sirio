@@ -294,7 +294,84 @@ file, and the reviewer's verdict on the page.
 
 ### PR A: names, tooling and behaviour checks (`refactor/bezel-off-a`)
 
-To be filled in by Task 4.
+PR A changes no pixel: it adds this page's tooling and checks, reaches the three kept bezel crates
+(`bezel-theme`, `bezel-markdown`, `bezel-syntax`) by their own names (`bezel_theme::`,
+`bezel_markdown::`, `bezel_syntax::` in place of `bezel::theme::`, `markdown::`, `syntax::`), and
+drops `bezel-editor`, whose `init` only bound keys in two contexts (`BezelEditor`,
+`BezelImagePrompt`) that nothing in Sirio enters. `bezel::ui` and `bezel::motion` stay until PRs B to E.
+
+**Base and head.** The "before" set was captured at `08e20455`, the head of this PR's third task,
+not at PR A's git base `3c220dd3` (the `feat/effort-list` head). `3c220dd3` has no capture tooling and
+no `SIRIO_REDUCED_MOTION` switch, so it cannot produce a set that is comparable with the "after" one.
+The head is `08e20455` plus the rename commit. What lies between the git base and `08e20455`, from
+`git diff --stat 3c220dd3..08e20455 -- rust/` (9 files, +1226 -1), so that a reader can judge that the
+git base would have drawn the same frames:
+
+| Change | Where |
+| --- | --- |
+| The debug-only switch `SIRIO_REDUCED_MOTION`: `cx.set_reduce_motion(true)` before `ely::init`, behind `cfg!(debug_assertions)` and the env var | `sirio/src/main.rs` (+6) |
+| `controls::tooltip`, which no app surface calls yet | `sirio_ui/src/controls.rs` (+10) |
+| `#[doc(hidden)] pub mod probes` and its file, the views the example probes draw | `sirio_ui/src/lib.rs` (+3), `sirio_ui/src/probes.rs` (+200) |
+| `mod list_scroll` becomes `pub(crate) mod list_scroll` (a visibility change only) | `sirio_ui/src/chat/mod.rs` (1 line) |
+| Two new examples that only the capture tooling runs | `examples/scroll_drag_probe.rs` (+67), `examples/surfaces_probe.rs` (+651) |
+| Tests: the model search, Enter in the address bar, and the project forms' Enter and clone tests | `chat/mod.rs` (+105), `browser.rs` (+67), `project_forms.rs` (+116) |
+
+None of them changes what the app draws without `SIRIO_REDUCED_MOTION` (the tooltip is called by the
+probe only), so the app at `3c220dd3` and at `08e20455` draws the same frames.
+
+**What PR A changes in product code.** Path roots and manifests only: 64 `bezel::theme::` to
+`bezel_theme::` (30 files), 216 `markdown::` to `bezel_markdown::` (9 files), 8 `syntax::` to
+`bezel_syntax::` (4 files), 2 `theme::` to `bezel_theme::` in `sirio_syntax`, one intra-doc link
+`` [`bezel::theme`] `` by hand, and the 12 `::editor::init` calls (the one in `file_view::init` and
+eleven in its tests). `rust/Cargo.lock` loses `bezel-editor` and gains three `bezel-theme` edges (`sirio`,
+`sirio_terminal`, `sirio_ui`); no version changes.
+
+**Reproduce.**
+
+```bash
+# The base: a detached worktree of 08e20455 with its own rust/target (a reflink copy of the
+# head's target warms it; the base never builds into the head's target itself). This run's
+# base lived at ~/.cache/sirio-wt/bezel-off-a-base.
+git worktree add --detach ../bezel-off-a-base 08e20455
+cp -a --reflink=auto rust/target ../bezel-off-a-base/rust/target   # optional, only to warm it
+(cd ../bezel-off-a-base && TMPDIR=$HOME/.cache/sirio-e2e-tmp \
+  Scripts/bezel-off-captures.sh --xvfb --out-dir "$OLDPWD/artifacts/bezel-off/pr-a/before")
+
+# The head, in this tree (the same script, the same geometry).
+TMPDIR=$HOME/.cache/sirio-e2e-tmp Scripts/bezel-off-captures.sh --xvfb \
+  --out-dir artifacts/bezel-off/pr-a/after
+
+# The diff.
+Scripts/capture-diff.py artifacts/bezel-off/pr-a/before/frames artifacts/bezel-off/pr-a/after/frames \
+  --out artifacts/bezel-off/pr-a/diff --masks Scripts/capture-masks.tsv
+```
+
+**The result.** Both runs printed `CAPTURES OK: ... (94 frames)` (the chat E2E, the sweep, the
+Changes E2E and the surfaces probe each passed on both sides, so `composer_keys`, `reduced_motion`,
+`unfocused_spinner` and `long_history` held at the base and at the head), and the diff printed
+`compared 94 frames present on both sides (94 before, 94 after), tolerance 1` and
+`CAPTURE DIFF IDENTICAL`: no frame differs by more than one level outside the masks. No attribution
+file was needed. `changed.tsv` has the header only and `index.html` lists nothing. The artifacts are
+under `artifacts/bezel-off/pr-a/` (gitignored): `before/`, `after/` and `diff/`. The test suites are the
+same on both sides: 1598 tests run in `sirio_ui`, `sirio_syntax`, `sirio_terminal` and `sirio_theme`
+(1597 passed, 1 skipped, and `sirio_terminal`'s
+`mutation_stamp_stays_flat_while_idle_and_bumps_on_output` failing in the full run on both sides and
+passing alone, a known load flake) and 531 in `sirio` (all passed).
+
+**What the masks hide here.** `IDENTICAL` says nothing about pixels inside a mask, and PR A renamed
+code that draws under two of them: `chat/list_scroll.rs` (the transcript scrollbar, under the
+scrollbar-thumb mask on `long-history/scrolled-up*`) and `sidebar/mod.rs` (a sidebar row, under the
+session-dots mask). So the same pair was compared a second time with no `--masks` and the mask table
+passed as `--allow`, which attributes each changed pixel to the mask rectangle that holds it
+(`artifacts/bezel-off/pr-a/diff-unmasked/`): `CAPTURE DIFF OK (62 changed, all attributed)`. The 62
+frames differ only inside mask rectangles whose `why` is a clock or a run-to-run accident: the status
+bar's usage meter (29 frames) and path (50), message times (34), the Agents toolbar and subtitle (2),
+the turn duration, the cancelled line and the crash addresses (1 each), and the session dots (1). The
+scrollbar-thumb mask holds no changed pixel in any frame, so the transcript bar is identical. The one
+frame where the session-dots mask holds a change is `restore/before-restart`; by eye, the base frame
+draws two green connected dots (the `main` row and the corner of the Ely chat tab) and the head frame
+draws none, and nothing else in that crop moves: the fixture-session race the mask names. The renamed
+paths resolve to the same crate (the lock has one `bezel-theme`, 0.1.4), so no draw call changed.
 
 ### PR B: the pieces Ely lacks, rebuilt in Sirio (`refactor/bezel-off-b`)
 

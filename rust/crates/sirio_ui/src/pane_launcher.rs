@@ -9,7 +9,7 @@
 //! from bezel's tokens, the way `settings::agents_page` draws its identity
 //! tile.
 
-use bezel::theme::Theme as BezelTheme;
+use bezel_theme::Theme as BezelTheme;
 use bezel::ui::tooltip::Tooltip;
 use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
 use sirio_theme::Theme;

@@ -388,7 +388,7 @@ impl SurfaceScroll {
 /// What the Preview draws this frame: the document, and the directory its
 /// diagrams live in. A click on one of those is not a link.
 struct PreviewFrame {
-    doc: markdown::Doc,
+    doc: bezel_markdown::Doc,
     diagram_dir: Option<PathBuf>,
 }
 
@@ -489,12 +489,9 @@ pub struct FileDiagnostic {
 // closes it to its header; `SearchInWorktree` opens it on Search.
 actions!(file_view, [Find, Replace, ToggleDrawer, SearchInWorktree]);
 
-/// Installs bezel-editor's key bindings for the application, and the file
-/// tab's own: Find and Replace, in the tab's `FileEditor` context so they
-/// reach neither a terminal nor a chat. The app crate calls through this
-/// module so the dependency remains owned by `sirio_ui`.
+/// Installs the file tab's key bindings: Find and Replace, in the tab's
+/// `FileEditor` context so they reach neither a terminal nor a chat.
 pub fn init(cx: &mut App) {
-    ::editor::init(cx);
     // `ctrl-h` on a platform with no `cmd-alt-f`: it is Backspace only inside
     // bezel's macOS text fields, which are not in this context.
     let replace = if cfg!(target_os = "macos") {
@@ -1457,7 +1454,7 @@ impl FileView {
 
     /// The Preview's document for this frame, scheduling every diagram it
     /// names that has no state yet. `None` outside Markdown Preview.
-    pub(crate) fn preview_document(&mut self, cx: &mut Context<Self>) -> Option<markdown::Doc> {
+    pub(crate) fn preview_document(&mut self, cx: &mut Context<Self>) -> Option<bezel_markdown::Doc> {
         if self.effective_mode() != MarkdownMode::Preview {
             return None;
         }
@@ -1776,7 +1773,7 @@ impl Render for FileView {
         // (mirrors the sidebar's popup guard). The code editor reads Ely's
         // theme instead, but the bezel primitives this view renders still
         // need this one.
-        if cx.try_global::<bezel::theme::Theme>().is_none() {
+        if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
         let entity = cx.entity();
@@ -2560,7 +2557,7 @@ pub(crate) fn horizontal_scrollbar<V: 'static>(
 
 /// One classified span of a source line, in bezel-syntax's own vocabulary.
 ///
-/// The kind is `bezel::theme::HighlightKind` rather than a reduction of it:
+/// The kind is `bezel_theme::HighlightKind` rather than a reduction of it:
 /// an earlier version funnelled 24 kinds into keyword/literal/comment and
 /// dropped the rest, which is how a tree-sitter parse came out looking like
 /// a three-colour regex highlighter — and how a number ended up painted in
@@ -2568,7 +2565,7 @@ pub(crate) fn horizontal_scrollbar<V: 'static>(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodeSpan {
     pub(crate) range: std::ops::Range<usize>,
-    pub(crate) kind: bezel::theme::HighlightKind,
+    pub(crate) kind: bezel_theme::HighlightKind,
 }
 
 /// F-EDIT-07's code path stays Sirio's no-wrap editor; only token
@@ -2745,7 +2742,7 @@ fn line_highlights(
     spans: &[CodeSpan],
     links: &[(Range<usize>, String)],
     theme: &Theme,
-    syntax_palette: &bezel::theme::SyntaxPalette,
+    syntax_palette: &bezel_theme::SyntaxPalette,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut painted: Vec<(Range<usize>, HighlightStyle)> = spans
         .iter()
@@ -2876,15 +2873,15 @@ mod tests {
         // painted like a .txt file.
         let source = "public class Main { int n = 42; } // note";
         let spans = code_spans(Language::Java, source);
-        let painted = |needle: &str, kind: bezel::theme::HighlightKind| {
+        let painted = |needle: &str, kind: bezel_theme::HighlightKind| {
             let at = source.find(needle).expect("needle is in the fixture");
             spans
                 .iter()
                 .any(|span| span.range == (at..at + needle.len()) && span.kind == kind)
         };
-        assert!(painted("public", bezel::theme::HighlightKind::Keyword), "{spans:?}");
-        assert!(painted("42", bezel::theme::HighlightKind::Number), "{spans:?}");
-        assert!(painted("// note", bezel::theme::HighlightKind::Comment), "{spans:?}");
+        assert!(painted("public", bezel_theme::HighlightKind::Keyword), "{spans:?}");
+        assert!(painted("42", bezel_theme::HighlightKind::Number), "{spans:?}");
+        assert!(painted("// note", bezel_theme::HighlightKind::Comment), "{spans:?}");
     }
 
     /// The editor must paint what tree-sitter actually classified, not a
@@ -2895,7 +2892,7 @@ mod tests {
     #[test]
     fn every_kind_bezel_classifies_reaches_the_code_surface() {
         let source = "let count: usize = compute_total(&items) + 42; // note";
-        let offered = syntax::highlight(source, "rust").unwrap_or_default();
+        let offered = bezel_syntax::highlight(source, "rust").unwrap_or_default();
         let kept = code_spans(Language::Rust, source);
 
         let painted = |needle: &str| {
@@ -2951,7 +2948,6 @@ mod tests {
 
         cx.update(|cx| {
             Theme::init(cx);
-            ::editor::init(cx);
             crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| FileView::new(file.path().to_path_buf(), cx));
@@ -3066,7 +3062,6 @@ mod tests {
 
         cx.update(|cx| {
             Theme::init(cx);
-            ::editor::init(cx);
             crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| FileView::new(file.path().to_path_buf(), cx));
@@ -3238,7 +3233,6 @@ mod tests {
 
         cx.update(|cx| {
             Theme::init(cx);
-            ::editor::init(cx);
             crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| FileView::new(file.path().to_path_buf(), cx));
@@ -3408,7 +3402,6 @@ mod tests {
 
         cx.update(|cx| {
             Theme::init(cx);
-            ::editor::init(cx);
             crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| FileView::new(file.path().to_path_buf(), cx));
@@ -3617,7 +3610,6 @@ mod tests {
 
         cx.update(|cx| {
             Theme::init(cx);
-            ::editor::init(cx);
             crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| {
@@ -3782,7 +3774,6 @@ mod tests {
     ) -> (VisualTestContext, gpui::Entity<FileView>) {
         cx.update(|cx| {
             Theme::init(cx);
-            ::editor::init(cx);
             crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| FileView::new(path, cx));
@@ -4531,7 +4522,6 @@ mod tests {
     ) -> (VisualTestContext, gpui::Entity<FileView>) {
         cx.update(|cx| {
             Theme::init(cx);
-            ::editor::init(cx);
             crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| {
@@ -5197,7 +5187,6 @@ mod tests {
         let note = dir.join("note.md");
         std::fs::write(&note, "# Notes\n\nSelect this paragraph.\n").expect("write file");
 
-        cx.update(::editor::init);
         cx.update(crate::ely::init);
         let path = note.clone();
         let (view, _, cx) = testing::host(cx, move |_, cx| FileView::new(path, cx));
@@ -5378,7 +5367,7 @@ mod tests {
 
     use crate::markdown_preview::{DiagramSettings, PlantUmlQueue};
     use base64::Engine as _;
-    use markdown::BlockKind;
+    use bezel_markdown::BlockKind;
 
     fn diagram_cache(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -5391,7 +5380,7 @@ mod tests {
 
     /// Drives frames and the background executor until no diagram fence is
     /// left in the Preview, and returns the last document built.
-    fn settle_preview(cx: &mut VisualTestContext, view: &gpui::Entity<FileView>) -> markdown::Doc {
+    fn settle_preview(cx: &mut VisualTestContext, view: &gpui::Entity<FileView>) -> bezel_markdown::Doc {
         let mut last = None;
         for _ in 0..200 {
             cx.run_until_parked();
@@ -5596,7 +5585,6 @@ mod tests {
 
         cx.update(|cx| {
             Theme::init(cx);
-            ::editor::init(cx);
             crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| {
@@ -5745,7 +5733,6 @@ mod tests {
     async fn a_reveal_asked_before_a_snapshots_retry_succeeded_still_happens(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             Theme::init(cx);
-            ::editor::init(cx);
             crate::ely::init(cx);
         });
         let window = cx.add_window(|_window, cx| {
@@ -5822,7 +5809,6 @@ mod tests {
         // take the only remedy with them.
         cx.update(|cx| {
             Theme::init(cx);
-            ::editor::init(cx);
             crate::ely::init(cx);
         });
         let window =

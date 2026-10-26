@@ -41,7 +41,7 @@ const OUTPUT_MAX_HEIGHT: f32 = 256.0;
 /// bump that moves `step_output` shows up there rather than as a well that
 /// quietly no longer matches the rest of the row.
 pub(crate) fn output_well(
-    theme: &bezel::theme::Theme,
+    theme: &bezel_theme::Theme,
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
 ) -> gpui::Stateful<Div> {
@@ -275,7 +275,7 @@ impl Chat {
         source_start: usize,
         interaction: Option<TranscriptInteraction>,
         theme: &Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         entity: Entity<Chat>,
         output_scrolls: &HashMap<String, ScrollHandle>,
     ) -> AnyElement {
@@ -365,7 +365,7 @@ impl Chat {
         title: &str,
         status: &str,
         theme: &Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         entity: Entity<Chat>,
         output_scrolls: &HashMap<String, ScrollHandle>,
     ) -> AnyElement {
@@ -523,7 +523,7 @@ impl Chat {
         entry: &Entry,
         transcript_focus: FocusHandle,
         theme: &Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         entity: Entity<Chat>,
     ) -> AnyElement {
         let Entry::ToolCall {
@@ -585,7 +585,7 @@ impl Chat {
         tool_calls: Vec<SubagentToolCall>,
         expanded: bool,
         theme: &Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         entity: Entity<Chat>,
         output_scrolls: &HashMap<String, ScrollHandle>,
     ) -> AnyElement {
@@ -628,10 +628,10 @@ impl Chat {
     }
 
     /// The box a run shares: rounded, bordered, clipping whatever it holds.
-    fn run_box(bezel_theme: &bezel::theme::Theme) -> Div {
+    fn run_box(bezel_theme: &bezel_theme::Theme) -> Div {
         div()
             .w_full()
-            .rounded(px(bezel::theme::Theme::panel_radius()))
+            .rounded(px(bezel_theme::Theme::panel_radius()))
             .border_1()
             .border_color(bezel_theme.border)
             .overflow_hidden()
@@ -648,7 +648,7 @@ impl Chat {
         members: Vec<(usize, usize, Entry)>,
         transcript_focus: FocusHandle,
         theme: &Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         entity: Entity<Chat>,
     ) -> AnyElement {
         let Some((run_start, _, _)) = members.first() else {
@@ -766,7 +766,7 @@ mod tests {
         struct Wells(String);
         impl Render for Wells {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let theme = bezel::theme::Theme::of(cx).clone();
+                let theme = bezel_theme::Theme::of(cx).clone();
                 div()
                     .w(px(220.0))
                     .child(

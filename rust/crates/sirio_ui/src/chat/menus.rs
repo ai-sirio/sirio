@@ -9,7 +9,7 @@ use ely_gpui_component::menus::{Hang, Menu, MenuItem, MenuPanel, layer};
 impl Chat {
     pub(super) fn render_composer_context_menu(
         &self,
-        _bezel_theme: &bezel::theme::Theme,
+        _bezel_theme: &bezel_theme::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = *Theme::get(cx);
@@ -54,7 +54,7 @@ impl Chat {
 
     pub(super) fn render_transcript_context_menu(
         &self,
-        _bezel_theme: &bezel::theme::Theme,
+        _bezel_theme: &bezel_theme::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = *Theme::get(cx);

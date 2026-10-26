@@ -118,7 +118,7 @@ fn main() {
                     for (token, color) in ely_tokens(&cx.global::<ElyTheme>().colors) {
                         push(&mut ely, &combo, &token, color);
                     }
-                    writeln!(bezel, "== {combo}\n{:#?}", bezel::theme::Theme::of(cx)).unwrap();
+                    writeln!(bezel, "== {combo}\n{:#?}", bezel_theme::Theme::of(cx)).unwrap();
                 });
             }
         }

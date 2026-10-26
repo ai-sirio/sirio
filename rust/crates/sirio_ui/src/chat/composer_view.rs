@@ -400,7 +400,7 @@ pub(crate) fn menu_above_at(
     position: Point<Pixels>,
     content: AnyElement,
 ) -> AnyElement {
-    let content = bezel::ui::surface::popover(bezel::theme::Theme::surface_radius(), content);
+    let content = bezel::ui::surface::popover(bezel_theme::Theme::surface_radius(), content);
     gpui::deferred(
         gpui::anchored()
             .position(position)
@@ -804,7 +804,7 @@ impl Chat {
     ) -> AnyElement {
         let _perf = sirio_perf::span("Chat.render_composer", cx.entity_id().as_u64());
         let typography = theme.typography;
-        let bezel_theme = bezel::theme::Theme::of(cx).clone();
+        let bezel_theme = bezel_theme::Theme::of(cx).clone();
         let placeholder = self.composer_placeholder();
         if placeholder != self.composer_placeholder_shown {
             self.composer_placeholder_shown = placeholder.clone();

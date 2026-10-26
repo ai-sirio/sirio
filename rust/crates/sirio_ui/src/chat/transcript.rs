@@ -53,7 +53,7 @@ impl Chat {
         entry_index: usize,
         label: &str,
         theme: &Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
     ) -> AnyElement {
         div()
             .debug_selector(move || format!("day-heading-{entry_index}"))

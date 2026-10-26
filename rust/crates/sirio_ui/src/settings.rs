@@ -7,7 +7,7 @@ use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
 use crate::text_selection::selectable_text;
-use bezel::theme::Theme as BezelTheme;
+use bezel_theme::Theme as BezelTheme;
 use bezel::ui::input::TextField;
 use bezel::ui::widgets::status_dot;
 use gpui::{

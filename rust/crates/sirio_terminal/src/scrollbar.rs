@@ -8,7 +8,7 @@
 //! calls scrolling down *negative*. This module is the one place that
 //! translation happens.
 
-use bezel::theme::ink;
+use bezel_theme::ink;
 use bezel::ui::scroll::{self, MIN_THUMB, ScrollbarDrag};
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, DragMoveEvent, Empty, InteractiveElement,

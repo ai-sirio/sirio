@@ -76,8 +76,8 @@ pub(crate) type LinkClickOverride = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 fn highlight_markdown_code(
     language: &str,
     code: &str,
-) -> Option<Vec<(Range<usize>, bezel::theme::HighlightKind)>> {
-    syntax::highlight(code, language)
+) -> Option<Vec<(Range<usize>, bezel_theme::HighlightKind)>> {
+    bezel_syntax::highlight(code, language)
 }
 
 /// Installs the app-owned syntax highlighter used by bezel-markdown code
@@ -85,16 +85,16 @@ fn highlight_markdown_code(
 /// paints an unknown language as plain code.
 pub fn init(cx: &mut App) {
     crate::ely::init(cx);
-    markdown::set_highlighter(
+    bezel_markdown::set_highlighter(
         cx,
         highlight_markdown_code,
-        syntax::lang::LANGS.iter().map(|language| language.name),
+        bezel_syntax::lang::LANGS.iter().map(|language| language.name),
     );
 }
 
 pub(crate) fn markdown_link_at(
-    document: &markdown::Doc,
-    cursor: markdown::Cursor,
+    document: &bezel_markdown::Doc,
+    cursor: bezel_markdown::Cursor,
 ) -> Option<String> {
     let text = document.blocks.get(cursor.block)?.text_at(cursor.part)?;
     text.marks.iter().rev().find_map(|span| {
@@ -102,16 +102,16 @@ pub(crate) fn markdown_link_at(
             return None;
         }
         match &span.mark {
-            markdown::Mark::Link(target) | markdown::Mark::Image(target) => Some(target.clone()),
-            markdown::Mark::Mention { url, .. } => Some(url.clone()),
+            bezel_markdown::Mark::Link(target) | bezel_markdown::Mark::Image(target) => Some(target.clone()),
+            bezel_markdown::Mark::Mention { url, .. } => Some(url.clone()),
             _ => None,
         }
     })
 }
 
-pub(crate) fn markdown_block_link_at(document: &markdown::Doc, block: usize) -> Option<String> {
+pub(crate) fn markdown_block_link_at(document: &bezel_markdown::Doc, block: usize) -> Option<String> {
     match &document.blocks.get(block)?.kind {
-        markdown::BlockKind::Bookmark { url, .. } | markdown::BlockKind::Image { url, .. } => {
+        bezel_markdown::BlockKind::Bookmark { url, .. } | bezel_markdown::BlockKind::Image { url, .. } => {
             Some(url.clone())
         }
         _ => None,
@@ -119,12 +119,12 @@ pub(crate) fn markdown_block_link_at(document: &markdown::Doc, block: usize) -> 
 }
 
 /// Defers bezel-markdown's build until gpui supplies the `Window` and `App`
-/// required by `markdown::render`. File Preview can therefore keep its
+/// required by `bezel_markdown::render`. File Preview can therefore keep its
 /// existing source-only seam while chat entries use the same renderer.
 struct MarkdownBody {
     /// Shared with the release handler of a transcript response, which looks
     /// a link up in it without copying the document each frame.
-    document: Rc<markdown::Doc>,
+    document: Rc<bezel_markdown::Doc>,
     selection: Option<MarkdownSelection>,
     rendered: Option<AnyElement>,
     /// What a transcript response's last layout recorded, read after paint to
@@ -147,7 +147,7 @@ struct MarkdownSelection {
 /// text — the text `Entry::plain_text` reports for an assistant entry.
 struct DocPart {
     block: usize,
-    part: markdown::Part,
+    part: bezel_markdown::Part,
     start: usize,
     len: usize,
 }
@@ -161,7 +161,7 @@ pub(crate) struct DocParts {
 }
 
 impl DocParts {
-    pub(crate) fn of(doc: &markdown::Doc) -> Self {
+    pub(crate) fn of(doc: &bezel_markdown::Doc) -> Self {
         let mut text = String::new();
         let mut parts = Vec::new();
         for (block, item) in doc.blocks.iter().enumerate() {
@@ -191,7 +191,7 @@ impl DocParts {
     /// A pointer hit as a plain-text offset. A block no caret can enter is
     /// never hit, so a missing part means a document out of step with the
     /// one that was laid out; the entry's start is the safe answer.
-    pub(crate) fn offset_of(&self, cursor: markdown::Cursor) -> usize {
+    pub(crate) fn offset_of(&self, cursor: bezel_markdown::Cursor) -> usize {
         self.parts
             .iter()
             .find(|part| part.block == cursor.block && part.part == cursor.part)
@@ -201,9 +201,9 @@ impl DocParts {
 
     /// The part holding `offset`, clamped to its end — an offset inside a
     /// separator lands at the end of the part before it.
-    fn cursor_at(&self, offset: usize) -> Option<markdown::Cursor> {
+    fn cursor_at(&self, offset: usize) -> Option<bezel_markdown::Cursor> {
         let part = self.parts.iter().rev().find(|part| part.start <= offset)?;
-        Some(markdown::Cursor::new(
+        Some(bezel_markdown::Cursor::new(
             part.block,
             part.part,
             (offset - part.start).min(part.len),
@@ -228,13 +228,13 @@ impl DocParts {
         &self,
         range: Range<usize>,
         source_start: usize,
-    ) -> Option<markdown::Selection> {
+    ) -> Option<bezel_markdown::Selection> {
         let start = range.start.max(source_start);
         let end = range.end.min(source_start + self.text.len());
         if start >= end {
             return None;
         }
-        Some(markdown::Selection::new(
+        Some(bezel_markdown::Selection::new(
             self.cursor_at(start - source_start)?,
             self.cursor_at(end - source_start)?,
         ))
@@ -247,7 +247,7 @@ impl DocParts {
 #[derive(Clone)]
 struct DocHit {
     parts: Rc<DocParts>,
-    layouts: markdown::BlockLayouts,
+    layouts: bezel_markdown::BlockLayouts,
     source_start: usize,
 }
 
@@ -260,7 +260,7 @@ impl DocHit {
 }
 
 impl MarkdownBody {
-    fn new(document: markdown::Doc) -> Self {
+    fn new(document: bezel_markdown::Doc) -> Self {
         Self {
             document: Rc::new(document),
             selection: None,
@@ -272,7 +272,7 @@ impl MarkdownBody {
     /// A transcript response: part of the chat's one selection, so a drag
     /// across it selects its visible text and Copy reads that text.
     fn selectable(
-        document: markdown::Doc,
+        document: bezel_markdown::Doc,
         interaction: TranscriptInteraction,
         source_start: usize,
     ) -> Self {
@@ -306,17 +306,17 @@ impl MarkdownBody {
             .as_ref()
             .map(TranscriptSelection::range)
             .and_then(|range| parts.selection_for(range, selection.source_start));
-        let layouts = markdown::BlockLayouts::default();
+        let layouts = bezel_markdown::BlockLayouts::default();
         // ponytail: bezel paints its editor caret at the selection's head
         // too — a 1.5px line at the highlight's edge, only while a
         // selection exists. Hiding it needs a renderer flag bezel has yet
         // to offer.
-        let rendered = markdown::render_with_selection(
+        let rendered = bezel_markdown::render_with_selection(
             &self.document,
             doc_selection,
             Some(&layouts),
             None,
-            markdown::Caption::Shown,
+            bezel_markdown::Caption::Shown,
             window,
             cx,
         );
@@ -437,7 +437,7 @@ impl MarkdownBody {
             return (element, Some(hit));
         }
         (
-            markdown::render(&self.document, markdown::Caption::Shown, window, cx),
+            bezel_markdown::render(&self.document, bezel_markdown::Caption::Shown, window, cx),
             None,
         )
     }
@@ -449,8 +449,8 @@ impl MarkdownBody {
 /// label at its vertical middle, and `w`, how wide the label painted (its
 /// first line, when it wraps).
 fn record_links(
-    document: &markdown::Doc,
-    layouts: &markdown::BlockLayouts,
+    document: &bezel_markdown::Doc,
+    layouts: &bezel_markdown::BlockLayouts,
     out: &mut Vec<BTreeMap<String, String>>,
 ) {
     for (block_ix, block) in document.blocks.iter().enumerate() {
@@ -459,10 +459,10 @@ fn record_links(
                 continue;
             };
             for span in &text.marks {
-                let markdown::Mark::Link(target) = &span.mark else {
+                let bezel_markdown::Mark::Link(target) = &span.mark else {
                     continue;
                 };
-                let at = |offset| markdown::Cursor::new(block_ix, part, offset);
+                let at = |offset| bezel_markdown::Cursor::new(block_ix, part, offset);
                 let Some((start, line_height)) = layouts.position(at(span.range.start)) else {
                     continue;
                 };
@@ -604,9 +604,9 @@ const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 /// renders a popover instead of a window-filling one.
 const MODEL_PICKER_LIST_MAX_H: f32 = 260.0;
 
-fn parse_chat_markdown(source: &str) -> markdown::Doc {
+fn parse_chat_markdown(source: &str) -> bezel_markdown::Doc {
     let _perf = sirio_perf::span("Chat.parse_markdown", source.len() as u64);
-    markdown::parse(source)
+    bezel_markdown::parse(source)
 }
 
 /// An assistant response's document with the files it names marked as links.
@@ -616,27 +616,27 @@ fn parse_linked_markdown(
     source: &str,
     cwd: &Path,
     memo: &mut file_links::FileLinkMemo,
-) -> markdown::Doc {
+) -> bezel_markdown::Doc {
     let mut document = parse_chat_markdown(source);
     file_links::link_file_paths(&mut document, cwd, std::env::home_dir().as_deref(), memo);
     document
 }
 
-pub(crate) fn bezel_doc_from_legacy(document: LegacyDocument) -> markdown::Doc {
+pub(crate) fn bezel_doc_from_legacy(document: LegacyDocument) -> bezel_markdown::Doc {
     let mut blocks = Vec::new();
     for block in document.blocks {
         push_legacy_block(block, 0, false, &mut blocks);
     }
-    markdown::Doc { blocks }
+    bezel_markdown::Doc { blocks }
 }
 
-fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec<markdown::Block>) {
-    let at = |kind| markdown::Block::at(kind, indent);
+fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec<bezel_markdown::Block>) {
+    let at = |kind| bezel_markdown::Block::at(kind, indent);
     match block {
         LegacyBlock::Heading { level, inline } => out.push(at(if quoted {
-            markdown::BlockKind::Quote(bezel_text(&inline))
+            bezel_markdown::BlockKind::Quote(bezel_text(&inline))
         } else {
-            markdown::BlockKind::Heading {
+            bezel_markdown::BlockKind::Heading {
                 level,
                 text: bezel_text(&inline),
             }
@@ -645,34 +645,34 @@ fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec
             out.push(at(if let Some((url, alt, width)) = lone_image(&inline) {
                 // Before the quote check: bezel's quote block holds text
                 // only, and a picture inside a quote is still a picture.
-                markdown::BlockKind::Image {
+                bezel_markdown::BlockKind::Image {
                     url: url.to_owned(),
-                    alt: markdown::Text::plain(alt),
+                    alt: bezel_markdown::Text::plain(alt),
                     width,
                 }
             } else if quoted {
-                markdown::BlockKind::Quote(bezel_text(&inline))
+                bezel_markdown::BlockKind::Quote(bezel_text(&inline))
             } else {
-                markdown::BlockKind::Paragraph(bezel_text(&inline))
+                bezel_markdown::BlockKind::Paragraph(bezel_text(&inline))
             }))
         }
         LegacyBlock::List { kind, items, .. } => {
             for (index, item) in items.into_iter().enumerate() {
                 let mut item_blocks = item.blocks.into_iter();
                 let text = item_blocks.next().map_or_else(
-                    || markdown::Text::plain(""),
+                    || bezel_markdown::Text::plain(""),
                     |first| match first {
                         LegacyBlock::Heading { inline, .. } | LegacyBlock::Paragraph { inline } => {
                             bezel_text(&inline)
                         }
-                        other => markdown::Text::plain(other.plain_text()),
+                        other => bezel_markdown::Text::plain(other.plain_text()),
                     },
                 );
                 let kind = match item.checked {
-                    Some(checked) => markdown::BlockKind::Task { checked, text },
+                    Some(checked) => bezel_markdown::BlockKind::Task { checked, text },
                     None => match kind {
-                        LegacyListKind::Bullet => markdown::BlockKind::Bullet(text),
-                        LegacyListKind::Ordered { start } => markdown::BlockKind::Ordered {
+                        LegacyListKind::Bullet => bezel_markdown::BlockKind::Bullet(text),
+                        LegacyListKind::Ordered { start } => bezel_markdown::BlockKind::Ordered {
                             number: start + index as u64,
                             text,
                         },
@@ -689,21 +689,21 @@ fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec
                 push_legacy_block(block, indent, true, out);
             }
         }
-        LegacyBlock::CodeBlock { language, text, .. } => out.push(at(markdown::BlockKind::Code {
+        LegacyBlock::CodeBlock { language, text, .. } => out.push(at(bezel_markdown::BlockKind::Code {
             language,
-            code: markdown::Text::plain(text.trim_end_matches('\n')),
+            code: bezel_markdown::Text::plain(text.trim_end_matches('\n')),
         })),
         LegacyBlock::Table {
             alignment,
             header,
             rows,
-        } => out.push(at(markdown::BlockKind::Table {
+        } => out.push(at(bezel_markdown::BlockKind::Table {
             align: alignment
                 .into_iter()
                 .map(|alignment| match alignment {
-                    LegacyAlignment::Center => markdown::Align::Center,
-                    LegacyAlignment::Right => markdown::Align::Right,
-                    LegacyAlignment::None | LegacyAlignment::Left => markdown::Align::Left,
+                    LegacyAlignment::Center => bezel_markdown::Align::Center,
+                    LegacyAlignment::Right => bezel_markdown::Align::Right,
+                    LegacyAlignment::None | LegacyAlignment::Left => bezel_markdown::Align::Left,
                 })
                 .collect(),
             header: header
@@ -719,17 +719,17 @@ fn push_legacy_block(block: LegacyBlock, indent: u8, quoted: bool, out: &mut Vec
                 })
                 .collect(),
         })),
-        LegacyBlock::ThematicBreak => out.push(at(markdown::BlockKind::Rule)),
+        LegacyBlock::ThematicBreak => out.push(at(bezel_markdown::BlockKind::Rule)),
         LegacyBlock::Html { text } => {
-            out.push(at(markdown::BlockKind::Paragraph(markdown::Text::plain(
+            out.push(at(bezel_markdown::BlockKind::Paragraph(bezel_markdown::Text::plain(
                 text,
             ))));
         }
     }
 }
 
-fn bezel_text(inlines: &[LegacyInline]) -> markdown::Text {
-    let mut text = markdown::Text::default();
+fn bezel_text(inlines: &[LegacyInline]) -> bezel_markdown::Text {
+    let mut text = bezel_markdown::Text::default();
     for inline in inlines {
         push_legacy_inline(inline, &mut text);
     }
@@ -759,10 +759,10 @@ fn lone_image(inlines: &[LegacyInline]) -> Option<(&str, &str, Option<u32>)> {
     found
 }
 
-fn push_marked_inlines(mark: markdown::Mark, inlines: &[LegacyInline], text: &mut markdown::Text) {
+fn push_marked_inlines(mark: bezel_markdown::Mark, inlines: &[LegacyInline], text: &mut bezel_markdown::Text) {
     let index = text.marks.len();
     let start = text.text.len();
-    text.marks.push(markdown::MarkSpan {
+    text.marks.push(bezel_markdown::MarkSpan {
         range: start..start,
         mark,
     });
@@ -772,30 +772,30 @@ fn push_marked_inlines(mark: markdown::Mark, inlines: &[LegacyInline], text: &mu
     text.marks[index].range.end = text.text.len();
 }
 
-fn push_legacy_inline(inline: &LegacyInline, text: &mut markdown::Text) {
+fn push_legacy_inline(inline: &LegacyInline, text: &mut bezel_markdown::Text) {
     match inline {
         LegacyInline::Text(value) | LegacyInline::Html(value) => text.text.push_str(value),
         LegacyInline::Emphasis(children) => {
-            push_marked_inlines(markdown::Mark::Italic, children, text)
+            push_marked_inlines(bezel_markdown::Mark::Italic, children, text)
         }
-        LegacyInline::Strong(children) => push_marked_inlines(markdown::Mark::Bold, children, text),
+        LegacyInline::Strong(children) => push_marked_inlines(bezel_markdown::Mark::Bold, children, text),
         LegacyInline::Code(value) => {
             let start = text.text.len();
             text.text.push_str(value);
-            text.marks.push(markdown::MarkSpan {
+            text.marks.push(bezel_markdown::MarkSpan {
                 range: start..text.text.len(),
-                mark: markdown::Mark::Code,
+                mark: bezel_markdown::Mark::Code,
             });
         }
         LegacyInline::Link {
             target, children, ..
-        } => push_marked_inlines(markdown::Mark::Link(target.clone()), children, text),
+        } => push_marked_inlines(bezel_markdown::Mark::Link(target.clone()), children, text),
         LegacyInline::Image { target, alt, .. } => {
             let start = text.text.len();
             text.text.push_str(alt);
-            text.marks.push(markdown::MarkSpan {
+            text.marks.push(bezel_markdown::MarkSpan {
                 range: start..text.text.len(),
-                mark: markdown::Mark::Image(target.clone()),
+                mark: bezel_markdown::Mark::Image(target.clone()),
             });
         }
         LegacyInline::SoftBreak | LegacyInline::HardBreak => text.text.push('\n'),
@@ -943,7 +943,7 @@ enum Entry {
     /// rendering, so a redraw never reparses the entire reply.
     Assistant {
         text: String,
-        document: markdown::Doc,
+        document: bezel_markdown::Doc,
     },
     /// A streamed reasoning chunk, visually distinct from the reply.
     ///
@@ -6151,7 +6151,7 @@ impl Chat {
     /// still follows a link.
     #[track_caller]
     pub(crate) fn render_markdown_document_with_link_override(
-        document: markdown::Doc,
+        document: bezel_markdown::Doc,
         _theme: &Theme,
         link_click: LinkClickOverride,
     ) -> AnyElement {
@@ -6853,7 +6853,7 @@ impl Render for Chat {
         // copy — never `Theme::dark()`, never a field.
         let theme = *Theme::get(cx);
         let transcript_theme = theme;
-        let bezel_theme = bezel::theme::Theme::of(cx).clone();
+        let bezel_theme = bezel_theme::Theme::of(cx).clone();
         // Built before the element tree borrows `cx`: the Cluster orb leases
         // the shared animation clock through the view being rendered.
         let generating_orb = self
@@ -7959,7 +7959,7 @@ mod tests {
             .expect("bezel-syntax carries a rust grammar by default");
         assert!(
             spans.iter().any(|(range, kind)| {
-                matches!(kind, bezel::theme::HighlightKind::Keyword) && &code[range.clone()] == "fn"
+                matches!(kind, bezel_theme::HighlightKind::Keyword) && &code[range.clone()] == "fn"
             }),
             "`fn` must be classified as a keyword; got {} spans",
             spans.len()

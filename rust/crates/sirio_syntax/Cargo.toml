@@ -7,11 +7,11 @@ publish.workspace = true
 [dependencies]
 # bezel's own classifier: its seven languages, its capture vocabulary, and
 # the `Lang` extension point every grammar below is registered through.
-bezel-syntax.workspace = true
+bezel_syntax.workspace = true
 # The `HighlightKind` those spans are expressed in. Pinned with bezel, and
 # already in the graph underneath it -- `bezel-syntax` takes the same crate
 # at the same version, so this adds an edge, not a dependency.
-theme = { package = "bezel-theme", version = "=0.1.4" }
+bezel_theme.workspace = true
 
 # One grammar per language `sirio_ui::editor::Language` knows and
 # `bezel-syntax` does not. Each is a C parser plus the grammar author's own

@@ -119,14 +119,14 @@ use sirio_theme::{BaseColor, Theme, ThemeMode};
 
 #[gpui::test]
 async fn install_into_bezel_makes_theme_of_return_the_branded_palette(cx: &mut TestAppContext) {
-    let _guard = bezel::theme::lock_appearance();
+    let _guard = bezel_theme::lock_appearance();
     let theme = Theme::for_mode(ThemeMode::Dark, WindowAppearance::Dark, BaseColor::Slate);
     let expected = theme.to_bezel_theme();
-    assert_ne!(expected.bg, bezel::theme::Theme::dark().bg);
+    assert_ne!(expected.bg, bezel_theme::Theme::dark().bg);
 
     cx.update(|cx| theme.install_into_bezel(cx));
     cx.update(|cx| {
-        let installed = bezel::theme::Theme::of(cx);
+        let installed = bezel_theme::Theme::of(cx);
         assert_eq!(installed.bg, expected.bg);
     });
 }

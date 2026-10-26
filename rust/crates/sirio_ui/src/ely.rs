@@ -113,7 +113,7 @@ mod tests {
     }
 
     fn bezel_holds(cx: &App, theme: &Theme) -> bool {
-        format!("{:?}", bezel::theme::Theme::of(cx)) == format!("{:?}", theme.to_bezel_theme())
+        format!("{:?}", bezel_theme::Theme::of(cx)) == format!("{:?}", theme.to_bezel_theme())
     }
 
     /// What the Linux portal follower does: build the next theme and set it,
@@ -127,8 +127,8 @@ mod tests {
         cx.update(|cx| {
             assert!(bezel_holds(cx, &next), "bezel kept the previous theme");
             assert_eq!(
-                bezel::theme::current_appearance(),
-                bezel::theme::Appearance::Light
+                bezel_theme::current_appearance(),
+                bezel_theme::Appearance::Light
             );
             let ely = cx.global::<ElyTheme>();
             assert!(!ely.is_dark());

@@ -17,7 +17,7 @@
 use std::{cell::Cell, rc::Rc};
 
 use bezel::motion::Painter;
-use bezel::theme::ink;
+use bezel_theme::ink;
 use bezel::ui::scroll::{self, MIN_THUMB, ScrollbarDrag};
 use gpui::{
     AnyElement, App, Context, DragMoveEvent, Empty, FollowMode, ListState, MouseButton, Pixels,
@@ -39,7 +39,7 @@ impl Chat {
     /// in `Chat::new` restores when a wheel lands back on the tail.
     pub(crate) fn render_jump_to_latest(
         &self,
-        _bezel_theme: &bezel::theme::Theme,
+        _bezel_theme: &bezel_theme::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.list_state.is_following_tail() {

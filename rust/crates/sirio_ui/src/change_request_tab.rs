@@ -252,11 +252,11 @@ pub struct ChangeRequestTab {
     /// dropped on its own (spec §8).
     pub(crate) unreachable: Option<String>,
     pub(crate) header: Slot<ChangeHeader>,
-    pub(crate) description: Option<markdown::Doc>,
+    pub(crate) description: Option<bezel_markdown::Doc>,
     /// The Markdown of each timeline entry that has a body, aligned with it.
-    bodies: Vec<Option<markdown::Doc>>,
+    bodies: Vec<Option<bezel_markdown::Doc>>,
     /// First published thread bodies for the Conversation, cached by forge id.
-    thread_bodies: HashMap<String, markdown::Doc>,
+    thread_bodies: HashMap<String, bezel_markdown::Doc>,
     thread_ids: HashMap<u64, String>,
     pub(crate) commits: Slot<Listing<CommitSummary>>,
     pub(crate) checks: Slot<Listing<Check>>,
@@ -1290,7 +1290,7 @@ fn body_of(item: &TimelineItem) -> Option<&str> {
 
 /// A forge body through the Preview's Markdown path, `expand_html` subset
 /// included, with its images turned into text (see [`images_as_text`]).
-fn markdown_doc(body: &str, theme: &Theme) -> markdown::Doc {
+fn markdown_doc(body: &str, theme: &Theme) -> bezel_markdown::Doc {
     let preview = crate::markdown_preview::build(
         sirio_markdown::parse(body),
         Path::new(""),
@@ -1306,9 +1306,9 @@ fn markdown_doc(body: &str, theme: &Theme) -> markdown::Doc {
 /// empty box (checked 2026-09-27), and a forge body's relative picture has
 /// no file behind it here. Each picture becomes its alt text (or "image"),
 /// a link when it is remote.
-pub(crate) fn images_as_text(doc: &mut markdown::Doc) {
+pub(crate) fn images_as_text(doc: &mut bezel_markdown::Doc) {
     for block in &mut doc.blocks {
-        let markdown::BlockKind::Image { url, alt, .. } = &block.kind else {
+        let bezel_markdown::BlockKind::Image { url, alt, .. } = &block.kind else {
             continue;
         };
         let label = if alt.text.trim().is_empty() {
@@ -1316,14 +1316,14 @@ pub(crate) fn images_as_text(doc: &mut markdown::Doc) {
         } else {
             alt.text.clone()
         };
-        let mut text = markdown::Text::plain(label.clone());
+        let mut text = bezel_markdown::Text::plain(label.clone());
         if url.contains("://") {
-            text.marks.push(markdown::MarkSpan {
+            text.marks.push(bezel_markdown::MarkSpan {
                 range: 0..label.len(),
-                mark: markdown::Mark::Link(url.clone()),
+                mark: bezel_markdown::Mark::Link(url.clone()),
             });
         }
-        block.kind = markdown::BlockKind::Paragraph(text);
+        block.kind = bezel_markdown::BlockKind::Paragraph(text);
     }
 }
 
@@ -2556,7 +2556,7 @@ mod tests {
 
     #[test]
     fn images_become_text_and_remote_ones_links() {
-        let mut doc = markdown::parse(
+        let mut doc = bezel_markdown::parse(
             "![after](https://ghe.test/a.png)\n\n![](https://ghe.test/b.png)\n\n![local](docs/c.png)\n",
         );
         images_as_text(&mut doc);
@@ -2564,10 +2564,10 @@ mod tests {
             .blocks
             .iter()
             .map(|block| match &block.kind {
-                markdown::BlockKind::Paragraph(text) => (
+                bezel_markdown::BlockKind::Paragraph(text) => (
                     text.text.clone(),
                     text.marks.iter().find_map(|span| match &span.mark {
-                        markdown::Mark::Link(url) => Some(url.clone()),
+                        bezel_markdown::Mark::Link(url) => Some(url.clone()),
                         _ => None,
                     }),
                 ),

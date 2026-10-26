@@ -1,4 +1,4 @@
-use bezel::theme::ink;
+use bezel_theme::ink;
 use bezel::ui::scroll::{self, ScrollbarDrag};
 use gpui::{
     AnyElement, App, Empty, MouseButton, Pixels, SharedString, Window, div, prelude::*, px,

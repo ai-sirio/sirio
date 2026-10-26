@@ -317,7 +317,7 @@ impl Chat {
         &self,
         view: QuestionView,
         theme: &Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let typography = theme.typography;

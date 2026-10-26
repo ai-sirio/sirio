@@ -683,19 +683,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bezel-editor"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46c60672aba1ee31d3710c1436cc8e83f30cdebdedc5d020e7bcd451ef873427"
-dependencies = [
- "bezel-gpui",
- "bezel-markdown",
- "bezel-motion",
- "bezel-theme",
- "bezel-ui",
-]
-
-[[package]]
 name = "bezel-gpui"
 version = "0.3.8+zed.82aeef"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7312,6 +7299,7 @@ dependencies = [
  "bezel-gpui",
  "bezel-gpui-linux",
  "bezel-gpui-platform",
+ "bezel-theme",
  "bezel-zed-scheduler",
  "chrono",
  "embed-resource",
@@ -7642,6 +7630,7 @@ dependencies = [
  "bezel",
  "bezel-gpui",
  "bezel-gpui-platform",
+ "bezel-theme",
  "futures",
  "image",
  "libc",
@@ -7678,11 +7667,11 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "bezel",
- "bezel-editor",
  "bezel-gpui",
  "bezel-gpui-platform",
  "bezel-markdown",
  "bezel-syntax",
+ "bezel-theme",
  "chrono",
  "ely-gpui-component",
  "futures",
