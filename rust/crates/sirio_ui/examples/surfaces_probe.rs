@@ -27,6 +27,13 @@
 //! the discovery sweep's error, and with no `PATH` the sweep has none to search. The script
 //! therefore runs every frame with `PATH` unset, which also keeps the Language Servers
 //! rows and the PlantUML line from reading the machine.
+//!
+//! What unsetting `PATH` does not stop: `Settings::with_snapshot` still runs
+//! `ProviderAccountStates::discovered()`, which reads the user's credential files and, for a
+//! signed-in Claude, runs `claude auth status`. With `PATH` unset glibc's `execvp` falls back
+//! to `/bin:/usr/bin`, so a `claude` installed there would still run. No pixel depends on it:
+//! `with_account_states` replaces the result before the first paint, and the frames show the
+//! fixed `probe@example.com`.
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -67,6 +74,22 @@ enum Frame {
     Tooltip,
 }
 
+/// The frame name of each Settings page. Fixed text, not derived from the page's title: a
+/// retitled page must not turn into an added and a removed frame in a before/after diff. The
+/// match has no wildcard arm, so a new category does not compile until it is named here.
+fn category_slug(category: SettingsCategory) -> &'static str {
+    match category {
+        SettingsCategory::AiProviders => "ai-providers",
+        SettingsCategory::Agents => "agents",
+        SettingsCategory::LanguageServers => "language-servers",
+        SettingsCategory::GitHosting => "git-hosting",
+        SettingsCategory::General => "general",
+        SettingsCategory::Permissions => "permissions",
+        SettingsCategory::Appearance => "appearance",
+        SettingsCategory::Editor => "editor",
+    }
+}
+
 impl Frame {
     fn all() -> Vec<Self> {
         SettingsCategory::all()
@@ -78,9 +101,7 @@ impl Frame {
 
     fn name(self) -> String {
         match self {
-            Self::Settings(category) => {
-                format!("settings-{}", category.title().to_lowercase().replace(' ', "-"))
-            }
+            Self::Settings(category) => format!("settings-{}", category_slug(category)),
             Self::GitHostingAccounts => "settings-git-hosting-accounts".to_owned(),
             Self::TabMenu => "tab-menu".to_owned(),
             Self::Tooltip => "tooltip".to_owned(),
@@ -235,8 +256,13 @@ fn agent_sources() -> (
 }
 
 /// A language-server store holding one install and the scratch directory it lives in. The
-/// page reads the store while the category is selected, so the directory is removed once
-/// the frame's `Settings` has been built.
+/// window's `Surface` holds it for as long as the process runs, so a page that re-reads the
+/// store later (an asynchronous refresh) still finds it.
+///
+/// The directory is `$SURFACES_PROBE_SCRATCH` when the script names one (it removes the
+/// directory itself at exit, which matters because the script ends a probe with SIGTERM and
+/// no destructor runs then) and otherwise a directory of the temp dir named for the pid,
+/// removed when the store is dropped, which a normal quit does.
 struct LanguageStore {
     scratch: PathBuf,
 }
@@ -248,8 +274,11 @@ impl LanguageStore {
 
     /// TypeScript's server, recorded as installed by Sirio.
     fn new() -> Self {
-        let scratch =
-            std::env::temp_dir().join(format!("sirio-surfaces-probe-{}", std::process::id()));
+        let scratch = std::env::var_os("SURFACES_PROBE_SCRATCH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("sirio-surfaces-probe-{}", std::process::id()))
+            });
         let _ = std::fs::remove_dir_all(&scratch);
         let store = Self { scratch };
         std::fs::create_dir_all(store.root()).expect("create the probe's language store");
@@ -373,8 +402,13 @@ impl ChangeRequestSource for ProbeForgeSource {
     fn release_revisions(&self, _worktree: &Path, _live: &[ChangeRef]) {}
 }
 
-/// The frame's `Settings`, seeded through the public builders and showing `category`.
-fn settings_entity(category: SettingsCategory, mode: ThemeMode, cx: &mut App) -> Entity<Settings> {
+/// The frame's `Settings`, seeded through the public builders and showing `category`, and the
+/// language-server store behind it (Language Servers only), which the caller keeps alive.
+fn settings_entity(
+    category: SettingsCategory,
+    mode: ThemeMode,
+    cx: &mut App,
+) -> (Entity<Settings>, Option<LanguageStore>) {
     let language_store = (category == SettingsCategory::LanguageServers).then(LanguageStore::new);
     let settings = cx.new(|cx| {
         let snapshot = SettingsSnapshot {
@@ -446,8 +480,7 @@ fn settings_entity(category: SettingsCategory, mode: ThemeMode, cx: &mut App) ->
         settings
     });
     settings.update(cx, |settings, cx| settings.select_category(category, cx));
-    drop(language_store);
-    settings
+    (settings, language_store)
 }
 
 /// What the public API cannot reach, one line each.
@@ -473,6 +506,8 @@ fn print_gaps(frame: Frame) {
 struct Surface {
     frame: Frame,
     settings: Option<Entity<Settings>>,
+    /// Kept for its `Drop` and for any later read of the store; never drawn.
+    _language_store: Option<LanguageStore>,
 }
 
 impl Render for Surface {
@@ -590,19 +625,23 @@ fn main() {
                 },
                 move |window, cx| {
                     window.set_window_title("Surfaces Probe");
-                    let settings = match options.frame {
+                    let (settings, language_store) = match options.frame {
                         Frame::Settings(category) => {
-                            Some(settings_entity(category, options.mode, cx))
+                            let (settings, store) = settings_entity(category, options.mode, cx);
+                            (Some(settings), store)
                         }
                         Frame::GitHostingAccounts => {
                             forge_source::set_source(Arc::new(ProbeForgeSource), cx);
-                            Some(settings_entity(SettingsCategory::GitHosting, options.mode, cx))
+                            let (settings, store) =
+                                settings_entity(SettingsCategory::GitHosting, options.mode, cx);
+                            (Some(settings), store)
                         }
-                        Frame::TabMenu | Frame::Tooltip => None,
+                        Frame::TabMenu | Frame::Tooltip => (None, None),
                     };
                     cx.new(|_| Surface {
                         frame: options.frame,
                         settings,
+                        _language_store: language_store,
                     })
                 },
             )

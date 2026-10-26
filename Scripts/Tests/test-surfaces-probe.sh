@@ -1,14 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-# Native capture of the surfaces the app's own E2E tests do not reach: the eight Settings pages,
-# a tab context menu and a tooltip, drawn by rust/crates/sirio_ui/examples/surfaces_probe.rs
-# with Sirio's theme, on an isolated X display. They are the frames of the bezel-off capture
+# Native capture of the surfaces the app's own E2E tests do not reach: the eight Settings pages
+# (and Git Hosting again with a hand-written forge source, `settings-git-hosting-accounts`), a tab
+# context menu and a tooltip, drawn by rust/crates/sirio_ui/examples/surfaces_probe.rs with
+# Sirio's theme, on an isolated X display. They are the frames of the bezel-off capture
 # set (docs/testing/bezel-off.md) that nothing else takes; Scripts/bezel-off-captures.sh runs
 # this script once per appearance and keeps DIR/frames/*.png.
 #
 # One probe process per frame and appearance, each one the PID-matched window of its own
-# process, captured once two consecutive captures one second apart are the same pixels. The
+# process, captured once two consecutive captures one second apart are the same pixels (compared
+# by pixel signature, `identify -format %#`, so file metadata never decides). The
 # pointer is parked outside the centred window before every launch and, once the window is up,
 # taken into the window and out again (see clear_hover), so no row is hovered; for
 # `tooltip` it is moved onto the 120x28 box at (200, 200), and the frame is kept once gpui's
@@ -19,10 +21,11 @@ set -euo pipefail
 # A Settings page longer than the window is captured in pages: after the first frame, the
 # script puts the pointer on the detail column's blank margin, turns the wheel SCROLL_NOTCHES
 # notches (one notch is 78 px, so a step is 702 px of the 792 px viewport and consecutive pages
-# share 90 px), moves the pointer out of the window again and takes `<frame>-p<N>-<appearance>.png` (N = 2, 3, ...) until a step
-# moves nothing: that capture is pixel-identical to the last page and is discarded. A page that
-# fits takes no second frame. The cap is MAX_PAGES pages a frame; a step after the last allowed
-# page that still moves fails the script. The pages each frame took are printed as `PAGES`.
+# share 90 px), moves the pointer out of the window again and takes
+# `<frame>-p<N>-<appearance>.png` (N = 2, 3, ...) until a step moves nothing: that capture is
+# pixel-identical to the last page and is discarded. A page that fits takes no second frame. The
+# cap is MAX_PAGES pages a frame (8, or $SURFACES_MAX_PAGES); a step after the last allowed page
+# that still moves fails the script. The pages each frame took are printed as `PAGES`.
 #
 # Asserted per frame: at least 200 distinct colours (the visual sweep's MIN_COLORS), except
 # `tooltip`, which must differ from its own pre-hover capture by at least 150 pixels, all of
@@ -32,6 +35,9 @@ set -euo pipefail
 # The artifact: --out-dir DIR (default artifacts/surfaces-probe-<stamp>-<pid>) keeps
 # transcript.log, probe-<frame>-<appearance>.log, tooltip-before-<appearance>.png and
 # frames/<frame>-<appearance>.png (plus -p<N> pages). Rerunning the script reproduces it.
+#
+# Environment: SURFACES_MAX_PAGES=N sets the page cap (default 8). Setting it below a page count
+# the frames really have shows the cap's FAIL line (General has 3 pages: N=2 fails on it).
 #
 # Usage: Scripts/Tests/test-surfaces-probe.sh [--xvfb | --display :N] [--appearance dark|light]
 #          [--no-software-vulkan] [--out-dir DIR] [--no-build]
@@ -47,7 +53,7 @@ LVP=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true)
 MIN_COLORS=200
 TOOLTIP_MIN_PIXELS=150
 SCROLL_NOTCHES=9
-MAX_PAGES=8
+MAX_PAGES="${SURFACES_MAX_PAGES:-8}"
 OUT_DIR=""
 DISPLAY_TARGET=""
 START_XVFB=0
@@ -69,6 +75,9 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+case "$MAX_PAGES" in
+  ''|*[!0-9]*|0) echo "SURFACES_MAX_PAGES must be a whole number of at least 1, not '$MAX_PAGES'" >&2; exit 2 ;;
+esac
 [ -n "$OUT_DIR" ] || OUT_DIR="$ROOT/artifacts/surfaces-probe-$(date +%Y%m%d-%H%M%S)-$$"
 mkdir -p "$OUT_DIR/frames" "$OUT_DIR/work"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"
@@ -152,6 +161,20 @@ clear_hover() {
   xd mousemove 0 0
 }
 
+# The pointer is parked at the display's (0,0), which must be outside the window: fail unless the
+# window's origin is greater than 0 on both axes (a display barely larger than the 1470x833
+# window would centre it on the park and the hover clearing would silently not happen).
+require_pointer_park_outside() {
+  local geometry x y
+  geometry=$(xwininfo -display "$DISPLAY_TARGET" -id "$WINDOW") || fail "xwininfo cannot read window $WINDOW"
+  x=$(printf '%s\n' "$geometry" | awk '/Absolute upper-left X:/ { print $NF }')
+  y=$(printf '%s\n' "$geometry" | awk '/Absolute upper-left Y:/ { print $NF }')
+  [[ "$x" =~ ^-?[0-9]+$ && "$y" =~ ^-?[0-9]+$ ]] || fail "cannot read the origin of window $WINDOW from xwininfo"
+  if [ "$x" -le 0 ] || [ "$y" -le 0 ]; then
+    fail "window $WINDOW is at $x,$y on $DISPLAY_TARGET: the pointer is parked at 0,0, which must be outside it; use a display larger than the 1470x833 window (--xvfb is 1600x1000)"
+  fi
+}
+
 WINDOW=""
 launch() { # frame appearance
   local log="$OUT_DIR/probe-$1-$2.log"
@@ -160,6 +183,7 @@ launch() { # frame appearance
   # env execs the probe, so $! is the probe's own pid, the one in _NET_WM_PID. PATH is unset on
   # purpose (the header says why); the probe is named by its absolute path.
   env -u WAYLAND_DISPLAY -u PATH DISPLAY="$DISPLAY_TARGET" ${VULKAN_ENV[@]+"${VULKAN_ENV[@]}"} \
+    SURFACES_PROBE_SCRATCH="$OUT_DIR/work/scratch" \
     "$PROBE" --frame "$1" --appearance "$2" >"$log" 2>&1 &
   PROBE_PID=$!
   WINDOW=""
@@ -171,6 +195,7 @@ launch() { # frame appearance
   done
   [ -n "$WINDOW" ] || fail "no window with _NET_WM_PID=$PROBE_PID ($1 $2)"
   echo "probe $1 $2: pid $PROBE_PID, window $WINDOW"
+  require_pointer_park_outside
   clear_hover
 }
 stop() {
@@ -185,6 +210,10 @@ grab() { # dest
   [ -s "$1" ] || fail "import produced no pixels for $1"
 }
 
+# Whether two captures are the same pixels. The signature is a hash of the pixel data, so the PNG
+# chunks `import` happens to write (none today) cannot make two identical frames differ.
+same_pixels() { [ "$(identify -format '%#' "$1")" = "$(identify -format '%#' "$2")" ]; }
+
 # settle DEST ACCEPT: capture the window until two captures one second apart are the same pixels
 # and `ACCEPT capture` agrees; DEST then holds the last one. Under load the first frames of a
 # lavapipe window can arrive late, and a blank window that is the same twice is not settled.
@@ -194,7 +223,7 @@ settle() {
   sleep 1.5
   for attempt in $(seq 1 20); do
     grab "$current"
-    if [ -f "$previous" ] && cmp -s "$previous" "$current" && "$accept" "$current"; then
+    if [ -f "$previous" ] && same_pixels "$previous" "$current" && "$accept" "$current"; then
       mv "$current" "$dest"
       return 0
     fi
@@ -238,7 +267,7 @@ take_pages() {
     scroll_page
     next="$OUT_DIR/frames/$frame-p$((page + 1))-$appearance.png"
     settle "$next" enough_colors || fail "$frame $appearance: page $((page + 1)) never settled with at least $MIN_COLORS colours; see $OUT_DIR/probe-$frame-$appearance.log"
-    if cmp -s "$previous" "$next"; then
+    if same_pixels "$previous" "$next"; then
       rm -f "$next"
       break
     fi
@@ -252,7 +281,7 @@ take_pages() {
       scroll_page
       probe_step="$OUT_DIR/work/cap-check.png"
       settle "$probe_step" enough_colors || fail "$frame $appearance: never settled after page $page"
-      cmp -s "$previous" "$probe_step" || fail "$frame $appearance: the page still scrolls after $MAX_PAGES pages (a step of $SCROLL_NOTCHES notches moved it); raise MAX_PAGES on purpose, do not drop frames"
+      same_pixels "$previous" "$probe_step" || fail "$frame $appearance: the page still scrolls after $MAX_PAGES pages (a step of $SCROLL_NOTCHES notches moved it); raise SURFACES_MAX_PAGES on purpose, do not drop frames"
       break
     fi
   done
@@ -273,7 +302,8 @@ take() { # frame appearance
     pixels=$(changed_pixels "$before" "$dest")
     box=$(changed_box "$before" "$dest")
     x=${box#*+}; x=${x%%+*}; y=${box##*+}
-    # The tooltip is drawn at the pointer, which is inside the box: well inside the window's top left.
+    # The tooltip is drawn at the pointer, which is inside the box: well inside the window's top
+    # left.
     [ "$x" -ge 190 ] && [ "$y" -ge 190 ] && [ "$x" -le 520 ] && [ "$y" -le 340 ] \
       || fail "$frame $appearance: the changed pixels ($box) are not near the box at 200,200; see $dest"
     echo "FRAME: $frame-$appearance ($(identify -format '%wx%h' "$dest") · tooltip $pixels pixels at $box)"

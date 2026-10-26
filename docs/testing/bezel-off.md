@@ -11,7 +11,7 @@ The tools:
 | `Scripts/bezel-off-captures.sh` | Captures the tree it runs in: the visual sweep, the surfaces probe, the Changes E2E and the Ely chat E2E, into one set of PNG frames. |
 | `Scripts/capture-diff.py` | Compares two sets of frames (a pixel counts as changed when a channel differs by more than `--tolerance`, default 1 level) and writes `changed.tsv` and a static `index.html`. |
 | `Scripts/capture-masks.tsv` | The regions a clock drives, painted black before two sets are compared. |
-| `Scripts/Tests/test-surfaces-probe.sh` | Captures the frames the app's own E2E tests do not reach, from `sirio_ui`'s `surfaces_probe` example: the eight Settings pages, a tab context menu and a tooltip (`SURFACES PROBE OK (<n> frames, <g> gaps)`). `Scripts/bezel-off-captures.sh` runs it once per appearance. |
+| `Scripts/Tests/test-surfaces-probe.sh` | Captures the frames the app's own E2E tests do not reach, from `sirio_ui`'s `surfaces_probe` example: the eight Settings pages, Git Hosting again with a forge source (`settings-git-hosting-accounts`), a tab context menu and a tooltip (`SURFACES PROBE OK (<n> frames, <g> gaps)`). `Scripts/bezel-off-captures.sh` runs it once per appearance. |
 | `Scripts/Tests/test-capture-diff.sh` | The contract of `capture-diff.py` on synthetic images (`CAPTURE DIFF CONTRACT OK`). |
 | `SIRIO_REDUCED_MOTION=1` | A debug-only switch (a no-op in release builds) that makes gpui snap every animation to its rest state. The capture script exports it. |
 
@@ -172,7 +172,7 @@ so a step is 702 px of the 792 px viewport and consecutive pages share 90 px), a
 leaves the window. It keeps `<frame>-p2-<appearance>`, `-p3-`, ... until a step moves nothing (the
 capture is pixel-identical to the last page and is dropped), so a page that fits takes no extra
 frame. At most 8 pages a frame: a step after the eighth that still moves fails the script. The
-script prints `PAGES: <frame>-<appearance> <n>` per frame. The pointer never rests on a row: a row
+script prints `PAGES: <frame>-<appearance> <n>` per frame (`SURFACES_MAX_PAGES=N` changes the cap of 8; a cap below a page count the frames really have fails with the cap's message). The pointer never rests on a row: a row
 a pointer sat on stays drawn hovered until the pointer is seen to leave it, and a window that
 maps with the pointer outside it is drawn with the row at its centre hovered until the pointer has
 been in the window and left it, so the script does that before the first page too.
@@ -196,7 +196,7 @@ line per rectangle; the table says what each category is and what it blinds.
 | Identity time | `chat-ui-default/identity/*` | The same `HH:MM` in the identity probe's own window (820x700). | 52 x 18 px. |
 | Sidebar session dots | `chat-ui-default/scenarios/*` | The green connected indicators on the session's sidebar row show in some runs and not in others: a timing race of the fixture session, not a clock (seen in `activity` and `death-recovery/recovered`). | 32 x 26 px at the right end of the session's sidebar row. |
 | Scrollbar thumb | `scenarios/long-history/frames/scrolled-up*` | After a turn completes the transcript scrollbar's thumb follows the transcript's estimated total height, so it sits about 7 px higher in some runs while the visible content is identical (a run-to-run accident, not a clock; found on held-out run 7). | The track column only: 10 x 540 px at x 1133, y 77. |
-| Agents toolbar and subtitle | `surfaces-*/settings-agents-[dl]*` (the first page only) | The toolbar stamps `Refreshed HH:MM:SS` with the wall clock when the page is built, and Geist draws digits at different widths (`12:01:57` is 5 px narrower than `12:02:50`). The toolbar is right-aligned, so the stamp's width pushes the search field left (x 683..684 over 15 runs) and narrows the header's left column, whose subtitle then wraps differently (3 of 15 runs). Nothing below y 170 or right of the stamp moved. | Two rectangles: the stamp and the search field, x 668..1022, y 54..94; and the subtitle block, x 475..687, y 88..170. The `Agents 5` title row, the `Update All` and `Refresh` buttons and everything below stay visible. |
+| Agents toolbar and subtitle | `surfaces-*/settings-agents-[dl]*` (the first page only) | The toolbar stamps `Refreshed HH:MM:SS` with the wall clock when the page is built, and Geist draws digits at different widths (`12:01:57` is 5 px narrower than `12:02:50`). The toolbar is right-aligned, so the stamp's width pushes the search field left (x 683..686 over 41 runs: 15 at random times and 26 more with `TZ` set so that every hour 00..23 was drawn) and narrows the header's left column, whose subtitle then wraps differently (3 of 15 runs). Nothing below y 170 or right of the stamp moved. | Two rectangles: the stamp and the search field, x 668..1022, y 54..94; and the subtitle block, x 475..687, y 88..170. The `Agents 5` title row, the `Update All` and `Refresh` buttons and everything below stay visible. |
 
 No caret, spinner, orb or trace-timer mask was needed: with `SIRIO_REDUCED_MOTION=1` those draw
 their rest state. A mask is for a clock or a run-to-run accident, sized to the whole element; a

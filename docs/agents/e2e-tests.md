@@ -154,7 +154,8 @@ Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SE
 # Mesa's lavapipe: PID-matched captures, at least 200 colours a frame, the
 # tooltip proven by its difference from the pre-hover capture, and a Settings
 # page longer than the window scrolled with the wheel into -p2, -p3, ... frames
-# (printed as `PAGES: <frame> <n>`; a page that still scrolls after 8 fails).
+# (printed as `PAGES: <frame>-<appearance> <n>`; a page that still scrolls after 8
+# fails; SURFACES_MAX_PAGES=N changes the cap).
 # They are the probe frames of the bezel-off capture set
 # (docs/testing/bezel-off.md). --xvfb | --display :N, --out-dir DIR,
 # --appearance dark|light (without it both), --no-build.
