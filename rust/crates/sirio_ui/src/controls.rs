@@ -84,6 +84,16 @@ impl gpui::Render for SidebarTooltip {
     }
 }
 
+/// A plain-text hover label for `.tooltip(..)`: the one place the app's tooltip
+/// look is chosen, so a surface asks for `controls::tooltip("text")` instead of
+/// naming a tooltip library.
+pub fn tooltip(
+    text: impl Into<gpui::SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let text = text.into();
+    move |window, cx| Tooltip::text(text.clone(), window, cx)
+}
+
 /// A segmented control's selection callback.
 type SegmentCallback = Rc<dyn Fn(usize, &mut App)>;
 

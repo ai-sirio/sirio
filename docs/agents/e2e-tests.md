@@ -147,6 +147,16 @@ Scripts/Tests/test-ely-forge-probe.sh --xvfb   # -> prints "ELY FORGE PROBE OK"
 # defect the vendored bezel_markdown fixes (rust/vendor/README.md).
 Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SELECTION PROBE OK"
 
+# The eight Settings pages, a tab context menu and a tooltip, drawn by the
+# `surfaces_probe` example (one process per frame and appearance, seeded through
+# the public builders only; a state they cannot reach prints `GAP <frame> <state>`),
+# on a private Xvfb with Mesa's lavapipe: PID-matched captures, at least 200
+# colours a frame, the tooltip proven by its difference from the pre-hover
+# capture. They are the probe frames of the bezel-off capture set
+# (docs/testing/bezel-off.md). --xvfb | --display :N, --out-dir DIR,
+# --appearance dark|light (without it both: 20 frames), --no-build.
+Scripts/Tests/test-surfaces-probe.sh --xvfb   # -> prints "SURFACES PROBE OK (<n> frames, <g> gaps)"
+
 # The horizontal bar bezel-markdown draws under a fence or a table wider than
 # its column (the vendored change of rust/vendor/README.md): a real xdotool
 # drag of each thumb to the end, the fence's last glyph clear of the edge, a
