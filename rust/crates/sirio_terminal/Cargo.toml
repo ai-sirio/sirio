@@ -18,6 +18,7 @@ sirio_project.workspace = true
 # The scrollbar's geometry (`scroll::thumb`, `scroll::offset_for_thumb`) and its
 # drag payload are bezel's own, the same ones the chat and file view bars use.
 bezel.workspace = true
+# The bar's `ink` colour, reached by the theme crate's own name.
 bezel_theme.workspace = true
 anyhow.workspace = true
 futures = "0.3"

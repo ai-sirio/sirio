@@ -314,7 +314,7 @@ git base would have drawn the same frames:
 | `#[doc(hidden)] pub mod probes` and its file, the views the example probes draw | `sirio_ui/src/lib.rs` (+3), `sirio_ui/src/probes.rs` (+200) |
 | `mod list_scroll` becomes `pub(crate) mod list_scroll` (a visibility change only) | `sirio_ui/src/chat/mod.rs` (1 line) |
 | Two new examples that only the capture tooling runs | `examples/scroll_drag_probe.rs` (+67), `examples/surfaces_probe.rs` (+651) |
-| Tests: the model search, Enter in the address bar, and the project forms' Enter and clone tests | `chat/mod.rs` (+105), `browser.rs` (+67), `project_forms.rs` (+116) |
+| Tests: the model search and Ctrl+C in the composer, Enter in the address bar, and the project forms' Enter and clone tests | `chat/mod.rs` (+105), `browser.rs` (+67), `project_forms.rs` (+116) |
 
 None of them changes what the app draws without `SIRIO_REDUCED_MOTION` (the tooltip is called by the
 probe only), so the app at `3c220dd3` and at `08e20455` draws the same frames.
@@ -344,6 +344,10 @@ TMPDIR=$HOME/.cache/sirio-e2e-tmp Scripts/bezel-off-captures.sh --xvfb \
 # The diff.
 Scripts/capture-diff.py artifacts/bezel-off/pr-a/before/frames artifacts/bezel-off/pr-a/after/frames \
   --out artifacts/bezel-off/pr-a/diff --masks Scripts/capture-masks.tsv
+
+# The same pair with the masks as attributions, not paint: what changed under them.
+Scripts/capture-diff.py artifacts/bezel-off/pr-a/before/frames artifacts/bezel-off/pr-a/after/frames \
+  --out artifacts/bezel-off/pr-a/diff-unmasked --allow Scripts/capture-masks.tsv
 ```
 
 **The result.** Both runs printed `CAPTURES OK: ... (94 frames)` (the chat E2E, the sweep, the
@@ -352,9 +356,9 @@ Changes E2E and the surfaces probe each passed on both sides, so `composer_keys`
 `compared 94 frames present on both sides (94 before, 94 after), tolerance 1` and
 `CAPTURE DIFF IDENTICAL`: no frame differs by more than one level outside the masks. No attribution
 file was needed. `changed.tsv` has the header only and `index.html` lists nothing. The artifacts are
-under `artifacts/bezel-off/pr-a/` (gitignored): `before/`, `after/` and `diff/`. The test suites are the
-same on both sides: 1598 tests run in `sirio_ui`, `sirio_syntax`, `sirio_terminal` and `sirio_theme`
-(1597 passed, 1 skipped, and `sirio_terminal`'s
+under `artifacts/bezel-off/pr-a/` (gitignored): `before/`, `after/`, `diff/` and `diff-unmasked/`. The
+test suites are the same on both sides: in `sirio_ui`, `sirio_syntax`, `sirio_terminal` and
+`sirio_theme`, 1598 tests run, 1597 passed and 1 skipped (`sirio_terminal`'s
 `mutation_stamp_stays_flat_while_idle_and_bumps_on_output` failing in the full run on both sides and
 passing alone, a known load flake) and 531 in `sirio` (all passed).
 
