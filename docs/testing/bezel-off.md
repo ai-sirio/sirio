@@ -143,16 +143,18 @@ reviewer sees the rectangle and the change together.
 `Scripts/Tests/test-surfaces-probe.sh` (`--xvfb | --display :N`, `--out-dir DIR`, `--appearance
 dark|light`, `--no-build`, `--no-software-vulkan`) captures one 1470x833 window per frame and
 appearance, each a process of `rust/crates/sirio_ui/examples/surfaces_probe.rs`, to
-`DIR/frames/<frame>-<appearance>.png`: 20 frames, 10 with `--appearance`. The frames, in the
-set as `surfaces-<appearance>/<frame>`:
+`DIR/frames/<frame>-<appearance>.png`: 11 frames, so 22 first pages, and 12 more pages for the
+three Settings pages that are longer than the window (34 frames; the set is 94). In the set they
+are `surfaces-<appearance>/<frame>`. The frames:
 
 | Frame | What it shows |
 | --- | --- |
-| `settings-ai-providers` | The four provider cards: signed in with an identity, not signed in, signed in, no local store. |
+| `settings-ai-providers` (3 pages) | The four provider cards: signed in with an identity, not signed in, signed in, no local store; the OpenCode Go and Ollama Cloud cookie fields and accounts rows on the later pages. |
 | `settings-agents` | Claude Code installed (green dot, Installed badge, meta line); Codex installed with an Update and no published checksum; OpenCode and Pi with Install; Pi's failed install (the error strip); Oh-My-Pi with no ACP server; the registry warning strip; the search field. |
-| `settings-language-servers` | Absent with Install, installed by Sirio, declined (Offer again), a manual guide, a failed install. |
+| `settings-language-servers` (3 pages) | Absent with Install, installed by Sirio, declined (Offer again), a manual guide, a failed install, then the rest of the 21 languages. |
 | `settings-git-hosting` | The empty state (no forge source). |
-| `settings-general` | About, an available update with its button, the toggles, the summarizer picker. |
+| `settings-git-hosting-accounts` | A source of three fixed, made-up hosts installed through `forge_source::set_source`: github.com on `gh` (Detect chosen), a self-hosted GitLab on a read-only pinned token (the GitHub and GitLab buttons, Detect, CLI and Token, the token field, Save token, Forget token), and a host that asks for its forge. |
+| `settings-general` (3 pages) | About, an available update with its button, the toggles, the summarizer picker; Chat history and Performance with the steppers; Markdown preview (the PlantUML line and server field); the sirioctl card, Host, Agent Skill and Agent Hooks. |
 | `settings-permissions` | Browser origin grants (the macOS permission rows draw on macOS only). |
 | `settings-appearance`, `settings-editor` | The whole pages (they fit the window) as `SettingsSnapshot::default()` draws them, with the theme set to the frame's appearance. |
 | `tab-menu` | `tab_bar::render_tab_context_menu`: enabled and disabled rows and separators. |
@@ -162,16 +164,23 @@ Every Settings frame is seeded through the public builders only, so nothing of t
 reaches a frame and no API exists for the probe; every probe runs with `PATH` unset (that is how
 the Agents page reaches its warning strip). A state those builders cannot reach prints
 `GAP <frame> <state>` and is counted, never faked: the Agents search with no match, the
-summarizer popover open, and the macOS permission rows (on a non-macOS host). Each frame is one
-window high, so what a long page keeps below the fold (General from Chat history down, with the
-steppers, the control socket, sirioctl and Host cards and the Markdown Preview card; AI Providers
-from the OpenCode Go card on; the Language Servers rows after `ruby`) is not in the set; nor are
-the Git Hosting rows, which need a `ChangeRequestSource`.
+summarizer popover open, and the macOS permission rows (on a non-macOS host).
+
+Pages. After a Settings frame's first page the script scrolls the detail column with the wheel:
+the pointer goes onto the blank margin left of the content, 9 notches turn (one notch is 78 px,
+so a step is 702 px of the 792 px viewport and consecutive pages share 90 px), and the pointer
+leaves the window. It keeps `<frame>-p2-<appearance>`, `-p3-`, ... until a step moves nothing (the
+capture is pixel-identical to the last page and is dropped), so a page that fits takes no extra
+frame. At most 8 pages a frame: a step after the eighth that still moves fails the script. The
+script prints `PAGES: <frame>-<appearance> <n>` per frame. The pointer never rests on a row: a row
+a pointer sat on stays drawn hovered until the pointer is seen to leave it, and a window that
+maps with the pointer outside it is drawn with the row at its centre hovered until the pointer has
+been in the window and left it, so the script does that before the first page too.
 
 ## Masks in force
 
-`Scripts/capture-masks.tsv` was derived from runs of one build (80 frames each: 5 + 5 sweep,
-4 + 4 Changes, 42 chat, 10 + 10 surfaces probe); two runs made after it was fitted found the cancelled line sized to the
+`Scripts/capture-masks.tsv` was derived from runs of one build (94 frames each: 5 + 5 sweep,
+4 + 4 Changes, 42 chat, 34 surfaces probe); two runs made after it was fitted found the cancelled line sized to the
 digits two runs happened to differ in, the session dots, and the status bar path longer than
 the mask (a `TMPDIR` change), and a later run found the scrollbar thumb; all four are in the table now. One
 line per rectangle; the table says what each category is and what it blinds.
@@ -187,7 +196,7 @@ line per rectangle; the table says what each category is and what it blinds.
 | Identity time | `chat-ui-default/identity/*` | The same `HH:MM` in the identity probe's own window (820x700). | 52 x 18 px. |
 | Sidebar session dots | `chat-ui-default/scenarios/*` | The green connected indicators on the session's sidebar row show in some runs and not in others: a timing race of the fixture session, not a clock (seen in `activity` and `death-recovery/recovered`). | 32 x 26 px at the right end of the session's sidebar row. |
 | Scrollbar thumb | `scenarios/long-history/frames/scrolled-up*` | After a turn completes the transcript scrollbar's thumb follows the transcript's estimated total height, so it sits about 7 px higher in some runs while the visible content is identical (a run-to-run accident, not a clock; found on held-out run 7). | The track column only: 10 x 540 px at x 1133, y 77. |
-| Agents toolbar and subtitle | `surfaces-*/settings-agents-*` | The toolbar stamps `Refreshed HH:MM:SS` with the wall clock when the page is built, and Geist draws digits at different widths (`12:01:57` is 5 px narrower than `12:02:50`). The toolbar is right-aligned, so the stamp's width pushes the search field left (x 683..684 over 15 runs) and narrows the header's left column, whose subtitle then wraps differently (3 of 15 runs). Nothing below y 170 or right of the stamp moved. | Two rectangles: the stamp and the search field, x 668..1022, y 54..94; and the subtitle block, x 475..687, y 88..170. The `Agents 5` title row, the `Update All` and `Refresh` buttons and everything below stay visible. |
+| Agents toolbar and subtitle | `surfaces-*/settings-agents-[dl]*` (the first page only) | The toolbar stamps `Refreshed HH:MM:SS` with the wall clock when the page is built, and Geist draws digits at different widths (`12:01:57` is 5 px narrower than `12:02:50`). The toolbar is right-aligned, so the stamp's width pushes the search field left (x 683..684 over 15 runs) and narrows the header's left column, whose subtitle then wraps differently (3 of 15 runs). Nothing below y 170 or right of the stamp moved. | Two rectangles: the stamp and the search field, x 668..1022, y 54..94; and the subtitle block, x 475..687, y 88..170. The `Agents 5` title row, the `Update All` and `Refresh` buttons and everything below stay visible. |
 
 No caret, spinner, orb or trace-timer mask was needed: with `SIRIO_REDUCED_MOTION=1` those draw
 their rest state. A mask is for a clock or a run-to-run accident, sized to the whole element; a

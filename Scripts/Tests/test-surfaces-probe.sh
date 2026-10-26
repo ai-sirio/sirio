@@ -9,11 +9,20 @@ set -euo pipefail
 #
 # One probe process per frame and appearance, each one the PID-matched window of its own
 # process, captured once two consecutive captures one second apart are the same pixels. The
-# pointer is parked outside the centred window before every launch, so no row is hovered; for
+# pointer is parked outside the centred window before every launch and, once the window is up,
+# taken into the window and out again (see clear_hover), so no row is hovered; for
 # `tooltip` it is moved onto the 120x28 box at (200, 200), and the frame is kept once gpui's
 # 500 ms hover delay has passed and the tooltip is on screen. Every probe runs with PATH unset
 # (see the probe's header: it is how the Agents page reaches its registry warning strip, and it
 # keeps the Language Servers rows and the PlantUML line from reading the machine).
+#
+# A Settings page longer than the window is captured in pages: after the first frame, the
+# script puts the pointer on the detail column's blank margin, turns the wheel SCROLL_NOTCHES
+# notches (one notch is 78 px, so a step is 702 px of the 792 px viewport and consecutive pages
+# share 90 px), moves the pointer out of the window again and takes `<frame>-p<N>-<appearance>.png` (N = 2, 3, ...) until a step
+# moves nothing: that capture is pixel-identical to the last page and is discarded. A page that
+# fits takes no second frame. The cap is MAX_PAGES pages a frame; a step after the last allowed
+# page that still moves fails the script. The pages each frame took are printed as `PAGES`.
 #
 # Asserted per frame: at least 200 distinct colours (the visual sweep's MIN_COLORS), except
 # `tooltip`, which must differ from its own pre-hover capture by at least 150 pixels, all of
@@ -22,21 +31,23 @@ set -euo pipefail
 #
 # The artifact: --out-dir DIR (default artifacts/surfaces-probe-<stamp>-<pid>) keeps
 # transcript.log, probe-<frame>-<appearance>.log, tooltip-before-<appearance>.png and
-# frames/<frame>-<appearance>.png. Rerunning the script reproduces it.
+# frames/<frame>-<appearance>.png (plus -p<N> pages). Rerunning the script reproduces it.
 #
 # Usage: Scripts/Tests/test-surfaces-probe.sh [--xvfb | --display :N] [--appearance dark|light]
 #          [--no-software-vulkan] [--out-dir DIR] [--no-build]
 #   --xvfb                start a private Xvfb (1600x1000x24, room for the 1470x833 window) on a
 #                         free display and stop it on exit
-#   --appearance A        only this appearance (10 frames); without it both (20 frames)
+#   --appearance A        only this appearance; without it both
 #   --no-software-vulkan  do not force Mesa's lavapipe (on Xvfb, frames are then blank)
-# Prints "SURFACES PROBE OK (<n> frames, <g> gaps)" last.
+# Prints "SURFACES PROBE OK (<n> frames, <g> gaps)" last, n counting every frame taken.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROBE="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/examples/surfaces_probe"
 LVP=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n 1 || true)
 MIN_COLORS=200
 TOOLTIP_MIN_PIXELS=150
+SCROLL_NOTCHES=9
+MAX_PAGES=8
 OUT_DIR=""
 DISPLAY_TARGET=""
 START_XVFB=0
@@ -133,10 +144,18 @@ if best:
 PY
 }
 
+# A window that maps with the pointer outside it is drawn with the row at its centre hovered, and
+# stays so until the pointer has been in the window and left it again. Enter the blank margin of
+# the Settings detail column (x 330, y 700) and leave, so no frame starts with a phantom hover.
+clear_hover() {
+  xd mousemove --window "$WINDOW" 330 700
+  xd mousemove 0 0
+}
+
 WINDOW=""
 launch() { # frame appearance
   local log="$OUT_DIR/probe-$1-$2.log"
-  # No pointer over the window when it maps, so no row starts out hovered.
+  # The pointer starts outside the window, which maps at the middle of the display.
   xd mousemove 0 0
   # env execs the probe, so $! is the probe's own pid, the one in _NET_WM_PID. PATH is unset on
   # purpose (the header says why); the probe is named by its absolute path.
@@ -152,6 +171,7 @@ launch() { # frame appearance
   done
   [ -n "$WINDOW" ] || fail "no window with _NET_WM_PID=$PROBE_PID ($1 $2)"
   echo "probe $1 $2: pid $PROBE_PID, window $WINDOW"
+  clear_hover
 }
 stop() {
   kill "$PROBE_PID" 2>/dev/null || true
@@ -198,6 +218,46 @@ changed_box() { # a b
   magick "$1" "$2" -compose Difference -composite -colorspace Gray -threshold 2% -format '%@' info:
 }
 
+# One wheel step over the settings detail column. The wheel turns with the pointer on the blank
+# margin left of the 720 px content (x 330, y 420), so no row is under it, and the pointer then
+# leaves the window: a row a pointer sat on stays drawn hovered until the pointer is seen to
+# leave it, and one that stayed on a row would open its tooltip.
+scroll_page() {
+  xd mousemove --window "$WINDOW" 330 420
+  xd click --repeat "$SCROLL_NOTCHES" --delay 25 5
+  xd mousemove 0 0
+}
+
+PAGE_LINES=()
+# take_pages FRAME APPEARANCE: the pages after the first, each kept while the wheel still moves
+# the page. Sets PAGES to the number of pages the frame took (the first included).
+take_pages() {
+  local frame="$1" appearance="$2" page=1 previous="$OUT_DIR/frames/$1-$2.png" next probe_step
+  PAGES=1
+  while :; do
+    scroll_page
+    next="$OUT_DIR/frames/$frame-p$((page + 1))-$appearance.png"
+    settle "$next" enough_colors || fail "$frame $appearance: page $((page + 1)) never settled with at least $MIN_COLORS colours; see $OUT_DIR/probe-$frame-$appearance.log"
+    if cmp -s "$previous" "$next"; then
+      rm -f "$next"
+      break
+    fi
+    page=$((page + 1))
+    PAGES=$page
+    previous="$next"
+    TAKEN=$((TAKEN + 1))
+    echo "FRAME: $frame-p$page-$appearance ($(identify -format '%wx%h' "$next") · $(colors_of "$next") colours)"
+    if [ "$page" -ge "$MAX_PAGES" ]; then
+      # The cap: the step after the last allowed page must move nothing.
+      scroll_page
+      probe_step="$OUT_DIR/work/cap-check.png"
+      settle "$probe_step" enough_colors || fail "$frame $appearance: never settled after page $page"
+      cmp -s "$previous" "$probe_step" || fail "$frame $appearance: the page still scrolls after $MAX_PAGES pages (a step of $SCROLL_NOTCHES notches moved it); raise MAX_PAGES on purpose, do not drop frames"
+      break
+    fi
+  done
+}
+
 TAKEN=0
 take() { # frame appearance
   local frame="$1" appearance="$2" dest="$OUT_DIR/frames/$1-$2.png" colors
@@ -222,8 +282,14 @@ take() { # frame appearance
     echo "FRAME: $frame-$appearance ($(identify -format '%wx%h' "$dest") · $(colors_of "$dest") colours)"
   fi
   [ "$(identify -format '%wx%h' "$dest")" = "1470x833" ] || fail "$frame $appearance: the window is $(identify -format '%wx%h' "$dest"), not 1470x833"
-  stop
   TAKEN=$((TAKEN + 1))
+  case "$frame" in
+    settings-*)
+      take_pages "$frame" "$appearance"
+      PAGE_LINES+=("PAGES: $frame-$appearance $PAGES")
+      ;;
+  esac
+  stop
 }
 
 for appearance in "${APPEARANCES[@]}"; do
@@ -239,7 +305,10 @@ if [ -n "$GAPS" ]; then
   GAP_COUNT=$(printf '%s\n' "$GAPS" | wc -l | tr -d ' ')
   printf '%s\n' "$GAPS"
 fi
-EXPECTED=$(( ${#FRAMES[@]} * ${#APPEARANCES[@]} ))
-[ "$TAKEN" -eq "$EXPECTED" ] || fail "took $TAKEN frames, expected $EXPECTED"
-[ "$(find "$OUT_DIR/frames" -name '*.png' | wc -l | tr -d ' ')" -eq "$EXPECTED" ] || fail "frames/ does not hold $EXPECTED frames"
+FRAME_COUNT=$(find "$OUT_DIR/frames" -name '*.png' | wc -l | tr -d ' ')
+[ "$FRAME_COUNT" -eq "$TAKEN" ] || fail "took $TAKEN frames but frames/ holds $FRAME_COUNT"
+# Every frame's first page was taken, one per frame and appearance; pages come on top of those.
+FIRST_PAGES=$(( ${#FRAMES[@]} * ${#APPEARANCES[@]} ))
+[ "$TAKEN" -ge "$FIRST_PAGES" ] || fail "took $TAKEN frames, fewer than the $FIRST_PAGES first pages"
+printf '%s\n' "${PAGE_LINES[@]}"
 echo "SURFACES PROBE OK ($TAKEN frames, $GAP_COUNT gaps)"

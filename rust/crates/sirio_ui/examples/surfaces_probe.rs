@@ -17,17 +17,25 @@
 //! frame, and no API exists for the probe. A state those builders cannot reach prints
 //! `GAP <frame> <state>` on stdout instead of being faked.
 //!
+//! `settings-git-hosting` is the page with no forge source (its empty state);
+//! `settings-git-hosting-accounts` installs `ProbeForgeSource` through
+//! `forge_source::set_source`, a source of three fixed, made-up hosts that reads no credential,
+//! runs no CLI and opens no connection, so the host rows are drawn: the forge, the means
+//! buttons, the token field, Save token and Forget token, and a host that asks for its forge.
+//!
 //! The Agents warning strip is the registry-error state: `Settings::with_snapshot` keeps
 //! the discovery sweep's error, and with no `PATH` the sweep has none to search. The script
 //! therefore runs every frame with `PATH` unset, which also keeps the Language Servers
 //! rows and the PlantUML line from reading the machine.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     App, Bounds, Context, Entity, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use sirio_agents::AgentAvailability;
+use sirio_forge::{ChangeRef, Forge, ForgeClient, ForgeError, Means, Revisions};
 use sirio_lsp::{LanguageTable, Recipe};
 use sirio_privacy::{PermissionKind, PermissionStatus};
 use sirio_registry::{
@@ -36,6 +44,9 @@ use sirio_registry::{
 };
 use sirio_theme::{Theme, ThemeMode};
 use sirio_ui::controls;
+use sirio_ui::forge_source::{
+    self, ChangeRequestSource, Connection, HostRow, RevisionError, TokenWrite,
+};
 use sirio_ui::settings::{
     CliStatus, InstallState, ProviderAccountStates, ProviderAccountStatus, Settings,
     SettingsCategory, SettingsSnapshot,
@@ -50,6 +61,8 @@ const WINDOW_HEIGHT: f32 = 833.0;
 #[derive(Clone, Copy, Debug)]
 enum Frame {
     Settings(SettingsCategory),
+    /// Settings > Git Hosting with a forge source installed, so the host rows are drawn.
+    GitHostingAccounts,
     TabMenu,
     Tooltip,
 }
@@ -59,7 +72,7 @@ impl Frame {
         SettingsCategory::all()
             .into_iter()
             .map(Self::Settings)
-            .chain([Self::TabMenu, Self::Tooltip])
+            .chain([Self::GitHostingAccounts, Self::TabMenu, Self::Tooltip])
             .collect()
     }
 
@@ -68,6 +81,7 @@ impl Frame {
             Self::Settings(category) => {
                 format!("settings-{}", category.title().to_lowercase().replace(' ', "-"))
             }
+            Self::GitHostingAccounts => "settings-git-hosting-accounts".to_owned(),
             Self::TabMenu => "tab-menu".to_owned(),
             Self::Tooltip => "tooltip".to_owned(),
         }
@@ -267,6 +281,98 @@ impl Drop for LanguageStore {
     }
 }
 
+/// A forge source that answers from memory: three fixed, made-up hosts and nothing else. Every
+/// method is fixed data; none reads a credential, runs `gh` or opens a socket. Settings >
+/// Git Hosting asks it only for `hosts()`.
+struct ProbeForgeSource;
+
+impl ProbeForgeSource {
+    fn host(host: &str, forge: Option<Forge>) -> HostRow {
+        HostRow {
+            host: host.to_owned(),
+            forge,
+            means: None,
+            pinned_means: None,
+            account: None,
+            write: None,
+            has_token: false,
+            configured: false,
+        }
+    }
+}
+
+impl ChangeRequestSource for ProbeForgeSource {
+    fn connect(&self, _worktree: &Path) -> Connection {
+        Connection::NoForgeRemote
+    }
+
+    fn has_forge(&self, _worktree: &Path) -> bool {
+        false
+    }
+
+    fn current_branch(&self, _worktree: &Path) -> Option<String> {
+        None
+    }
+
+    fn client_for(&self, _reference: &ChangeRef) -> Result<Arc<ForgeClient>, Connection> {
+        Err(Connection::NoForgeRemote)
+    }
+
+    fn forget(&self, _host: &str) {}
+
+    fn set_forge(&self, _host: &str, _forge: Forge) {}
+
+    fn set_means(&self, _host: &str, _forge: Forge, _means: Option<Means>) {}
+
+    fn save_token(&self, host: &str, _forge: Forge, _token: &str) -> Result<String, ForgeError> {
+        Err(ForgeError::NotAuthenticated {
+            host: host.to_owned(),
+        })
+    }
+
+    fn delete_token(&self, _host: &str) {}
+
+    /// - github.com: a public host, signed in through `gh` and detected (Detect is the chosen
+    ///   means);
+    /// - git.example.corp: a self-hosted GitLab (so the forge buttons show), on a read-only token
+    ///   the user pinned (Token is chosen, the token field, Save token and Forget token show);
+    /// - code.unknown.test: a host nothing identifies, which asks the user for its forge.
+    fn hosts(&self) -> Vec<HostRow> {
+        vec![
+            HostRow {
+                means: Some(Means::Cli),
+                account: Some("probe-user".to_owned()),
+                ..Self::host("github.com", Some(Forge::GitHub))
+            },
+            HostRow {
+                means: Some(Means::Token),
+                pinned_means: Some(Means::Token),
+                account: Some("probe-bot".to_owned()),
+                write: Some(TokenWrite::No),
+                has_token: true,
+                configured: true,
+                ..Self::host("git.example.corp", Some(Forge::GitLab))
+            },
+            HostRow {
+                configured: true,
+                ..Self::host("code.unknown.test", None)
+            },
+        ]
+    }
+
+    fn ensure_revisions(
+        &self,
+        _worktree: &Path,
+        _reference: &ChangeRef,
+        _revisions: &Revisions,
+        _target_branch: Option<&str>,
+    ) -> Result<(), RevisionError> {
+        Ok(())
+    }
+
+    fn release_revisions(&self, _worktree: &Path, _live: &[ChangeRef]) {}
+}
+
 /// The frame's `Settings`, seeded through the public builders and showing `category`.
 fn settings_entity(category: SettingsCategory, mode: ThemeMode, cx: &mut App) -> Entity<Settings> {
     let language_store = (category == SettingsCategory::LanguageServers).then(LanguageStore::new);
@@ -378,7 +484,9 @@ impl Render for Surface {
             .bg(theme.ely.bg)
             .font_family(theme.typography.ui_family);
         match self.frame {
-            Frame::Settings(_) => root.child(div().size_full().children(self.settings.clone())),
+            Frame::Settings(_) | Frame::GitHostingAccounts => {
+                root.child(div().size_full().children(self.settings.clone()))
+            }
             Frame::TabMenu => {
                 // The rows of a terminal tab's menu in the middle of a group: every kind of
                 // row the real menu has.
@@ -448,6 +556,21 @@ fn main() {
     gpui_platform::application()
         .with_assets(sirio_ui::ely::AppAssets)
         .run(move |cx: &mut App| {
+            // The app's motion setup (`sirio`'s `init_motion`): bezel parks its animation clock
+            // while no window of the app is active, and a display with no window manager never
+            // activates one, so a row's hover fade would stop half-way and stay drawn that way
+            // after the pointer left it (what a wheel over a Settings page does to the row at the
+            // window's centre).
+            {
+                use bezel::motion::AppExt as _;
+                cx.set_pause_when_inactive(false);
+            }
+            // The debug switch `Scripts/bezel-off-captures.sh` exports: snap every animation to
+            // its rest state. It lands before `ely::init`, which copies the flag into Ely's theme
+            // (a no-op in release builds), as in `sirio`'s `main`.
+            if cfg!(debug_assertions) && std::env::var_os("SIRIO_REDUCED_MOTION").is_some() {
+                cx.set_reduce_motion(true);
+            }
             // Fonts before `Theme::init`: it resolves and caches the families once.
             sirio_theme::register_ui_fonts(cx).expect("Sirio fonts");
             sirio_theme::register_bundled_terminal_font(cx).expect("Sirio terminal font");
@@ -470,6 +593,10 @@ fn main() {
                     let settings = match options.frame {
                         Frame::Settings(category) => {
                             Some(settings_entity(category, options.mode, cx))
+                        }
+                        Frame::GitHostingAccounts => {
+                            forge_source::set_source(Arc::new(ProbeForgeSource), cx);
+                            Some(settings_entity(SettingsCategory::GitHosting, options.mode, cx))
                         }
                         Frame::TabMenu | Frame::Tooltip => None,
                     };

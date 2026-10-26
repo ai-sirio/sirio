@@ -114,9 +114,10 @@ echo "bezel-off captures of $ROOT"
 echo "commit: $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "display: $DISPLAY_TARGET ($DIMENSIONS), renderer: $LVP_ICD, SIRIO_REDUCED_MOTION=$SIRIO_REDUCED_MOTION, TMPDIR=$TMPDIR"
 
-echo "building sirio, sirioctl and the chat E2E's seed and probe"
+echo "building sirio, sirioctl, the chat E2E's seed and probe and the surfaces probe"
 (cd "$ROOT/rust" && cargo build --quiet -p sirio --bin sirio -p sirio_control --bin sirioctl \
-  -p sirio_persistence --example ely_chat_seed --example appearance_seed -p sirio_ui --example ely_chat_probe)
+  -p sirio_persistence --example ely_chat_seed --example appearance_seed \
+  -p sirio_ui --example ely_chat_probe --example surfaces_probe)
 
 # run_source NAME COMMAND...: one source, its console in runs/NAME.console.log.
 run_source() {
@@ -184,17 +185,13 @@ for appearance in dark light; do
   keep_flat "sweep-$appearance" "sweep-$appearance"
 done
 
-# Task 2's probe. Until it exists the set simply has no such frames, and says so.
-# Its contract: --out-dir DIR --display :N --appearance dark|light, frames in DIR/frames/*.png.
-if [ -x "$ROOT/Scripts/Tests/test-surfaces-probe.sh" ]; then
-  for appearance in dark light; do
-    run_source "surfaces-$appearance" "$ROOT/Scripts/Tests/test-surfaces-probe.sh" \
-      --out-dir "$RUNS/surfaces-$appearance" --display "$DISPLAY_TARGET" --appearance "$appearance"
-    keep_flat "surfaces-$appearance" "surfaces-$appearance"
-  done
-else
-  echo "GAP: Scripts/Tests/test-surfaces-probe.sh does not exist yet; the surfaces probe frames are not in this set"
-fi
+# The surfaces probe (the Settings pages, a tab menu, a tooltip): the build above is the one it
+# drives, hence --no-build. A missing script or a failed probe fails like any other source.
+for appearance in dark light; do
+  run_source "surfaces-$appearance" "$ROOT/Scripts/Tests/test-surfaces-probe.sh" \
+    --out-dir "$RUNS/surfaces-$appearance" --display "$DISPLAY_TARGET" --appearance "$appearance" --no-build
+  keep_flat "surfaces-$appearance" "surfaces-$appearance"
+done
 
 for appearance in dark light; do
   run_source "changes-$appearance" "$ROOT/Scripts/Tests/test-changes-e2e.sh" \
