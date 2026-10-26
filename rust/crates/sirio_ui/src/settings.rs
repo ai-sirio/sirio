@@ -3110,7 +3110,7 @@ impl Settings {
             .child(
                 if is_empty {
                     // Empty and focused: the bar at the hint's start, the
-                    // way bezel's `TextField` paints an empty field.
+                    // way Ely's `TextInput` paints an empty field.
                     caret::field_placeholder(
                         text!(placeholder.to_string()),
                         is_focused.then(|| caret::bar(px(16.0), theme.ely.fg, caret_visible)),

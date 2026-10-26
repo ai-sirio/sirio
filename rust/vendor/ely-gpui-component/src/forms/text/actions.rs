@@ -17,6 +17,9 @@ actions!(
         Backspace,
         Delete,
         DeleteWordLeft,
+        DeleteWordRight,
+        DeleteToLineStart,
+        DeleteToLineEnd,
         Left,
         Right,
         Up,
@@ -48,6 +51,10 @@ actions!(
 
 pub(super) const CONTEXT: &str = "ElyInput";
 
+/// Added to the root's key context while the field has several rows, so a binding can be for
+/// multi-line fields alone: Ctrl+N and Ctrl+P on macOS (below).
+pub const MULTI_LINE_CONTEXT: &str = "ElyMultiLine";
+
 /// Binds the text keys. `init` calls it.
 pub(crate) fn bind_keys(cx: &mut App) {
     let word = if cfg!(target_os = "macos") {
@@ -59,6 +66,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", Backspace, Some(CONTEXT)),
         KeyBinding::new("delete", Delete, Some(CONTEXT)),
         KeyBinding::new(&format!("{word}-backspace"), DeleteWordLeft, Some(CONTEXT)),
+        KeyBinding::new(&format!("{word}-delete"), DeleteWordRight, Some(CONTEXT)),
         KeyBinding::new("left", Left, Some(CONTEXT)),
         KeyBinding::new("right", Right, Some(CONTEXT)),
         KeyBinding::new("up", Up, Some(CONTEXT)),
@@ -100,6 +108,19 @@ pub(crate) fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-shift-left", SelectHome, Some(CONTEXT)),
             KeyBinding::new("cmd-shift-right", SelectEnd, Some(CONTEXT)),
             KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(CONTEXT)),
+            KeyBinding::new("cmd-backspace", DeleteToLineStart, Some(CONTEXT)),
+            // The emacs bindings macOS honours in every native text field.
+            KeyBinding::new("ctrl-a", Home, Some(CONTEXT)),
+            KeyBinding::new("ctrl-e", End, Some(CONTEXT)),
+            KeyBinding::new("ctrl-b", Left, Some(CONTEXT)),
+            KeyBinding::new("ctrl-f", Right, Some(CONTEXT)),
+            KeyBinding::new("ctrl-h", Backspace, Some(CONTEXT)),
+            KeyBinding::new("ctrl-d", Delete, Some(CONTEXT)),
+            KeyBinding::new("ctrl-k", DeleteToLineEnd, Some(CONTEXT)),
+            // Vertical motion is for several rows only: a one-line field is nested in lists that
+            // bind Down and Up (a combobox, a model search) and must not answer these.
+            KeyBinding::new("ctrl-n", Down, Some(MULTI_LINE_CONTEXT)),
+            KeyBinding::new("ctrl-p", Up, Some(MULTI_LINE_CONTEXT)),
         ]);
     } else {
         bindings.push(KeyBinding::new("ctrl-y", Redo, Some(CONTEXT)));
@@ -129,6 +150,40 @@ impl TextInput {
     fn delete_word_left(&mut self, _: &DeleteWordLeft, _: &mut Window, cx: &mut Context<Self>) {
         let range = if self.selection.is_empty() {
             edit::prev_word(&self.text, self.cursor())..self.cursor()
+        } else {
+            self.selection.clone()
+        };
+        self.replace(range, "", false, cx);
+    }
+
+    /// A non-empty selection is what goes; otherwise the unit up to the caret, as `delete_word_left`.
+    fn delete_word_right(&mut self, _: &DeleteWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        let range = if self.selection.is_empty() {
+            self.cursor()..edit::next_word(&self.text, self.cursor())
+        } else {
+            self.selection.clone()
+        };
+        self.replace(range, "", false, cx);
+    }
+
+    /// The line is the logical one, between newlines, not a soft-wrapped row.
+    fn delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = if self.selection.is_empty() {
+            edit::line_start(&self.text, self.cursor())..self.cursor()
+        } else {
+            self.selection.clone()
+        };
+        self.replace(range, "", false, cx);
+    }
+
+    fn delete_to_line_end(&mut self, _: &DeleteToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        let range = if self.selection.is_empty() {
+            self.cursor()..edit::line_end(&self.text, self.cursor())
         } else {
             self.selection.clone()
         };
@@ -387,7 +442,7 @@ impl Render for TextInput {
         self.first_frame(window, cx);
         div()
             .id("ely-text-input")
-            .key_context(self.host_context.as_deref().unwrap_or(CONTEXT))
+            .key_context(self.context.as_ref())
             .track_focus(&self.focus)
             .cursor(if self.disabled {
                 CursorStyle::OperationNotAllowed
@@ -397,6 +452,9 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::delete_to_line_end))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::up))

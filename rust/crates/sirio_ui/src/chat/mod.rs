@@ -2155,7 +2155,7 @@ pub struct Chat {
     /// QuestionAnswerState so there is one surface, one Blink, one timer.
     answer_blink: caret::Blink,
     answer_caret_visible: bool,
-    /// The model picker's search row: a real bezel field (`Shape::Line`),
+    /// The model picker's search row: a real Ely field (one line),
     /// focused while the picker is open; typing filters, Backspace edits,
     /// and none of it touches the composer's draft.
     model_search_field: Entity<TextInput>,
@@ -6020,7 +6020,7 @@ impl Chat {
             }
             return;
         }
-        // F-CHAT-16: the model picker's search is a real TextField — typing,
+        // F-CHAT-16: the model picker's search is a real text field — typing,
         // Backspace and Escape are the field's own job; no raw-key redirect
         // lives here any more.
         if event.keystroke.key == "c"
@@ -6067,7 +6067,7 @@ impl Chat {
         // The bar always occupies layout, so the answer text does not shift
         // by two pixels every half second as it blinks. An empty field
         // carries it at the placeholder's start (`caret::field_placeholder`,
-        // bezel's `TextField` convention), a draft after its last character.
+        // the text-field convention), a draft after its last character.
         let answer_caret = || {
             div()
                 .debug_selector(|| "question-answer-caret".into())
@@ -8449,7 +8449,7 @@ mod tests {
 
     /// `up`/`down` drive a picker while one is open and are the field's own
     /// vertical motion otherwise — the handlers propagate when no popup is
-    /// on screen, so gpui reaches the TextField's binding next.
+    /// on screen, so gpui reaches the field's binding next.
     #[gpui::test]
     async fn arrows_move_the_caret_when_no_popup_is_open(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["plain"]);
@@ -9618,6 +9618,132 @@ two"
                 |entry| matches!(entry, Entry::User { text, .. } if text == "line one\nline two"),
             ) && chat.has_completed_turn
         });
+    }
+
+    /// One chord, pressed in the composer: the draft it starts from, whether the caret first goes
+    /// to the start, the keys, what is typed after them and the draft that must result.
+    struct Chord {
+        draft: &'static str,
+        home: bool,
+        keys: &'static [&'static str],
+        then: &'static str,
+        expect: &'static str,
+    }
+
+    /// Chords bezel's field answered and a composer on Ely's must still answer, on the platform
+    /// that has them: Ctrl+Delete deletes the next word, and Ctrl+A is still select-all.
+    #[cfg(not(target_os = "macos"))]
+    const CHORDS: &[Chord] = &[
+        Chord {
+            draft: "one two three",
+            home: true,
+            keys: &["ctrl-delete"],
+            then: "",
+            expect: " two three",
+        },
+        Chord {
+            draft: "one two",
+            home: false,
+            keys: &["ctrl-a"],
+            then: "x",
+            expect: "x",
+        },
+    ];
+
+    /// On macOS: Cmd+Backspace deletes to the line's start, Option+Delete the next word, Ctrl+K to
+    /// the line's end, and Ctrl+A is the emacs line start (select-all is Cmd+A).
+    #[cfg(target_os = "macos")]
+    const CHORDS: &[Chord] = &[
+        Chord {
+            draft: "one two",
+            home: false,
+            keys: &["cmd-backspace"],
+            then: "",
+            expect: "",
+        },
+        Chord {
+            draft: "one two",
+            home: true,
+            keys: &["alt-delete"],
+            then: "",
+            expect: " two",
+        },
+        Chord {
+            draft: "one two",
+            home: true,
+            keys: &["right", "right", "right", "ctrl-k"],
+            then: "",
+            expect: "one",
+        },
+        Chord {
+            draft: "one two",
+            home: false,
+            keys: &["ctrl-a"],
+            then: "x",
+            expect: "xone two",
+        },
+    ];
+
+    /// Goal 3, keys work as they do today: the editing chords of bezel's field that Ely's did not
+    /// have. The table is the running platform's; the macOS one runs only in the release gate.
+    #[gpui::test]
+    async fn the_composer_answers_the_editing_chords_of_its_platform(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        for case in CHORDS {
+            chat.update(cx, |chat, cx| chat.set_composer_text(case.draft, cx));
+            cx.run_until_parked();
+            if case.home {
+                cx.simulate_keystrokes("home");
+            }
+            for key in case.keys {
+                cx.simulate_keystrokes(key);
+            }
+            if !case.then.is_empty() {
+                cx.simulate_input(case.then);
+            }
+            cx.run_until_parked();
+            assert_eq!(
+                chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+                case.expect,
+                "{:?} from {:?}, then {:?}, must leave {:?}",
+                case.keys,
+                case.draft,
+                case.then,
+                case.expect
+            );
+        }
+    }
+
+    /// The keys that move the caret a row in a multi-line field: Ctrl+N and Ctrl+P on macOS, where
+    /// bezel's field bound them, the arrows elsewhere. In the composer these are Ely's caret
+    /// motion, not the host's Up and Down (history, popups).
+    const NEXT_ROW: &str = if cfg!(target_os = "macos") { "ctrl-n" } else { "down" };
+    const PREVIOUS_ROW: &str = if cfg!(target_os = "macos") { "ctrl-p" } else { "up" };
+
+    #[gpui::test]
+    async fn the_composer_moves_the_caret_a_row_with_its_platforms_keys(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "a");
+        cx.simulate_keystrokes("shift-return");
+        cx.simulate_input("b");
+        let draft = |cx: &mut VisualTestContext| chat.read_with(&cx.cx, |chat, _| chat.draft_text());
+        assert_eq!(draft(cx), "a\nb", "the draft is two rows, the caret at its end");
+
+        cx.simulate_keystrokes(PREVIOUS_ROW);
+        cx.simulate_input("x");
+        assert_eq!(draft(cx), "ax\nb", "{PREVIOUS_ROW} moved the caret up a row");
+        cx.simulate_keystrokes(NEXT_ROW);
+        cx.simulate_input("y");
+        assert_eq!(draft(cx), "ax\nby", "{NEXT_ROW} moved the caret down a row");
     }
 
     /// F-CORE-DOM-07: before this pass `ChatEvent` had exactly two variants
@@ -12799,7 +12925,7 @@ two"
             window.simulate_next_frame(cx);
         });
         assert!(cx.debug_bounds("model-search-input").is_some());
-        // The search row is a real TextField: typing, Backspace and Escape
+        // The search row is a real text field: typing, Backspace and Escape
         // are its own job, and the picker holds focus on it while open.
         let search_focus = chat.read_with(&cx.cx, |chat, cx| {
             chat.model_search_field.read(cx).focus_handle(cx)
@@ -16970,10 +17096,10 @@ two"
         refresh_frame(cx);
 
         focus_and_type(cx, "hello menu");
-        // Select-all is bezel's own binding, and `input::init` registers it
+        // Select-all is Ely's own binding, and `ely::init` registers it
         // per platform: cmd-a on macOS, ctrl-a everywhere else. The test has
         // to press the chord this build actually bound — cmd-a on Windows
-        // selects nothing, and bezel's `Copy` writes nothing for an empty
+        // selects nothing, and Ely's `Copy` writes nothing for an empty
         // selection, so the menu would be exercised against no selection at
         // all. Same shape as `file_view.rs`'s Markdown-toolbar test.
         #[cfg(target_os = "macos")]
@@ -17075,7 +17201,7 @@ two"
         cx.simulate_click(composer.center(), Modifiers::none());
         cx.run_until_parked();
         // `PasteComposer` is bound per platform in `Chat::bind_keys` (cmd-v
-        // on macOS, ctrl-v elsewhere, matching bezel's own `Paste`), so press
+        // on macOS, ctrl-v elsewhere, matching Ely's own `Paste`), so press
         // the chord this build bound: cmd-v resolves to no binding on Windows
         // and the picture never reaches `paste_clipboard_image`.
         #[cfg(target_os = "macos")]

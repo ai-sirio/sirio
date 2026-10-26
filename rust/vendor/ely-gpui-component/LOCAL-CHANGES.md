@@ -186,7 +186,8 @@ fields) included.
     the window activates, so taking the focus at the first frame as well would report it twice
     with no `Blur` between. The focus body is `gained_focus`, shared with the listener.
   - `TextInput::host_context(context)`: the root's key context becomes the one node
-    `"ElyInput <context>"`, built once and set in `render` (`actions.rs`). `context` is one
+    `"ElyInput <context>"` (`"ElyInput ElyMultiLine <context>"` for a field with rows, see the entry
+    below), built once and set in `render` (`actions.rs`). `context` is one
     identifier (alphanumerics, `_`, `-`; a `debug_assert!` says so): GPUI's context parser
     recurses forever on a `.` and reads `=` as a key/value. A host binding in `context`,
     registered after `init_chat`, outranks Ely's at equal depth (GPUI: later wins), and a
@@ -230,6 +231,52 @@ Proof: `sirio_ui::ely_ui::tests` hosts a field in a window
 `reset_text_starts_a_fresh_history`, `a_long_multi_line_draft_scrolls_under_the_wheel`,
 `a_wheeled_draft_follows_the_caret_again_on_the_next_edit`,
 `a_wheel_scrolls_a_draft_alone_and_reaches_the_page_at_its_limit`).
+
+### Editing chords bezel's field had (bezel UI off)
+
+Moving Sirio's fields from bezel's text input to `forms::TextInput` (above) lost chords bezel's
+field bound and Ely's did not answer (spec Goal 3: keys work as they do today). They are Ely's
+now, for every `TextInput` in the app, so the change-request fields (the right panel's search,
+token and comment fields, the compose and hand-off bodies) and the editor-page fields gain them
+too, as do the settings, the forms, the browser's address bar and the composer.
+
+- `src/forms/text/actions.rs`, `mod.rs`, `forms/mod.rs`: three actions, ported from bezel's
+  handlers (`bezel_ui/src/input.rs`), exported beside `Copy`/`Cut`/`Paste`:
+  - `DeleteToLineStart` and `DeleteToLineEnd` delete from the caret to the start or end of the
+    logical line, the one between newlines, never a soft-wrapped row;
+  - `DeleteWordRight` deletes to the end of the word after the caret. The word is Ely's
+    (`edit::next_word`), the unit `WordRight` and `DeleteWordLeft` already use, where bezel's
+    skipped punctuation (they differ only when the caret is on punctuation);
+  - a non-empty selection is what each deletes, and nothing more. Each is one undo step
+    (`replace(.., "", false, ..)`, as `DeleteWordLeft`), where bezel coalesced a run of
+    adjacent deletes and Ely has never coalesced deletes.
+- Bindings in `ElyInput`, as bezel's:
+  - every platform: `alt-delete` on macOS and `ctrl-delete` elsewhere for `DeleteWordRight`;
+  - macOS only: `cmd-backspace` for `DeleteToLineStart`, `ctrl-k` for `DeleteToLineEnd`, and the
+    emacs set onto Ely's existing actions: `ctrl-a` Home, `ctrl-e` End, `ctrl-b` Left, `ctrl-f`
+    Right, `ctrl-h` Backspace, `ctrl-d` Delete. (Elsewhere `ctrl-a` stays select-all.)
+- `ctrl-n` and `ctrl-p`, macOS only, are Down and Up in multi-line fields alone, as bezel bound
+  them under its `TextArea` context. Ely binds Up and Down in every `ElyInput` and had no
+  multi-line context, so under plain `ElyInput` every one-line field (a model search, a combobox's
+  query, a form's) would answer a chord it never did. A field with rows now adds the identifier
+  `MULTI_LINE_CONTEXT` (`ElyMultiLine`, exported) to its root's key context, built the way
+  `host_context` builds its one node: `ElyInput`, then `ElyMultiLine` when it has rows, then the
+  host's identifier. A one-line field's context is `ElyInput` as before, and the host's
+  identifier is still on the node, so a host binding outranks Ely's as it did (the key context
+  string is built when `multi_line` or `host_context` is called, not on every frame).
+- A sync with upstream must keep the three actions and their bindings, `MULTI_LINE_CONTEXT` and the
+  `refresh_context` that composes the context.
+
+Proof: `sirio_ui::ely_ui::tests` dispatches each action and checks text, caret, selection and undo
+(`the_delete_to_line_and_word_actions_delete_what_bezels_did`,
+`a_delete_to_line_end_is_one_undo_step`), checks the multi-line context
+(`only_a_multi_line_field_names_the_multi_line_context`,
+`a_host_binding_still_wins_in_a_multi_line_field`,
+`ctrl_n_and_ctrl_p_do_not_move_a_single_line_field_the_way_down_and_up_do`), and the chat's tests
+press the running platform's chords in the composer
+(`the_composer_answers_the_editing_chords_of_its_platform`,
+`the_composer_moves_the_caret_a_row_with_its_platforms_keys`). The macOS chords' tests run only in
+the release gate: `macos-check.yml` does not run the test suite and this was written on Linux.
 
 ## Final compatibility evidence
 

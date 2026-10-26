@@ -3038,7 +3038,7 @@ impl Sidebar {
                 .child(caret::bar(px(14.0), theme.ely.fg, caret_shown))
                 .into_any_element()
         });
-        // bezel's `TextField` convention: an empty field keeps its hint,
+        // The text-field convention: an empty field keeps its hint,
         // focused or not, and the bar stands at the hint's start — offset 0
         // of the empty value — never after it, which read "branch name|" as
         // if the hint had been typed. A value has the bar after its last
@@ -4149,7 +4149,7 @@ impl Render for Sidebar {
                             // filter, instead of replacing the contents of
                             // the same text child. While focused it carries
                             // the bar at its start (`caret::field_placeholder`),
-                            // bezel's `TextField` convention.
+                            // the text-field convention.
                             .when(filter_is_empty, |this| {
                                 this.child(caret::field_placeholder(
                                     div()

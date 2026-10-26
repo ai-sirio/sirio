@@ -12,7 +12,10 @@ use gpui::{
     Subscription, Task, Window, WrappedLine,
 };
 
-pub use actions::{Copy, Cut, Newline, Paste, SelectAll};
+pub use actions::{
+    Copy, Cut, DeleteToLineEnd, DeleteToLineStart, DeleteWordRight, MULTI_LINE_CONTEXT, Newline,
+    Paste, SelectAll,
+};
 pub(crate) use actions::{Backspace, Down, Enter, Redo, Submit, Undo, Up, bind_keys};
 pub use edit::History;
 use edit::Snapshot;
@@ -63,8 +66,11 @@ pub struct TextInput {
     max_len: Option<usize>,
     highlighter: Option<Highlighter>,
     disabled: bool,
-    /// The root's whole key context when a host adds its own: see [`Self::host_context`].
-    host_context: Option<SharedString>,
+    /// The host's identifier, if it added one: see [`Self::host_context`].
+    host: Option<SharedString>,
+    /// The root's whole key context, `ElyInput` and, as they apply, `ElyMultiLine` and the host's,
+    /// built when `multi_line` or `host_context` changes what it holds.
+    context: SharedString,
     history: History<Snapshot>,
     /// The selection the last edit replaced.
     edited_from: Range<usize>,
@@ -124,7 +130,8 @@ impl TextInput {
             max_len: None,
             highlighter: None,
             disabled: false,
-            host_context: None,
+            host: None,
+            context: actions::CONTEXT.into(),
             history: History::default(),
             edited_from: 0..0,
             layout: None,
@@ -176,8 +183,9 @@ impl TextInput {
         }
     }
 
-    /// Adds `context` to the root's key context, which becomes the one node `"ElyInput <context>"`,
-    /// so a host can bind keys of its own in its context while the field has focus. `context` is
+    /// Adds `context` to the root's key context, which becomes the one node `"ElyInput <context>"`
+    /// (`"ElyInput ElyMultiLine <context>"` for a field with rows), so a host can bind keys of its
+    /// own in its context while the field has focus. `context` is
     /// one identifier: alphanumerics, `_` and `-`. GPUI's context parser recurses forever on a
     /// `.` and reads `=` as a key/value pair, so anything else is a bug in the host.
     ///
@@ -196,14 +204,31 @@ impl TextInput {
                     .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '-'),
             "a host context is one identifier (alphanumerics, `_`, `-`), not {context:?}"
         );
-        self.host_context = Some(format!("{} {context}", actions::CONTEXT).into());
+        self.host = Some(context);
+        self.refresh_context();
         self
+    }
+
+    /// `ElyInput`, then `ElyMultiLine` for several rows, then the host's: one node, one string
+    /// built here and not on every frame. A plain one-line field keeps `ElyInput` alone.
+    fn refresh_context(&mut self) {
+        let mut context = String::from(actions::CONTEXT);
+        if self.rows.is_some() {
+            context.push(' ');
+            context.push_str(actions::MULTI_LINE_CONTEXT);
+        }
+        if let Some(host) = &self.host {
+            context.push(' ');
+            context.push_str(host);
+        }
+        self.context = context.into();
     }
 
     /// Several lines: grows from `min` rows to `max`, then scrolls.
     pub fn multi_line(mut self, min: usize, max: usize) -> Self {
         assert!(0 < min && min <= max, "text rows {min}..={max} are empty");
         self.rows = Some((min, max));
+        self.refresh_context();
         self
     }
 

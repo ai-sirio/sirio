@@ -938,7 +938,7 @@ impl ProjectIconPicker {
                                     ))
                                     .into_any_element();
                                 // An empty query carries the bar at the hint's
-                                // start (bezel's `TextField` convention); a
+                                // start (the text-field convention); a
                                 // value has it after its last character.
                                 let (text, trailing_bar) = if self.emoji_grid_query.is_empty() {
                                     (
@@ -1111,7 +1111,7 @@ impl ProjectIconPicker {
             .child(caret::bar(px(16.0), theme.ely.fg, caret_visible))
             .into_any_element();
         // An empty field shows its placeholder with the bar at its start
-        // (bezel's `TextField` convention); a draft has it after its last
+        // (the text-field convention); a draft has it after its last
         // character.
         let (text, trailing_bar) = if draft.is_empty() {
             (
