@@ -166,6 +166,70 @@ clickable.
 A sync with upstream must keep both fields, both builders and their two lines in
 `draw::row`.
 
+### Hosting a text field (bezel UI off)
+
+Sirio's composer, model search, combobox and forms move from bezel's text input to
+`forms::TextInput`, and each keeps the keys it has today. The field learns what bezel's
+gave them. Single-line fields, and every other way a field is built or driven, behave as
+before; the one behaviour change for existing callers is that a multi-line field now takes
+the wheel (below), Ely's own chat composer and Sirio's `new_input(.., Some(rows), ..)` sites
+(the change-request composer, compose, edit body, review summary, merge message and hand-off
+fields) included.
+
+- `src/forms/text/mod.rs`:
+  - `TextInput::detached(cx)` is `new` without a `Window`. `new` is now `detached` plus
+    `attach`, the one place the focus and blur subscriptions are made (it sets `attached`). A
+    detached field attaches at its first `render`; if the handle is already focused by then,
+    and the window is active, it takes the focused state, emits one `InputEvent::Focus` and
+    starts its blink (`first_frame`), because the listener `attach` makes only sees changes
+    after it. In an inactive window GPUI blanks the focus paths and that listener fires when
+    the window activates, so taking the focus at the first frame as well would report it twice
+    with no `Blur` between. The focus body is `gained_focus`, shared with the listener.
+  - `TextInput::host_context(context)`: the root's key context becomes the one node
+    `"ElyInput <context>"`, built once and set in `render` (`actions.rs`). `context` is one
+    identifier (alphanumerics, `_`, `-`; a `debug_assert!` says so): GPUI's context parser
+    recurses forever on a `.` and reads `=` as a key/value. A host binding in `context`,
+    registered after `init_chat`, outranks Ely's at equal depth (GPUI: later wins), and a
+    handler that calls `cx.propagate()` hands the key on to Ely's. The doc comment states
+    the ordering rule; `init_chat`'s early return is what keeps a later init from flipping it.
+  - `TextInput::reset_text(text, cx)` is `set_text` plus a fresh undo history, what bezel's
+    `set_content` did: an undo after a send must not bring the prompt back. `set_text` itself
+    is unchanged apart from ending the wheel's hold (below).
+- `src/forms/text/actions.rs`, `element.rs`: a multi-line field takes the wheel. `scroll_wheel`
+  moves `scroll.y` within the overflow of the laid-out rows (`content_height`, the sum
+  `keep_in_view` already took), as bezel's `on_scroll_wheel` does, so a draft over its
+  rows can be read. It stops the event only when it scrolled, so at the field's limits, or with
+  nothing to scroll, the wheel still reaches a page the field sits in (the change-request tab's
+  body). A single-line field gets no handler. Ely follows the caret on every frame, which would
+  undo the wheel at the next one, where bezel kept a `follow_caret` flag. Here the wheel records
+  where the caret lay in the laid-out text (`wheeled`); while it lies there still
+  `keep_in_view` clamps and does not follow. Every edit (`replace`, `restore`) and caret command
+  (`move_to`, `select_to`) ends the hold, as bezel's re-follow on each, even one that leaves
+  the caret where it was (forward Delete, a Left at the start); prepaint also drops it when the
+  caret has moved by other means. Every other path follows as before.
+- `src/forms/text/mod.rs`, `src/forms/mod.rs`: `Copy`, `Cut`, `Paste`, `Newline` and
+  `SelectAll` are `pub use` from `forms::text` and `forms`, so a host can bind a key of its
+  own to the field's action. `Copy` shadows the prelude trait's name for a module that
+  glob-imports `forms`: none does.
+- `src/menus/draw.rs`, `src/menus/mod.rs`: `menus::row_frame(id, current, disabled, cx)` is the
+  frame of `draw::row` (`relative`, `flex`, `items_center`, `gap_2`, `h(control_height Md)`,
+  `px_2`, radius `Md`, `fg` or `fg_disabled`, the `hover` fill when `current` and enabled,
+  a pointer when enabled) as a `Stateful<Div>`. `draw::row` builds on it, so Ely's menus
+  draw as before, and a host's own list (the model search, the combobox) wears the same frame.
+
+A sync with upstream must keep `detached`/`attach`/`first_frame`, `host_context`,
+`reset_text`, the wheel handler with `wheeled` (set by the wheel, cleared by `replace`,
+`restore`, `move_to`, `select_to` and `set_text`, read by `keep_in_view` and prepaint), the five
+re-exports and `row_frame` under `draw::row`.
+
+Proof: `sirio_ui::ely_ui::tests` hosts a field in a window
+(`a_host_binding_registered_after_ely_wins_and_can_hand_the_key_on`,
+`a_detached_field_focused_before_its_first_frame_reports_focus_and_types`,
+`a_detached_field_first_drawn_in_an_inactive_window_reports_focus_once_it_activates`,
+`reset_text_starts_a_fresh_history`, `a_long_multi_line_draft_scrolls_under_the_wheel`,
+`a_wheeled_draft_follows_the_caret_again_on_the_next_edit`,
+`a_wheel_scrolls_a_draft_alone_and_reaches_the_page_at_its_limit`).
+
 ## Final compatibility evidence
 
 Seen on Linux x86_64 (Arch, kernel 7.2.3) with rustc 1.98.1, cargo 1.98.1 and
@@ -820,51 +884,3 @@ A sync with upstream must keep `scroll_x` in `x` and `grid`.
   call. This is a change of shape in a file upstream also edits: a sync must
   keep `ShimmerText::phase`, the early return that animates nothing, and the
   shared `shimmered` path.
-
-### Hosting a text field (bezel UI off)
-
-Sirio's composer, model search, combobox and forms move from bezel's text input to
-`forms::TextInput`, and each keeps the keys it has today. The field learns what bezel's
-gave them. Ely's own chat composer and every caller of `TextInput::new` are unchanged.
-
-- `src/forms/text/mod.rs`:
-  - `TextInput::detached(cx)` is `new` without a `Window`. `new` is now `detached` plus
-    `attach`, the one place the focus and blur subscriptions are made. A detached field
-    attaches at its first `render`; if the handle is already focused by then it takes the
-    focused state, emits one `InputEvent::Focus` and starts its blink (`first_frame`),
-    because the listener `attach` makes only sees changes after it. The focus body is
-    `gained_focus`, shared with the listener.
-  - `TextInput::host_context(context)`: the root's key context becomes the one node
-    `"ElyInput <context>"` (`actions.rs`, `render`). A host binding in `context`,
-    registered after `init_chat`, outranks Ely's at equal depth (GPUI: later wins), and a
-    handler that calls `cx.propagate()` hands the key on to Ely's. The doc comment states
-    the ordering rule; `init_chat`'s early return is what keeps a later init from flipping it.
-  - `TextInput::reset_text(text, cx)` is `set_text` plus a fresh undo history, what bezel's
-    `set_content` did: an undo after a send must not bring the prompt back. `set_text` itself
-    is unchanged apart from ending the wheel's hold (below).
-- `src/forms/text/actions.rs`, `element.rs`: a multi-line field takes the wheel. `scroll_wheel`
-  moves `scroll.y` within the overflow of the laid-out rows (`content_height`, the sum
-  `keep_in_view` already took), as bezel's `on_scroll_wheel` does, so a draft over its
-  rows can be read. A single-line field gets no handler. Ely follows the caret on every
-  frame, which would undo the wheel at the next one, where bezel kept a `follow_caret`
-  flag. Here the wheel records where the caret lay in the laid-out text (`wheeled`);
-  while it lies there still `keep_in_view` clamps and does not follow, and prepaint drops
-  the record when the caret has moved. Every other path follows as before.
-- `src/forms/text/mod.rs`, `src/forms/mod.rs`: `Copy`, `Cut`, `Paste`, `Newline` and
-  `SelectAll` are `pub use` from `forms::text` and `forms`, so a host can bind a key of its
-  own to the field's action. `Copy` shadows the prelude trait's name for a module that
-  glob-imports `forms`: none does.
-- `src/menus/draw.rs`, `src/menus/mod.rs`: `menus::row_frame(id, current, disabled, cx)` is the
-  frame of `draw::row` (`relative`, `flex`, `items_center`, `gap_2`, `h(control_height Md)`,
-  `px_2`, radius `Md`, `fg` or `fg_disabled`, the `hover` fill when `current` and enabled,
-  a pointer when enabled) as a `Stateful<Div>`. `draw::row` builds on it, so Ely's menus
-  draw as before, and a host's own list (the model search, the combobox) wears the same frame.
-
-A sync with upstream must keep `detached`/`attach`/`first_frame`, `host_context`,
-`reset_text`, the wheel handler with `wheeled` in `keep_in_view` and prepaint, the five
-re-exports and `row_frame` under `draw::row`.
-
-Proof: `sirio_ui::ely_ui::tests` hosts a field in a window
-(`a_host_binding_registered_after_ely_wins_and_can_hand_the_key_on`,
-`a_detached_field_focused_before_its_first_frame_reports_focus_and_types`,
-`reset_text_starts_a_fresh_history`, `a_long_multi_line_draft_scrolls_under_the_wheel`).

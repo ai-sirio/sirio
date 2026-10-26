@@ -259,7 +259,7 @@ impl Element for TextElement {
         });
         self.input.update(cx, |input, _| {
             input.scroll = scroll;
-            // The wheel's hold ends when the caret has moved.
+            // The wheel's hold also ends when the caret has moved by other means.
             input.wheeled = input.wheeled.filter(|at| *at == caret_at);
         });
         Prepaint {
@@ -333,8 +333,8 @@ pub(super) fn content_height(lines: &[(usize, WrappedLine)], line_height: Pixels
 }
 
 /// Scroll that keeps the caret inside the box, clamped to the text. After the wheel scrolled a
-/// multi-line field the caret is not followed until it moves (`TextInput::wheeled`), or the
-/// view would be pulled back to it at the next frame.
+/// multi-line field the caret is not followed until an edit or a caret command ends the hold
+/// (`TextInput::wheeled`), or the view would be pulled back to it at the next frame.
 fn keep_in_view(
     input: &TextInput,
     lines: &[(usize, WrappedLine)],

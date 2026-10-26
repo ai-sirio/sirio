@@ -46,7 +46,7 @@ actions!(
     ]
 );
 
-const CONTEXT: &str = "ElyInput";
+pub(super) const CONTEXT: &str = "ElyInput";
 
 /// Binds the text keys. `init` calls it.
 pub(crate) fn bind_keys(cx: &mut App) {
@@ -355,7 +355,9 @@ impl TextInput {
     }
 
     /// The wheel scrolls a multi-line field within the rows it has laid out. It does not move the
-    /// caret, so the view stays where the wheel left it until the caret moves: see `wheeled`.
+    /// caret, so the view stays where the wheel left it until an edit or a caret command: see
+    /// `wheeled`. It stops here only when it scrolled: at the field's limit, or with nothing to
+    /// scroll, it goes on to whatever scrolls behind the field.
     fn scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -369,8 +371,13 @@ impl TextInput {
             - layout.bounds.size.height)
             .max(Pixels::ZERO);
         let delta = event.delta.pixel_delta(window.line_height());
-        self.scroll.y = (self.scroll.y - delta.y).clamp(Pixels::ZERO, overflow);
+        let scrolled = (self.scroll.y - delta.y).clamp(Pixels::ZERO, overflow);
+        if scrolled == self.scroll.y {
+            return;
+        }
+        self.scroll.y = scrolled;
         self.wheeled = self.position_for(self.display_offset(self.cursor()));
+        cx.stop_propagation();
         cx.notify();
     }
 }
@@ -378,13 +385,9 @@ impl TextInput {
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.first_frame(window, cx);
-        let hosted = self
-            .host_context
-            .as_ref()
-            .map(|host| format!("{CONTEXT} {host}"));
         div()
             .id("ely-text-input")
-            .key_context(hosted.as_deref().unwrap_or(CONTEXT))
+            .key_context(self.host_context.as_deref().unwrap_or(CONTEXT))
             .track_focus(&self.focus)
             .cursor(if self.disabled {
                 CursorStyle::OperationNotAllowed

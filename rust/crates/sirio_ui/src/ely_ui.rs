@@ -175,8 +175,9 @@ mod tests {
     use super::normalize;
     use ely_gpui_component::forms::{InputEvent, TextInput};
     use gpui::{
-        Context, Entity, Focusable, KeyBinding, Modifiers, Render, ScrollDelta, ScrollWheelEvent,
-        TestAppContext, TouchPhase, VisualTestContext, actions, div, point, prelude::*, px,
+        Context, Entity, Focusable, KeyBinding, Modifiers, Pixels, Point, Render, ScrollDelta,
+        ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, actions, div, point,
+        prelude::*, px,
     };
     use sirio_theme::Theme;
 
@@ -193,16 +194,20 @@ mod tests {
     actions!(ely_ui_probe, [HostEnter, HostUp]);
 
     /// A host that owns a field and keeps two of its keys. `HostEnter` stops there;
-    /// `HostUp` is handed on, so the field's own `Up` runs after it.
+    /// `HostUp` is handed on, so the field's own `Up` runs after it. The field sits in a page
+    /// that counts the wheel events reaching it.
     struct Hosted {
         input: Entity<TextInput>,
         events: Vec<InputEvent>,
         entered: usize,
         upped: usize,
+        page_wheels: usize,
+        /// Whether the field is in the tree yet.
+        shown: bool,
     }
 
     impl Hosted {
-        fn new(input: Entity<TextInput>, cx: &mut Context<Self>) -> Self {
+        fn new(input: Entity<TextInput>, shown: bool, cx: &mut Context<Self>) -> Self {
             cx.subscribe(&input, |host, _, event: &InputEvent, _| {
                 host.events.push(*event);
             })
@@ -212,7 +217,13 @@ mod tests {
                 events: Vec::new(),
                 entered: 0,
                 upped: 0,
+                page_wheels: 0,
+                shown,
             }
+        }
+
+        fn count(&self, event: InputEvent) -> usize {
+            self.events.iter().filter(|seen| **seen == event).count()
         }
     }
 
@@ -225,7 +236,10 @@ mod tests {
                     host.upped += 1;
                     cx.propagate();
                 }))
-                .child(div().w(px(300.0)).child(self.input.clone()))
+                .on_scroll_wheel(cx.listener(|host, _, _, _| host.page_wheels += 1))
+                .when(self.shown, |page| {
+                    page.child(div().w(px(300.0)).child(self.input.clone()))
+                })
         }
     }
 
@@ -241,16 +255,17 @@ mod tests {
     ) -> (Entity<Hosted>, &mut VisualTestContext) {
         cx.add_window_view(move |window, cx| {
             let input = build(window, cx);
-            Hosted::new(input, cx)
+            Hosted::new(input, true, cx)
         })
     }
 
     /// How many times the host's Enter ran, and how many `Submit`s the field emitted.
     fn counts(host: &Entity<Hosted>, cx: &mut VisualTestContext) -> (usize, usize) {
-        host.read_with(cx, |host, _| {
-            let submits = host.events.iter().filter(|e| **e == InputEvent::Submit);
-            (host.entered, submits.count())
-        })
+        host.read_with(cx, |host, _| (host.entered, host.count(InputEvent::Submit)))
+    }
+
+    fn count(host: &Entity<Hosted>, event: InputEvent, cx: &mut VisualTestContext) -> usize {
+        host.read_with(cx, |host, _| host.count(event))
     }
 
     fn text_of(host: &Entity<Hosted>, cx: &mut VisualTestContext) -> String {
@@ -277,42 +292,93 @@ mod tests {
 
         cx.simulate_keystrokes("enter");
         let (entered, submitted) = counts(&host, cx);
-        assert_eq!(entered, 1, "the host's Enter ran");
-        assert_eq!(submitted, 0, "Ely's own Enter ran as well");
-        assert_eq!(text_of(&host, cx), "abc");
+        assert_eq!(entered, 1, "the host's Enter must run once");
+        assert_eq!(submitted, 0, "Ely's own Enter must not run: the host's stops the key");
+        assert_eq!(text_of(&host, cx), "abc", "the text must stay as typed");
 
         cx.simulate_keystrokes("up");
         let upped = host.read_with(cx, |host, _| host.upped);
         let cursor = host.read_with(cx, |host, cx| host.input.read(cx).cursor());
-        assert_eq!(upped, 1, "the host's Up ran");
-        assert_eq!(cursor, 0, "the hand-on never reached Ely's Up");
+        assert_eq!(upped, 1, "the host's Up must run once");
+        assert_eq!(cursor, 0, "Ely's own Up must run after the host's hands the key on");
 
         // A second setup, or a second window, runs Sirio's init after the host bound its keys.
         cx.update(|_, cx| crate::ely::init(cx));
         cx.simulate_keystrokes("enter");
         let (entered, submitted) = counts(&host, cx);
-        assert_eq!(entered, 2, "a later init took the host's Enter back");
-        assert_eq!(submitted, 0, "a later init put Ely's Enter above the host's");
+        assert_eq!(entered, 2, "after a later init the host's Enter must still run");
+        assert_eq!(submitted, 0, "after a later init Ely's Enter must still not run");
+    }
+
+    /// A window whose detached field is not in the tree yet, its handle already focused. The
+    /// test windows start inactive, as a window does until the platform activates it.
+    fn unshown(cx: &mut TestAppContext) -> (Entity<Hosted>, &mut VisualTestContext) {
+        boot(cx);
+        cx.add_window_view(|window, cx| {
+            let input = cx.new(|cx| TextInput::detached(cx));
+            window.focus(&input.focus_handle(cx), cx);
+            Hosted::new(input, false, cx)
+        })
+    }
+
+    /// Puts the field in the tree: its first frame.
+    fn show(host: &Entity<Hosted>, cx: &mut VisualTestContext) {
+        host.update(cx, |host, cx| {
+            host.shown = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
     }
 
     #[gpui::test]
     async fn a_detached_field_focused_before_its_first_frame_reports_focus_and_types(
         cx: &mut TestAppContext,
     ) {
-        boot(cx);
-        let (host, cx) = host(cx, |window, cx| {
-            let input = cx.new(|cx| TextInput::detached(cx));
-            window.focus(&input.focus_handle(cx), cx);
-            input
-        });
+        let (host, cx) = unshown(cx);
+        cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
-        let focuses = host.read_with(cx, |host, _| {
-            host.events.iter().filter(|e| **e == InputEvent::Focus).count()
-        });
-        assert_eq!(focuses, 1, "one Focus for a handle focused before the first frame");
+
+        show(&host, cx);
+        assert_eq!(
+            count(&host, InputEvent::Focus, cx),
+            1,
+            "a handle focused before the field's first frame must report exactly one Focus"
+        );
 
         cx.simulate_input("x");
-        assert_eq!(text_of(&host, cx), "x");
+        assert_eq!(text_of(&host, cx), "x", "a detached field must take typed text");
+
+        // The subscriptions made at the first frame work: focus leaving is reported once.
+        cx.update(|window, cx| window.blur(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            count(&host, InputEvent::Blur, cx),
+            1,
+            "focus leaving a detached field must report exactly one Blur"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_detached_field_first_drawn_in_an_inactive_window_reports_focus_once_it_activates(
+        cx: &mut TestAppContext,
+    ) {
+        let (host, cx) = unshown(cx);
+        cx.deactivate_window();
+
+        show(&host, cx);
+        assert_eq!(
+            count(&host, InputEvent::Focus, cx),
+            0,
+            "a field first drawn in an inactive window must not report focus yet"
+        );
+
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        assert_eq!(
+            count(&host, InputEvent::Focus, cx),
+            1,
+            "the window activating must report the field's focus exactly once"
+        );
     }
 
     /// The edit between typing and `reset_text` is a backspace on purpose: typing in one burst
@@ -337,12 +403,14 @@ mod tests {
         assert_eq!(
             text_of(&host, cx),
             "",
-            "undo brought back what the reset replaced"
+            "undo after reset_text must leave the empty text, not bring back what it replaced"
         );
     }
 
-    #[gpui::test]
-    async fn a_long_multi_line_draft_scrolls_under_the_wheel(cx: &mut TestAppContext) {
+    /// A 30-line draft in a field that shows 3 to 12 rows, with the caret on the first row.
+    /// `set_text` leaves the caret at the end, with the view already at its maximum scroll, so a
+    /// downward wheel would have nowhere to go. Returns a point over the field.
+    fn draft(cx: &mut TestAppContext) -> (Entity<Hosted>, &mut VisualTestContext, Point<Pixels>) {
         boot(cx);
         let draft = (0..30).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
         let (host, cx) = host(cx, move |window, cx| {
@@ -354,35 +422,83 @@ mod tests {
             window.focus(&input.focus_handle(cx), cx);
             input
         });
-        // `set_text` leaves the caret at the end, with the view already scrolled to it. Put the
-        // caret on the first row so a downward wheel has room, and a view that follows the caret
-        // would pull it back.
         host.update(cx, |host, cx| {
             host.input.update(cx, |input, cx| input.select(0..0, cx));
         });
         cx.run_until_parked();
-        let top = |host: &Entity<Hosted>, cx: &mut VisualTestContext| {
-            host.read_with(cx, |host, cx| host.input.read(cx).bounds_for(0))
-                .expect("the field is laid out")
-        };
-        let before = top(&host, cx);
+        let over = first_row(&host, cx).origin + point(px(10.0), px(10.0));
+        (host, cx, over)
+    }
 
-        let over = before.origin + point(px(10.0), px(10.0));
+    fn first_row(host: &Entity<Hosted>, cx: &mut VisualTestContext) -> gpui::Bounds<Pixels> {
+        host.read_with(cx, |host, cx| host.input.read(cx).bounds_for(0))
+            .expect("the field must be laid out")
+    }
+
+    /// One wheel event of `by` pixels downward, with the pointer at `over`.
+    fn wheel_down(cx: &mut VisualTestContext, over: Point<Pixels>, by: f32) {
         cx.simulate_mouse_move(over, None, Modifiers::none());
         cx.simulate_event(ScrollWheelEvent {
             position: over,
-            delta: ScrollDelta::Pixels(point(px(0.0), px(-40.0))),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-by))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,
         });
         cx.run_until_parked();
+    }
 
-        let after = top(&host, cx);
+    #[gpui::test]
+    async fn a_long_multi_line_draft_scrolls_under_the_wheel(cx: &mut TestAppContext) {
+        let (host, cx, over) = draft(cx);
+        let before = first_row(&host, cx);
+
+        wheel_down(cx, over, 40.0);
+
+        let after = first_row(&host, cx);
         assert!(
             after.origin.y < before.origin.y,
-            "the wheel moved the first row from {:?} to {:?}",
+            "a wheel down must move the first row up: {:?} then {:?}",
             before.origin.y,
             after.origin.y
         );
+    }
+
+    /// The caret has not moved when Delete removes a character after it, nor when Left finds it
+    /// at the start already, yet each is the user acting on the caret: the view must return to it.
+    #[gpui::test]
+    async fn a_wheeled_draft_follows_the_caret_again_on_the_next_edit(cx: &mut TestAppContext) {
+        let (host, cx, over) = draft(cx);
+        let top = first_row(&host, cx).origin.y;
+        for key in ["delete", "left"] {
+            wheel_down(cx, over, 40.0);
+            assert!(
+                first_row(&host, cx).origin.y < top,
+                "the wheel must have scrolled the draft before {key}"
+            );
+
+            cx.simulate_keystrokes(key);
+
+            assert_eq!(
+                first_row(&host, cx).origin.y,
+                top,
+                "{key} must bring the view back to the caret"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn a_wheel_scrolls_a_draft_alone_and_reaches_the_page_at_its_limit(
+        cx: &mut TestAppContext,
+    ) {
+        let (host, cx, over) = draft(cx);
+
+        wheel_down(cx, over, 40.0);
+        let reached = host.read_with(cx, |host, _| host.page_wheels);
+        assert_eq!(reached, 0, "a wheel that scrolls the draft must not also scroll the page");
+
+        wheel_down(cx, over, 10_000.0);
+        wheel_down(cx, over, 40.0);
+        let reached = host.read_with(cx, |host, _| host.page_wheels);
+        assert_eq!(reached, 1, "a wheel the draft cannot use must reach the page");
     }
 }
