@@ -119,37 +119,59 @@ Rules:
 - The project's own Lombok version is not looked up. It usually comes from Spring Boot's
   dependency management rather than from the project's POM, and only jdtls knows it
   after the import. The newest version in the caches is what VS Code also leans on: it
-  uses its bundled jar unless the project's is newer. The risk this leaves is covered
-  in §2.5.
+  uses its bundled jar unless the project's is newer.
+- A project that needs a newer Lombok than any jar in the caches usually gets one: its
+  own import downloads that version, and §2.3 restarts jdtls with it. The case left
+  over is accepted: an agent too old for the project, with no newer jar arriving (for
+  example an offline import), leaves Lombok-shaped errors behind and no restart
+  follows. *(designer's call, from the builder check)*
 
 ### §2.3 The restart
 
-**When.** A jdtls was launched without the agent because the project uses Lombok
-(§2.1, rule 2) but no jar was found. Later in the same session a jar appears. The usual
-case is the first open of a project on a machine whose caches do not hold Lombok yet,
-where jdtls's own Maven or Gradle import downloads it.
+**When.** A jdtls is running for a project that uses Lombok (§2.1, rule 2), and later
+in the same session a jar appears that is newer than the one it was launched with, or
+any jar when it was launched without one. Two usual cases:
+
+- The first open of a project on a machine whose caches do not hold Lombok yet. jdtls's
+  own Maven or Gradle import downloads it.
+- The caches hold only an older Lombok, left by another project, and the import
+  downloads the version this project asks for. *(designer's call, from the builder
+  check)*
 
 **What happens:**
 
-1. Sirio stops that jdtls deliberately with `shutdown` and `exit`, the way
-   `sirio_lsp::shutdown` already does. It does not kill the process.
-2. Sirio does the same cleanup `language_server_gone` does today:
+1. Sirio takes the old server's handle out of the supervisor and cancels its router
+   first. When the old stream closes, the router today calls `language_server_gone`
+   for the key, and `forget` would then remove whatever handle sits under that key,
+   including the new server's. The old read loop keeps running until the stop below
+   returns, because the answer to `shutdown` arrives through it.
+2. Sirio stops the old jdtls with `Server::stop`, the existing contract: `shutdown`,
+   then `exit`, then a grace period, then a kill. The live run checks whether jdtls
+   needs a longer grace than `EXIT_GRACE` (500 ms) to save its workspace before the
+   kill. If it does, the restart uses a longer one. Quitting the app keeps 500 ms.
+3. The new jdtls is launched only after the old process has exited and been reaped.
+   An Eclipse-based server may lock its workspace directory while it runs, and under
+   the default launcher the new process uses the same directory. The live run
+   confirms the lock.
+4. Sirio does the same cleanup `language_server_gone` does today:
    - every drawer drops the server's findings;
    - open files of the key clear their gutters;
    - the documents it held are forgotten, so the next server is sent them again.
 
    The old server's Lombok errors must not survive the restart.
-3. Sirio launches jdtls again with the agent, and sends it every open file of that key.
+5. Sirio launches jdtls again with the agent, and sends it every open file of that key.
    This is the same path a launch follows today, ending in
    `sync_document_with_server` for each open file.
-4. During the restart the status row reads "starting", which is the existing state. No
-   card, no message.
+6. From the moment the old handle is taken out until the new launch answers, the
+   status row reads "starting", which is the existing state. No card, no message.
 
 **Bounds:**
 
 - At most one deliberate restart per key per session. *(designer's call)* It follows
   the LSP client design's "no automatic restart loop" rule
-  (`docs/superpowers/specs/2026-09-14-lsp-client-design.md`).
+  (`docs/superpowers/specs/2026-09-14-lsp-client-design.md`). Together with the single
+  fallback launch of §2.5, a key gets at most two launches beyond its first in a
+  session.
 - This restart is its own path. It is not `LspSupervisor::revive`, whose documented
   single caller is a successful install, and that stays true.
 - A server that crashes after the restart lands in `Dead::Failed` like any crash.
@@ -212,13 +234,18 @@ If a launch with the agent fails, Sirio launches once more without it, and that 
 no agent for the rest of the session. *(designer's call)* A failed launch means any of:
 - the spawn fails;
 - the handshake fails;
-- the stream closes before `initialize` answers.
+- the stream closes before `initialize` answers;
+- the stream closes after `initialize` but before the server's first
+  `textDocument/publishDiagnostics`. Lombok patches the compiler when the first build
+  runs, so a crash in that window is treated as the agent's fault. *(designer's call,
+  from the builder check)*
 
 Lombok's errors come back, but Java support stays: the user is left where they are
 today, not worse. The fallback is silent, like the rest of this feature. It records a
 content-free `sirio_perf` event so a trace can show it happened.
 
-A jdtls that starts with the agent and crashes later is an ordinary crash (`Failed`).
+A jdtls with the agent that crashes after its first publish is an ordinary crash
+(`Failed`). Sirio cannot tell it apart from any other crash.
 
 ## §3 Non-goals
 
@@ -240,7 +267,8 @@ These would make the feature a failure even if it worked:
 - A restart loop, or more than one deliberate restart per key per session.
 - Sirio reaching the network for this.
 - A card, banner or notification about Lombok.
-- A project losing Java support because of the agent (§2.5).
+- A project losing Java support because the agent kept jdtls from starting or from
+  finishing its first build (§2.5).
 - Anything at all changing for a project that does not use Lombok.
 
 ## §5 Constraints
@@ -291,9 +319,12 @@ Cases:
      relaunch with the agent;
    - a newer jar placed afterwards causes no second restart.
 4. `localRepository` in `settings.xml` is honoured.
-5. A launch with the agent fails (the fake exits when it sees the agent argument): a
-   second launch without it follows, and the file gets its server.
-6. A hand-written `java` entry in `languages.toml`: its argv is exactly what was
+5. A launch with the agent fails: a second launch without it follows, and the file gets
+   its server. Two variants: the fake exits during `initialize` when it sees the agent
+   argument, and the fake exits after `initialize` but before its first publish.
+6. During a restart the old server's stream closes, and the new server under the same
+   key keeps running: the old router does not remove it.
+7. A hand-written `java` entry in `languages.toml`: its argv is exactly what was
    written.
 
 It prints one OK line and is listed in `docs/agents/e2e-tests.md`.
