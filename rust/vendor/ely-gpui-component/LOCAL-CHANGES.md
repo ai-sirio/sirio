@@ -205,8 +205,9 @@ fields) included.
   where the caret lay in the laid-out text (`wheeled`); while it lies there still
   `keep_in_view` clamps and does not follow. Every edit (`replace`, `restore`) and caret command
   (`move_to`, `select_to`) ends the hold, as bezel's re-follow on each, even one that leaves
-  the caret where it was (forward Delete, a Left at the start); prepaint also drops it when the
-  caret has moved by other means. Every other path follows as before.
+  the caret where it was (forward Delete, a Left at the start). IME composition, select-all and
+  a double or triple click go through neither, so prepaint drops the hold only when they move the
+  caret's laid-out position. Every other path follows as before.
 - `src/forms/text/mod.rs`, `src/forms/mod.rs`: `Copy`, `Cut`, `Paste`, `Newline` and
   `SelectAll` are `pub use` from `forms::text` and `forms`, so a host can bind a key of its
   own to the field's action. `Copy` shadows the prelude trait's name for a module that

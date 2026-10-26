@@ -71,9 +71,11 @@ pub struct TextInput {
     pub(crate) layout: Option<Layout>,
     pub(crate) scroll: Point<Pixels>,
     /// Where the caret lay, in the laid-out text, when the wheel last scrolled the view: while
-    /// it lies there still the view stays where the wheel left it instead of following it. Any
-    /// edit or caret command ends the hold, as it does in bezel's field (`follow_caret`), so one
-    /// that leaves the caret where it was still brings the view back to it.
+    /// it lies there still the view stays where the wheel left it instead of following it. An
+    /// edit (`replace`, `restore`) or a caret command (`move_to`, `select_to`) ends the hold, as
+    /// it does in bezel's field (`follow_caret`), so one that leaves the caret where it was still
+    /// brings the view back to it. Other paths (IME composition, select-all, a double or triple
+    /// click) end it only when the caret's laid-out position changes.
     pub(crate) wheeled: Option<Point<Pixels>>,
     selecting: bool,
     caret_on: bool,
