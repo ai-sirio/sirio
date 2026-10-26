@@ -84,8 +84,10 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # Three scenarios need a display and are skipped under --state-only (`SKIP <name>: needs a
 # display`, recorded as `skipped` in summary.json): composer_keys types through xdotool (Return,
 # Shift+Return, Up and Down moving the caret, the slash popup taken with Down and Tab, closed by
-# Escape, proved by a frame diff of its box against the frame before the `/`; its fixture is
-# `composer`, because `plain` advertises no slash commands) and reduced_motion
+# Escape, proved by a frame diff of its box against the frame before the `/`; and the composer's
+# field paints nothing of its own (`composer_field_has_no_fill`: in the empty draft's frame every
+# pixel of a band across the field is the card's colour, for the default 1470x833 window); its
+# fixture is `composer`, because `plain` advertises no slash commands) and reduced_motion
 # (SIRIO_REDUCED_MOTION=1: the transcript is pixel-identical in three frames 250 ms apart) and
 # unfocused_spinner (a second window, `surfaces_probe --frame tooltip`, takes the X focus, and the
 # sidebar row's status bloom, which only Sirio's frame clock (`sirio_ui::motion`) repaints, must still turn in three

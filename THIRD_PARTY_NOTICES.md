@@ -183,6 +183,7 @@ naming the crate it came from. In `rust/crates/sirio_ui/src/` that is:
 - `popup.rs`: the popup and filter state and the menu's close lifecycle;
 - `scroll.rs`: the scrollbar's thumb maths, its drag payload and the follow-the-tail state;
 - `chat/thought.rs`: `Takeover`;
+- `combobox.rs`: the type-to-filter select, and the closed face of a select (`select_trigger`);
 - `sidebar/tree_keys.rs`: the tree's arrow-key bindings and cursor step.
 
 Both crates are by clearloop ([crabtalk/bezel](https://github.com/crabtalk/bezel))

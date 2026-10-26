@@ -331,7 +331,7 @@ mod tests {
         &mut gpui::VisualTestContext,
         f32,
     ) {
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let opened = Rc::new(RefCell::new(Vec::new()));
         let shared = opened.clone();
         let (_, _, cx) = testing::host(cx, move |_, _| Page {

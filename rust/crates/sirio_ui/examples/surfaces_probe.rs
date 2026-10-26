@@ -614,7 +614,7 @@ fn main() {
             // Theme observers run when this closure returns; Ely's palette must already
             // follow the mode chosen above when the window draws.
             sirio_ui::ely::init(cx);
-            bezel::ui::input::init(cx);
+            sirio_ui::ely::init(cx);
             sirio_ui::chat::init(cx);
             sirio_ui::text_selection::init(cx);
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);

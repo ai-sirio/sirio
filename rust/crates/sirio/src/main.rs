@@ -28272,8 +28272,7 @@ fn main() {
         Theme::init(cx);
         sirio_ui::ely::init(cx);
         init_motion(cx);
-        bezel::ui::input::init(cx);
-        bezel::ui::combobox::init(cx);
+        sirio_ui::combobox::init(cx);
         sirio_ui::sidebar::tree_keys::init(cx);
         sirio_ui::chat::init(cx);
         sirio_ui::text_selection::init(cx);
@@ -31454,8 +31453,8 @@ done
         tab_count: usize,
         translucency_enabled: bool,
     ) -> SirioWorkspace {
-        bezel::ui::input::init(cx);
-        bezel::ui::combobox::init(cx);
+        sirio_ui::ely::init(cx);
+        sirio_ui::combobox::init(cx);
         sirio_ui::text_selection::init(cx);
         sirio_ui::file_view::init(cx);
         if let Some(theme) = cx.try_global::<Theme>().copied() {

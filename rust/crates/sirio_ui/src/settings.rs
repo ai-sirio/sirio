@@ -8,7 +8,7 @@ use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::status_bar::{UpdateState, UpdateStatus};
 use crate::text_selection::selectable_text;
 use bezel_theme::Theme as BezelTheme;
-use bezel::ui::input::TextField;
+use ely_gpui_component::forms::{InputEvent, TextInput};
 use bezel::ui::widgets::status_dot;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyBinding,
@@ -1007,11 +1007,11 @@ pub struct Settings {
     browser_origins: BTreeSet<String>,
     on_revoke_browser_origin: Option<Rc<dyn Fn(String)>>,
     on_revoke_all_browser_origins: Option<Rc<dyn Fn()>>,
-    /// The Agents screen's search field (F-SET-16): a bezel `TextField`
+    /// The Agents screen's search field (F-SET-16): an Ely `TextInput`
     /// whose content is the filter query. Transient UI state, not part of
     /// the persistence contract — nothing durable depends on what was last
     /// typed into a filter box.
-    agent_search_field: Entity<TextField>,
+    agent_search_field: Entity<TextInput>,
     /// Shared blink state for every settings text field's insertion caret
     /// (search, both cookies, workspace override). One is enough: window
     /// focus is unique, so at most one field can show a caret. Computed
@@ -1179,12 +1179,13 @@ impl Settings {
             on_revoke_browser_origin: None,
             on_revoke_all_browser_origins: None,
             agent_search_field: {
-                let field = cx.new(|cx| {
-                    TextField::new(cx)
-                        .with_placeholder("Search agents")
-                        .with_key_context("SettingsAgentSearch")
-                });
-                cx.observe(&field, |_, _, cx| cx.notify()).detach();
+                let field = cx.new(|cx| TextInput::detached(cx).placeholder("Search agents"));
+                cx.subscribe(&field, |_, _, event: &InputEvent, cx| {
+                    if *event == InputEvent::Changed {
+                        cx.notify();
+                    }
+                })
+                .detach();
                 field
             },
             field_blink: caret::Blink::new(),
@@ -1412,6 +1413,9 @@ impl Settings {
     /// handling (P58, F-SET-02) keeps closing the settings surface when the
     /// menu is not the focused thing.
     fn bind_keys(cx: &mut App) {
+        // The Agents search and the git hosting tokens are Ely's fields, which need Ely's theme
+        // and keys: bound once (a repeat call changes nothing), and before this page's own.
+        crate::ely::init(cx);
         cx.bind_keys([KeyBinding::new(
             "escape",
             CloseSummarizerPicker,

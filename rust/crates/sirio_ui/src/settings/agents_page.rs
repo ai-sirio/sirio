@@ -12,6 +12,7 @@ use bezel::ui::widgets::{
     ButtonStyle, Buttons as _, Content as _, Scaffolding as _, Status as _, card_row_hover,
     status_dot,
 };
+use ely_gpui_component::forms::Input;
 use gpui::Focusable;
 
 /// #334: the old path pill capped the resolved path at 240 px so version plus checksum still fit one meta line.
@@ -58,7 +59,7 @@ impl Settings {
         let query = self
             .agent_search_field
             .read(cx)
-            .content()
+            .text()
             .trim()
             .to_lowercase();
         let first_load = self.provider_availability.is_empty()
@@ -456,7 +457,7 @@ impl Settings {
                                                 .focus(window, cx);
                                         },
                                     )
-                                    .child(search_field.clone()),
+                                    .child(Input::new(&search_field)),
                             );
                             // F-SET-16: a "Refreshed …" stamp next to the
                             // button — the conjunct a byte-identical
@@ -590,7 +591,7 @@ mod tests {
     #[gpui::test]
     async fn agent_search_narrows_rows_and_clearing_restores_them(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![
             AgentAvailability {
                 id: "claude",
@@ -633,7 +634,7 @@ mod tests {
                 .read(cx)
                 .agent_search_field
                 .read(cx)
-                .content()
+                .text()
                 .to_string()
         });
         assert_eq!(
@@ -659,7 +660,7 @@ mod tests {
             let settings = window.root::<Settings>().flatten().expect("settings root");
             settings.update(cx, |settings, cx| {
                 settings.agent_search_field.update(cx, |field, cx| {
-                    field.set_content("", cx);
+                    field.reset_text("", cx);
                 });
                 cx.notify();
             });
@@ -684,7 +685,7 @@ mod tests {
     #[gpui::test]
     async fn the_claude_row_says_which_transport_it_resolved(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![
             AgentAvailability {
                 id: "claude",
@@ -729,7 +730,7 @@ mod tests {
     ) {
         use sirio_registry::LaunchSource;
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![AgentAvailability {
             id: "claude",
             display_name: "Claude Code",
@@ -775,7 +776,7 @@ mod tests {
     ) {
         use sirio_registry::{LaunchSource, UnavailableReason};
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![AgentAvailability {
             id: "omp",
             display_name: "Oh-My-Pi",
@@ -808,7 +809,7 @@ mod tests {
     async fn the_checksum_note_is_a_meta_fragment_on_the_rows_line(cx: &mut TestAppContext) {
         use sirio_registry::{InstalledAgent, Integrity, LaunchSource};
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![AgentAvailability {
             id: "claude",
             display_name: "Claude Code",
@@ -909,7 +910,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (fixture, sources, versions) = outdated_fixture();
         let window = cx.add_window(|_window, cx| {
             Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
@@ -975,7 +976,7 @@ mod tests {
     #[gpui::test]
     async fn update_all_emits_one_update_per_outdated_agent(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (fixture, sources, versions) = outdated_fixture();
         let window = cx.add_window(|_window, cx| {
             Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
@@ -1029,7 +1030,7 @@ mod tests {
     async fn update_all_is_absent_when_nothing_is_outdated(cx: &mut TestAppContext) {
         use sirio_registry::LaunchSource;
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![AgentAvailability {
             id: "claude",
             display_name: "Claude Code",
@@ -1457,7 +1458,7 @@ mod tests {
     #[gpui::test]
     async fn a_search_with_no_match_shows_the_empty_state(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![
             AgentAvailability {
                 id: "claude",

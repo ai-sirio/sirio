@@ -28,34 +28,6 @@ use std::rc::Rc;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
-/// Bezel 0.1.4 fixes the TextField root at 13px/18px and exposes no typography
-/// setter. Style that root while preserving the field's entity identity,
-/// native editing, focus, and notification-driven redraws.
-pub(crate) fn sidebar_text_field(field: gpui::Entity<bezel::ui::input::TextField>) -> impl IntoElement {
-    gpui::ViewElement::new(SidebarTextField(field))
-}
-
-struct SidebarTextField(gpui::Entity<bezel::ui::input::TextField>);
-
-impl gpui::View for SidebarTextField {
-    fn entity_id(&self) -> Option<gpui::EntityId> {
-        Some(self.0.entity_id())
-    }
-
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let typography = Theme::get(cx).with_sidebar_typography().typography;
-        self.0.update(cx, |field, cx| {
-            let mut element = gpui::Render::render(field, window, cx).into_any_element();
-            let root = element
-                .downcast_mut::<Div>()
-                .expect("Bezel TextField root is a Div");
-            root.text_style().font_size = Some(typography.scaled(13.0).into());
-            root.text_style().line_height = Some(typography.scaled(18.0).into());
-            element
-        })
-    }
-}
-
 /// A sidebar hover label, built on Bezel's popover surface with the same
 /// compact font adjustment as its originating panel.
 pub(crate) fn sidebar_tooltip(

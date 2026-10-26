@@ -15,7 +15,8 @@ at start, the list opened and a level chosen, High asked again after a
 relaunch; `effort_full`, `effort_full_light`: the whole ladder, Default and
 Ultracode included, drawn, and Default chosen from it). Three more need a display and
 real X input or windows, and are skipped under --state-only: `composer_keys` (the composer's
-keys through xdotool: Return, Shift+Return, Up and Down, the slash popup), `reduced_motion`
+keys through xdotool: Return, Shift+Return, Up and Down, the slash popup, and the frame check
+`composer_field_has_no_fill`: the field paints no fill or frame of its own over the card), `reduced_motion`
 (SIRIO_REDUCED_MOTION=1 holds the thinking orb still) and `unfocused_spinner` (the sidebar
 row's status bloom keeps turning while another window holds the focus, and what that costs in
 CPU). After them, unless --no-identity, the five agents' marks as native
@@ -1025,6 +1026,14 @@ POPUP_REGION = (0.231, 0.606, 0.204, 0.148)
 # Where a click lands in the composer card, in window pixels from the bottom edge and as a
 # fraction of the width: the card's text area, in the chat column.
 COMPOSER_CLICK = (0.487, 150)
+# Where the composer's field must paint nothing, in pixels of the default 1470x833 window as an
+# ImageMagick `WxH+X+Y`: a band on the field's second and third rows (the first holds the placeholder
+# and the caret) across its whole width and a few pixels of the card's padding to each side, so that
+# a frame drawn on the field's edge lies inside it; and the card's own padding just left of the
+# field on the same rows. `composer_field_has_no_fill` compares the two.
+DEFAULT_WINDOW = "1470x833"
+FIELD_BAND = "745x28+343+672"
+CARD_BESIDE_FIELD = "8x28+340+672"
 
 
 def crop_difference(run: Run, before: Path, after: Path, crop: str, tolerance: int = 0) -> int:
@@ -1132,6 +1141,55 @@ def burst(run: Run, chat: Instance, prefix: str, count: int = 3, gap: float = 0.
     return frames
 
 
+def colour_counts(frame: Path, crop: str) -> dict[str, int]:
+    """How many pixels of each exact colour (`#RRGGBB`) `crop` (an ImageMagick `WxH+X+Y`) holds."""
+    histogram = subprocess.run(
+        ["magick", str(frame), "-crop", crop, "+repage", "-fuzz", "0", "-format", "%c", "histogram:info:"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    counts: dict[str, int] = {}
+    for line in histogram.splitlines():
+        found = re.match(r"\s*(\d+):.*?(#[0-9A-Fa-f]{6})", line)
+        if found:
+            counts[found.group(2).upper()] = counts.get(found.group(2).upper(), 0) + int(found.group(1))
+    if not counts:
+        raise Failure(f"no colours counted in {crop} of {frame.name}")
+    return counts
+
+
+def composer_field_has_no_fill(run: Run, frame: Path) -> None:
+    """Goal 5: the composer's field paints nothing of its own, no fill and no frame, so the shell is
+    the one surface the field and the card read as. In the frame of an empty draft, every pixel of
+    a band across `composer-input` (on rows below the placeholder and the caret, with a few pixels
+    of the card's padding to each side) is the colour of the card just outside the field, exactly
+    (`-fuzz 0`).
+
+    Every pixel, and not only the band's most frequent colour: Ely's framed field fills with the
+    same `surface` as the shell, so what tells it apart is its border and its corners, a few
+    pixels the mode would not count."""
+    size = subprocess.run(
+        ["identify", "-format", "%wx%h", str(frame)], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    if size != DEFAULT_WINDOW:
+        raise Failure(
+            f"composer_field_has_no_fill: the frame is {size}, and its band is placed for {DEFAULT_WINDOW}"
+        )
+    beside = colour_counts(frame, CARD_BESIDE_FIELD)
+    if len(beside) != 1:
+        raise Failure(f"composer_field_has_no_fill: the card beside the field is not one colour: {beside}")
+    (card, _), = beside.items()
+    band = colour_counts(frame, FIELD_BAND)
+    stray = sum(count for colour, count in band.items() if colour != card)
+    run.log(
+        f"composer_field_has_no_fill: the card is {card}; {stray} of {sum(band.values())} pixels of "
+        f"the field's band differ from it ({dict(sorted(band.items(), key=lambda item: -item[1])[:3])})"
+    )
+    if stray:
+        raise Failure(
+            f"composer_field_has_no_fill: the field paints {stray} pixels of its own over the card's {card}: {band}"
+        )
+
+
 def composer_keys(run: Run) -> str | None:
     """The composer's keys, typed through X as a hand would: the gpui tests drive the keymap, this
     drives the whole path from the server's key event to the draft.
@@ -1190,6 +1248,7 @@ def composer_keys(run: Run) -> str | None:
     # step 4's comparison empty).
     clear_draft()
     chat.frame("before-slash")
+    composer_field_has_no_fill(run, scenario.out / "frames" / "before-slash.png")
     x_type(run, "/")
     chat.until("the draft is '/'", lambda s: s["composer"] == "/", timeout=10)
     chat.frame("slash-popup")

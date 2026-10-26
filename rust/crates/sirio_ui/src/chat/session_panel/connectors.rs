@@ -624,7 +624,7 @@ mod tests {
         // test scheduler refuses unless it is told real threads are in play.
         cx.executor().allow_parking();
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(crate::chat::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut args = vec![CLAUDE_FIXTURE.to_string(), mode.to_string()];

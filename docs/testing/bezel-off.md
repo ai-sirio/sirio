@@ -207,8 +207,9 @@ difference of one level is not one (the tolerance takes it).
 
 Frames say what a surface looks like; these say what it does. Each passes on the tree before the
 PRs that move a surface off bezel, and a PR that touches the behaviour must still pass it. The
-checks written for this page (the thumb drag, `composer_keys`, `reduced_motion`, `unfocused_spinner`
-and the five gpui tests of Enter, the model search and Ctrl+C) were each shown to fail by breaking the behaviour they
+checks written for this page (the thumb drag, `composer_keys` and its `composer_field_has_no_fill`,
+`reduced_motion`, `unfocused_spinner`, the worktree select's test and the five gpui tests of Enter, the
+model search and Ctrl+C) were each shown to fail by breaking the behaviour they
 name, so a green run of them means something; the others are existing checks, named here so the
 PRs know which ones gate them, and were not mutated for it.
 
@@ -217,6 +218,8 @@ PRs know which ones gate them, and were not mutated for it.
 | Dragging a scrollbar thumb: the thumb follows the pointer, and a long drag stops at the track's end (file view, transcript list, horizontal bar) | `Scripts/Tests/test-scroll-drag-probe.sh --xvfb` |
 | The transcript follows its tail, a scrolled-back view does not jump when a turn arrives | `Scripts/Tests/test-ely-chat-ui-e2e.py`, scenario `long_history` |
 | The composer's keys as X delivers them: Return sends, Shift+Return is a newline, Up and Down move the caret with no popup open, the slash popup takes Down and Tab and closes on Escape | the same script, scenario `composer_keys` (fixture `composer`: `plain` advertises no slash commands) |
+| The composer's field paints no fill and no frame of its own: with an empty draft every pixel of a band across the field is the card's colour, exactly | the same script, scenario `composer_keys`, check `composer_field_has_no_fill` (default 1470x833 window) |
+| The worktree select answers Down, Enter and Escape while its search field has the focus, and a query that matches nothing leaves nothing to choose | `the_worktree_combobox_answers_its_keys_while_its_search_field_has_focus` |
 | Reduced motion holds the thinking orb and the transcript still | the same script, scenario `reduced_motion` |
 | A running turn's sidebar status bloom keeps turning while another window holds the X focus (Sirio's frame clock does not wait for an active window), and what that costs in CPU | the same script, scenario `unfocused_spinner`, with `--cpu-ceiling` |
 | Input methods: Enter while a completion or a composition is open | `cargo nextest run -p sirio_ui ely_composer_enter_respects_completion_and_ime` |

@@ -1,4 +1,4 @@
-//! The composer: bezel's `TextField` in the gallery's Composer card, with the
+//! The composer: Ely's `TextInput` in the gallery's Composer card, with the
 //! `/` and `@` tokens read off the text the way the gallery's `reread` does.
 //!
 //! Transcribed from `crabtalk/bezel` tag `v0.1.4`,
@@ -391,7 +391,7 @@ use super::{Chat, PopupAccept, PopupNext, PopupPrevious};
 
 /// An upward menu at a window point — `popover::anchored_menu_above` with an
 /// explicit position, for a token/caret anchor that is measured in window
-/// coordinates (`TextField::offset_bounds`). Same material
+/// coordinates (`TextInput::bounds_for`). Same material
 /// (`ui::surface::popover`), entrance motion, occlusion and window snapping
 /// as bezel's own; bezel's `anchored_menu_above_at` takes an ancestor-relative
 /// point instead, which a caret measurement is not.
@@ -453,10 +453,12 @@ impl Chat {
         cx: &mut Context<Self>,
     ) {
         let text: SharedString = text.into();
+        // The field holds line endings as `\n`; the cache must read what it will.
+        let text: SharedString = crate::ely_ui::normalize(&text, true).into();
         self.draft = text.clone();
         self.draft_caret = text.len();
         self.composer_field
-            .update(cx, |field, cx| field.set_content(text, cx));
+            .update(cx, |field, cx| field.reset_text(text.to_string(), cx));
         self.refresh_token_popups(cx);
     }
 
@@ -464,17 +466,19 @@ impl Chat {
     /// A disabled composer refuses edits by putting the last accepted draft
     /// back (`offline_enter_never_discards_the_typed_draft`).
     pub(crate) fn reread_composer(&mut self, cx: &mut Context<Self>) {
+        // The blink and every caret move notify, so most calls end at this
+        // comparison, with nothing read out of the field.
         let (content, caret) = {
             let field = self.composer_field.read(cx);
-            (field.content().clone(), field.cursor())
+            if field.text() == self.draft.as_ref() && field.cursor() == self.draft_caret {
+                return;
+            }
+            (SharedString::from(field.text().to_owned()), field.cursor())
         };
-        if content == self.draft && caret == self.draft_caret {
-            return;
-        }
         if self.composer_disabled() && content != self.draft {
-            let last = self.draft.clone();
+            let last = self.draft.to_string();
             self.composer_field
-                .update(cx, |field, cx| field.set_content(last, cx));
+                .update(cx, |field, cx| field.reset_text(last, cx));
             return;
         }
         self.draft = content;
@@ -579,15 +583,9 @@ use ely_gpui_component::{
     typography::EllipsisTooltip,
 };
 
-/// How much of bezel's text field is clipped away on every side. The field
-/// draws a 1px border on an 8px corner radius; clipping 3px clears the arc
-/// where it bends inward, so no trace of the border or the focus ring shows.
-const FIELD_CROP: f32 = 3.0;
-
-/// How far the clip box sits outside the composer's content: the field's 1px
-/// border and 10px inset, less what is clipped. The text lands on the content
-/// edge, lined up with the chips and the tool row.
-const FIELD_INSET: f32 = 11.0 - FIELD_CROP;
+/// The room above and below the field's rows inside `composer-input`: what the
+/// card's field always had between its edge and its text.
+const FIELD_PAD_Y: f32 = 5.0;
 
 /// The distance from the shell's top edge to the field's first row: its 1px
 /// border and 12px padding. The completion popups hang above the token that
@@ -843,7 +841,7 @@ impl Chat {
             let anchor = self
                 .composer_field
                 .read(cx)
-                .offset_bounds(0, window)
+                .bounds_for(0)
                 .map(|row| gpui::point(row.left(), row.top() - px(8.0 + SHELL_TOP_INSET)));
             anchor.map(|anchor| {
                 let rows: Vec<AnyElement> = candidates
@@ -943,7 +941,7 @@ impl Chat {
             let anchor = self
                 .composer_field
                 .read(cx)
-                .offset_bounds(at, window)
+                .bounds_for(at)
                 .map(|row| gpui::point(row.left(), row.top() - px(8.0 + SHELL_TOP_INSET)));
             anchor.map(|anchor| {
                 let rows: Vec<AnyElement> = candidates
@@ -1104,17 +1102,19 @@ impl Chat {
                 }))
         });
 
-        // Bezel's field draws a frame of its own (fill, border, a 10px inset).
-        // The shell is the one frame the composer has, so the field is laid
-        // partly outside a clip box (`FIELD_CROP`, `FIELD_INSET`): its border
-        // and the focus ring are never drawn, and it paints no fill
-        // (`with_transparent_fill`), so the shell's themed surface shows
-        // through (`PromptInput::custom`).
+        // The field is Ely's raw `TextInput`: it paints text, selection and
+        // caret and no frame or fill, so the shell's themed surface shows
+        // through (`PromptInput::custom`) and the shell is the one frame the
+        // composer has. The text lands on the content edge, lined up with the
+        // chips and the tool row, in the 13px/18px the field has always had.
         let input_box = div()
             .id("composer-input")
             .debug_selector(|| "composer-input".into())
             .relative()
             .w_full()
+            .py(px(FIELD_PAD_Y))
+            .text_size(px(13.0))
+            .line_height(px(18.0))
             .when(disabled, |input| input.opacity(0.6))
             .on_mouse_down(
                 MouseButton::Right,
@@ -1123,12 +1123,7 @@ impl Chat {
                     this.open_composer_context_menu(event.position, window, cx);
                 }),
             )
-            .child(
-                div()
-                    .mx(px(-FIELD_INSET))
-                    .overflow_hidden()
-                    .child(div().m(px(-FIELD_CROP)).child(self.composer_field.clone())),
-            )
+            .child(self.composer_field.clone())
             .children(slash_popup)
             .children(mention_popup)
             .children(composer_context_menu);

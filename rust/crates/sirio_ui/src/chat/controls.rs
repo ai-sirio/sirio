@@ -5,7 +5,10 @@
 
 use super::composer_view::{EFFORT_RESET, EFFORT_ULTRACODE, effort_rows};
 use super::*;
-use ely_gpui_component::menus::{Hang, Menu, MenuItem, MenuPanel, layer, panel_surface};
+use ely_gpui_component::{
+    forms::Input,
+    menus::{Hang, Menu, MenuItem, MenuPanel, layer, panel_surface},
+};
 use sirio_acp::EffortChoice;
 
 /// A popup's width at the interface's text size: the 13px design size at
@@ -604,7 +607,7 @@ impl Chat {
                             .debug_selector(|| "model-search-input".into())
                             .w_full()
                             .mb(px(6.0))
-                            .child(self.model_search_field.clone()),
+                            .child(Input::new(&self.model_search_field)),
                     )
                 });
             layer(
@@ -1037,7 +1040,7 @@ impl Chat {
     /// The rows of whichever catalogue popup is open, in the order drawn.
     pub(super) fn picker_rows(&self, cx: &App) -> Vec<PickerRow> {
         if self.model_picker_open {
-            let query = self.model_search_field.read(cx).content().to_string();
+            let query = self.model_search_field.read(cx).text().to_owned();
             self.available_models
                 .iter()
                 .filter(|option| model_query_matches(option, &query))

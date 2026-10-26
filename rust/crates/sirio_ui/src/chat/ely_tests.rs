@@ -34,7 +34,7 @@ impl Render for ThemeProbe {
 async fn ely_theme_change_preserves_chat_state_and_bezel_palette(cx: &mut TestAppContext) {
     let dir = TempDir::new();
     cx.update(Theme::init);
-    cx.update(bezel::ui::input::init);
+    cx.update(crate::ely::init);
     cx.update(init);
     cx.update(ely_gpui_component::init_chat);
     let (host, cx) = cx.add_window_view(|_, cx| {
@@ -279,7 +279,7 @@ impl Render for ActivityProbe {
 #[gpui::test]
 async fn ely_tool_and_thought_expansion_survives_virtualization(cx: &mut TestAppContext) {
     cx.update(Theme::init);
-    cx.update(bezel::ui::input::init);
+    cx.update(crate::ely::init);
     cx.update(init);
     let (host, cx) = cx.add_window_view(|_, cx| {
         let chat = cx.new(|cx| {
@@ -863,7 +863,7 @@ async fn ely_history_opens_the_chosen_session_and_confirms_deletion(cx: &mut Tes
     let long_title = "LongSessionTitle".repeat(12);
     history_database(&database_path, &long_title);
     cx.update(Theme::init);
-    cx.update(bezel::ui::input::init);
+    cx.update(crate::ely::init);
     cx.update(init);
     let path = database_path.clone();
     let (chat, cx) = cx.add_window_view(move |_, cx| {

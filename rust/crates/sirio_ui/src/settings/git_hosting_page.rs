@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 
-use bezel::ui::input::TextField;
 use bezel::ui::widgets::{ButtonStyle, Buttons as _, Content as _, Scaffolding as _};
+use ely_gpui_component::forms::{Input, TextInput};
 use gpui::Task;
 use sirio_forge::{Forge, Means, known_forge};
 
@@ -26,7 +26,7 @@ pub(crate) enum GitHostStatus {
 pub(crate) struct GitHosting {
     pub(crate) hosts: Vec<HostRow>,
     pub(crate) loaded: bool,
-    pub(crate) tokens: HashMap<String, Entity<TextField>>,
+    pub(crate) tokens: HashMap<String, Entity<TextInput>>,
     pub(crate) status: HashMap<String, GitHostStatus>,
     load_task: Option<Task<()>>,
     actions: Vec<Task<()>>,
@@ -49,7 +49,7 @@ impl Settings {
                         .entry(row.host.clone())
                         .or_insert_with(|| {
                             cx.new(|cx| {
-                                TextField::new(cx).with_placeholder("Personal access token")
+                                TextInput::detached(cx).placeholder("Personal access token")
                             })
                         });
                 }
@@ -84,7 +84,7 @@ impl Settings {
                             .status
                             .insert(host.clone(), GitHostStatus::Saved(account));
                         if let Some(field) = settings.git_hosting.tokens.get(&host) {
-                            field.update(cx, |field, cx| field.clear(cx));
+                            field.update(cx, |field, cx| field.reset_text("", cx));
                         }
                     }
                     Ok(None) => {
@@ -114,7 +114,7 @@ impl Settings {
         let Some(field) = self.git_hosting.tokens.get(&host) else {
             return;
         };
-        let token = field.read(cx).content().to_string();
+        let token = field.read(cx).text().to_owned();
         if token.trim().is_empty() {
             return;
         }
@@ -307,7 +307,7 @@ impl Settings {
                 if let Some(field) = self.git_hosting.tokens.get(&host) {
                     let entity = entity.clone();
                     let target = host.clone();
-                    tail = tail.child(div().w(px(220.0)).child(field.clone())).child(
+                    tail = tail.child(div().w(px(220.0)).child(Input::new(field))).child(
                         bezel_theme
                             .button("Save token", ButtonStyle::Prominent, None)
                             .id(("settings-git-host-token-save", index))
@@ -395,7 +395,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let source = FakeSource::with(Connection::NoForgeRemote);
         *source.token_answer.lock().unwrap() = Err(ForgeError::NotAuthenticated {
             host: "git.corp".into(),
@@ -403,8 +403,9 @@ mod tests {
         cx.update(|cx| forge_source::set_source(source.clone(), cx));
         let settings = cx.new(|cx| Settings::with_snapshot(cx, SettingsSnapshot::default()));
         settings.update(cx, |settings, cx| {
-            let field = cx.new(|cx| TextField::new(cx));
-            field.update(cx, |field, cx| field.set_content("  glpat-secret \n", cx));
+            let field = cx.new(|cx| TextInput::detached(cx));
+            // A paste: a single-line field folds the newline into a space.
+            field.update(cx, |field, cx| field.insert("  glpat-secret \n", cx));
             settings.git_hosting.tokens.insert("git.corp".into(), field);
             settings.save_git_host_token("git.corp".into(), Forge::GitLab, cx);
         });
@@ -432,12 +433,10 @@ mod tests {
         });
         let tokens = source.tokens.lock().unwrap();
         // NOTE (deviation from the brief's verbatim expectation, per the
-        // dispatch's "follow the tree when it differs"): bezel's single-line
-        // `TextField` normalizes a pasted newline to a space on `set_content`
-        // (`bezel-ui 0.1.4 input.rs`: `normalize` — "a pasted newline becomes
-        // a space rather than silently truncating what was pasted"), so by the
-        // time the page reads `content()` the trailing `\n` is already a
-        // space. The page still hands over exactly what the field holds —
+        // dispatch's "follow the tree when it differs"): a single-line
+        // `TextInput` folds a pasted newline into a space, so by the time the
+        // page reads `text()` the trailing `\n` is already a space. The page
+        // still hands over exactly what the field holds —
         // leading spaces intact, i.e. nothing trimmed page-side; the host
         // (Task 3) owns trimming before verify/store. Same single-line shape
         // as the right panel's own token field (`change_requests.rs`).
