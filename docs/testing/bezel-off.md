@@ -9,7 +9,7 @@ The tools:
 | File | What it is |
 | --- | --- |
 | `Scripts/bezel-off-captures.sh` | Captures the tree it runs in: the visual sweep, the surfaces probe, the Changes E2E and the Ely chat E2E, into one set of PNG frames. |
-| `Scripts/capture-diff.py` | Compares two sets of frames and writes `changed.tsv` and a static `index.html`. |
+| `Scripts/capture-diff.py` | Compares two sets of frames (a pixel counts as changed when a channel differs by more than `--tolerance`, default 1 level) and writes `changed.tsv` and a static `index.html`. |
 | `Scripts/capture-masks.tsv` | The regions a clock drives, painted black before two sets are compared. |
 | `Scripts/Tests/test-capture-diff.sh` | The contract of `capture-diff.py` on synthetic images (`CAPTURE DIFF CONTRACT OK`). |
 | `SIRIO_REDUCED_MOTION=1` | A debug-only switch (compiled out of release builds) that makes gpui snap every animation to its rest state. The capture script exports it. |
@@ -30,7 +30,8 @@ git worktree add ../bezel-off-base <base-commit>
 # The PR: the same script in the PR's tree, so the same build recipe and the same display size.
 Scripts/bezel-off-captures.sh --out-dir ../bezel-off-captures/after --xvfb
 
-# The diff: masks are always applied; --allow is the PR's attribution file.
+# The diff: masks are always applied (the tolerance is 1 level unless --tolerance says otherwise);
+# --allow is the PR's attribution file.
 Scripts/capture-diff.py ../bezel-off-captures/before/frames ../bezel-off-captures/after/frames \
   --out ../bezel-off-captures/diff --masks Scripts/capture-masks.tsv [--allow ATTRIBUTION.tsv]
 ```
@@ -54,33 +55,54 @@ What it cannot remove, a mask hides or the script drops by name.
 
 ## Reading the diff
 
-`capture-diff.py BEFORE AFTER --out DIR [--masks TSV] [--allow TSV]` pairs frames by their path
+`capture-diff.py BEFORE AFTER --out DIR [--masks TSV] [--allow TSV] [--tolerance N]` pairs frames by their path
 under BEFORE and AFTER without the `.png` (`changes-dark/local-split`) and prints one of:
 
 | Line | Exit | Meaning |
 | --- | --- | --- |
-| `CAPTURE DIFF IDENTICAL` | 0 | No frame differs once the masks are painted over. |
+| `CAPTURE DIFF IDENTICAL` | 0 | No frame has a pixel more than the tolerance apart once the masks are painted over. |
 | `CAPTURE DIFF OK (<n> changed, all attributed)` | 0 | Frames changed, and every changed pixel lies in an `--allow` rectangle. |
-| `CAPTURE DIFF FAILED (...)` | 1 | A frame was added, removed or changed size, or a pixel changed outside every mask and allow rectangle (an `UNATTRIBUTED <frame>` line says which). |
-| `capture-diff: ...` on stderr | 2 | The tool could not decide: a missing tree, a malformed table, no frame at all, a file that is not an image. |
+| `CAPTURE DIFF FAILED (...)` | 1 | A frame was added, removed or changed size, or a pixel changed (by more than the tolerance) outside every mask and allow rectangle (an `UNATTRIBUTED <frame>` line says which). |
+| `capture-diff: ...` on stderr | 2 | The tool could not decide: a missing tree, a malformed table, a tolerance outside 0..255, no frame at all, a file that is not an image. |
 
 `DIR/changed.tsv` has one row per listed frame, with the columns
 `frame status pixels bbox unattributed_pixels rows`:
 
 - `status` is `changed`, `added` (only in AFTER), `removed` (only in BEFORE) or `size` (both, at
   different sizes). An identical frame is not listed.
-- `pixels` is the number of pixels that differ at all (fuzz 0), after the masks. `bbox` is
+- `pixels` is the number of pixels more than the tolerance apart, after the masks. `bbox` is
   `x,y,w,h` of the union of those pixels. `unattributed_pixels` is how many of them lie outside
   every allow rectangle. `rows` lists the allow lines whose rectangle holds at least one changed
   pixel, joined with `;`. All four are `-` or empty for `added`, `removed` and `size`.
-- A pixel is counted from the mask ImageMagick's `compare` draws, never from its `-metric AE`
-  figure: on ImageMagick 7.1 (HDRI) that figure is not a pixel count (a one-pixel change printed
-  0.6, and a change of 1/255 in one channel printed 0.0013 with exit 0).
+- Every count comes from a difference image, never from ImageMagick's `compare`: the script
+  writes the largest per-channel difference of each pixel (R, G, B and alpha, in 8-bit levels, one
+  byte per pixel) and a pixel is changed iff that byte is greater than the tolerance. `compare
+  -fuzz` is a colour distance, which is not that rule, and on ImageMagick 7.1 (HDRI) its `-metric
+  AE` figure is not a pixel count (a one-pixel change printed 0.6, a change of 1/255 in one channel
+  0.0013 with exit 0). The pipeline is described at the top of `Scripts/capture-diff.py`.
 
 `DIR/index.html` is a static page: the listed frames as before | after | diff, with the allowed
 rectangles drawn in outline over each image. The listed frames' images are copied under `DIR`
 (`before/`, `after/`, `diff/`) and the page reaches them by relative paths with no leading slash,
 so `DIR` can be published as it is.
+
+## The tolerance: `--tolerance N`
+
+`--tolerance N` (levels on the 8-bit scale, an integer from 0 to 255, default 1) is the noise
+floor. After the masks are painted, a pixel counts as changed iff the largest of its channels'
+differences (R, G, B and alpha) between the two images is greater than N; the verdict, `pixels`,
+`bbox`, `unattributed_pixels` and the `rows` are all counted that way. `--tolerance 0` compares
+strictly.
+
+Why the default is 1: Mesa's software Vulkan (lavapipe) rasterizes a few glyph pixels exactly one
+level apart in one channel from one app process to the next. The pixel is the same in every frame
+of one process and differs between processes, and the set of such pixels did not settle over five
+runs (two of them found a pixel the earlier ones had not), so masking them one by one cannot end.
+
+What it cannot hide: any difference of two levels or more in any channel, in any frame; in practice
+a change of colour, shape or position that a person can see moves some pixel that far. It does hide a real change
+of exactly one level, so a PR that means to change a colour by one level must say so and be
+checked with `--tolerance 0`.
 
 ## The mask table: `Scripts/capture-masks.tsv`
 
@@ -113,28 +135,26 @@ reviewer sees the rectangle and the change together.
 
 ## Masks in force
 
-`Scripts/capture-masks.tsv` was derived from three runs of one build (60 frames each: 5 + 5
-sweep, 4 + 4 Changes, 42 chat) and checked against a fourth that had no mask added for it (it
-found the cancelled line sized to the digits two runs happened to differ in, one more noise pixel
-and the session dots; all three are in the table now). One line per rectangle; the table says
-what each category is and what it blinds.
+`Scripts/capture-masks.tsv` was derived from runs of one build (60 frames each: 5 + 5 sweep,
+4 + 4 Changes, 42 chat); two runs made after it was fitted found the cancelled line sized to the
+digits two runs happened to differ in, the session dots, and the status bar path longer than
+the mask (a `TMPDIR` change); all three are in the table now. One
+line per rectangle; the table says what each category is and what it blinds.
 
 | Category | Frames | What moves | What the mask blinds |
 | --- | --- | --- | --- |
 | Usage meter | `sweep-*`, `changes-*`, `chat-ui-default/scenarios/*` | The status bar's left end reads the user's live account: percent used and the reset countdown (`4h 9m`), fetched over the network, so it differs per run and is sometimes absent. | The meter and its loading mark, x 76..376, y 802..824. |
-| Fixture path | the same | The status bar's right end shows the branch and the fixture directory, whose name `mktemp` randomises (not a clock). | The right label, from x 955 (chat), 1040 (Changes) or 1140 (sweep). |
+| Fixture path | the same | The status bar's right end shows the branch and the fixture directory, whose name `mktemp` randomises (not a clock). The label is right-aligned, so its left edge follows the length of `TMPDIR` (found on the sixth run, when `visual-sweep.sh` began to honour `TMPDIR` and its label grew 114 px to the left). | The right label, from x 780 (room for the longest `TMPDIR` the script accepts, 60 characters). |
 | Message time | the chat scenarios that show one (see the file) | The `HH:MM` wall clock between turns, centred at x 715. | 52 x 17 px at each time's row. |
 | Cancelled-line time | `scenarios/cancel/frames/after-cancel` | `HH:MM · cancelled`, centred, whose width follows the digits. | The whole line, x 655..775. |
 | Turn duration | `scenarios/staged-queue/frames/queue-drained` | `125 ms`, the elapsed time of a turn. | 50 x 17 px. |
 | Crash addresses | `scenarios/death-recovery/frames/agent-died` | The dead fixture agent's crash report prints process addresses that ASLR moves on every start (not a clock). | 400 x 45 px of the error text. |
 | Identity time | `chat-ui-default/identity/*` | The same `HH:MM` in the identity probe's own window (820x700). | 52 x 18 px. |
 | Sidebar session dots | `chat-ui-default/scenarios/*` | The green connected indicators on the session's sidebar row show in some runs and not in others: a timing race of the fixture session, not a clock (seen in `activity` and `death-recovery/recovered`). | 32 x 26 px at the right end of the session's sidebar row. |
-| Glyph noise | `changes-*/error`, `changes-*/local-*`, `scenarios/activity`, `scenarios/effort-full*` | One glyph pixel renders 1/255 apart in one channel between app processes: the same in every frame of one process, different between processes (text rasterization, not a clock). | Exactly the observed pixels, 1x1 (1x2 at 855,95). |
 
 No caret, spinner, orb or trace-timer mask was needed: with `SIRIO_REDUCED_MOTION=1` those draw
-their rest state. The glyph-noise set has not settled: the third run found a pixel the first two
-had not, so a later run can show another one. A new one is a line to add to the table (one pixel,
-this `why`), not a change to look for, and `Scripts/capture-diff.py` stays at fuzz 0 on purpose.
+their rest state. A mask is for a clock or a run-to-run accident, sized to the whole element; a
+difference of one level is not one (the tolerance takes it).
 
 ## Per PR
 

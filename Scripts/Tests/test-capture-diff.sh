@@ -111,14 +111,93 @@ expect_cell a pixels 1
 expect_cell a bbox 10,10,1,1
 expect_cell a unattributed_pixels 1
 
-# a difference of 1/255 in one channel is invisible to the eye and to ImageMagick's AE figure
+# The noise floor: a pixel counts as changed iff its largest channel difference is greater than
+# --tolerance (default 1). Lavapipe's text rasterization is one level apart in one channel from
+# one app process to the next, and a change of two levels is not that.
+tweak() { # color point file: the base picture with one pixel in another color
+  magick -size 64x64 xc:'#336699' -fill "$1" +antialias -draw "point $2" "PNG24:$3"
+}
 new_case one-step
+base "$B/a.png"; tweak '#336698' 10,10 "$A/a.png"
+run_diff "$B" "$A" --out "$O"
+expect_code 0
+expect_out "CAPTURE DIFF IDENTICAL"
+expect_rows 0
+run_diff "$B" "$A" --out "$O" --tolerance 0
+CASE="one-step, --tolerance 0"; expect_code 1
+expect_cell a pixels 1
+expect_cell a bbox 10,10,1,1
+
+new_case two-steps
+base "$B/a.png"; tweak '#33669b' 10,10 "$A/a.png"
+run_diff "$B" "$A" --out "$O"
+expect_code 1
+expect_cell a status changed
+expect_cell a pixels 1
+expect_cell a bbox 10,10,1,1
+run_diff "$B" "$A" --out "$O" --tolerance 2
+CASE="two-steps, --tolerance 2"; expect_code 0
+expect_out "CAPTURE DIFF IDENTICAL"
+
+# one level in every channel is still one level: the rule is a maximum, not a sum or a distance
+new_case one-step-everywhere
+base "$B/a.png"; tweak '#34679a' 10,10 "$A/a.png"
+run_diff "$B" "$A" --out "$O"
+expect_code 0
+expect_out "CAPTURE DIFF IDENTICAL"
+run_diff "$B" "$A" --out "$O" --tolerance 0
+CASE="one-step-everywhere, --tolerance 0"; expect_code 1
+expect_cell a pixels 1
+
+# a pixel one level apart is not counted, nor does it widen the bounding box of one that is
+new_case noise-and-change
 base "$B/a.png"
-magick -size 64x64 xc:'#336699' -fill '#336698' +antialias -draw "point 10,10" "PNG24:$A/a.png"
+magick -size 64x64 xc:'#336699' -fill '#336698' +antialias -draw "point 10,10" -fill '#ff0000' -draw "point 30,30" "PNG24:$A/a.png"
 run_diff "$B" "$A" --out "$O"
 expect_code 1
 expect_cell a pixels 1
-expect_cell a bbox 10,10,1,1
+expect_cell a bbox 30,30,1,1
+expect_cell a unattributed_pixels 1
+
+# the alpha channel counts too, by the same rule, and the BEFORE image's alpha is read as well as
+# the AFTER image's (both pixels here are half transparent, 128 vs 129 vs 130 of 255)
+alpha_at() { # level file: opaque picture whose pixel 10,10 has this alpha
+  magick -size 64x64 xc:'rgba(51,102,153,1)' -channel A -fx "(i==10 && j==10) ? $1/255 : 1" +channel "PNG32:$2"
+}
+new_case alpha
+alpha_at 128 "$B/a.png"; alpha_at 128 "$A/a.png"
+run_diff "$B" "$A" --out "$O"
+expect_code 0
+expect_out "CAPTURE DIFF IDENTICAL"
+alpha_at 129 "$A/a.png"
+run_diff "$B" "$A" --out "$O"
+CASE="alpha, one level"; expect_code 0
+expect_out "CAPTURE DIFF IDENTICAL"
+alpha_at 130 "$A/a.png"
+run_diff "$B" "$A" --out "$O"
+CASE="alpha, two levels"; expect_code 1
+expect_cell a pixels 1
+base "$B/a.png"
+run_diff "$B" "$A" --out "$O"
+CASE="alpha, opaque against 130"; expect_code 1
+expect_cell a pixels 1
+
+# the tolerance applies after the masks, and an allow rectangle attributes what it counts
+new_case two-steps-allowed
+base "$B/a.png"; tweak '#33669b' 10,10 "$A/a.png"
+mask_line a 8 8 5 5 "ui::tooltip::Tooltip" > "$WORK/allow.tsv"
+run_diff "$B" "$A" --out "$O" --allow "$WORK/allow.tsv"
+expect_code 0
+expect_out "CAPTURE DIFF OK (1 changed, all attributed)"
+
+new_case bad-tolerance
+base "$B/a.png"; base "$A/a.png"
+run_diff "$B" "$A" --out "$O" --tolerance 256
+expect_code 2
+expect_no_out "CAPTURE DIFF IDENTICAL"
+run_diff "$B" "$A" --out "$O" --tolerance=-1
+CASE="bad-tolerance: negative"; expect_code 2
+expect_no_out "CAPTURE DIFF IDENTICAL"
 
 # the bounding box is the union of the changed regions, corners included
 new_case corners

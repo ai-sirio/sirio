@@ -6,9 +6,9 @@
 sweep-*/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
 changes-*/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
 chat-ui-default/scenarios/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
-sweep-*/*	1140	802	330	22	status bar path: the mktemp-random directory name of the fixture (not a clock)
-changes-*/*	1040	802	430	22	status bar path: the mktemp-random directory name of the fixture (not a clock)
-chat-ui-default/scenarios/*	955	802	515	22	status bar path: the mktemp-random directory name of the fixture (not a clock)
+sweep-*/*	780	802	690	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left)
+changes-*/*	780	802	690	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left)
+chat-ui-default/scenarios/*	780	802	690	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left)
 #
 # Chat transcript: the time between turns, centred in the transcript column (HH:MM wall clock).
 chat-ui-default/scenarios/activity/frames/*	689	398	52	17	message time (HH:MM wall clock)
@@ -47,14 +47,3 @@ chat-ui-default/scenarios/*	240	194	32	26	sidebar session dots: the green connec
 #
 # The probe window of the identity lane (820x700): the time of its one message.
 chat-ui-default/identity/*	385	209	52	18	message time (HH:MM wall clock) in the identity probe window
-#
-# One-pixel text rasterization noise, found by diffing three runs of one build: a glyph pixel comes out
-# 1/255 apart in one channel, the same way in every frame of one app process and differently between
-# processes. Each line masks one observed pixel and no more. The set has not settled (a third run found a
-# new pixel), so a later run can show another one: that is a mask to add here, not a change to look for.
-changes-*/error	855	95	1	2	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)
-changes-*/error	1226	177	1	1	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)
-changes-*/local-*	1226	177	1	1	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)
-chat-ui-default/scenarios/activity/frames/*	372	202	1	1	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)
-chat-ui-default/scenarios/effort-full*/frames/*	580	659	1	1	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)
-chat-ui-default/scenarios/effort-full*/frames/*	577	636	1	1	glyph pixel that renders 1/255 apart in one channel between app processes (text rasterization, not a clock)

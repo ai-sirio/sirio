@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Pixel diff of two sets of screen captures, the evidence every bezel-off PR is judged by.
+r"""Pixel diff of two sets of screen captures, the evidence every bezel-off PR is judged by.
 
-Usage: Scripts/capture-diff.py BEFORE AFTER --out DIR [--masks TSV] [--allow TSV]
+Usage: Scripts/capture-diff.py BEFORE AFTER --out DIR [--masks TSV] [--allow TSV] [--tolerance N]
 
 BEFORE and AFTER are directories of PNG frames (Scripts/bezel-off-captures.sh writes one).
 A frame is named by its path under its directory, without the ".png": "changes-dark/local-split".
 Frames are paired by that name. A frame only in AFTER is `added`, only in BEFORE `removed`, in
-both at different sizes `size`, in both at the same size with a differing pixel `changed`.
+both at different sizes `size`, in both at the same size with a pixel more than --tolerance
+levels apart `changed`.
 
 --masks and --allow share one tab-separated format, one rectangle per line (a line that is
 blank or starts with # is skipped):
@@ -21,6 +22,14 @@ with the ".png". The rectangle is x,y (top left) and w,h in pixels of the frame.
   * An allow is a region a PR is expected to change: a difference inside it is attributed.
     `why` is the first cell of the inventory row that explains it (`ui::tooltip::Tooltip`).
 
+--tolerance N (levels on the 8-bit scale, default 1) is the noise floor. After the masks are
+painted, a pixel counts as changed iff the largest difference over its channels (R, G, B and
+alpha) between the two images is greater than N. The default exists because Mesa's software
+Vulkan rasterizes a handful of glyph pixels one level apart in one channel from one app process to
+the next (docs/testing/bezel-off.md); it cannot hide a change of 2 levels or more. --tolerance 0
+compares strictly. Every number below (the verdict, `pixels`, `bbox`, `unattributed_pixels`, the
+rows) is counted with it.
+
 OUT gets changed.tsv (frame, status, pixels, bbox, unattributed_pixels, rows) and index.html, a
 static page that shows each listed frame as before | after | diff with the allowed rectangles
 in outline. The listed frames' images are copied under OUT, so OUT is self-contained.
@@ -28,7 +37,18 @@ in outline. The listed frames' images are copied under OUT, so OUT is self-conta
 Exit 0: no frame is added, removed or size-changed and no changed pixel lies outside every mask
 and allow rectangle (prints CAPTURE DIFF IDENTICAL when nothing is listed at all, else
 CAPTURE DIFF OK (...)). Exit 1: the diff found something unattributed (CAPTURE DIFF FAILED).
-Exit 2: the tool could not do its job (a missing tree, a malformed table, an unreadable image).
+Exit 2: the tool could not do its job (a missing tree, a malformed table, an unreadable image, a
+tolerance outside 0..255, no frame at all).
+
+How a pixel is counted (the pipeline, and why): `magick \( \( A -alpha off \) \( B -alpha off \)
+-compose difference -composite -separate \) \( \( A -alpha extract \) \( B -alpha extract \)
+-compose difference -composite \) -evaluate-sequence max` gives, per pixel, the largest |A - B| over R, G, B and alpha,
+and written as 8-bit gray it is one byte per pixel holding exactly that number of levels, so
+"changed" is `byte > N` and nothing else. `magick compare -fuzz` is not used for the count: its
+fuzz is a colour distance (the root of the summed squared channel differences, scaled), which is
+not "no channel is more than N levels apart", and the AE figure `compare` prints is not a pixel
+count on ImageMagick 7.1 HDRI (a one-pixel change printed 0.6, a change of 1/255 in one channel
+0.0013 with exit 0). The page's diff image is drawn from the same counted pixels.
 
 Needs ImageMagick 7 (`magick`) and nothing beyond the Python standard library.
 """
@@ -145,30 +165,33 @@ def sha(path: Path) -> str:
 
 
 def paint(source: Path, rects: list[Rect], width: int, height: int, target: Path) -> Path:
-    """A copy of source, alpha dropped, with every rectangle black. Rectangles are inclusive."""
-    args = ["magick", str(source), "-alpha", "off", "-fill", "black", "+antialias"]
+    """A copy of source with every rectangle opaque black. Rectangles are inclusive."""
+    args = ["magick", str(source), "-fill", "black", "+antialias"]
     for rect in rects:
         x0, y0, x1, y1 = rect.clamp(width, height)
         if x1 > x0 and y1 > y0:
             args += ["-draw", f"rectangle {x0},{y0} {x1 - 1},{y1 - 1}"]
-    run([*args, f"PNG24:{target}"])
+    run([*args, f"PNG32:{target}"])
     return target
 
 
-def diff_mask(before: Path, after: Path, width: int, height: int) -> bytes:
-    """One byte per pixel, 255 where the pixel differs at all (fuzz 0), 0 where it is the same.
+def channel_deltas(before: Path, after: Path, width: int, height: int) -> bytes:
+    """One byte per pixel: the largest difference over R, G, B and alpha, in 8-bit levels.
 
-    The AE figure `compare` prints is not a pixel count on ImageMagick 7.1 HDRI (a one-pixel
-    change printed 0.6, a change of 1/255 in one channel 0.0013 and exit 0), so the verdict is the
-    mask `compare` draws, never that figure; it exits 1 for "differs", only 2 or more is an error.
+    `-set colorspace Gray` before the write keeps ImageMagick from converting the gray image
+    through a gamma curve (without it a difference of 17 levels is written as 4).
     """
     data = run(
         [
-            "magick", "compare", "-metric", "AE", "-fuzz", "0", "-compose", "src",
-            "-highlight-color", "white", "-lowlight-color", "black",
-            str(before), str(after), "-depth", "8", "gray:-",
-        ],
-        ok=(0, 1),
+            "magick",
+            # Each image sits in its own parentheses: an operator such as -alpha acts on every
+            # image read so far, so `A -alpha extract B -alpha extract` would extract A twice.
+            "(", "(", str(before), "-alpha", "off", ")", "(", str(after), "-alpha", "off", ")",
+            "-compose", "difference", "-composite", "-separate", ")",
+            "(", "(", str(before), "-alpha", "extract", ")", "(", str(after), "-alpha", "extract", ")",
+            "-compose", "difference", "-composite", ")",
+            "-evaluate-sequence", "max", "-set", "colorspace", "Gray", "-depth", "8", "gray:-",
+        ]
     )
     if len(data) != width * height:
         raise Fatal(f"comparing {before} with {after} drew {len(data)} bytes, want {width * height}")
@@ -191,9 +214,10 @@ def count_in(data: bytes, width: int, height: int, rect: Rect) -> int:
 
 
 def compare_frame(
-    frame: str, before: Path, after: Path, masks: list[Rect], allows: list[Rect], out: Path, scratch: Path
+    frame: str, before: Path, after: Path, masks: list[Rect], allows: list[Rect], out: Path, scratch: Path,
+    tolerance: int,
 ) -> Result | None:
-    """None when the two frames are the same once the masks are painted over them."""
+    """None when no pixel is more than `tolerance` levels apart once the masks are painted over."""
     if sha(before) == sha(after):
         return None
     size_before, size_after = size_of(before), size_of(after)
@@ -206,7 +230,8 @@ def compare_frame(
         key = hashlib.sha256(frame.encode()).hexdigest()[:16]
         left = paint(before, mine, width, height, scratch / f"{key}-before.png")
         right = paint(after, mine, width, height, scratch / f"{key}-after.png")
-    data = diff_mask(left, right, width, height)
+    over = bytes(255 if level > tolerance else 0 for level in range(256))
+    data = channel_deltas(left, right, width, height).translate(over)
     pixels = width * height - data.count(0)
     if pixels == 0:
         return None
@@ -221,7 +246,16 @@ def compare_frame(
             attributed[y * width + x0 : y * width + x1] = bytes(x1 - x0)
     diff = out / "diff" / f"{frame}.png"
     diff.parent.mkdir(parents=True, exist_ok=True)
-    run(["magick", "compare", "-metric", "AE", "-fuzz", "0", str(left), str(right), str(diff)], ok=(0, 1))
+    counted = scratch / f"{hashlib.sha256(frame.encode()).hexdigest()[:16]}-counted.gray"
+    counted.write_bytes(data)
+    run(
+        [
+            "magick", str(right), "-alpha", "off", "-fill", "white", "-colorize", "60%",
+            "(", "-size", f"{width}x{height}", "-depth", "8", f"gray:{counted}",
+            "-fill", "red", "-opaque", "white", "-transparent", "black", ")",
+            "-composite", f"PNG24:{diff}",
+        ]
+    )
     return Result(
         frame,
         "changed",
@@ -283,7 +317,7 @@ td, th { border: 1px solid var(--line); padding: 2px 8px; text-align: left; }
 """
 
 
-def write_index(out: Path, results: list[Result], counts: dict[str, int], verdict: str) -> None:
+def write_index(out: Path, results: list[Result], counts: dict[str, int], verdict: str, tolerance: int) -> None:
     table = "".join(
         f'<tr><td><a href="#f-{n}">{html.escape(r.frame)}</a></td><td>{r.status}</td>'
         f'<td>{"" if r.pixels is None else r.pixels}</td>'
@@ -314,8 +348,9 @@ def write_index(out: Path, results: list[Result], counts: dict[str, int], verdic
         )
     summary = ", ".join(f"{counts[key]} {key}" for key in ("changed", "added", "removed", "size"))
     body = (
-        f"<h1>Capture diff</h1><p>{html.escape(verdict)}. Listed: {summary}. Orange outlines are the "
-        "allowed rectangles: the regions this change is expected to touch.</p>"
+        f"<h1>Capture diff</h1><p>{html.escape(verdict)}. Listed: {summary}. A pixel counts as changed when "
+        f"a channel differs by more than {tolerance} level(s). Orange outlines are the allowed rectangles: the regions "
+        "this change is expected to touch.</p>"
         + (f"<table><tr><th>frame</th><th>status</th><th>pixels</th><th>unattributed</th><th>rows</th></tr>{table}</table>" if results else "")
         + "".join(sections)
     )
@@ -333,7 +368,13 @@ def main() -> int:
     parser.add_argument("--out", required=True, metavar="DIR")
     parser.add_argument("--masks", metavar="TSV", help="regions driven by a clock: painted black before comparing")
     parser.add_argument("--allow", metavar="TSV", help="regions the change is expected to touch")
+    parser.add_argument(
+        "--tolerance", type=int, default=1, metavar="N",
+        help="levels (8-bit) a channel may differ before a pixel counts as changed (default 1; 0 is strict)",
+    )
     arguments = parser.parse_args()
+    if not 0 <= arguments.tolerance <= 255:
+        raise Fatal("--tolerance must be between 0 and 255")
 
     masks, allows = read_table(arguments.masks), read_table(arguments.allow)
     before, after = frames_in(arguments.before), frames_in(arguments.after)
@@ -354,7 +395,9 @@ def main() -> int:
         max_workers=min(8, os.cpu_count() or 2)
     ) as pool:
         futures = [
-            pool.submit(compare_frame, frame, before[frame], after[frame], masks, allows, out, Path(scratch))
+            pool.submit(
+                compare_frame, frame, before[frame], after[frame], masks, allows, out, Path(scratch), arguments.tolerance
+            )
             for frame in both
         ]
         results += [done for done in (future.result() for future in futures) if done is not None]
@@ -400,9 +443,12 @@ def main() -> int:
                 ";".join(result.rows),
             ]
             handle.write("\t".join(fields) + "\n")
-    write_index(out, results, counts, verdict)
+    write_index(out, results, counts, verdict, arguments.tolerance)
 
-    print(f"compared {len(both)} frames present on both sides ({len(before)} before, {len(after)} after)")
+    print(
+        f"compared {len(both)} frames present on both sides ({len(before)} before, {len(after)} after), "
+        f"tolerance {arguments.tolerance}"
+    )
     for result in results:
         if result.status == "changed":
             print(f"changed {result.frame}: {result.pixels} px, bbox {result.bbox}, {result.unattributed} unattributed")
