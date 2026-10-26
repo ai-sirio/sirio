@@ -344,8 +344,9 @@ A test stays only if it goes red when the behaviour changes.
 
 **Real jdtls.** Only the real server proves that Lombok's errors go away, and only the
 real server can settle §2.3's trigger and §2.4's stale markers.
-- Run on Linux with a Java 21+ runtime and jdtls installed at user level (mise or the
-  release tarball, never a system package).
+- Run on this Linux development machine. Enzo approved installing a Java 21+ runtime
+  and jdtls there, at user level (mise or the release tarball, never a system package),
+  and downloading a public sample project with its dependencies from Maven Central.
 - Use a small public Spring Boot + Lombok Maven project.
 - Record:
   - Problems counts, for open and for not-open files, before and after;
@@ -355,7 +356,10 @@ real server can settle §2.3's trigger and §2.4's stale markers.
 - The run keeps its transcript and captures as the artifact.
 
 **Hand check on Enzo's Mac.** The work project on the reference platform. This is owed
-before release.
+before release. It also confirms an assumption: how jdtls was installed on that Mac was
+asked and not answered, so §2.1 assumes the upstream launcher, which Homebrew and Mason
+both install. If the Mac's `jdtls` does not accept `--jvm-arg`, the way the agent is
+passed has to change.
 
 ## §7 Left to the builder
 
