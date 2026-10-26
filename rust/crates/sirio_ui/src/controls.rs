@@ -235,19 +235,9 @@ pub fn segmented(
     control
 }
 
-/// A segmented control whose options are icon/tooltip pairs.
+/// A segmented control whose options are icon/tooltip pairs: every option's
+/// hover label is [`tooltip`].
 pub fn segmented_icons(
-    id: &'static str,
-    options: &[(Icon, &'static str)],
-    selected: usize,
-    theme: Theme,
-    callback: impl Fn(usize, &mut App) + 'static,
-) -> impl IntoElement {
-    segmented_icons_with_tooltip(id, options, selected, theme, callback)
-}
-
-/// The body of [`segmented_icons`]: every option's hover label is [`tooltip`].
-pub(crate) fn segmented_icons_with_tooltip(
     id: &'static str,
     options: &[(Icon, &'static str)],
     selected: usize,
