@@ -681,7 +681,8 @@ menu init Ely (`cae7e14a`), labels kept inside their card at large interface siz
 (`632645e6`, `a10c6cda`) and the scrollbars and icons (`89bbd118`), with `THIRD_PARTY_NOTICES.md` listing
 `transcript.rs` among the files ported from bezel-ui (`9198f15c`, a `docs:` commit). The commits
 after the capture change no pixel: this page and the allow file, the header of `examples/scroll_drag_probe.rs`
-(the bars' thickness), the module doc of `scroll.rs`, one more test of its frame-request helper, and
+(the bars' thickness) and of `test-scroll-drag-probe.sh` (where each thumb sits), the module doc of
+`scroll.rs`, one more test of its frame-request helper, and
 `composer_view.rs` and `sidebar/sessions.rs` importing Ely's icon types instead of spelling their paths.
 
 **What PR D moved.**
@@ -885,7 +886,7 @@ not hide a change of this PR: it covers the transcript's own bar, `list_scrollba
 `scrolled-up-after-new-turn`, has 100 changed pixels in it (x 1135..1140, y 495..526, the track's lower
 part), the accident the mask names, the same figure and place as in PR C's page.
 
-Enzo's verdict: pending.
+Enzo's verdict: approved on 2026-10-27, on the page built from these captures.
 
 ### PR E: Settings, then the crates out (`refactor/bezel-off-e`)
 
