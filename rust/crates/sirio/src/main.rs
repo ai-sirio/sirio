@@ -15356,6 +15356,18 @@ impl SirioWorkspace {
                             workspace.apply_diagnostics(&key, &params, cx);
                         });
                     }
+                    // jdtls says it can take requests: the one `language/status`
+                    // that is acted on (the Lombok full build). The rest of them
+                    // fall through to the drop below.
+                    sirio_lsp::Incoming::Notification { method, params }
+                        if method == "language/status"
+                            && params.get("type").and_then(serde_json::Value::as_str)
+                                == Some("ServiceReady") =>
+                    {
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.lombok_service_ready(&key, cx);
+                        });
+                    }
                     // `$/progress`, `window/logMessage` and the rest. Read
                     // and dropped on purpose: draining is the point, and the
                     // name here must stay content-free.
@@ -15367,6 +15379,70 @@ impl SirioWorkspace {
             // this is only ever the server's own end.
             let _ = this.update(cx, |workspace, cx| workspace.language_server_gone(&key, cx));
         })
+    }
+
+    /// jdtls reported `ServiceReady`. A launch that carries the Lombok agent is
+    /// sent one full build then: jdtls keeps a workspace on disk, and one built
+    /// without the agent republishes stale Lombok errors for files that are not
+    /// open until a build runs again. Once per launch (`built`), whatever the
+    /// answer; a launch with no agent, and a `ServiceReady` that comes again,
+    /// do nothing. Nothing is shown. `build_answered` is set when the request
+    /// ends any way but a closed stream: it ends the window in which a crash is
+    /// blamed on the agent.
+    fn lombok_service_ready(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
+        let Some(state) = self.lsp.lombok(key) else {
+            return;
+        };
+        if state.built {
+            return;
+        }
+        let Some(agent) = state.agent.clone() else {
+            return;
+        };
+        let Some(client) = self.lsp.server_for(key).map(|server| server.client().clone()) else {
+            return;
+        };
+        self.lsp.lombok_mut(key).built = true;
+        let key = key.clone();
+        cx.spawn(async move |this, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move {
+                    client
+                        .request_with_timeout::<_, serde_json::Value>(
+                            "java/buildWorkspace",
+                            true,
+                            crate::lsp::FULL_BUILD_TIMEOUT,
+                        )
+                        .await
+                })
+                .await;
+            // CompileWorkspaceStatus: 1 is a build that succeeded, 2 one that
+            // finished with errors in the code. Anything else did not clear
+            // the stale findings.
+            let built = matches!(
+                &answer,
+                Ok(value) if matches!(value.as_i64(), Some(1 | 2))
+            );
+            if !built {
+                sirio_perf::event("lsp.lombok.full_build_failed", 0);
+            }
+            // A closed stream is not an answer: the server died with the build
+            // unanswered, which the agent may have caused.
+            if matches!(answer, Err(sirio_lsp::LspError::Transport(_))) {
+                return;
+            }
+            let _ = this.update(cx, |workspace, _| {
+                // Only while the key is still the launch that sent the build.
+                if let Some(state) = workspace.lsp.lombok(&key)
+                    && state.built
+                    && state.agent.as_ref() == Some(&agent)
+                {
+                    workspace.lsp.lombok_mut(&key).build_answered = true;
+                }
+            });
+        })
+        .detach();
     }
 
     /// A language server ended. Its handle goes (so it reads as not running

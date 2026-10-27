@@ -13,15 +13,19 @@ set -eEuo pipefail
 #   agent_at_launch      a project whose parent POM alone mentions Lombok
 #                        (lombok-parent/app) launches with the newest jar's agent: the
 #                        Gradle cache's 1.18.36 over Maven's 1.18.30, as one argv
-#                        element (checked from the argv itself, not the joined log line)
+#                        element (checked from the argv itself, not the joined log line),
+#                        and sends one full build (`java/buildWorkspace`) after the
+#                        server's ServiceReady, after `initialized`
 #   agent_from_settings  with the Gradle jar gone, the agent is Maven's, found through
 #                        ~/.m2/settings.xml's localRepository, `${user.home}/m2 custom`:
 #                        the space in the path reaches the launch intact
 #   no_lombok            a project that does not mention Lombok launches with no argument
+#                        and is sent no full build
 #   stderr_flood         a jdtls that writes 200 KB to stderr before it answers is
 #                        ready within 10 s: the app's pipe to it is never left unread
 #   hand_written         a java entry in languages.toml is launched with exactly the
-#                        arguments written there, in a project that mentions Lombok
+#                        arguments written there, in a project that mentions Lombok,
+#                        and is sent no full build
 #
 # The artifact: --out-dir DIR (default artifacts/jdtls-lombok-e2e-<stamp>-<pid>) keeps
 # transcript.log, app.log and jdtls/, the fake server's launch log (launches.log, one
@@ -342,6 +346,45 @@ wait_launches() { # project count seconds
   done
   fail "$SCENARIO: $1 expected $2 launches within $3 s, got $got ($(cat "$JDTLS_DIR/launches.log" 2>/dev/null | tr '\n' '|'))"
 }
+# The request log of a project's FIRST launch: the fake server's record of every
+# message the app sent it, one line per message.
+requests_log_of() { # project
+  local n
+  n="$(launches_of "$1" | head -n 1 | cut -d' ' -f1)"
+  echo "$JDTLS_DIR/requests-$n.log"
+}
+# Waits up to SECONDS for the project's first launch to have been sent exactly one
+# full build, and that after `initialized`.
+expect_one_full_build() { # project seconds
+  local log tries=0 limit=$(($2 * 5)) builds=0
+  log="$(requests_log_of "$1")"
+  while [ "$tries" -lt "$limit" ]; do
+    builds="$(grep -c '^request java/buildWorkspace$' "$log" 2>/dev/null || true)"
+    [ "$builds" -ge 1 ] && break
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  [ "$builds" = 1 ] || fail "$SCENARIO: $1 expected one java/buildWorkspace within $2 s, got $builds ($(tr '\n' '|' <"$log" 2>/dev/null))"
+  # Anything more arrives within a moment of the first.
+  sleep 1
+  builds="$(grep -c '^request java/buildWorkspace$' "$log")"
+  [ "$builds" = 1 ] || fail "$SCENARIO: $1 expected exactly one java/buildWorkspace, got $builds"
+  [ "$(grep -n '^notification initialized$' "$log" | head -n 1 | cut -d: -f1)" -lt \
+    "$(grep -n '^request java/buildWorkspace$' "$log" | head -n 1 | cut -d: -f1)" ] \
+    || fail "$SCENARIO: $1 sent the full build before initialized ($(tr '\n' '|' <"$log"))"
+  echo "OK: $1 was sent one full build after initialized"
+}
+# After SECONDS, the project's first launch has been sent no full build.
+expect_no_full_build() { # project seconds
+  local log
+  log="$(requests_log_of "$1")"
+  sleep "$2"
+  [ -f "$log" ] || fail "$SCENARIO: $1 has no request log"
+  if grep -q '^request java/buildWorkspace$' "$log"; then
+    fail "$SCENARIO: $1 was sent a full build though it launched without the agent ($(tr '\n' '|' <"$log"))"
+  fi
+  echo "OK: $1 was sent no full build"
+}
 open_java() { # path relative to the repository
   ctl surface editor open --path="$WT/$1" >/dev/null
 }
@@ -371,6 +414,7 @@ scenario_agent_at_launch() {
     || fail "$SCENARIO: the launch of lombok-parent/app expected '$expected', got '$line'"
   echo "OK: launch args: $line"
   expect_argv app 1 "$expected"
+  expect_one_full_build app 5
 }
 
 scenario_agent_from_settings() {
@@ -399,6 +443,7 @@ scenario_no_lombok() {
   [ -z "$line" ] || fail "$SCENARIO: plain expected a launch with no argument, got '$line'"
   echo "OK: launch args: none"
   expect_argv plain 0
+  expect_no_full_build plain 3
 }
 
 scenario_stderr_flood() {
@@ -427,6 +472,7 @@ TOML
     || fail "$SCENARIO: lombok-hand expected exactly --hand-written, got '$line'"
   echo "OK: launch args: $line"
   expect_argv lombok-hand 1 "--hand-written"
+  expect_no_full_build lombok-hand 3
 }
 
 scenario agent_at_launch scenario_agent_at_launch

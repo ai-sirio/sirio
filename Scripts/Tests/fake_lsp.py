@@ -44,6 +44,11 @@ the editor's pointer features ask:
   goes away (the answers are put back) the thread publishes everything once more
   and rests, so a test that never sets it sees none of this. `"exit": true` ends
   the process at the next look, as a crashed server ends.
+- With `"service_ready": true` in ANSWERS the server sends jdtls's
+  `language/status` notification once, right after `initialized` (after the
+  first publish, if there is one): `{"type": "ServiceReady", "message":
+  "ServiceReady"}`, what jdtls says when it can take requests. The file is read
+  at `initialized`, so the answer set when the server starts is the one that counts.
 - `java/buildWorkspace` (jdtls's full build) is answered with `1`, the status
   jdtls gives a build that succeeded.
 - Any other request is answered with null; notifications are ignored.
@@ -333,6 +338,12 @@ def main():
             ).start()
             if "publish" in config:
                 publish_all(config)
+            if config.get("service_ready"):
+                send({
+                    "jsonrpc": "2.0",
+                    "method": "language/status",
+                    "params": {"type": "ServiceReady", "message": "ServiceReady"},
+                })
         elif method == "shutdown":
             send({"jsonrpc": "2.0", "id": message["id"], "result": None})
         elif method == "exit":

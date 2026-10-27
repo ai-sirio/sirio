@@ -14,6 +14,11 @@ use std::path::{Path, PathBuf};
 
 use sirio_lsp::{Capabilities, ConfigLoader, LanguageEntry, LanguageTable, Reload, Server};
 
+/// How long the full build jdtls is sent after `ServiceReady` (the Lombok
+/// agent's rebuild) may take before it counts as unanswered. A workspace build
+/// is not an editor request: a large project takes minutes.
+pub const FULL_BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// One running server: the connection, plus the gpui task driving its read
 /// loop. Dropping the task stops the loop, so the handle owning both is what
 /// keeps a server alive.
