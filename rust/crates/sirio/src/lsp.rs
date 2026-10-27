@@ -19,6 +19,32 @@ use sirio_lsp::{Capabilities, ConfigLoader, LanguageEntry, LanguageTable, Reload
 /// is not an editor request: a large project takes minutes.
 pub const FULL_BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How soon after one look at the caches the next may happen, per key: the look
+/// follows a publish, and a publish stream is chatty.
+pub const LOMBOK_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long the old jdtls gets to end after `exit` when it is being replaced.
+/// jdtls ended 1.0 to 4.1 s after `exit` in the live runs, so app quit's 500 ms
+/// would kill it every time; the new launch also waits for the old process to be
+/// gone, since both use one workspace directory.
+pub const RESTART_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether a key's jdtls should be restarted for `newest`, the newest jar in the
+/// caches just now: the project uses Lombok, the one restart is not spent, the key
+/// is not in fallback, and the jar is newer than the launch's agent (or the launch
+/// has none).
+pub fn wants_lombok_restart(state: &LombokState, newest: Option<&sirio_lsp::LombokJar>) -> bool {
+    state.uses_lombok
+        && !state.restarted
+        && !state.fallen_back
+        && newest.is_some_and(|newest| {
+            state
+                .agent
+                .as_ref()
+                .is_none_or(|agent| newest.version > agent.version)
+        })
+}
+
 /// One running server: the connection, plus the gpui task driving its read
 /// loop. Dropping the task stops the loop, so the handle owning both is what
 /// keeps a server alive.
@@ -486,6 +512,13 @@ impl LspSupervisor {
         }
     }
 
+    /// Takes the server for `key` out whole, router and read loop with it, and
+    /// detaches nothing: the caller decides what is cancelled and when. The key
+    /// is not marked dead.
+    pub fn take(&mut self, key: &(PathBuf, String)) -> Option<ServerHandle> {
+        self.servers.remove(key)
+    }
+
     /// The key of every server that is running.
     pub fn running_keys(&self) -> Vec<(PathBuf, String)> {
         self.servers.keys().cloned().collect()
@@ -881,5 +914,54 @@ mod tests {
         supervisor.revive(&key);
 
         assert!(supervisor.is_dead(&key), "Failed is final");
+    }
+
+    fn jar(version: &str) -> sirio_lsp::LombokJar {
+        sirio_lsp::LombokJar {
+            path: PathBuf::from(format!("/m2/lombok-{version}.jar")),
+            version: sirio_lsp::LombokVersion::parse(version).expect("a version"),
+        }
+    }
+
+    fn state(agent: Option<&str>) -> LombokState {
+        LombokState {
+            uses_lombok: true,
+            agent: agent.map(jar),
+            ..LombokState::default()
+        }
+    }
+
+    #[test]
+    fn a_launch_without_the_agent_restarts_for_any_jar() {
+        assert!(wants_lombok_restart(&state(None), Some(&jar("1.18.30"))));
+    }
+
+    #[test]
+    fn a_launch_restarts_only_for_a_strictly_newer_jar() {
+        // The same version is the jar the launch already has, and an older one
+        // is a cache another project left: neither is worth a restart.
+        assert!(wants_lombok_restart(&state(Some("1.18.30")), Some(&jar("1.18.36"))));
+        assert!(!wants_lombok_restart(&state(Some("1.18.36")), Some(&jar("1.18.36"))));
+        assert!(!wants_lombok_restart(&state(Some("1.18.36")), Some(&jar("1.18.30"))));
+        assert!(!wants_lombok_restart(&state(Some("1.18.30")), Some(&jar("1.18.30-edge"))));
+    }
+
+    #[test]
+    fn no_jar_restarts_nothing() {
+        assert!(!wants_lombok_restart(&state(None), None));
+    }
+
+    #[test]
+    fn a_spent_restart_a_fallback_or_a_project_without_lombok_never_restarts() {
+        let newest = jar("1.18.36");
+        let mut spent = state(None);
+        spent.restarted = true;
+        let mut fallen = state(None);
+        fallen.fallen_back = true;
+        let mut plain = state(None);
+        plain.uses_lombok = false;
+        for state in [spent, fallen, plain] {
+            assert!(!wants_lombok_restart(&state, Some(&newest)), "{state:?}");
+        }
     }
 }

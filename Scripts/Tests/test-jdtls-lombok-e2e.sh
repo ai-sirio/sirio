@@ -10,6 +10,13 @@ set -eEuo pipefail
 # back through the editor's status row. Linux and X11 only.
 #
 # Scenarios, in the order they run:
+#   restart              a project that mentions Lombok, opened with no jar anywhere,
+#                        launches with no argument; once Maven's 1.18.30 lands and the
+#                        server next publishes diagnostics (the app looks at most every
+#                        2 s), it is stopped (`shutdown`, then `exit`) and launched again
+#                        with that jar's agent, sent the open file and one full build, and
+#                        it stays ready (the old server's end does not remove the new
+#                        one); a newer Gradle jar placed afterwards causes no third launch
 #   agent_at_launch      a project whose parent POM alone mentions Lombok
 #                        (lombok-parent/app) launches with the newest jar's agent: the
 #                        Gradle cache's 1.18.36 over Maven's 1.18.30, as one argv
@@ -243,6 +250,7 @@ make_project() { # dir pom-text
 mkdir -p "$WT/lombok-parent"
 printf '%s\n' '<project><dependencies><dependency><artifactId>lombok</artifactId></dependency></dependencies></project>' >"$WT/lombok-parent/pom.xml"
 make_project lombok-parent/app '<project><artifactId>app</artifactId></project>'
+make_project restart '<project><artifactId>lombok</artifactId></project>'
 make_project plain '<project><artifactId>plain</artifactId></project>'
 make_project plain-stderr '<project><artifactId>plain-stderr</artifactId></project>'
 make_project lombok-m2 '<project><artifactId>lombok</artifactId></project>'
@@ -416,6 +424,70 @@ scenario() { # name function
   echo "PASS $1"
 }
 
+# Rewrites answers.json with the next nonce: the fake server looks at the file every
+# 200 ms and, `publish` being there, publishes every open document when it changes.
+NONCE=0
+bump_nonce() {
+  NONCE=$((NONCE + 1))
+  printf '{"service_ready": true, "publish": {}, "nonce": %s}\n' "$NONCE" >"$JDTLS_DIR/answers.json.new"
+  mv "$JDTLS_DIR/answers.json.new" "$JDTLS_DIR/answers.json"
+}
+# Waits up to SECONDS for a launch's request log to hold LINE (a whole line).
+wait_request() { # log line seconds
+  local tries=0 limit=$(($3 * 5))
+  while [ "$tries" -lt "$limit" ]; do
+    grep -qx "$2" "$1" 2>/dev/null && return 0
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  fail "$SCENARIO: $(basename "$1") never held '$2' within $3 s ($(tr '\n' '|' <"$1" 2>/dev/null))"
+}
+
+scenario_restart() {
+  # No jar anywhere: the first launch has no agent, and is ready.
+  rm -rf "$HOME/m2 custom" "$HOME/.gradle"
+  open_java restart/src/main/java/demo/A.java
+  expect_status lsp jdtls:ready
+  wait_launches restart 1 10
+  expect_argv restart 0
+  local first="$JDTLS_DIR/requests-$(launches_of restart | sed -n 1p | cut -d' ' -f1).log"
+  wait_request "$first" "notification textDocument/didOpen" 10
+  # The jar lands, as a Maven import would put it; the next publish after the
+  # re-check interval makes the app look.
+  place_jar "$MAVEN_REPO/org/projectlombok/lombok/1.18.30" 1.18.30
+  sleep 2.5
+  bump_nonce
+  wait_launches restart 2 15
+  local expected="--jvm-arg=-javaagent:$MAVEN_REPO/org/projectlombok/lombok/1.18.30/lombok-1.18.30.jar"
+  expect_argv restart 1 "$expected" 2
+  # The old server was stopped as a server is: `shutdown`, then `exit`.
+  wait_request "$first" "notification exit" 10
+  [ "$(grep -n '^request shutdown$' "$first" | head -n 1 | cut -d: -f1)" -lt \
+    "$(grep -n '^notification exit$' "$first" | head -n 1 | cut -d: -f1)" ] \
+    || fail "$SCENARIO: the old server was not sent shutdown before exit ($(tr '\n' '|' <"$first"))"
+  echo "OK: the old server was sent shutdown, then exit"
+  # The new one is sent the open file and one full build, and stays ready: the old
+  # stream's end does not take the new server out.
+  local second="$JDTLS_DIR/requests-$(launches_of restart | sed -n 2p | cut -d' ' -f1).log"
+  wait_request "$second" "notification textDocument/didOpen" 10
+  wait_request "$second" "request java/buildWorkspace" 10
+  sleep 1
+  [ "$(grep -c '^request java/buildWorkspace$' "$second")" = 1 ] \
+    || fail "$SCENARIO: the second launch expected one java/buildWorkspace ($(tr '\n' '|' <"$second"))"
+  echo "OK: the second launch was sent the open file and one full build"
+  expect_status lsp jdtls:ready
+  sleep 3
+  expect_status lsp jdtls:ready 5
+  # A newer jar later does not restart it again: the one restart is spent.
+  place_jar "$GRADLE_CACHE/1.18.36/abc123" 1.18.36
+  sleep 2.5
+  bump_nonce
+  sleep 5
+  [ "$(launches_of restart | grep -c .)" = 2 ] \
+    || fail "$SCENARIO: restart expected exactly 2 launches, got $(launches_of restart | grep -c .)"
+  echo "OK: a newer jar caused no second restart"
+}
+
 scenario_agent_at_launch() {
   ensure_jars
   open_java lombok-parent/app/src/main/java/demo/A.java
@@ -533,6 +605,7 @@ TOML
   expect_no_full_build lombok-hand 3
 }
 
+scenario restart scenario_restart
 scenario agent_at_launch scenario_agent_at_launch
 scenario agent_from_settings scenario_agent_from_settings
 scenario no_lombok scenario_no_lombok

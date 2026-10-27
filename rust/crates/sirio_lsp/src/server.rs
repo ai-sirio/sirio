@@ -131,11 +131,17 @@ impl Server {
     /// `shutdown` → `exit` → wait → kill. The kill is not a fallback for
     /// misbehaviour, it is the contract: without it a server that ignores
     /// `exit` keeps indexing after Sirio is gone.
-    pub async fn stop(mut self) -> Result<(), LspError> {
+    pub async fn stop(self) -> Result<(), LspError> {
+        self.stop_within(EXIT_GRACE).await
+    }
+
+    /// `stop` with a grace of the caller's choosing: a server being replaced is
+    /// given long enough to end by itself, where a quit cannot wait.
+    pub async fn stop_within(mut self, grace: Duration) -> Result<(), LspError> {
         // A shutdown that fails is not a reason to skip the kill — a server
         // too broken to answer is exactly the one that needs killing.
         let outcome = lifecycle::shutdown(&self.client).await;
-        kill_after_grace(&mut self.child, EXIT_GRACE).await?;
+        kill_after_grace(&mut self.child, grace).await?;
         outcome
     }
 }

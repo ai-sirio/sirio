@@ -15391,6 +15391,7 @@ impl SirioWorkspace {
                     {
                         let _ = this.update(cx, |workspace, cx| {
                             workspace.apply_diagnostics(&key, &params, cx);
+                            workspace.lombok_after_publish(&key, cx);
                         });
                     }
                     // jdtls says it can take requests: the one `language/status`
@@ -15500,12 +15501,23 @@ impl SirioWorkspace {
             self.lombok_fall_back(key);
         }
         self.lsp.forget(key);
+        self.clear_server_traces(key, cx);
+        if blame_agent {
+            self.relaunch_key(key, cx);
+        }
+    }
+
+    /// What a server leaves behind when it is no longer the key's: every drawer
+    /// drops what it reported, the documents it held are forgotten (the next
+    /// server is sent them again, in a parked worktree as well as the shown
+    /// one), the open files of the key stop showing its findings, and the
+    /// drawers name the servers still running. The handle is the caller's to
+    /// have removed already.
+    fn clear_server_traces(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
         let drawers: Vec<_> = self.drawers.values().cloned().collect();
         for drawer in drawers {
             drawer.update(cx, |drawer, cx| drawer.server_gone(key, cx));
         }
-        // Its copy of every file died with it, in a parked worktree as well as
-        // the shown one: the next server is sent the text again.
         for path in self.lsp.synced_paths() {
             if self.server_key_for(&path).as_ref() == Some(key) {
                 self.lsp.forget_synced(&path);
@@ -15519,9 +15531,90 @@ impl SirioWorkspace {
         }
         self.refresh_running_servers(cx);
         self.push_language_server_status_to_open_files(cx);
-        if blame_agent {
-            self.relaunch_key(key, cx);
+    }
+
+    /// A key's jdtls published diagnostics: the moment to look for a Lombok jar
+    /// that arrived after it was launched (its own Maven or Gradle import
+    /// downloads one). Only for a key that could still restart, and at most once
+    /// every `LOMBOK_RECHECK`: never a timer. The caches are read on the
+    /// background executor; the decision is taken back here, against the key as
+    /// it is by then.
+    fn lombok_after_publish(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
+        let Some(state) = self.lsp.lombok(key) else {
+            return;
+        };
+        if !state.uses_lombok
+            || state.restarted
+            || state.fallen_back
+            || state
+                .last_check
+                .is_some_and(|at| at.elapsed() < crate::lsp::LOMBOK_RECHECK)
+        {
+            return;
         }
+        self.lsp.lombok_mut(key).last_check = Some(std::time::Instant::now());
+        let key = key.clone();
+        cx.spawn(async move |this, cx| {
+            let newest = cx
+                .background_executor()
+                .spawn(async { sirio_lsp::newest_jar(&sirio_env::for_child()) })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                // The key may have restarted, fallen back or stopped while the
+                // caches were read: decide on what it is now.
+                let wants = workspace
+                    .lsp
+                    .lombok(&key)
+                    .is_some_and(|state| crate::lsp::wants_lombok_restart(state, newest.as_ref()));
+                if wants && workspace.lsp.is_running(&key) {
+                    workspace.restart_with_newer_lombok(&key, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Replaces the key's jdtls with one that has the Lombok agent, once. The
+    /// old handle is taken out and its router cancelled first, so that the old
+    /// stream's end cannot reach `language_server_gone` and `forget` whatever
+    /// sits under the key by then. The old server is stopped the way `stop`
+    /// does it but with `RESTART_GRACE`, its read loop kept alive until that
+    /// returns (the answer to `shutdown` arrives through it); only then is the
+    /// new one launched, because both use the same workspace directory. The
+    /// status row reads "starting" in between. This is not `revive`.
+    fn restart_with_newer_lombok(
+        &mut self,
+        key: &sirio_ui::drawer::ServerKey,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(handle) = self.lsp.take(key) else {
+            return;
+        };
+        let crate::lsp::ServerHandle {
+            server,
+            read_loop,
+            router,
+        } = handle;
+        drop(router);
+        self.lsp.lombok_mut(key).restarted = true;
+        sirio_perf::event("lsp.lombok.restart", 0);
+        self.clear_server_traces(key, cx);
+        self.lsp.mark_starting(key.clone());
+        self.push_language_server_status_to_open_files(cx);
+        let key = key.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = server.stop_within(crate::lsp::RESTART_GRACE).await;
+                    drop(read_loop);
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.lsp.finish_starting(&key);
+                workspace.relaunch_key(&key, cx);
+            });
+        })
+        .detach();
     }
 
     /// The key gets no agent for the rest of the session. What belonged to the
