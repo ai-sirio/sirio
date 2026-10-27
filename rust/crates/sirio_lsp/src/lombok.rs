@@ -118,9 +118,11 @@ fn home_dir(environment: &BTreeMap<String, String>, windows: bool) -> Option<Pat
 pub fn newest_jar(environment: &BTreeMap<String, String>) -> Option<LombokJar> {
     let home = home_dir(environment, cfg!(windows))?;
 
-    let maven = std::fs::read_to_string(home.join(".m2").join("settings.xml"))
+    // Read as bytes: a settings.xml in ISO-8859-1 (an accent in a comment) is not
+    // UTF-8, and the setting is ASCII wherever the file is not.
+    let maven = std::fs::read(home.join(".m2").join("settings.xml"))
         .ok()
-        .and_then(|xml| local_repository(&xml, &home))
+        .and_then(|bytes| local_repository(&String::from_utf8_lossy(&bytes), &home))
         .unwrap_or_else(|| home.join(".m2").join("repository"));
     let gradle = environment
         .get("GRADLE_USER_HOME")
@@ -236,6 +238,8 @@ mod tests {
     //   zero-byte jar beats an older complete jar;
     // - a non-version folder beside real ones aborts the scan;
     // - a set localRepository is searched together with `~/.m2/repository`;
+    // - a settings.xml that is not UTF-8 (an ISO-8859-1 accent in a comment) loses its
+    //   localRepository;
     // - no cache at all panics instead of answering None;
     // - a parent build file up to the worktree root is missed, or one above it counts;
     // - a version catalog is not read;
@@ -405,6 +409,23 @@ mod tests {
         let found = newest_jar(&env_with(&home)).unwrap();
         assert_eq!(found.path, custom);
         assert_eq!(found.version, v("1.18.20"));
+    }
+
+    #[test]
+    fn a_settings_file_that_is_not_utf8_still_gives_its_local_repository() {
+        // An ISO-8859-1 `è` (0xE8) in a comment before the setting, as a
+        // corporate settings.xml written on a Latin-1 machine has it.
+        let home = scratch("latin1");
+        let mut xml = b"<settings><!-- repository di prova: \xe8 locale -->".to_vec();
+        xml.extend_from_slice(
+            format!("<localRepository>{}</localRepository></settings>", home.join("custom").display())
+                .as_bytes(),
+        );
+        write(&home.join(".m2/settings.xml"), &xml);
+        let custom = maven_jar(&home.join("custom"), "1.18.20");
+        maven_jar(&home.join(".m2/repository"), "1.18.40");
+        assert_eq!(newest_jar(&env_with(&home)).unwrap().path, custom);
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
