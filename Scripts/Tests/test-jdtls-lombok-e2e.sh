@@ -13,7 +13,7 @@ set -eEuo pipefail
 #   agent_at_launch      a project whose parent POM alone mentions Lombok
 #                        (lombok-parent/app) launches with the newest jar's agent: the
 #                        Gradle cache's 1.18.36 over Maven's 1.18.30, as one argv
-#                        element
+#                        element (checked from the argv itself, not the joined log line)
 #   agent_from_settings  with the Gradle jar gone, the agent is Maven's, found through
 #                        ~/.m2/settings.xml's localRepository, `${user.home}/m2 custom`:
 #                        the space in the path reaches the launch intact
@@ -196,6 +196,10 @@ cat >"$RUN_DIR/stubs/jdtls" <<STUB
 # Fake jdtls: logs "<n> <project dir name> <argv>" then behaves by the dir name.
 dir="$RUN_DIR/jdtls"
 n=\$(( \$(wc -l < "\$dir/launches.log" 2>/dev/null || echo 0) + 1 ))
+# The argv itself, one element per line after its count: launches.log joins it with
+# spaces, which cannot tell one element holding a space from two. Written first, so
+# a launch in launches.log always has its argv file.
+{ echo "\$#"; printf '%s\n' "\$@"; } > "\$dir/argv-\$n.log"
 printf '%s %s %s\n' "\$n" "\$(basename "\$PWD")" "\$*" >> "\$dir/launches.log"
 agent=0; case " \$* " in *" --jvm-arg=-javaagent:"*) agent=1 ;; esac
 answers="\$dir/answers.json"
@@ -314,6 +318,20 @@ launches_of() { # project
 launch_args_of() { # project
   launches_of "$1" | sed -E 's/^[0-9]+ [^ ]+ ?//'
 }
+# The launch's argv as the fake jdtls received it, from its argv file: the element
+# count, and for a count of 1 the element, compared whole.
+expect_argv() { # project count [element]
+  local n count first
+  n="$(launches_of "$1" | head -n 1 | cut -d' ' -f1)"
+  [ -f "$JDTLS_DIR/argv-$n.log" ] || fail "$SCENARIO: $1 has no argv file for launch '$n'"
+  count="$(sed -n 1p "$JDTLS_DIR/argv-$n.log")"
+  [ "$count" = "$2" ] || fail "$SCENARIO: $1 expected $2 argv elements, got $count ($(tr '\n' '|' <"$JDTLS_DIR/argv-$n.log"))"
+  if [ "$2" -ge 1 ]; then
+    first="$(sed -n 2p "$JDTLS_DIR/argv-$n.log")"
+    [ "$first" = "$3" ] || fail "$SCENARIO: $1 expected the one element '$3', got '$first'"
+  fi
+  echo "OK: $1 argv: $count element(s)"
+}
 wait_launches() { # project count seconds
   local tries=0 limit=$(($3 * 5)) got=0
   while [ "$tries" -lt "$limit" ]; do
@@ -352,6 +370,7 @@ scenario_agent_at_launch() {
   [ "$line" = "$expected" ] \
     || fail "$SCENARIO: the launch of lombok-parent/app expected '$expected', got '$line'"
   echo "OK: launch args: $line"
+  expect_argv app 1 "$expected"
 }
 
 scenario_agent_from_settings() {
@@ -368,6 +387,7 @@ scenario_agent_from_settings() {
   [ "$line" = "$expected" ] \
     || fail "$SCENARIO: the launch of lombok-m2 expected '$expected', got '$line'"
   echo "OK: launch args: $line"
+  expect_argv lombok-m2 1 "$expected"
 }
 
 scenario_no_lombok() {
@@ -378,6 +398,7 @@ scenario_no_lombok() {
   line="$(launch_args_of plain)"
   [ -z "$line" ] || fail "$SCENARIO: plain expected a launch with no argument, got '$line'"
   echo "OK: launch args: none"
+  expect_argv plain 0
 }
 
 scenario_stderr_flood() {
@@ -405,6 +426,7 @@ TOML
   [ "$line" = "--hand-written" ] \
     || fail "$SCENARIO: lombok-hand expected exactly --hand-written, got '$line'"
   echo "OK: launch args: $line"
+  expect_argv lombok-hand 1 "--hand-written"
 }
 
 scenario agent_at_launch scenario_agent_at_launch
