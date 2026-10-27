@@ -734,7 +734,7 @@ fn menu_selector(label: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, MouseButton, MouseDownEvent, TestAppContext, VisualTestContext};
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -921,6 +921,75 @@ mod tests {
             "the open menu must self-heal onto the button's post-resize position within one \
              more delivered frame, not stay pinned to where the button was before the resize \
              forever: button={plus_after:?} menu={menu_after:?}"
+        );
+    }
+
+    /// A press outside the menu starts its exit, and for the span of the exit
+    /// it is still drawn. Its rows do not check whether the popup is open, so
+    /// what keeps a click on a row of the dying menu from choosing it is the
+    /// exit's own occluding overlay.
+    #[gpui::test]
+    async fn a_row_of_the_closing_new_tab_menu_takes_no_click(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let collected = actions.clone();
+        let tab_bar_cell: Rc<RefCell<Option<gpui::Entity<TabBar>>>> =
+            Rc::new(RefCell::new(None));
+        let tab_bar_cell_for_window = tab_bar_cell.clone();
+        let window = cx.add_window(move |_window, cx| {
+            let tab_bar = cx.new(|cx| {
+                TabBar::new(cx).on_new_tab(move |action| collected.borrow_mut().push(action))
+            });
+            *tab_bar_cell_for_window.borrow_mut() = Some(tab_bar.clone());
+            ResizeHost { tab_bar }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let tab_bar = tab_bar_cell
+            .borrow_mut()
+            .take()
+            .expect("the window build captured the tab bar entity");
+
+        let plus = cx
+            .debug_bounds("new-tab-button")
+            .expect("the plus control is drawn");
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+        let item = cx
+            .debug_bounds("new-tab-item-new-terminal")
+            .expect("the first menu row is drawn");
+
+        // The press lands in the gutter beside the tab bar, outside the menu.
+        let viewport = cx.update(|window, _| window.viewport_size());
+        cx.simulate_event(MouseDownEvent {
+            position: point(viewport.width - px(100.0), px(500.0)),
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+        assert!(
+            tab_bar.read_with(&cx.cx, |bar, _| bar.menu_open.is_closing()),
+            "a press outside starts the exit"
+        );
+        assert!(
+            cx.debug_bounds("new-tab-item-new-terminal").is_some(),
+            "the menu is still drawn while it exits"
+        );
+
+        cx.simulate_click(item.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            actions.borrow().is_empty(),
+            "a row of the dying menu ran its action: {:?}",
+            actions.borrow()
         );
     }
 
