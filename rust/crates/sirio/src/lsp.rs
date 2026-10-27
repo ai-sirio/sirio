@@ -30,13 +30,12 @@ pub const LOMBOK_RECHECK: std::time::Duration = std::time::Duration::from_secs(2
 pub const RESTART_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Whether a key's jdtls should be restarted for `newest`, the newest jar in the
-/// caches just now: the project uses Lombok, the one restart is not spent, the key
-/// is not in fallback, and the jar is newer than the launch's agent (or the launch
-/// has none).
+/// caches just now: the project uses Lombok, the restart is still available
+/// ([`LombokState::may_restart`]), and the jar is newer than the launch's agent
+/// (or the launch has none).
 pub fn wants_lombok_restart(state: &LombokState, newest: Option<&sirio_lsp::LombokJar>) -> bool {
     state.uses_lombok
-        && !state.restarted
-        && !state.fallen_back
+        && state.may_restart()
         && newest.is_some_and(|newest| {
             state
                 .agent
@@ -254,6 +253,18 @@ pub struct LombokState {
     /// No agent for the rest of the session.
     pub fallen_back: bool,
     pub last_check: Option<std::time::Instant>,
+    /// The worktree root the launch was given, with the key's root the arguments
+    /// of `project_uses_lombok`: the re-check reads the build files with the same.
+    pub worktree_root: Option<PathBuf>,
+}
+
+impl LombokState {
+    /// The key's one restart is still available: it is not spent and the key is
+    /// not in fallback. What the re-check at a publish and the restart's own
+    /// decision share.
+    pub fn may_restart(&self) -> bool {
+        !self.restarted && !self.fallen_back
+    }
 }
 
 /// Why a key has no server and will not be tried again — and, for the arms

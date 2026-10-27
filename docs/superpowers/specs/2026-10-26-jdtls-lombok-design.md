@@ -186,12 +186,14 @@ jar landed in `~/.m2` at 42.1 s, during the import. jdtls said `ServiceReady` at
 and published its first diagnostics at 51.4 s, for every file of the project and not
 only the open one. The first publish is therefore always after the jar. A later
 download of a newer jar, for a project that already used Lombok at launch, is caught
-by a later publish. A project that starts using Lombok mid-session, for example after
-Lombok is added to the POM, gets the agent the next time its server is launched
-(restarting Sirio, or any later launch of that key's server, for example after it
-ends), because "uses Lombok" is decided at launch. *(builder's call, during execution)*
-The re-check runs only for keys that could still restart: the project uses Lombok, the
-restart has not been spent, and the key is not in fallback. It is never a free-running timer. A filesystem watch was not needed.
+by a later publish. So is a project that starts using Lombok mid-session (its build
+file gains the dependency): the publish re-reads the build files, and when they now
+mention Lombok and a jar is in the caches the key restarts once with that jar's agent;
+with no jar in the caches nothing happens, and the agent comes with the next launch of
+that key's server. The re-check runs only for a key launched from the built-in entry
+whose restart is unspent and that is not in fallback, and never as a free-running
+timer (a filesystem watch was not needed). A project that never mentions Lombok pays
+at most one build-file read per 2 s of publishes, and nothing visible changes (§4).
 
 ### §2.4 No stale findings after the agent arrives
 

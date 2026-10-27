@@ -34,7 +34,13 @@ set -eEuo pipefail
 #                        ~/.m2/settings.xml's localRepository, `${user.home}/m2 custom`:
 #                        the space in the path reaches the launch intact
 #   no_lombok            a project that does not mention Lombok launches with no argument
-#                        and is sent no full build
+#                        and is sent no full build; with a jar in the caches, later
+#                        publishes cause no restart
+#   pom_gains_lombok     a project whose pom.xml does not mention Lombok launches with no
+#                        argument; once the pom gains a Lombok dependency, the next publish
+#                        (the app looks at most every 2 s) stops the server and launches it
+#                        again with Maven's agent, as one argv element, and a further
+#                        publish causes no third launch
 #   fallback_init        a jdtls that exits at once when it is given the agent (a launch
 #                        that fails) is launched once more without it: two launches, the
 #                        first with the agent and the second with no argument, which is
@@ -42,6 +48,10 @@ set -eEuo pipefail
 #   fallback_early       a jdtls that ends right after `initialized`, before it has
 #                        answered the full build, is launched once more without the agent,
 #                        with the same checks
+#   fallback_stuck       a jdtls that answers `initialize` with an error and keeps running is
+#                        launched once more without the agent, and the first process is
+#                        gone by then (the app killed it: a server left running would hold
+#                        jdtls's workspace)
 #   stderr_flood         a jdtls that writes 200 KB to stderr before it answers is
 #                        ready within 10 s: the app's pipe to it is never left unread
 #   hand_written         a java entry in languages.toml is launched with exactly the
@@ -279,6 +289,7 @@ printf '%s\n' '<project><dependencies><dependency><artifactId>lombok</artifactId
 make_project lombok-parent/app '<project><artifactId>app</artifactId></project>'
 make_project restart '<project><artifactId>lombok</artifactId></project>'
 make_project plain '<project><artifactId>plain</artifactId></project>'
+make_project pom-late '<project><artifactId>pom-late</artifactId></project>'
 make_project plain-stderr '<project><artifactId>plain-stderr</artifactId></project>'
 make_project lombok-m2 '<project><artifactId>lombok</artifactId></project>'
 make_project lombok-failinit '<project><artifactId>lombok</artifactId></project>'
@@ -584,6 +595,7 @@ scenario_agent_from_settings() {
 }
 
 scenario_no_lombok() {
+  use_maven_agent_only
   open_java plain/src/main/java/demo/A.java
   expect_status lsp jdtls:ready
   wait_launches plain 1 10
@@ -593,6 +605,15 @@ scenario_no_lombok() {
   echo "OK: launch args: none"
   expect_argv plain 0
   expect_no_full_build plain 3
+  # A Maven jar is in the caches, but the project never mentions Lombok: later
+  # publishes look at its build file and leave the server alone.
+  bump_nonce
+  sleep 2.5
+  bump_nonce
+  sleep 3
+  [ "$(launches_of plain | grep -c .)" = 1 ] \
+    || fail "$SCENARIO: plain expected exactly 1 launch, got $(launches_of plain | grep -c .)"
+  echo "OK: later publishes caused no restart of a project without Lombok"
 }
 
 # After the agent broke the first launch: two launches, the first with the agent (one
@@ -659,6 +680,41 @@ scenario_fallback_stuck() {
   echo "OK: the first launch's process is gone"
 }
 
+# A project that starts using Lombok after its server launched: its build file gains
+# the dependency, and the next publish after the re-check interval restarts the server
+# once with the jar that is in the caches.
+scenario_pom_gains_lombok() {
+  use_maven_agent_only
+  open_java pom-late/src/main/java/demo/A.java
+  expect_status lsp jdtls:ready
+  wait_launches pom-late 1 10
+  expect_argv pom-late 0
+  local first="$JDTLS_DIR/requests-$(launches_of pom-late | sed -n 1p | cut -d' ' -f1).log"
+  wait_request "$first" "notification textDocument/didOpen" 10
+  # Publishes with the build file unchanged cause nothing.
+  sleep 2.5
+  bump_nonce
+  sleep 3
+  [ "$(launches_of pom-late | grep -c .)" = 1 ] \
+    || fail "$SCENARIO: pom-late expected 1 launch before the build file changed, got $(launches_of pom-late | grep -c .)"
+  echo "OK: a publish with no Lombok in the build file caused no restart"
+  printf '%s\n' '<project><artifactId>pom-late</artifactId><dependencies><dependency><artifactId>lombok</artifactId></dependency></dependencies></project>' \
+    >"$WT/pom-late/pom.xml"
+  sleep 2.5
+  bump_nonce
+  wait_launches pom-late 2 15
+  local expected="--jvm-arg=-javaagent:$MAVEN_REPO/org/projectlombok/lombok/1.18.30/lombok-1.18.30.jar"
+  expect_argv pom-late 1 "$expected" 2
+  expect_status lsp jdtls:ready
+  # Further publishes cause no third launch: the one restart is spent.
+  sleep 2.5
+  bump_nonce
+  sleep 5
+  [ "$(launches_of pom-late | grep -c .)" = 2 ] \
+    || fail "$SCENARIO: pom-late expected exactly 2 launches, got $(launches_of pom-late | grep -c .)"
+  echo "OK: the project that gained Lombok was restarted once"
+}
+
 scenario_stderr_flood() {
   # 200 KB on stderr is more than a pipe holds: a server whose stderr nobody reads
   # blocks before its first answer, and the editor never leaves "starting".
@@ -696,6 +752,7 @@ scenario no_lombok scenario_no_lombok
 scenario fallback_init scenario_fallback_init
 scenario fallback_early scenario_fallback_early
 scenario fallback_stuck scenario_fallback_stuck
+scenario pom_gains_lombok scenario_pom_gains_lombok
 scenario stderr_flood scenario_stderr_flood
 # Last: the table it writes applies to every .java file from then on.
 scenario hand_written scenario_hand_written

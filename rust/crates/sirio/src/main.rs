@@ -14918,7 +14918,7 @@ impl SirioWorkspace {
         }
         let lombok_worktree_root = (builtin_java
             && !self.lsp.lombok(&key).is_some_and(|state| state.fallen_back))
-        .then_some(worktree_root);
+        .then_some(worktree_root.clone());
         // Step 2 of the ladder, read here and used only once step 1 has
         // answered `NotInstalled`. Consulting the store before the spawn
         // would be wrong; reading it here is not, because an answer that is
@@ -15030,6 +15030,7 @@ impl SirioWorkspace {
                             }
                             let state = workspace.lsp.lombok_mut(&key);
                             state.uses_lombok = uses;
+                            state.worktree_root = Some(worktree_root);
                             state.agent = agent;
                             state.built = false;
                             state.build_answered = false;
@@ -15541,33 +15542,67 @@ impl SirioWorkspace {
 
     /// A key's jdtls published diagnostics: the moment to look for a Lombok jar
     /// that arrived after it was launched (its own Maven or Gradle import
-    /// downloads one). Only for a key that could still restart, and at most once
-    /// every `LOMBOK_RECHECK`: never a timer. The caches are read on the
-    /// background executor; the decision is taken back here, against the key as
-    /// it is by then.
+    /// downloads one), and for a project that started using Lombok after it was
+    /// launched (its build file gained the dependency). Only for a key launched
+    /// from the built-in entry whose restart is still available
+    /// ([`crate::lsp::LombokState::may_restart`]), and at most once every
+    /// `LOMBOK_RECHECK`: never a timer. For a project not known to use Lombok
+    /// the build files are read again first, and the caches only when they now
+    /// mention it. Both are read on the background executor; the decision is
+    /// taken back here, against the key as it is by then. A project that turns
+    /// out to use Lombok with no jar in the caches restarts nothing, and gets
+    /// the agent at its next launch.
     fn lombok_after_publish(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
         let Some(state) = self.lsp.lombok(key) else {
             return;
         };
-        if !state.uses_lombok
-            || state.restarted
-            || state.fallen_back
+        if !state.may_restart()
             || state
                 .last_check
                 .is_some_and(|at| at.elapsed() < crate::lsp::LOMBOK_RECHECK)
         {
             return;
         }
+        // The launch's own arguments, so the read sees what the launch saw.
+        let unknown_project = if state.uses_lombok {
+            None
+        } else {
+            state
+                .worktree_root
+                .clone()
+                .map(|worktree_root| (key.0.clone(), worktree_root))
+        };
+        if !state.uses_lombok && unknown_project.is_none() {
+            return;
+        }
         self.lsp.lombok_mut(key).last_check = Some(std::time::Instant::now());
         let key = key.clone();
         cx.spawn(async move |this, cx| {
-            let newest = cx
+            let (uses_lombok, newest) = cx
                 .background_executor()
-                .spawn(async { sirio_lsp::newest_jar(&sirio_env::for_child()) })
+                .spawn(async move {
+                    let uses_lombok = unknown_project.is_none_or(|(root, worktree_root)| {
+                        sirio_lsp::project_uses_lombok(&root, &worktree_root)
+                    });
+                    let newest = uses_lombok
+                        .then(|| sirio_lsp::newest_jar(&sirio_env::for_child()))
+                        .flatten();
+                    (uses_lombok, newest)
+                })
                 .await;
             let _ = this.update(cx, |workspace, cx| {
                 // The key may have restarted, fallen back or stopped while the
-                // caches were read: decide on what it is now.
+                // files were read: decide on what it is now.
+                if !workspace
+                    .lsp
+                    .lombok(&key)
+                    .is_some_and(crate::lsp::LombokState::may_restart)
+                {
+                    return;
+                }
+                if uses_lombok {
+                    workspace.lsp.lombok_mut(&key).uses_lombok = true;
+                }
                 let wants = workspace
                     .lsp
                     .lombok(&key)

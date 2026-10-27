@@ -161,7 +161,7 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # How Sirio launches the built-in `jdtls` around Lombok (spec
 # docs/superpowers/specs/2026-10-26-jdtls-lombok-design.md) in a real, isolated debug Sirio on
 # a private Xvfb, with a fake `jdtls` on PATH that logs each launch's argv and project and
-# speaks LSP through Scripts/Tests/fake_lsp.py, and fake Lombok jars in a private HOME. Nine
+# speaks LSP through Scripts/Tests/fake_lsp.py, and fake Lombok jars in a private HOME. Eleven
 # scenarios: restart (no jar at launch, one lands, the next publish stops the server with
 # shutdown and exit and launches it again with the agent, sent the open file and one full
 # build, and a newer jar afterwards causes no third launch), restart_held (the restart from a
@@ -169,14 +169,18 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # the newer agent), agent_at_launch (a parent POM alone mentions Lombok: the newest jar of the
 # Maven and Gradle caches as one argv element, one `java/buildWorkspace` after ServiceReady),
 # agent_from_settings (the jar found through settings.xml's localRepository, a path with a
-# space), no_lombok (no argument, no build), fallback_init and fallback_early (a launch with
-# the agent that fails, at once or after `initialized`, is launched once more without it),
-# stderr_flood (200 KB on stderr and the server is still ready) and hand_written (a
-# languages.toml entry is launched with exactly its own arguments, and sent no build).
+# space), no_lombok (no argument, no build, and later publishes restart nothing with a jar in
+# the caches), pom_gains_lombok (a project whose build file gains Lombok after its launch is
+# restarted once with the jar's agent at a later publish), fallback_init and fallback_early (a
+# launch with the agent that fails, at once or after `initialized`, is launched once more
+# without it), fallback_stuck (an `initialize` that fails while the process lives on: the
+# process is killed before the launch without the agent), stderr_flood (200 KB on stderr and
+# the server is still ready) and hand_written (a languages.toml entry is launched with exactly
+# its own arguments, and sent no build).
 # --xvfb or --display :N picks the display (never your own $DISPLAY); --out-dir DIR keeps the
 # transcript, app.log, the launch log and each launch's request log; --only NAME[,NAME...]
 # runs some scenarios and prints "JDTLS LOMBOK E2E PARTIAL" instead.
-Scripts/Tests/test-jdtls-lombok-e2e.sh --xvfb   # -> prints "JDTLS LOMBOK E2E OK (9 scenarios)"
+Scripts/Tests/test-jdtls-lombok-e2e.sh --xvfb   # -> prints "JDTLS LOMBOK E2E OK (11 scenarios)"
 
 # The same feature on the real jdtls, opt-in and never part of Scripts/ci.sh: a debug Sirio on
 # a private Xvfb launches the real jdtls (a `jdtls` stub on PATH that logs each launch and runs

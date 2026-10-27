@@ -33,11 +33,14 @@ caches and never downloaded. The first `ServiceReady` of such a launch is follow
 by one `java/buildWorkspace(true)`, because a workspace built without the agent
 keeps its Lombok errors in files nobody opened. When a jar appears that is newer
 than the launch's, or any jar after a launch with none (checked on that key's
-`publishDiagnostics`, at most every 2 s), the key's jdtls is restarted once; a
-launch the agent breaks is repeated once without it. A hand-written `java` entry in
-`languages.toml` is never touched, no card or message mentions Lombok, and every
-language server's stderr is discarded, so a server that is noisy there can no
-longer hang on a full pipe. Spec:
+`publishDiagnostics`, at most every 2 s), the key's jdtls is restarted once; so is
+one whose project gained Lombok after the launch (the build files are read again at
+those publishes) when a jar is in the caches. Only a launch of the built-in entry is
+ever restarted. A launch the agent breaks is repeated once without it, after the
+failed one has been killed (a server left running would hold jdtls's workspace). A
+hand-written `java` entry in `languages.toml` is never touched, no card or message
+mentions Lombok, and every language server's stderr is discarded, so a server that
+is noisy there can no longer hang on a full pipe. Spec:
 `docs/superpowers/specs/2026-10-26-jdtls-lombok-design.md`.
 
 The failure mode both halves share is silence: an unlisted language is detected,
