@@ -253,8 +253,9 @@ pub struct LombokState {
     /// No agent for the rest of the session.
     pub fallen_back: bool,
     pub last_check: Option<std::time::Instant>,
-    /// The worktree root the launch was given, with the key's root the arguments
-    /// of `project_uses_lombok`: the re-check reads the build files with the same.
+    /// The worktree root the launch was given. With the key's root these are the
+    /// arguments of `project_uses_lombok`, so the re-check reads the build files
+    /// as the launch did.
     pub worktree_root: Option<PathBuf>,
 }
 
