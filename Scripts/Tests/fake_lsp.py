@@ -53,6 +53,9 @@ the editor's pointer features ask:
   reads `initialized`, before `ServiceReady` and before it handles anything else or
   publishes: a jdtls that dies while it starts, after `initialize` has answered.
   The file is read at `initialized`, like `service_ready`.
+- With `"hold_build": true` in ANSWERS the server never answers `java/buildWorkspace`
+  (the request is still logged): a jdtls whose full build has not finished. It goes on
+  answering `shutdown` and ends at `exit`, so a client can stop it.
 - `java/buildWorkspace` (jdtls's full build) is answered with `1`, the status
   jdtls gives a build that succeeded.
 - Any other request is answered with null; notifications are ignored.
@@ -381,6 +384,8 @@ def main():
             uri = (params.get("textDocument") or {}).get("uri", "")
             send({"jsonrpc": "2.0", "id": message["id"], "result": symbols_for(uri, answers())})
         elif method == "java/buildWorkspace":
+            if answers().get("hold_build"):
+                continue
             send({"jsonrpc": "2.0", "id": message["id"], "result": 1})
         elif is_request:
             send({"jsonrpc": "2.0", "id": message["id"], "result": None})

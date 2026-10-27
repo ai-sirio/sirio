@@ -15,8 +15,15 @@ set -eEuo pipefail
 #                        server next publishes diagnostics (the app looks at most every
 #                        2 s), it is stopped (`shutdown`, then `exit`) and launched again
 #                        with that jar's agent, sent the open file and one full build, and
-#                        it stays ready (the old server's end does not remove the new
-#                        one); a newer Gradle jar placed afterwards causes no third launch
+#                        it is ready, and still ready 3 s later; a newer Gradle jar placed
+#                        afterwards causes no third launch
+#   restart_held         the same restart, from a launch that carries Maven's 1.18.30
+#                        agent and has not been answered its full build (the fake holds
+#                        the answer): Gradle's newer 1.18.36 lands and the next publish
+#                        stops it and launches again with the 1.18.36 agent, not with no
+#                        agent. That is the old router being cancelled: left running, it
+#                        would see the stream close before the build was answered, blame
+#                        the agent and send the relaunch out without it
 #   agent_at_launch      a project whose parent POM alone mentions Lombok
 #                        (lombok-parent/app) launches with the newest jar's agent: the
 #                        Gradle cache's 1.18.36 over Maven's 1.18.30, as one argv
@@ -213,6 +220,10 @@ JSON
 cat >"$JDTLS_DIR/answers-dieearly.json" <<JSON
 {"service_ready": true, "publish": {}, "nonce": 0, "exit_after_initialized": true}
 JSON
+# The same answers for a launch that is never answered its full build.
+cat >"$JDTLS_DIR/answers-holdbuild.json" <<JSON
+{"service_ready": true, "publish": {}, "nonce": 0, "hold_build": true}
+JSON
 cat >"$RUN_DIR/stubs/jdtls" <<STUB
 #!/bin/sh
 # Fake jdtls: logs "<n> <project dir name> <argv>" then behaves by the dir name.
@@ -228,6 +239,7 @@ answers="\$dir/answers.json"
 case "\$(basename "\$PWD")" in
   *-failinit) [ "\$agent" = 1 ] && exit 3 ;;
   *-dieearly) [ "\$agent" = 1 ] && answers="\$dir/answers-dieearly.json" ;;
+  *-holdbuild) [ "\$agent" = 1 ] && answers="\$dir/answers-holdbuild.json" ;;
   *-stderr) head -c 204800 /dev/zero | tr '\0' x >&2 ;;
 esac
 exec python3 -I "$ROOT/Scripts/Tests/fake_lsp.py" "\$answers" "\$dir/requests-\$n.log"
@@ -256,6 +268,7 @@ make_project plain-stderr '<project><artifactId>plain-stderr</artifactId></proje
 make_project lombok-m2 '<project><artifactId>lombok</artifactId></project>'
 make_project lombok-failinit '<project><artifactId>lombok</artifactId></project>'
 make_project lombok-dieearly '<project><artifactId>lombok</artifactId></project>'
+make_project lombok-holdbuild '<project><artifactId>lombok</artifactId></project>'
 make_project lombok-hand '<project><artifactId>lombok</artifactId></project>'
 git -C "$WT" add -A
 git -C "$WT" commit -q -m "fixtures"
@@ -424,13 +437,15 @@ scenario() { # name function
   echo "PASS $1"
 }
 
-# Rewrites answers.json with the next nonce: the fake server looks at the file every
-# 200 ms and, `publish` being there, publishes every open document when it changes.
+# Rewrites an answers file (default answers.json) with the next nonce, plus EXTRA
+# members: the fake server looks at its file every 200 ms and, `publish` being there,
+# publishes every open document when it changes.
 NONCE=0
-bump_nonce() {
+bump_nonce() { # [file [extra members, with a leading comma]]
+  local file="${1:-answers.json}"
   NONCE=$((NONCE + 1))
-  printf '{"service_ready": true, "publish": {}, "nonce": %s}\n' "$NONCE" >"$JDTLS_DIR/answers.json.new"
-  mv "$JDTLS_DIR/answers.json.new" "$JDTLS_DIR/answers.json"
+  printf '{"service_ready": true, "publish": {}, "nonce": %s%s}\n' "$NONCE" "${2:-}" >"$JDTLS_DIR/$file.new"
+  mv "$JDTLS_DIR/$file.new" "$JDTLS_DIR/$file"
 }
 # Waits up to SECONDS for a launch's request log to hold LINE (a whole line).
 wait_request() { # log line seconds
@@ -466,8 +481,7 @@ scenario_restart() {
     "$(grep -n '^notification exit$' "$first" | head -n 1 | cut -d: -f1)" ] \
     || fail "$SCENARIO: the old server was not sent shutdown before exit ($(tr '\n' '|' <"$first"))"
   echo "OK: the old server was sent shutdown, then exit"
-  # The new one is sent the open file and one full build, and stays ready: the old
-  # stream's end does not take the new server out.
+  # The new one is sent the open file and one full build, and is ready.
   local second="$JDTLS_DIR/requests-$(launches_of restart | sed -n 2p | cut -d' ' -f1).log"
   wait_request "$second" "notification textDocument/didOpen" 10
   wait_request "$second" "request java/buildWorkspace" 10
@@ -486,6 +500,39 @@ scenario_restart() {
   [ "$(launches_of restart | grep -c .)" = 2 ] \
     || fail "$SCENARIO: restart expected exactly 2 launches, got $(launches_of restart | grep -c .)"
   echo "OK: a newer jar caused no second restart"
+}
+
+# The restart from a launch whose full build is still unanswered: the old router must
+# be cancelled, or the old stream's end is blamed on its (older) agent and the
+# relaunch goes out with no agent at all.
+scenario_restart_held() {
+  # Maven's 1.18.30 only: the restart scenario left Gradle's 1.18.36 behind.
+  rm -rf "$GRADLE_CACHE/1.18.36"
+  place_jar "$MAVEN_REPO/org/projectlombok/lombok/1.18.30" 1.18.30
+  open_java lombok-holdbuild/src/main/java/demo/A.java
+  expect_status lsp jdtls:ready
+  wait_launches lombok-holdbuild 1 10
+  local maven="--jvm-arg=-javaagent:$MAVEN_REPO/org/projectlombok/lombok/1.18.30/lombok-1.18.30.jar"
+  local gradle="--jvm-arg=-javaagent:$GRADLE_CACHE/1.18.36/abc123/lombok-1.18.36.jar"
+  expect_argv lombok-holdbuild 1 "$maven" 1
+  local first="$JDTLS_DIR/requests-$(launches_of lombok-holdbuild | sed -n 1p | cut -d' ' -f1).log"
+  # The build is asked for and never answered.
+  wait_request "$first" "request java/buildWorkspace" 10
+  place_jar "$GRADLE_CACHE/1.18.36/abc123" 1.18.36
+  sleep 2.5
+  bump_nonce answers-holdbuild.json ', "hold_build": true'
+  wait_launches lombok-holdbuild 2 15
+  expect_argv lombok-holdbuild 1 "$gradle" 2
+  wait_request "$first" "notification exit" 10
+  [ "$(grep -n '^request shutdown$' "$first" | head -n 1 | cut -d: -f1)" -lt \
+    "$(grep -n '^notification exit$' "$first" | head -n 1 | cut -d: -f1)" ] \
+    || fail "$SCENARIO: the old server was not sent shutdown before exit ($(tr '\n' '|' <"$first"))"
+  echo "OK: the old server was sent shutdown, then exit"
+  expect_status lsp jdtls:ready
+  sleep 3
+  [ "$(launches_of lombok-holdbuild | grep -c .)" = 2 ] \
+    || fail "$SCENARIO: lombok-holdbuild expected exactly 2 launches, got $(launches_of lombok-holdbuild | grep -c .)"
+  echo "OK: the relaunch carried the newer agent, and there was no third launch"
 }
 
 scenario_agent_at_launch() {
@@ -606,6 +653,7 @@ TOML
 }
 
 scenario restart scenario_restart
+scenario restart_held scenario_restart_held
 scenario agent_at_launch scenario_agent_at_launch
 scenario agent_from_settings scenario_agent_from_settings
 scenario no_lombok scenario_no_lombok
