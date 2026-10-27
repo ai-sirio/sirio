@@ -14909,8 +14909,14 @@ impl SirioWorkspace {
         // key has fallen back without it. A `languages.toml` entry's argv is
         // exactly what was written. `root` and `worktree_root` are compared as
         // given, never canonicalised: both come from the same path.
-        let lombok_worktree_root = (entry.builtin
-            && entry.name == "java"
+        let builtin_java = entry.builtin && entry.name == "java";
+        // A launch from any other entry is not Lombok's business: the state an
+        // earlier built-in launch of this key left must not let the restart or
+        // the re-check stop this one.
+        if !builtin_java {
+            self.lsp.forget_lombok(&key);
+        }
+        let lombok_worktree_root = (builtin_java
             && !self.lsp.lombok(&key).is_some_and(|state| state.fallen_back))
         .then_some(worktree_root);
         // Step 2 of the ladder, read here and used only once step 1 has

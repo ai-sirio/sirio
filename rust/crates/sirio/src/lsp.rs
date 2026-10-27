@@ -234,7 +234,7 @@ pub struct LspSupervisor {
     /// "starting" is read from (`state_of`).
     starting: HashSet<(PathBuf, String)>,
     /// What each `java` key knows about Lombok (see [`LombokState`]); a key
-    /// that never launched the built-in entry has none.
+    /// whose running launch is not the built-in entry has none.
     lombok: HashMap<(PathBuf, String), LombokState>,
 }
 
@@ -308,6 +308,14 @@ impl LspSupervisor {
     /// The same, created empty when there is none yet.
     pub fn lombok_mut(&mut self, key: &(PathBuf, String)) -> &mut LombokState {
         self.lombok.entry(key.clone()).or_default()
+    }
+
+    /// Drops what `key` knew about Lombok. A launch that is not the built-in
+    /// `java` entry (a `languages.toml` entry of the reader's own) calls it, so
+    /// that state left by an earlier built-in launch of the key never lets the
+    /// restart or the re-check act on a server that is the reader's.
+    pub fn forget_lombok(&mut self, key: &(PathBuf, String)) {
+        self.lombok.remove(key);
     }
 
     /// A launch for `key` is about to be spawned.
