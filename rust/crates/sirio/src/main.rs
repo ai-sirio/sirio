@@ -15011,116 +15011,115 @@ impl SirioWorkspace {
                 other => (other, lombok, false),
             };
 
-            let _ = this.update(cx, |workspace, cx| match launched {
-                Ok((server, read_loop)) => {
-                    workspace.lsp.finish_starting(&key);
-                    if fell_back {
-                        workspace.lombok_fall_back(&key);
-                    }
-                    if let Some((uses, agent)) = lombok {
-                        if agent.is_some() {
-                            sirio_perf::event("lsp.lombok.agent", 0);
-                        }
-                        let state = workspace.lsp.lombok_mut(&key);
-                        state.uses_lombok = uses;
-                        state.agent = agent;
-                        state.built = false;
-                        state.build_answered = false;
-                    }
-                    let task = cx.background_executor().spawn(read_loop);
-                    let router = Self::spawn_router(&server, key.clone(), cx);
-                    workspace.lsp.insert(
-                        key.clone(),
-                        crate::lsp::ServerHandle {
-                            server,
-                            read_loop: task,
-                            router,
-                        },
-                    );
-                    // The server exists only now, so the facts that depend
-                    // on it — whether "Go to Definition" is offered — were
-                    // false when the tab opened. Push them again.
-                    let facts = workspace.file_context_facts(&path_for_facts);
-                    view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
-                    workspace.sync_document_with_server(&path_for_facts, &view, cx);
-                    // Files of this key opened while the launch ran were not
-                    // spawned for; the server is theirs now.
-                    for (path, other) in Self::open_file_views(&workspace.tabs, cx) {
-                        if !other.read(cx).is_snapshot() {
-                            workspace.sync_document_with_server(&path, &other, cx);
-                        }
-                    }
-                    workspace.push_language_server_status_to_open_files(cx);
-                    workspace.refresh_running_servers(cx);
+            let _ = this.update(cx, |workspace, cx| {
+                if fell_back {
+                    workspace.lombok_fall_back(&key);
                 }
-                Err(sirio_lsp::LspError::NotInstalled { command }) => {
-                    workspace.lsp.finish_starting(&key);
-                    // The shipped table offers a server for every language
-                    // Sirio can open, so "not installed" is the answer for
-                    // most of it on any given machine. Saying so on every
-                    // .yaml file would make the message worthless for the
-                    // case that matters — a server that *is* there and
-                    // broke. So: no card, ever.
-                    //
-                    // The context menu is the other half of that bargain,
-                    // and it is not silence. A reader who right-clicks has
-                    // asked a direct question, and answering it with "no
-                    // language server offers definitions here" describes
-                    // Sirio rather than their machine. The ladder is what
-                    // the menu gives back — the recipe to install, or the
-                    // thing that has to come first — and the facts are
-                    // pushed again because the tab computed them before
-                    // anyone had looked. Marked dead, so it is tried once
-                    // and not again.
-                    let reason = match install {
-                        Some(sirio_lsp::Recipe::Manual { needs, url }) => {
-                            crate::lsp::Dead::Manual { needs, url }
+                match launched {
+                    Ok((server, read_loop)) => {
+                        workspace.lsp.finish_starting(&key);
+                        if let Some((uses, agent)) = lombok {
+                            if agent.is_some() {
+                                sirio_perf::event("lsp.lombok.agent", 0);
+                            }
+                            let state = workspace.lsp.lombok_mut(&key);
+                            state.uses_lombok = uses;
+                            state.agent = agent;
+                            state.built = false;
+                            state.build_answered = false;
                         }
-                        Some(recipe) => crate::lsp::Dead::Installable { recipe },
-                        // An entry of the reader's own carries no recipe on
-                        // purpose: Sirio must not offer a second copy of a
-                        // server they already chose. There is nothing to
-                        // fetch and nothing to explain, so what is left is
-                        // the name they wrote, which is what the menu gives
-                        // back — and the key still dies here, so it is tried
-                        // once and not again.
-                        None => crate::lsp::Dead::NotInstalled {
-                            command: command.clone(),
-                        },
-                    };
-                    workspace.lsp.mark_dead(key, reason.clone());
-                    // Nothing to name: the row draws no server for a missing one.
-                    workspace.push_language_server_status_to_open_files(cx);
-                    let facts = workspace.file_context_facts(&path_for_facts);
-                    view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
-                    // The offer, once per language: a silenced language
-                    // costs no card at all, and Failed / the reader's own
-                    // entry offer nothing.
-                    workspace.maybe_offer_language_server(
-                        &language,
-                        &command,
-                        &reason,
-                        &view,
-                        &path_for_facts,
-                        cx,
-                    );
-                }
-                Err(error) => {
-                    workspace.lsp.finish_starting(&key);
-                    if fell_back {
-                        workspace.lombok_fall_back(&key);
+                        let task = cx.background_executor().spawn(read_loop);
+                        let router = Self::spawn_router(&server, key.clone(), cx);
+                        workspace.lsp.insert(
+                            key.clone(),
+                            crate::lsp::ServerHandle {
+                                server,
+                                read_loop: task,
+                                router,
+                            },
+                        );
+                        // The server exists only now, so the facts that depend
+                        // on it — whether "Go to Definition" is offered — were
+                        // false when the tab opened. Push them again.
+                        let facts = workspace.file_context_facts(&path_for_facts);
+                        view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+                        workspace.sync_document_with_server(&path_for_facts, &view, cx);
+                        // Files of this key opened while the launch ran were not
+                        // spawned for; the server is theirs now.
+                        for (path, other) in Self::open_file_views(&workspace.tabs, cx) {
+                            if !other.read(cx).is_snapshot() {
+                                workspace.sync_document_with_server(&path, &other, cx);
+                            }
+                        }
+                        workspace.push_language_server_status_to_open_files(cx);
+                        workspace.refresh_running_servers(cx);
                     }
-                    workspace.lsp.mark_dead(
-                        key,
-                        crate::lsp::Dead::Failed {
-                            message: error.to_string(),
-                        },
-                    );
-                    workspace.push_language_server_status_to_open_files(cx);
-                    // Naming the command is the point: it came from the
-                    // user's languages.toml, and naming it turns a mystery
-                    // into a line they can edit.
-                    view.update(cx, |view, cx| view.set_message(error.to_string(), cx));
+                    Err(sirio_lsp::LspError::NotInstalled { command }) => {
+                        workspace.lsp.finish_starting(&key);
+                        // The shipped table offers a server for every language
+                        // Sirio can open, so "not installed" is the answer for
+                        // most of it on any given machine. Saying so on every
+                        // .yaml file would make the message worthless for the
+                        // case that matters — a server that *is* there and
+                        // broke. So: no card, ever.
+                        //
+                        // The context menu is the other half of that bargain,
+                        // and it is not silence. A reader who right-clicks has
+                        // asked a direct question, and answering it with "no
+                        // language server offers definitions here" describes
+                        // Sirio rather than their machine. The ladder is what
+                        // the menu gives back — the recipe to install, or the
+                        // thing that has to come first — and the facts are
+                        // pushed again because the tab computed them before
+                        // anyone had looked. Marked dead, so it is tried once
+                        // and not again.
+                        let reason = match install {
+                            Some(sirio_lsp::Recipe::Manual { needs, url }) => {
+                                crate::lsp::Dead::Manual { needs, url }
+                            }
+                            Some(recipe) => crate::lsp::Dead::Installable { recipe },
+                            // An entry of the reader's own carries no recipe on
+                            // purpose: Sirio must not offer a second copy of a
+                            // server they already chose. There is nothing to
+                            // fetch and nothing to explain, so what is left is
+                            // the name they wrote, which is what the menu gives
+                            // back — and the key still dies here, so it is tried
+                            // once and not again.
+                            None => crate::lsp::Dead::NotInstalled {
+                                command: command.clone(),
+                            },
+                        };
+                        workspace.lsp.mark_dead(key, reason.clone());
+                        // Nothing to name: the row draws no server for a missing one.
+                        workspace.push_language_server_status_to_open_files(cx);
+                        let facts = workspace.file_context_facts(&path_for_facts);
+                        view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+                        // The offer, once per language: a silenced language
+                        // costs no card at all, and Failed / the reader's own
+                        // entry offer nothing.
+                        workspace.maybe_offer_language_server(
+                            &language,
+                            &command,
+                            &reason,
+                            &view,
+                            &path_for_facts,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        workspace.lsp.finish_starting(&key);
+                        workspace.lsp.mark_dead(
+                            key,
+                            crate::lsp::Dead::Failed {
+                                message: error.to_string(),
+                            },
+                        );
+                        workspace.push_language_server_status_to_open_files(cx);
+                        // Naming the command is the point: it came from the
+                        // user's languages.toml, and naming it turns a mystery
+                        // into a line they can edit.
+                        view.update(cx, |view, cx| view.set_message(error.to_string(), cx));
+                    }
                 }
             });
         })
@@ -15536,12 +15535,15 @@ impl SirioWorkspace {
     }
 
     /// Starts the key's server again, for the first open file that belongs to
-    /// it. Nothing happens when no file of the key is open: the next one that
+    /// it (a revision tab never counts: a snapshot is not opened on a server).
+    /// Nothing happens when no file of the key is open: the next one that
     /// opens starts it. The key must not be running, starting or dead.
     fn relaunch_key(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
         let file = Self::open_file_views(&self.tabs, cx)
             .into_iter()
-            .find(|(path, _)| self.server_key_for(path).as_ref() == Some(key));
+            .find(|(path, view)| {
+                !view.read(cx).is_snapshot() && self.server_key_for(path).as_ref() == Some(key)
+            });
         if let Some((path, view)) = file {
             self.start_language_server_for(&path, &view, cx);
         }
