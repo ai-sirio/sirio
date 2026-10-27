@@ -941,11 +941,9 @@ impl Chat {
                             });
                         })
                         .child(
-                            ely_gpui_component::primitives::Icon::new(
-                                ely_gpui_component::primitives::IconName::FileText,
-                            )
-                            .size(ely_gpui_component::theme::IconSize::Xs)
-                            .color(theme.ely.fg_subtle),
+                            Icon::new(IconName::FileText)
+                                .size(IconSize::Xs)
+                                .color(theme.ely.fg_subtle),
                         )
                         .child(
                             div()
