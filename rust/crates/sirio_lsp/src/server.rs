@@ -29,6 +29,13 @@ impl Server {
     /// connection, and completes the handshake. The read loop is returned
     /// alongside so the caller can place it on gpui's executor.
     ///
+    /// A launch that fails after the process exists (no stdio, the handshake
+    /// answering with an error or never answering) kills it and waits for it
+    /// before returning: `async_process` does not kill on drop by itself, and a
+    /// server left running keeps what it holds (jdtls its workspace lock) from
+    /// the launch that is tried next. A `Server` that is dropped without being
+    /// stopped is killed for the same reason.
+    ///
     /// The server's stderr goes to the null device: nothing reads it, and a pipe
     /// nobody drains blocks a server that logs more than the pipe holds (jdtls
     /// does, while it indexes).
@@ -49,6 +56,7 @@ impl Server {
             launch.env_clear().envs(user);
         }
         let mut child = launch
+            .kill_on_drop(true)
             .args(args)
             .current_dir(root)
             .stdin(Stdio::piped())
@@ -68,14 +76,14 @@ impl Server {
                 }
             })?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| LspError::Launch(format!("`{command}` has no stdin")))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| LspError::Launch(format!("`{command}` has no stdout")))?;
+        let Some(stdin) = child.stdin.take() else {
+            kill_and_reap(&mut child).await;
+            return Err(LspError::Launch(format!("`{command}` has no stdin")));
+        };
+        let Some(stdout) = child.stdout.take() else {
+            kill_and_reap(&mut child).await;
+            return Err(LspError::Launch(format!("`{command}` has no stdout")));
+        };
 
         let (client, incoming, read_loop) = Connection::new(BufReader::new(stdout), stdin);
         // The handshake is a request like any other: it only completes
@@ -86,20 +94,25 @@ impl Server {
         let mut read_loop: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
             Box::pin(read_loop);
         let mut handshake = Box::pin(lifecycle::initialize(&client, root));
-        let capabilities = {
+        let outcome = {
             // Scoped so the handshake's borrows of `client` and `root`
             // end before `client` moves into the returned `Server`.
             let outcome = future::select(&mut read_loop, &mut handshake).await;
             match outcome {
-                Either::Left(((), _)) => {
-                    return Err(LspError::Transport(
-                        "the server closed its stream during initialize".into(),
-                    ));
-                }
-                Either::Right((outcome, _)) => outcome?,
+                Either::Left(((), _)) => Err(LspError::Transport(
+                    "the server closed its stream during initialize".into(),
+                )),
+                Either::Right((outcome, _)) => outcome,
             }
         };
         drop(handshake);
+        let capabilities = match outcome {
+            Ok(capabilities) => capabilities,
+            Err(error) => {
+                kill_and_reap(&mut child).await;
+                return Err(error);
+            }
+        };
 
         Ok((
             Self { client, incoming, capabilities, child },
@@ -144,6 +157,22 @@ impl Server {
         kill_after_grace(&mut self.child, grace).await?;
         outcome
     }
+}
+
+/// How long a server that is being killed gets to be reaped. A killed process is
+/// reaped at once; the bound is for one that cannot be (a stuck kernel call), so
+/// that a failed launch still returns.
+const REAP_BOUND: Duration = Duration::from_secs(2);
+
+/// Kills a server whose launch failed and waits for it to be gone, within
+/// `REAP_BOUND`, so that whatever launch comes next does not find it running.
+/// Failures are not reported: the launch's own error is the one that matters.
+async fn kill_and_reap(child: &mut async_process::Child) {
+    let _ = child.kill();
+    let reaped = child.status();
+    let bound = futures_timer::Delay::new(REAP_BOUND);
+    futures::pin_mut!(reaped, bound);
+    let _ = future::select(reaped, bound).await;
 }
 
 async fn kill_after_grace(

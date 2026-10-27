@@ -151,7 +151,7 @@ stop_hosts() {
   done
 }
 cleanup() {
-  local rc=$?
+  local rc=$? file pid cmdline
   [ -z "$APP_PID" ] || terminate "$APP_PID"
   stop_hosts
   [ -z "$XVFB_PID" ] || terminate "$XVFB_PID"
@@ -159,6 +159,14 @@ cleanup() {
   # The fake server's launch and request logs: the artifact, kept on failure too.
   [ -d "$RUN_DIR/jdtls" ] && cp -R "$RUN_DIR/jdtls" "$OUT_DIR/" 2>/dev/null || true
   [ -d "$RUN_DIR/host/log" ] && cp -R "$RUN_DIR/host/log" "$OUT_DIR/" 2>/dev/null || true
+  # A fake that ignores the end of its stdin (the failed handshake's) outlives the app
+  # when the run fails before the app reaps it; its pid file says which process it was.
+  for file in "$RUN_DIR"/jdtls/pid-*; do
+    [ -f "$file" ] || continue
+    pid="$(cat "$file")"
+    cmdline="$(tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" || true)"
+    case "$cmdline" in *fake_lsp.py*) kill -KILL "$pid" 2>/dev/null || true ;; esac
+  done
   rm -rf "$RUN_DIR"
   exit "$rc"
 }
@@ -224,6 +232,10 @@ JSON
 cat >"$JDTLS_DIR/answers-holdbuild.json" <<JSON
 {"service_ready": true, "publish": {}, "nonce": 0, "hold_build": true}
 JSON
+# The same answers for a launch whose `initialize` fails while the process lives on.
+cat >"$JDTLS_DIR/answers-initerror.json" <<JSON
+{"service_ready": true, "publish": {}, "nonce": 0, "initialize_error": true}
+JSON
 cat >"$RUN_DIR/stubs/jdtls" <<STUB
 #!/bin/sh
 # Fake jdtls: logs "<n> <project dir name> <argv>" then behaves by the dir name.
@@ -234,10 +246,13 @@ n=\$(( \$(wc -l < "\$dir/launches.log" 2>/dev/null || echo 0) + 1 ))
 # a launch in launches.log always has its argv file.
 { echo "\$#"; printf '%s\n' "\$@"; } > "\$dir/argv-\$n.log"
 printf '%s %s %s\n' "\$n" "\$(basename "\$PWD")" "\$*" >> "\$dir/launches.log"
+# The pid the server runs as: the exec below keeps it, so a test can look for it.
+echo \$\$ > "\$dir/pid-\$n"
 agent=0; case " \$* " in *" --jvm-arg=-javaagent:"*) agent=1 ;; esac
 answers="\$dir/answers.json"
 case "\$(basename "\$PWD")" in
   *-failinit) [ "\$agent" = 1 ] && exit 3 ;;
+  *-stuck) [ "\$agent" = 1 ] && answers="\$dir/answers-initerror.json" ;;
   *-dieearly) [ "\$agent" = 1 ] && answers="\$dir/answers-dieearly.json" ;;
   *-holdbuild) [ "\$agent" = 1 ] && answers="\$dir/answers-holdbuild.json" ;;
   *-stderr) head -c 204800 /dev/zero | tr '\0' x >&2 ;;
@@ -267,6 +282,7 @@ make_project plain '<project><artifactId>plain</artifactId></project>'
 make_project plain-stderr '<project><artifactId>plain-stderr</artifactId></project>'
 make_project lombok-m2 '<project><artifactId>lombok</artifactId></project>'
 make_project lombok-failinit '<project><artifactId>lombok</artifactId></project>'
+make_project lombok-stuck '<project><artifactId>lombok</artifactId></project>'
 make_project lombok-dieearly '<project><artifactId>lombok</artifactId></project>'
 make_project lombok-holdbuild '<project><artifactId>lombok</artifactId></project>'
 make_project lombok-hand '<project><artifactId>lombok</artifactId></project>'
@@ -623,6 +639,26 @@ scenario_fallback_early() {
   expect_fallback lombok-dieearly
 }
 
+# A jdtls that answers `initialize` with an error and keeps running, holding its
+# workspace as the JVM does: the launch is repeated without the agent, and the first
+# process must be gone by then, or the second would find the workspace locked.
+scenario_fallback_stuck() {
+  use_maven_agent_only
+  open_java lombok-stuck/src/main/java/demo/A.java
+  expect_status lsp jdtls:ready
+  expect_fallback lombok-stuck
+  local first pid tries=0
+  first="$(launches_of lombok-stuck | sed -n 1p | cut -d' ' -f1)"
+  pid="$(cat "$JDTLS_DIR/pid-$first")"
+  while [ "$tries" -lt 25 ] && kill -0 "$pid" 2>/dev/null; do
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  ! kill -0 "$pid" 2>/dev/null \
+    || fail "$SCENARIO: the first launch's process $pid is still running after the fallback"
+  echo "OK: the first launch's process is gone"
+}
+
 scenario_stderr_flood() {
   # 200 KB on stderr is more than a pipe holds: a server whose stderr nobody reads
   # blocks before its first answer, and the editor never leaves "starting".
@@ -659,6 +695,7 @@ scenario agent_from_settings scenario_agent_from_settings
 scenario no_lombok scenario_no_lombok
 scenario fallback_init scenario_fallback_init
 scenario fallback_early scenario_fallback_early
+scenario fallback_stuck scenario_fallback_stuck
 scenario stderr_flood scenario_stderr_flood
 # Last: the table it writes applies to every .java file from then on.
 scenario hand_written scenario_hand_written

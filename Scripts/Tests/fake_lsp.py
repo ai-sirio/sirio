@@ -53,6 +53,10 @@ the editor's pointer features ask:
   reads `initialized`, before `ServiceReady` and before it handles anything else or
   publishes: a jdtls that dies while it starts, after `initialize` has answered.
   The file is read at `initialized`, like `service_ready`.
+- With `"initialize_error": true` in ANSWERS the server answers `initialize` with a
+  JSON-RPC error and then stays alive, reading nothing and ignoring the end of its
+  stdin until it is killed: a jdtls whose handshake failed and whose JVM still holds
+  the workspace lock. The file is read at `initialize`.
 - With `"hold_build": true` in ANSWERS the server never answers `java/buildWorkspace`
   (the request is still logged): a jdtls whose full build has not finished. It goes on
   answering `shutdown` and ends at `exit`, so a client can stop it.
@@ -322,6 +326,15 @@ def main():
         if method == "initialize":
             root_uri = params.get("rootUri") or ""
             root["path"] = unquote(urlparse(root_uri).path) if root_uri else None
+            if answers().get("initialize_error"):
+                send({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "error": {"code": -32603, "message": "initialize failed (fake)"},
+                })
+                log_line("initialize_error: staying alive")
+                while True:
+                    time.sleep(3600)
             send({
                 "jsonrpc": "2.0",
                 "id": message["id"],
