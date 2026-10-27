@@ -13,6 +13,8 @@ use sirio_ui::chat::Chat;
 fn main() {
     application().run(|cx: &mut App| {
         Theme::init(cx);
+        // The chat, its slash and mention popups included, draws with Ely.
+        sirio_ui::ely::init(cx);
 
         let bounds = match std::env::var("CHAT_DEMO_AT") {
             Ok(position) => {
