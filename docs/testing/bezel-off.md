@@ -509,9 +509,12 @@ comments (the doc of `init_motion` in `sirio/src/main.rs` and one in `sirio_term
 so the "before" frames are the frames of PR C's base and the base was not captured again. The "after"
 set was captured on the working tree of PR C's last commit, `refactor: draw tooltips with Ely`: its
 `rust/` diff against `c90f6b71` (the commit before it) is what the tree held while the capture ran.
-PR C is eight commits on `10243f3a`: Ely's text field learns to be hosted (`57d96855`, `379af0eb`,
+PR C's code is eight commits on `10243f3a`: Ely's text field learns to be hosted (`57d96855`, `379af0eb`,
 `7620843c`), every field on Ely (`4f07a14a`), the editing chords, the framed field's height and Ely's
-word unit (`5a2e910b`, `dd88109d`, `c90f6b71`) and the tooltips.
+word unit (`5a2e910b`, `dd88109d`, `c90f6b71`) and the tooltips (`07580658`). Two follow-ups from the
+review of the last one come after the capture: `f51d01ab` makes the sidebar and files-panel demos init
+Ely (they panicked on a tooltip hover) and folds `segmented_icons_with_tooltip` into `segmented_icons`,
+which draws the same tooltips; `139e43c6` is docs.
 
 **What PR C moved.**
 
@@ -657,7 +660,7 @@ smaller, its placeholder is 14.5 px where it was 13 px, and in light the fill is
 border where bezel's was white. That is Ely's framed input; it is the one text-field change a capture reaches
 only without the mask.
 
-Enzo's verdict: pending.
+Enzo's verdict: approved on 2026-10-27, on the page built from these captures.
 
 ### PR D: menus, popovers, scrollbars and icons on Ely (`refactor/bezel-off-d`)
 
