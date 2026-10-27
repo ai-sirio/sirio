@@ -189,13 +189,21 @@ Scripts/Tests/test-jdtls-lombok-e2e.sh --xvfb   # -> prints "JDTLS LOMBOK E2E OK
 # agent, jdtls's own import downloads Lombok, the next publish restarts it with the agent
 # from $HOME/.m2, and the open file's diagnostics and the drawer's error count (which covers
 # files nobody opened) read 0 and hold 0 for 60 s, counted only once the drawer shows the
-# warning of an unused import in PegaService.java, a file nobody opens: the current server has
-# published it, so a zero is not just the empty state after a restart. Run 2: the app is
-# quit, every jdtls is confirmed gone, and the relaunch carries the agent from the start over
-# the workspace Run 1 left, with the same condition. It needs network access to Maven Central, a jdtls install
-# and a Java 25 home, and takes 10 to 20 minutes. --jdtls PATH and --java-home DIR are required;
+# warning of an unused import in PegaService.java, a file nobody opens: the current process
+# has published it, so a zero is not just the empty state after a restart (the full build
+# Sirio sends after ServiceReady is what clears stored markers, inside the hold). Run 2: the
+# app is ended with SIGTERM (Sirio installs no SIGTERM handler, so its quit path does not
+# run), every jdtls is confirmed gone (the servers ended on their own), and the relaunch
+# carries the agent from the start over the workspace Run 1 left, with the same condition.
+# Run 3, the control: a hand-written java entry in languages.toml runs the same stub on a
+# fresh -data directory with no agent, over the Maven cache Run 1 filled; the open file's
+# diagnostics and the drawer's errors read at least 1, with PegaService.java among the files,
+# and it stays one launch with no -javaagent. The summary reports the worst diagnostics and
+# errors seen while each run waited for its clean state. It needs network access to Maven
+# Central, a jdtls install and a Java 25 home, and takes about 5 minutes (the first
+# Maven import downloads the dependencies). --jdtls PATH and --java-home DIR are required;
 # --xvfb or --display :N; --out-dir DIR keeps transcript.log, jdtls-launches.log, app.log and
-# jdtls's own workspace log; --no-build uses the binaries already built.
+# jdtls's own workspace logs; --no-build uses the binaries already built.
 Scripts/Tests/test-jdtls-lombok-live.sh --xvfb --jdtls PATH --java-home DIR   # -> prints "JDTLS LOMBOK LIVE OK"
 
 # The editor's hosting hooks on a real frame, on a private Xvfb with Mesa's

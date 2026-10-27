@@ -19,23 +19,35 @@ set -eEuo pipefail
 # diagnostics and the drawer's error count (PegaService.java and LoginBody.java are
 # never opened) must read 0 and hold 0 for 60 s: a Lombok error republished from the
 # workspace the first launch left behind would show in that window. A zero is only
-# counted once the server has published PegaService.java: that file carries an unused
-# import, a warning jdtls reports by default and Lombok has nothing to do with, so the
-# drawer holds 0 errors, at least 1 warning and PegaService.java in its files. Each
-# publish replaces a file's whole set, so seeing that warning means the current server
-# has published the file, and a Lombok error would have come in the same publish.
-# Run 2, the relaunch: the app is quit, every jdtls the run launched must be gone
-# (one left over would hold the workspace lock and the fallback would hide it), the
-# app is started again and the file reopened: the launch carries the agent from the
-# start, over the workspace Run 1 built, and the same condition holds.
+# counted once the drawer lists PegaService.java: that file carries an unused import, a
+# warning jdtls reports by default and Lombok has nothing to do with, so the drawer holds
+# 0 errors, at least 1 warning and PegaService.java in its files. Seeing that warning
+# proves the current process has published the file, from the markers jdtls stored in
+# the workspace or from the full build's result; it does not by itself prove the markers
+# are fresh. What rules out stale ones is the full build Sirio sends after ServiceReady,
+# which republishes the file inside the 60 s hold, where a stale error would restart it.
+# Run 2, the relaunch: the app is ended with SIGTERM (Sirio installs no SIGTERM handler,
+# so its quit path does not run and the servers get no `shutdown`), every jdtls the run
+# launched must be gone (they end on their own when the app's pipes close; one left over
+# would hold the workspace lock and the fallback would hide it), the app is started again
+# and the file reopened: the launch carries the agent from the start, over the workspace
+# Run 1 built, and the same condition holds.
+# Run 3, the control: the app is ended the same way and started once more with a
+# hand-written `java` entry in languages.toml, which runs the same jdtls stub on a fresh
+# `-data` directory and no agent, over the Maven cache Run 1 filled. Without the agent
+# Lombok's errors must show: the open file's diagnostics and the drawer's errors read at
+# least 1, with PegaService.java among the files, and the launch carries no `-javaagent`.
+# It is launched once and stays at one: a hand-written launch is never restarted. This is
+# what shows the clean reads of Runs 1 and 2 are the agent's doing and not an empty state.
 #
 # Opt-in: it needs network access to Maven Central, a Java 25 runtime and a jdtls
-# install (1.63 needs Java 25), takes 10 to 20 minutes, and is never part of
-# Scripts/ci.sh. Nothing is installed: the two paths are yours. Linux and X11 only.
+# install (1.63 needs Java 25), takes about 5 minutes (the first Maven import
+# downloads the dependencies), and is never part of Scripts/ci.sh. Nothing is installed:
+# the two paths are yours. Linux and X11 only.
 #
 # The artifact: --out-dir DIR (default artifacts/jdtls-lombok-live-<stamp>-<pid>)
 # keeps transcript.log, jdtls-launches.log (one line per launch: "<pid> <project dir
-# name> <argv>") and app.log, plus the jdtls workspace's own log when there is one.
+# name> <argv>") and app.log, plus the jdtls workspaces' own logs when there are any.
 #
 # Usage: Scripts/Tests/test-jdtls-lombok-live.sh --jdtls PATH --java-home DIR
 #          [--xvfb | --display :N] [--out-dir DIR] [--no-build]
@@ -174,7 +186,7 @@ cleanup() {
   cp "$LAUNCH_LOG" "$OUT_DIR/" 2>/dev/null || true
   # jdtls's own log in its workspace, kept when it is there: it says why a launch failed.
   local log n=0
-  for log in "$RUN_DIR"/home/.cache/jdtls/*/.metadata/.log; do
+  for log in "$RUN_DIR"/home/.cache/jdtls/*/.metadata/.log "$RUN_DIR"/control-workspace/.metadata/.log; do
     [ -f "$log" ] || continue
     n=$((n + 1))
     tail -c 200000 "$log" >"$OUT_DIR/jdtls-workspace-$n.log" 2>/dev/null || true
@@ -241,9 +253,10 @@ JAVA_HOME="$JAVA_HOME_ARG" exec "$JDTLS" "--jvm-arg=-Duser.home=\$HOME" "\$@"
 STUB
 chmod +x "$RUN_DIR/stubs/jdtls"
 
-# The project, in a fresh git repository inside the run dir: the four files of
-# spec section 7 (PegaService.java gains an unused import: the warning the run waits for). Lombok 1.18.40 comes from Spring Boot's dependency management, and
-# `$HOME/.m2` is empty, so the import downloads it.
+# The project, in a fresh git repository inside the run dir: the four files of spec
+# section 7 (PegaService.java gains an unused import: the warning the run waits for).
+# Lombok 1.18.40 comes from Spring Boot's dependency management, and `$HOME/.m2` is
+# empty, so the import downloads it.
 mkdir -p "$WT/src/main/java/demo/model" "$WT/src/main/java/demo/service" "$WT/src/main/java/demo/controller"
 git -C "$WT" init -q -b main
 git -C "$WT" config user.email tester@example.invalid
@@ -481,19 +494,30 @@ expect_ready() { # seconds
 # A restart (the Lombok one, or the app's) starts with empty stores, so 0 errors and 0
 # diagnostics are the state before the server has said anything. PegaService's unused
 # import is a warning every jdtls publish of that file carries, and each publish replaces
-# the file's whole set: seeing it means the CURRENT server has published the file, and a
-# Lombok error in it would have arrived in that same publish. The restart empties the old
-# server's findings first, so a sample taken before the new server's first publish has no
-# anchor and cannot count. Polled up to LIMIT seconds for the first such sample; any
-# sample that stops matching restarts the window.
+# the file's whole set: seeing it proves the CURRENT process has published the file, from
+# the markers jdtls stored in the workspace or from the full build's result. It does not
+# prove those markers are fresh: what rules stale ones out is the full build Sirio sends
+# after ServiceReady, which republishes the file inside the hold (a stale error there
+# restarts the window). The restart empties the old server's findings first, so a sample
+# taken before the new server's first publish has no anchor and cannot count. Polled up to
+# LIMIT seconds for the first such sample; any sample that stops matching restarts the
+# window. The largest diagnostics and error counts any sample showed are kept in
+# WORST_DIAGNOSTICS and WORST_ERRORS, for the summary: a stale 6/2/0 that was cleared
+# must show there, whatever the final sample reads.
+WORST_DIAGNOSTICS=0
+WORST_ERRORS=0
 expect_clean() { # limit hold
   local deadline=$((SECONDS + $1)) hold_until=0 diagnostics counts errors warnings files anchor next=$((SECONDS + 30))
+  WORST_DIAGNOSTICS=0
+  WORST_ERRORS=0
   while [ "$SECONDS" -lt "$deadline" ] || [ "$hold_until" -gt 0 ]; do
     read_state
     diagnostics="$(sfield diagnostics)"
     counts="$(problem_counts)"
     errors="${counts% *}"
     warnings="${counts#* }"
+    [ "${diagnostics:-0}" -le "$WORST_DIAGNOSTICS" ] || WORST_DIAGNOSTICS="$diagnostics"
+    [ "$errors" -le "$WORST_ERRORS" ] || WORST_ERRORS="$errors"
     files="$(sfield problem_files)"
     case ";$files;" in *";src/main/java/demo/service/PegaService.java;"*) anchor=1 ;; *) anchor=0 ;; esac
     if [ "$diagnostics" = 0 ] && [ "$errors" = 0 ] && [ "$warnings" -ge 1 ] && [ "$anchor" = 1 ]; then
@@ -514,6 +538,50 @@ expect_clean() { # limit hold
     sleep 1
   done
   fail "$SCENARIO: expected diagnostics=0, no error and PegaService.java's warning in the drawer, got diagnostics=$diagnostics problems=$(sfield problems) problem_files='$files'"
+}
+
+# The control's condition: what a jdtls with no agent shows for this project. Up to
+# LIMIT seconds for a sample where the open file's `diagnostics` is at least 1 and the
+# drawer has at least one error with PegaService.java among its files.
+expect_errors() { # limit
+  local deadline=$((SECONDS + $1)) next=$((SECONDS + 30)) diagnostics errors files
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    read_state
+    diagnostics="$(sfield diagnostics)"
+    errors="$(problem_errors)"
+    files="$(sfield problem_files)"
+    case ";$files;" in
+      *";src/main/java/demo/service/PegaService.java;"*)
+        if [ "${diagnostics:-0}" -ge 1 ] && [ "$errors" -ge 1 ]; then
+          echo "seen without the agent: diagnostics=$diagnostics problems=$(sfield problems), PegaService.java among the files ('$files') at $(elapsed)"
+          return 0
+        fi
+        ;;
+    esac
+    if [ "$SECONDS" -ge "$next" ]; then
+      echo "... $(elapsed): diagnostics=$diagnostics problems=$(sfield problems) files='$files'"
+      next=$((SECONDS + 30))
+    fi
+    sleep 1
+  done
+  fail "$SCENARIO: expected diagnostics>=1 and an error in PegaService.java without the agent, got diagnostics=$diagnostics problems=$(sfield problems) problem_files='$files'"
+}
+# Ends the app the way Runs 2 and 3 do, with SIGTERM, then waits up to 30 s for every
+# jdtls the run launched to be gone: they end on their own, and one left over would hold
+# the workspace lock and the fallback would hide the cause.
+end_app_and_wait_for_jdtls() {
+  terminate "$APP_PID"
+  APP_PID=""
+  local deadline=$((SECONDS + 30)) alive pid
+  while :; do
+    alive=""
+    for pid in $(cut -d' ' -f1 "$LAUNCH_LOG"); do
+      if is_alive "$pid"; then alive="$alive $pid"; fi
+    done
+    [ -n "$alive" ] || break
+    [ "$SECONDS" -lt "$deadline" ] || fail "$SCENARIO: jdtls still running 30 s after the app ended (pid$alive): it would hold the workspace lock, and the fallback would hide the cause"
+    sleep 0.5
+  done
 }
 
 # ---------------------------------------------------------------- run 1: the restart
@@ -539,24 +607,14 @@ RUN1_PROBLEMS="$(sfield problems)"
 RUN1_DIAGNOSTICS="$(sfield diagnostics)"
 RUN1_MAX_DIAGNOSTICS="$MAX_DIAGNOSTICS"
 RUN1_MAX_PROBLEM_ERRORS="$MAX_PROBLEM_ERRORS"
+RUN1_WORST_DIAGNOSTICS="$WORST_DIAGNOSTICS"
+RUN1_WORST_ERRORS="$WORST_ERRORS"
 
 # ---------------------------------------------------------------- run 2: the relaunch
 
 SCENARIO="run2_relaunch"
-say "run 2: quit, every jdtls gone, relaunch over the workspace run 1 left"
-terminate "$APP_PID"
-APP_PID=""
-deadline=$((SECONDS + 30))
-alive=""
-while :; do
-  alive=""
-  for pid in $(cut -d' ' -f1 "$LAUNCH_LOG"); do
-    if is_alive "$pid"; then alive="$alive $pid"; fi
-  done
-  [ -n "$alive" ] || break
-  [ "$SECONDS" -lt "$deadline" ] || fail "$SCENARIO: jdtls still running 30 s after the app quit (pid$alive): it would hold the workspace lock, and the fallback would hide the cause"
-  sleep 0.5
-done
+say "run 2: the app ended with SIGTERM, every jdtls gone, relaunch over the workspace run 1 left"
+end_app_and_wait_for_jdtls
 echo "OK: every jdtls of run 1 is gone at $(elapsed)"
 app_start
 select_workspace
@@ -569,10 +627,47 @@ expect_clean 300 60
 echo "OK: run 2 had one launch, with the agent from the start"
 RUN2_PROBLEMS="$(sfield problems)"
 RUN2_DIAGNOSTICS="$(sfield diagnostics)"
+RUN2_WORST_DIAGNOSTICS="$WORST_DIAGNOSTICS"
+RUN2_WORST_ERRORS="$WORST_ERRORS"
+
+# ---------------------------------------------------------------- run 3: the control
+
+SCENARIO="run3_control"
+say "run 3: a hand-written java entry, a fresh workspace, no agent, over the Maven cache run 1 filled"
+end_app_and_wait_for_jdtls
+echo "every jdtls of run 2 is gone at $(elapsed)"
+cat >"$XDG_CONFIG_HOME/sirio/languages.toml" <<TOML
+[[language]]
+name = "java"
+extensions = ["java"]
+command = "jdtls"
+args = ["-data", "$RUN_DIR/control-workspace"]
+roots = ["pom.xml"]
+TOML
+app_start
+select_workspace
+ctl surface editor open --path="$WT/$CONTROLLER" >/dev/null
+wait_launches 4 60
+case "$(launch_line 4)" in
+  *"-javaagent:"*) fail "$SCENARIO: the hand-written launch carries an agent: '$(launch_line 4)'" ;;
+  *"-data $RUN_DIR/control-workspace"*) echo "launch 4 is the hand-written one, with no agent: $(launch_line 4)" ;;
+  *) fail "$SCENARIO: launch 4 expected the hand-written -data $RUN_DIR/control-workspace, got '$(launch_line 4)'" ;;
+esac
+expect_ready 300
+expect_errors 300
+# A hand-written launch is never restarted, whatever the caches hold: the jar Run 1
+# downloaded is there, and a few more publishes go by.
+sleep 20
+[ "$(launch_count)" = 4 ] || fail "$SCENARIO: expected exactly 4 launches, got $(launch_count) ($(tr '\n' '|' <"$LAUNCH_LOG"))"
+read_state
+RUN3_PROBLEMS="$(sfield problems)"
+RUN3_DIAGNOSTICS="$(sfield diagnostics)"
+echo "OK: run 3 had one launch, with no agent, and Lombok's errors show without it (diagnostics=$RUN3_DIAGNOSTICS problems=$RUN3_PROBLEMS)"
 
 stop_hosts
-echo "run 1: diagnostics=$RUN1_DIAGNOSTICS problems=$RUN1_PROBLEMS (before the restart the poll saw at most diagnostics=$RUN1_MAX_DIAGNOSTICS, drawer errors=$RUN1_MAX_PROBLEM_ERRORS)"
-echo "run 2: diagnostics=$RUN2_DIAGNOSTICS problems=$RUN2_PROBLEMS"
+echo "run 1: diagnostics=$RUN1_DIAGNOSTICS problems=$RUN1_PROBLEMS (before the restart the poll saw at most diagnostics=$RUN1_MAX_DIAGNOSTICS, drawer errors=$RUN1_MAX_PROBLEM_ERRORS; while waiting for the clean state at most diagnostics=$RUN1_WORST_DIAGNOSTICS, drawer errors=$RUN1_WORST_ERRORS)"
+echo "run 2: diagnostics=$RUN2_DIAGNOSTICS problems=$RUN2_PROBLEMS (while waiting for the clean state at most diagnostics=$RUN2_WORST_DIAGNOSTICS, drawer errors=$RUN2_WORST_ERRORS)"
+echo "run 3 (control, no agent): diagnostics=$RUN3_DIAGNOSTICS problems=$RUN3_PROBLEMS"
 echo "launches:"
 sed 's/^/  /' "$LAUNCH_LOG"
 echo "total $(elapsed)"
