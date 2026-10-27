@@ -367,6 +367,8 @@ mod tests {
         let mut env = env_with(&home);
         env.insert("GRADLE_USER_HOME".into(), other.to_string_lossy().into_owned());
         assert_eq!(newest_jar(&env).unwrap().path, moved);
+        std::fs::remove_dir_all(&home).ok();
+        std::fs::remove_dir_all(&other).ok();
     }
 
     #[test]
@@ -382,6 +384,7 @@ mod tests {
         let found = newest_jar(&env_with(&home)).unwrap();
         assert_eq!(found.path, good);
         assert_eq!(found.version, v("1.18.30"));
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -391,6 +394,7 @@ mod tests {
         let good = maven_jar(&repo, "1.18.30");
         maven_jar(&repo, "edge-SNAPSHOT");
         assert_eq!(newest_jar(&env_with(&home)).unwrap().path, good);
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -409,6 +413,7 @@ mod tests {
         let found = newest_jar(&env_with(&home)).unwrap();
         assert_eq!(found.path, custom);
         assert_eq!(found.version, v("1.18.20"));
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -433,6 +438,7 @@ mod tests {
         let home = scratch("empty");
         assert_eq!(newest_jar(&env_with(&home)), None);
         assert_eq!(newest_jar(&BTreeMap::new()), None);
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -441,6 +447,7 @@ mod tests {
         write(&worktree.join("pom.xml"), b"<artifactId>lombok</artifactId>");
         write(&worktree.join("app/pom.xml"), b"<project/>");
         assert!(project_uses_lombok(&worktree.join("app"), &worktree));
+        std::fs::remove_dir_all(&worktree).ok();
     }
 
     #[test]
@@ -450,6 +457,7 @@ mod tests {
         let worktree = outer.join("wt");
         write(&worktree.join("app/pom.xml"), b"<project/>");
         assert!(!project_uses_lombok(&worktree.join("app"), &worktree));
+        std::fs::remove_dir_all(&outer).ok();
     }
 
     #[test]
@@ -460,6 +468,7 @@ mod tests {
             b"[libraries]\nlombok = { module = \"org.projectlombok:lombok\" }\n",
         );
         assert!(project_uses_lombok(&root, &root));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
