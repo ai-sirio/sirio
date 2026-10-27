@@ -249,17 +249,21 @@ no agent for the rest of the session. *(designer's call)* A failed launch means 
 - the spawn fails;
 - the handshake fails;
 - the stream closes before `initialize` answers;
-- the stream closes after `initialize` but before the server's first
-  `textDocument/publishDiagnostics`. Lombok patches the compiler when the first build
-  runs, so a crash in that window is treated as the agent's fault. *(designer's call,
-  from the builder check)*
+- the stream closes after `initialize` but before jdtls has answered the full build of
+  §2.4. Any answer counts: a result, an error object or the timeout. A closed stream
+  does not. Lombok patches the compiler when a build runs, so a crash in that window is
+  treated as the agent's fault. *(designer's call, from the builder check; the end of
+  the window moved from "the first `publishDiagnostics`" during planning)* The first
+  publish was the wrong boundary: on a workspace that already exists, jdtls republishes
+  its stored markers before it has compiled anything with the agent (§7, about 8 s
+  into the relaunch).
 
 Lombok's errors come back, but Java support stays: the user is left where they are
 today, not worse. The fallback is silent, like the rest of this feature. It records a
 content-free `sirio_perf` event so a trace can show it happened.
 
-A jdtls with the agent that crashes after its first publish is an ordinary crash
-(`Failed`). Sirio cannot tell it apart from any other crash.
+A jdtls with the agent that crashes after answering the full build is an ordinary
+crash (`Failed`). Sirio cannot tell it apart from any other crash.
 
 ## §3 Non-goals
 
@@ -335,7 +339,7 @@ Cases:
 4. `localRepository` in `settings.xml` is honoured.
 5. A launch with the agent fails: a second launch without it follows, and the file gets
    its server. Two variants: the fake exits during `initialize` when it sees the agent
-   argument, and the fake exits after `initialize` but before its first publish.
+   argument, and the fake exits after `initialize` but before answering the full build.
 6. During a restart the old server's stream closes, and the new server under the same
    key keeps running: the old router does not remove it.
 7. A hand-written `java` entry in `languages.toml`: its argv is exactly what was
