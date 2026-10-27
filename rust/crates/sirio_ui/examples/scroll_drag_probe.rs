@@ -6,7 +6,8 @@
 //!
 //! The layout is a contract the script reads: a 900x600 window, three panes of 300x600 from
 //! the left edge, a vertical bar at the right edge of panes 1 and 2 and a horizontal bar along
-//! the bottom of pane 3, each 10 px thick.
+//! the bottom of pane 3. Pane 1's bar is Ely's (a 12 px strip, its 6 px thumb in the strip's left
+//! half); the other two are 10 px thick.
 //!
 //! The appearance is dark, pinned. Env: `SIRIO_REDUCED_MOTION` (a debug build snaps every
 //! animation to its rest state, as in `sirio`'s `main`).

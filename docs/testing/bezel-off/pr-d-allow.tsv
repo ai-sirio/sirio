@@ -1,0 +1,11 @@
+# PR D's attribution file: the pixels the move of the menus and popovers (Task 11), and of the scroll-handle scrollbars and two
+# icons (Task 12), to Ely changes. Format and meaning: docs/testing/bezel-off.md ("The allow table"). Each why starts with the
+# first cell of the spec's inventory row that explains the change.
+#
+# Two frames change, both the probe's new-tab menu, and each row below is that frame's whole changed box. `ui::scroll` and
+# `ui::icons` have no row: no frame of the 94 draws a scrollbar that moved (the Markdown preview, the CI log, the trace tab and the
+# thought well are in no capture) or the mention popup's file icon or the sidebar's trash button, so no pixel of the set is theirs.
+surfaces-dark/tab-menu-dark	178	146	284	282	ui::popover (the new-tab menu's card, rows and dividers: bezel's popover_card with 33 px rows and dividers running border to border became Ely's menu panel with 28 px rows and dividers inset by the card's padding; the box is the union of both menus' footprints with their shadows)
+surfaces-dark/tab-menu-dark	178	146	284	282	ui::surface (the same menu's surface: bezel's translucent glass card, 12 px radius and hairline became Ely's solid panel, Lg radius and floating shadow)
+surfaces-light/tab-menu-light	180	148	280	310	ui::popover (the new-tab menu's card, rows and dividers: bezel's popover_card with 33 px rows and dividers running border to border became Ely's menu panel with 28 px rows and dividers inset by the card's padding; the box is the union of both menus' footprints with their shadows)
+surfaces-light/tab-menu-light	180	148	280	310	ui::surface (the same menu's surface: bezel's translucent glass card, 12 px radius and hairline became Ely's solid panel, Lg radius and floating shadow)
