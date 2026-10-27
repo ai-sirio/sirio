@@ -1,14 +1,14 @@
 //! The scrollbar for the transcript's virtualized list.
 //!
-//! `bezel::ui::scroll::scrollbar` reads a gpui `ScrollHandle`, and the
+//! Ely's `layout::Scrollbar` reads a gpui `ScrollHandle`, and the
 //! transcript is a `gpui::list` — it has no handle, but it answers the same
 //! three numbers (viewport, overflow, offset) through its own
-//! `*_for_scrollbar` hooks. This is that bar with the hooks in place of the
+//! `*_for_scrollbar` hooks. This is a bar with the hooks in place of the
 //! handle: the geometry (`scroll::thumb`, `scroll::offset_for_thumb`,
 //! `MIN_THUMB`) and the drag payload (`ScrollbarDrag`) are
-//! [`crate::scroll`]'s, ported from bezel's, so this bar and the thought
-//! bodies' agree to the pixel, and the paint is [`ink`] for the same reason
-//! bezel's is — a scrollbar is a neutral overlay, not a toned surface.
+//! [`crate::scroll`]'s, ported from bezel's, and the paint is [`ink`] — a
+//! scrollbar is a neutral overlay, not a toned surface. The strip and thumb
+//! keep the widths bezel's bar had, a pixel or two off Ely's.
 //!
 //! The list freezes its content height for the length of a thumb drag
 //! (`scrollbar_drag_started` / `_ended`), so rows measured mid-drag do not

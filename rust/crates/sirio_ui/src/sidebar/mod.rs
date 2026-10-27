@@ -8140,6 +8140,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| {
             let mut sidebar = sessions_fixture(cx);
             let archived = vec![closed(&sidebar, "old-chat", 10)];
@@ -8189,6 +8190,7 @@ mod tests {
     #[gpui::test]
     async fn sidebar_view_switches_disarm_pending_closed_delete(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| {
             let mut sidebar = sessions_fixture(cx);
             sidebar.set_closed_sessions(vec![closed(&sidebar, "old-chat", 10)], cx);
@@ -8242,6 +8244,7 @@ mod tests {
     #[gpui::test]
     async fn focusing_filter_disarms_pending_closed_delete(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| {
             let mut sidebar = sessions_fixture(cx);
             sidebar.set_closed_sessions(vec![closed(&sidebar, "old-chat", 10)], cx);
@@ -8270,6 +8273,7 @@ mod tests {
     #[gpui::test]
     async fn the_closed_group_collapses(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| {
             let mut sidebar = sessions_fixture(cx);
             let archived = vec![closed(&sidebar, "a", 2), closed(&sidebar, "b", 1)];
@@ -8290,6 +8294,7 @@ mod tests {
     #[gpui::test]
     async fn arrows_and_enter_walk_open_then_closed_sessions(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         cx.update(tree_keys::init);
         let window = cx.add_window(|_window, cx| {
             let mut sidebar = sessions_fixture(cx);
@@ -8339,6 +8344,7 @@ mod tests {
     #[gpui::test]
     async fn keyboard_activation_disarms_pending_closed_delete(cx: &mut TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         cx.update(tree_keys::init);
         let window = cx.add_window(|_window, cx| {
             let mut sidebar = sessions_fixture(cx);

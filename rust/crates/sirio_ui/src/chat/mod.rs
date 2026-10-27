@@ -6442,24 +6442,15 @@ impl Chat {
                                     gpui::Axis::Horizontal,
                                 )),
                         );
-                    } else {
-                        // Ely's bar reads last frame's geometry: ask for
-                        // the frame that draws it once the rows first lay
-                        // out wider than the box. Self-limiting.
-                        let watched = handle.clone();
-                        frame = frame.child(
-                            canvas(
-                                move |_, window, _| {
-                                    if watched.max_offset().x > Pixels::ZERO {
-                                        window.request_animation_frame();
-                                    }
-                                },
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .size_full(),
-                        );
                     }
+                    // Ely's bar reads last frame's geometry: ask for the
+                    // frame that draws it once the rows first lay out wider
+                    // than the box, and for the one that redraws it when the
+                    // box or its rows change width. Self-limiting.
+                    frame = frame.child(crate::scroll::request_frame_when_geometry_moves(
+                        &handle,
+                        gpui::Axis::Horizontal,
+                    ));
                     frame.into_any_element()
                 }
             })
@@ -6977,10 +6968,9 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                 {
                                     let streaming = this.thought_is_streaming(entry_index);
                                     if open.get(streaming) {
-                                        let painter = bezel::motion::Painter::of(cx);
-                                        this.thought_scroll.entry(entry_index).or_insert_with(
-                                            || thought::ThoughtScroll::new(painter),
-                                        );
+                                        this.thought_scroll
+                                            .entry(entry_index)
+                                            .or_insert_with(thought::ThoughtScroll::new);
                                     }
                                 }
                                 // Execute wells: handle persistente per isolare

@@ -744,9 +744,11 @@ impl Sidebar {
                             delete_entity.update(cx, |sidebar, cx| sidebar.arm_delete(id, cx));
                         })
                         .child(
-                            bezel::ui::icons::icon(bezel::ui::icons::TRASH_BIN_MINIMALISTIC)
-                                .size(px(14.0))
-                                .text_color(theme.ely.danger),
+                            ely_gpui_component::primitives::Icon::new(
+                                ely_gpui_component::primitives::IconName::Trash2,
+                            )
+                            .size(ely_gpui_component::theme::IconSize::Sm)
+                            .color(theme.ely.danger),
                         )
                         .into_any_element()
                 })
