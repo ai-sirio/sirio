@@ -14937,8 +14937,9 @@ impl SirioWorkspace {
         let first_program = command.clone();
         cx.spawn(async move |this, cx| {
             // Kept for step 2: the launch below consumes its own copies, and
-            // the fallback launches the same arguments behind a different
-            // binary.
+            // step 2 launches the same arguments behind a different binary.
+            // `installed_args` is the argv the first launch used, the Lombok
+            // agent included, so an installed `jdtls` gets the agent too.
             let installed_root = root.clone();
             let (launched, installed_args, lombok) = cx
                 .background_executor()

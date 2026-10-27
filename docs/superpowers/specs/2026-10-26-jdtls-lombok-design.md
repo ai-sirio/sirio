@@ -119,8 +119,9 @@ Rules:
 - Nothing leaves the machine and nothing is downloaded.
 - The project's own Lombok version is not looked up. It usually comes from Spring Boot's
   dependency management rather than from the project's POM, and only jdtls knows it
-  after the import. The newest version in the caches is what VS Code also leans on: it
-  uses its bundled jar unless the project's is newer.
+  after the import. VS Code uses its bundled jar, or the project's own Lombok when that
+  is newer, chosen per project. Sirio has no bundled jar, so the newest jar across the
+  user's caches stands in for it, and that one jar applies to every Lombok project.
 - A project that needs a newer Lombok than any jar in the caches usually gets one: its
   own import downloads that version, and §2.3 restarts jdtls with it. The case left
   over is accepted: an agent too old for the project, with no newer jar arriving (for
