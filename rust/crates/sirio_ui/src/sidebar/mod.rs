@@ -30,7 +30,9 @@ use sirio_theme::{AgentBrandColor, Theme, Typography};
 
 use crate::caret;
 use crate::loading;
-use crate::popup::{HANG_GAP, Popup, hang_below, leaving, menu_card, menu_row, reap_popup};
+use crate::popup::{
+    HANG_GAP, Popup, hang_below, leaving, menu_card, menu_label, menu_row, reap_popup,
+};
 use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
 use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconValue};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
@@ -3170,7 +3172,7 @@ impl Sidebar {
             // The disabled reason is not rendered here: it did not fit
             // beside the label in this card. The command palette still
             // shows it.
-            row = row.child(item.label);
+            row = row.child(menu_label(item.label));
             if is_new_chat {
                 row = row.child(
                     IconElement::new(
@@ -3277,7 +3279,7 @@ impl Sidebar {
                 .w_full()
                 .text_color(theme.ely.fg_subtle)
                 .on_click(on_choose(SidebarContextAction::OpenAgentSettings))
-                .child("Other agents…"),
+                .child(menu_label("Other agents…")),
         )
     }
 
@@ -3349,7 +3351,7 @@ impl Sidebar {
             .w_full()
             .text_size(theme.typography.ui_size)
             .on_click(move |_, window, cx| action(entity.clone(), window, cx))
-            .child(label)
+            .child(menu_label(label))
     }
 
     fn render_worktree_close_menu(
@@ -3373,7 +3375,7 @@ impl Sidebar {
                     sidebar.choose_worktree_close(false, window, cx)
                 });
             })
-            .child("Remove from disk");
+            .child(menu_label("Remove from disk"));
 
         let mut remote_row = menu_row(
             "worktree-close-item-remove-remote-and-disk",
@@ -3385,7 +3387,10 @@ impl Sidebar {
         .text_size(theme.typography.ui_size)
         .w_full()
         .justify_between()
-        .child("Remove from disk and remote branch");
+        .child(
+            menu_label("Remove from disk and remote branch")
+                .debug_selector(|| "worktree-close-item-remove-remote-and-disk-label".to_owned()),
+        );
         // Disabled without the reason beside the label: it did not fit
         // the card. The command palette still shows it.
         if remote_reason.is_none() {
@@ -6077,6 +6082,85 @@ mod tests {
              ('release'), not from HEAD -- the release-only marker file must \
              be present at {}",
             expected_path.display()
+        );
+    }
+
+    /// The menus' rows follow the interface size, and a label wider than its
+    /// row neither wraps nor shrinks: unless the row clips it, it runs out
+    /// of the card over whatever is behind the menu. At the largest size the
+    /// closure menu's longest label ends inside its card, cut with an
+    /// ellipsis if need be.
+    #[gpui::test]
+    async fn the_closure_menu_keeps_its_longest_label_inside_its_card_at_the_largest_size(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let project_root = std::env::temp_dir();
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(|cx| Theme::set_interface_font_size(18, cx));
+        let window = cx.open_window(size(px(400.0), px(400.0)), |_window, cx| {
+            Sidebar::from_projects(
+                vec![SidebarProject {
+                    id: "closure-menu".into(),
+                    name: "Project".into(),
+                    is_git: true,
+                    root_path: project_root.clone(),
+                    worktrees: vec![
+                        SidebarWorktree {
+                            branch: "main".into(),
+                            path: project_root.clone(),
+                            is_primary: true,
+                            comment: None,
+                        },
+                        SidebarWorktree {
+                            branch: "feat/closing".into(),
+                            path: project_root.join("closing"),
+                            is_primary: false,
+                            comment: None,
+                        },
+                    ],
+                }],
+                cx,
+            )
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        let sidebar_entity =
+            cx.update(|window, _| window.root::<Sidebar>().flatten().expect("sidebar root"));
+        let row_id = sidebar_entity
+            .read_with(&cx, |sidebar, _| {
+                sidebar
+                    .rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Worktree && !row.is_primary)
+                    .map(|row| row.id)
+            })
+            .expect("the removable worktree row exists");
+        let row_selector: &'static str =
+            Box::leak(format!("sidebar-row-{row_id}").into_boxed_str());
+        let remove_selector: &'static str =
+            Box::leak(format!("remove-worktree-{row_id}").into_boxed_str());
+        let row = cx
+            .debug_bounds(row_selector)
+            .expect("the worktree row is drawn");
+        cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+        cx.run_until_parked();
+        let remove_button = cx
+            .debug_bounds(remove_selector)
+            .expect("the hover-x is drawn once the row is hovered");
+        cx.simulate_click(remove_button.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        let card = cx
+            .debug_bounds("worktree-close-menu")
+            .expect("the hover-x opens the closure menu");
+        let label = cx
+            .debug_bounds("worktree-close-item-remove-remote-and-disk-label")
+            .expect("the longest label is drawn");
+        assert!(
+            label.right() <= card.right(),
+            "the label ends inside the card: label={label:?}, card={card:?}"
         );
     }
 

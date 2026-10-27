@@ -68,8 +68,9 @@ impl<T> Popup<T> {
         matches!(self.inner, Some((_, Some(_))))
     }
 
-    /// When the exit phase began — what the render path hands to the popover
-    /// wrappers, which derive the eased exit progress from it each frame.
+    /// When the exit phase began — what the render path hands to [`leaving`]
+    /// (directly, or through [`hang_below`] and [`hang_above_at`]), which
+    /// derives the eased exit progress from it each frame.
     pub fn closing_since(&self) -> Option<Instant> {
         match &self.inner {
             Some((_, Some(since))) => Some(*since),
@@ -208,13 +209,33 @@ pub fn menu_row(
 
 /// The card a menu's rows sit on: Ely's [`panel_surface`], inset by `p_1` and
 /// stacking what it holds. Its text is Ely's `fg`, so a plain child that sets
-/// no colour of its own is not drawn in gpui's default black.
+/// no colour of its own is not drawn in gpui's default black. It clips what it
+/// holds to its own bounds, as bezel's card did, so a child too wide for it is
+/// cut at the edge instead of painted over the page behind the menu. (Its own
+/// shadow is not clipped, and nor is a layer raised from inside it.)
 pub fn menu_card(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
     panel_surface(id, cx)
         .p_1()
         .flex()
         .flex_col()
+        .overflow_hidden()
         .text_color(cx.theme().colors.fg)
+}
+
+/// The label of a one-line menu row, treated as Ely's own rows treat theirs:
+/// it takes the room the row has left and is cut with an ellipsis when it is
+/// wider. A bare string in a flex row does neither, because gpui measures a
+/// text's minimum width as its whole unwrapped line, so at a large interface
+/// size it would run out of the card. Add a `debug_selector` to the result
+/// where a test needs the label's own bounds.
+pub fn menu_label(text: impl Into<SharedString>) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden()
+        .text_ellipsis()
+        .whitespace_nowrap()
+        .child(text.into())
 }
 
 /// The hairline between two groups of rows, Ely's separator.

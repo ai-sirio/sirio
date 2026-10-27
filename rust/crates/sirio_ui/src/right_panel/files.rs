@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::editor::fs_actions;
 use crate::loading;
-use crate::popup::{menu_card, menu_row};
+use crate::popup::{menu_card, menu_label, menu_row};
 use crate::sidebar::icons::{file_glyph, folder_glyph};
 
 pub(super) fn build_snapshot(repo_root: &Path) -> Result<super::FilesSnapshot, String> {
@@ -497,7 +497,7 @@ impl RightPanel {
                 }),
                 _ => row,
             };
-            view = view.child(row.child(label));
+            view = view.child(row.child(menu_label(label)));
         }
 
         layer(

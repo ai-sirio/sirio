@@ -11,7 +11,7 @@ use sirio_theme::Theme;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use crate::popup::{Popup, divider, leaving, menu_card, menu_row, reap_popup};
+use crate::popup::{Popup, divider, leaving, menu_card, menu_label, menu_row, reap_popup};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 const HEIGHT: f32 = 34.0;
@@ -129,7 +129,7 @@ pub fn render_tab_context_menu<T: 'static>(
         let mut row = menu_row(format!("tab-command-{selector}"), false, !enabled, cx)
             .debug_selector(move || format!("tab-command-{selector_for_debug}"))
             .w_full()
-            .child(item.label);
+            .child(menu_label(item.label));
 
         if enabled {
             let callback = on_action.clone();
@@ -519,7 +519,7 @@ impl TabBar {
             .on_click(move |_, _, cx| {
                 entity.update(cx, |this, cx| this.emit_open_agent_settings(cx))
             })
-            .child("Other agents…")
+            .child(menu_label("Other agents…"))
     }
 }
 
