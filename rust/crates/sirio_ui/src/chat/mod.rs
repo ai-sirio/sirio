@@ -15702,10 +15702,6 @@ two"
         focus_and_type(cx, "@");
         pump_chat_until(cx, &chat, |chat| !chat.mention_candidates.is_empty());
         refresh_frame(cx);
-        // The popup's entrance runs on the wall clock; measure it where it
-        // comes to rest.
-        std::thread::sleep(std::time::Duration::from_millis(400));
-        refresh_frame(cx);
 
         let viewport = cx.update(|window, _| window.viewport_size());
         let popup = cx
