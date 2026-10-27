@@ -14,8 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use bezel::motion::{Fade, Painter};
-use bezel::ui::popover;
+use ely_gpui_component::menus::{Hang, layer};
 use gpui::{
     App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render, Rgba,
@@ -31,7 +30,7 @@ use sirio_theme::{AgentBrandColor, Theme, Typography};
 
 use crate::caret;
 use crate::loading;
-use crate::popup::{Popup, reap_popup};
+use crate::popup::{HANG_GAP, Popup, hang_below, leaving, menu_card, menu_row, reap_popup};
 use crate::project_forms::{CloneForm, CloneFormEvent, CreateForm, CreateFormEvent};
 use crate::project_identity::{AvatarSource, ProjectIcon, ProjectIconValue};
 use crate::row_reorder::{ReorderScope, RowDrag, accepts_drop, insertion_index};
@@ -3127,7 +3126,7 @@ impl Sidebar {
         chat_agents: Vec<(&'static str, &'static str)>,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        painter: Painter,
+        cx: &App,
     ) -> impl IntoElement {
         let menu = popup.get().expect("mounted context menu").clone();
         let closing = popup.closing_since();
@@ -3135,11 +3134,9 @@ impl Sidebar {
         let chat_picker_open = menu.chat_picker_open;
         let target = menu.target;
         let position = menu.position;
-        let bezel_theme = theme.to_bezel_theme();
         // The hover-x's closure menu is 280px for the same pair of removals;
         // at 240 "Remove Worktree and Remote Branch" did not fit.
-        let mut card = popover::popover_card(&bezel_theme)
-            .id("sidebar-context-menu")
+        let mut card = menu_card("sidebar-context-menu", cx)
             .debug_selector(|| "sidebar-context-menu".to_owned())
             .text_size(theme.typography.ui_size)
             .w(px(280.0));
@@ -3153,22 +3150,11 @@ impl Sidebar {
             let action = item.action;
             let item_target = target.clone();
             let item_entity = entity.clone();
-            let mut row =
-                popover::menu_row(&bezel_theme, false, Fade::new(painter, selector.clone()))
-                    .id(selector.clone())
-                    .debug_selector(move || selector.clone())
-                    .w_full()
-                    .min_h(px(29.0))
-                    .text_size(theme.typography.ui_size)
-                    .justify_between()
-                    .text_color(if enabled {
-                        bezel_theme.text
-                    } else {
-                        bezel_theme.text_faint
-                    })
-                    .when(!enabled, |this| {
-                        this.cursor_default().bg(gpui::transparent_black())
-                    });
+            let mut row = menu_row(selector.clone(), false, !enabled, cx)
+                .debug_selector(move || selector.clone())
+                .w_full()
+                .text_size(theme.typography.ui_size)
+                .justify_between();
             let is_new_chat = action == SidebarContextAction::NewTab(NewTabAction::NewChat);
             if enabled && is_new_chat {
                 row = row.on_click(move |_, _, cx| {
@@ -3205,23 +3191,22 @@ impl Sidebar {
                     &chat_agents,
                     entity.clone(),
                     theme,
-                    &bezel_theme,
-                    painter,
+                    cx,
                 ));
             }
         }
-        // F-SID-15: `menu_at` owns the deferred priority-1 layer, so later
-        // sidebar siblings cannot paint over the menu or intercept its rows.
-        // Dismissal stays on the card because bezel intentionally leaves that
+        // F-SID-15: Ely's layer is raised over the page at priority 1, so
+        // later sidebar siblings cannot paint over the menu or intercept its
+        // rows. Dismissal stays on the card because the layer leaves that
         // listener to the caller.
         let card = card.on_mouse_down_out(move |_, _, cx| {
             entity.update(cx, |sidebar, cx| sidebar.close_context_menu(cx));
         });
-        popover::menu_at(
+        layer(
             "sidebar-context-menu-layer",
-            position,
-            card.into_any_element(),
-            closing,
+            Hang::At(position),
+            leaving("sidebar-context-menu-layer", closing, card),
+            cx,
         )
     }
 
@@ -3233,8 +3218,7 @@ impl Sidebar {
         agents: &[(&'static str, &'static str)],
         entity: gpui::Entity<Self>,
         theme: Theme,
-        bezel_theme: &bezel_theme::Theme,
-        painter: Painter,
+        cx: &App,
     ) -> impl IntoElement {
         let on_choose = |action: SidebarContextAction| {
             let entity = entity.clone();
@@ -3253,26 +3237,24 @@ impl Sidebar {
             .flex_col();
         if agents.is_empty() {
             return list.child(
-                popover::menu_row(
-                    bezel_theme,
-                    false,
-                    Fade::new(painter, "sidebar-context-chat-empty"),
-                )
-                .id("sidebar-context-chat-empty")
-                .debug_selector(|| "sidebar-context-chat-empty".to_owned())
-                .w_full()
-                .flex_col()
-                .items_start()
-                .gap(theme.spacing.titlebar_control_spacing)
-                .text_size(theme.typography.ui_size)
-                .text_color(bezel_theme.text_faint)
-                .on_click(on_choose(SidebarContextAction::OpenAgentSettings))
-                .child("Other agents…")
-                .child(
-                    div()
-                        .text_size(theme.typography.caption2)
-                        .child("No supported agent found on PATH"),
-                ),
+                menu_row("sidebar-context-chat-empty", false, false, cx)
+                    .debug_selector(|| "sidebar-context-chat-empty".to_owned())
+                    .w_full()
+                    // Two lines, so not the one-line height of the frame.
+                    .h_auto()
+                    .py_1p5()
+                    .flex_col()
+                    .items_start()
+                    .gap(theme.spacing.titlebar_control_spacing)
+                    .text_size(theme.typography.ui_size)
+                    .text_color(theme.ely.fg_subtle)
+                    .on_click(on_choose(SidebarContextAction::OpenAgentSettings))
+                    .child("Other agents…")
+                    .child(
+                        div()
+                            .text_size(theme.typography.caption2)
+                            .child("No supported agent found on PATH"),
+                    ),
             );
         }
         for &(id, display_name) in agents {
@@ -3282,27 +3264,20 @@ impl Sidebar {
                     display_name,
                     format!("sidebar-context-chat-agent-{id}"),
                     theme,
-                    bezel_theme,
-                    painter,
+                    cx,
                 )
                 .text_size(theme.typography.ui_size)
                 .on_click(on_choose(SidebarContextAction::NewChatAgent(id))),
             );
         }
         list.child(
-            popover::menu_row(
-                bezel_theme,
-                false,
-                Fade::new(painter, "sidebar-context-chat-other-agents"),
-            )
-            .id("sidebar-context-chat-other-agents")
-            .debug_selector(|| "sidebar-context-chat-other-agents".to_owned())
-            .text_size(theme.typography.ui_size)
-            .w_full()
-            .min_h(px(29.0))
-            .text_color(bezel_theme.text_faint)
-            .on_click(on_choose(SidebarContextAction::OpenAgentSettings))
-            .child("Other agents…"),
+            menu_row("sidebar-context-chat-other-agents", false, false, cx)
+                .debug_selector(|| "sidebar-context-chat-other-agents".to_owned())
+                .text_size(theme.typography.ui_size)
+                .w_full()
+                .text_color(theme.ely.fg_subtle)
+                .on_click(on_choose(SidebarContextAction::OpenAgentSettings))
+                .child("Other agents…"),
         )
     }
 
@@ -3310,14 +3285,12 @@ impl Sidebar {
         popup: &Popup<()>,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        painter: Painter,
+        cx: &App,
     ) -> impl IntoElement {
         let open_entity = entity.clone();
         let clone_entity = entity.clone();
         let create_entity = entity.clone();
-        let bezel_theme = theme.to_bezel_theme();
-        let card = popover::popover_card(&bezel_theme)
-            .id("add-project-menu")
+        let card = menu_card("add-project-menu", cx)
             .debug_selector(|| "add-project-menu".to_owned())
             .text_size(theme.typography.ui_size)
             .w(px(190.0))
@@ -3326,7 +3299,7 @@ impl Sidebar {
                 "Open Project…",
                 "add-project-open",
                 theme,
-                painter,
+                cx,
                 move |_, window, cx| {
                     open_entity.update(cx, |sidebar, cx| sidebar.start_open_project(window, cx))
                 },
@@ -3336,7 +3309,7 @@ impl Sidebar {
                 "Clone Repository…",
                 "add-project-clone",
                 theme,
-                painter,
+                cx,
                 move |_, _, cx| {
                     clone_entity.update(cx, |sidebar, cx| sidebar.start_clone_project(cx))
                 },
@@ -3346,7 +3319,7 @@ impl Sidebar {
                 "Create Project…",
                 "add-project-create",
                 theme,
-                painter,
+                cx,
                 move |_, _, cx| {
                     create_entity.update(cx, |sidebar, cx| sidebar.start_create_project(cx))
                 },
@@ -3354,10 +3327,12 @@ impl Sidebar {
             .on_mouse_down_out(move |_, _, cx| {
                 entity.update(cx, |sidebar, cx| sidebar.close_add_project_menu(cx));
             });
-        popover::anchored_menu_below(
+        hang_below(
             "add-project-menu-layer",
-            card.into_any_element(),
+            HANG_GAP,
+            card,
             popup.closing_since(),
+            cx,
         )
     }
 
@@ -3366,17 +3341,13 @@ impl Sidebar {
         label: &'static str,
         selector: &'static str,
         theme: Theme,
-        painter: Painter,
+        cx: &App,
         action: impl Fn(gpui::Entity<Self>, &mut Window, &mut gpui::App) + 'static,
     ) -> impl IntoElement {
-        let bezel_theme = theme.to_bezel_theme();
-        popover::menu_row(&bezel_theme, false, Fade::new(painter, selector))
-            .id(selector)
+        menu_row(selector, false, false, cx)
             .debug_selector(|| selector.to_owned())
             .w_full()
-            .min_h(px(29.0))
             .text_size(theme.typography.ui_size)
-            .text_color(bezel_theme.text)
             .on_click(move |_, window, cx| action(entity.clone(), window, cx))
             .child(label)
     }
@@ -3385,55 +3356,39 @@ impl Sidebar {
         popup: &Popup<OpenWorktreeCloseMenu>,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        painter: Painter,
+        cx: &App,
     ) -> impl IntoElement {
         let menu = popup.get().expect("mounted closure menu").clone();
         let closing = popup.closing_since();
-        let bezel_theme = theme.to_bezel_theme();
         let remote_reason = menu.remote_tracking.disabled_reason();
         let disk_entity = entity.clone();
         let remote_entity = entity.clone();
 
-        let disk_row = popover::menu_row(
-            &bezel_theme,
-            false,
-            Fade::new(painter, "worktree-close-item-remove-disk"),
-        )
-        .id("worktree-close-item-remove-disk")
-        .debug_selector(|| "worktree-close-item-remove-disk".to_owned())
-        .text_size(theme.typography.ui_size)
-        .w_full()
-        .min_h(px(29.0))
-        .text_color(bezel_theme.text)
-        .on_click(move |_, window, cx| {
-            disk_entity.update(cx, |sidebar, cx| {
-                sidebar.choose_worktree_close(false, window, cx)
-            });
-        })
-        .child("Remove from disk");
+        let disk_row = menu_row("worktree-close-item-remove-disk", false, false, cx)
+            .debug_selector(|| "worktree-close-item-remove-disk".to_owned())
+            .text_size(theme.typography.ui_size)
+            .w_full()
+            .on_click(move |_, window, cx| {
+                disk_entity.update(cx, |sidebar, cx| {
+                    sidebar.choose_worktree_close(false, window, cx)
+                });
+            })
+            .child("Remove from disk");
 
-        let mut remote_row = popover::menu_row(
-            &bezel_theme,
+        let mut remote_row = menu_row(
+            "worktree-close-item-remove-remote-and-disk",
             false,
-            Fade::new(painter, "worktree-close-item-remove-remote-and-disk"),
+            remote_reason.is_some(),
+            cx,
         )
-        .id("worktree-close-item-remove-remote-and-disk")
         .debug_selector(|| "worktree-close-item-remove-remote-and-disk".to_owned())
         .text_size(theme.typography.ui_size)
         .w_full()
-        .min_h(px(29.0))
         .justify_between()
-        .text_color(if remote_reason.is_none() {
-            bezel_theme.text
-        } else {
-            bezel_theme.text_faint
-        })
         .child("Remove from disk and remote branch");
         // Disabled without the reason beside the label: it did not fit
         // the card. The command palette still shows it.
-        if remote_reason.is_some() {
-            remote_row = remote_row.cursor_default().bg(gpui::transparent_black());
-        } else {
+        if remote_reason.is_none() {
             remote_row = remote_row.on_click(move |_, window, cx| {
                 remote_entity.update(cx, |sidebar, cx| {
                     sidebar.choose_worktree_close(true, window, cx)
@@ -3443,10 +3398,9 @@ impl Sidebar {
 
         // The heading names the target at the moment of choice (#372), in
         // the branch's own case — a kebab branch name is unreadable
-        // uppercased, so this is a plain muted line rather than
-        // `popover::menu_heading`.
-        let card = popover::popover_card(&bezel_theme)
-            .id("worktree-close-menu")
+        // uppercased, so this is a plain muted line rather than a tracked
+        // capitals heading.
+        let card = menu_card("worktree-close-menu", cx)
             .debug_selector(|| "worktree-close-menu".to_owned())
             .text_size(theme.typography.ui_size)
             .w(px(280.0))
@@ -3456,7 +3410,7 @@ impl Sidebar {
                     .pt(px(6.0))
                     .pb(px(4.0))
                     .text_size(theme.typography.scaled(11.0))
-                    .text_color(bezel_theme.text_muted)
+                    .text_color(theme.ely.fg_muted)
                     .child(format!("Remove worktree {}", menu.branch)),
             )
             .child(disk_row)
@@ -3464,11 +3418,11 @@ impl Sidebar {
             .on_mouse_down_out(move |_, _, cx| {
                 entity.update(cx, |sidebar, cx| sidebar.close_worktree_close_menu(cx));
             });
-        popover::menu_at(
+        layer(
             "worktree-close-menu-layer",
-            menu.position,
-            card.into_any_element(),
-            closing,
+            Hang::At(menu.position),
+            leaving("worktree-close-menu-layer", closing, card),
+            cx,
         )
     }
 
@@ -3648,7 +3602,8 @@ impl Render for Sidebar {
         let theme = Theme::get(cx).with_sidebar_typography();
         // Production installs bezel alongside Sirio's theme. Some isolated
         // sidebar fixtures set only the Sirio global, so establish the same
-        // invariant lazily before the tree or a popup reads bezel's palette.
+        // invariant lazily before a part of the sidebar still drawn by bezel
+        // reads bezel's palette.
         if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
@@ -3712,7 +3667,7 @@ impl Render for Sidebar {
                 self.chat_agents(),
                 entity.clone(),
                 theme,
-                Painter::of(cx),
+                cx,
             )
             .into_any_element()
         });
@@ -3721,7 +3676,7 @@ impl Render for Sidebar {
                 &self.worktree_close_menu,
                 entity.clone(),
                 theme,
-                Painter::of(cx),
+                cx,
             )
             .into_any_element()
         });
@@ -3730,7 +3685,7 @@ impl Render for Sidebar {
                 &self.add_project_menu,
                 entity.clone(),
                 theme,
-                Painter::of(cx),
+                cx,
             )
             .into_any_element()
         });
@@ -5393,6 +5348,7 @@ mod tests {
     ) {
         let repo = scratch_repo("context-menu");
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -5475,6 +5431,7 @@ mod tests {
     ) {
         let repo = scratch_repo("context-menu-chat-agents");
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| {
             let mut sidebar = Sidebar::new_with_repo(cx, Some(repo.clone()));
             sidebar.apply_chat_launch_sources(vec![
@@ -5589,6 +5546,7 @@ mod tests {
     ) {
         let repo = scratch_repo("context-menu-chat-empty");
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -5641,6 +5599,7 @@ mod tests {
     async fn drawn_project_context_menu_offers_refresh_project(cx: &mut gpui::TestAppContext) {
         let repo = scratch_repo("context-menu-refresh-project");
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| {
             Sidebar::from_projects(
                 vec![SidebarProject {
@@ -5692,6 +5651,7 @@ mod tests {
     ) {
         let repo = scratch_repo("context-menu-pointer");
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -5752,6 +5712,73 @@ mod tests {
         );
     }
 
+    /// A menu opened where the pointer is must still fit the window: a
+    /// right-click a couple of pixels from the bottom-right corner puts the
+    /// whole 280px card where the corner cannot hold it, and it is the
+    /// layer's window snap that brings it back inside, with the margin
+    /// the other floating layers keep from the edge.
+    #[gpui::test]
+    async fn a_context_menu_opened_at_the_window_corner_stays_inside_the_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let repo = scratch_repo("context-menu-corner");
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        // A window that ends 1px past the row's bottom-right corner, so the
+        // click that opens the menu lands 2px from the window's corner. The
+        // panel is wider than the 280px card, so the card can fit inside the
+        // window's margin at all.
+        cx.update(|window, cx| {
+            let sidebar = window.root::<Sidebar>().flatten().expect("sidebar root");
+            sidebar.update(cx, |sidebar, cx| sidebar.set_panel_width(400.0, cx));
+        });
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the worktree row is drawn");
+        cx.simulate_resize(size(row.right() + px(1.0), row.bottom() + px(1.0)));
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("sidebar-row-1")
+            .expect("the worktree row is drawn in the smaller window");
+        let corner = point(row.right() - px(1.0), row.bottom() - px(1.0));
+        let viewport = cx.update(|window, _| window.viewport_size());
+        assert!(
+            viewport.width - corner.x <= px(2.5) && viewport.height - corner.y <= px(2.5),
+            "the click is 2px from the window's corner: {corner:?} in {viewport:?}"
+        );
+        cx.simulate_event(MouseDownEvent {
+            position: corner,
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: corner,
+            button: MouseButton::Right,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+
+        let menu = cx
+            .debug_bounds("sidebar-context-menu")
+            .expect("right-click draws the context menu");
+        let inset = px(8.0);
+        assert!(
+            menu.left() >= inset
+                && menu.top() >= inset
+                && menu.right() <= viewport.width - inset
+                && menu.bottom() <= viewport.height - inset,
+            "the menu lies inside the window inset by {inset:?}: menu={menu:?}, window={viewport:?}"
+        );
+    }
+
     /// The context menu's "Remove Worktree" is a real removal (not just an
     /// event nobody outside sidebar.rs would act on), gated by the same
     /// confirmation dialog as the hover-x.
@@ -5767,6 +5794,7 @@ mod tests {
         unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
         let repo = scratch_repo("context-menu-remove");
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -6063,6 +6091,7 @@ mod tests {
         add_bare_origin(&repo);
 
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -6162,6 +6191,7 @@ mod tests {
         let repo = scratch_repo("remove");
 
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -6290,6 +6320,7 @@ mod tests {
         unsafe { std::env::set_var("SIRIO_GIT_TIMEOUT_MS", "120000") };
         let repo = scratch_repo("remove-cancel");
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -6343,6 +6374,7 @@ mod tests {
             .expect("scratch repo has a parent")
             .to_path_buf();
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, Some(repo.clone())));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         let sidebar_entity =
@@ -6516,6 +6548,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let picked = std::env::temp_dir().join(format!(
             "sirio-sidebar-test-init-git-{}",
             std::process::id()
@@ -6579,6 +6612,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -7210,6 +7244,7 @@ mod tests {
     #[gpui::test]
     async fn escape_closes_clone_repository_card(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -7237,6 +7272,7 @@ mod tests {
     #[gpui::test]
     async fn escape_closes_create_project_card(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -7266,6 +7302,7 @@ mod tests {
     #[gpui::test]
     async fn backdrop_click_closes_clone_repository_card(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, cx| Sidebar::new_with_repo(cx, None));
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -7740,6 +7777,7 @@ mod tests {
         let repo = scratch_repo("remove-project");
 
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let projects = vec![SidebarProject {
             id: "proj-1".to_string(),
             name: "scratch".to_string(),

@@ -3,8 +3,7 @@
 //! drag).
 
 use super::*;
-use bezel::motion::{Fade, Painter};
-use bezel::ui::popover;
+use ely_gpui_component::menus::{Hang, layer};
 use gpui::{
     AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, uniform_list,
 };
@@ -15,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::editor::fs_actions;
 use crate::loading;
+use crate::popup::{menu_card, menu_row};
 use crate::sidebar::icons::{file_glyph, folder_glyph};
 
 pub(super) fn build_snapshot(repo_root: &Path) -> Result<super::FilesSnapshot, String> {
@@ -143,7 +143,6 @@ pub(super) struct FileContextMenu {
     /// would otherwise emit an `OpenFile` for a path no editor opens.
     is_dir: bool,
     position: Point<Pixels>,
-    painter: Painter,
 }
 
 impl RightPanel {
@@ -417,7 +416,6 @@ impl RightPanel {
             path,
             is_dir,
             position,
-            painter: Painter::of(cx),
         });
         cx.notify();
     }
@@ -432,14 +430,12 @@ impl RightPanel {
         menu: FileContextMenu,
         entity: gpui::Entity<Self>,
         theme: Theme,
+        cx: &App,
     ) -> impl IntoElement {
         let path = menu.path;
         let is_dir = menu.is_dir;
         let position = menu.position;
-        let painter = menu.painter;
-        let bezel_theme = theme.to_bezel_theme();
-        let mut view = popover::popover_card(&bezel_theme)
-            .id("file-context-menu")
+        let mut view = menu_card("file-context-menu", cx)
             .debug_selector(|| "file-context-menu".to_owned())
             .text_size(theme.typography.ui_size)
             .w(theme.spacing.menu_width);
@@ -459,13 +455,10 @@ impl RightPanel {
         for (label, selector) in entries {
             let action_entity = entity.clone();
             let action_path = path.clone();
-            let mut row = popover::menu_row(&bezel_theme, false, Fade::new(painter, selector))
-                .id(selector)
+            let mut row = menu_row(selector, false, false, cx)
                 .debug_selector(move || selector.to_owned())
                 .w_full()
-                .min_h(theme.spacing.titlebar_control_frame.height)
-                .text_size(theme.typography.ui_size)
-                .text_color(bezel_theme.text);
+                .text_size(theme.typography.ui_size);
 
             row = match selector {
                 "file-context-open" => row.on_click(move |_, _, cx| {
@@ -507,14 +500,13 @@ impl RightPanel {
             view = view.child(row.child(label));
         }
 
-        popover::menu_at(
+        layer(
             "file-context-menu-layer",
-            position,
+            Hang::At(position),
             view.on_mouse_down_out(move |_, _, cx| {
                 entity.update(cx, |panel, cx| panel.close_file_context_menu(cx));
-            })
-            .into_any_element(),
-            None,
+            }),
+            cx,
         )
     }
 
@@ -1742,6 +1734,7 @@ mod tests {
         std::fs::write(&path, "# opened\n").expect("write file");
 
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, _cx| RightPanel::new(dir.0.clone()));
         let panel = cx
             .update_window(window.into(), |_, window, _| {
@@ -1784,12 +1777,9 @@ mod tests {
             menu.origin.x,
             row.center().x
         );
-        // Bezel's menu entrance begins 2px above its settled anchor and eases
-        // into place; keep guarding the pointer anchor without rejecting that
-        // deliberate first-frame transform.
         assert!(
-            (menu.origin.y.as_f32() - row.center().y.as_f32()).abs() <= 2.0,
-            "the file context menu starts at the pointer's y coordinate (within bezel's 2px entrance): menu={:?}, pointer={:?}",
+            (menu.origin.y.as_f32() - row.center().y.as_f32()).abs() <= 1.0,
+            "the file context menu starts at the pointer's y coordinate: menu={:?}, pointer={:?}",
             menu.origin.y,
             row.center().y
         );
@@ -2736,6 +2726,7 @@ mod tests {
         root: PathBuf,
     ) -> (VisualTestContext, Entity<RightPanel>) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, _cx| RightPanel::new(root));
         let panel = cx
             .update_window(window.into(), |_, window, _| {

@@ -16,11 +16,9 @@
 //! .detach();
 //! ```
 
-use bezel::ui::popover;
 use bezel_theme::Theme as BezelTheme;
 use ely_gpui_component::{
     forms::{Input, InputEvent, TextInput},
-    menus::{panel_surface, row_frame},
     primitives::{Icon, IconName},
     theme::{ActiveTheme as _, IconSize},
 };
@@ -29,7 +27,7 @@ use gpui::{
     SharedString, Window, actions, canvas, div, prelude::*, px,
 };
 
-use crate::popup::{Filter, Popup, reap_popup};
+use crate::popup::{Filter, HANG_GAP, Popup, hang_below, menu_card, menu_row, reap_popup};
 
 actions!(
     sirio_combobox,
@@ -173,7 +171,7 @@ impl Combobox {
         self.close(cx);
     }
 
-    fn menu_card(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn card(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = cx.theme().colors;
         let rows: Vec<gpui::AnyElement> = self
             .filter
@@ -182,14 +180,13 @@ impl Combobox {
             .enumerate()
             .map(|(position, &item)| {
                 let chosen = Some(item) == self.chosen;
-                row_frame(
+                menu_row(
                     ("combobox-row", item),
                     Some(position) == self.filter.active(),
                     false,
                     cx,
                 )
                 .debug_selector(move || format!("combobox-row-{item}"))
-                .hover(move |row| row.bg(colors.hover))
                 .when(chosen, |row| row.bg(colors.active))
                 .on_click(cx.listener(move |combobox, _, _, cx| combobox.choose(item, cx)))
                 .child(
@@ -203,9 +200,8 @@ impl Combobox {
             })
             .collect();
 
-        panel_surface("combobox-card", cx)
+        menu_card("combobox-card", cx)
             .w(self.trigger_width.unwrap_or(px(200.0)))
-            .p_1()
             .on_mouse_down_out(cx.listener(|combobox, _, _, cx| combobox.close(cx)))
             .child(div().mb_1().child(Input::new(&self.query)))
             .child(if rows.is_empty() {
@@ -238,7 +234,7 @@ impl Render for Combobox {
             Some(item) => self.filter.items()[item].clone(),
             None => self.placeholder.clone(),
         };
-        let card = open.then(|| self.menu_card(cx));
+        let card = open.then(|| self.card(cx));
         let combobox = cx.entity().downgrade();
 
         div()
@@ -278,10 +274,12 @@ impl Render for Combobox {
                     .child(select_trigger(&theme, label, open)),
             )
             .when_some(card, |trigger, card| {
-                trigger.child(popover::anchored_menu_below(
+                trigger.child(hang_below(
                     "combobox-menu",
+                    HANG_GAP,
                     card,
                     self.menu.closing_since(),
+                    cx,
                 ))
             })
     }

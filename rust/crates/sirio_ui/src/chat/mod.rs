@@ -15676,6 +15676,51 @@ two"
         );
     }
 
+    /// A completion popup hangs above the caret's row. When the window is too
+    /// short for it there, it is kept inside the window, with the margin the
+    /// other floating layers keep from its edge: it is not flipped below the
+    /// caret, where it would run off the bottom instead.
+    #[gpui::test]
+    async fn a_mention_popup_on_the_first_line_stays_inside_the_window(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        for name in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+            std::fs::write(dir.0.join(format!("{name}.txt")), name).expect("write a file");
+        }
+        let cwd = dir.0.clone();
+
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let command =
+                LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]));
+            Chat::from_test_command(command, cwd, cx)
+        });
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        refresh_frame(cx);
+
+        focus_and_type(cx, "@");
+        pump_chat_until(cx, &chat, |chat| !chat.mention_candidates.is_empty());
+        refresh_frame(cx);
+        // The popup's entrance runs on the wall clock; measure it where it
+        // comes to rest.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        refresh_frame(cx);
+
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let popup = cx
+            .debug_bounds("mention-popup-card")
+            .expect("typing @ opens the mention popup");
+        let inset = px(8.0);
+        assert!(
+            popup.left() >= inset
+                && popup.top() >= inset
+                && popup.right() <= viewport.width - inset
+                && popup.bottom() <= viewport.height - inset,
+            "the popup lies inside the window inset by {inset:?}: popup={popup:?}, window={viewport:?}"
+        );
+    }
+
     /// F-CHAT-11 + F-CHAT-12: the attach control accepts exactly one PNG or
     /// JPEG as an image chip; an unsupported file and a multiple selection
     /// are rejected with a transient message; the chip's removal control

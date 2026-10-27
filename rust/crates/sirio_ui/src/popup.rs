@@ -1,14 +1,27 @@
 // Ported from bezel-ui 0.1.4 (MIT); see THIRD_PARTY_NOTICES.md.
-//! The state behind a popup menu: its open / closing / closed lifecycle and
-//! the searchable list a picker shows.
+//! A popup menu: the state behind it (its open / closing / closed lifecycle and
+//! the searchable list a picker shows) and the pieces every Sirio menu is
+//! drawn from.
 //!
-//! State only. The elements that draw a popup (the anchored card, the rows)
-//! are not here; this is the part that decides *whether* one is mounted and
-//! which row is active.
+//! The lifecycle decides *whether* a popup is mounted and which row is active.
+//! The drawing is Ely's: [`menu_card`] is its card, [`menu_row`] the frame of
+//! a row, [`divider`] its separator, and [`hang_below`] / [`hang_above_at`]
+//! float a card the way Ely's `menus::layer` does. The rows keep their own
+//! children. What Ely cannot draw, the exit, stays Sirio's: [`leaving`] plays
+//! [`motion::menu_out`] while the popup is closing.
 
 use std::time::{Duration, Instant};
 
-use gpui::SharedString;
+use ely_gpui_component::{
+    menus::{panel_surface, row_frame},
+    motion as ely_motion,
+    primitives::{Raised, raise},
+    theme::ActiveTheme as _,
+};
+use gpui::{
+    Anchor, Animation, AnimationExt as _, AnyElement, App, Div, ElementId, Pixels, Point,
+    SharedString, Stateful, anchored, div, prelude::*, px,
+};
 
 use crate::motion;
 
@@ -171,6 +184,150 @@ pub fn reap_popup<V: 'static, T: 'static>(
 pub fn exit_progress(since: Instant) -> f32 {
     let raw = (since.elapsed().as_secs_f32() / motion::MENU_OUT.as_secs_f32()).clamp(0.0, 1.0);
     motion::EASE.eval(raw)
+}
+
+// ---------------------------------------------------------------------------
+// Drawing — Ely's card, row frame and separator; Sirio's exit
+// ---------------------------------------------------------------------------
+
+/// The frame of one menu row: Ely's [`row_frame`] and, when the row can be
+/// pressed, the hover wash. `current` is the row the keys have marked;
+/// `disabled` draws the quiet colour and takes neither hover nor a pointer.
+/// The hover snaps, as Ely's own rows do. What the row holds, and what a click
+/// does, is the caller's.
+pub fn menu_row(
+    id: impl Into<ElementId>,
+    current: bool,
+    disabled: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let hover = cx.theme().colors.hover;
+    row_frame(id, current, disabled, cx)
+        .when(!disabled, |row| row.hover(move |style| style.bg(hover)))
+}
+
+/// The card a menu's rows sit on: Ely's [`panel_surface`], inset by `p_1` and
+/// stacking what it holds. Its text is Ely's `fg`, so a plain child that sets
+/// no colour of its own is not drawn in gpui's default black.
+pub fn menu_card(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
+    panel_surface(id, cx)
+        .p_1()
+        .flex()
+        .flex_col()
+        .text_color(cx.theme().colors.fg)
+}
+
+/// The hairline between two groups of rows, Ely's separator.
+pub fn divider(cx: &App) -> Div {
+    div().h_px().my_1().bg(cx.theme().colors.border)
+}
+
+/// `content` while the popup is open, and while it is closing the exit:
+/// [`motion::menu_out`] from the wall clock (`since` is
+/// [`Popup::closing_since`]), with an occluding overlay on top. The dying
+/// menu's rows must not take a click, and nor may whatever is under them.
+pub fn leaving(
+    id: impl Into<ElementId>,
+    closing: Option<Instant>,
+    content: impl IntoElement,
+) -> AnyElement {
+    let Some(since) = closing else {
+        return content.into_any_element();
+    };
+    let dying = div()
+        .relative()
+        .child(content)
+        .child(div().absolute().inset_0().occlude());
+    // A name of its own: reusing the entrance's would inherit its finished
+    // clock and snap the exit to its end.
+    motion::menu_out((id.into(), "out"), exit_progress(since), dying).into_any_element()
+}
+
+/// The gap, in pixels, between a trigger and the card [`hang_below`] opens
+/// under it.
+pub const HANG_GAP: Pixels = px(6.0);
+
+/// Floats `content` under the `relative` element it is a child of, left-aligned
+/// to it, `gap` below its bottom edge.
+pub fn hang_below(
+    id: impl Into<ElementId>,
+    gap: Pixels,
+    content: impl IntoElement,
+    closing: Option<Instant>,
+    cx: &App,
+) -> AnyElement {
+    div()
+        .absolute()
+        .bottom_0()
+        .left_0()
+        .size_0()
+        .child(hang(
+            id.into(),
+            Anchor::TopLeft,
+            None,
+            gap,
+            content,
+            closing,
+            cx,
+        ))
+        .into_any_element()
+}
+
+/// Floats `content` over the window point `at`, its bottom-left corner there,
+/// [`HANG_GAP`] above it: a completion popup over the caret that opened it.
+/// `at` is a window point, as a caret measures, not one relative to a parent.
+pub fn hang_above_at(
+    id: impl Into<ElementId>,
+    at: Point<Pixels>,
+    content: impl IntoElement,
+    closing: Option<Instant>,
+    cx: &App,
+) -> AnyElement {
+    hang(
+        id.into(),
+        Anchor::BottomLeft,
+        Some(at),
+        HANG_GAP,
+        content,
+        closing,
+        cx,
+    )
+    .into_any_element()
+}
+
+/// The layer both hang over the page, drawn as Ely's `menus::layer` draws its
+/// own: kept inside the window with a margin, occluding what is under it, its
+/// opacity easing in, raised over the page by Ely's [`raise`]. `gap` is the
+/// room between the anchor corner and the card, on the side facing it. A press
+/// outside the card is the host's to handle, on the card.
+fn hang(
+    id: ElementId,
+    anchor: Anchor,
+    at: Option<Point<Pixels>>,
+    gap: Pixels,
+    content: impl IntoElement,
+    closing: Option<Instant>,
+    cx: &App,
+) -> Raised {
+    let enter = Animation::new(ely_motion::duration(ely_motion::FAST, cx))
+        .with_easing(ely_motion::ease_out_cubic);
+    let body = div()
+        .occlude()
+        .map(|body| match anchor {
+            Anchor::BottomLeft | Anchor::BottomRight => body.pb(gap),
+            _ => body.pt(gap),
+        })
+        .child(leaving(id.clone(), closing, content))
+        .with_animation((id.clone(), "in"), enter, |body, t| body.opacity(t));
+    let placed = anchored()
+        .anchor(anchor)
+        .snap_to_window_with_margin(px(8.0))
+        .map(|placed| match at {
+            Some(at) => placed.position(at),
+            None => placed,
+        })
+        .child(body);
+    raise((id, "layer"), placed).with_priority(1)
 }
 
 // ---------------------------------------------------------------------------

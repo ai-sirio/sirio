@@ -1,3 +1,4 @@
+// Ported from bezel-ui 0.1.4 (MIT); see THIRD_PARTY_NOTICES.md.
 //! The transcript's turn chrome. Every entry of a turn — thought, prose,
 //! tool run, closing answer — is drawn where it sits and in one weight:
 //! what the model says between its tool calls is an answer like any
@@ -13,6 +14,22 @@ use super::*;
 use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::chat::{MessageAvatar, MessageBubble, MessageFooter, MessageHeader, Role};
 use ely_gpui_component::theme::ControlSize;
+
+/// Uppercase with a hair space between the letters, for about 0.1em of
+/// tracking: gpui has no letter-spacing at the pinned revision.
+fn tracked_upper(label: &str) -> String {
+    let upper = label.to_uppercase();
+    let mut out = String::with_capacity(upper.len() * 2);
+    let mut first = true;
+    for ch in upper.chars() {
+        if !first {
+            out.push('\u{200A}');
+        }
+        out.push(ch);
+        first = false;
+    }
+    out
+}
 
 /// Sirio's words for a day — bezel carries no clock. `Today`, `Yesterday`,
 /// otherwise `Mon 2 Sep`.
@@ -48,7 +65,7 @@ pub(crate) fn heading_for(entries: &[Entry], index: usize, now: DateTime<Local>)
 
 impl Chat {
     /// The day heading above a turn's question: `py 8`, `Subheadline` in
-    /// `fg_subtle`, uppercased with the popover's tracking.
+    /// `fg_subtle`, uppercased and tracked by [`tracked_upper`].
     pub(crate) fn render_day_heading(
         entry_index: usize,
         label: &str,
@@ -61,7 +78,7 @@ impl Chat {
             .text_size(theme.typography.footnote)
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(bezel_theme.text_faint)
-            .child(SharedString::from(bezel::ui::popover::tracked_upper(label)))
+            .child(SharedString::from(tracked_upper(label)))
             .into_any_element()
     }
 }

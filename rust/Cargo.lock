@@ -7299,7 +7299,6 @@ dependencies = [
  "bezel-gpui",
  "bezel-gpui-linux",
  "bezel-gpui-platform",
- "bezel-theme",
  "bezel-zed-scheduler",
  "chrono",
  "embed-resource",
