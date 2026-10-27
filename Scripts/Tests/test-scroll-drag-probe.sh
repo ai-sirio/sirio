@@ -21,7 +21,8 @@ set -euo pipefail
 # vertical bar at the right edge of panes 1 and 2, a horizontal one along the bottom of pane 3.
 # Pane 1's bar is Ely's `Scrollbar` (a 12 px strip with its 6 px thumb in the strip's left half,
 # so the thumb's centre line is 9 px in from the pane's edge); pane 2's and pane 3's are Sirio's
-# own, a 10 px strip with a centred 6 px thumb (centre line 5 px in).
+# own, a 10 px strip whose centre line is 5 px in (pane 2's 6 px thumb is centred on it, pane 3's
+# fills the strip).
 # The probe's appearance is dark, pinned (the desktop's colour scheme does not reach it), and
 # probe.log says so.
 #
