@@ -184,9 +184,11 @@ Scripts/Tests/test-jdtls-lombok-e2e.sh --xvfb   # -> prints "JDTLS LOMBOK E2E OK
 # Maven project the script writes, with an empty $HOME/.m2. Run 1: the first launch has no
 # agent, jdtls's own import downloads Lombok, the next publish restarts it with the agent
 # from $HOME/.m2, and the open file's diagnostics and the drawer's error count (which covers
-# files nobody opened) read 0 and hold 0 for 60 s. Run 2: the app is quit, every jdtls is
-# confirmed gone, and the relaunch carries the agent from the start over the workspace Run 1
-# left, with the same two values. It needs network access to Maven Central, a jdtls install
+# files nobody opened) read 0 and hold 0 for 60 s, counted only once the drawer shows the
+# warning of an unused import in PegaService.java, a file nobody opens: the current server has
+# published it, so a zero is not just the empty state after a restart. Run 2: the app is
+# quit, every jdtls is confirmed gone, and the relaunch carries the agent from the start over
+# the workspace Run 1 left, with the same condition. It needs network access to Maven Central, a jdtls install
 # and a Java 25 home, and takes 10 to 20 minutes. --jdtls PATH and --java-home DIR are required;
 # --xvfb or --display :N; --out-dir DIR keeps transcript.log, jdtls-launches.log, app.log and
 # jdtls's own workspace log; --no-build uses the binaries already built.

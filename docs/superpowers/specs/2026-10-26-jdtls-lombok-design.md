@@ -188,10 +188,10 @@ only the open one. The first publish is therefore always after the jar. A later
 download of a newer jar, for a project that already used Lombok at launch, is caught
 by a later publish. A project that starts using Lombok mid-session, for example after
 Lombok is added to the POM, gets the agent the next time its server is launched
-(reopening the project or restarting Sirio), because "uses Lombok" is decided at
-launch. *(builder's call, during execution)* The re-check runs only for keys that could
-still restart: the project uses Lombok, the restart has not been spent, and the key is
-not in fallback. It is never a free-running timer. A filesystem watch was not needed.
+(restarting Sirio, or any later launch of that key's server, for example after it
+ends), because "uses Lombok" is decided at launch. *(builder's call, during execution)*
+The re-check runs only for keys that could still restart: the project uses Lombok, the
+restart has not been spent, and the key is not in fallback. It is never a free-running timer. A filesystem watch was not needed.
 
 ### §2.4 No stale findings after the agent arrives
 

@@ -18,11 +18,16 @@ set -eEuo pipefail
 # show the second line with the agent. Once that server is ready the editor's
 # diagnostics and the drawer's error count (PegaService.java and LoginBody.java are
 # never opened) must read 0 and hold 0 for 60 s: a Lombok error republished from the
-# workspace the first launch left behind would show in that window.
+# workspace the first launch left behind would show in that window. A zero is only
+# counted once the server has published PegaService.java: that file carries an unused
+# import, a warning jdtls reports by default and Lombok has nothing to do with, so the
+# drawer holds 0 errors, at least 1 warning and PegaService.java in its files. Each
+# publish replaces a file's whole set, so seeing that warning means the current server
+# has published the file, and a Lombok error would have come in the same publish.
 # Run 2, the relaunch: the app is quit, every jdtls the run launched must be gone
 # (one left over would hold the workspace lock and the fallback would hide it), the
 # app is started again and the file reopened: the launch carries the agent from the
-# start, over the workspace Run 1 built, and the same two values read 0 and hold.
+# start, over the workspace Run 1 built, and the same condition holds.
 #
 # Opt-in: it needs network access to Maven Central, a Java 25 runtime and a jdtls
 # install (1.63 needs Java 25), takes 10 to 20 minutes, and is never part of
@@ -237,7 +242,7 @@ STUB
 chmod +x "$RUN_DIR/stubs/jdtls"
 
 # The project, in a fresh git repository inside the run dir: the four files of
-# spec section 7. Lombok 1.18.40 comes from Spring Boot's dependency management, and
+# spec section 7 (PegaService.java gains an unused import: the warning the run waits for). Lombok 1.18.40 comes from Spring Boot's dependency management, and
 # `$HOME/.m2` is empty, so the import downloads it.
 mkdir -p "$WT/src/main/java/demo/model" "$WT/src/main/java/demo/service" "$WT/src/main/java/demo/controller"
 git -C "$WT" init -q -b main
@@ -292,6 +297,7 @@ cat >"$WT/src/main/java/demo/service/PegaService.java" <<'JAVA'
 package demo.service;
 
 import demo.model.LoginBody;
+import java.util.List;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -382,13 +388,29 @@ sfield() { printf '%s\n' "$STATE" | sed -n "s/^$1=//p" | head -n 1; }
 status_field() { # key
   sfield status | tr ';' '\n' | sed -n "s/^$1=//p" | head -n 1
 }
-# The drawer's error count: the first field of `problems` ("<errors>/<warnings>/<notes>"),
-# over every file of the worktree, open or not. An empty field (no drawer yet) reads 0.
+# The drawer's counts: the first field of `problems` is the errors, the second the
+# warnings ("<errors>/<warnings>/<notes>"), over every file of the worktree, open or not.
+# For the informational sampling while waiting for a launch: an empty field (no drawer
+# yet) reads 0.
 problem_errors() {
   local value
   value="$(sfield problems)"
   value="${value%%/*}"
   echo "${value:-0}"
+}
+# The same two counts for the pass condition, "<errors> <warnings>". An empty or odd
+# field fails the script: a drawer that does not exist proves nothing.
+problem_counts() {
+  local value errors rest warnings
+  value="$(sfield problems)"
+  case "$value" in
+    [0-9]*/[0-9]*/[0-9]*) ;;
+    *) fail "$SCENARIO: the drawer's problems field is '$value', expected <errors>/<warnings>/<notes>" ;;
+  esac
+  errors="${value%%/*}"
+  rest="${value#*/}"
+  warnings="${rest%%/*}"
+  echo "$errors $warnings"
 }
 
 # The launch log: one line per launch, "<pid> <project dir name> <argv>".
@@ -453,35 +475,45 @@ expect_ready() { # seconds
   done
   fail "$SCENARIO: lsp expected jdtls:ready within $1 s, got '$got' (status: $(sfield status))"
 }
-# Both values must read 0 and hold 0 for HOLD seconds: the open file's `diagnostics`
-# and the drawer's error count over every file. A zero that is only the window's first
-# instant (the restart emptied the stores) would not survive a Lombok error republished
-# from the workspace on disk, which is what the window is for. Polled up to LIMIT seconds
-# for the first zero; any non-zero after it restarts the window.
+# The pass condition must hold for HOLD seconds: the open file's `diagnostics` is 0, the
+# drawer has no error in any file, and the drawer shows at least one warning in
+# PegaService.java, the file nobody opens. The last part is what makes a zero evidence.
+# A restart (the Lombok one, or the app's) starts with empty stores, so 0 errors and 0
+# diagnostics are the state before the server has said anything. PegaService's unused
+# import is a warning every jdtls publish of that file carries, and each publish replaces
+# the file's whole set: seeing it means the CURRENT server has published the file, and a
+# Lombok error in it would have arrived in that same publish. The restart empties the old
+# server's findings first, so a sample taken before the new server's first publish has no
+# anchor and cannot count. Polled up to LIMIT seconds for the first such sample; any
+# sample that stops matching restarts the window.
 expect_clean() { # limit hold
-  local deadline=$((SECONDS + $1)) hold_until=0 diagnostics errors next=$((SECONDS + 30))
+  local deadline=$((SECONDS + $1)) hold_until=0 diagnostics counts errors warnings files anchor next=$((SECONDS + 30))
   while [ "$SECONDS" -lt "$deadline" ] || [ "$hold_until" -gt 0 ]; do
     read_state
     diagnostics="$(sfield diagnostics)"
-    errors="$(problem_errors)"
-    if [ "$diagnostics" = 0 ] && [ "$errors" = 0 ]; then
-      [ "$hold_until" -gt 0 ] || { hold_until=$((SECONDS + $2)); echo "clean at $(elapsed): holding for $2 s"; }
+    counts="$(problem_counts)"
+    errors="${counts% *}"
+    warnings="${counts#* }"
+    files="$(sfield problem_files)"
+    case ";$files;" in *";src/main/java/demo/service/PegaService.java;"*) anchor=1 ;; *) anchor=0 ;; esac
+    if [ "$diagnostics" = 0 ] && [ "$errors" = 0 ] && [ "$warnings" -ge 1 ] && [ "$anchor" = 1 ]; then
+      [ "$hold_until" -gt 0 ] || { hold_until=$((SECONDS + $2)); echo "clean at $(elapsed): PegaService.java's warning seen from the current server (problems=$(sfield problems), files '$files'); holding for $2 s"; }
       if [ "$SECONDS" -ge "$hold_until" ]; then
-        echo "OK: diagnostics=0 problems=$(sfield problems) held for $2 s (problem_files: '$(sfield problem_files)')"
+        echo "OK: diagnostics=0 problems=$(sfield problems) held for $2 s with PegaService.java's warning in the drawer (files '$files')"
         return 0
       fi
     else
-      [ "$hold_until" -eq 0 ] || echo "not clean again at $(elapsed): diagnostics=$diagnostics problems=$(sfield problems) problem_files='$(sfield problem_files)'"
+      [ "$hold_until" -eq 0 ] || echo "not clean again at $(elapsed): diagnostics=$diagnostics problems=$(sfield problems) problem_files='$files'"
       hold_until=0
       [ "$SECONDS" -lt "$deadline" ] || break
     fi
     if [ "$SECONDS" -ge "$next" ]; then
-      echo "... $(elapsed): diagnostics=$diagnostics problems=$(sfield problems) files='$(sfield problem_files)'"
+      echo "... $(elapsed): diagnostics=$diagnostics problems=$(sfield problems) files='$files'"
       next=$((SECONDS + 30))
     fi
     sleep 1
   done
-  fail "$SCENARIO: expected diagnostics=0 and no error in the drawer, got diagnostics=$diagnostics problems=$(sfield problems) problem_files='$(sfield problem_files)'"
+  fail "$SCENARIO: expected diagnostics=0, no error and PegaService.java's warning in the drawer, got diagnostics=$diagnostics problems=$(sfield problems) problem_files='$files'"
 }
 
 # ---------------------------------------------------------------- run 1: the restart
@@ -502,7 +534,7 @@ echo "before the restart the poll saw at most diagnostics=$MAX_DIAGNOSTICS, draw
 expect_ready 300
 expect_clean 300 60
 [ "$(launch_count)" = 2 ] || fail "$SCENARIO: expected exactly 2 launches, got $(launch_count) ($(tr '\n' '|' <"$LAUNCH_LOG"))"
-echo "OK: run 1 had two launches, and Lombok's errors are gone from the open file and from files nobody opened"
+echo "OK: run 1 had two launches, and Lombok's errors are gone from the open file and from files nobody opened (PegaService.java published, no error)"
 RUN1_PROBLEMS="$(sfield problems)"
 RUN1_DIAGNOSTICS="$(sfield diagnostics)"
 RUN1_MAX_DIAGNOSTICS="$MAX_DIAGNOSTICS"
