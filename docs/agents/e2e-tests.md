@@ -158,6 +158,40 @@ Scripts/Tests/test-markdown-scroll-probe.sh --xvfb   # -> prints "MARKDOWN SCROL
 # `--only replace_mixed`, which then proves Replace all tells the open tabs itself.
 Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
 
+# How Sirio launches the built-in `jdtls` around Lombok (spec
+# docs/superpowers/specs/2026-10-26-jdtls-lombok-design.md) in a real, isolated debug Sirio on
+# a private Xvfb, with a fake `jdtls` on PATH that logs each launch's argv and project and
+# speaks LSP through Scripts/Tests/fake_lsp.py, and fake Lombok jars in a private HOME. Nine
+# scenarios: restart (no jar at launch, one lands, the next publish stops the server with
+# shutdown and exit and launches it again with the agent, sent the open file and one full
+# build, and a newer jar afterwards causes no third launch), restart_held (the restart from a
+# launch not yet answered its full build: the old router is cancelled, so the relaunch keeps
+# the newer agent), agent_at_launch (a parent POM alone mentions Lombok: the newest jar of the
+# Maven and Gradle caches as one argv element, one `java/buildWorkspace` after ServiceReady),
+# agent_from_settings (the jar found through settings.xml's localRepository, a path with a
+# space), no_lombok (no argument, no build), fallback_init and fallback_early (a launch with
+# the agent that fails, at once or after `initialized`, is launched once more without it),
+# stderr_flood (200 KB on stderr and the server is still ready) and hand_written (a
+# languages.toml entry is launched with exactly its own arguments, and sent no build).
+# --xvfb or --display :N picks the display (never your own $DISPLAY); --out-dir DIR keeps the
+# transcript, app.log, the launch log and each launch's request log; --only NAME[,NAME...]
+# runs some scenarios and prints "JDTLS LOMBOK E2E PARTIAL" instead.
+Scripts/Tests/test-jdtls-lombok-e2e.sh --xvfb   # -> prints "JDTLS LOMBOK E2E OK (9 scenarios)"
+
+# The same feature on the real jdtls, opt-in and never part of Scripts/ci.sh: a debug Sirio on
+# a private Xvfb launches the real jdtls (a `jdtls` stub on PATH that logs each launch and runs
+# your launcher on your Java 25, with the private HOME as user.home) in a Spring Boot + Lombok
+# Maven project the script writes, with an empty $HOME/.m2. Run 1: the first launch has no
+# agent, jdtls's own import downloads Lombok, the next publish restarts it with the agent
+# from $HOME/.m2, and the open file's diagnostics and the drawer's error count (which covers
+# files nobody opened) read 0 and hold 0 for 60 s. Run 2: the app is quit, every jdtls is
+# confirmed gone, and the relaunch carries the agent from the start over the workspace Run 1
+# left, with the same two values. It needs network access to Maven Central, a jdtls install
+# and a Java 25 home, and takes 10 to 20 minutes. --jdtls PATH and --java-home DIR are required;
+# --xvfb or --display :N; --out-dir DIR keeps transcript.log, jdtls-launches.log, app.log and
+# jdtls's own workspace log; --no-build uses the binaries already built.
+Scripts/Tests/test-jdtls-lombok-live.sh --xvfb --jdtls PATH --java-home DIR   # -> prints "JDTLS LOMBOK LIVE OK"
+
 # The editor's hosting hooks on a real frame, on a private Xvfb with Mesa's
 # lavapipe: the host's per-line colour (and Ely's own lexer kept out), a git mark,
 # a diagnostic, the gutter, and the events a host hears, each from a real xdotool
