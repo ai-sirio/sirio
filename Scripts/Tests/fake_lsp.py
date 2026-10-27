@@ -49,6 +49,10 @@ the editor's pointer features ask:
   first publish, if there is one): `{"type": "ServiceReady", "message":
   "ServiceReady"}`, what jdtls says when it can take requests. The file is read
   at `initialized`, so the answer set when the server starts is the one that counts.
+- With `"exit_after_initialized": true` in ANSWERS the server ends right after it
+  reads `initialized`, before `ServiceReady` and before it handles anything else or
+  publishes: a jdtls that dies while it starts, after `initialize` has answered.
+  The file is read at `initialized`, like `service_ready`.
 - `java/buildWorkspace` (jdtls's full build) is answered with `1`, the status
   jdtls gives a build that succeeded.
 - Any other request is answered with null; notifications are ignored.
@@ -331,6 +335,9 @@ def main():
         elif method == "initialized":
             stamp = stamp_of_answers()
             config = answers()
+            if config.get("exit_after_initialized"):
+                log_line("exit: exit_after_initialized")
+                break
             # A server started while `publish` is there has to publish again when
             # it goes (a test puts the answers back), as one that saw it come does.
             threading.Thread(

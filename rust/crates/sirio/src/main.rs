@@ -14924,6 +14924,11 @@ impl SirioWorkspace {
         );
         let view = view.clone();
         let path_for_facts = path.to_path_buf();
+        // What the launch falls back to when the agent breaks it: the entry's
+        // own arguments, behind the program that failed.
+        let plain_args = args.clone();
+        let plain_root = root.clone();
+        let first_program = command.clone();
         cx.spawn(async move |this, cx| {
             // Kept for step 2: the launch below consumes its own copies, and
             // the fallback launches the same arguments behind a different
@@ -14958,30 +14963,60 @@ impl SirioWorkspace {
             // never by putting its directory on the child's PATH, so two
             // installed servers cannot see each other and an installed one
             // cannot displace the reader's own choice.
-            let launched = match launched {
+            let (launched, program) = match launched {
                 Err(sirio_lsp::LspError::NotInstalled { command }) => match installed {
                     Some(binary) => {
                         let binary = binary.to_string_lossy().into_owned();
-                        cx.background_executor()
+                        let program = binary.clone();
+                        let launched = cx
+                            .background_executor()
                             .spawn(async move {
                                 sirio_lsp::Server::launch(&binary, &installed_args, &installed_root)
                                     .await
                             })
-                            .await
+                            .await;
+                        (launched, program)
                     }
                     // Nothing in the store, so nothing more to try: the key
                     // dies below, with the arm the recipe dictates.
-                    None => Err(sirio_lsp::LspError::NotInstalled { command }),
+                    None => (
+                        Err(sirio_lsp::LspError::NotInstalled { command }),
+                        first_program,
+                    ),
                 },
                 // Including the fallback's own failures: a binary that is
                 // there and will not start is not a missing one, and
                 // `Failed` is the arm that says so.
-                other => other,
+                other => (other, first_program),
+            };
+            // A launch that carries the Lombok agent and fails for any reason but
+            // a missing program is tried once more, with the same program and the
+            // entry's own arguments. The key gets no agent from here on. A second
+            // failure is an ordinary failure: no third try.
+            let carried_agent = lombok.as_ref().is_some_and(|(_, agent)| agent.is_some());
+            let (launched, lombok, fell_back) = match launched {
+                Err(error)
+                    if carried_agent
+                        && !matches!(error, sirio_lsp::LspError::NotInstalled { .. }) =>
+                {
+                    sirio_perf::event("lsp.lombok.fallback", 0);
+                    let launched = cx
+                        .background_executor()
+                        .spawn(async move {
+                            sirio_lsp::Server::launch(&program, &plain_args, &plain_root).await
+                        })
+                        .await;
+                    (launched, lombok.map(|(uses, _)| (uses, None)), true)
+                }
+                other => (other, lombok, false),
             };
 
             let _ = this.update(cx, |workspace, cx| match launched {
                 Ok((server, read_loop)) => {
                     workspace.lsp.finish_starting(&key);
+                    if fell_back {
+                        workspace.lombok_fall_back(&key);
+                    }
                     if let Some((uses, agent)) = lombok {
                         if agent.is_some() {
                             sirio_perf::event("lsp.lombok.agent", 0);
@@ -15072,6 +15107,9 @@ impl SirioWorkspace {
                 }
                 Err(error) => {
                     workspace.lsp.finish_starting(&key);
+                    if fell_back {
+                        workspace.lombok_fall_back(&key);
+                    }
                     workspace.lsp.mark_dead(
                         key,
                         crate::lsp::Dead::Failed {
@@ -15450,7 +15488,18 @@ impl SirioWorkspace {
     /// what it reported, the open files of its key stop showing its findings
     /// and are told to the next server from the start, and the drawers name the
     /// servers still running.
+    ///
+    /// A launch that carried the Lombok agent and ended before jdtls answered
+    /// the full build is blamed on the agent: the key falls back (no agent for
+    /// the rest of the session) and is started once more, after the cleanup.
     fn language_server_gone(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
+        let blame_agent = self.lsp.lombok(key).is_some_and(|state| {
+            state.agent.is_some() && !state.build_answered && !state.fallen_back
+        });
+        if blame_agent {
+            sirio_perf::event("lsp.lombok.fallback", 0);
+            self.lombok_fall_back(key);
+        }
         self.lsp.forget(key);
         let drawers: Vec<_> = self.drawers.values().cloned().collect();
         for drawer in drawers {
@@ -15471,6 +15520,31 @@ impl SirioWorkspace {
         }
         self.refresh_running_servers(cx);
         self.push_language_server_status_to_open_files(cx);
+        if blame_agent {
+            self.relaunch_key(key, cx);
+        }
+    }
+
+    /// The key gets no agent for the rest of the session. What belonged to the
+    /// launch that carried it (`built`, `build_answered`) goes with it.
+    fn lombok_fall_back(&mut self, key: &sirio_ui::drawer::ServerKey) {
+        let state = self.lsp.lombok_mut(key);
+        state.fallen_back = true;
+        state.agent = None;
+        state.built = false;
+        state.build_answered = false;
+    }
+
+    /// Starts the key's server again, for the first open file that belongs to
+    /// it. Nothing happens when no file of the key is open: the next one that
+    /// opens starts it. The key must not be running, starting or dead.
+    fn relaunch_key(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
+        let file = Self::open_file_views(&self.tabs, cx)
+            .into_iter()
+            .find(|(path, _)| self.server_key_for(path).as_ref() == Some(key));
+        if let Some((path, view)) = file {
+            self.start_language_server_for(&path, &view, cx);
+        }
     }
 
     /// The key of the server `path` would use, from the table as loaded.

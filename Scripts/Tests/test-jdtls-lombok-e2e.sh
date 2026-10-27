@@ -21,6 +21,13 @@ set -eEuo pipefail
 #                        the space in the path reaches the launch intact
 #   no_lombok            a project that does not mention Lombok launches with no argument
 #                        and is sent no full build
+#   fallback_init        a jdtls that exits at once when it is given the agent (a launch
+#                        that fails) is launched once more without it: two launches, the
+#                        first with the agent and the second with no argument, which is
+#                        ready and sent the open file, and no third launch
+#   fallback_early       a jdtls that ends right after `initialized`, before it has
+#                        answered the full build, is launched once more without the agent,
+#                        with the same checks
 #   stderr_flood         a jdtls that writes 200 KB to stderr before it answers is
 #                        ready within 10 s: the app's pipe to it is never left unread
 #   hand_written         a java entry in languages.toml is launched with exactly the
@@ -195,6 +202,10 @@ mkdir -p "$JDTLS_DIR"
 cat >"$JDTLS_DIR/answers.json" <<JSON
 {"service_ready": true, "publish": {}, "nonce": 0}
 JSON
+# The same answers for a launch that ends right after `initialized`.
+cat >"$JDTLS_DIR/answers-dieearly.json" <<JSON
+{"service_ready": true, "publish": {}, "nonce": 0, "exit_after_initialized": true}
+JSON
 cat >"$RUN_DIR/stubs/jdtls" <<STUB
 #!/bin/sh
 # Fake jdtls: logs "<n> <project dir name> <argv>" then behaves by the dir name.
@@ -235,6 +246,8 @@ make_project lombok-parent/app '<project><artifactId>app</artifactId></project>'
 make_project plain '<project><artifactId>plain</artifactId></project>'
 make_project plain-stderr '<project><artifactId>plain-stderr</artifactId></project>'
 make_project lombok-m2 '<project><artifactId>lombok</artifactId></project>'
+make_project lombok-failinit '<project><artifactId>lombok</artifactId></project>'
+make_project lombok-dieearly '<project><artifactId>lombok</artifactId></project>'
 make_project lombok-hand '<project><artifactId>lombok</artifactId></project>'
 git -C "$WT" add -A
 git -C "$WT" commit -q -m "fixtures"
@@ -323,18 +336,19 @@ launch_args_of() { # project
   launches_of "$1" | sed -E 's/^[0-9]+ [^ ]+ ?//'
 }
 # The launch's argv as the fake jdtls received it, from its argv file: the element
-# count, and for a count of 1 the element, compared whole.
-expect_argv() { # project count [element]
+# count, and for a count of 1 the element, compared whole. The project's first launch,
+# or its ORDINAL-th (a fallback is the second).
+expect_argv() { # project count [element] [ordinal]
   local n count first
-  n="$(launches_of "$1" | head -n 1 | cut -d' ' -f1)"
-  [ -f "$JDTLS_DIR/argv-$n.log" ] || fail "$SCENARIO: $1 has no argv file for launch '$n'"
+  n="$(launches_of "$1" | sed -n "${4:-1}p" | cut -d' ' -f1)"
+  [ -f "$JDTLS_DIR/argv-$n.log" ] || fail "$SCENARIO: $1 has no argv file for launch ${4:-1} ('$n')"
   count="$(sed -n 1p "$JDTLS_DIR/argv-$n.log")"
   [ "$count" = "$2" ] || fail "$SCENARIO: $1 expected $2 argv elements, got $count ($(tr '\n' '|' <"$JDTLS_DIR/argv-$n.log"))"
   if [ "$2" -ge 1 ]; then
     first="$(sed -n 2p "$JDTLS_DIR/argv-$n.log")"
     [ "$first" = "$3" ] || fail "$SCENARIO: $1 expected the one element '$3', got '$first'"
   fi
-  echo "OK: $1 argv: $count element(s)"
+  echo "OK: $1 argv of launch ${4:-1}: $count element(s)"
 }
 wait_launches() { # project count seconds
   local tries=0 limit=$(($3 * 5)) got=0
@@ -446,6 +460,50 @@ scenario_no_lombok() {
   expect_no_full_build plain 3
 }
 
+# After the agent broke the first launch: two launches, the first with the agent (one
+# argv element) and the second with none, and the second sent the open file. Then no
+# third launch, whatever else happens in 3 s.
+expect_fallback() { # project
+  local expected second tries=0 log=""
+  expected="--jvm-arg=-javaagent:$MAVEN_REPO/org/projectlombok/lombok/1.18.30/lombok-1.18.30.jar"
+  wait_launches "$1" 2 20
+  expect_argv "$1" 1 "$expected" 1
+  expect_argv "$1" 0 "" 2
+  expect_status lsp jdtls:ready
+  second="$(launches_of "$1" | sed -n 2p | cut -d' ' -f1)"
+  log="$JDTLS_DIR/requests-$second.log"
+  while [ "$tries" -lt 50 ] && ! grep -q '^notification textDocument/didOpen$' "$log" 2>/dev/null; do
+    tries=$((tries + 1))
+    sleep 0.2
+  done
+  grep -q '^notification textDocument/didOpen$' "$log" \
+    || fail "$SCENARIO: $1's second launch was never sent the open file ($(tr '\n' '|' <"$log" 2>/dev/null))"
+  echo "OK: $1's second launch was sent the open file"
+  sleep 3
+  [ "$(launches_of "$1" | grep -c .)" = 2 ] \
+    || fail "$SCENARIO: $1 expected exactly 2 launches, got $(launches_of "$1" | grep -c .)"
+  echo "OK: $1 had no third launch"
+}
+# The agent is Maven's from here on, as in agent_from_settings.
+use_maven_agent_only() {
+  ensure_jars
+  rm -rf "$GRADLE_CACHE/1.18.36"
+}
+
+scenario_fallback_init() {
+  use_maven_agent_only
+  open_java lombok-failinit/src/main/java/demo/A.java
+  expect_status lsp jdtls:ready
+  expect_fallback lombok-failinit
+}
+
+scenario_fallback_early() {
+  use_maven_agent_only
+  open_java lombok-dieearly/src/main/java/demo/A.java
+  wait_launches lombok-dieearly 2 20
+  expect_fallback lombok-dieearly
+}
+
 scenario_stderr_flood() {
   # 200 KB on stderr is more than a pipe holds: a server whose stderr nobody reads
   # blocks before its first answer, and the editor never leaves "starting".
@@ -478,6 +536,8 @@ TOML
 scenario agent_at_launch scenario_agent_at_launch
 scenario agent_from_settings scenario_agent_from_settings
 scenario no_lombok scenario_no_lombok
+scenario fallback_init scenario_fallback_init
+scenario fallback_early scenario_fallback_early
 scenario stderr_flood scenario_stderr_flood
 # Last: the table it writes applies to every .java file from then on.
 scenario hand_written scenario_hand_written
