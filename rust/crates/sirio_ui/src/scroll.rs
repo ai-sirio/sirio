@@ -287,4 +287,45 @@ mod tests {
             assert_eq!(asked_over_three_frames(cx), 0, "{rows} rows: and then it settles");
         }
     }
+
+    #[gpui::test]
+    fn a_box_resized_along_its_bars_axis_asks_for_one_more_frame_and_across_it_for_none(
+        cx: &mut TestAppContext,
+    ) {
+        let (host, cx) = mounted(cx, 40, Axis::Horizontal);
+        let overflow = |host: &gpui::Entity<Host>, cx: &mut VisualTestContext| {
+            host.read_with(cx, |host, _| host.handle.max_offset().x)
+        };
+        asked_over_three_frames(cx);
+        assert_eq!(asked_over_three_frames(cx), 0, "the bar is up and the box idle");
+        assert!(
+            (overflow(&host, cx) - px(700.0)).abs() < px(0.5),
+            "the premise: 800 px of content in a 100 px box overflow by 700, not {:?}",
+            overflow(&host, cx)
+        );
+
+        // 40 px narrower with 40 px less content, in the one frame the resize draws (the content
+        // is changed without a notify): the length moved and the overflow did not, so only the
+        // comparison of the length can see it.
+        host.update(cx, |host, _| host.rows = 38);
+        cx.simulate_resize(size(px(60.0), px(100.0)));
+        assert!(
+            asked_over_three_frames(cx) > 0,
+            "the box is 40 px narrower and its bar was sized for the old width"
+        );
+        assert_eq!(asked_over_three_frames(cx), 0, "and then it settles");
+        assert!(
+            (overflow(&host, cx) - px(700.0)).abs() < px(0.5),
+            "the premise held: 760 px of content in a 60 px box still overflow by 700, not {:?}",
+            overflow(&host, cx)
+        );
+
+        // Shorter only: a horizontal bar reads the width, so the height is not its business.
+        cx.simulate_resize(size(px(60.0), px(70.0)));
+        assert_eq!(
+            asked_over_three_frames(cx),
+            0,
+            "a horizontal bar asks for nothing when only the box's height changes"
+        );
+    }
 }
