@@ -27,7 +27,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/hero.png" />
-    <img src="assets/readme/sirio-promo.gif" alt="A short tour of Sirio: live status in the sidebar and every agent session in one list, OpenCode and Pi in terminals beside a native Claude Code chat, an agent's question you answer above the composer, the Changes review, a pull request's diff you read inside Sirio, a Markdown plan drawing its diagram, and Claude splitting the window with sirioctl" width="960" />
+    <img src="assets/readme/sirio-promo.gif" alt="A short tour of Sirio in five chapters: Sessions, one sidebar with every session and its live status; Chat, with any agent and its requests approved in place, here a Claude Code chat; Context, what fills the context and a trace of every call; Editor, files edited next to the agent with find in a file and its errors; and Change requests, a pull request read in Sirio and its fixes handed to an agent" width="960" />
   </picture>
 </p>
 
@@ -45,7 +45,7 @@ Each project lists its git worktrees, one row per branch, sorted by who needs yo
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/workspace/sidebar"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-sidebar.png" /><img src="assets/readme/feature-sidebar.gif" alt="Sirio's window zooming onto the sidebar's Sessions tab, with main's Claude Code session waiting for input at the top" width="100%" /></picture></a>
+  <a href="https://sirioai.app/docs/workspace/sidebar"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-sidebar.png" /><img src="assets/readme/feature-sidebar.gif" alt="Sirio's window zooming onto the sidebar of the orbit project, with its worktrees feat/rate-limit, main and fix/login-redirect, each row carrying its agents and their status dots" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -53,13 +53,13 @@ Each project lists its git worktrees, one row per branch, sorted by who needs yo
 
 ### A real terminal, split any way
 
-Terminal panes on [libghostty-vt](https://github.com/ghostty-org/ghostty), the VT core behind Ghostty, with tabs and recursive splits per worktree. The centre holds two panes: drag a terminal or a chat across, use its right-click menu, or press `Ctrl+Shift+M`, and it keeps running. A scrollbar follows the scrollback. On macOS and Linux, the close button minimizes the window, so agent PTYs live on until you quit. On Windows it quits Sirio.
+Terminal panes on [libghostty-vt](https://github.com/ghostty-org/ghostty), the VT core behind Ghostty, with tabs and recursive splits per worktree. The centre holds two panes: drag a terminal or a chat across, use its right-click menu, or press `Ctrl+Shift+M`, and it keeps running. A scrollbar follows the scrollback. Terminals run in a [background host](https://sirioai.app/docs/workspace/tray#terminals-that-outlive-the-app), so an agent keeps running through Quit, a crash or an update, and the next launch reattaches it with its scrollback.
 
 [Docs →](https://sirioai.app/docs/workspace/tabs)
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/workspace/tabs"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-terminal.png" /><img src="assets/readme/feature-terminal.gif" alt="Pi over OpenCode in a split terminal beside a native Claude Code chat, zooming onto Pi's pane" width="100%" /></picture></a>
+  <a href="https://sirioai.app/docs/workspace/tabs"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-terminal.png" /><img src="assets/readme/feature-terminal.gif" alt="Pi over OpenCode in a split terminal beside a native Claude Code chat, zooming onto OpenCode's pane" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -73,7 +73,21 @@ Run an agent in a chat tab instead of a terminal. Claude Code speaks its own pro
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/agents/chats"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-chat.png" /><img src="assets/readme/feature-chat.gif" alt="Sirio's window zooming onto a Claude Code chat whose request to edit PLAN.md waits in a panel above the composer" width="100%" /></picture></a>
+  <a href="https://sirioai.app/docs/agents/chats"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-chat.png" /><img src="assets/readme/feature-chat.gif" alt="Sirio's window zooming onto a Claude Code chat whose permission request for PLAN.md waits above the composer, with Allow, Always allow and Reject" width="100%" /></picture></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### See the session beside the chat
+
+The button after a chat's composer opens a column of cards beside it: Environment, what fills the Context window, the Connectors of the Claude session, a Trace of the current turn, and the Change request of the chat's branch. Trace draws one lane per agent on a shared time axis, subagents included, and follows background agents until they finish, with the cost reading as a floor until the last one is done.
+
+[Docs →](https://sirioai.app/docs/agents/chats#the-session-panel)
+
+</td>
+<td width="50%">
+  <a href="https://sirioai.app/docs/agents/chats#the-session-panel"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-session-panel.png" /><img src="assets/readme/feature-session-panel.gif" alt="Sirio's window zooming onto the session panel beside a Claude Code chat, on its Trace card, with one lane for Claude Code and one for each of three subagents" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -87,7 +101,21 @@ Click a `.md` link in the terminal, drag a file in, or press `Ctrl+O`: it opens 
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/editor/markdown-preview"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-markdown.png" /><img src="assets/readme/feature-markdown.gif" alt="Sirio's window zooming onto PLAN.md rendered in a tab, with its checklist and a flow diagram" width="100%" /></picture></a>
+  <a href="https://sirioai.app/docs/editor/markdown-preview"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-markdown.png" /><img src="assets/readme/feature-markdown.gif" alt="Sirio's window zooming onto PLAN.md rendered in a tab, with its checklist and a flow diagram from token bucket to Retry-After" width="100%" /></picture></a>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="middle">
+
+### An editor next to the agent
+
+A file an agent names in a chat opens in the editor with a click, at the line it names. The editor marks added, changed and removed lines in the gutter, finds and replaces in a bar above the code, shows a breadcrumb of the path and the symbols around the cursor, and colours twenty-three languages. A drawer under the code lists the language servers' Problems across the worktree and searches its files, and their findings are underlined in the code.
+
+[Docs →](https://sirioai.app/docs/editor/overview)
+
+</td>
+<td width="50%">
+  <a href="https://sirioai.app/docs/editor/overview"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-editor.png" /><img src="assets/readme/feature-editor.gif" alt="Sirio's window zooming onto the editor, with two tabs, a breadcrumb and the code of rates.ts, where a red squiggle and an error mark flag line 8" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -101,21 +129,21 @@ A git-status-aware Changes surface for every worktree: stage, unstage, discard, 
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/workspace/right-panel"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-changes.png" /><img src="assets/readme/feature-changes.gif" alt="Sirio's window zooming onto the Changes surface, with PLAN.md open to its diff and Discard and Stage beside it" width="100%" /></picture></a>
+  <a href="https://sirioai.app/docs/workspace/right-panel"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-changes.png" /><img src="assets/readme/feature-changes.gif" alt="Sirio's window zooming onto the Changes surface, with PLAN.md open to its diff and Discard and Stage beside it, and README.md changed below" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
 <td width="50%" valign="middle">
 
-### Pull requests, read in place
+### Pull requests, start to finish
 
-Your pull and merge requests from github.com, GitHub Enterprise Server, gitlab.com and self-managed GitLab sit in the right panel: this worktree's own on top, then Mine, To review, All open and Closed & merged. Open one in a tab to read its conversation, commits and checks, and its diff inside Sirio. Sirio signs in with the `gh` or `glab` you already use, or a read-only token.
+Your pull and merge requests from github.com, GitHub Enterprise Server, gitlab.com and self-managed GitLab sit in the right panel: this worktree's own on top, then Mine, To review, All open and Closed & merged. Open one in a tab to read its conversation, commits, checks and diff, then comment, review with threads on the diff, merge from a bar that says what blocks it, re-run CI and read a job's log, open its branch in a worktree, or hand it to an agent with Hand off. Sirio signs in with the `gh` or `glab` you already use, or a token, and a token with write access lets it act.
 
 [Docs →](https://sirioai.app/docs/workspace/pull-requests)
 
 </td>
 <td width="50%">
-  <a href="https://sirioai.app/docs/workspace/pull-requests"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-pull-requests.png" /><img src="assets/readme/feature-pull-requests.gif" alt="Sirio's window zooming onto a pull request of ai-sirio/sirio open on its diff, beside the list of open pull requests" width="100%" /></picture></a>
+  <a href="https://sirioai.app/docs/workspace/pull-requests"><picture><source media="(prefers-reduced-motion: reduce)" srcset="assets/readme/feature-pull-requests.png" /><img src="assets/readme/feature-pull-requests.gif" alt="Sirio's window zooming onto a pull request of ai-sirio/sirio-demo open on its Files tab, with the merge bar blocked by a failing check and a review thread on src/session.ts offering Resolve and Fix with agent" width="100%" /></picture></a>
 </td>
 </tr>
 <tr>
@@ -123,7 +151,7 @@ Your pull and merge requests from github.com, GitHub Enterprise Server, gitlab.c
 
 ### Agents drive Sirio too
 
-`sirioctl` talks to Sirio over its control socket: run an agent in a background panel, wait for it to exit, read what it printed, or split the window you are looking at with `sirioctl pane split`. `sirioctl surface` opens and reads Changes, Settings, pull requests and every open tab. It is also how agent lifecycle hooks report status back, and the [`skills/sirio`](skills/sirio/SKILL.md) skill that Sirio provisions for Claude Code, OpenCode and Oh-My-Pi teaches them to use it.
+`sirioctl` talks to Sirio over its control socket: run an agent in a background panel, wait for it to exit, read what it printed, or split the window you are looking at with `sirioctl pane split`. `sirioctl surface` opens and reads Changes, Settings, pull requests and every open tab. It is also how agent lifecycle hooks report status back, and the [`skills/sirio`](skills/sirio/SKILL.md) skill that Install Skill in Settings writes for Claude Code, Codex, Pi, OpenCode and Oh-My-Pi teaches them to use it.
 
 [Docs →](https://sirioai.app/docs/sirioctl/overview)
 
