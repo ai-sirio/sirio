@@ -14905,6 +14905,14 @@ impl SirioWorkspace {
         let install = entry.install.clone();
         let language = entry.name.clone();
         let root = key.0.clone();
+        // Only the built-in `java` entry gets Lombok's agent, and not once the
+        // key has fallen back without it. A `languages.toml` entry's argv is
+        // exactly what was written. `root` and `worktree_root` are compared as
+        // given, never canonicalised: both come from the same path.
+        let lombok_worktree_root = (entry.builtin
+            && entry.name == "java"
+            && !self.lsp.lombok(&key).is_some_and(|state| state.fallen_back))
+        .then_some(worktree_root);
         // Step 2 of the ladder, read here and used only once step 1 has
         // answered `NotInstalled`. Consulting the store before the spawn
         // would be wrong; reading it here is not, because an answer that is
@@ -14920,13 +14928,29 @@ impl SirioWorkspace {
             // Kept for step 2: the launch below consumes its own copies, and
             // the fallback launches the same arguments behind a different
             // binary.
-            let installed_args = args.clone();
             let installed_root = root.clone();
-            let launched = cx
+            let (launched, installed_args, lombok) = cx
                 .background_executor()
                 // The owned String/Vec/PathBuf move in and deref to the
                 // &str/&[String]/&Path the signature wants — no helper needed.
-                .spawn(async move { sirio_lsp::Server::launch(&command, &args, &root).await })
+                .spawn(async move {
+                    let mut args = args;
+                    // Whether the project uses Lombok, and the agent it is
+                    // launched with: both are answered with the launch, for the
+                    // key's `LombokState`.
+                    let lombok = lombok_worktree_root.map(|worktree_root| {
+                        let uses = sirio_lsp::project_uses_lombok(&root, &worktree_root);
+                        let agent = uses
+                            .then(|| sirio_lsp::newest_jar(&sirio_env::for_child()))
+                            .flatten();
+                        if let Some(jar) = &agent {
+                            args.push(sirio_lsp::agent_arg(&jar.path));
+                        }
+                        (uses, agent)
+                    });
+                    let launched = sirio_lsp::Server::launch(&command, &args, &root).await;
+                    (launched, args, lombok)
+                })
                 .await;
             // Step 2. A spawn by name *is* the PATH lookup, so its
             // `NotInstalled` is step 1's answer and this is where step 2
@@ -14958,6 +14982,16 @@ impl SirioWorkspace {
             let _ = this.update(cx, |workspace, cx| match launched {
                 Ok((server, read_loop)) => {
                     workspace.lsp.finish_starting(&key);
+                    if let Some((uses, agent)) = lombok {
+                        if agent.is_some() {
+                            sirio_perf::event("lsp.lombok.agent", 0);
+                        }
+                        let state = workspace.lsp.lombok_mut(&key);
+                        state.uses_lombok = uses;
+                        state.agent = agent;
+                        state.built = false;
+                        state.build_answered = false;
+                    }
                     let task = cx.background_executor().spawn(read_loop);
                     let router = Self::spawn_router(&server, key.clone(), cx);
                     workspace.lsp.insert(

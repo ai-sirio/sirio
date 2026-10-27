@@ -202,6 +202,27 @@ pub struct LspSupervisor {
     /// cleared when the launch answers either way. What the status row's
     /// "starting" is read from (`state_of`).
     starting: HashSet<(PathBuf, String)>,
+    /// What each `java` key knows about Lombok (see [`LombokState`]); a key
+    /// that never launched the built-in entry has none.
+    lombok: HashMap<(PathBuf, String), LombokState>,
+}
+
+/// What a `java` key knows about Lombok, kept across the key's launches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LombokState {
+    pub uses_lombok: bool,
+    /// The jar the running launch was given, if any.
+    pub agent: Option<sirio_lsp::LombokJar>,
+    /// This launch has sent its full build.
+    pub built: bool,
+    /// jdtls answered that build (any outcome but a closed stream): the end of
+    /// the fallback window.
+    pub build_answered: bool,
+    /// The one deliberate restart is spent for the session.
+    pub restarted: bool,
+    /// No agent for the rest of the session.
+    pub fallen_back: bool,
+    pub last_check: Option<std::time::Instant>,
 }
 
 /// Why a key has no server and will not be tried again — and, for the arms
@@ -244,7 +265,18 @@ impl LspSupervisor {
             dead: HashMap::new(),
             synced: HashMap::new(),
             starting: HashSet::new(),
+            lombok: HashMap::new(),
         }
+    }
+
+    /// What `key` knows about Lombok, if its built-in `java` entry ever launched.
+    pub fn lombok(&self, key: &(PathBuf, String)) -> Option<&LombokState> {
+        self.lombok.get(key)
+    }
+
+    /// The same, created empty when there is none yet.
+    pub fn lombok_mut(&mut self, key: &(PathBuf, String)) -> &mut LombokState {
+        self.lombok.entry(key.clone()).or_default()
     }
 
     /// A launch for `key` is about to be spawned.

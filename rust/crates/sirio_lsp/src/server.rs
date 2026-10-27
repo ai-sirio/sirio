@@ -29,6 +29,10 @@ impl Server {
     /// connection, and completes the handshake. The read loop is returned
     /// alongside so the caller can place it on gpui's executor.
     ///
+    /// The server's stderr goes to the null device: nothing reads it, and a pipe
+    /// nobody drains blocks a server that logs more than the pipe holds (jdtls
+    /// does, while it indexes).
+    ///
     /// The `use<>` is load-bearing: without it the returned future
     /// captures the `args` and `root` borrows, and the caller could never
     /// move it anywhere (a thread, an executor) that outlives them — even
@@ -49,7 +53,7 @@ impl Server {
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|error| {
                 // "not on PATH" is the answer for every language the user

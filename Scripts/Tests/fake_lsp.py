@@ -44,6 +44,8 @@ the editor's pointer features ask:
   goes away (the answers are put back) the thread publishes everything once more
   and rests, so a test that never sets it sees none of this. `"exit": true` ends
   the process at the next look, as a crashed server ends.
+- `java/buildWorkspace` (jdtls's full build) is answered with `1`, the status
+  jdtls gives a build that succeeded.
 - Any other request is answered with null; notifications are ignored.
 
 ANSWERS is read again for every message, so a test may rewrite it between
@@ -360,6 +362,8 @@ def main():
         elif method == "textDocument/documentSymbol":
             uri = (params.get("textDocument") or {}).get("uri", "")
             send({"jsonrpc": "2.0", "id": message["id"], "result": symbols_for(uri, answers())})
+        elif method == "java/buildWorkspace":
+            send({"jsonrpc": "2.0", "id": message["id"], "result": 1})
         elif is_request:
             send({"jsonrpc": "2.0", "id": message["id"], "result": None})
     log.close()
