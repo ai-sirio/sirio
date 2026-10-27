@@ -88,8 +88,9 @@ What gets added is one argument, appended to the entry's arguments:
 `--jvm-arg=-javaagent:<absolute path of the jar>`. It is a single argv element passed
 with no shell, so spaces in the path need no quoting. This is how the upstream jdtls
 launcher passes a JVM option; that launcher is the Python `jdtls` script installed by
-the release tarball, Homebrew and Mason. The builder confirms on the real launcher that
-the flag reaches the JVM (§6).
+the release tarball, Homebrew and Mason. **Confirmed live (§7):** `jdtls.py` of 1.63.0
+appends every `--jvm-arg` to the JVM's arguments, and with the agent the Lombok errors
+of the open file are gone.
 
 ### §2.2 Where the jar comes from
 
@@ -145,14 +146,15 @@ any jar when it was launched without one. Two usual cases:
    for the key, and `forget` would then remove whatever handle sits under that key,
    including the new server's. The old read loop keeps running until the stop below
    returns, because the answer to `shutdown` arrives through it.
-2. Sirio stops the old jdtls with `Server::stop`, the existing contract: `shutdown`,
-   then `exit`, then a grace period, then a kill. The live run checks whether jdtls
-   needs a longer grace than `EXIT_GRACE` (500 ms) to save its workspace before the
-   kill. If it does, the restart uses a longer one. Quitting the app keeps 500 ms.
-3. The new jdtls is launched only after the old process has exited and been reaped.
-   An Eclipse-based server may lock its workspace directory while it runs, and under
-   the default launcher the new process uses the same directory. The live run
-   confirms the lock.
+2. Sirio stops the old jdtls the way `Server::stop` does: `shutdown`, then `exit`,
+   then a grace period, then a kill. **The restart's grace is 10 s.** In the live runs
+   jdtls exited between 1.0 s and 4.1 s after `exit` (§7), so `EXIT_GRACE` (500 ms)
+   would kill it every time. Quitting the app keeps 500 ms. The live runs also showed
+   that the workspace is saved while jdtls answers `shutdown`, so a kill after `exit`
+   loses nothing a relaunch needs.
+3. The new jdtls is launched only after the old process has exited and been reaped,
+   because under the default launcher the new process uses the same workspace
+   directory.
 4. Sirio does the same cleanup `language_server_gone` does today:
    - every drawer drops the server's findings;
    - open files of the key clear their gutters;
@@ -178,57 +180,69 @@ any jar when it was launched without one. Two usual cases:
 - Only a key whose project uses Lombok is ever restarted, so a jar downloaded by another
   project never restarts an unrelated jdtls.
 
-**The trigger** (how Sirio learns that the jar appeared) **is the builder's call, made
-after a live log.** Today the router drops every notification except
-`textDocument/publishDiagnostics` (the `lsp.message.dropped` event in `spawn_router`),
-and the client declares no `window.workDoneProgress`. Before choosing, run real jdtls on
-a Lombok project with empty caches and log the method names it sends while importing.
-Candidates:
-
-- **Re-check the caches when that key publishes diagnostics, throttled.** This is the
-  designer's preference. Diagnostics arrive after the build that follows the import,
-  which is when the jar exists. It needs no timer and no non-standard protocol.
-- **jdtls's own `language/status` notification**, if the log shows it arrives reliably
-  once the import is done.
-- **A filesystem watch on the cache directories.**
-
-Whatever the trigger, it runs only for keys waiting for a jar, and never as a
-free-running timer.
+**The trigger, decided from the live log (§7):** Sirio re-checks the caches when that
+key publishes diagnostics, at most once every 2 seconds per key. With empty caches the
+jar landed in `~/.m2` at 42.1 s, during the import. jdtls said `ServiceReady` at 49.4 s
+and published its first diagnostics at 51.4 s, for every file of the project and not
+only the open one. The first publish is therefore always after the jar. A later
+download, for example after Lombok is added to the POM, is caught by a later publish.
+The re-check runs only for keys that could still restart: the project uses Lombok, the
+restart has not been spent, and the key is not in fallback. It is never a free-running
+timer. A filesystem watch was not needed.
 
 ### §2.4 No stale findings after the agent arrives
 
 Requirement: once jdtls runs with the agent, Problems keeps no Lombok error for any file
 of the project, open or not.
 
-The risk:
+The problem is real (§7):
+- jdtls keeps a workspace on disk between launches. The launcher's default is
+  `~/.cache/jdtls/jdtls-<sha1 of the launch directory's name>` on Linux,
+  `~/Library/Caches/jdtls/...` on macOS and `%APPDATA%\jdtls\...` on Windows.
+- Relaunched with the agent over a workspace built without it, jdtls cleared the open
+  file but republished the three old Lombok errors of `PegaService.java`, which was not
+  open, and kept them.
 
-- jdtls keeps a workspace on disk (its `-data` directory) between launches.
-- By default the launcher derives that directory from the name of the directory it was
-  launched in. The builder confirms this on the real launcher.
-- A workspace built without Lombok may hold the old error markers through an
-  incremental build that sees no changed source.
+This would hit Enzo's machine on the first launch after the feature ships, and every
+restart of §2.3.
 
-This would hit Enzo's machine on the first launch after the feature ships, and it would
-hit every restart of §2.3.
+**The mechanism, decided from the live check:** after every launch with the agent, at
+the launch's first `language/status` notification of type `ServiceReady`, Sirio sends
+jdtls `java/buildWorkspace` with `true` (a full build).
+- It goes through `request_with_timeout` with a 10-minute timeout, because the default
+  30 s is too short for a large project.
+- An answer of `1` (built) or `2` (built, with compile errors) is the expected outcome.
+  Any other answer, an error or the timeout records a content-free `sirio_perf` event
+  and nothing else.
+- In the live run the full build cleared `PegaService.java` in 1.7 s on the sample
+  project. Its cost scales with the project, and it runs inside jdtls after it is
+  ready.
+- The router routes `language/status` for this. Today it drops it.
 
-**The mechanism is the builder's call, after a live check.** First establish with real
-jdtls whether the problem exists: relaunch with the agent over a workspace built
-without it, and count Problems for files that are not open. If it exists, there are two
-candidates:
+*(builder's call, made during planning)* Rejected: a Sirio-owned `-data` directory with
+a marker saying which agent last built it, and a full build only when that changes. It
+is cheaper per launch. But it moves the workspace of every Lombok project, it trusts the
+marker across a crash that skipped the workspace save, and it is more code than one
+request.
 
-- **A full build after a launch with the agent**, through jdtls's `java/buildWorkspace`
-  request. Verify that the installed jdtls has it. The cost is a full build on every
-  such launch, unless Sirio can tell that the workspace was already built with the
-  agent.
-- **Sirio passes its own `-data` directory**, keyed by the server's root and by the
-  agent jar, so a change of agent means a fresh import. This also ends the default
-  launcher sharing one workspace between two roots whose directories have the same
-  name. But it moves every jdtls workspace and costs one full import per project the
-  first time.
+### §2.6 Language servers' stderr is discarded
+
+`Server::launch` pipes the child's stderr today and nothing ever reads it. In the live
+run an old Lombok (1.18.20) on Java 25 did not stop jdtls, but it wrote about 50 KB of
+stack traces to stderr. A pipe holds 64 KB on Linux and less on macOS. Past that, a
+server's next write to stderr blocks and the server hangs.
+
+So every language server's stderr goes to the null device. This is a deliberate
+exception to §4's "nothing changes for a project that does not use Lombok": it touches
+every server, and the only thing it changes is that a server can no longer hang this
+way. Nothing reads stderr today, so no message is lost.
 
 ### §2.5 When the agent breaks the launch
 
-An old Lombok can fail inside a newer jdtls. jdtls itself needs Java 21 or newer.
+An old Lombok can fail inside a newer jdtls. jdtls 1.63 itself needs Java 25: its
+bundles require `JavaSE 25`, although its launcher still only checks for 21. In the
+live run Lombok 1.18.20 did not stop jdtls 1.63 from starting; it only wrote stack
+traces to stderr (§2.6). The fallback below covers the releases that do stop it.
 
 If a launch with the agent fails, Sirio launches once more without it, and that key gets
 no agent for the rest of the session. *(designer's call)* A failed launch means any of:
@@ -326,6 +340,10 @@ Cases:
    key keeps running: the old router does not remove it.
 7. A hand-written `java` entry in `languages.toml`: its argv is exactly what was
    written.
+8. A launch with the agent sends one `java/buildWorkspace` after its first
+   `ServiceReady`; a launch without it sends none.
+9. A server that writes 200 KB to stderr before answering `initialize` reaches ready
+   (§2.6). Today it hangs and ends `Failed` when the handshake times out.
 
 It prints one OK line and is listed in `docs/agents/e2e-tests.md`.
 
@@ -342,17 +360,20 @@ before the code:
 
 A test stays only if it goes red when the behaviour changes.
 
-**Real jdtls.** Only the real server proves that Lombok's errors go away, and only the
-real server can settle §2.3's trigger and §2.4's stale markers.
-- Run on this Linux development machine. Enzo approved installing a Java 21+ runtime
-  and jdtls there, at user level (mise or the release tarball, never a system package),
-  and downloading a public sample project with its dependencies from Maven Central.
-- Use a small public Spring Boot + Lombok Maven project.
-- Record:
-  - Problems counts, for open and for not-open files, before and after;
+**Real jdtls.** Only the real server proves that Lombok's errors go away in Sirio.
+- Run on this Linux development machine. Enzo approved installing a Java runtime and
+  jdtls there, at user level (mise or the release tarball, never a system package),
+  and downloading dependencies from Maven Central. jdtls 1.63 needs Java 25.
+- The project is a small Spring Boot + Lombok Maven project that the script writes
+  itself, the one §7 used.
+- Java takes `user.home` from the passwd entry on Linux, not from `$HOME`. A private
+  `HOME` therefore needs a `jdtls` wrapper on `PATH` that adds
+  `--jvm-arg=-Duser.home=$HOME` and execs the real launcher. It is still the built-in
+  entry, so the run stays valid.
+- Record the Problems counts (open and not-open files) for:
   - the restart case, starting from an empty local Maven repository so the import
     downloads Lombok;
-  - the method log the trigger was chosen from.
+  - a relaunch over the workspace that run left behind.
 - The run keeps its transcript and captures as the artifact.
 
 **Hand check on Enzo's Mac.** The work project on the reference platform. This is owed
@@ -361,10 +382,48 @@ asked and not answered, so §2.1 assumes the upstream launcher, which Homebrew a
 both install. If the Mac's `jdtls` does not accept `--jvm-arg`, the way the agent is
 passed has to change.
 
-## §7 Left to the builder
+## §7 Live findings (2026-10-27)
+
+What the decisions above rest on.
+
+**Setup:**
+- jdtls 1.63.0 (`jdt-language-server-1.63.0-202610191322.tar.gz`, sha256 checked) on
+  Temurin 25.0.5.
+- A four-file Spring Boot 3.5.6 + Lombok project; Lombok 1.18.40 comes from Spring
+  Boot's dependency management.
+- A client sending Sirio's exact `initialize` capabilities and answering server
+  requests like `answer_for`.
+- `user.home` pointed at an empty directory.
+- Logs and the client live in `~/.cache/sirio-spike/jdtls-lombok/`, which is not in
+  the repository.
+
+**Findings:**
+- **Java 21 is refused.** jdtls 1.63 exits at once: its bundles require `JavaSE 25`.
+- **Without the agent, empty caches:**
+  - `language/status` messages arrived without any client capability declared;
+  - the Lombok jar landed at 42.1 s;
+  - `ServiceReady` came at 49.4 s;
+  - the first `publishDiagnostics` came at 51.4 s, for all three Java files.
+  - Errors in the open file: `The blank final field pegaService may not have been
+    initialized`, `log cannot be resolved` and `The method setTarga(String) is
+    undefined for the type LoginBody`.
+  - Errors in a file that was not open: three Lombok errors.
+- **With the agent, same workspace, no full build:** the open file went to 0 errors.
+  The file that was not open kept its 3.
+- **The same, then `java/buildWorkspace(true)`:** the answer was `1`, and every file
+  went to 0 errors.
+- **Exit time:** `shutdown` was answered at once, and the process ended 1.0 to 4.1 s
+  after `exit`.
+- **A full build, then a kill 0.5 s after `exit`, then a relaunch with the agent and no
+  build:** the file that was not open stayed at 0. The workspace is saved when jdtls
+  answers `shutdown`.
+- **Lombok 1.18.20 as the agent, fresh workspace:** jdtls started and the open file had
+  0 errors. Stderr carried 50,335 bytes of `Unsupported class file major version 69`
+  stack traces.
+- **A fresh workspace with the agent and populated caches:** 41 s to `ServiceReady`,
+  then 0 errors.
+
+## §8 Left to the builder
 
 - Module layout and names, and how the supervisor marks an entry as built-in.
-- The trigger (§2.3), chosen from the live log.
-- The stale-marker mechanism (§2.4), chosen from the live check.
-- Throttle values for the re-check.
 - Whether the E2E is a new script or extends `test-editor-e2e.sh`.
