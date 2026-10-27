@@ -5,7 +5,10 @@
 //! The bars themselves are drawn elsewhere (the terminal's, the transcript's
 //! and the horizontal one); what they have in common is here: where a thumb
 //! sits in its track, which scroll offset a dragged thumb asks for, and the
-//! payload that tells one bar's drag from another's.
+//! payload that tells one bar's drag from another's. Beside Ely's bars, which
+//! draw from the geometry the previous frame left, sits
+//! [`request_frame_when_geometry_moves`], the canvas that asks for the frame
+//! that redraws them when this frame's layout disagrees.
 //!
 //! The geometry is transcribed from zed's own scrollbar (`thumb_ranges` in
 //! `crates/ui/src/components/scrollbar.rs`). Two of gpui's conventions are easy

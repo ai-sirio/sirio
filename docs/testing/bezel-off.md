@@ -245,9 +245,9 @@ draws the bar (the line is 5 px in from the pane's edge, and 9 px in for pane 1,
 Ely's since PR D: a 12 px strip with its 6 px thumb in the strip's left half). A 900x600 window of
 three 300x600 panes (`sirio_ui::probes::scroll_drag_view`); the pointer presses a thumb's centre,
 moves 3 px (past gpui's 2 px threshold, where the drag starts) then 1 px (the move whose event is the
-first drag event, where every bar anchors its grab), then 120 px in six steps. The thumb must have moved as far as the pointer did after its
-second move, within 4 px, and a second drag of +2000 px (the pointer stops at the screen's edge,
-past the track's end) must leave it flush with the track's end.
+first drag event, where every bar anchors its grab), then 120 px in six steps. The thumb must have
+moved as far as the pointer did after its second move, within 4 px, and a second drag of +2000 px (the
+pointer stops at the screen's edge, past the track's end) must leave it flush with the track's end.
 
 ### The unfocused spinner and its CPU base
 
@@ -676,11 +676,13 @@ gaining `sirio_ui::ely::init` (`right_panel_demo.rs`, `sidebar_demo.rs`) and a f
 `controls.rs` (`segmented_icons_with_tooltip` into `segmented_icons`) with no drawing change, so the
 "before" frames are the frames of PR D's base and the base was not captured again. The "after" set was
 captured on the tree of `89bbd118`, PR D's last code commit (the working tree was clean). PR D's code is
-seven commits on `64ed9ae2`: the menus and popovers (`06e28245`), the demos that open a menu init Ely
-(`cae7e14a`), a notices line (`9198f15c`), labels kept inside their card at large interface sizes
-(`0644c3ca`), two tests (`632645e6`, `a10c6cda`), and the scrollbars and icons (`89bbd118`). One commit
-follows the capture and changes no pixel: this page, the allow file and one comment, the thickness of the
-bars in the header of `examples/scroll_drag_probe.rs`.
+six commits on `64ed9ae2` and a notices line: the menus and popovers (`06e28245`), the demos that open a
+menu init Ely (`cae7e14a`), labels kept inside their card at large interface sizes (`0644c3ca`), two tests
+(`632645e6`, `a10c6cda`) and the scrollbars and icons (`89bbd118`), with `THIRD_PARTY_NOTICES.md` listing
+`transcript.rs` among the files ported from bezel-ui (`9198f15c`, a `docs:` commit). The commits
+after the capture change no pixel: this page and the allow file, the header of `examples/scroll_drag_probe.rs`
+(the bars' thickness), the module doc of `scroll.rs`, one more test of its frame-request helper, and
+`composer_view.rs` and `sidebar/sessions.rs` importing Ely's icon types instead of spelling their paths.
 
 **What PR D moved.**
 
@@ -695,9 +697,18 @@ bars in the header of `examples/scroll_drag_probe.rs`.
 | 12 | `Scripts/Tests/test-scroll-drag-probe.sh` | Pane 1's thumb is 4 px nearer the pane's centre (below), so its scan line is 9 px in from the edge instead of 5. Nothing else of the check moved (tolerance, anchoring move, end-flush). |
 | 12 | six sidebar test hosts | `cx.update(crate::ely::init)`: they draw a closed session, whose delete button is an Ely `Icon`, which reads Ely's theme. |
 
-What still reaches bezel after PR D: the `AppAssets` fallback for the icons of `agents_page.rs` and
-`git_hosting_page.rs`, and `init_motion`'s `AppExt` (both go in PR E). No vendored Ely file changed in
-Task 12, so `LOCAL-CHANGES.md` has no entry for it.
+What still reaches bezel after PR D, all of it for PR E (`grep -rn 'bezel::' rust/crates`):
+
+- `bezel::ui::widgets` (the button styles and `Buttons`, `Status` and `status_dot`, `Controls`, `Content` and
+  `Scaffolding`, `card_row_hover`) in `loading.rs`, `settings.rs`, `settings/git_hosting_page.rs`,
+  `settings/agents_page.rs`, `settings/language_servers_page.rs` and `chat/turn_rail.rs`, and in the tests of
+  `chat/tool_calls.rs` and `chat/ely_tests.rs`;
+- `bezel::ui::icons`, read directly at `settings/git_hosting_page.rs:214` (`MAGNIFER`) and
+  `settings/agents_page.rs:9`, and through the `AppAssets` fallback in `ely.rs`;
+- `bezel::motion::AppExt`, in `init_motion` (`sirio/src/main.rs`), in one chat test and in two examples
+  (`scroll_drag_probe.rs`, `surfaces_probe.rs`).
+
+No vendored Ely file changed in Task 12, so `LOCAL-CHANGES.md` has no entry for it.
 
 **Reproduce.**
 
@@ -759,7 +770,7 @@ did not always survive that (`capture-attempts/`):
 | Check | Result |
 | --- | --- |
 | `cargo build --workspace --all-targets` | exit 0 on PR D's final tree; 135 warning lines, the count PR C recorded, none at a line Task 12 edited. `Cargo.lock` unchanged by Task 12 (Task 11's one edge is in the same PR) |
-| `cargo nextest run -p sirio_ui` | 1420 run, 1420 passed, 0 skipped; against the 1418 of `a10c6cda` the sorted `cargo nextest list` differs by two additions (below) and no removal |
+| `cargo nextest run -p sirio_ui` | 1421 run, 1421 passed, 0 skipped; against the 1418 of `a10c6cda` the sorted `cargo nextest list` differs by three additions (below) and no removal |
 | `cargo nextest run -p sirio` | 531 run, 531 passed; the list is identical |
 | `cargo nextest run -p sirio_terminal` | 143 run, 143 passed, 1 skipped; the list is identical |
 | `cargo nextest run -p sirio_ui an_overflowing_tab_draws_a_scrollbar_and_asks_for_no_frame_while_idle a_long_markdown_preview_shows_a_scrollbar a_live_thought_opens_while_streaming` | 3 run, 3 passed |
@@ -771,11 +782,15 @@ did not always survive that (`capture-attempts/`):
 
 The first full `-p sirio_ui` run had six failures, all `no state of type ely_gpui_component::theme::Theme
 exists`: the six sidebar tests that draw a closed session now draw the trash icon through Ely, so their
-hosts call `ely::init` (table above). The two added tests are in `scroll.rs`, both written before the
-helper they test: `a_box_that_first_overflows_asks_for_the_frame_that_draws_its_bar` (vertical and
-horizontal) and `content_that_grows_or_shrinks_under_a_bar_asks_for_one_more_frame`. Both were red against
-a stub that returned an empty element and are red again with the helper's `request_animation_frame` call
-taken out.
+hosts call `ely::init` (table above). The three added tests are in `scroll.rs`:
+`a_box_that_first_overflows_asks_for_the_frame_that_draws_its_bar` (vertical and horizontal) and
+`content_that_grows_or_shrinks_under_a_bar_asks_for_one_more_frame`, both written before the helper they
+test, and `a_box_resized_along_its_bars_axis_asks_for_one_more_frame_and_across_it_for_none`, added after
+review. The first two were red against a stub that returned an empty element and are red again with the
+helper's `request_animation_frame` call taken out. The third resizes a horizontal box with its content
+changed by the same amount (the overflow stays 700 px) and then changes only its height; it is red with
+the length half of the helper's comparison deleted and red with the helper's `geometry` made to ignore
+its axis, each tried alone.
 
 **Every changed frame** (`artifacts/bezel-off/pr-d/diff/changed.tsv`).
 
@@ -827,6 +842,10 @@ Scrollbars and icons (Task 12):
   - the shortest thumb is 24 px where it was 25 px, and the thickness comes from Ely's theme in rems (6 px
     at the default);
   - a drag repaints the whole window (`window.refresh()`) where bezel's asked the owning view to repaint.
+- The Markdown preview and the CI log now pair an Ely vertical bar (`fg` at 22%, a 6 px thumb in the left half
+  of a 12 px strip) with Sirio's own horizontal bar (`ink(0.2)`, a thumb that fills its 10 px strip along the
+  bottom edge), so the two bars of one surface differ in colour, in thickness and in how far they sit from
+  the edge.
 - The drag still anchors at the first move past gpui's 2 px threshold, as bezel's did and as the spec says:
   the probe reads 120 px of thumb for 120 px of pointer on pane 1.
 - The bar's frame request now also fires when the box is resized or its content grows or shrinks while the
@@ -836,6 +855,11 @@ Scrollbars and icons (Task 12):
   committed) drew one under a 600 px line in a 700 px window: the bar is up (624 x 12 px), the first
   round of frames asks for 2 and each of the next five for 0; narrowed to 500 px the bar is redrawn at 424
   px, one round asks for 1 and the next three for 0.
+- The helper's cost while a thought streams: a thought pinned to its newest line already asks for each
+  frame through `scroll::follow`, so the helper adds nothing there. Once the reader has scrolled up in a
+  streaming thought the pin is released, and from then on the helper adds one more Chat render per change
+  of the thought's height (the bar needs it to draw the right thumb). No test counts a streaming thought's
+  frames.
 - The mention row's icon is Lucide's `file-text` where it was Solar's `document`, and the closed chat's delete
   button is `trash-2` where it was `trash-bin-minimalistic`. Neither is in a capture (the mention popup is
   not captured, and the delete button is invisible until the pointer is over a closed row). Ely sizes an icon
