@@ -765,6 +765,7 @@ mod tests {
                 version: "1.0.0",
                 bin: "never-used",
             }),
+            builtin: false,
         };
         let executable = root
             .join("shared-package")

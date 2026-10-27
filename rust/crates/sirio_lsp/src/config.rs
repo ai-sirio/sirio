@@ -33,6 +33,10 @@ pub struct LanguageEntry {
     /// to download another one underneath it.
     #[serde(skip)]
     pub install: Option<crate::Recipe>,
+    /// True only for entries from `LanguageTable::defaults`. `#[serde(skip)]`, so an
+    /// entry read from `languages.toml` is always `false`.
+    #[serde(skip)]
+    pub builtin: bool,
 }
 
 /// The whole table, in the order entries were written. Order is meaningful:
@@ -108,6 +112,7 @@ impl LanguageTable {
                 args: args.iter().map(|value| (*value).to_owned()).collect(),
                 roots: roots.iter().map(|value| (*value).to_owned()).collect(),
                 install,
+                builtin: true,
             }
         }
 
