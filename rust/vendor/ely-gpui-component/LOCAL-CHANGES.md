@@ -810,3 +810,7 @@ A sync with upstream must keep `scroll_x` in `x` and `grid`.
   `shape_line` sets a `\n` as a missing glyph while the sizing copy breaks
   there and makes the box two lines tall; a TypeScript diagnostic's message in
   the drawer's Problems row did both. A sync must keep the join.
+- `src/chat/message.rs`: `Role::System`'s body is `min_w_0`, as the user and
+  assistant bodies already are. Upstream's flex row lets the body grow to its
+  unbroken text, so a long system line ran off both sides of the centre
+  instead of wrapping.

@@ -15444,6 +15444,32 @@ two"
     }
 
     #[gpui::test]
+    async fn a_long_task_notice_wraps_inside_its_row(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        // The CLI's summary can be the agent's whole answer, not a sentence.
+        let summary = "`src/limiter.ts` holds a TokenBucket class whose `take()` method \
+                       refills tokens in proportion to elapsed time "
+            .repeat(6);
+        chat.update(cx, |chat, cx| {
+            chat.apply_notice(SessionNotice::BackgroundTaskEnded { summary });
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let text = cx
+            .debug_bounds("notice-task-text")
+            .expect("the notice text");
+        let column = cx.debug_bounds("composer").expect("the composer");
+        // Unwrapped, the text is as wide as the whole summary and centred, so it
+        // runs off both sides of the transcript.
+        assert!(
+            text.left() >= column.left() && text.right() <= column.right(),
+            "the notice runs off the column: {text:?} in {column:?}"
+        );
+    }
+
+    #[gpui::test]
     async fn a_notice_that_lands_inside_a_reply_leaves_it_whole(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["composer"]);
         pump_chat_until(cx, &chat, |chat| chat.client.is_some());
