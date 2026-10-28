@@ -7923,10 +7923,6 @@ mod tests {
                 cx,
             );
         });
-        cx.update(|_, cx| {
-            use bezel::motion::AppExt as _;
-            cx.set_pause_when_inactive(false);
-        });
         refresh_frame(cx);
         cx.executor().advance_clock(Duration::from_millis(40));
         cx.run_until_parked();

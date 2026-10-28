@@ -190,7 +190,8 @@ naming the crate it came from. In `rust/crates/sirio_ui/src/` that is:
   empty state and status dot.
 
 Both crates are by clearloop ([crabtalk/bezel](https://github.com/crabtalk/bezel))
-and are licensed under the MIT licence below, copied from `rust/vendor/bezel_ui/LICENSE`. The second
+and are licensed under the MIT licence below, which is the `LICENSE` of the repository's `v0.1.4` tag
+(the published crates do not ship it). The second
 copyright line is bezel-ui's own, for the portions it extracted from
 zeronsh/comet; `bezel-motion`'s manifest names the same MIT licence and the same
 author.

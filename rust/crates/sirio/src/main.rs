@@ -27282,19 +27282,6 @@ fn register_fonts(cx: &App) {
     }
 }
 
-/// Sirio is watched from elsewhere: an agent runs for minutes while the user
-/// works in another window or on another monitor, and the sidebar spinner and
-/// the chat's thinking orb are what says it is still going. Those two draw on
-/// `sirio_ui::motion`'s clock, which never parks. bezel's own clock, still
-/// leased by the scrollbars and Settings widgets bezel draws, parks while no
-/// window of the app is active unless told otherwise; this keeps it running
-/// too, so nothing on screen freezes half-way while another window has the
-/// focus.
-fn init_motion(cx: &mut App) {
-    use bezel::motion::AppExt as _;
-    cx.set_pause_when_inactive(false);
-}
-
 /// #364: the binary is a `windows_subsystem = "windows"` GUI app, so it
 /// starts with no console of its own. Reuse the parent console when there
 /// is one (terminal launch) so `eprintln!` logs stay visible; otherwise
@@ -28247,9 +28234,10 @@ fn main() {
     cli_path::set_login_path(login);
 
     sirio_perf::init();
-    // Ely's icons are `svg().path("ely/…")`; without an asset source gpui
-    // finds nothing and paints nothing. Sirio's own icons embed their bytes
-    // and never needed this.
+    // `AppAssets` serves the two prefixes an `svg().path(..)` reaches: Ely's
+    // icons (`ely/…`) and the chat's agent marks (`sirio-chat/…`,
+    // `chat/identity.rs`). Without an asset source gpui finds nothing and
+    // paints nothing. Sirio's own icons embed their bytes and never needed this.
     let app = application().with_assets(sirio_ui::ely::AppAssets);
     app.run(move |cx: &mut App| {
         #[cfg(feature = "perf-native")]
@@ -28264,7 +28252,6 @@ fn main() {
         }
         Theme::init(cx);
         sirio_ui::ely::init(cx);
-        init_motion(cx);
         sirio_ui::combobox::init(cx);
         sirio_ui::sidebar::tree_keys::init(cx);
         sirio_ui::chat::init(cx);
@@ -35288,9 +35275,8 @@ done
             workspace.mark_activity_dirty();
             cx.notify();
         });
-        // The spinner's lease refuses to claim frames while no window is
-        // active (`pause_when_inactive`), and a test window is never active
-        // unless activated.
+        // The spinner row is checked as the user sees it, in an active
+        // window, and a test window is never active unless activated.
         cx.update(|window, _| window.activate_window());
         let tick = |cx: &mut VisualTestContext| {
             cx.run_until_parked();

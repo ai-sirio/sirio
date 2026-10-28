@@ -106,7 +106,8 @@ physical Wayland session and native macOS/Windows input are unverified.
   rows, so the host's keyboard, IME and popups stay in charge; the default
   constructor keeps its upstream behaviour. In custom mode the shell wears
   the theme's `surface`, with the host's field painting no fill of its own
-  (Sirio's vendored bezel-ui `TextField::with_transparent_fill`), so the two
+  (Sirio's composer hands it Ely's raw `TextInput`, which draws text, selection
+  and caret but no frame or fill), so the two
   read as one card in the theme's card colour; its border is `border` in both
   states, never the ring colour or a brighter step, and the tool row wraps. `.trailing` puts tools at the end of the row, next
   to the send control. `SendButton` carries `send`, `send-ready` and
@@ -241,7 +242,7 @@ token and comment fields, the compose and hand-off bodies) and the editor-page f
 too, as do the settings, the forms, the browser's address bar and the composer.
 
 - `src/forms/text/actions.rs`, `mod.rs`, `forms/mod.rs`: three actions, ported from bezel's
-  handlers (`bezel_ui/src/input.rs`), exported beside `Copy`/`Cut`/`Paste`:
+  handlers (upstream bezel-ui 0.1.4's `src/input.rs`), exported beside `Copy`/`Cut`/`Paste`:
   - `DeleteToLineStart` and `DeleteToLineEnd` delete from the caret to the start or end of the
     logical line, the one between newlines, never a soft-wrapped row;
   - `DeleteWordRight` deletes to the end of the word after the caret, by the word unit below;

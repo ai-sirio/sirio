@@ -247,7 +247,7 @@ Want to contribute or run locally? [CONTRIBUTING.md](CONTRIBUTING.md) covers the
 
 ## Acknowledgements
 
- Sirio UI is built from [bezel](https://github.com/crabtalk/bezel); the terminal runs on [libghostty-vt](https://github.com/ghostty-org/ghostty) with [portable-pty](https://github.com/wez/wezterm). Designed and built with [Claude Code](https://claude.ai/code) and [OpenCode](https://opencode.ai/) as pair programmers.
+ Sirio runs on the GPUI packages of [bezel](https://github.com/crabtalk/bezel) and draws its UI with [Ely GPUI Components](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components); the terminal runs on [libghostty-vt](https://github.com/ghostty-org/ghostty) with [portable-pty](https://github.com/wez/wezterm). Designed and built with [Claude Code](https://claude.ai/code) and [OpenCode](https://opencode.ai/) as pair programmers.
 
 ## License
 

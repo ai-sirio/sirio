@@ -10,7 +10,6 @@ sirio_perf = { path = "../sirio_perf" }
 sirio_env = { path = "../sirio_env" }
 gpui.workspace = true
 gpui_platform.workspace = true
-bezel = { workspace = true }
 bezel_theme.workspace = true
 bezel_markdown.workspace = true
 bezel_syntax.workspace = true
