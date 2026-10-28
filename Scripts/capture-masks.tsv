@@ -51,5 +51,5 @@ chat-ui-default/identity/*	385	209	52	18	message time (HH:MM wall clock) in the 
 #
 # The surfaces probe (1470x833, one process per frame): the Agents page.
 # Its toolbar stamps "Refreshed HH:MM:SS" with the wall clock when the page is built, and Geist draws digits at different widths ("12:01:57" is 5 px narrower than "12:02:50"). The toolbar is right-aligned, so the stamp's width moves the search field with it (x 683..686 over 41 runs, every hour 00..23 included) and the header's left column, whose subtitle then wraps differently (three of 15 runs); nothing below y 170 or right of the stamp ever moved. The two rectangles hold everything that moves, and the title row ("Agents 5") stays unmasked.
-surfaces-*/settings-agents-[dl]*	668	54	354	40	Agents toolbar: the "Refreshed HH:MM:SS" stamp (wall clock, set when the page is built) and the search field its width pushes left, x 668..1022
+surfaces-*/settings-agents-[dl]*	668	54	364	40	Agents toolbar: the "Refreshed HH:MM:SS" stamp (wall clock, set when the page is built) and the search field its width pushes left, x 668..1032 (it ended at 1022 while the buttons were bezel's; Ely's narrower Update All moved the stamp's last digit out to x 1028)
 surfaces-*/settings-agents-[dl]*	475	88	212	82	Agents header subtitle: its soft wrap follows the toolbar's width, which the stamp's digits change
