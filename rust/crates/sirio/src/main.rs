@@ -22975,8 +22975,9 @@ impl SirioWorkspace {
         role: PaneRole,
         theme: Theme,
         entity: Entity<Self>,
-        // `&mut`, not `&`: a running tab's bloom takes a lease on Bezel's
-        // shared clock through `window` and `cx` (see `loading::bloom`).
+        // `&mut`, not `&`: a running tab's bloom takes a lease on
+        // `sirio_ui::motion`'s shared clock through `window` and `cx` (see
+        // `loading::bloom`).
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {

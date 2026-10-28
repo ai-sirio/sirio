@@ -1762,12 +1762,13 @@ impl Render for FileView {
                 }));
         }
         let theme = *Theme::get(cx);
-        // Production installs bezel alongside Sirio's theme. Some isolated
-        // shell fixtures set only the Sirio global, so establish the same
-        // invariant before anything below reaches for a bezel component
-        // (mirrors the sidebar's popup guard). The code editor reads Ely's
-        // theme instead, but the bezel primitives this view renders still
-        // need this one.
+        // Production installs bezel-theme's palette alongside Sirio's theme.
+        // Some isolated shell fixtures set only the Sirio global, so
+        // establish the same invariant before anything below reads a
+        // `bezel_theme::Theme` (mirrors the sidebar's popup guard). The code
+        // editor reads Ely's theme instead, but the Markdown preview and the
+        // modules this view renders that read bezel tokens still need this
+        // one.
         if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }

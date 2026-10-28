@@ -137,7 +137,7 @@ pub(crate) const ACTIVE_TICK: Pixels = px(8.0);
 const HIT_ROW: Pixels = px(8.0);
 
 /// A tick's length `shown` of the way through the rail's reveal (`0..=1`,
-/// bezel's hover progress): the ticks grow out of the left edge as they
+/// `motion::hover_t`'s hover progress): the ticks grow out of the left edge as they
 /// fade in, and shrink back into it as they fade out.
 pub(crate) fn tick_width(is_active: bool, shown: f32) -> Pixels {
     let full = if is_active { ACTIVE_TICK } else { TICK };

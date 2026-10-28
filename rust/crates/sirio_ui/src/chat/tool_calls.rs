@@ -1,9 +1,10 @@
-//! Tool calls as the gallery draws them: one `step_row` per call, a bordered
-//! box per run of consecutive calls, and a `Verb · N` fold for consecutive
-//! calls of the same verb — `crabtalk/bezel` tag `v0.1.4`,
-//! `apps/gallery/src/patterns/agent.rs` (the `ToolCalls` section).
+//! Tool calls as the gallery draws them: one row per call (Ely's
+//! `ToolCallCard`), a bordered box per run of consecutive calls, and a
+//! `Verb · N` fold for consecutive calls of the same verb — `crabtalk/bezel`
+//! tag `v0.1.4`, `apps/gallery/src/patterns/agent.rs` (the `ToolCalls`
+//! section), whose layout this follows.
 //!
-//! The library never learns what a tool is: `step_row` takes strings, and the
+//! The library never learns what a tool is: a row takes strings, and the
 //! grouping is `slice::chunk_by`. What Sirio adds is the mapping from the
 //! protocol's `kind` to an icon and a verb, and a clock for the duration.
 
@@ -344,8 +345,8 @@ impl Chat {
             .into_any_element()
     }
 
-    /// The body under an open row: text output through bezel's capped
-    /// scrolling well; diffs, file links and the edit summary keep Sirio's
+    /// The body under an open row: text output through [`output_well`], the
+    /// capped scrolling well; diffs, file links and the edit summary keep Sirio's
     /// renderers, stacked in the gallery's gap/padding frame.
     #[allow(clippy::too_many_arguments)]
     fn render_tool_body(

@@ -946,6 +946,8 @@ Scripts/capture-diff.py artifacts/bezel-off/pr-e/task-13-r1/frames artifacts/bez
 cat Scripts/capture-masks.tsv docs/testing/bezel-off/pr-e-allow.tsv > artifacts/bezel-off/pr-e/allow-unmasked.tsv
 Scripts/capture-diff.py artifacts/bezel-off/pr-d/after/frames artifacts/bezel-off/pr-e/after/frames \
   --out "$PWD/artifacts/bezel-off/pr-e/diff-unmasked" --allow artifacts/bezel-off/pr-e/allow-unmasked.tsv
+Scripts/capture-diff.py artifacts/bezel-off/pr-e/task-13-r1/frames artifacts/bezel-off/pr-e/after/frames \
+  --out "$PWD/artifacts/bezel-off/pr-e/diff-vs-task-13-r1-unmasked" --allow artifacts/bezel-off/pr-e/allow-unmasked.tsv
 
 # The probes and E2Es this PR's code is held to (Xvfb :N is any free display, 1600x1000x24, with lavapipe:
 # VK_ICD_FILENAMES and VK_DRIVER_FILES set to /usr/share/vulkan/icd.d/lvp_icd.json; TMPDIR as above).
@@ -971,7 +973,7 @@ masked diff against PR D's set printed `compared 94 frames present on both sides
 tolerance 1` and `CAPTURE DIFF OK (12 changed, all attributed)`. The same set against Task 13's final
 head printed `CAPTURE DIFF IDENTICAL`: removing the crates, and `init_motion` with them, moved no pixel
 under a mask. The artifacts are under `artifacts/bezel-off/pr-e/` (gitignored): `after/`, `diff/`,
-`diff-unmasked/`, `diff-vs-task-13-r1/`, `crops/`, `hand/`, `step3/` (every check's log and out-dir) and
+`diff-unmasked/`, `diff-vs-task-13-r1/`, `diff-vs-task-13-r1-unmasked/`, `crops/`, `hand/`, `step3/` (every check's log and out-dir) and
 Task 13's own sets and diffs (`task-13*`).
 
 The first masked diff against Task 13's head was not identical: `settings-agents-{dark,light}` differed by 48
@@ -999,7 +1001,7 @@ x 1032 (below), which is the only change to `Scripts/capture-masks.tsv`. Nothing
 | `Scripts/Tests/test-chat-session-panel-e2e.sh --state-only` | `CHAT SESSION PANEL E2E OK (14 scenarios, 7 skipped, appearance default, state-only 1, window default)` |
 | `Scripts/Tests/test-open-list-e2e.sh --display :151` | `OPEN LIST E2E OK` |
 | `Scripts/Tests/test-theme-sweep.sh --display :151 --out-dir <checkout>/artifacts/bezel-off/pr-e/step3/theme-sweep` | `THEME SWEEP OK: <checkout>/artifacts/bezel-off/pr-e/step3/theme-sweep` |
-| `Scripts/Tests/test-editor-e2e.sh --xvfb` | `EDITOR E2E OK (47 scenarios, appearance dark, state-only 0)`, with the script's one-line wait that PR E adds (below). Without it the run was red: `FAIL: git_marks: git_marks expected ...,30:added,41:added, got ...,30:added,40:modified,41:modified`, twice on this tree and once each on `39d871e7` and on `b4f6de7a` (PR D's head; PR D's page records `EDITOR E2E OK (47 scenarios ...)` on PR D's tree), so no code commit of this PR causes it. It passed alone (`--only git_marks`) and after most scenarios, and failed after `context_rows`. Cause, from a debug print of the state before the assertion: the script measured the end of the adopted text from a state whose `git_marks` already follow the disk but whose `text` is still the buffer it replaces (`end=328`, the adopted text is 331 bytes), so `appended\n` landed 3 bytes early, in `line 4` / `0`. The marks come from `git diff` of the disk and lead the buffer's adoption by a beat; the user sees the adopted text either way. The added line, `expect_state text "$(escaped "$RUN_DIR/marks-adopt.txt")"` after the marks check, waits for the adopted text before measuring its end |
+| `Scripts/Tests/test-editor-e2e.sh --xvfb` | `EDITOR E2E OK (47 scenarios, appearance dark, state-only 0)`, with the script's one-line wait that PR E adds (below). Without it the run was red: `FAIL: git_marks: git_marks expected ...,30:added,41:added, got ...,30:added,40:modified,41:modified`, twice on this tree and once each on `39d871e7` and on `b4f6de7a` (PR D's head; PR D's page records `EDITOR E2E OK (47 scenarios ...)` on PR D's tree), so no code commit of this PR causes it. It passed alone (`--only git_marks`) and after most scenarios, and failed after `context_rows`. Cause, from a debug print of the state before the assertion: the script measured the end of the adopted text from a state whose `git_marks` already follow the disk but whose `text` is still the buffer it replaces (`end=328`, the adopted text is 331 bytes), so `appended\n` landed 3 bytes early, in `line ` / `40` (the disk ended `line 39\nline appended\n40\n`). The marks come from `git diff` of the disk and lead the buffer's adoption by a beat; the user sees the adopted text either way. The added line, `expect_state text "$(escaped "$RUN_DIR/marks-adopt.txt")"` after the marks check, waits for the adopted text before measuring its end |
 
 Every probe and E2E ran one at a time on a private Xvfb (`:151`, `1600x1000x24`, lavapipe), never beside
 nextest or the capture run. The editor E2E's runs and the debug print are under `artifacts/bezel-off/pr-e/step3/`.
@@ -1058,8 +1060,8 @@ neighbourhood in both runs show nothing but the digits differing under it; no El
 which is the clock, fell outside the old rectangle. The new right edge is 6 px short of the button's border. The "Masks in
 force" table says so.
 
-**Hand renders of the three surfaces no frame shows.** After only, not committed, inside the 30-minute box the
-ledger set. A throwaway example (`hand_probe`, deleted afterwards) drew them in a 900 x 520 window on a private Xvfb with
+**Hand renders of the three surfaces no frame shows.** After only, and not committed.
+A throwaway example (`hand_probe`, deleted afterwards) drew them in a 900 x 520 window on a private Xvfb with
 lavapipe, in dark and light, with `SIRIO_REDUCED_MOTION=1`. `loading::progress` is the app's own function. The status-bar
 segment around it, the clone form's progress block and the preview card around the rewind button are replicas of their call
 sites, built from the same public pieces (`menu_card`, Ely's `Button`, the same slot widths), not the surfaces themselves,

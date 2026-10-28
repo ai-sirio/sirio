@@ -3,10 +3,9 @@
 //!
 //! A render function, not an entity — it holds no state. What a tile *does*
 //! stays with the host (`sirio`'s `main.rs`), the only place that can create
-//! a tab: a click reports the item's `action` and the host decides. bezel has
-//! no launcher tile of its own — `Scaffolding::option_card` is a 148px
-//! preview frame and `row_tile` a 36px identity mark — so the tile is drawn
-//! from bezel's tokens, the way `settings::agents_page` draws its identity
+//! a tab: a click reports the item's `action` and the host decides. No library
+//! has a launcher tile of its own, so the tile is drawn by hand from the
+//! theme's tokens, the way `settings::agents_page` draws its identity
 //! tile.
 
 use bezel_theme::Theme as BezelTheme;

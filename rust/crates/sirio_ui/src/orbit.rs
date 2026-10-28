@@ -4,7 +4,7 @@
 //! Decoration, not a loader. `loading.rs` is where an indicator that means
 //! *something is running* comes from; this one means the opposite — nothing is
 //! running, the surface is empty — so it deliberately does not reach for
-//! Bezel's orbs, whose whole vocabulary is "wait".
+//! `loading`'s orbs, whose whole vocabulary is "wait".
 //!
 //! Everything is positioned arithmetic on plain circular `div`s because gpui
 //! at this pin offers no rotation transform, so a ring with a travelling dot

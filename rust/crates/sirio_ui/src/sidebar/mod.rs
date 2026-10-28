@@ -3605,10 +3605,10 @@ impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("Sidebar.render", cx.entity_id().as_u64());
         let theme = Theme::get(cx).with_sidebar_typography();
-        // Production installs bezel alongside Sirio's theme. Some isolated
-        // sidebar fixtures set only the Sirio global, so establish the same
-        // invariant lazily before a part of the sidebar still drawn by bezel
-        // reads bezel's palette.
+        // Production installs bezel-theme's palette alongside Sirio's theme.
+        // Some isolated sidebar fixtures set only the Sirio global, so
+        // establish the same invariant lazily before a part of the sidebar
+        // that reads a `bezel_theme::Theme` does.
         if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
