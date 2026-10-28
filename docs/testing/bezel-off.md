@@ -1149,7 +1149,7 @@ Four changes a person will notice with the keyboard. Each was made on purpose an
 - (d) Every Settings button is a Tab stop: the Tab walk under Settings above, from a Settings field through Update, Install and
   Refresh to the next field (`settings/agents_page.rs`, `git_hosting_page.rs`, `language_servers_page.rs`).
 
-Enzo's yes or no on each: pending.
+Enzo's yes or no on each: (a) accepted on 2026-10-28, before the hand check; (b), (c) and (d) pending, on the Mac.
 
 *What no frame shows*
 
@@ -1158,5 +1158,7 @@ Enzo's yes or no on each: pending.
 - The clone progress bar while a real clone runs.
 - The rewind button in the turn preview: its look at `Sm`, a hover, and a click that asks for the restore preview.
 - With the composer focused and the chat idle, Activity Monitor shows Sirio near 0% CPU (the caret blinks; nothing else should redraw).
+
+Enzo's verdict: approved on 2026-10-28, on the page built from these captures.
 
 Enzo's macOS verdict: pending.
