@@ -2645,6 +2645,18 @@ impl Chat {
             .map(|started| started.elapsed().as_millis() as u64)
     }
 
+    /// The row a streamed chunk may still grow: the last one that is not a
+    /// notice. A notice is news about the session, not a turn of the
+    /// conversation, so one that lands while a reply streams sits below it
+    /// and the reply's next chunk still joins it. Split there, each half
+    /// would be parsed on its own, and a backtick or a link in the second
+    /// would pair with the wrong one.
+    fn streamed_entry(&self) -> Option<usize> {
+        self.entries
+            .iter()
+            .rposition(|entry| !matches!(entry, Entry::Notice { .. }))
+    }
+
     /// Add one transcript row and keep the virtualizer's index tree in sync.
     /// Turns one notice into the row it belongs in, at the point in the
     /// transcript where it arrived.
@@ -2697,7 +2709,7 @@ impl Chat {
         let index = self.entries.len();
         self.turn_message_ids.push(None);
         let following_tail = self.list_state.is_following_tail();
-        if !matches!(entry, Entry::Thought { .. }) {
+        if !matches!(entry, Entry::Thought { .. } | Entry::Notice { .. }) {
             self.settle_open_thought();
         }
         self.entries.push(entry);
@@ -2919,15 +2931,17 @@ impl Chat {
         };
         match event {
             AcpEvent::AgentMessageChunk(text) => {
-                if let Some(Entry::Assistant {
-                    text: existing,
-                    document,
-                }) = self.entries.last_mut()
+                let streamed = self.streamed_entry();
+                if let Some(index) = streamed
+                    && let Some(Entry::Assistant {
+                        text: existing,
+                        document,
+                    }) = self.entries.get_mut(index)
                 {
                     existing.push_str(&text);
                     *document =
                         parse_linked_markdown(existing, &self.agent_cwd, &mut self.file_link_memo);
-                    self.remeasure_entry(self.entries.len() - 1);
+                    self.remeasure_entry(index);
                 } else {
                     // A new response: what the last one found is not this one's.
                     self.file_link_memo.clear();
@@ -2937,9 +2951,12 @@ impl Chat {
                 }
             }
             AcpEvent::ThoughtChunk(text) => {
-                if let Some(Entry::Thought { text: existing, .. }) = self.entries.last_mut() {
+                let streamed = self.streamed_entry();
+                if let Some(index) = streamed
+                    && let Some(Entry::Thought { text: existing, .. }) = self.entries.get_mut(index)
+                {
                     existing.push_str(&text);
-                    self.remeasure_entry(self.entries.len() - 1);
+                    self.remeasure_entry(index);
                 } else {
                     // A new thought re-follows: drop any stale scroll state
                     // for this index so the next draw starts pinned.
@@ -15424,6 +15441,90 @@ two"
         // Both sizes, so the reader can see how much went.
         assert!(text.contains("43k"), "{text}");
         assert!(text.contains("12k"), "{text}");
+    }
+
+    #[gpui::test]
+    async fn a_notice_that_lands_inside_a_reply_leaves_it_whole(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["composer"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.run_until_parked();
+        chat.update(cx, |chat, cx| {
+            chat.streaming = true;
+            chat.handle_event(AcpEvent::ThoughtChunk("first the ".into()), cx);
+            chat.apply_notice(SessionNotice::BackgroundTaskEnded {
+                summary: "The auth agent finished.".into(),
+            });
+            chat.handle_event(AcpEvent::ThoughtChunk("tests".into()), cx);
+            let thought = chat
+                .entries
+                .iter()
+                .position(|entry| matches!(entry, Entry::Thought { .. }));
+            assert!(
+                thought.is_some_and(|index| chat.thought_is_streaming(index)),
+                "a notice does not settle the thought it lands under"
+            );
+            chat.handle_event(AcpEvent::AgentMessageChunk("The `src/auth.".into()), cx);
+            // A background agent ends while the reply is still streaming.
+            chat.apply_notice(SessionNotice::BackgroundTaskEnded {
+                summary: "The server agent finished.".into(),
+            });
+            chat.handle_event(
+                AcpEvent::AgentMessageChunk("ts` agent has finished.".into()),
+                cx,
+            );
+        });
+        let (thoughts, replies, notices) = chat.read_with(cx, |chat, _| {
+            let mut kinds = (Vec::new(), Vec::new(), 0);
+            for entry in &chat.entries {
+                match entry {
+                    Entry::Thought { text, .. } => kinds.0.push(text.clone()),
+                    Entry::Assistant { text, .. } => kinds.1.push(text.clone()),
+                    Entry::Notice { .. } => kinds.2 += 1,
+                    _ => {}
+                }
+            }
+            kinds
+        });
+        // Split at the notice, each half would be parsed on its own, and the
+        // second would open an inline code span on the backtick after `ts`.
+        assert_eq!(thoughts, vec!["first the tests".to_owned()]);
+        assert_eq!(
+            replies,
+            vec!["The `src/auth.ts` agent has finished.".to_owned()]
+        );
+        assert_eq!(notices, 2, "both notices are still in the transcript");
+
+        // A reply the CLI starts after the turn's end is a reply of its own,
+        // even with only a notice between the two.
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                AcpEvent::TurnEnded {
+                    stop_reason: "EndTurn".into(),
+                },
+                cx,
+            );
+            chat.apply_notice(SessionNotice::BackgroundTaskEnded {
+                summary: "The limiter agent finished.".into(),
+            });
+            chat.streaming = true;
+            chat.handle_event(AcpEvent::AgentMessageChunk("All three are in.".into()), cx);
+        });
+        let replies = chat.read_with(cx, |chat, _| {
+            chat.entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Assistant { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            replies,
+            vec![
+                "The `src/auth.ts` agent has finished.".to_owned(),
+                "All three are in.".to_owned()
+            ]
+        );
     }
 
     #[gpui::test]
