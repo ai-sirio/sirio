@@ -907,6 +907,12 @@ variants by role (`39d871e7`: a bordered bezel Ghost is Ely's Outline, every Set
 rewind button are `Sm`) and the removal (`474f35e8`). The commits after the capture change no pixel: this
 page, the allow file, one mask and one wait line in the editor E2E (both below).
 
+The final review's fix wave adds four more commits on top, with no drawing change and no new capture: `45f8fc6c` moves the generic
+scrollbars into `scroll` (M1), `616cc029` drops the dead popup and loading helpers (M2, M3), `72e035c4` rewords three comments,
+marks the ported key handlers and adds the owed hand checks (M4, M7, M5, M6), and the last commit writes this page's check results.
+The rows of the table below marked "fix wave" ran on `72e035c4`, whose `rust/` differs from `616cc029`'s by comment lines only
+(`git diff 616cc029 72e035c4 -- rust/` has no other line).
+
 **What PR E moved.**
 
 | Task | Where | What |
@@ -985,20 +991,20 @@ x 1032 (below), which is the only change to `Scripts/capture-masks.tsv`. Nothing
 
 | Check | Result |
 | --- | --- |
-| `cargo build --offline --workspace --all-targets` | exit 0 on the removal commit's tree; 135 warning lines, the count PR D recorded, none at a line Task 14 edited |
+| `cargo build --offline --workspace --all-targets` | exit 0 on the removal commit's tree; 135 warning lines, the count PR D recorded, none at a line Task 14 edited. Fix wave, on `72e035c4`: exit 0, 135 warning lines again, none at a line the fix wave edited (the two in files it touched, `chat/mod.rs:262` and `right_panel/history.rs:389`, are old, unused-code warnings on lines it did not edit) |
 | `cargo tree --offline -i bezel-ui`, `-i bezel-motion`, `-i bezel-agent`, `-i bezel-editor`, `-i bezel` | each: `package ID specification ... did not match any packages`. `bezel-markdown` and `bezel-syntax` still resolve and take none of them. `cargo tree -e features -p sirio` before and after differs by the lines of the four removed crates and nothing else: no kept crate lost a feature |
-| `grep -E '^name = "bezel(-ui\|-motion\|-agent\|-editor)?"$' rust/Cargo.lock`; `grep -rn 'bezel::' rust/crates`; `test ! -e rust/vendor/bezel_ui`; `grep -nE '^(bezel\|bezel-editor) *=' rust/Cargo.toml` | each prints nothing (the `test` exits 0) |
+| `grep -E '^name = "bezel(-ui\|-motion\|-agent\|-editor)?"$' rust/Cargo.lock`; `grep -rn 'bezel::' rust/crates`; `test ! -e rust/vendor/bezel_ui`; `grep -nE '^(bezel\|bezel-editor) *=' rust/Cargo.toml` | each prints nothing (the `test` exits 0); the same on `72e035c4` |
 | `git diff rust/Cargo.lock` | 48 deletions, 0 insertions: four `[[package]]` blocks and the two `"bezel"` dependency lines; no version or source changed |
-| `cargo nextest run -p sirio_ui` | 1420 run, 1420 passed, 0 skipped; against the base's 1420 the sorted `cargo nextest list` is identical |
-| `cargo nextest run -p sirio` | 531 run, 531 passed; the list is identical |
+| `cargo nextest run -p sirio_ui` | 1420 run, 1420 passed, 0 skipped; against the base's 1420 the sorted `cargo nextest list` is identical. Fix wave, on `72e035c4`: 1420 run, 1420 passed, 0 skipped, and the sorted list is identical to `7093a128`'s (recorded before the first edit) |
+| `cargo nextest run -p sirio` | 531 run, 531 passed; the list is identical. Fix wave, on `72e035c4`: 531 run, 531 passed, 0 skipped, and the sorted list is identical to `7093a128`'s |
 | `cargo nextest run -p sirio_terminal` | 143 run, 143 passed, 1 skipped; the list is identical |
 | `cargo nextest run -p sirio_syntax` | 13 run, 13 passed; the list is identical |
 | `cargo nextest run -p ely-gpui-component --features test-support` | 144 run, 144 passed; the list is identical |
-| `Scripts/Tests/test-ely-chat-ui-e2e.py --display :151 --cpu-ceiling 413.1` (no `--only`) | `ELY CHAT UI E2E OK`, with the effort scenarios, the identity lane and `unfocused_spinner` in it; `unfocused-spinner CPU 318.4% of one core over 10 s (load average 7.88 12.29 12.71)`, against PR D's 313.3%, the base of 329.7% and the ceiling of 413.1%, and the bloom's pixels differ between frames 1-2, 2-3 and 1-3 (`[132, 108, 135]`): it turns in an unfocused window with `init_motion` gone |
+| `Scripts/Tests/test-ely-chat-ui-e2e.py --display :151 --cpu-ceiling 413.1` (no `--only`) | `ELY CHAT UI E2E OK`, with the effort scenarios, the identity lane and `unfocused_spinner` in it; `unfocused-spinner CPU 318.4% of one core over 10 s (load average 7.88 12.29 12.71)`, against PR D's 313.3%, the base of 329.7% and the ceiling of 413.1%, and the bloom's pixels differ between frames 1-2, 2-3 and 1-3 (`[132, 108, 135]`): it turns in an unfocused window with `init_motion` gone. Fix wave, on `72e035c4`: `--display :185`, `ELY CHAT UI E2E OK`, all 20 scenarios `passed` in `summary.json`; `unfocused-spinner CPU 298.1% of one core over 10 s (load average 7.79 15.83 25.27)` and the bloom's pixels `[106, 137, 132]` |
 | `Scripts/Tests/test-surfaces-probe.sh --xvfb` | `SURFACES PROBE OK (34 frames, 3 gaps)` |
-| `Scripts/Tests/test-scroll-drag-probe.sh --xvfb` | `SCROLL DRAG PROBE OK (3 bars)`: each bar's thumb moved 120 px for 120 px of pointer (tolerance 4) and ends flush after +2000 px |
+| `Scripts/Tests/test-scroll-drag-probe.sh --xvfb` | `SCROLL DRAG PROBE OK (3 bars)`: each bar's thumb moved 120 px for 120 px of pointer (tolerance 4) and ends flush after +2000 px. Fix wave, on `72e035c4`: `SCROLL DRAG PROBE OK (3 bars)`, the same 120 px for each of the three bars and flush ends (the first five runs failed at the first capture, under load: see below) |
 | `Scripts/Tests/test-text-selection-e2e.sh` | `TEXT SELECTION E2E OK (32 tests; ...)` (its floor is 30; 33 before Task 13 deleted one test) |
-| `Scripts/Tests/test-markdown-selection-probe.sh --xvfb`, `test-markdown-scroll-probe.sh --xvfb` | `MARKDOWN SELECTION PROBE OK`, `MARKDOWN SCROLL PROBE OK` |
+| `Scripts/Tests/test-markdown-selection-probe.sh --xvfb`, `test-markdown-scroll-probe.sh --xvfb` | `MARKDOWN SELECTION PROBE OK`, `MARKDOWN SCROLL PROBE OK`. Fix wave, on `72e035c4`, the scroll probe only: `MARKDOWN SCROLL PROBE OK` |
 | `Scripts/Tests/test-chat-session-panel-e2e.sh --state-only` | `CHAT SESSION PANEL E2E OK (14 scenarios, 7 skipped, appearance default, state-only 1, window default)` |
 | `Scripts/Tests/test-open-list-e2e.sh --display :151` | `OPEN LIST E2E OK` |
 | `Scripts/Tests/test-theme-sweep.sh --display :151 --out-dir <checkout>/artifacts/bezel-off/pr-e/step3/theme-sweep` | `THEME SWEEP OK: <checkout>/artifacts/bezel-off/pr-e/step3/theme-sweep` |
@@ -1006,6 +1012,18 @@ x 1032 (below), which is the only change to `Scripts/capture-masks.tsv`. Nothing
 
 Every probe and E2E ran one at a time on a private Xvfb (`:151`, `1600x1000x24`, lavapipe), never beside
 nextest or the capture run. The editor E2E's runs and the debug print are under `artifacts/bezel-off/pr-e/step3/`.
+
+The fix wave's runs were one at a time too, never beside nextest: the two probes with their own `--xvfb` display (`:90`; all but the
+first scroll drag run with `--no-build`, on binaries built from `72e035c4`'s tree) and the chat E2E on a private `:185`
+(`1600x1000x24`, lavapipe), stopped by its PID. Their logs and out-dirs are under `artifacts/bezel-off/pr-e/step3-final/`.
+
+The scroll drag probe's first five runs (`scroll-drag-probe-fail-1` to `-fail-5`) all failed the same way, at the first capture:
+`bar 1: no thumb in .../before.png (every pixel of 1x600+291+0 is (0, 0, 0))`. The window was black. The machine's load average was
+20 to 23 over one minute and 31 to 35 over five (other worktrees' builds), and a hand run of the same binary on a private display painted its first frame between 4.5 and
+6 s after the start, where the script captures 2.5 s after it finds the window. A copy of the script with only that wait lengthened
+to 12 s (`step3-final/scroll-drag-probe-slow*`) printed `SCROLL DRAG PROBE OK (3 bars)`, and so did the stock script, unchanged, at a
+load average of 5 (`scroll-drag-probe-ok-stock*`): the figures in the row above. The failed runs show a blank window, not a window
+with a bar missing.
 
 **Every changed frame** (`artifacts/bezel-off/pr-e/diff/changed.tsv`).
 
