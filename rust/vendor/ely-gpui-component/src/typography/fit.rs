@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use gpui::{
     App, Div, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce,
     ShapedLine, SharedString, StatefulInteractiveElement, Styled, TextAlign, TextRun, Window,
@@ -111,8 +113,28 @@ fn offset(align: TextAlign, free: Pixels) -> Pixels {
     }
 }
 
-/// One line, cut by `fit` to its box and aligned.
+/// `text` as the one line a cut line draws: each break, with the blanks around it, becomes one space.
+fn one_line(text: &str) -> Cow<'_, str> {
+    if !text.contains(['\n', '\r']) {
+        return Cow::Borrowed(text);
+    }
+    let mut lines = text.split(['\n', '\r']);
+    let first = lines.next().unwrap_or_default().trim_end();
+    let rest = lines.map(str::trim);
+    let kept: Vec<&str> = std::iter::once(first)
+        .chain(rest)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    Cow::Owned(kept.join(" "))
+}
+
+/// One line, cut by `fit` to its box and aligned. A break in `text` would set as a missing glyph
+/// and make the box two lines tall, so the line is joined first.
 fn cut_line(text: SharedString, fit: fn(&str, Pixels, &mut Window) -> String) -> Div {
+    let text = match one_line(&text) {
+        Cow::Borrowed(_) => text,
+        Cow::Owned(joined) => SharedString::from(joined),
+    };
     let line = text.clone();
     div()
         .relative()
@@ -242,9 +264,31 @@ impl RenderOnce for EllipsisTooltip {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use gpui::{TextAlign, px};
 
-    use super::{elide, offset};
+    use super::{elide, offset, one_line};
+
+    #[test]
+    fn a_cut_line_joins_the_lines_it_is_given() {
+        assert!(matches!(one_line("one line"), Cow::Borrowed("one line")));
+        assert_eq!(
+            one_line("Type 'a' is not assignable.\n  Type 'string' is not."),
+            "Type 'a' is not assignable. Type 'string' is not.",
+            "a break and the indent after it are one space"
+        );
+        assert_eq!(one_line("a\r\nb"), "a b");
+        assert_eq!(one_line("a\rb"), "a b");
+        assert_eq!(one_line("a\n\n   \nb"), "a b", "blank lines leave no gap");
+        assert_eq!(one_line("a  \n"), "a", "a break at the end leaves nothing");
+        assert_eq!(one_line("\n  b"), "b", "nor does one at the start");
+        assert_eq!(
+            one_line("  a\nb"),
+            "  a b",
+            "the first line keeps its indent"
+        );
+    }
 
     #[test]
     fn a_line_starts_by_its_alignment() {
