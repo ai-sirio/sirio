@@ -20,6 +20,7 @@ use super::*;
 use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::feedback::Alert;
 use ely_gpui_component::primitives::Severity;
+use ely_gpui_component::theme::ControlSize;
 use gpui::ElementId;
 use sirio_lsp::{LanguageTable, Recipe};
 
@@ -309,6 +310,7 @@ impl Settings {
                                         "Install",
                                     )
                                     .variant(ButtonVariant::Primary)
+                                    .size(ControlSize::Sm)
                                     .on_click(move |_, _, cx| {
                                         let language = language.clone();
                                         control_entity.update(cx, |_, cx| {
@@ -331,7 +333,8 @@ impl Settings {
                                         ("settings-language-server-link", index),
                                         "Install guide",
                                     )
-                                    .variant(ButtonVariant::Ghost)
+                                    .variant(ButtonVariant::Outline)
+                                    .size(ControlSize::Sm)
                                     .on_click(move |_, _, cx| cx.open_url(url)),
                                 ),
                         );
@@ -355,7 +358,8 @@ impl Settings {
                                 ("settings-language-server-unsilence", index),
                                 "Offer again",
                             )
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
+                            .size(ControlSize::Sm)
                             .on_click(move |_, _, cx| {
                                 let language = language.clone();
                                 control_entity.update(cx, |settings, cx| {

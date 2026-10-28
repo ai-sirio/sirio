@@ -12,6 +12,7 @@ use ely_gpui_component::data_display::{Badge, Tone};
 use ely_gpui_component::feedback::Alert;
 use ely_gpui_component::forms::Input;
 use ely_gpui_component::primitives::{IconName, Severity};
+use ely_gpui_component::theme::ControlSize;
 use gpui::{ElementId, Focusable};
 
 /// #334: the old path pill capped the resolved path at 240 px so version plus checksum still fit one meta line.
@@ -285,7 +286,8 @@ impl Settings {
                                 .debug_selector(move || format!("settings-agent-update-{index}"))
                                 .child(
                                     Button::new(("settings-agent-update", index), "Update")
-                                        .variant(ButtonVariant::Ghost)
+                                        .variant(ButtonVariant::Outline)
+                                        .size(ControlSize::Sm)
                                         .on_click(move |_, _, cx| {
                                             control_entity.update(cx, |_, cx| {
                                                 cx.emit(event.clone());
@@ -301,6 +303,7 @@ impl Settings {
                                 .child(
                                     Button::new(("settings-agent-install", index), "Install")
                                         .variant(ButtonVariant::Primary)
+                                        .size(ControlSize::Sm)
                                         .on_click(move |_, _, cx| {
                                             control_entity.update(cx, |_, cx| {
                                                 cx.emit(event.clone());
@@ -496,7 +499,8 @@ impl Settings {
                                         .debug_selector(|| "agents-update-all".to_string())
                                         .child(
                                             Button::new("agents-update-all", "Update All")
-                                                .variant(ButtonVariant::Ghost)
+                                                .variant(ButtonVariant::Outline)
+                                                .size(ControlSize::Sm)
                                                 .on_click(move |_, _, cx| {
                                                     update_all_entity.update(cx, |this, cx| {
                                                         for id in this.outdated_agent_ids() {
@@ -514,6 +518,7 @@ impl Settings {
                                     .child(
                                         Button::new("refresh-agents", "Refresh")
                                             .variant(ButtonVariant::Ghost)
+                                            .size(ControlSize::Sm)
                                             .on_click(move |_, _, cx| {
                                                 refresh_entity.update(cx, |this, cx| {
                                                     this.refresh_agent_availability(cx)

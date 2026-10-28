@@ -13,7 +13,7 @@ use crate::motion::{Fade, Painter, hover_listener, hover_t};
 use bezel_theme::ink;
 use chrono::{DateTime, Local};
 use ely_gpui_component::buttons::{Button, ButtonVariant};
-use ely_gpui_component::theme::ActiveTheme as _;
+use ely_gpui_component::theme::{ActiveTheme as _, ControlSize};
 use gpui::{
     AnyElement, AnyView, App, Context, Empty, Entity, FontWeight, ListOffset, Pixels,
     SharedString, Stateful, Window, canvas, div, prelude::*, px,
@@ -217,6 +217,7 @@ impl TurnPreview {
                         .child(
                             Button::new("turn-rewind-action", action.label)
                                 .variant(ButtonVariant::Ghost)
+                                .size(ControlSize::Sm)
                                 .on_click(move |_, _, cx| {
                                     action.chat.update(cx, |chat, cx| {
                                         chat.request_rewind_preview(action.entry_index, cx);

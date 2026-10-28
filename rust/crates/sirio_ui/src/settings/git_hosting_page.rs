@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::forms::{Input, TextInput};
 use ely_gpui_component::primitives::IconName;
+use ely_gpui_component::theme::ControlSize;
 use gpui::Task;
 use sirio_forge::{Forge, Means, known_forge};
 
@@ -266,6 +267,7 @@ impl Settings {
                             } else {
                                 ButtonVariant::Ghost
                             })
+                            .size(ControlSize::Sm)
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |settings, cx| {
                                     settings.set_git_host_forge(target.clone(), forge, cx)
@@ -290,6 +292,7 @@ impl Settings {
                             } else {
                                 ButtonVariant::Ghost
                             })
+                            .size(ControlSize::Sm)
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |settings, cx| {
                                     settings.set_git_host_means(target.clone(), forge, means, cx)
@@ -303,6 +306,7 @@ impl Settings {
                     tail = tail.child(div().w(px(220.0)).child(Input::new(field))).child(
                         Button::new(("settings-git-host-token-save", index), "Save token")
                             .variant(ButtonVariant::Primary)
+                            .size(ControlSize::Sm)
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |settings, cx| {
                                     settings.save_git_host_token(target.clone(), forge, cx)
@@ -325,6 +329,7 @@ impl Settings {
                     tail = tail.child(
                         Button::new(("settings-git-host-token-forget", index), "Forget token")
                             .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |settings, cx| {
                                     settings.forget_git_host_token(target.clone(), cx)
