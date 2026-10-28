@@ -1,4 +1,5 @@
-// Ported from bezel-ui 0.1.4 (MIT); see THIRD_PARTY_NOTICES.md.
+// The thumb maths, the drag payload and the follow-the-tail state are ported from bezel-ui 0.1.4
+// (MIT); see THIRD_PARTY_NOTICES.md. The two bars over a `ScrollHandle` are Sirio's own.
 //! The maths Sirio's own scrollbars share, the drag payload they pass, the two
 //! generic bars over a `ScrollHandle`, and the state that keeps a view pinned
 //! to the end of content that grows under it.

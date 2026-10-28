@@ -901,15 +901,15 @@ the tree of `89bbd118`. PR E's git base is `b4f6de7a`, and `git diff 89bbd118 b4
 is five files and no drawing: the comments of `scroll_drag_probe.rs` and of `test-scroll-drag-probe.sh`,
 an import-only change in `composer_view.rs` and `sidebar/sessions.rs`, and in `scroll.rs` one module-doc
 sentence and one test. So the "before" frames are the frames of PR E's base and the base was not
-captured again. The "after" set was captured on the tree of `474f35e8`, PR E's last code commit (the
-working tree was clean). PR E's code is three commits: the Settings widgets (`10894f80`), their sizes and
+captured again. The "after" set was captured on the tree of `474f35e8`, PR E's last code commit before the final review's cleanup, which
+draws nothing differently (below; the working tree was clean). PR E's code is three commits: the Settings widgets (`10894f80`), their sizes and
 variants by role (`39d871e7`: a bordered bezel Ghost is Ely's Outline, every Settings button and the
 rewind button are `Sm`) and the removal (`474f35e8`). The commits after the capture change no pixel: this
 page, the allow file, one mask and one wait line in the editor E2E (both below).
 
 The final review's fix wave adds four more commits on top, with no drawing change and no new capture: `45f8fc6c` moves the generic
 scrollbars into `scroll` (M1), `616cc029` drops the dead popup and loading helpers (M2, M3), `72e035c4` rewords three comments,
-marks the ported key handlers and adds the owed hand checks (M4, M7, M5, M6), and the last commit writes this page's check results.
+marks the ported key handlers and adds the owed hand checks (M4, M7, M5, M6), `80208ec9` writes this page's check results, and a last commit settles the re-review's page and header nits.
 The rows of the table below marked "fix wave" ran on `72e035c4`, whose `rust/` differs from `616cc029`'s by comment lines only
 (`git diff 616cc029 72e035c4 -- rust/` has no other line).
 
@@ -1020,8 +1020,8 @@ first scroll drag run with `--no-build`, on binaries built from `72e035c4`'s tre
 The scroll drag probe's first five runs (`scroll-drag-probe-fail-1` to `-fail-5`) all failed the same way, at the first capture:
 `bar 1: no thumb in .../before.png (every pixel of 1x600+291+0 is (0, 0, 0))`. The window was black. The machine's load average was
 20 to 23 over one minute and 31 to 35 over five (other worktrees' builds), and a hand run of the same binary on a private display painted its first frame between 4.5 and
-6 s after the start, where the script captures 2.5 s after it finds the window. A copy of the script with only that wait lengthened
-to 12 s (`step3-final/scroll-drag-probe-slow*`) printed `SCROLL DRAG PROBE OK (3 bars)`, and so did the stock script, unchanged, at a
+6 s after the start, where the script captures 2.5 s after it finds the window. A copy of the script with that wait lengthened
+to 12 s (and its `ROOT=` pointed at the checkout, so the copy could run from elsewhere) (`step3-final/scroll-drag-probe-slow*`) printed `SCROLL DRAG PROBE OK (3 bars)`, and so did the stock script, unchanged, at a
 load average of 5 (`scroll-drag-probe-ok-stock*`): the figures in the row above. The failed runs show a blank window, not a window
 with a bar missing.
 
@@ -1138,8 +1138,7 @@ because the real ones need a live account, a running clone and a native Claude c
 
 *Keyboard changes to accept or refuse*
 
-Four changes a person will notice with the keyboard. Each was made on purpose and none is recorded as accepted yet
-(`final-review.md` M6). A no on (a) is one binding: `shift-enter` to `Submit` under the single-line context.
+Four changes a person will notice with the keyboard. Each was made on purpose and none is recorded as accepted yet. A no on (a) is one binding: `shift-enter` to `Submit` under the single-line context.
 
 - (a) Shift+Enter and Alt+Enter no longer submit a one-line field (the project forms, the browser's address bar). Shift+Enter
   is `Newline`, which a single-line field consumes and ignores, and Alt+Enter is unbound. Enter and Cmd+Enter still submit
