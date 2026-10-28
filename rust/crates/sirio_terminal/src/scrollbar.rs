@@ -22,7 +22,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// bezel's own strip and thumb widths (`scroll.rs`, private there); the chat
-/// and file view bars restate them the same way.
+/// bar (`chat/list_scroll.rs`) restates them the same way. The file view's
+/// vertical bar is Ely's, and its horizontal thumb fills the 10 px strip.
 const TRACK: f32 = 10.0;
 const THUMB: f32 = 6.0;
 

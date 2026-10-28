@@ -2159,8 +2159,8 @@ pub struct Chat {
     /// and none of it touches the composer's draft.
     model_search_field: Entity<TextInput>,
     streaming: bool,
-    /// Retired with the rotating streaming border: the shared Bezel clock
-    /// drives the reasoning header now, so this stays permanently `false`.
+    /// Retired with the rotating streaming border: Sirio's `crate::motion`
+    /// clock drives the reasoning header now, so this stays permanently `false`.
     /// Kept as a regression guard — a repaint timer reappearing here would
     /// mean a Chat-owned animation crept back in. Read only by that guard
     /// test, hence the lint allowance.
@@ -17113,9 +17113,11 @@ two"
         cx.run_until_parked();
     }
 
-    /// Chooses a row of the composer's context menu and lets the menu leave:
-    /// it exits through its closing animation, staying mounted — and over the
-    /// pointer — until a timer the test clock has to be moved past.
+    /// Chooses a row of the composer's context menu and lets the menu leave.
+    /// A closing menu draws nothing (`render_composer_context_menu` returns an
+    /// empty element for it), so it is out of the frame and off the pointer at
+    /// once; the clock is still moved past the exit timer so the popup state
+    /// itself is reaped.
     fn choose_composer_context_item(cx: &mut VisualTestContext, selector: &'static str) {
         let row = cx
             .debug_bounds(selector)

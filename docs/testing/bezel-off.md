@@ -921,6 +921,7 @@ page, the allow file, one mask and one wait line in the editor E2E (both below).
 | 14 | `sirio/src/main.rs`, a chat test, `scroll_drag_probe.rs`, `surfaces_probe.rs` | `init_motion` and the three `set_pause_when_inactive(false)` calls go. They set the pause flag of bezel's clock, which nothing leases any more; `sirio_ui::motion`'s clock has no such flag and keeps turning in an unfocused window, which `unfocused_spinner` checks (below). |
 | 14 | `sirio/src/main.rs` | The comment above `with_assets` names both prefixes `AppAssets` serves through `svg().path(..)`, Ely's icons (`ely/…`) and the chat's agent marks (`sirio-chat/…`, `chat/identity.rs`), which is why the asset source stays. |
 | 14 | docs | `CLAUDE.md`, `README.md`, `docs/agents/architecture/crates.md`, `rust/vendor/README.md` (the `bezel_ui` section goes), `LOCAL-CHANGES.md` and `THIRD_PARTY_NOTICES.md` (the MIT text stands on its own: it no longer points at the deleted `LICENSE`). |
+| fix wave | `scroll.rs`, `file_view.rs` and the callers of its bars, `popup.rs`, `loading.rs`, three comments, `forms/text/` in the vendored Ely tree, `THIRD_PARTY_NOTICES.md` | A no-drawing cleanup from the final review (M1, M2, M3, M4, M7); no colour, size or layout changes, so no capture was taken. M1: `scroll::bar` and `scroll::horizontal_bar` are `file_view::scrollbar` and `horizontal_scrollbar`, moved with their bodies unchanged and every caller re-pointed; the two overflow watchers differ in axis (height, `max_offset().y` and `offset().y` against width, `.x` and `.x`), so both bodies stay. M2: `Popup::as_open` is deleted. M3: `loading::bezel_theme`, `redacted_rows`' two unused parameters and `skeleton_rows`' `theme` are deleted (its `id` stays, as `_id`, as in `thinking_indicator` and `indeterminate`). M4: three comments that described code that is gone are reworded. M7: the ported key handlers and `is_word` in the vendored Ely tree carry a provenance comment, and `THIRD_PARTY_NOTICES.md` lists them. M5 and M6 are this page's own (below). |
 
 What still reaches bezel after PR E is the engine and three crates: `bezel-gpui`, `bezel-theme`,
 `bezel-markdown` (vendored, two changes) and `bezel-syntax`. `grep -rn 'bezel::' rust/crates` prints nothing.
@@ -1042,6 +1043,12 @@ boxes are read from this run's `changed.tsv`.
   `sirio_ui::motion`, which never pauses. `unfocused_spinner` is the automated witness (318.4%, bloom moving, above) and
   a capture cannot be one, because `SIRIO_REDUCED_MOTION=1` snaps every animation to rest. The thinking orb in an
   unfocused window is on the macOS list for that reason.
+- **A focused, idle composer (Review Focus 4).** Ely's caret blinks every 530 ms and notifies the composer's field,
+  which `cx.observe` hands to `reread_composer`; its early return on an unchanged `(text, caret)`
+  (`chat/composer_view.rs`) is what keeps the whole chat from being re-read at 2 Hz. No check here witnesses it. The
+  `unfocused_spinner` CPU ceiling samples an inactive window, where the caret's blink does not run, so deleting the
+  early return would leave it green. Review Focus 4 is held by that guard and by review only; no test was written for
+  it after the code (the repo's rule), and the macOS list below has the check.
 
 **What the masks hide here.** `CAPTURE DIFF OK` says nothing about pixels inside a mask. PR E touches no element
 under a standing mask except the two named below, so the same pair was compared with no `--masks` and the mask
@@ -1111,11 +1118,28 @@ because the real ones need a live account, a running clone and a native Claude c
 - Keyboard: press Tab through the buttons of those three pages. Every Settings button is a Tab stop now; the order should read
   top to bottom and each button should show Ely's focus ring.
 
+*Keyboard changes to accept or refuse*
+
+Four changes a person will notice with the keyboard. Each was made on purpose and none is recorded as accepted yet
+(`final-review.md` M6). A no on (a) is one binding: `shift-enter` to `Submit` under the single-line context.
+
+- (a) Shift+Enter and Alt+Enter no longer submit a one-line field (the project forms, the browser's address bar). Shift+Enter
+  is `Newline`, which a single-line field consumes and ignores, and Alt+Enter is unbound. Enter and Cmd+Enter still submit
+  (`rust/vendor/ely-gpui-component/src/forms/text/actions.rs:95-97`).
+- (b) Fields that were already Ely's on main now use bezel's word unit for word moves and deletes: a run of punctuation is not a
+  word, so Option+Backspace on `Hello world.` deletes `world.` (`forms/text/edit.rs:23`, `is_word`).
+- (c) On macOS, Ctrl+K deletes to the end of the line in every field (`actions.rs:119`).
+- (d) Every Settings button is a Tab stop: the Tab walk under Settings above, from a Settings field through Update, Install and
+  Refresh to the next field (`settings/agents_page.rs`, `git_hosting_page.rs`, `language_servers_page.rs`).
+
+Enzo's yes or no on each: pending.
+
 *What no frame shows*
 
 - The status-bar usage meter: a 2 px bar in an 18 px slot, centred in its 4 px height, gliding when the value changes, and
   dimmed when the numbers are stale.
 - The clone progress bar while a real clone runs.
 - The rewind button in the turn preview: its look at `Sm`, a hover, and a click that asks for the restore preview.
+- With the composer focused and the chat idle, Activity Monitor shows Sirio near 0% CPU (the caret blinks; nothing else should redraw).
 
 Enzo's macOS verdict: pending.
