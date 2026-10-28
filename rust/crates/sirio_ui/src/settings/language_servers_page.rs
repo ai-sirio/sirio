@@ -1,4 +1,4 @@
-//! Settings › Language Servers, drawn on bezel's settings scaffolding.
+//! Settings › Language Servers, drawn on the settings scaffold (`scaffold.rs`).
 //!
 //! Modelled on `agents_page.rs`: one row per item, `InstallState` for live
 //! state, the row unclickable while the installer holds its lock, and the
@@ -15,10 +15,12 @@ use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::Path;
 
+use super::scaffold::{Scaffolding as _, card_row_hover, status_dot};
 use super::*;
-use bezel::ui::widgets::{
-    ButtonStyle, Buttons as _, Scaffolding as _, Status as _, card_row_hover, status_dot,
-};
+use ely_gpui_component::buttons::{Button, ButtonVariant};
+use ely_gpui_component::feedback::Alert;
+use ely_gpui_component::primitives::Severity;
+use gpui::ElementId;
 use sirio_lsp::{LanguageTable, Recipe};
 
 /// Where one language's server is right now.
@@ -296,33 +298,42 @@ impl Settings {
                         let control_entity = entity.clone();
                         let language = row.language.clone();
                         tail = tail.child(
-                            bezel_theme
-                                .button("Install", ButtonStyle::Prominent, None)
-                                .id(("settings-language-server-install", index))
+                            div()
+                                .flex_none()
                                 .debug_selector(move || {
                                     format!("settings-language-server-install-{index}")
                                 })
-                                .on_click(move |_, _, cx| {
-                                    let language = language.clone();
-                                    control_entity.update(cx, |_, cx| {
-                                        cx.emit(SettingsEvent::InstallLanguageServer(language));
-                                    });
-                                }),
+                                .child(
+                                    Button::new(
+                                        ("settings-language-server-install", index),
+                                        "Install",
+                                    )
+                                    .variant(ButtonVariant::Primary)
+                                    .on_click(move |_, _, cx| {
+                                        let language = language.clone();
+                                        control_entity.update(cx, |_, cx| {
+                                            cx.emit(SettingsEvent::InstallLanguageServer(language));
+                                        });
+                                    }),
+                                ),
                         );
                     }
                     RowAction::OpenUrl { url, .. } => {
                         let url = *url;
                         tail = tail.child(
-                            bezel_theme
-                                .button("Install guide", ButtonStyle::Ghost, None)
-                                .border_1()
-                                .border_color(bezel_theme.border)
-                                .hover(|s| s.bg(bezel_theme.element_hover))
-                                .id(("settings-language-server-link", index))
+                            div()
+                                .flex_none()
                                 .debug_selector(move || {
                                     format!("settings-language-server-link-{index}")
                                 })
-                                .on_click(move |_, _, cx| cx.open_url(url)),
+                                .child(
+                                    Button::new(
+                                        ("settings-language-server-link", index),
+                                        "Install guide",
+                                    )
+                                    .variant(ButtonVariant::Ghost)
+                                    .on_click(move |_, _, cx| cx.open_url(url)),
+                                ),
                         );
                     }
                     RowAction::Nothing => {}
@@ -334,21 +345,24 @@ impl Settings {
                 let control_entity = entity.clone();
                 let language = row.language.clone();
                 tail = tail.child(
-                    bezel_theme
-                        .button("Offer again", ButtonStyle::Ghost, None)
-                        .border_1()
-                        .border_color(bezel_theme.border)
-                        .hover(|s| s.bg(bezel_theme.element_hover))
-                        .id(("settings-language-server-unsilence", index))
+                    div()
+                        .flex_none()
                         .debug_selector(move || {
                             format!("settings-language-server-unsilence-{index}")
                         })
-                        .on_click(move |_, _, cx| {
-                            let language = language.clone();
-                            control_entity.update(cx, |settings, cx| {
-                                settings.set_language_silenced(&language, false, cx)
-                            });
-                        }),
+                        .child(
+                            Button::new(
+                                ("settings-language-server-unsilence", index),
+                                "Offer again",
+                            )
+                            .variant(ButtonVariant::Ghost)
+                            .on_click(move |_, _, cx| {
+                                let language = language.clone();
+                                control_entity.update(cx, |settings, cx| {
+                                    settings.set_language_silenced(&language, false, cx)
+                                });
+                            }),
+                        ),
                 );
             }
             let mut row_el = bezel_theme
@@ -360,15 +374,20 @@ impl Settings {
                 .child(body)
                 .child(tail);
             if let Some(InstallState::Failed(message)) = install_state {
+                let reason_id = ElementId::from(("settings-language-server-install-reason", index));
                 row_el = row_el.child(
-                    bezel_theme
-                        .error_strip(message.clone())
-                        .mt(px(8.0))
-                        .w_full()
-                        .id(("settings-language-server-install-reason", index))
+                    div()
+                        .id(reason_id.clone())
                         .debug_selector(move || {
                             format!("settings-language-server-install-reason-{index}")
-                        }),
+                        })
+                        .mt(px(8.0))
+                        .w_full()
+                        .text_color(theme.ely.fg)
+                        .child(
+                            Alert::new((reason_id.clone(), "error"), Severity::Danger, "")
+                                .content(selectable_text(message.clone()).id((reason_id, "text"))),
+                        ),
                 );
             }
             card = card.child(row_el);

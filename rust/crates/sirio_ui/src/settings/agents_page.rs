@@ -1,4 +1,4 @@
-//! Settings › Agents, drawn on bezel's settings scaffolding.
+//! Settings › Agents, drawn on the settings scaffold (`scaffold.rs`).
 //!
 //! Moved out of `settings.rs`: the screen's renderer, its private helpers
 //! and its tests live here. State, events, `provider_row` and
@@ -6,13 +6,13 @@
 
 use crate::text_selection::selectable_text;
 use super::*;
-use bezel::ui::icons;
-use bezel::ui::widgets::{
-    ButtonStyle, Buttons as _, Content as _, Scaffolding as _, Status as _, card_row_hover,
-    status_dot,
-};
+use super::scaffold::{Scaffolding as _, card_row_hover, empty_state, status_dot};
+use ely_gpui_component::buttons::{Button, ButtonVariant};
+use ely_gpui_component::data_display::{Badge, Tone};
+use ely_gpui_component::feedback::Alert;
 use ely_gpui_component::forms::Input;
-use gpui::Focusable;
+use ely_gpui_component::primitives::{IconName, Severity};
+use gpui::{ElementId, Focusable};
 
 /// #334: the old path pill capped the resolved path at 240 px so version plus checksum still fit one meta line.
 const PATH_FRAGMENT_MAX_WIDTH: f32 = 240.0;
@@ -280,30 +280,33 @@ impl Settings {
                     action.map(|(event, label)| {
                         if label == "Update" {
                             let control_entity = entity.clone();
-                            bezel_theme
-                                .button("Update", ButtonStyle::Ghost, None)
-                                .border_1()
-                                .border_color(bezel_theme.border)
-                                .hover(|s| s.bg(bezel_theme.element_hover))
-                                .id(("settings-agent-update", index))
+                            div()
+                                .flex_none()
                                 .debug_selector(move || format!("settings-agent-update-{index}"))
-                                .on_click(move |_, _, cx| {
-                                    control_entity.update(cx, |_, cx| {
-                                        cx.emit(event.clone());
-                                    });
-                                })
+                                .child(
+                                    Button::new(("settings-agent-update", index), "Update")
+                                        .variant(ButtonVariant::Ghost)
+                                        .on_click(move |_, _, cx| {
+                                            control_entity.update(cx, |_, cx| {
+                                                cx.emit(event.clone());
+                                            });
+                                        }),
+                                )
                                 .into_any_element()
                         } else {
                             let control_entity = entity.clone();
-                            bezel_theme
-                                .button("Install", ButtonStyle::Prominent, None)
-                                .id(("settings-agent-install", index))
+                            div()
+                                .flex_none()
                                 .debug_selector(move || format!("settings-agent-install-{index}"))
-                                .on_click(move |_, _, cx| {
-                                    control_entity.update(cx, |_, cx| {
-                                        cx.emit(event.clone());
-                                    });
-                                })
+                                .child(
+                                    Button::new(("settings-agent-install", index), "Install")
+                                        .variant(ButtonVariant::Primary)
+                                        .on_click(move |_, _, cx| {
+                                            control_entity.update(cx, |_, cx| {
+                                                cx.emit(event.clone());
+                                            });
+                                        }),
+                                )
                                 .into_any_element()
                         }
                     })
@@ -341,10 +344,11 @@ impl Settings {
             ) {
                 let badge_id = format!("settings-agent-acp-{}", availability.id);
                 tail = tail.child(
-                    bezel_theme
-                        .badge_active("Installed")
+                    div()
                         .id(badge_id.clone())
-                        .debug_selector(move || badge_id.clone()),
+                        .debug_selector(move || badge_id.clone())
+                        .flex_none()
+                        .child(Badge::new("Installed").tone(Tone::Success)),
                 );
             }
             let mut row_el = bezel_theme
@@ -357,13 +361,18 @@ impl Settings {
                 .child(body)
                 .child(tail);
             if let Some(InstallState::Failed(message)) = install_state {
+                let reason_id = ElementId::from(("settings-agent-install-reason", index));
                 row_el = row_el.child(
-                    bezel_theme
-                        .error_strip(message.clone())
+                    div()
+                        .id(reason_id.clone())
+                        .debug_selector(move || format!("settings-agent-install-reason-{index}"))
                         .mt(px(8.0))
                         .w_full()
-                        .id(("settings-agent-install-reason", index))
-                        .debug_selector(move || format!("settings-agent-install-reason-{index}")),
+                        .text_color(theme.ely.fg)
+                        .child(
+                            Alert::new((reason_id.clone(), "error"), Severity::Danger, "")
+                                .content(selectable_text(message.clone()).id((reason_id, "text"))),
+                        ),
                 );
             }
             card = card.child(row_el);
@@ -388,7 +397,7 @@ impl Settings {
                         .items_start()
                         .gap(px(16.0))
                         .child(
-                            // Left: bezel page headline + subtitle.
+                            // Left: the page headline + subtitle.
                             // `page_header` carries no per-part selectors,
                             // so the count is a sibling with the headline's
                             // own tokens (13px, muted at 0.7) rather than its
@@ -482,33 +491,35 @@ impl Settings {
                             // in-flight lock, so no new event is needed.
                             if !outdated.is_empty() {
                                 toolbar = toolbar.child(
-                                    bezel_theme
-                                        .button("Update All", ButtonStyle::Ghost, None)
-                                        .border_1()
-                                        .border_color(bezel_theme.border)
-                                        .hover(|s| s.bg(bezel_theme.element_hover))
-                                        .id("agents-update-all")
+                                    div()
+                                        .flex_none()
                                         .debug_selector(|| "agents-update-all".to_string())
-                                        .on_click(move |_, _, cx| {
-                                            update_all_entity.update(cx, |this, cx| {
-                                                for id in this.outdated_agent_ids() {
-                                                    cx.emit(SettingsEvent::UpdateAgent(id));
-                                                }
-                                            });
-                                        }),
+                                        .child(
+                                            Button::new("agents-update-all", "Update All")
+                                                .variant(ButtonVariant::Ghost)
+                                                .on_click(move |_, _, cx| {
+                                                    update_all_entity.update(cx, |this, cx| {
+                                                        for id in this.outdated_agent_ids() {
+                                                            cx.emit(SettingsEvent::UpdateAgent(id));
+                                                        }
+                                                    });
+                                                }),
+                                        ),
                                 );
                             }
                             toolbar.child(
-                                bezel_theme
-                                    .button("Refresh", ButtonStyle::Ghost, None)
-                                    .hover(|s| s.bg(bezel_theme.element_hover))
-                                    .id("refresh-agents")
+                                div()
+                                    .flex_none()
                                     .debug_selector(|| "refresh-agents".to_string())
-                                    .on_click(move |_, _, cx| {
-                                        refresh_entity.update(cx, |this, cx| {
-                                            this.refresh_agent_availability(cx)
-                                        });
-                                    }),
+                                    .child(
+                                        Button::new("refresh-agents", "Refresh")
+                                            .variant(ButtonVariant::Ghost)
+                                            .on_click(move |_, _, cx| {
+                                                refresh_entity.update(cx, |this, cx| {
+                                                    this.refresh_agent_availability(cx)
+                                                });
+                                            }),
+                                    ),
                             )
                         }),
                 );
@@ -516,11 +527,17 @@ impl Settings {
         // the last successful sweep, with the Refresh button above as
         // the retry.
         if let Some(error) = self.agent_registry_error.clone() {
+            let error_id = ElementId::from("settings-agents-registry-error");
             surface = surface.child(
-                bezel_theme
-                    .warning_strip(error)
-                    .id("settings-agents-registry-error")
-                    .debug_selector(|| "settings-agents-registry-error".to_string()),
+                div()
+                    .id(error_id.clone())
+                    .debug_selector(|| "settings-agents-registry-error".to_string())
+                    .mt(px(8.0))
+                    .text_color(theme.ely.fg)
+                    .child(
+                        Alert::new((error_id.clone(), "warning"), Severity::Warning, "")
+                            .content(selectable_text(error).id((error_id, "text"))),
+                    ),
             );
         }
         if first_load {
@@ -548,13 +565,13 @@ impl Settings {
         } else if !query.is_empty() && first_visible_row {
             surface.child(
                 card.child(
-                    bezel_theme
-                        .empty_state(
-                            icons::MAGNIFER,
-                            format!("No agents match \u{201c}{query}\u{201d}"),
-                            format!("Clear the search to see all {agent_count} agents."),
-                        )
-                        .debug_selector(|| "settings-agents-empty".to_string()),
+                    empty_state(
+                        &bezel_theme,
+                        IconName::Search,
+                        format!("No agents match \u{201c}{query}\u{201d}"),
+                        format!("Clear the search to see all {agent_count} agents."),
+                    )
+                    .debug_selector(|| "settings-agents-empty".to_string()),
                 ),
             )
         } else {

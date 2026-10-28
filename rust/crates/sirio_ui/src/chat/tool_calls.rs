@@ -26,20 +26,14 @@ use super::{
 use sirio_acp::{ToolCallContentInfo, ToolCallLocationInfo};
 use sirio_theme::Theme;
 
-// bezel's `step_output` metrics (`bezel-ui` `widgets/status.rs`), private there.
+// The output well's metrics.
 const OUTPUT_PAD_X: f32 = 10.0;
 const OUTPUT_PAD_Y: f32 = 6.0;
 const OUTPUT_MAX_HEIGHT: f32 = 256.0;
 
-/// bezel's `step_output` well, with a body that can be selected.
-///
-/// `step_output` hangs its text on the well as a plain string child, and a
-/// `Div` cannot give a child back, so the only way to a selectable body is to
-/// draw the well here. It must stay indistinguishable from bezel's — same
-/// cap, border, padding, face and colour — which is what
-/// `the_selectable_output_well_lays_out_like_bezels` holds it to, so a bezel
-/// bump that moves `step_output` shows up there rather than as a well that
-/// quietly no longer matches the rest of the row.
+/// A tool call's output well: the text capped at [`OUTPUT_MAX_HEIGHT`] and
+/// scrolling past it, monospaced, under a hairline, with a body that can be
+/// selected.
 pub(crate) fn output_well(
     theme: &bezel_theme::Theme,
     id: impl Into<ElementId>,
@@ -753,52 +747,6 @@ impl Chat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bezel::ui::widgets::Status as _;
-
-    /// The well is a copy of bezel's `step_output` with a selectable body;
-    /// this is what keeps the copy honest. Drawn side by side at the same
-    /// width, on text that wraps and text that does not, the two must occupy
-    /// the same box.
-    #[gpui::test]
-    async fn the_selectable_output_well_lays_out_like_bezels(cx: &mut gpui::TestAppContext) {
-        use gpui::{Context, Render, Window, size};
-
-        struct Wells(String);
-        impl Render for Wells {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let theme = bezel_theme::Theme::of(cx).clone();
-                div()
-                    .w(px(220.0))
-                    .child(
-                        theme
-                            .step_output("bezel-well", self.0.clone())
-                            .debug_selector(|| "bezel-well".into()),
-                    )
-                    .child(
-                        output_well(&theme, "sirio-well", self.0.clone())
-                            .debug_selector(|| "sirio-well".into()),
-                    )
-            }
-        }
-
-        cx.update(sirio_theme::Theme::init);
-        for text in [
-            "one short line".to_string(),
-            "error[E0308]: mismatched types in a line long enough to wrap\nsecond line".to_string(),
-            (0..80).map(|i| format!("line {i}\n")).collect(),
-        ] {
-            let (_, vcx) = cx.add_window_view(|_, _| Wells(text.clone()));
-            vcx.simulate_resize(size(px(400.0), px(800.0)));
-            vcx.run_until_parked();
-            let bezel = vcx
-                .debug_bounds("bezel-well")
-                .expect("bezel's well renders");
-            let sirio = vcx
-                .debug_bounds("sirio-well")
-                .expect("the selectable well renders");
-            assert_eq!(sirio.size, bezel.size, "for {text:?}");
-        }
-    }
 
     #[test]
     fn titles_are_flattened_to_one_line() {

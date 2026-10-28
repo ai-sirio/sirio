@@ -639,9 +639,9 @@ impl Render for StatusBar {
                     .into()
                 })
                 .child(IconElement::new(mark, IconSize::XSmall))
-                // The pill: bezel's determinate progress bar on a fixed
-                // narrow track, so the row never reflows as the value
-                // moves. Dimmed with the text when the numbers are stale.
+                // The pill: a determinate progress bar on a fixed narrow
+                // track, so the row never reflows as the value moves.
+                // Dimmed with the text when the numbers are stale.
                 .child(
                     div()
                         .id(format!("{display_name}-usage-meter"))
@@ -649,7 +649,10 @@ impl Render for StatusBar {
                         .flex_none()
                         .w(px(METER_WIDTH))
                         .opacity(if dimmed { DIM_OPACITY } else { 1.0 })
-                        .child(loading::progress(meter, &theme)),
+                        .child(loading::progress(
+                            format!("{display_name}-usage-meter-bar"),
+                            meter,
+                        )),
                 )
                 .child(selectable_text(text).id(text_id))
         };
@@ -948,6 +951,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -1008,6 +1012,7 @@ mod tests {
     #[gpui::test]
     async fn usage_bar_consumes_visibility_and_interval_preferences(cx: &mut gpui::TestAppContext) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -1115,6 +1120,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
@@ -1308,6 +1314,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let settings_calls = std::rc::Rc::new(std::cell::RefCell::new(0));
         let spy = settings_calls.clone();
         let update = UpdateState {
@@ -1340,6 +1347,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(Theme::init);
+        cx.update(crate::ely::init);
         let window = cx.add_window(|_window, _cx| StatusBar::new_with_default_context());
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         // Let the constructor's own fetch loop settle first so the

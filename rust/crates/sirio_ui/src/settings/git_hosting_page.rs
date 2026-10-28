@@ -6,11 +6,13 @@
 
 use std::collections::HashMap;
 
-use bezel::ui::widgets::{ButtonStyle, Buttons as _, Content as _, Scaffolding as _};
+use ely_gpui_component::buttons::{Button, ButtonVariant};
 use ely_gpui_component::forms::{Input, TextInput};
+use ely_gpui_component::primitives::IconName;
 use gpui::Task;
 use sirio_forge::{Forge, Means, known_forge};
 
+use super::scaffold::{Scaffolding as _, empty_state};
 use super::*;
 use crate::change_request_style as style;
 use crate::forge_source::{self, ChangeRequestSource, HostRow, TokenWrite};
@@ -210,8 +212,9 @@ impl Settings {
             .group_box()
             .debug_selector(|| "settings-git-hosting-card".to_string());
         if self.git_hosting.loaded && self.git_hosting.hosts.is_empty() {
-            card = card.child(bezel_theme.empty_state(
-                bezel::ui::icons::MAGNIFER,
+            card = card.child(empty_state(
+                &bezel_theme,
+                IconName::Search,
                 "No forge hosts yet",
                 "Open the change request view in the right panel on a project with a GitHub or GitLab remote.",
             ));
@@ -257,17 +260,12 @@ impl Settings {
                     let entity = entity.clone();
                     let target = host.clone();
                     tail = tail.child(
-                        bezel_theme
-                            .button(
-                                label,
-                                if chosen {
-                                    ButtonStyle::Prominent
-                                } else {
-                                    ButtonStyle::Ghost
-                                },
-                                None,
-                            )
-                            .id((id, index))
+                        Button::new((id, index), label)
+                            .variant(if chosen {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Ghost
+                            })
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |settings, cx| {
                                     settings.set_git_host_forge(target.clone(), forge, cx)
@@ -286,17 +284,12 @@ impl Settings {
                     let entity = entity.clone();
                     let target = host.clone();
                     tail = tail.child(
-                        bezel_theme
-                            .button(
-                                label,
-                                if chosen {
-                                    ButtonStyle::Prominent
-                                } else {
-                                    ButtonStyle::Ghost
-                                },
-                                None,
-                            )
-                            .id((id, index))
+                        Button::new((id, index), label)
+                            .variant(if chosen {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Ghost
+                            })
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |settings, cx| {
                                     settings.set_git_host_means(target.clone(), forge, means, cx)
@@ -308,9 +301,8 @@ impl Settings {
                     let entity = entity.clone();
                     let target = host.clone();
                     tail = tail.child(div().w(px(220.0)).child(Input::new(field))).child(
-                        bezel_theme
-                            .button("Save token", ButtonStyle::Prominent, None)
-                            .id(("settings-git-host-token-save", index))
+                        Button::new(("settings-git-host-token-save", index), "Save token")
+                            .variant(ButtonVariant::Primary)
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |settings, cx| {
                                     settings.save_git_host_token(target.clone(), forge, cx)
@@ -331,9 +323,8 @@ impl Settings {
                     let entity = entity.clone();
                     let target = host.clone();
                     tail = tail.child(
-                        bezel_theme
-                            .button("Forget token", ButtonStyle::Ghost, None)
-                            .id(("settings-git-host-token-forget", index))
+                        Button::new(("settings-git-host-token-forget", index), "Forget token")
+                            .variant(ButtonVariant::Ghost)
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |settings, cx| {
                                     settings.forget_git_host_token(target.clone(), cx)

@@ -185,7 +185,9 @@ naming the crate it came from. In `rust/crates/sirio_ui/src/` that is:
 - `chat/thought.rs`: `Takeover`;
 - `chat/transcript.rs`: `tracked_upper`, the day heading's letter tracking;
 - `combobox.rs`: the type-to-filter select, and the closed face of a select (`select_trigger`);
-- `sidebar/tree_keys.rs`: the tree's arrow-key bindings and cursor step.
+- `sidebar/tree_keys.rs`: the tree's arrow-key bindings and cursor step;
+- `settings/scaffold.rs`: the settings page skeleton (headline, section card, rows, meta line) and its
+  empty state and status dot.
 
 Both crates are by clearloop ([crabtalk/bezel](https://github.com/crabtalk/bezel))
 and are licensed under the MIT licence below, copied from `rust/vendor/bezel_ui/LICENSE`. The second

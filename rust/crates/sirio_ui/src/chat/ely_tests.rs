@@ -1,7 +1,6 @@
 //! Regression tests at the host/component boundaries.
 use super::tests::{CHAT_FIXTURE, TempDir, pump_chat_until, refresh_frame};
 use super::*;
-use bezel::ui::widgets::{ButtonStyle, Buttons};
 use gpui::{TestAppContext, VisualTestContext, size};
 
 struct ThemeProbe {
@@ -20,11 +19,11 @@ impl Render for ThemeProbe {
                         "ely-theme-probe",
                         "Ely",
                     ))
-                    .child(bezel_theme::Theme::of(cx).button(
-                        "Bezel",
-                        ButtonStyle::Prominent,
-                        None,
-                    )),
+                    .child(
+                        div()
+                            .text_color(bezel_theme::Theme::of(cx).text)
+                            .child("Bezel"),
+                    ),
             )
             .child(self.chat.clone())
     }

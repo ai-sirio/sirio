@@ -16,10 +16,10 @@
 
 use std::time::Duration;
 
-use bezel::ui::widgets::Controls;
+use ely_gpui_component::motion::ProgressBar;
 use gpui::{
-    AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Styled, Window,
-    div, px,
+    AnyElement, App, Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, Styled,
+    Window, div, px,
 };
 use sirio_theme::Theme;
 
@@ -46,7 +46,7 @@ pub const SETTLED_BLOOM_OPACITIES: [f32; 3] = [1.0, 0.55, 0.25];
 const _: () = assert!(SETTLED_BLOOM_OPACITIES.len() == motion::ORB_BLOOM_RINGS);
 /// The cell size of the compact refresh spinner.
 pub const COMPACT_MINI_CELL: f32 = 2.5;
-/// Determinate progress: track thickness and the width the gallery demos.
+/// Determinate progress: the height of the slot a bar sits in and the widest it draws.
 pub const PROGRESS_TRACK: f32 = 4.0;
 pub const PROGRESS_MAX_WIDTH: f32 = 280.0;
 /// A subordinate skeleton: three rows, never the sole activity signal. Its
@@ -77,9 +77,9 @@ pub fn clamp_fraction(fraction: f32) -> f32 {
 }
 
 /// Build the Bezel palette expected by its published UI primitives while
-/// retaining Sirio's appearance and accent. Bezel's progress bar and the
-/// skeleton rows take that theme type, whereas the adapter's public contract
-/// intentionally exposes Sirio's theme type to its callers.
+/// retaining Sirio's appearance and accent. The skeleton rows take that theme
+/// type, whereas the adapter's public contract intentionally exposes Sirio's
+/// theme type to its callers.
 ///
 /// This module used to push Sirio's appearance into Bezel's process-wide
 /// paint mirror on every call, because `ink`, `wash` and `hairline` are free
@@ -389,14 +389,20 @@ pub fn compact(id: &'static str, window: &mut Window, cx: &mut App) -> AnyElemen
         .into_any_element()
 }
 
-/// A determinate progress bar with the gallery's fixed track and width.
-pub fn progress(fraction: f32, theme: &Theme) -> Div {
-    let bezel_theme = bezel_theme(theme);
+/// A determinate progress bar, Ely's, centred in a fixed-height slot at most
+/// [`PROGRESS_MAX_WIDTH`] wide.
+///
+/// `id` keys the bar's glide from one value to the next, so two bars on screen
+/// at once take two ids.
+pub fn progress(id: impl Into<ElementId>, fraction: f32) -> Div {
     div()
         .w_full()
         .max_w(px(PROGRESS_MAX_WIDTH))
         .h(px(PROGRESS_TRACK))
-        .child(bezel_theme.progress_bar(clamp_fraction(fraction)))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .child(ProgressBar::new(id, clamp_fraction(fraction)))
 }
 
 /// A subordinate set of redacted rows. `motion::pulse_delta` owns the shared

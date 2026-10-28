@@ -49,7 +49,7 @@ command -v cargo-nextest >/dev/null 2>&1 || {
 
 # Every test that drives a drag and a copy. A name filter, not a list of
 # names, so a new surface's test joins by being named for what it proves.
-UI_FILTER='test(/^text_selection::/) | test(/^selectable_markdown::/) | test(/selected_and_copied/) | test(/can_be_copied/) | test(/selected_and_copied_in_unified_and_split_view/) | test(/^chat::tool_calls::tests::the_selectable_output_well/)'
+UI_FILTER='test(/^text_selection::/) | test(/^selectable_markdown::/) | test(/selected_and_copied/) | test(/can_be_copied/) | test(/selected_and_copied_in_unified_and_split_view/)'
 HOST_FILTER='test(/text_selected_in_/)'
 
 run() {

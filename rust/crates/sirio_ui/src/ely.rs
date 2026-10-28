@@ -17,11 +17,10 @@ impl AssetSource for AppAssets {
         if path.starts_with("sirio-chat/") {
             return Ok(identity::asset(path).map(Cow::Borrowed));
         }
-        bezel::ui::icons::Assets.load(path)
+        Ok(None)
     }
     fn list(&self, path: &str) -> anyhow::Result<Vec<gpui::SharedString>> {
-        let mut paths = bezel::ui::icons::Assets.list(path)?;
-        paths.extend(ely_gpui_component::Assets.list(path)?);
+        let mut paths = ely_gpui_component::Assets.list(path)?;
         paths.extend(
             identity::ASSETS
                 .iter()

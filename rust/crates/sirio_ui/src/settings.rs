@@ -9,7 +9,6 @@ use crate::status_bar::{UpdateState, UpdateStatus};
 use crate::text_selection::selectable_text;
 use bezel_theme::Theme as BezelTheme;
 use ely_gpui_component::forms::{InputEvent, TextInput};
-use bezel::ui::widgets::status_dot;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyBinding,
     Hsla, KeyDownEvent, MouseButton, Render, ScrollHandle, Window, actions, div, point, prelude::*,
@@ -40,9 +39,11 @@ mod agents_page;
 mod editor_page;
 mod git_hosting_page;
 mod language_servers_page;
+mod scaffold;
 
 use editor_page::EditorInputs;
 use language_servers_page::ServerStates;
+use scaffold::status_dot;
 
 /// The settings content column — the frozen 720px content column of
 /// `docs/linux-rewrite/03-visual-bar-and-gpui-patterns.md` (waku

@@ -28247,9 +28247,9 @@ fn main() {
     cli_path::set_login_path(login);
 
     sirio_perf::init();
-    // bezel's icons are `svg().path("icons/…")`; without an asset source
-    // gpui finds nothing and paints nothing. Sirio's own icons embed their
-    // bytes and never needed this.
+    // Ely's icons are `svg().path("ely/…")`; without an asset source gpui
+    // finds nothing and paints nothing. Sirio's own icons embed their bytes
+    // and never needed this.
     let app = application().with_assets(sirio_ui::ely::AppAssets);
     app.run(move |cx: &mut App| {
         #[cfg(feature = "perf-native")]
