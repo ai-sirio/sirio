@@ -827,7 +827,6 @@ impl RightPanel {
                 .child(loading::skeleton_rows(
                     "files-skeleton",
                     loading::SKELETON_ROWS,
-                    &theme,
                     window,
                     cx,
                 ))

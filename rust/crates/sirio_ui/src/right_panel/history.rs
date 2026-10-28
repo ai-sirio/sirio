@@ -681,7 +681,6 @@ impl Render for GitHistory {
                 .child(loading::skeleton_rows(
                     "history-skeleton",
                     loading::SKELETON_ROWS,
-                    &theme,
                     window,
                     cx,
                 ))
