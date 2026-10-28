@@ -202,7 +202,7 @@ impl Chat {
                             )),
                     )
                     .child(scroll.follow_element())
-                    .child(crate::file_view::scrollbar(
+                    .child(crate::scroll::bar(
                         format!("thought-bar-{entry_index}"),
                         &scroll.scroll,
                     )),

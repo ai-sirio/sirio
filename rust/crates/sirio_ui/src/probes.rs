@@ -12,9 +12,9 @@ use gpui::{
 use sirio_theme::Theme;
 
 use crate::chat::list_scroll::{ListScrollbarState, list_scrollbar};
-use crate::file_view;
 use crate::horizontal_scroll::{self, HorizontalBarState};
 use crate::motion::Painter;
+use crate::scroll;
 
 /// Width of each of the three panes. The window is `3 * PANE_WIDTH` wide and the panes fill its
 /// height, side by side from the left edge with nothing between them. The script reads this
@@ -34,7 +34,7 @@ const BAR_CLEARANCE: f32 = 16.0;
 
 /// Three panes side by side, each over long fixture text and each with its own scrollbar:
 ///
-/// 1. a `ScrollHandle` body with [`file_view::scrollbar`], the file view's and the CI log's bar;
+/// 1. a `ScrollHandle` body with [`scroll::bar`], the file view's and the CI log's bar;
 /// 2. a `ListState` body with [`list_scrollbar`], the chat transcript's bar;
 /// 3. a wide body with [`horizontal_scroll::bar`], the diff and Preview's bar along the bottom.
 ///
@@ -105,11 +105,11 @@ impl Render for ScrollDragProbe {
                 .pr(px(BAR_CLEARANCE))
                 .children((0..ROWS).map(|ix| row(format!("pane 1 row {ix:04} scroll handle body")))),
         );
-        // `file_view::scrollbar` tags its own full-pane overlay with the id it is given; that is
+        // `scroll::bar` tags its own full-pane overlay with the id it is given; that is
         // not the selector the probe promises, which every bar gets the same way, from the probe.
         let plain = plain.child(bar_overlay(
             1,
-            file_view::scrollbar("probe-file-bar", &self.handle),
+            scroll::bar("probe-file-bar", &self.handle),
         ));
 
         let listed = pane()
@@ -160,7 +160,7 @@ impl Render for ScrollDragProbe {
 impl ScrollDragProbe {
     /// `horizontal_scroll::bar` over the wide pane's handle. The handle reports no viewport on
     /// the first frame, so while the bar has nothing to draw a canvas asks for the frame that
-    /// does, as `file_view::horizontal_scrollbar` does for the surfaces that use it.
+    /// does, as `scroll::horizontal_bar` does for the surfaces that use it.
     fn wide_bar_element(&self, cx: &mut Context<Self>) -> AnyElement {
         let handle = &self.wide_handle;
         let overflowing = |handle: &ScrollHandle| {

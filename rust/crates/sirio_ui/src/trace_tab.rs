@@ -654,7 +654,7 @@ impl Render for TraceTab {
                     .min_h(px(0.0))
                     .relative()
                     .child(list)
-                    .child(crate::file_view::scrollbar("trace-tab-bar", &handle)),
+                    .child(crate::scroll::bar("trace-tab-bar", &handle)),
             )
             .child(frame_driver(
                 self.frame_pending.clone(),

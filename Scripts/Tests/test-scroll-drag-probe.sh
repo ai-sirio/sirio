@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Native check that a scrollbar thumb follows the pointer when it is dragged, for the three bars
-# the app draws (file_view::scrollbar, the transcript's list_scrollbar and horizontal_scroll::bar),
+# the app draws (scroll::bar, the transcript's list_scrollbar and horizontal_scroll::bar),
 # side by side in rust/crates/sirio_ui/examples/scroll_drag_probe.rs on an isolated X display.
 # It runs before a PR moves those bars off bezel and again after, so the new bars are held to the
 # behaviour the old ones have: this is the pointer's view of a drag, which a gpui test cannot give.
