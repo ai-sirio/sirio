@@ -24,6 +24,25 @@ project's life:
   facts a second time because the tab computed its own before anyone had
   looked.
 
+The built-in `java` entry also learns Lombok when the project uses it: if a build
+file (`pom.xml`, `build.gradle(.kts)`, `settings.gradle(.kts)`,
+`gradle/libs.versions.toml`) in the key's root or any directory above it up to the
+worktree root mentions `lombok`, `jdtls` is launched with
+`--jvm-arg=-javaagent:<newest lombok jar>`, taken from the local Maven and Gradle
+caches and never downloaded. The first `ServiceReady` of such a launch is followed
+by one `java/buildWorkspace(true)`, because a workspace built without the agent
+keeps its Lombok errors in files nobody opened. When a jar appears that is newer
+than the launch's, or any jar after a launch with none (checked on that key's
+`publishDiagnostics`, at most every 2 s), the key's jdtls is restarted once; so is
+one whose project gained Lombok after the launch (the build files are read again at
+those publishes) when a jar is in the caches. Only a launch of the built-in entry is
+ever restarted. A launch the agent breaks is repeated once without it, after the
+failed one has been killed (a server left running would hold jdtls's workspace). A
+hand-written `java` entry in `languages.toml` is never touched, no card or message
+mentions Lombok, and every language server's stderr is discarded, so a server that
+is noisy there can no longer hang on a full pipe. Spec:
+`docs/superpowers/specs/2026-10-26-jdtls-lombok-design.md`.
+
 The failure mode both halves share is silence: an unlisted language is detected,
 named in the status line, and then rendered as plain text with no action in its
 context menu — indistinguishable from a file with nothing to say. The three
