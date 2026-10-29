@@ -801,3 +801,16 @@ A sync with upstream must keep `scroll_x` in `x` and `grid`.
   call. This is a change of shape in a file upstream also edits: a sync must
   keep `ShimmerText::phase`, the early return that animates nothing, and the
   shared `shimmered` path.
+
+## One-line text and system rows
+
+- `src/typography/fit.rs`: `cut_line`, behind `Ellipsis` and `MiddleEllipsis`,
+  joins the lines of its text first (`one_line`: each break, with the blanks
+  around it, becomes one space). Upstream shapes the text as it comes, and
+  `shape_line` sets a `\n` as a missing glyph while the sizing copy breaks
+  there and makes the box two lines tall; a TypeScript diagnostic's message in
+  the drawer's Problems row did both. A sync must keep the join.
+- `src/chat/message.rs`: `Role::System`'s body is `min_w_0`, as the user and
+  assistant bodies already are. Upstream's flex row lets the body grow to its
+  unbroken text, so a long system line ran off both sides of the centre
+  instead of wrapping.
