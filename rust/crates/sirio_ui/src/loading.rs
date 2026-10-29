@@ -16,10 +16,10 @@
 
 use std::time::Duration;
 
-use bezel::ui::widgets::Controls;
+use ely_gpui_component::motion::ProgressBar;
 use gpui::{
-    AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Styled, Window,
-    div, px,
+    AnyElement, App, Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, Styled,
+    Window, div, px,
 };
 use sirio_theme::Theme;
 
@@ -46,7 +46,7 @@ pub const SETTLED_BLOOM_OPACITIES: [f32; 3] = [1.0, 0.55, 0.25];
 const _: () = assert!(SETTLED_BLOOM_OPACITIES.len() == motion::ORB_BLOOM_RINGS);
 /// The cell size of the compact refresh spinner.
 pub const COMPACT_MINI_CELL: f32 = 2.5;
-/// Determinate progress: track thickness and the width the gallery demos.
+/// Determinate progress: the height of the slot a bar sits in and the widest it draws.
 pub const PROGRESS_TRACK: f32 = 4.0;
 pub const PROGRESS_MAX_WIDTH: f32 = 280.0;
 /// A subordinate skeleton: three rows, never the sole activity signal. Its
@@ -74,25 +74,6 @@ pub fn clamp_fraction(fraction: f32) -> f32 {
     } else {
         fraction.clamp(0.0, 1.0)
     }
-}
-
-/// Build the Bezel palette expected by its published UI primitives while
-/// retaining Sirio's appearance and accent. Bezel's progress bar and the
-/// skeleton rows take that theme type, whereas the adapter's public contract
-/// intentionally exposes Sirio's theme type to its callers.
-///
-/// This module used to push Sirio's appearance into Bezel's process-wide
-/// paint mirror on every call, because `ink`, `wash` and `hairline` are free
-/// functions with no `cx` and would otherwise paint for the previous
-/// appearance. `Theme::sync_appearance` now does it wherever the theme global
-/// is written, which is the one place that can be sure it happened.
-fn bezel_theme(theme: &Theme) -> bezel_theme::Theme {
-    let mut bezel_theme = match theme.appearance {
-        sirio_theme::Appearance::Light => bezel_theme::Theme::light(),
-        sirio_theme::Appearance::Dark => bezel_theme::Theme::dark(),
-    };
-    bezel_theme.accent = theme.sirio.brand_coral;
-    bezel_theme
 }
 
 /// The neutral gray the thinking and loading orbs paint in.
@@ -220,13 +201,7 @@ fn mini_gradient_spinner(cell_px: f32, painter: Painter, cx: &mut App) -> impl I
 
 /// Pulsing skeleton rows shown while a list loads (the reference:
 /// `h-7 animate-pulse rounded-md bg-white/[0.04]`).
-fn redacted_rows(
-    _id: &'static str,
-    _theme: &bezel_theme::Theme,
-    count: usize,
-    painter: Painter,
-    cx: &mut App,
-) -> AnyElement {
+fn redacted_rows(count: usize, painter: Painter, cx: &mut App) -> AnyElement {
     let wash = bezel_theme::ink(0.04);
     let delta = motion::pulse_delta(Duration::from_millis(motion::PULSE_MS), painter, cx);
     div()
@@ -389,27 +364,31 @@ pub fn compact(id: &'static str, window: &mut Window, cx: &mut App) -> AnyElemen
         .into_any_element()
 }
 
-/// A determinate progress bar with the gallery's fixed track and width.
-pub fn progress(fraction: f32, theme: &Theme) -> Div {
-    let bezel_theme = bezel_theme(theme);
+/// A determinate progress bar, Ely's, centred in a fixed-height slot at most
+/// [`PROGRESS_MAX_WIDTH`] wide.
+///
+/// `id` keys the bar's glide from one value to the next, so two bars on screen
+/// at once take two ids.
+pub fn progress(id: impl Into<ElementId>, fraction: f32) -> Div {
     div()
         .w_full()
         .max_w(px(PROGRESS_MAX_WIDTH))
         .h(px(PROGRESS_TRACK))
-        .child(bezel_theme.progress_bar(clamp_fraction(fraction)))
+        .flex()
+        .flex_col()
+        .justify_center()
+        .child(ProgressBar::new(id, clamp_fraction(fraction)))
 }
 
 /// A subordinate set of redacted rows. `motion::pulse_delta` owns the shared
 /// clock and its reduced-motion behavior; no timer is created here.
 pub fn skeleton_rows(
-    id: &'static str,
+    _id: &'static str,
     count: usize,
-    theme: &Theme,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let bezel_theme = bezel_theme(theme);
-    redacted_rows(id, &bezel_theme, count, painter(window), cx)
+    redacted_rows(count, painter(window), cx)
 }
 
 #[cfg(test)]

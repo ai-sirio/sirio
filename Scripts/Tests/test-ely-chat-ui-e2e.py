@@ -1362,8 +1362,9 @@ def unfocused_spinner(run: Run) -> str | None:
     run.log(f"unfocused_spinner: before the second window, getwindowfocus is {before_thief} (Sirio's window {window} is {int(window, 16)})")
     if before_thief != int(window, 16):
         raise Failure("unfocused_spinner: Sirio's window did not take the X focus")
-    # A click in the composer and a prompt typed there: the composer keeps the focus, so its caret
-    # blink is part of what the CPU figure samples.
+    # A click in the composer and a prompt typed there, as a person starts a turn. The second window
+    # takes the focus below and the figure is sampled while Sirio's window is inactive, where the
+    # caret's blink does not run: this figure is not a witness of a focused, idle composer.
     click_composer(run, window)
     x_type(run, "go on")
     chat.until("the composer holds the prompt", lambda s: s["composer"] == "go on", timeout=10, quiet=True)

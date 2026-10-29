@@ -386,8 +386,9 @@ of Neutral, Onice, Argilla and Grafite (`paint_grey_ladder`). The tint stays
 `NONE` for Neutral and Onice — they move lightness only — and is the
 measured warm hue for Argilla and Grafite, whose ladders also carry text
 rungs that `paint_grey_ladder` writes over bezel's `text`, `text_muted`,
-`text_faint` and `text_dim`, so bezel widgets (via `to_bezel_theme`) and
-Sirio tokens see one ladder by construction.
+`text_faint` and `text_dim`, so bezel-markdown and the `sirio_ui` modules that
+read a `bezel_theme::Theme` (via `to_bezel_theme`) and Sirio tokens see one
+ladder by construction.
 
 ## Changing a colour
 

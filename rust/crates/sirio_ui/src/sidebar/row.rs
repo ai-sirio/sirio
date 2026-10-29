@@ -605,7 +605,7 @@ impl Sidebar {
         // The bloom that stands where the status word used to. Built here
         // rather than inline in `title_line` because it is the one part of
         // the row that needs `window` and `cx`: a travelling bloom takes a
-        // lease on Bezel's shared clock, and that lease is what re-renders
+        // lease on `sirio_ui::motion`'s shared clock, and that lease is what re-renders
         // this row — and only this row — on every spinner frame.
         let status_bloom = match status_glyph {
             RowStatusGlyph::Running(tint) => Some(

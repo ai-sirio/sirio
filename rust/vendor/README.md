@@ -12,15 +12,15 @@ small crate, so a host's theme crate can use Ely's palette without compiling
 Ely's components; `ely-gpui-component` re-exports those types at their original
 paths.
 
-This directory holds `[patch.crates-io]` overrides for four packages: `bezel-gpui-linux` and
-`bezel-gpui-windows` (both release `0.3.8`) and `bezel-ui` and `bezel-markdown` (both release
-`0.1.4`), all wired in via `rust/Cargo.toml`'s `[patch.crates-io]` section. Everything else in the
-Bezel GPUI family (`gpui`, `gpui_platform`, and the rest) still comes straight from the published
-crates.io releases, unpatched.
+This directory holds `[patch.crates-io]` overrides for three packages: `bezel-gpui-linux` and
+`bezel-gpui-windows` (both release `0.3.8`) and `bezel-markdown` (release `0.1.4`), all wired in
+via `rust/Cargo.toml`'s `[patch.crates-io]` section. Everything else in the Bezel GPUI family
+(`gpui`, `gpui_platform`, and the rest) still comes straight from the published crates.io releases,
+unpatched.
 
 Each override changes one thing about its crate and nothing else (`bezel_markdown` changes two, both
-in `src/render.rs`); the four are unrelated fixes that happen to need the same mechanism.
-`gpui_linux` is described first and at length because it established the arrangement; `gpui_windows`, `bezel_ui` and `bezel_markdown`
+in `src/render.rs`); the three are unrelated fixes that happen to need the same mechanism.
+`gpui_linux` is described first and at length because it established the arrangement; `gpui_windows` and `bezel_markdown`
 follow it, each with its own short section at the end.
 
 ## Why this exists: F-CORE-FILE-03A
@@ -165,24 +165,6 @@ Bumping the pinned `bezel-gpui-windows` version means re-applying that one descr
 hand — or dropping the override, if upstream's no-DirectComposition path has become
 translucency-capable by then (worth checking first, as for `gpui_linux`).
 
-## `bezel_ui` — a text field that can leave its fill to its host
-
-`vendor/bezel_ui/` is the released `bezel-ui` 0.1.4 source with exactly one change: `TextField`
-gains `with_transparent_fill()`, which skips the field's `.bg(theme.input_bg)` in `src/input.rs`.
-The chat composer is the one caller. Its shell (Ely's `PromptInput::custom`) paints the theme's
-`surface` and the field inside it clips its own border away; without this the field painted the
-app-wide input fill (`ely.sunken`, by `sirio_theme`'s contract) over almost the whole card, so the
-card could only ever be `sunken` — a grey slab that matched nothing else in the theme. A builder
-flag rather than a colour, because the theme can change under a live field and only a host that
-reads it every frame stays right. Every other file is byte-for-byte the released source, plus
-the MIT `LICENSE` from the repository's `v0.1.4` tag, which the published crate does not ship.
-
-The manifest follows `gpui_windows`'s conventions (`[workspace]` table, `publish = false`, package
-name kept as `bezel-ui`, `[lib] name` kept as `ui`); no standalone `Cargo.lock`. Check with
-`cargo tree -i bezel-ui` (the path source, no `patch ... was not used` warning). Bumping the pinned
-bezel version means re-applying the one builder by hand, or dropping the override if upstream has
-gained a way to style a field's fill by then.
-
 ## `bezel_markdown` — a selection that covers each wrapped row from its first glyph, and a bar under wide blocks
 
 `vendor/bezel_markdown/` is the released `bezel-markdown` 0.1.4 source with two changes. The first:
@@ -199,8 +181,9 @@ of reach as a bump — it builds on gpui 0.3.19 and moves the whole bezel family
 Every other file is byte-for-byte the released source, plus the MIT `LICENSE` from the repository's
 `v0.1.4` tag, which the published crate does not ship.
 
-Same manifest conventions as `bezel_ui`, no standalone `Cargo.lock`; `cargo tree -i bezel-markdown`
-shows the path source, used by `sirio_ui` alone (`bezel-editor` left the graph). The check is
+Same manifest conventions as `gpui_windows` (`[workspace]` table, `publish = false`, package name kept
+as `bezel-markdown`), no standalone `Cargo.lock`; `cargo tree -i bezel-markdown` shows the path source,
+used by `sirio_ui` alone. The check is
 `Scripts/Tests/test-markdown-selection-probe.sh --xvfb` (`MARKDOWN SELECTION PROBE OK`): it draws
 `sirio_ui`'s `markdown_selection_probe` example, a selected document whose rows soft-wrap, break
 inside one paragraph and wrap an inline code span, and fails when any row's wash leaves the text's
@@ -213,7 +196,7 @@ scroll container itself, whose trailing padding is not part of what it scrolls t
 characters of a long line stayed under the right edge. Each block now keeps a `ScrollHandle`
 (`Sideways`, a `RenderOnce`, so the state is keyed under the element ids above it and two documents on
 one page do not share block 0's offset), draws a private horizontal bar as an overlay beside the
-scroller (a child would scroll away with the content; `bezel-ui` 0.1.4's bar is vertical only, and
+scroller (a child would scroll away with the content; upstream `bezel-ui` 0.1.4's bar is vertical only, and
 `bezel_markdown` takes no dependency on it or on Ely), and the fence's padding moved onto an inner
 column. The thumb stops a left mouse-down from propagating, because a host such as the chat's
 `MarkdownBody` starts a transcript selection from any left press on a response; the drag still

@@ -585,8 +585,8 @@ impl CiLogTab {
         let handle = self.scroll.0.borrow().base_handle.clone();
         body.child(div().flex_1().min_h(px(0.0)).relative()
             .child(list)
-            .child(crate::file_view::scrollbar("ci-log-bar", &handle))
-            .child(crate::file_view::horizontal_scrollbar("ci-log-horizontal-bar", &handle,
+            .child(crate::scroll::bar("ci-log-bar", &handle))
+            .child(crate::scroll::horizontal_bar("ci-log-horizontal-bar", &handle,
                 &self.horizontal_bar, entity.clone())))
             .into_any_element()
     }

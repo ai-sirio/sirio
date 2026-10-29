@@ -391,7 +391,7 @@ impl Render for CloneForm {
                         .w_full()
                         .flex()
                         .justify_center()
-                        .child(loading::progress(progress as f32, &theme)),
+                        .child(loading::progress("clone-progress-bar", progress as f32)),
                 )
             })
             .child(

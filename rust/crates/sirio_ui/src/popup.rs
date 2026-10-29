@@ -79,18 +79,10 @@ impl<T> Popup<T> {
     }
 
     /// The state while mounted — open OR playing the exit animation. Render
-    /// paths use this; logic paths use [`Self::as_open`]/[`Self::open_mut`].
+    /// paths use this; logic paths use [`Self::open_mut`], which is `None`
+    /// during the exit phase, so event handlers on a dying popup fall through.
     pub fn get(&self) -> Option<&T> {
         self.inner.as_ref().map(|(value, _)| value)
-    }
-
-    /// The state only while genuinely open — `None` during the exit phase, so
-    /// event handlers on a dying popup fall through.
-    pub fn as_open(&self) -> Option<&T> {
-        match &self.inner {
-            Some((value, None)) => Some(value),
-            _ => None,
-        }
     }
 
     pub fn open_mut(&mut self) -> Option<&mut T> {

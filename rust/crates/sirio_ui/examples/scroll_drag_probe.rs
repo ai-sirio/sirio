@@ -33,15 +33,8 @@ fn main() {
     gpui_platform::application()
         .with_assets(sirio_ui::ely::AppAssets)
         .run(|cx: &mut App| {
-            // Same motion setup as the surfaces probe: bezel parks its animation clock while no
-            // window of the app is active, and a display with no window manager never activates
-            // one, so a thumb's hover fade would stop half-way.
-            {
-                use bezel::motion::AppExt as _;
-                cx.set_pause_when_inactive(false);
-                if cfg!(debug_assertions) && std::env::var_os("SIRIO_REDUCED_MOTION").is_some() {
-                    cx.set_reduce_motion(true);
-                }
+            if cfg!(debug_assertions) && std::env::var_os("SIRIO_REDUCED_MOTION").is_some() {
+                cx.set_reduce_motion(true);
             }
             sirio_theme::register_ui_fonts(cx).expect("Sirio fonts");
             Theme::init(cx);

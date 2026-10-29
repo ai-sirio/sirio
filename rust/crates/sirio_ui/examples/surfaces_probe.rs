@@ -591,15 +591,6 @@ fn main() {
     gpui_platform::application()
         .with_assets(sirio_ui::ely::AppAssets)
         .run(move |cx: &mut App| {
-            // The app's motion setup (`sirio`'s `init_motion`): bezel parks its animation clock
-            // while no window of the app is active, and a display with no window manager never
-            // activates one, so a row's hover fade would stop half-way and stay drawn that way
-            // after the pointer left it (what a wheel over a Settings page does to the row at the
-            // window's centre).
-            {
-                use bezel::motion::AppExt as _;
-                cx.set_pause_when_inactive(false);
-            }
             // The debug switch `Scripts/bezel-off-captures.sh` exports: snap every animation to
             // its rest state. It lands before `ely::init`, which copies the flag into Ely's theme
             // (a no-op in release builds), as in `sirio`'s `main`.

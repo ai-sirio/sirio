@@ -50,7 +50,7 @@ use crate::editor::{
     Conflict, Editor, Language, LoadStatus, Selection,
 };
 use crate::file_context_menu::{self, FileContextAction, FileContextFacts, ItemState};
-use crate::horizontal_scroll::{self, HorizontalBarState};
+use crate::horizontal_scroll::HorizontalBarState;
 use crate::loading;
 use crate::markdown_preview::{
     self, DiagramRequest, DiagramSettings, DiagramState, Diagrams, PlantUmlQueue,
@@ -1762,12 +1762,13 @@ impl Render for FileView {
                 }));
         }
         let theme = *Theme::get(cx);
-        // Production installs bezel alongside Sirio's theme. Some isolated
-        // shell fixtures set only the Sirio global, so establish the same
-        // invariant before anything below reaches for a bezel component
-        // (mirrors the sidebar's popup guard). The code editor reads Ely's
-        // theme instead, but the bezel primitives this view renders still
-        // need this one.
+        // Production installs bezel-theme's palette alongside Sirio's theme.
+        // Some isolated shell fixtures set only the Sirio global, so
+        // establish the same invariant before anything below reads a
+        // `bezel_theme::Theme` (mirrors the sidebar's popup guard). The code
+        // editor reads Ely's theme instead, but the Markdown preview and the
+        // modules this view renders that read bezel tokens still need this
+        // one.
         if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
@@ -2365,8 +2366,8 @@ fn render_content(
                             )),
                     ),
             )
-            .child(scrollbar("file-markdown-bar", &scroll.preview))
-            .child(horizontal_scrollbar(
+            .child(crate::scroll::bar("file-markdown-bar", &scroll.preview))
+            .child(crate::scroll::horizontal_bar(
                 "file-markdown-horizontal-bar",
                 &scroll.preview,
                 &scroll.preview_horizontal_bar,
@@ -2444,118 +2445,6 @@ fn render_content(
                 ),
         )
         .into_any_element()
-}
-
-/// Ely's vertical bar over one tracked surface, under a selector the
-/// drawn-frame tests can find. Ely's track carries no selector of its own, so
-/// the tag goes on a full-surface overlay that exists only while there is
-/// overflow to show, and that registers no hitbox, so the pointer still
-/// reaches the rows beneath it. `id` names the overlay and, with `-track`,
-/// the bar's own element.
-///
-/// While there is nothing to show, a canvas watches the handle instead:
-/// the bar can only draw from the geometry the *previous* frame left, so
-/// the frame that first lays the content out taller than its viewport
-/// would otherwise end with no bar and nothing asking for the frame that
-/// paints it (Preview has no caret blink to repaint on). The canvas
-/// prepaints after its sibling has, sees this frame's overflow, and asks
-/// for one more frame. Self-limiting: once the bar is up it is not here.
-/// While the bar is up,
-/// [`request_frame_when_geometry_moves`](crate::scroll::request_frame_when_geometry_moves)
-/// does the same for a viewport that resizes or content that grows or
-/// shrinks under it.
-pub(crate) fn scrollbar(id: impl Into<SharedString>, handle: &ScrollHandle) -> AnyElement {
-    let id: SharedString = id.into();
-    let has_overflow = |handle: &ScrollHandle| {
-        crate::scroll::thumb(
-            handle.bounds().size.height,
-            handle.max_offset().y,
-            handle.offset().y,
-            crate::scroll::MIN_THUMB,
-        )
-        .is_some()
-    };
-    if !has_overflow(handle) {
-        let watched = handle.clone();
-        return canvas(
-            move |_, window, _| {
-                if has_overflow(&watched) {
-                    window.request_animation_frame();
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full()
-        .into_any_element();
-    }
-    let selector = id.clone();
-    div()
-        .debug_selector(move || selector.to_string())
-        .absolute()
-        .top_0()
-        .right_0()
-        .bottom_0()
-        .left_0()
-        .child(ely_gpui_component::layout::Scrollbar::new(
-            SharedString::from(format!("{id}-track")),
-            handle,
-            gpui::Axis::Vertical,
-        ))
-        .child(crate::scroll::request_frame_when_geometry_moves(
-            handle,
-            gpui::Axis::Vertical,
-        ))
-        .into_any_element()
-}
-
-/// The horizontal counterpart of [`scrollbar`], for a surface wider than
-/// its viewport. The bar overlays the surface's own box, so it spans
-/// exactly the viewport it reports on and never reflows what is beneath
-/// it; a drag moves only X, leaving the vertical offset where it was.
-/// While there is nothing to show, the same canvas watch asks for the
-/// frame that paints the bar once the content first lays out wider.
-pub(crate) fn horizontal_scrollbar<V: 'static>(
-    id: &'static str,
-    handle: &ScrollHandle,
-    state: &HorizontalBarState,
-    entity: gpui::Entity<V>,
-) -> AnyElement {
-    let has_overflow = |handle: &ScrollHandle| {
-        crate::scroll::thumb(
-            handle.bounds().size.width,
-            handle.max_offset().x,
-            handle.offset().x,
-            crate::scroll::MIN_THUMB,
-        )
-        .is_some()
-    };
-    if !has_overflow(handle) {
-        let watched = handle.clone();
-        return canvas(
-            move |_, window, _| {
-                if has_overflow(&watched) {
-                    window.request_animation_frame();
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full()
-        .into_any_element();
-    }
-    let drag_handle = handle.clone();
-    horizontal_scroll::bar(
-        id,
-        handle.bounds().size.width,
-        handle.max_offset().x,
-        handle.offset().x,
-        state,
-        move |x, cx| {
-            drag_handle.set_offset(point(x, drag_handle.offset().y));
-            entity.update(cx, |_, cx| cx.notify());
-        },
-    )
 }
 
 /// One classified span of a source line, in bezel-syntax's own vocabulary.

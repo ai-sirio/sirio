@@ -80,12 +80,9 @@ gpui = { package = "bezel-gpui", version = "=0.3.8", default-features = false }
 # "font-kit" is not Linux-specific (unlike wayland/x11 above) so it stays unconditional here,
 # matching gpui_platform's pre-portability-wave feature set on every platform.
 gpui_platform = { package = "bezel-gpui-platform", version = "=0.3.8", default-features = false, features = ["font-kit"] }
-# Geist ships from rust/assets/fonts (sirio_theme::register_ui_fonts).
-bezel = { version = "=0.1.4", default-features = false }
 # Renamed: each package's lib target is a bare word (`theme`, `markdown`, `syntax`), so the
 # extern name carries the `bezel_` prefix and a path reads `bezel_theme::…`, `bezel_markdown::…`,
-# `bezel_syntax::…` (`bezel_theme` is the same crate as `bezel::theme`). Cf.
-# `gpui = { package = "bezel-gpui" }` above.
+# `bezel_syntax::…`. Cf. `gpui = { package = "bezel-gpui" }` above.
 bezel_theme = { version = "=0.1.4", package = "bezel-theme" }
 bezel_markdown = { version = "=0.1.4", package = "bezel-markdown" }
 bezel_syntax = { version = "=0.1.4", package = "bezel-syntax" }
@@ -142,11 +139,6 @@ bezel-gpui-linux = { path = "vendor/gpui_linux" }
 # copy presents through a bitblt swap chain instead; its alpha reaches the redirection surface and
 # the acrylic accent policy shows through. One function changed; see rust/vendor/README.md.
 bezel-gpui-windows = { path = "vendor/gpui_windows" }
-# Local override that lets the chat composer's text field paint no fill of its own, so the
-# composer's shell (Ely's `PromptInput::custom`) draws the one surface both read as, in the
-# theme's `surface` rather than the app-wide input fill. One builder added to `TextField`; see
-# rust/vendor/README.md.
-bezel-ui = { path = "vendor/bezel_ui" }
 # Local override that washes the first glyph of every soft-wrapped row of a selection. Upstream
 # 0.1.4 walks a range's rows through `position_for_index`, which places a wrap boundary at the end
 # of the row above, so each wrapped row's highlight began one glyph late — in a chat response and

@@ -185,10 +185,19 @@ naming the crate it came from. In `rust/crates/sirio_ui/src/` that is:
 - `chat/thought.rs`: `Takeover`;
 - `chat/transcript.rs`: `tracked_upper`, the day heading's letter tracking;
 - `combobox.rs`: the type-to-filter select, and the closed face of a select (`select_trigger`);
-- `sidebar/tree_keys.rs`: the tree's arrow-key bindings and cursor step.
+- `sidebar/tree_keys.rs`: the tree's arrow-key bindings and cursor step;
+- `settings/scaffold.rs`: the settings page skeleton (headline, section card, rows, meta line) and its
+  empty state and status dot.
+
+The vendored Ely tree (`rust/vendor/ely-gpui-component/`) holds ported `bezel-ui` code too, each piece
+marked by a comment naming bezel-ui 0.1.4's `src/input.rs`:
+
+- `src/forms/text/actions.rs`: the `DeleteWordRight`, `DeleteToLineStart` and `DeleteToLineEnd` handlers;
+- `src/forms/text/edit.rs`: `is_word`, the word unit that word motion and deletion share.
 
 Both crates are by clearloop ([crabtalk/bezel](https://github.com/crabtalk/bezel))
-and are licensed under the MIT licence below, copied from `rust/vendor/bezel_ui/LICENSE`. The second
+and are licensed under the MIT licence below, which is the `LICENSE` of the repository's `v0.1.4` tag
+(the published crates do not ship it). The second
 copyright line is bezel-ui's own, for the portions it extracted from
 zeronsh/comet; `bezel-motion`'s manifest names the same MIT licence and the same
 author.

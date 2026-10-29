@@ -1878,6 +1878,9 @@ GIT_MARKS_PY
   write_disk "$WT/marks.txt" "$RUN_DIR/marks-adopt.txt"
   expect_state dirty false
   expect_state git_marks "4:modified,9:modified,18:deleted,20:modified,29:added,30:added"
+  # The marks follow the disk and the text follows the buffer, and the buffer adopts a beat
+  # later: the end measured below must be the adopted text's, not the one it replaces.
+  expect_state text "$(escaped "$RUN_DIR/marks-adopt.txt")"
   echo "OK: an adopted change refreshes the marks"
 
   # A save changes the diff: a line typed at the end adds its mark once saved.

@@ -180,7 +180,7 @@ Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SE
 # --appearance dark|light (without it both), --no-build.
 Scripts/Tests/test-surfaces-probe.sh --xvfb   # -> prints "SURFACES PROBE OK (<n> frames, <g> gaps)"
 
-# Dragging a scrollbar thumb, for the three bars the app draws (file_view::scrollbar, the
+# Dragging a scrollbar thumb, for the three bars the app draws (scroll::bar, the
 # transcript's list_scrollbar, horizontal_scroll::bar), side by side in the `scroll_drag_probe`
 # example on a private Xvfb with lavapipe: a real xdotool press at each thumb's centre, 3 px, 1
 # px, then 120 px of travel; the thumb must have moved as far as the pointer did (4 px tolerance)

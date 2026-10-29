@@ -156,6 +156,7 @@ impl TextInput {
         self.replace(range, "", false, cx);
     }
 
+    // Ported from bezel-ui 0.1.4 `src/input.rs`.
     /// A non-empty selection is what goes; otherwise the unit up to the caret, as `delete_word_left`.
     fn delete_word_right(&mut self, _: &DeleteWordRight, _: &mut Window, cx: &mut Context<Self>) {
         let range = if self.selection.is_empty() {
@@ -166,6 +167,7 @@ impl TextInput {
         self.replace(range, "", false, cx);
     }
 
+    // Ported from bezel-ui 0.1.4 `src/input.rs`.
     /// The line is the logical one, between newlines, not a soft-wrapped row.
     fn delete_to_line_start(
         &mut self,
@@ -181,6 +183,7 @@ impl TextInput {
         self.replace(range, "", false, cx);
     }
 
+    // Ported from bezel-ui 0.1.4 `src/input.rs`.
     fn delete_to_line_end(&mut self, _: &DeleteToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
         let range = if self.selection.is_empty() {
             self.cursor()..edit::line_end(&self.text, self.cursor())

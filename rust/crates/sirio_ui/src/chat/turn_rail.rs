@@ -10,10 +10,10 @@
 //! the element itself is built from bezel's tokens in `Chat::render_turn_rail`.
 
 use crate::motion::{Fade, Painter, hover_listener, hover_t};
-use bezel_theme::{Theme as BezelTheme, ink};
-use bezel::ui::widgets::{ButtonStyle, Buttons};
+use bezel_theme::ink;
 use chrono::{DateTime, Local};
-use ely_gpui_component::theme::ActiveTheme as _;
+use ely_gpui_component::buttons::{Button, ButtonVariant};
+use ely_gpui_component::theme::{ActiveTheme as _, ControlSize};
 use gpui::{
     AnyElement, AnyView, App, Context, Empty, Entity, FontWeight, ListOffset, Pixels,
     SharedString, Stateful, Window, canvas, div, prelude::*, px,
@@ -137,7 +137,7 @@ pub(crate) const ACTIVE_TICK: Pixels = px(8.0);
 const HIT_ROW: Pixels = px(8.0);
 
 /// A tick's length `shown` of the way through the rail's reveal (`0..=1`,
-/// bezel's hover progress): the ticks grow out of the left edge as they
+/// `motion::hover_t`'s hover progress): the ticks grow out of the left edge as they
 /// fade in, and shrink back into it as they fade out.
 pub(crate) fn tick_width(is_active: bool, shown: f32) -> Pixels {
     let full = if is_active { ACTIVE_TICK } else { TICK };
@@ -188,7 +188,7 @@ impl TurnPreview {
     }
 
     /// The card and its contents.
-    pub(crate) fn card(&self, theme: &BezelTheme, cx: &App) -> Stateful<gpui::Div> {
+    pub(crate) fn card(&self, cx: &App) -> Stateful<gpui::Div> {
         // Wider and airier than a tooltip: this holds prose, not a label.
         menu_card("turn-preview-card", cx)
             .debug_selector(|| "turn-preview".into())
@@ -211,15 +211,19 @@ impl TurnPreview {
             )
             .when_some(self.rewind.clone(), |card, action| {
                 card.child(
-                    theme
-                        .button(action.label, ButtonStyle::Ghost, None)
-                        .id("turn-rewind-action")
+                    div()
+                        .flex_none()
                         .debug_selector(|| "turn-rewind-action".into())
-                        .on_click(move |_, _, cx| {
-                            action.chat.update(cx, |chat, cx| {
-                                chat.request_rewind_preview(action.entry_index, cx);
-                            });
-                        }),
+                        .child(
+                            Button::new("turn-rewind-action", action.label)
+                                .variant(ButtonVariant::Ghost)
+                                .size(ControlSize::Sm)
+                                .on_click(move |_, _, cx| {
+                                    action.chat.update(cx, |chat, cx| {
+                                        chat.request_rewind_preview(action.entry_index, cx);
+                                    });
+                                }),
+                        ),
                 )
             })
     }
@@ -227,8 +231,7 @@ impl TurnPreview {
 
 impl Render for TurnPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = BezelTheme::of(cx).clone();
-        self.card(&theme, cx)
+        self.card(cx)
     }
 }
 

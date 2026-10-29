@@ -16,6 +16,7 @@ pub(crate) fn next_grapheme(text: &str, offset: usize) -> usize {
         .unwrap_or(text.len())
 }
 
+// Ported from bezel-ui 0.1.4 `src/input.rs`.
 /// A word-bound segment counts as a word if it has any alphanumeric content; whitespace and
 /// punctuation runs are what word motion and deletion skip over. Bezel's text field moved and
 /// deleted by this unit (and so do macOS's native fields).

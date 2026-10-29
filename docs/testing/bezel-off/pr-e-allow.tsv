@@ -1,0 +1,26 @@
+# PR E's attribution file: the pixels the move of the Settings pages' buttons, strips, badge and empty-state icon (Task 13) to Ely
+# changes. Format and meaning: docs/testing/bezel-off.md ("The allow table"). Each why starts with the first cell of the spec's
+# inventory row that explains the change.
+#
+# Twelve frames change (the Agents, Git hosting accounts, Git hosting and Language servers pages, the last in three pages, each in dark
+# and light), and each row below is that frame's whole changed box, read from changed.tsv of the diff against PR D's after set. No
+# frame draws what Task 13 also changed (the status bar's usage meter, the clone form's progress bar, the turn preview's rewind
+# button), and removing the crates (Task 14) moves no pixel: the same set differs from Task 13's final head by nothing.
+surfaces-dark/settings-agents-dark	475	56	720	639	widgets::Buttons::button (the Agents page's Update, Update All, Refresh and Install: bezel's ButtonStyle buttons became Ely Buttons at Sm, Outline for Update and Update All, Ghost for Refresh, Primary for Install, so each is larger or smaller than before, Ghost has no border and the rows and the toolbar reflow; the box is the page's whole changed region, because the registry strip above the card is 6 px taller and everything below it shifts)
+surfaces-dark/settings-agents-dark	475	56	720	639	widgets::Status (the registry-error strip and the install-failure strip: bezel's warning_strip and error_strip became Ely Alerts, Warning and Danger, taller, with Ely's severity icon, no border and Base text; the registry strip's extra 6 px moves the card below it)
+surfaces-dark/settings-agents-dark	475	56	720	639	widgets::Content (the Installed badge on Claude Code: bezel's badge_active became Ely's Success Badge, with larger, bolder text on a squarer tint)
+surfaces-dark/settings-git-hosting-accounts-dark	475	224	720	305	widgets::Buttons::button (the forge and means pickers, Save token and Forget token: bezel's Ghost and Prominent buttons became Ely Ghost and Primary at Sm, so the rows are shorter, 5 and 14 px, and the picked option is Ely's Primary)
+surfaces-dark/settings-git-hosting-dark	824	194	22	22	ui::icons (the empty state's icon: Solar's magnifer became Lucide's search at 24 px; nothing else on the page moved)
+surfaces-dark/settings-language-servers-dark	476	151	718	682	widgets::Buttons::button (Install, Install guide and Offer again: bezel's buttons became Ely Primary at Sm for Install and Outline at Sm for the other two)
+surfaces-dark/settings-language-servers-dark	476	151	718	682	widgets::Status (the clangd install-failure strip: bezel's error_strip became an Ely Danger Alert, 1 px taller, with Ely's severity icon and no border)
+surfaces-dark/settings-language-servers-p2-dark	476	41	718	779	widgets::Buttons::button (the same buttons, further down the list)
+surfaces-dark/settings-language-servers-p3-dark	1015	41	159	759	widgets::Buttons::button (the same buttons, the tail of the list)
+surfaces-light/settings-agents-light	475	56	720	639	widgets::Buttons::button (the Agents page's Update, Update All, Refresh and Install: bezel's ButtonStyle buttons became Ely Buttons at Sm, Outline for Update and Update All, Ghost for Refresh, Primary for Install, so each is larger or smaller than before, Ghost has no border and the rows and the toolbar reflow; the box is the page's whole changed region, because the registry strip above the card is 6 px taller and everything below it shifts)
+surfaces-light/settings-agents-light	475	56	720	639	widgets::Status (the registry-error strip and the install-failure strip: bezel's warning_strip and error_strip became Ely Alerts, Warning and Danger, taller, with Ely's severity icon, no border and Base text; the registry strip's extra 6 px moves the card below it)
+surfaces-light/settings-agents-light	475	56	720	639	widgets::Content (the Installed badge on Claude Code: bezel's badge_active became Ely's Success Badge, with larger, bolder text on a squarer tint)
+surfaces-light/settings-git-hosting-accounts-light	475	224	720	305	widgets::Buttons::button (the forge and means pickers, Save token and Forget token: bezel's Ghost and Prominent buttons became Ely Ghost and Primary at Sm, so the rows are shorter, 5 and 14 px, and the picked option is Ely's Primary)
+surfaces-light/settings-git-hosting-light	824	194	22	22	ui::icons (the empty state's icon: Solar's magnifer became Lucide's search at 24 px; nothing else on the page moved)
+surfaces-light/settings-language-servers-light	476	151	718	682	widgets::Buttons::button (Install, Install guide and Offer again: bezel's buttons became Ely Primary at Sm for Install and Outline at Sm for the other two)
+surfaces-light/settings-language-servers-light	476	151	718	682	widgets::Status (the clangd install-failure strip: bezel's error_strip became an Ely Danger Alert, 1 px taller, with Ely's severity icon and no border)
+surfaces-light/settings-language-servers-p2-light	476	41	718	779	widgets::Buttons::button (the same buttons, further down the list)
+surfaces-light/settings-language-servers-p3-light	1015	41	159	759	widgets::Buttons::button (the same buttons, the tail of the list)

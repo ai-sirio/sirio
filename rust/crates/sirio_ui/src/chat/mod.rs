@@ -2169,8 +2169,8 @@ pub struct Chat {
     /// and none of it touches the composer's draft.
     model_search_field: Entity<TextInput>,
     streaming: bool,
-    /// Retired with the rotating streaming border: the shared Bezel clock
-    /// drives the reasoning header now, so this stays permanently `false`.
+    /// Retired with the rotating streaming border: Sirio's `crate::motion`
+    /// clock drives the reasoning header now, so this stays permanently `false`.
     /// Kept as a regression guard — a repaint timer reappearing here would
     /// mean a Chat-owned animation crept back in. Read only by that guard
     /// test, hence the lint allowance.
@@ -2239,7 +2239,7 @@ pub struct Chat {
     transcript_focus: FocusHandle,
     context_usage: Option<ContextUsage>,
     list_state: ListState,
-    /// The transcript scrollbar's grab state (bezel's bar over the list).
+    /// The transcript scrollbar's grab state (Sirio's own bar over the list).
     transcript_bar: list_scroll::ListScrollbarState,
     transcript_selection: Option<TranscriptSelection>,
     transcript_dragging: bool,
@@ -7213,7 +7213,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                 )
             })
 
-            // bezel's scrollbar over the list, on the root's right edge and
+            // Sirio's own scrollbar over the list, on the root's right edge and
             // as tall as the list's viewport (the transcript's own top
             // padding below the root's top edge).
             .child(list_scroll::list_scrollbar(
@@ -7905,9 +7905,9 @@ mod tests {
                 trace.matches("\tevent\tnotify.Chat.acp_thought\t").count(),
                 2
             );
-            // Ely indicators use GPUI animations, not Bezel's Painter lease.
-            // Keep observing real Bezel wakes when present; the redraw/content
-            // contract below does not require that retired indicator engine.
+            // Ely indicators use GPUI animations, not a Painter lease; the
+            // redraw/content contract below does not depend on an indicator
+            // engine.
             assert_eq!(
                 trace
                     .matches("\tevent\trequest_frame.Chat.thought_follow\t")
@@ -7949,10 +7949,6 @@ mod tests {
                 AcpEvent::ThoughtChunk("private-fixture-content\n".repeat(100)),
                 cx,
             );
-        });
-        cx.update(|_, cx| {
-            use bezel::motion::AppExt as _;
-            cx.set_pause_when_inactive(false);
         });
         refresh_frame(cx);
         cx.executor().advance_clock(Duration::from_millis(40));
@@ -9322,7 +9318,7 @@ two"
         });
     }
 
-    /// The transcript's scrollbar: bezel's bar geometry laid over the list.
+    /// The transcript's scrollbar: `list_scroll`'s bar laid over the list.
     /// Nothing is drawn while the content fits; once it overflows the thumb
     /// hugs the root's right edge and travels with the list.
     #[gpui::test]
@@ -15042,7 +15038,7 @@ two"
         assert!(!is_expanded(&chat, cx), "clicking again collapses it back");
     }
 
-    /// A call is one `step_row`: icon and verb from its kind, the title as
+    /// A call is one row: icon and verb from its kind, the title as
     /// the truncating detail, the duration (or the status word) pinned right,
     /// and a chevron only when there is something to open.
     #[gpui::test]
@@ -17254,9 +17250,11 @@ two"
         cx.run_until_parked();
     }
 
-    /// Chooses a row of the composer's context menu and lets the menu leave:
-    /// it exits through bezel's animation, staying mounted — and over the
-    /// pointer — until a timer the test clock has to be moved past.
+    /// Chooses a row of the composer's context menu and lets the menu leave.
+    /// A closing menu draws nothing (`render_composer_context_menu` returns an
+    /// empty element for it), so it is out of the frame and off the pointer at
+    /// once; the clock is still moved past the exit timer so the popup state
+    /// itself is reaped.
     fn choose_composer_context_item(cx: &mut VisualTestContext, selector: &'static str) {
         let row = cx
             .debug_bounds(selector)
@@ -17302,7 +17300,7 @@ two"
             .debug_bounds("composer-context-menu")
             .expect("right-click on the composer draws its context menu");
         // At the pointer horizontally; vertically the composer sits at the
-        // window's bottom edge, so bezel's window snapping may lift the
+        // window's bottom edge, so the popup's snapping inside the window may lift the
         // menu up over the pointer rather than hang it below.
         assert!(
             (menu.left() - click.x).abs() <= px(8.0)

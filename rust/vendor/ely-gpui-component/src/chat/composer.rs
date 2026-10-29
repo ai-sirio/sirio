@@ -517,9 +517,9 @@ impl RenderOnce for PromptInput {
                 (true, false) => colors.focus,
                 (false, false) => colors.border_strong,
             })
-            // A host's editor paints no fill of its own (bezel's
-            // `with_transparent_fill`); the shell's `surface` is the one
-            // surface both read as, the same card fill as the rest of the theme.
+            // A host's editor paints no fill of its own (Sirio's is Ely's raw
+            // `TextInput`); the shell's `surface` is the one surface both
+            // read as, the same card fill as the rest of the theme.
             .bg(colors.surface)
             // Text below inherits this: attachment names and the like carry no
             // colour of their own, and gpui's default is black.

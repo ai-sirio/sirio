@@ -46,7 +46,7 @@ The Rust workspace is 25 crates under `rust/crates/`. Leaves have no local depen
 | Crate | Role |
 |-------|------|
 | `sirio` | The app: window shell, tabs/panes, control-socket dispatch, tray, command palette |
-| `sirio_ui` | Reusable UI surfaces (sidebar, tab bar, chat, changes, editor, browser, settings), built on [bezel](https://github.com/crabtalk/bezel) |
+| `sirio_ui` | Reusable UI surfaces (sidebar, tab bar, chat, changes, editor, browser, settings), built on [Ely](https://github.com/ZacharyZhang-NY/Ely-GPUI-Components) and Sirio's own `motion`, `scroll`, `popup`, `combobox` and `settings::scaffold` modules |
 | `sirio_terminal` | Terminal panes on `libghostty-vt`, PTY handling via `portable-pty`, splits |
 | `sirio_activity` | Layered agent-activity detection (hooks / title / content / process), no GPUI dependency |
 | `sirio_control` | `ControlServer` (unix socket) + `PaneRegistry` + the `sirioctl` CLI |
@@ -58,7 +58,7 @@ The Rust workspace is 25 crates under `rust/crates/`. Leaves have no local depen
 | `sirio_forge` | GitHub pull requests and GitLab merge requests over one GraphQL layer, through `gh` / `glab` or a personal token |
 | `sirio_persistence` | SQLite (`rusqlite`) schema, migrations, records |
 | `sirio_project` | Domain model of projects, worktrees and tabs, discovered from disk |
-| `sirio_theme` | Theme tokens derived from `bezel::theme` (see `docs/THEME-PROVENANCE.md`) |
+| `sirio_theme` | Theme tokens in Ely's palette vocabulary, with `bezel-theme` derived for what still reads it (see `docs/THEME-PROVENANCE.md`) |
 | `sirio_markdown` | Markdown parsing/rendering for the editor and chat |
 | `sirio_diagram` | Mermaid and PlantUML source to SVG for the Markdown preview, with no GPUI dependency |
 | `sirio_syntax` | The grammars Sirio highlights beyond the seven `bezel-syntax` carries |
@@ -78,7 +78,7 @@ The Rust workspace is 25 crates under `rust/crates/`. Leaves have no local depen
 1. **Tests first.** New logic needs `#[test]` coverage before implementation.
 2. **Respect the crate boundaries.** Run `cargo build -p <crate>` to check a crate compiles in isolation before assuming a change is layered correctly.
 3. **Keep pure logic pure.** State machines, parsers, and merge/filter logic that don't need a window belong in a crate with no `gpui` dependency (`sirio_activity` is the pattern) — that is what keeps them unit-testable without spinning up a window.
-4. **UI comes from bezel.** Every primitive in `sirio_ui` is built from bezel before anything is hand-rolled; a bezel bump is a visual change to review, not a dependency chore.
+4. **UI comes from Ely.** Every primitive in `sirio_ui` is built from Ely, or from Sirio's own `motion`, `scroll`, `popup`, `combobox` and `settings::scaffold` modules, before anything is hand-rolled; [gpui-component](https://github.com/longbridge/gpui-component) is the secondary structural reference where Ely has no equivalent. An Ely bump is a visual change to review, not a dependency chore.
 5. **Commit messages** follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`, lower-case imperative subject.
 6. **Verification gate.** `Scripts/ci.sh` must print `CI OK` before you open a PR.
 

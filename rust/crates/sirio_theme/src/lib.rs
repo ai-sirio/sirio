@@ -144,7 +144,7 @@ pub struct SirioColors {
     /// and the neutral rail down a task, edit or tool card.
     pub border_strong: Hsla,
     /// Keyboard-focus ring on a text field — bezel's `ring`, the translucent
-    /// hairline every bezel input, select and control lights up with. A veil
+    /// hairline bezel's inputs, selects and controls lit up with. A veil
     /// on the surface's own tone (white on dark, black on light), never the
     /// body text colour: that painted an opaque white frame on the dark theme.
     pub ring: Hsla,

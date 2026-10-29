@@ -197,7 +197,7 @@ line per rectangle; the table says what each category is and what it blinds.
 | Identity time | `chat-ui-default/identity/*` | The same `HH:MM` in the identity probe's own window (820x700). | 52 x 18 px. |
 | Sidebar session dots | `chat-ui-default/scenarios/*` | The green connected indicators on the session's sidebar row show in some runs and not in others: a timing race of the fixture session, not a clock (seen in `activity` and `death-recovery/recovered`). | 32 x 26 px at the right end of the session's sidebar row. |
 | Scrollbar thumb | `scenarios/long-history/frames/scrolled-up*` | After a turn completes the transcript scrollbar's thumb follows the transcript's estimated total height, so it sits about 7 px higher in some runs while the visible content is identical (a run-to-run accident, not a clock; found on held-out run 7). | The track column only: 10 x 540 px at x 1133, y 77. |
-| Agents toolbar and subtitle | `surfaces-*/settings-agents-[dl]*` (the first page only) | The toolbar stamps `Refreshed HH:MM:SS` with the wall clock when the page is built, and Geist draws digits at different widths (`12:01:57` is 5 px narrower than `12:02:50`). The toolbar is right-aligned, so the stamp's width pushes the search field left (x 683..686 over 41 runs: 15 at random times and 26 more with `TZ` set so that every hour 00..23 was drawn) and narrows the header's left column, whose subtitle then wraps differently (3 of 15 runs). Nothing below y 170 or right of the stamp moved. | Two rectangles: the stamp and the search field, x 668..1022, y 54..94; and the subtitle block, x 475..687, y 88..170. The `Agents 5` title row, the `Update All` and `Refresh` buttons and everything below stay visible. |
+| Agents toolbar and subtitle | `surfaces-*/settings-agents-[dl]*` (the first page only) | The toolbar stamps `Refreshed HH:MM:SS` with the wall clock when the page is built, and Geist draws digits at different widths (`12:01:57` is 5 px narrower than `12:02:50`). The toolbar is right-aligned, so the stamp's width pushes the search field left (x 683..686 over 41 runs: 15 at random times and 26 more with `TZ` set so that every hour 00..23 was drawn) and narrows the header's left column, whose subtitle then wraps differently (3 of 15 runs). Nothing below y 170 or right of the stamp moved. | Two rectangles: the stamp and the search field, x 668..1032, y 54..94 (x 1022 until PR E: Ely's narrower Update All moved the stamp's last digit to x 1028, outside the old rectangle, and two capture runs then differed there by 48 and 50 pixels); and the subtitle block, x 475..687, y 88..170. The `Agents 5` title row, the `Update All` and `Refresh` buttons and everything below stay visible. |
 
 No caret, spinner, orb or trace-timer mask was needed: with `SIRIO_REDUCED_MOTION=1` those draw
 their rest state. A mask is for a clock or a run-to-run accident, sized to the whole element; a
@@ -272,8 +272,8 @@ Which clock that is changed in PR B. Until Task 6 the bloom drew on bezel-motion
 runs, and 40 to 141 differing pixels per pair with it off in every run. Since Task 6 the bloom is
 drawn on `sirio_ui::motion`'s clock, a port that has no pause switch: it keeps turning while no
 window of the app is active, because an agent runs for minutes while the user works elsewhere and
-the bloom is what says it is still going. (`main.rs` still sets bezel's flag, for the clock that
-bezel's menu rows and scrollbars lease, until Task 14 removes the call.) The red proof is now the
+the bloom is what says it is still going. (`main.rs` set bezel's flag too, for the clock that
+bezel's menu rows and scrollbars leased, until PR E's last task removed the call: no widget leases that clock any more.) The red proof is now the
 gated lease: `motion::lease` made to return early when `cx.active_window().is_none()`, which is
 what bezel's pause did. Run in Task 6 with `--only unfocused_spinner`, the unfocused crops were
 `[0, 0, 0]` and the focused control `[90, 120, 102]`, and the run failed with the "froze while
@@ -890,4 +890,275 @@ Enzo's verdict: approved on 2026-10-27, on the page built from these captures.
 
 ### PR E: Settings, then the crates out (`refactor/bezel-off-e`)
 
-To be filled in by Task 14.
+PR E draws every button, strip, badge and the empty state's icon of the Settings pages with Ely
+(Task 13), then deletes bezel's UI crates (Task 14). It changes pixels in 12 of the 94 frames, all of
+them Settings pages (Agents, Git hosting accounts, Git hosting and Language servers in three pages,
+each in dark and light), attributed in `docs/testing/bezel-off/pr-e-allow.tsv`. Removing the crates
+changes none: the set captured after it differs from the set Task 13 ended on by nothing under the masks.
+
+**Base and head.** The "before" set is `artifacts/bezel-off/pr-d/after`, PR D's after set, captured on
+the tree of `89bbd118`. PR E's git base is `b4f6de7a`, and `git diff 89bbd118 b4f6de7a -- rust/ Scripts/`
+is five files and no drawing: the comments of `scroll_drag_probe.rs` and of `test-scroll-drag-probe.sh`,
+an import-only change in `composer_view.rs` and `sidebar/sessions.rs`, and in `scroll.rs` one module-doc
+sentence and one test. So the "before" frames are the frames of PR E's base and the base was not
+captured again. The "after" set was captured on the tree of `474f35e8`, PR E's last code commit before the final review's cleanup, which
+draws nothing differently (below; the working tree was clean). PR E's code is three commits: the Settings widgets (`10894f80`), their sizes and
+variants by role (`39d871e7`: a bordered bezel Ghost is Ely's Outline, every Settings button and the
+rewind button are `Sm`) and the removal (`474f35e8`). The commits after the capture change no pixel: this
+page, the allow file, one mask and one wait line in the editor E2E (both below).
+
+The final review's fix wave adds four more commits on top, with no drawing change and no new capture: `45f8fc6c` moves the generic
+scrollbars into `scroll` (M1), `616cc029` drops the dead popup and loading helpers (M2, M3), `72e035c4` rewords three comments,
+marks the ported key handlers and adds the owed hand checks (M4, M7, M5, M6), `80208ec9` writes this page's check results, and a last commit settles the re-review's page and header nits.
+The rows of the table below marked "fix wave" ran on `72e035c4`, whose `rust/` differs from `616cc029`'s by comment lines only
+(`git diff 616cc029 72e035c4 -- rust/` has no other line).
+
+**What PR E moved.**
+
+| Task | Where | What |
+| --- | --- | --- |
+| 13 | `settings/scaffold.rs` (new, ported from bezel-ui) | The settings page skeleton (`page_header`, `page_subtitle`, `group_box`, `card_row`, `row_title`, `meta_line`), `card_row_hover`, `status_dot`, and `empty_state`, whose icon is Ely's `Search` at 24 px. Same constants as bezel's. |
+| 13 | `settings/agents_page.rs`, `settings/language_servers_page.rs`, `settings/git_hosting_page.rs` | Update, Update All, Install guide and Offer again (bordered bezel Ghost) are Ely `Outline` at `Sm`; Refresh, Forget token and the unselected pickers are `Ghost`; Install and Save token and the selected picker are `Primary`. "Installed" is Ely's Success `Badge`. The install-failure and registry-error strips are Ely `Alert`s (Danger and Warning) with selectable text. |
+| 13 | `loading::progress` | Ely's `ProgressBar` (2 px) centred in the old 4 px slot, one id per bar because the bar keys its glide on it. Callers: the clone form and the status bar's usage meter (one id per provider). |
+| 13 | `chat/turn_rail.rs` | The turn preview's rewind action is an Ely `Ghost` button at `Sm`. |
+| 13 | `ely.rs` | `AppAssets` serves only `ely/` and `sirio-chat/`; bezel's icon fallback is gone (no path was served only by it). |
+| 13 | `chat/tool_calls.rs` | `the_selectable_output_well_lays_out_like_bezels` is deleted with the bezel widget it compared against; the text-selection E2E reads 32 tests where it read 33 (its floor is 30). |
+| 14 | `rust/Cargo.toml`, `crates/sirio`, `crates/sirio_ui`, `rust/vendor/bezel_ui/` | The `bezel` dependency, the `[patch.crates-io] bezel-ui` override and the vendored crate are deleted. `Cargo.lock` loses `bezel`, `bezel-agent`, `bezel-motion` and `bezel-ui` and the two `bezel` edges: 48 deletions, no addition. |
+| 14 | `sirio/src/main.rs`, a chat test, `scroll_drag_probe.rs`, `surfaces_probe.rs` | `init_motion` and the three `set_pause_when_inactive(false)` calls go. They set the pause flag of bezel's clock, which nothing leases any more; `sirio_ui::motion`'s clock has no such flag and keeps turning in an unfocused window, which `unfocused_spinner` checks (below). |
+| 14 | `sirio/src/main.rs` | The comment above `with_assets` names both prefixes `AppAssets` serves through `svg().path(..)`, Ely's icons (`ely/…`) and the chat's agent marks (`sirio-chat/…`, `chat/identity.rs`), which is why the asset source stays. |
+| 14 | docs | `CLAUDE.md`, `README.md`, `docs/agents/architecture/crates.md`, `rust/vendor/README.md` (the `bezel_ui` section goes), `LOCAL-CHANGES.md` and `THIRD_PARTY_NOTICES.md` (the MIT text stands on its own: it no longer points at the deleted `LICENSE`). |
+| fix wave | `scroll.rs`, `file_view.rs` and the callers of its bars, `popup.rs`, `loading.rs`, three comments, `forms/text/` in the vendored Ely tree, `THIRD_PARTY_NOTICES.md` | A no-drawing cleanup from the final review (M1, M2, M3, M4, M7); no colour, size or layout changes, so no capture was taken. M1: `scroll::bar` and `scroll::horizontal_bar` are `file_view::scrollbar` and `horizontal_scrollbar`, moved with their bodies unchanged and every caller re-pointed; the two overflow watchers differ in axis (height, `max_offset().y` and `offset().y` against width, `.x` and `.x`), so both bodies stay. M2: `Popup::as_open` is deleted. M3: `loading::bezel_theme`, `redacted_rows`' two unused parameters and `skeleton_rows`' `theme` are deleted (its `id` stays, as `_id`, as in `thinking_indicator` and `indeterminate`). M4: three comments that described code that is gone are reworded. M7: the ported key handlers and `is_word` in the vendored Ely tree carry a provenance comment, and `THIRD_PARTY_NOTICES.md` lists them. M5 and M6 are this page's own (below). |
+
+What still reaches bezel after PR E is the engine and three crates: `bezel-gpui`, `bezel-theme`,
+`bezel-markdown` (vendored, two changes) and `bezel-syntax`. `grep -rn 'bezel::' rust/crates` prints nothing.
+
+**Reproduce.**
+
+```bash
+# The before set is PR D's after set, already on disk (see above). The after set. On a busy machine start
+# your own Xvfb (1600x1000x24, a display number nobody else uses) and pass --display instead of --xvfb.
+TMPDIR=$HOME/.cache/sirio-e2e-tmp Scripts/bezel-off-captures.sh --xvfb --out-dir "$PWD/artifacts/bezel-off/pr-e/after"
+
+# The diff against PR D's set, with this PR's attribution file.
+Scripts/capture-diff.py artifacts/bezel-off/pr-d/after/frames artifacts/bezel-off/pr-e/after/frames \
+  --out "$PWD/artifacts/bezel-off/pr-e/diff" --masks Scripts/capture-masks.tsv \
+  --allow docs/testing/bezel-off/pr-e-allow.tsv
+
+# The diff against the set Task 13 ended on (artifacts/bezel-off/pr-e/task-13-r1, captured at 39d871e7):
+# what removing the crates changed.
+Scripts/capture-diff.py artifacts/bezel-off/pr-e/task-13-r1/frames artifacts/bezel-off/pr-e/after/frames \
+  --out "$PWD/artifacts/bezel-off/pr-e/diff-vs-task-13-r1" --masks Scripts/capture-masks.tsv
+
+# The same pairs with no masks, and the masks plus this PR's rows as the allow table.
+cat Scripts/capture-masks.tsv docs/testing/bezel-off/pr-e-allow.tsv > artifacts/bezel-off/pr-e/allow-unmasked.tsv
+Scripts/capture-diff.py artifacts/bezel-off/pr-d/after/frames artifacts/bezel-off/pr-e/after/frames \
+  --out "$PWD/artifacts/bezel-off/pr-e/diff-unmasked" --allow artifacts/bezel-off/pr-e/allow-unmasked.tsv
+Scripts/capture-diff.py artifacts/bezel-off/pr-e/task-13-r1/frames artifacts/bezel-off/pr-e/after/frames \
+  --out "$PWD/artifacts/bezel-off/pr-e/diff-vs-task-13-r1-unmasked" --allow artifacts/bezel-off/pr-e/allow-unmasked.tsv
+
+# The probes and E2Es this PR's code is held to (Xvfb :N is any free display, 1600x1000x24, with lavapipe:
+# VK_ICD_FILENAMES and VK_DRIVER_FILES set to /usr/share/vulkan/icd.d/lvp_icd.json; TMPDIR as above).
+Scripts/Tests/test-ely-chat-ui-e2e.py --display :N --cpu-ceiling 413.1 --out-dir "$PWD/artifacts/bezel-off/pr-e/step3/chat-e2e"
+Scripts/Tests/test-surfaces-probe.sh --xvfb
+Scripts/Tests/test-scroll-drag-probe.sh --xvfb
+Scripts/Tests/test-text-selection-e2e.sh
+Scripts/Tests/test-editor-e2e.sh --xvfb
+Scripts/Tests/test-markdown-selection-probe.sh --xvfb
+Scripts/Tests/test-markdown-scroll-probe.sh --xvfb
+Scripts/Tests/test-chat-session-panel-e2e.sh --state-only
+Scripts/Tests/test-open-list-e2e.sh --display :N
+Scripts/Tests/test-theme-sweep.sh --display :N --out-dir "$PWD/artifacts/bezel-off/pr-e/step3/theme-sweep"
+
+(cd rust && cargo build --offline --workspace --all-targets && cargo nextest run -p sirio_ui && cargo nextest run -p sirio \
+  && cargo nextest run -p sirio_terminal && cargo nextest run -p sirio_syntax \
+  && cargo nextest run -p ely-gpui-component --features test-support)
+```
+
+**The result.** `bezel-off-captures.sh` printed `CAPTURES OK: artifacts/bezel-off/pr-e/after (94 frames)`
+on its first run (the chat E2E, the sweep, the Changes E2E and both surfaces probes passed inside it). The
+masked diff against PR D's set printed `compared 94 frames present on both sides (94 before, 94 after),
+tolerance 1` and `CAPTURE DIFF OK (12 changed, all attributed)`. The same set against Task 13's final
+head printed `CAPTURE DIFF IDENTICAL`: removing the crates, and `init_motion` with them, moved no pixel
+under a mask. The artifacts are under `artifacts/bezel-off/pr-e/` (gitignored): `after/`, `diff/`,
+`diff-unmasked/`, `diff-vs-task-13-r1/`, `diff-vs-task-13-r1-unmasked/`, `crops/`, `hand/`, `step3/` (every check's log and out-dir) and
+Task 13's own sets and diffs (`task-13*`).
+
+The first masked diff against Task 13's head was not identical: `settings-agents-{dark,light}` differed by 48
+and 50 pixels at x 1022..1028, y 65..75, the last digit of the toolbar's `Refreshed HH:MM:SS` stamp (`14:14:55`
+in one run and `15:18:11` in the other). That is the stamp the Agents toolbar mask exists for, but the mask
+ended at x 1022 and Ely's narrower `Update All` moved the stamp's right edge to x 1028. The mask is widened to
+x 1032 (below), which is the only change to `Scripts/capture-masks.tsv`. Nothing else differed.
+
+| Check | Result |
+| --- | --- |
+| `cargo build --offline --workspace --all-targets` | exit 0 on the removal commit's tree; 135 warning lines, the count PR D recorded, none at a line Task 14 edited. Fix wave, on `72e035c4`: exit 0, 135 warning lines again, none at a line the fix wave edited (the two in files it touched, `chat/mod.rs:262` and `right_panel/history.rs:389`, are old, unused-code warnings on lines it did not edit) |
+| `cargo tree --offline -i bezel-ui`, `-i bezel-motion`, `-i bezel-agent`, `-i bezel-editor`, `-i bezel` | each: `package ID specification ... did not match any packages`. `bezel-markdown` and `bezel-syntax` still resolve and take none of them. `cargo tree -e features -p sirio` before and after differs by the lines of the four removed crates and nothing else: no kept crate lost a feature |
+| `grep -E '^name = "bezel(-ui\|-motion\|-agent\|-editor)?"$' rust/Cargo.lock`; `grep -rn 'bezel::' rust/crates`; `test ! -e rust/vendor/bezel_ui`; `grep -nE '^(bezel\|bezel-editor) *=' rust/Cargo.toml` | each prints nothing (the `test` exits 0); the same on `72e035c4` |
+| `git diff rust/Cargo.lock` | 48 deletions, 0 insertions: four `[[package]]` blocks and the two `"bezel"` dependency lines; no version or source changed |
+| `cargo nextest run -p sirio_ui` | 1420 run, 1420 passed, 0 skipped; against the base's 1420 the sorted `cargo nextest list` is identical. Fix wave, on `72e035c4`: 1420 run, 1420 passed, 0 skipped, and the sorted list is identical to `7093a128`'s (recorded before the first edit) |
+| `cargo nextest run -p sirio` | 531 run, 531 passed; the list is identical. Fix wave, on `72e035c4`: 531 run, 531 passed, 0 skipped, and the sorted list is identical to `7093a128`'s |
+| `cargo nextest run -p sirio_terminal` | 143 run, 143 passed, 1 skipped; the list is identical |
+| `cargo nextest run -p sirio_syntax` | 13 run, 13 passed; the list is identical |
+| `cargo nextest run -p ely-gpui-component --features test-support` | 144 run, 144 passed; the list is identical |
+| `Scripts/Tests/test-ely-chat-ui-e2e.py --display :151 --cpu-ceiling 413.1` (no `--only`) | `ELY CHAT UI E2E OK`, with the effort scenarios, the identity lane and `unfocused_spinner` in it; `unfocused-spinner CPU 318.4% of one core over 10 s (load average 7.88 12.29 12.71)`, against PR D's 313.3%, the base of 329.7% and the ceiling of 413.1%, and the bloom's pixels differ between frames 1-2, 2-3 and 1-3 (`[132, 108, 135]`): it turns in an unfocused window with `init_motion` gone. Fix wave, on `72e035c4`: `--display :185`, `ELY CHAT UI E2E OK`, all 20 scenarios `passed` in `summary.json`; `unfocused-spinner CPU 298.1% of one core over 10 s (load average 7.79 15.83 25.27)` and the bloom's pixels `[106, 137, 132]` |
+| `Scripts/Tests/test-surfaces-probe.sh --xvfb` | `SURFACES PROBE OK (34 frames, 3 gaps)` |
+| `Scripts/Tests/test-scroll-drag-probe.sh --xvfb` | `SCROLL DRAG PROBE OK (3 bars)`: each bar's thumb moved 120 px for 120 px of pointer (tolerance 4) and ends flush after +2000 px. Fix wave, on `72e035c4`: `SCROLL DRAG PROBE OK (3 bars)`, the same 120 px for each of the three bars and flush ends (the first five runs failed at the first capture, under load: see below) |
+| `Scripts/Tests/test-text-selection-e2e.sh` | `TEXT SELECTION E2E OK (32 tests; ...)` (its floor is 30; 33 before Task 13 deleted one test) |
+| `Scripts/Tests/test-markdown-selection-probe.sh --xvfb`, `test-markdown-scroll-probe.sh --xvfb` | `MARKDOWN SELECTION PROBE OK`, `MARKDOWN SCROLL PROBE OK`. Fix wave, on `72e035c4`, the scroll probe only: `MARKDOWN SCROLL PROBE OK` |
+| `Scripts/Tests/test-chat-session-panel-e2e.sh --state-only` | `CHAT SESSION PANEL E2E OK (14 scenarios, 7 skipped, appearance default, state-only 1, window default)` |
+| `Scripts/Tests/test-open-list-e2e.sh --display :151` | `OPEN LIST E2E OK` |
+| `Scripts/Tests/test-theme-sweep.sh --display :151 --out-dir <checkout>/artifacts/bezel-off/pr-e/step3/theme-sweep` | `THEME SWEEP OK: <checkout>/artifacts/bezel-off/pr-e/step3/theme-sweep` |
+| `Scripts/Tests/test-editor-e2e.sh --xvfb` | `EDITOR E2E OK (47 scenarios, appearance dark, state-only 0)`, with the script's one-line wait that PR E adds (below). Without it the run was red: `FAIL: git_marks: git_marks expected ...,30:added,41:added, got ...,30:added,40:modified,41:modified`, twice on this tree and once each on `39d871e7` and on `b4f6de7a` (PR D's head; PR D's page records `EDITOR E2E OK (47 scenarios ...)` on PR D's tree), so no code commit of this PR causes it. It passed alone (`--only git_marks`) and after most scenarios, and failed after `context_rows`. Cause, from a debug print of the state before the assertion: the script measured the end of the adopted text from a state whose `git_marks` already follow the disk but whose `text` is still the buffer it replaces (`end=328`, the adopted text is 331 bytes), so `appended\n` landed 3 bytes early, in `line ` / `40` (the disk ended `line 39\nline appended\n40\n`). The marks come from `git diff` of the disk and lead the buffer's adoption by a beat; the user sees the adopted text either way. The added line, `expect_state text "$(escaped "$RUN_DIR/marks-adopt.txt")"` after the marks check, waits for the adopted text before measuring its end |
+
+Every probe and E2E ran one at a time on a private Xvfb (`:151`, `1600x1000x24`, lavapipe), never beside
+nextest or the capture run. The editor E2E's runs and the debug print are under `artifacts/bezel-off/pr-e/step3/`.
+
+The fix wave's runs were one at a time too, never beside nextest: the two probes with their own `--xvfb` display (`:90`; all but the
+first scroll drag run with `--no-build`, on binaries built from `72e035c4`'s tree) and the chat E2E on a private `:185`
+(`1600x1000x24`, lavapipe), stopped by its PID. Their logs and out-dirs are under `artifacts/bezel-off/pr-e/step3-final/`.
+
+The scroll drag probe's first five runs (`scroll-drag-probe-fail-1` to `-fail-5`) all failed the same way, at the first capture:
+`bar 1: no thumb in .../before.png (every pixel of 1x600+291+0 is (0, 0, 0))`. The window was black. The machine's load average was
+20 to 23 over one minute and 31 to 35 over five (other worktrees' builds), and a hand run of the same binary on a private display painted its first frame between 4.5 and
+6 s after the start, where the script captures 2.5 s after it finds the window. A copy of the script with that wait lengthened
+to 12 s (and its `ROOT=` pointed at the checkout, so the copy could run from elsewhere) (`step3-final/scroll-drag-probe-slow*`) printed `SCROLL DRAG PROBE OK (3 bars)`, and so did the stock script, unchanged, at a
+load average of 5 (`scroll-drag-probe-ok-stock*`): the figures in the row above. The failed runs show a blank window, not a window
+with a bar missing.
+
+**Every changed frame** (`artifacts/bezel-off/pr-e/diff/changed.tsv`).
+
+| Frame | Pixels dark / light | bbox (x,y,w,h) | Allow rows | What |
+| --- | --- | --- | --- | --- |
+| `settings-agents` | 111390 / 111277 | 475,56,720,639 | `widgets::Buttons::button`, `widgets::Status`, `widgets::Content` | Update All, Refresh, Update and Install are Ely buttons (Outline, Ghost, Primary at `Sm`; Ghost has no border); "Installed" is Ely's Success badge, larger and bolder; the registry strip and the install-failure strip are Ely alerts, taller, without a border and with Ely's severity icon. The registry strip is 6 px taller (47 px against bezel's 41), so the card and every row below it sit 6 px lower and the header reflows; row heights are within 1 px of PR D's. |
+| `settings-git-hosting-accounts` | 50496 / 50472 | 475,224,720,305 | `widgets::Buttons::button` | The forge and means pickers, Save token and Forget token are Ely buttons at `Sm`, so the rows are 5 and 14 px shorter. The GitLab row is still one line (GitHub, GitLab, Detect, CLI, Token, the field and Save token); the scope line and Forget token share the line below it, as in PR D. |
+| `settings-git-hosting` | 253 / 259 | 824,194,22,22 | `ui::icons` | The empty state's icon: Lucide's search at 24 px where it was Solar's magnifier. Nothing else on the page moved. |
+| `settings-language-servers` | 58922 / 58880 | 476,151,718,682 | `widgets::Buttons::button`, `widgets::Status` | Install (Primary), Install guide and Offer again (Outline) at `Sm`; the clangd install-failure strip is an Ely alert, 1 px taller. |
+| `settings-language-servers-p2` | 52278 / 52190 | 476,41,718,779 | `widgets::Buttons::button` | The same buttons, further down the list. |
+| `settings-language-servers-p3` | 25054 / 25054 | 1015,41,159,759 | `widgets::Buttons::button` | The same buttons, the tail of the list. |
+
+`crops/<frame>-{dark,light}-{before,after,stack}.png` has the changed box of each frame from PR D's set and from
+this one, and the two side by side (`settings-git-hosting`'s 22 px box is enlarged eight times). Every
+other frame (82) is within the tolerance of PR D's. They are the same 12 frames, with the same boxes, as at
+Task 13's final head (`task-13-r1`); the pixel counts differ from it only by the stamp. (Task 13's first round, before
+the buttons were sized by role, had larger boxes for the accounts and the third Language servers page.) The allow file's
+boxes are read from this run's `changed.tsv`.
+
+**Changes no capture shows.** Each is on the list of what Enzo should see.
+
+- **The status bar's usage meter.** It is in every main-window frame and in none of them: a standing mask (x 76..376,
+  y 802..824) blinds it, because it reads the user's live account. It is now Ely's 2 px `fg` on `border`, centred in the
+  4 px slot of an 18 px meter, gliding between values; bezel's was 4 px of `text` on `ink(0.12)`.
+- **The clone form's progress bar** (`project_forms.rs`) is the same function in a 280 px slot, and **the turn
+  preview's rewind button** (`chat/turn_rail.rs`) is an Ely Ghost at `Sm` in a 280 px card. No frame, probe or test
+  draws either.
+- **Renders of the three above**, after only, are described below.
+- **Every Settings button is a Tab stop** (Ely gives each `tab_index(0)`); no check asserts the order.
+- **The registry-error text is selectable now** (it was a plain string); the strips' wrappers set the text colour
+  because `Alert::content` is host-owned and the first capture drew the message black on the tint.
+- **Outline's border** on the four bordered buttons is Ely's `border_strong` at one pixel, not bezel's `border`.
+- **The unfocused window.** `init_motion` is gone. What it set (bezel's pause flag) only ever governed the clock
+  that bezel's scrollbars and Settings widgets leased, and none of them is left; the sidebar bloom and the orb draw on
+  `sirio_ui::motion`, which never pauses. `unfocused_spinner` is the automated witness (318.4%, bloom moving, above) and
+  a capture cannot be one, because `SIRIO_REDUCED_MOTION=1` snaps every animation to rest. The thinking orb in an
+  unfocused window is on the macOS list for that reason.
+- **A focused, idle composer (Review Focus 4).** Ely's caret blinks every 530 ms and notifies the composer's field,
+  which `cx.observe` hands to `reread_composer`; its early return on an unchanged `(text, caret)`
+  (`chat/composer_view.rs`) is what keeps the whole chat from being re-read at 2 Hz. No check here witnesses it. The
+  `unfocused_spinner` CPU ceiling samples an inactive window, where the caret's blink does not run, so deleting the
+  early return would leave it green. Review Focus 4 is held by that guard and by review only; no test was written for
+  it after the code (the repo's rule), and the macOS list below has the check.
+
+**What the masks hide here.** `CAPTURE DIFF OK` says nothing about pixels inside a mask. PR E touches no element
+under a standing mask except the two named below, so the same pair was compared with no `--masks` and the mask
+table plus this PR's rows as `--allow` (`artifacts/bezel-off/pr-e/diff-unmasked/`): `CAPTURE DIFF OK (72 changed,
+all attributed)`. The 12 frames above, and 60 more that differ only inside mask rectangles whose `why` is a clock
+or a run-to-run accident: the status bar's path and usage meter, the identity probe's message time and the Agents
+stamp. Against Task 13's head (`diff-vs-task-13-r1-unmasked/`) 62 frames differ, all inside those masks.
+
+The two it does touch: the status bar's usage-meter mask covers the meter whose bar PR E redraws, so no frame can show it
+(the renders below do), and the Agents toolbar's stamp mask lies next to the buttons PR E restyled. The crops of the stamp's
+neighbourhood in both runs show nothing but the digits differing under it; no Ely button or alert lies inside the mask.
+
+**The mask that moved.** `Scripts/capture-masks.tsv`'s Agents toolbar row was `668 54 354 40` (x 668..1022) and is
+`668 54 364 40` (x 668..1032). In PR D's set the stamp ended near x 1016 and bezel's `Update All` began at 1028; Ely's
+`Update All` is narrower and begins at 1038, so the right-aligned toolbar moved the stamp out to x 1028 and its last digit,
+which is the clock, fell outside the old rectangle. The new right edge is 6 px short of the button's border. The "Masks in
+force" table says so.
+
+**Hand renders of the three surfaces no frame shows.** After only, and not committed.
+A throwaway example (`hand_probe`, deleted afterwards) drew them in a 900 x 520 window on a private Xvfb with
+lavapipe, in dark and light, with `SIRIO_REDUCED_MOTION=1`. `loading::progress` is the app's own function. The status-bar
+segment around it, the clone form's progress block and the preview card around the rewind button are replicas of their call
+sites, built from the same public pieces (`menu_card`, Ely's `Button`, the same slot widths), not the surfaces themselves,
+because the real ones need a live account, a running clone and a native Claude chat. The files are
+`artifacts/bezel-off/pr-e/hand/{usage-meter,clone-progress,rewind-button}-{dark,light}.png` (enlarged three times) and
+`window-{dark,light}.png`. What they show:
+
+- The meter's bar is 2 px high in its 18 px slot, drawn in `fg` on a `border` track. The track is faint, so a meter at 12% reads
+  as a 2 px dot with a hairline after it, and a stale meter (the same bar at 0.55 opacity) is dimmer again. Whether that reads as
+  a meter at a glance is Enzo's call on the Mac.
+- The clone bar is the same bar at 280 px (the slot's maximum), centred in its column: an empty track at 0%, a bright bar at 40%
+  and 100%.
+- The rewind button at `Sm` has no border or fill: it reads as a medium-weight label ("Restore files to this message") at the
+  foot of the card, centred in it. Its hover and its click are not shown.
+- The glide between two values is not shown: reduced motion snaps it. It is on the Mac list.
+
+**macOS hand-check list.** One check on a build of this branch, with translucency on and off, by Enzo.
+
+*Fields and forms*
+
+- The chat composer (typing, selection, paste, Enter and Shift+Enter, the history keys, the slash and `@` popups) and the
+  model search field.
+- The clone-repository and create-project forms, the browser's address bar and the worktree picker's search field: each is
+  an Ely framed field now.
+- A framed text field at interface size 18 (Settings, then the interface size): the frame, the caret and the text still
+  line up.
+
+*Menus, popups and tooltips*
+
+- A tab context menu, the files context menu and the sidebar context menu, at the default interface size and at 18 (the
+  rows take Ely's `Sm`; a long label ends in an ellipsis inside its card).
+- The sidebar's worktree close menu, the `@` mention popup, the slash popup, the worktree combobox's menu and the turn preview
+  (hover a tick of the turn rail).
+- A tooltip.
+- The "Hide Pane" close button's hover (no frame proves it).
+
+*Bars and logs*
+
+- The CI log and the file view bars: Ely's vertical bar and Sirio's own horizontal bar side by side, at the edges of a log
+  and a Markdown preview.
+- The thinking orb in an unfocused window: it keeps turning while another window holds the focus.
+
+*Settings*
+
+- Settings, then Agents, Git hosting and Language servers: the Outline, Ghost and Primary buttons, the "Installed" badge, the
+  two alerts, the empty state's search icon, the rows' height and where the Git hosting line wraps.
+- Keyboard: press Tab through the buttons of those three pages. Every Settings button is a Tab stop now; the order should read
+  top to bottom and each button should show Ely's focus ring.
+
+*Keyboard changes to accept or refuse*
+
+Four changes a person will notice with the keyboard. Each was made on purpose and none is recorded as accepted yet. A no on (a) is one binding: `shift-enter` to `Submit` under the single-line context.
+
+- (a) Shift+Enter and Alt+Enter no longer submit a one-line field (the project forms, the browser's address bar). Shift+Enter
+  is `Newline`, which a single-line field consumes and ignores, and Alt+Enter is unbound. Enter and Cmd+Enter still submit
+  (`rust/vendor/ely-gpui-component/src/forms/text/actions.rs:95-97`).
+- (b) Fields that were already Ely's on main now use bezel's word unit for word moves and deletes: a run of punctuation is not a
+  word, so Option+Backspace on `Hello world.` deletes `world.` (`forms/text/edit.rs:23`, `is_word`).
+- (c) On macOS, Ctrl+K deletes to the end of the line in every field (`actions.rs:119`).
+- (d) Every Settings button is a Tab stop: the Tab walk under Settings above, from a Settings field through Update, Install and
+  Refresh to the next field (`settings/agents_page.rs`, `git_hosting_page.rs`, `language_servers_page.rs`).
+
+Enzo's yes or no on each: (a) accepted on 2026-10-28, before the hand check; (b), (c) and (d) pending, on the Mac.
+
+*What no frame shows*
+
+- The status-bar usage meter: a 2 px bar in an 18 px slot, centred in its 4 px height, gliding when the value changes, and
+  dimmed when the numbers are stale.
+- The clone progress bar while a real clone runs.
+- The rewind button in the turn preview: its look at `Sm`, a hover, and a click that asks for the restore preview.
+- With the composer focused and the chat idle, Activity Monitor shows Sirio near 0% CPU (the caret blinks; nothing else should redraw).
+
+Enzo's verdict: approved on 2026-10-28, on the page built from these captures.
+
+Enzo's macOS verdict: pending.
