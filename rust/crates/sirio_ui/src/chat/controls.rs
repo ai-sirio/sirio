@@ -3,10 +3,7 @@
 //! the popup each one opens. Every control draws only what the agent reported,
 //! so a catalogue it never sent leaves no chevron and no chip behind.
 
-use super::composer_view::{
-    EFFORT_RESET, effort_fraction_for_stop, effort_stop_for_fraction, effort_stop_share,
-    effort_stops,
-};
+use super::composer_view::{EFFORT_RESET, EFFORT_ULTRACODE, effort_rows};
 use super::*;
 use ely_gpui_component::menus::{Hang, Menu, MenuItem, MenuPanel, layer, panel_surface};
 use sirio_acp::EffortChoice;
@@ -16,6 +13,46 @@ use sirio_acp::EffortChoice;
 /// the default one fits.
 pub(super) fn popup_width(theme: &Theme, at_rest: f32) -> Pixels {
     px(at_rest * (f32::from(theme.typography.ui_size) / 13.0).max(1.0))
+}
+
+/// How tall step `step` of `total` stands in a level's bar, in pixels: up to
+/// five steps rise 2px each from 4px (4, 6, 8, 10, 12), and more than five are
+/// spread over the same 4px to 12px.
+fn effort_step_height(step: usize, total: usize) -> f32 {
+    if total <= 5 {
+        4.0 + 2.0 * step as f32
+    } else {
+        4.0 + 8.0 * step as f32 / (total - 1) as f32
+    }
+}
+
+/// A level's bar in the effort list: one 3px bar a level, rising, with the
+/// first `filled` in the strong tone. Its selector names where it stands.
+fn effort_steps(
+    selector: String,
+    filled: usize,
+    total: usize,
+    filled_step: Hsla,
+    empty_step: Hsla,
+) -> AnyElement {
+    div()
+        .debug_selector(move || selector)
+        .flex()
+        .items_end()
+        .gap(px(2.0))
+        .h(px(12.0))
+        .children((0..total).map(|step| {
+            div()
+                .w(px(3.0))
+                .h(px(effort_step_height(step, total)))
+                .rounded(px(1.0))
+                .bg(if step < filled {
+                    filled_step
+                } else {
+                    empty_step
+                })
+        }))
+        .into_any_element()
 }
 
 impl Chat {
@@ -340,7 +377,7 @@ impl Chat {
         // The thinking display. Drawn only while the transport has it and
         // the CLI has not refused the verb; unset shows no value at all,
         // because nothing reports the session's own and a word here would
-        // be one nobody read (F-CHAT-18's rule, as the effort track already
+        // be one nobody read (F-CHAT-18's rule, as the effort chip already
         // applies it).
         let thinking = self
             .thinking_display
@@ -418,215 +455,66 @@ impl Chat {
             )
         });
 
-        // The effort selector, anchored to the chip above. A slider rather
-        // than a row per level: effort is a scale, and the levels are the
-        // session's own — `supportedEffortLevels` differs per model, so the
-        // track grows and shrinks with the model instead of naming rungs the
-        // model does not have.
+        // The effort list, anchored to the chip above. The levels are the
+        // session's own — `supportedEffortLevels` differs per model — so the
+        // list grows and shrinks with the model instead of naming rungs the
+        // model does not have. Each level shows its step on that scale;
+        // Ultracode is no further step, and the reset is the model's own pick,
+        // set apart below them.
         let effort_picker = self
             .effort_picker_open
             .then(|| self.effort.clone())
             .flatten()
             .map(|effort| {
-                let stops: Vec<EffortChoice> =
-                    effort_stops(&effort.choices).into_iter().cloned().collect();
-                let count = stops.len();
-                let current = effort
-                    .current_value
-                    .clone()
-                    .unwrap_or_else(|| EFFORT_RESET.to_string());
-                // `None` while the session is on its model's own default:
-                // that is not a point on the track, so nothing is filled and
-                // the value reads in the muted tone the rest of the row uses
-                // for "not chosen".
-                let selected = stops.iter().position(|stop| stop.value == current);
-                let fraction = selected.map_or(0.0, |index| effort_fraction_for_stop(count, index));
-                let current_name = effort
-                    .choices
-                    .iter()
-                    .find(|choice| choice.value == current)
-                    .map(|choice| choice.name.clone())
-                    .unwrap_or_else(|| current.clone());
-                let reset = effort
-                    .choices
-                    .iter()
-                    .find(|choice| choice.value == EFFORT_RESET)
-                    .cloned();
-                let heading = effort.name.clone().unwrap_or_else(|| "Effort".to_string());
+                let split = effort_rows(&effort.choices);
+                let current = effort.current_value.as_deref().unwrap_or(EFFORT_RESET);
+                let (filled_step, empty_step) =
+                    (theme.ely.fg_muted, theme.ely.fg_muted.opacity(0.3));
+                let row = |choice: &EffortChoice| {
+                    let value = choice.value.clone();
+                    let note_selector =
+                        (value == EFFORT_ULTRACODE).then(|| "effort-note-ultracode".into());
+                    MenuItem::check(choice.name.clone(), current == value)
+                        .selectors(format!("effort-option-{value}"), note_selector)
+                        .on_click(self.picker_click(PickerRow::Effort(value), cx))
+                };
 
-                let zones: Vec<AnyElement> = stops
-                    .iter()
-                    .enumerate()
-                    .map(|(index, stop)| {
-                        let value = stop.value.clone();
-                        let selector_value = value.clone();
-                        let zone_entity = entity.clone();
-                        div()
-                            .id(format!("effort-stop-{value}"))
-                            .debug_selector(move || format!("effort-stop-{selector_value}"))
-                            // Not an equal share each: a stop owns the track
-                            // that is nearer to it than to its neighbours, and
-                            // the two ends have a neighbour on one side only.
-                            // Equal shares would put every boundary half a
-                            // step away from where the drag snaps.
-                            .w(relative(effort_stop_share(count, index)))
-                            .h_full()
-                            .cursor_pointer()
-                            // The zones sit above the track, so they are what
-                            // the pointer actually lands on: gpui only arms a
-                            // drag on the element whose hitbox is topmost at
-                            // mouse-down. Each one therefore starts the
-                            // track's drag, under the track's own id — the
-                            // move is read against the whole track's bounds
-                            // by the listener below, not against one zone's.
-                            .on_drag(SliderDrag("effort-slider".into()), |_, _, _, cx| {
-                                cx.new(|_| gpui::Empty)
-                            })
-                            .on_click(move |_, _, cx| {
-                                zone_entity.update(cx, |chat, cx| {
-                                    chat.select_effort(value.clone(), cx);
-                                });
-                            })
-                            .into_any_element()
-                    })
-                    .collect();
-
-                let drag_stops = stops.clone();
-                let track = div()
-                    .relative()
-                    .w_full()
-                    .h(px(16.0))
-                    .child(bezel_theme.slider(fraction))
-                    .child(
-                        div()
-                            .id("effort-slider")
-                            .debug_selector(|| "effort-slider".into())
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_stretch()
-                            .on_drag_move(cx.listener(
-                                move |chat, event: &DragMoveEvent<SliderDrag>, _, cx| {
-                                    let Some(fraction) =
-                                        slider_fraction(event, "effort-slider", cx)
-                                    else {
-                                        return;
-                                    };
-                                    let Some(stop) =
-                                        drag_stops.get(effort_stop_for_fraction(count, fraction))
-                                    else {
-                                        return;
-                                    };
-                                    // Every stop reached is a control request
-                                    // to the agent, and a drag crosses the
-                                    // track in dozens of moves. Only a stop
-                                    // the session is not already on is worth
-                                    // asking for.
-                                    let standing = chat
-                                        .effort
-                                        .as_ref()
-                                        .and_then(|effort| effort.current_value.as_deref());
-                                    if standing != Some(stop.value.as_str()) {
-                                        chat.select_effort(stop.value.clone(), cx);
-                                    }
-                                },
-                            ))
-                            .children(zones),
-                    );
-
-                let ends = div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(typography.caption2)
-                    .text_color(theme.ely.fg_subtle)
-                    .child(
-                        stops
-                            .first()
-                            .map(|stop| stop.name.clone())
-                            .unwrap_or_default(),
-                    )
-                    .child(
-                        stops
-                            .last()
-                            .map(|stop| stop.name.clone())
-                            .unwrap_or_default(),
-                    );
-
-                let reset_row = reset.map(|reset| {
-                    let reset_entity = entity.clone();
-                    let reset_value = reset.value.clone();
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(div().h(px(1.0)).w_full().bg(theme.ely.border))
-                        .child(
-                            div()
-                                .id("effort-reset")
-                                .debug_selector(|| "effort-reset".into())
-                                .h(px(22.0))
-                                .px(px(6.0))
-                                .flex()
-                                .items_center()
-                                .rounded(theme.radii.control)
-                                .text_size(typography.caption2)
-                                .text_color(theme.ely.fg)
-                                .when(selected.is_none(), |this| this.bg(theme.ely.active))
-                                .hover(|style| style.bg(theme.sirio.overlay))
-                                .on_click(move |_, _, cx| {
-                                    reset_entity.update(cx, |chat, cx| {
-                                        chat.select_effort(reset_value.clone(), cx);
-                                        // A reset is a command, not an
-                                        // adjustment: it answers and closes,
-                                        // where the track stays open because
-                                        // moving a knob is something you do
-                                        // more than once.
-                                        chat.effort_picker_open = false;
-                                        cx.notify();
-                                    });
-                                })
-                                .child("Use the model's default"),
-                        )
-                });
-
-                // A scale needs two ends. One level is a choice between it
-                // and the model's default, which is a row — a knob with
-                // nowhere to slide would be a control that cannot be worked.
-                let scale = (count > 1).then(|| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        // The knob is 14px centred on the track ends, so it
-                        // overhangs 7px each side: without this inset it runs
-                        // into the card's 4px padding and clips.
-                        .px(px(8.0))
-                        .child(track)
-                        .child(ends)
-                });
-                let lone_stop = stops.first().filter(|_| count == 1).map(|stop| {
-                    let value = stop.value.clone();
-                    let selector_value = value.clone();
-                    let lone_entity = entity.clone();
-                    div()
-                        .id(format!("effort-stop-{value}"))
-                        .debug_selector(move || format!("effort-stop-{selector_value}"))
-                        .h(px(22.0))
-                        .px(px(6.0))
-                        .flex()
-                        .items_center()
-                        .rounded(theme.radii.control)
-                        .text_size(typography.caption2)
-                        .text_color(theme.ely.fg)
-                        .when(selected.is_some(), |this| this.bg(theme.ely.active))
-                        .hover(|style| style.bg(theme.sirio.overlay))
-                        .on_click(move |_, _, cx| {
-                            lone_entity
-                                .update(cx, |chat, cx| chat.select_effort(value.clone(), cx));
-                        })
-                        .child(stop.name.clone())
-                });
+                // The menu's entries in the order drawn, `None` being a separator.
+                // This is the one place the order is written down.
+                let total = split.levels.len();
+                let mut entries: Vec<Option<MenuItem>> = Vec::new();
+                for (index, level) in split.levels.iter().enumerate() {
+                    let filled = index + 1;
+                    let selector = format!("effort-steps-{}-{filled}-{total}", level.value);
+                    entries.push(Some(row(level).trailing(move |_| {
+                        effort_steps(selector.clone(), filled, total, filled_step, empty_step)
+                    })));
+                }
+                if let Some(ultracode) = &split.ultracode {
+                    entries.push(Some(row(ultracode).note("+ workflow")));
+                }
+                if let Some(reset) = &split.reset {
+                    if !entries.is_empty() {
+                        entries.push(None);
+                    }
+                    entries.push(Some(row(reset).muted(true).note("model's own")));
+                }
+                // The keys mark a row, and `MenuPanel` marks an entry: a
+                // separator is an entry no key lands on.
+                let mut entry_of_row = Vec::new();
+                let mut menu = Menu::new();
+                for (entry, item) in entries.into_iter().enumerate() {
+                    match item {
+                        Some(item) => {
+                            entry_of_row.push(entry);
+                            menu = menu.item(item);
+                        }
+                        None => menu = menu.separator(),
+                    }
+                }
+                let marked = self
+                    .marked_picker_row(entry_of_row.len())
+                    .map(|at| entry_of_row[at]);
 
                 layer(
                     "effort-picker-menu",
@@ -637,50 +525,15 @@ impl Chat {
                         .key_context("ChatEffortPicker")
                         .track_focus(&self.effort_picker_focus)
                         .on_action(cx.listener(Self::cancel))
+                        .on_action(cx.listener(Self::picker_previous))
+                        .on_action(cx.listener(Self::picker_next))
+                        .on_action(cx.listener(Self::picker_choose))
                         .w(popup_width(theme, 220.0))
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.effort_picker_open = false;
                             cx.notify();
                         }))
-                        .child(
-                            panel_surface("effort-picker-surface", cx).p_2().child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap(px(8.0))
-                                            .text_size(typography.caption2)
-                                            .child(
-                                                div().text_color(theme.ely.fg_subtle).child(heading),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("effort-current")
-                                                    .debug_selector(move || {
-                                                        if selected.is_some() {
-                                                            "effort-current".into()
-                                                        } else {
-                                                            "effort-current-unset".into()
-                                                        }
-                                                    })
-                                                    .text_color(if selected.is_some() {
-                                                        theme.ely.fg
-                                                    } else {
-                                                        theme.ely.fg_subtle
-                                                    })
-                                                    .child(current_name),
-                                            ),
-                                    )
-                                    .children(scale)
-                                    .children(lone_stop)
-                                    .children(reset_row),
-                            ),
-                        ),
+                        .child(MenuPanel::new("effort-picker-rows", menu).current(marked)),
                     cx,
                 )
             });
@@ -1167,6 +1020,8 @@ pub(super) enum PickerRow {
     Model(ModelOption),
     Mode(AgentMode),
     Thinking(Option<&'static str>),
+    /// An effort level, by its wire value.
+    Effort(String),
     Overflow(OverflowRow),
 }
 
@@ -1203,6 +1058,16 @@ impl Chat {
                 .unwrap_or_default()
         } else if self.thinking_picker_open {
             thinking_rows().map(PickerRow::Thinking).collect()
+        } else if self.effort_picker_open {
+            self.effort
+                .as_ref()
+                .map(|effort| {
+                    effort_rows(&effort.choices)
+                        .in_order()
+                        .map(|choice| PickerRow::Effort(choice.value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
         } else if self.overflow_open {
             [
                 OverflowRow::Follow,
@@ -1229,6 +1094,11 @@ impl Chat {
             .thinking_display
             .as_ref()
             .and_then(|state| state.chosen.as_deref());
+        let effort = self
+            .effort
+            .as_ref()
+            .and_then(|effort| effort.current_value.as_deref())
+            .unwrap_or(EFFORT_RESET);
         let current = rows.iter().position(|row| match row {
             PickerRow::Model(option) => self.selected_model.as_deref() == Some(option.id.as_str()),
             PickerRow::Mode(mode) => self
@@ -1236,6 +1106,7 @@ impl Chat {
                 .as_ref()
                 .is_some_and(|catalog| catalog.current_id == mode.id),
             PickerRow::Thinking(value) => chosen == *value,
+            PickerRow::Effort(value) => value == effort,
             PickerRow::Overflow(_) => false,
         });
         self.picker_cursor = current.or((!rows.is_empty()).then_some(0));
@@ -1269,6 +1140,10 @@ impl Chat {
             PickerRow::Mode(mode) => self.select_mode(mode, cx),
             PickerRow::Thinking(value) => {
                 self.select_thinking_display(value.map(str::to_string), cx)
+            }
+            PickerRow::Effort(value) => {
+                self.select_effort(value, cx);
+                self.effort_picker_open = false;
             }
             // Follow is a toggle: the menu stays open, with the focus where it is.
             PickerRow::Overflow(OverflowRow::Follow) => {

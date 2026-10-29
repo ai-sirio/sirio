@@ -1625,6 +1625,13 @@ fn run_connection(
         let auth_methods_seen = Arc::clone(&auth_methods_for_connection);
         let mode_catalog_for_notifications = Arc::clone(&mode_catalog);
         let mode_catalog_for_session = Arc::clone(&mode_catalog);
+        // The effort option as the agent last reported it, from the session,
+        // a config update or the answer to a change. A refused change has
+        // nothing to say about the level, so what goes back out in its place
+        // is this.
+        let last_effort: Arc<Mutex<Option<EffortOption>>> = Arc::new(Mutex::new(None));
+        let last_effort_for_notifications = Arc::clone(&last_effort);
+        let last_effort_for_session = Arc::clone(&last_effort);
         let shutdown_ack = Arc::clone(&shutdown_ack_for_connection);
         let child_for_prompt = Arc::clone(&child_for_connection);
         let outgoing = futures::sink::unfold(stdin, |mut writer, line: String| async move {
@@ -1652,6 +1659,12 @@ fn run_connection(
                         && let Ok(mut guard) = mode_catalog_for_notifications.lock()
                     {
                         *guard = Some(catalog);
+                    }
+                    if let SessionUpdate::ConfigOptionUpdate(ref update) = notification.update
+                        && let Some(effort) = effort_from_options(Some(&update.config_options))
+                        && let Ok(mut guard) = last_effort_for_notifications.lock()
+                    {
+                        *guard = Some(effort);
                     }
                     if let SessionUpdate::CurrentModeUpdate(ref update) = notification.update {
                         apply_current_mode(
@@ -1795,6 +1808,11 @@ fn run_connection(
                 };
                 let model_catalog = model_catalog_from_options(session.config_options.as_ref());
                 let effort = effort_from_options(session.config_options.as_ref());
+                if let Some(effort) = &effort
+                    && let Ok(mut guard) = last_effort_for_session.lock()
+                {
+                    *guard = Some(effort.clone());
+                }
                 if let Ok(mut catalog) = mode_catalog_for_session.lock() {
                     if let Some(state) = &session.modes {
                         *catalog = Some(mode_catalog_from_state(state));
@@ -1970,6 +1988,7 @@ fn run_connection(
                         }
                         Command::SetModel { config_id, value } => {
                             let event_tx = connection_events.clone();
+                            let last_effort_for_model = Arc::clone(&last_effort);
                             connection
                                 .send_request(SetSessionConfigOptionRequest::new(
                                     session.session_id.clone(),
@@ -1986,6 +2005,21 @@ fn run_connection(
                                                     .send(AcpEvent::ModelCatalog(catalog))
                                                     .await;
                                             }
+                                            // The answer to a model switch carries
+                                            // every option, the new model's effort
+                                            // ladder among them: an agent that
+                                            // resets its level on a model change
+                                            // says so only here.
+                                            if let Some(effort) =
+                                                effort_from_options(Some(&response.config_options))
+                                            {
+                                                if let Ok(mut guard) = last_effort_for_model.lock()
+                                                {
+                                                    *guard = Some(effort.clone());
+                                                }
+                                                let _ =
+                                                    event_tx.send(AcpEvent::Effort(effort)).await;
+                                            }
                                         }
                                         Err(error) => {
                                             let _ = event_tx
@@ -2001,6 +2035,8 @@ fn run_connection(
                         Command::SetConfigOption { option_id, value } => {
                             let event_tx = connection_events.clone();
                             let mode_catalog_for_config = Arc::clone(&mode_catalog_for_session);
+                            let last_effort_for_config = Arc::clone(&last_effort);
+                            let requested_option = option_id.clone();
                             connection
                                 .send_request(SetSessionConfigOptionRequest::new(
                                     session.session_id.clone(),
@@ -2020,16 +2056,38 @@ fn run_connection(
                                             if let Some(effort) =
                                                 effort_from_options(Some(&response.config_options))
                                             {
+                                                if let Ok(mut guard) = last_effort_for_config.lock()
+                                                {
+                                                    *guard = Some(effort.clone());
+                                                }
                                                 let _ =
                                                     event_tx.send(AcpEvent::Effort(effort)).await;
                                             }
                                         }
                                         Err(error) => {
-                                            let _ = event_tx
-                                                .send(AcpEvent::TransportError(format!(
+                                            // An agent that refuses a level has
+                                            // not lost the session: the chip goes
+                                            // back to what it reported, not to a
+                                            // dead connection. The crate keeps no
+                                            // log and the event enum has no
+                                            // variant for a refusal, so the
+                                            // error's text is not kept. Any other
+                                            // option's failure is still the
+                                            // transport's.
+                                            let refused_effort = last_effort_for_config
+                                                .lock()
+                                                .ok()
+                                                .and_then(|guard| guard.clone())
+                                                .filter(|effort| {
+                                                    effort.option_id == requested_option
+                                                });
+                                            let event = match refused_effort {
+                                                Some(effort) => AcpEvent::Effort(effort),
+                                                None => AcpEvent::TransportError(format!(
                                                     "config option selection failed: {error}"
-                                                )))
-                                                .await;
+                                                )),
+                                            };
+                                            let _ = event_tx.send(event).await;
                                         }
                                     }
                                     Ok(())

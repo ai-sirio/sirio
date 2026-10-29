@@ -147,6 +147,25 @@ physical Wayland session and native macOS/Windows input are unverified.
   `chat/list.rs`, `chat/message.rs`, `chat/search.rs`, `chat/status.rs`,
   `menus/panel.rs`, `theme/mod.rs` and `theme/tests.rs`.
 
+### `MenuItem::trailing` and `MenuItem::muted` (effort list)
+
+Sirio's chat picks its effort from a list whose rows need two things a
+`MenuItem` could not draw: a host-drawn indicator at the row's end (each level's
+stepped bar), and a reset row that reads quieter than the choices while staying
+clickable.
+
+- `src/menus/model.rs`: `MenuItem` gains `trailing`
+  (`Option<Rc<dyn Fn(&App) -> AnyElement>>`, so the item stays `Clone`) and
+  `muted` (`bool`), with the builders `MenuItem::trailing(impl Fn(&App) ->
+  AnyElement + 'static)` and `MenuItem::muted(bool)`.
+- `src/menus/draw.rs`: `row` draws the trailing element after the note and
+  before the keys, in a `flex_none` wrapper, and sets a muted row's label in
+  `colors.fg_muted` (a disabled row keeps its disabled colour). The check or
+  radio mark keeps the row's own colour.
+
+A sync with upstream must keep both fields, both builders and their two lines in
+`draw::row`.
+
 ## Final compatibility evidence
 
 Seen on Linux x86_64 (Arch, kernel 7.2.3) with rustc 1.98.1, cargo 1.98.1 and

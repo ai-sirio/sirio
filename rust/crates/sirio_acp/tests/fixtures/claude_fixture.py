@@ -23,11 +23,25 @@ REFUSE_RECONNECT = MODE == "session_panel_refuse"
 STARTS_AFTER = {"session_panel_starting": 2, "session_panel_pending": None}.get(MODE, 0)
 if REFUSE_RECONNECT or MODE in ("session_panel_starting", "session_panel_pending"):
     MODE = "session_panel"
+# `effort_ladder` gives the session's first model an effort ladder, as the
+# real CLI's handshake does; `effort_refused` is the same with every change of
+# `effortLevel` refused. No other mode advertises one: a chat that finds an
+# effort selector asks for High at once, and that is not what the rest of the
+# suite is about.
+EFFORT_LADDER = MODE in ("effort_ladder", "effort_refused")
+REFUSE_EFFORT = MODE == "effort_refused"
 # A launch argument names the file `mcp_status` requests are counted in, so a
 # test needs no environment of its own; the environment names it otherwise.
 COUNT_PATH = next(
     (arg[len("--fixture-count="):] for arg in sys.argv if arg.startswith("--fixture-count=")),
     os.environ.get("SIRIO_FIXTURE_COUNT"),
+)
+# A launch argument names the file every control request is appended to, one
+# JSON line each, before it is answered: what reached the CLI, as the CLI
+# heard it. A file the fixture has not created yet holds none.
+CONTROL_LOG_PATH = next(
+    (arg[len("--fixture-control-log="):] for arg in sys.argv if arg.startswith("--fixture-control-log=")),
+    os.environ.get("SIRIO_FIXTURE_CONTROL_LOG"),
 )
 # The worker appends its protocol flags after our own argv, so a second
 # positional starting with "-" is one of those, not a pid file.
@@ -70,6 +84,10 @@ def initialize_payload():
         if MODE == "logged_out"
         else {"email": "dev@example.com", "subscriptionType": "max", "apiProvider": "firstParty"}
     )
+    default_model = {"value": "default", "displayName": "Default (recommended)", "description": ""}
+    if EFFORT_LADDER:
+        default_model["supportsEffort"] = True
+        default_model["supportedEffortLevels"] = ["low", "medium", "high", "xhigh", "max"]
     return {
         "commands": [
             {"name": "usage", "description": "Show plan usage", "argumentHint": ""},
@@ -77,7 +95,7 @@ def initialize_payload():
         ],
         "terminal_slash_commands": ["statusline"],
         "models": [
-            {"value": "default", "displayName": "Default (recommended)", "description": ""},
+            default_model,
             {"value": "sonnet", "displayName": "Sonnet", "description": "Balanced"},
         ],
         "agents": [],
@@ -910,6 +928,9 @@ def main():
             request = message.get("request", {})
             subtype = request.get("subtype")
             request_id = message.get("request_id")
+            if CONTROL_LOG_PATH:
+                with open(CONTROL_LOG_PATH, "a", encoding="utf-8") as log:
+                    log.write(json.dumps(request, separators=(",", ":")) + "\n")
             if subtype == "initialize":
                 if MODE == "malformed":
                     sys.stdout.write("not-json\n")
@@ -970,6 +991,8 @@ def main():
                             "error": "Unknown setting: fastMode",
                         },
                     })
+                elif REFUSE_EFFORT and "effortLevel" in request.get("settings", {}):
+                    control_error(request_id, "Effort level not available for this session")
                 else:
                     control_response(request_id, {})
             elif subtype == "get_context_usage":

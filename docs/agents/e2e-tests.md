@@ -79,6 +79,17 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # --appearance light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL".
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
 
+# The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the
+# control socket (docs/testing/ely-agent-chat.md). The effort and effort_light scenarios (dark and
+# light) prove a chat asks its agent for High at start and again after a relaunch, and that the
+# effort list opens and takes a pick through the debug-only `surface.chat.effort`; they capture it.
+# effort_full and effort_full_light run the fixture's effort-full mode (Default, five levels,
+# Ultracode), capture the whole list (the notes, the separator) and choose Default from it.
+# --display :N (an Xvfb; export VK_DRIVER_FILES and VK_ICD_FILENAMES as lavapipe's lvp_icd.json)
+# takes the captures, --state-only omits them,
+# --only NAME[,NAME] runs some scenarios, --out-dir DIR keeps the artifact.
+Scripts/Tests/test-ely-chat-ui-e2e.py --out-dir DIR --state-only   # -> prints "ELY CHAT UI E2E OK"
+
 # Live end-to-end test of the forge layer (sirio_forge): the token transport
 # and the real gh/glab against loopback fake forges. --out-dir DIR keeps the
 # transcript and the fake forges' request logs; SIRIO_FORGE_E2E_VERBOSE=1

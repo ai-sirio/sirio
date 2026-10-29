@@ -59,6 +59,9 @@ pub(super) fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Statef
                 .overflow_hidden()
                 .text_ellipsis()
                 .whitespace_nowrap()
+                .when(item.muted && !item.disabled, |label| {
+                    label.text_color(colors.fg_muted)
+                })
                 .child(if item.hits.is_empty() {
                     item.label.clone().into_any_element()
                 } else {
@@ -79,6 +82,9 @@ pub(super) fn row(item: &MenuItem, ix: usize, current: bool, cx: &App) -> Statef
                     .text_color(colors.fg_muted)
                     .child(note),
             )
+        })
+        .when_some(item.trailing.clone(), |row, trailing| {
+            row.child(div().flex_none().child(trailing(cx)))
         })
         .when_some(item.keys.clone(), |row, keys| {
             row.child(

@@ -44,7 +44,7 @@ use sirio_theme::{AgentBrandColor, Theme, ThemeMode};
 use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
-    chat::{Chat, ChatControlSnapshot, ChatEvent, SessionPanelAction},
+    chat::{Chat, ChatControlSnapshot, ChatEvent, EffortListAction, SessionPanelAction},
     drawer::{DrawerTab, SearchQuery, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent, rematch},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
     editor::{Conflict, LineEnding},
@@ -1477,6 +1477,11 @@ enum ChatControlAction {
     Panel {
         surface_id: String,
         action: SessionPanelAction,
+    },
+    /// Debug-only: what the effort chip and the rows of its list do.
+    Effort {
+        surface_id: String,
+        action: EffortListAction,
     },
 }
 /// Cloning shares every entity handle (`PaneContent`'s `Clone`): a cloned
@@ -3500,6 +3505,38 @@ impl ControlHandler for AppControlHandler {
                 };
                 self.queue_action(request, move |reply| ControlAction::Chat {
                     action: ChatControlAction::Panel { surface_id, action },
+                    reply,
+                })
+            }
+            "surface.chat.effort" if cfg!(debug_assertions) => {
+                let Some(surface_id) = request.params.get("surfaceId").cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.chat.effort requires surfaceId",
+                    );
+                };
+                let value = request.params.get("value").cloned();
+                let action = match request.params.get("action").map(String::as_str) {
+                    Some("open") => EffortListAction::Open,
+                    Some("close") => EffortListAction::Close,
+                    Some("choose") => {
+                        let Some(value) = value else {
+                            return ControlResponse::failure(
+                                &request.id,
+                                "surface.chat.effort choose requires value",
+                            );
+                        };
+                        EffortListAction::Choose(value)
+                    }
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.chat.effort requires action open, close or choose",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::Chat {
+                    action: ChatControlAction::Effort { surface_id, action },
                     reply,
                 })
             }
@@ -20500,6 +20537,8 @@ impl SirioWorkspace {
                 "lastVisibleEntry".to_string(),
                 snapshot.last_visible_entry.to_string(),
             ),
+            // The effort level in force, by its wire value; empty when the session has none.
+            ("effort".to_string(), snapshot.effort.unwrap_or_default()),
         ]
     }
 
@@ -20600,6 +20639,15 @@ impl SirioWorkspace {
                 let window = window.ok_or("the session panel needs a window")?;
                 let snapshot = chat.update(cx, |chat, cx| {
                     chat.session_panel_act(action, window, cx)?;
+                    Ok::<_, String>(chat.control_snapshot())
+                })?;
+                Ok(Self::control_chat_result(&surface_id, snapshot))
+            }
+            ChatControlAction::Effort { surface_id, action } => {
+                let chat = self.control_chat_surface(&surface_id)?;
+                let window = window.ok_or("the effort list needs a window")?;
+                let snapshot = chat.update(cx, |chat, cx| {
+                    chat.effort_act(action, window, cx)?;
                     Ok::<_, String>(chat.control_snapshot())
                 })?;
                 Ok(Self::control_chat_result(&surface_id, snapshot))
@@ -44143,6 +44191,7 @@ done
             "surface.chat.stop" => request_with_params(method, &[]),
             "surface.chat.read" => request_with_params(method, &[]),
             "surface.chat.panel" => request::chat_panel("chat-1", "open", None),
+            "surface.chat.effort" => request::chat_effort("chat-1", "open", None),
             "browser.open" | "browser.navigate" | "browser.act" | "browser.get"
             | "browser.wait" | "browser.eval" | "browser.console" | "browser.snapshot"
             | "browser.permission" => request_with_params(method, &[]),
