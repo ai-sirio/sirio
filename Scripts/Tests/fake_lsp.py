@@ -44,6 +44,24 @@ the editor's pointer features ask:
   goes away (the answers are put back) the thread publishes everything once more
   and rests, so a test that never sets it sees none of this. `"exit": true` ends
   the process at the next look, as a crashed server ends.
+- With `"service_ready": true` in ANSWERS the server sends jdtls's
+  `language/status` notification once, right after `initialized` (after the
+  first publish, if there is one): `{"type": "ServiceReady", "message":
+  "ServiceReady"}`, what jdtls says when it can take requests. The file is read
+  at `initialized`, so the answer set when the server starts is the one that counts.
+- With `"exit_after_initialized": true` in ANSWERS the server ends right after it
+  reads `initialized`, before `ServiceReady` and before it handles anything else or
+  publishes: a jdtls that dies while it starts, after `initialize` has answered.
+  The file is read at `initialized`, like `service_ready`.
+- With `"initialize_error": true` in ANSWERS the server answers `initialize` with a
+  JSON-RPC error and then stays alive, reading nothing and ignoring the end of its
+  stdin until it is killed: a jdtls whose handshake failed and whose JVM still holds
+  the workspace lock. The file is read at `initialize`.
+- With `"hold_build": true` in ANSWERS the server never answers `java/buildWorkspace`
+  (the request is still logged): a jdtls whose full build has not finished. It goes on
+  answering `shutdown` and ends at `exit`, so a client can stop it.
+- `java/buildWorkspace` (jdtls's full build) is answered with `1`, the status
+  jdtls gives a build that succeeded.
 - Any other request is answered with null; notifications are ignored.
 
 ANSWERS is read again for every message, so a test may rewrite it between
@@ -308,6 +326,15 @@ def main():
         if method == "initialize":
             root_uri = params.get("rootUri") or ""
             root["path"] = unquote(urlparse(root_uri).path) if root_uri else None
+            if answers().get("initialize_error"):
+                send({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "error": {"code": -32603, "message": "initialize failed (fake)"},
+                })
+                log_line("initialize_error: staying alive")
+                while True:
+                    time.sleep(3600)
             send({
                 "jsonrpc": "2.0",
                 "id": message["id"],
@@ -324,6 +351,9 @@ def main():
         elif method == "initialized":
             stamp = stamp_of_answers()
             config = answers()
+            if config.get("exit_after_initialized"):
+                log_line("exit: exit_after_initialized")
+                break
             # A server started while `publish` is there has to publish again when
             # it goes (a test puts the answers back), as one that saw it come does.
             threading.Thread(
@@ -331,6 +361,12 @@ def main():
             ).start()
             if "publish" in config:
                 publish_all(config)
+            if config.get("service_ready"):
+                send({
+                    "jsonrpc": "2.0",
+                    "method": "language/status",
+                    "params": {"type": "ServiceReady", "message": "ServiceReady"},
+                })
         elif method == "shutdown":
             send({"jsonrpc": "2.0", "id": message["id"], "result": None})
         elif method == "exit":
@@ -360,6 +396,10 @@ def main():
         elif method == "textDocument/documentSymbol":
             uri = (params.get("textDocument") or {}).get("uri", "")
             send({"jsonrpc": "2.0", "id": message["id"], "result": symbols_for(uri, answers())})
+        elif method == "java/buildWorkspace":
+            if answers().get("hold_build"):
+                continue
+            send({"jsonrpc": "2.0", "id": message["id"], "result": 1})
         elif is_request:
             send({"jsonrpc": "2.0", "id": message["id"], "result": None})
     log.close()
