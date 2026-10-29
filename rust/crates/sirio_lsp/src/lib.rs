@@ -19,6 +19,7 @@ mod document;
 mod framing;
 mod lifecycle;
 mod loader;
+mod lombok;
 mod message;
 mod navigation;
 mod position;
@@ -30,6 +31,7 @@ mod uri;
 
 pub use config::{ConfigError, LanguageEntry, LanguageTable};
 pub use loader::{ConfigLoader, Reload, config_path};
+pub use lombok::{LombokJar, LombokVersion, agent_arg, newest_jar, project_uses_lombok};
 pub use roots::project_root;
 pub use connection::{Client, Connection};
 pub use diagnostics::{RawDiagnostic, Severity, parse_publish};

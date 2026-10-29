@@ -30,7 +30,7 @@ __pycache__/
 *.pyc
 
 # Local tool/IDE/planning artifacts — not shared repo content. docs/ stays
-# local except five directories and one file the repo itself depends on. Each needs the
+# local except six directories and one file the repo itself depends on. Each needs the
 # `/docs/*` + `!` shape, because a parent excluded with `/docs/` could not
 # be re-included:
 #   - agents: CLAUDE.md links each area's notes there (architecture, the
@@ -52,9 +52,14 @@ __pycache__/
 #     docs/perf/2026-10-ely-code-editor.md for the editor's measured cost.
 #     Only a report and its captures are shared; the harness scripts and the
 #     raw measurement data stay with the machine that took them.
+#   - designs: an RFC is written for other people to review before a spec
+#     exists, and an untracked RFC reaches no reviewer. Once the spec lands
+#     in superpowers/specs, the RFC stays as the record of the alternatives
+#     weighed and of why each was rejected.
 /.codegraph/
 /docs/*
 !/docs/agents/
+!/docs/designs/
 !/docs/release-notes/
 !/docs/perf/
 /docs/perf/*-harness/

@@ -61,7 +61,7 @@ Scripts/build-dev.sh
 Anything that builds `sirio_terminal` (both gates, `cargo build/test --workspace`, any
 `-p sirio_terminal` command) needs **Zig exactly 0.15.2** on PATH: a *newer* Zig fails too, so
 install 0.15.2 alongside and put it first on PATH. Both CI scripts fail fast when it is missing or
-mismatched. Why, and what a version bump of the vendored `libghostty-vt-sys` drags with it:
+mismatched. Why, and what a version bump of `libghostty-vt-sys` drags with it:
 [`docs/agents/build-and-release.md`](docs/agents/build-and-release.md).
 
 `Scripts/ci.sh` additionally needs **cargo-nextest** on PATH — `cargo install cargo-nextest --locked`, or `brew install cargo-nextest` — and fails fast with that install line when it is missing, the same shape as the Zig preflight.
