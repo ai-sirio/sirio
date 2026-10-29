@@ -19,11 +19,11 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::{ffi::c_ulong, time::Instant};
 
-use bezel::ui::input::TextField;
+use ely_gpui_component::forms::{Input, InputEvent, TextInput};
 use gpui::{
     App, Bounds, Context, Element, ElementId, FocusHandle, Focusable, GlobalElementId,
-    InspectorElementId, IntoElement, KeyDownEvent, LayoutId, Pixels, Render, Style, Task, Window,
-    div, prelude::*, px, relative,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Render, Style, Task, Window, div,
+    prelude::*, px, relative,
 };
 use raw_window_handle::HasWindowHandle;
 #[cfg(target_os = "windows")]
@@ -1398,8 +1398,8 @@ fn deferred_install_failure(
 /// pixels live in the native child window below it.
 pub struct BrowserSurface {
     state: BrowserState,
-    address_field: gpui::Entity<TextField>,
-    /// F-BRW-03: mirrors the TextField focus handle, refreshed each
+    address_field: gpui::Entity<TextInput>,
+    /// F-BRW-03: mirrors the address field's focus handle, refreshed each
     /// render (the only place a `Window` is available). Guards the
     /// PageLoad(Finished) address resync below from clobbering a caret or
     /// selection the user is actively editing.
@@ -1555,11 +1555,9 @@ impl BrowserSurface {
                 Some(error.to_string()),
             ),
         };
-        let address_field = cx.new(|cx| {
-            let mut field = TextField::new(cx).with_placeholder("");
-            field.set_content(state.address(), cx);
-            field
-        });
+        // The address field is Ely's: bind its keys here if the host has not.
+        sirio_ui::ely::init(cx);
+        let address_field = Self::address_input(state.address(), cx);
         let web_events = Rc::new(RefCell::new(Vec::new()));
         #[cfg(not(target_os = "windows"))]
         {
@@ -1776,7 +1774,7 @@ impl BrowserSurface {
     ///
     /// `Window::focus` only updates GPUI's focus tree. A wry child is a real
     /// native window and can keep the operating system focus after a page
-    /// click, so hand focus back to its parent before focusing the TextField.
+    /// click, so hand focus back to its parent before focusing the address field.
     pub fn focus_address_bar(&self, window: &mut Window, cx: &mut App) {
         #[cfg(target_os = "windows")]
         steal_win32_focus_from_webview_child(window);
@@ -2256,7 +2254,7 @@ impl BrowserSurface {
             self.state.did_fail_navigation(error.to_string());
         } else {
             self.address_field
-                .update(cx, |field, cx| field.set_content(address, cx));
+                .update(cx, |field, cx| field.reset_text(Self::single_line(&address), cx));
         }
     }
 
@@ -2264,8 +2262,8 @@ impl BrowserSurface {
         let address = self.state.go_back();
         self.navigate_history(address, cx);
         // F-BRW-02: go_back()/navigate_history() mutate self.state and
-        // the state and TextField correctly, but nothing repaints without an
-        // explicit notify — unlike on_address_key's "enter" path, which
+        // the state and the address field correctly, but nothing repaints
+        // without an explicit notify — unlike `on_address_submit`, which
         // does call it after submit_address().
         cx.notify();
     }
@@ -2289,7 +2287,7 @@ impl BrowserSurface {
                 .did_fail_navigation("Browser child is unavailable".to_owned());
         }
         self.address_field
-            .update(cx, |field, cx| field.set_content(address, cx));
+            .update(cx, |field, cx| field.reset_text(Self::single_line(&address), cx));
     }
 
     fn on_stop(&mut self) {
@@ -2300,16 +2298,39 @@ impl BrowserSurface {
         }
     }
 
-    fn on_address_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        if event.keystroke.key == "enter" {
-            let draft = self.address_field.read(cx).content().to_string();
-            if self.submit_address(&draft).is_ok() {
-                let address = self.state.address().to_owned();
-                self.address_field
-                    .update(cx, |field, cx| field.set_content(address, cx));
+    /// The address as the single-line field holds it: line endings fold into spaces, as typing or
+    /// a paste into the field would. Ely's `set_text` does not, and `ely_ui::normalize`, the
+    /// crate's own, is out of this file's reach (it is built into the examples too).
+    fn single_line(text: &str) -> String {
+        text.replace("\r\n", "\n").replace('\r', "\n").replace('\n', " ")
+    }
+
+    /// The address field with `address` in it, and Enter in it answered: it
+    /// navigates to what the field holds. One place builds it, so the surface
+    /// and the tests that put one together by hand hear the same key.
+    fn address_input(address: &str, cx: &mut Context<Self>) -> gpui::Entity<TextInput> {
+        let field = cx.new(|cx| {
+            let mut field = TextInput::detached(cx).placeholder("");
+            field.reset_text(Self::single_line(address), cx);
+            field
+        });
+        cx.subscribe(&field, |surface, _, event: &InputEvent, cx| {
+            if *event == InputEvent::Submit {
+                surface.on_address_submit(cx);
             }
-            cx.notify();
+        })
+        .detach();
+        field
+    }
+
+    fn on_address_submit(&mut self, cx: &mut Context<Self>) {
+        let draft = self.address_field.read(cx).text().to_owned();
+        if self.submit_address(&draft).is_ok() {
+            let address = self.state.address().to_owned();
+            self.address_field
+                .update(cx, |field, cx| field.reset_text(Self::single_line(&address), cx));
         }
+        cx.notify();
     }
 
     /// Drains the queue the webview callbacks push into, and reports
@@ -2355,8 +2376,9 @@ impl BrowserSurface {
                     // already sets the authoritative text on Enter.
                     if !self.address_focused {
                         let address = self.state.address().to_owned();
-                        self.address_field
-                            .update(cx, |field, cx| field.set_content(address, cx));
+                        self.address_field.update(cx, |field, cx| {
+                            field.reset_text(Self::single_line(&address), cx)
+                        });
                     }
                     self.events.push(BrowserEvent::PageFinished(url));
                 }
@@ -2378,7 +2400,6 @@ impl BrowserSurface {
     ) -> impl IntoElement {
         let address_field = self.address_field.clone();
         let focus_address = entity.clone();
-        let address_entity = entity.clone();
         let back = entity.clone();
         let forward = entity.clone();
         let reload = entity.clone();
@@ -2447,11 +2468,6 @@ impl BrowserSurface {
                             surface.focus_address_bar(window, cx);
                         });
                     })
-                    .on_key_down(move |event, _, cx| {
-                        address_entity.update(cx, |surface, cx| {
-                            surface.on_address_key(event, cx);
-                        });
-                    })
                     .child(
                         div()
                             .ml(px(10.0))
@@ -2459,7 +2475,7 @@ impl BrowserSurface {
                             .text_color(theme.ely.fg_subtle)
                             .child("◎"),
                     )
-                    .child(div().flex_1().min_w_0().child(address_field)),
+                    .child(div().flex_1().min_w_0().child(Input::new(&address_field))),
             )
             .child(
                 div()
@@ -3332,16 +3348,12 @@ mod tests {
     ) {
         cx.update(|cx| {
             Theme::init(cx);
-            bezel::ui::input::init(cx);
+            sirio_ui::ely::init(cx);
         });
         let window = cx.open_window(gpui::size(px(390.0), px(200.0)), |_, cx| {
             let mut state = BrowserState::new("https://example.com").expect("valid URL");
             state.did_finish_navigation("https://example.com", "Example Domain");
-            let address_field = cx.new(|cx| {
-                let mut field = TextField::new(cx);
-                field.set_content(state.address(), cx);
-                field
-            });
+            let address_field = BrowserSurface::address_input(state.address(), cx);
             BrowserSurface {
                 state,
                 address_field,
@@ -3374,24 +3386,18 @@ mod tests {
     }
 
     /// Enter in the address bar navigates to what the field holds, normalised. The key is the
-    /// field wrapper's own `on_key_down`, not a binding of the field, so a field that takes
-    /// Enter for itself (a replacement for bezel's) silently ends navigation. There is no
-    /// webview here: the browser state is what navigates.
+    /// field's `Submit`, which the surface answers, so a field that stops reporting it silently
+    /// ends navigation. There is no webview here: the browser state is what navigates.
     #[gpui::test]
     async fn pressing_enter_in_the_address_bar_navigates(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             Theme::init(cx);
-            bezel::ui::input::init(cx);
-            // Ely's bindings are live, as they are in the app: a replacement field may bind keys.
+            // Ely's bindings are live, as they are in the app.
             sirio_ui::ely::init(cx);
         });
         let window = cx.open_window(gpui::size(px(800.0), px(200.0)), |_, cx| {
             let state = BrowserState::new("https://example.com").expect("valid URL");
-            let address_field = cx.new(|cx| {
-                let mut field = TextField::new(cx);
-                field.set_content(state.address(), cx);
-                field
-            });
+            let address_field = BrowserSurface::address_input(state.address(), cx);
             BrowserSurface {
                 state,
                 address_field,
@@ -3421,7 +3427,7 @@ mod tests {
             .expect("the address field is drawn");
         cx.simulate_click(address.center(), gpui::Modifiers::none());
         // The field starts on the page's own address: replace it. Select-all is the chord
-        // `input::init` binds per platform, the one Ctrl+A or Cmd+A reaches.
+        // Ely's field binds per platform, the one Ctrl+A or Cmd+A reaches.
         cx.simulate_keystrokes("secondary-a");
         cx.simulate_input("example.org");
         cx.run_until_parked();

@@ -860,7 +860,7 @@ mod tests {
         let forge = forge_with(vec![testing::summary(112, "Fix login")]);
         let source = FakeSource::ready(testing::github_client(forge.clone()), Some("feat/login"));
         cx.update(sirio_theme::Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(crate::chat::init);
         cx.update(|cx| forge_source::set_source(source.clone(), cx));
         // A restored chat, or one in a background tab: open, in no window.
@@ -981,7 +981,7 @@ mod tests {
         let forge = forge_with(vec![testing::summary(112, "Fix login")]);
         let source = FakeSource::ready(testing::github_client(forge.clone()), Some("main"));
         cx.update(sirio_theme::Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(crate::chat::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(

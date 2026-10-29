@@ -11,6 +11,8 @@ fn main() {
     let working_directory = std::env::current_dir().expect("current directory");
     application().run(move |cx: &mut App| {
         Theme::init(cx);
+        // A disabled context-menu row's reason is an Ely tooltip, which reads Ely's theme.
+        sirio_ui::ely::init(cx);
         if std::env::var("SIRIO_THEME").as_deref() == Ok("light") {
             Theme::set_mode(ThemeMode::Light, cx);
         }

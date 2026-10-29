@@ -1049,7 +1049,7 @@ mod tests {
         // test scheduler refuses unless it is told real threads are in play.
         cx.executor().allow_parking();
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         let forge = std::sync::Arc::new(CannedForge::default());
         let source = FakeSource::ready(testing::github_client(forge), Some("feat/y"));
@@ -1091,7 +1091,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
 
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         cx.update(|cx| {
             worktree_lookup::set_worktrees(

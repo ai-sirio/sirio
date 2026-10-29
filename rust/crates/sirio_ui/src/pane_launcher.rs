@@ -10,7 +10,6 @@
 //! tile.
 
 use bezel_theme::Theme as BezelTheme;
-use bezel::ui::tooltip::Tooltip;
 use gpui::{AnyElement, App, SharedString, Window, div, prelude::*, px};
 use sirio_theme::Theme;
 use std::rc::Rc;
@@ -114,7 +113,7 @@ fn tile<A: Copy + 'static>(
     match item.disabled {
         Some(reason) => column
             .opacity(0.5)
-            .tooltip(move |window, cx| Tooltip::text(reason.clone(), window, cx))
+            .tooltip(crate::controls::tooltip(reason))
             .into_any_element(),
         None => {
             let action = item.action;

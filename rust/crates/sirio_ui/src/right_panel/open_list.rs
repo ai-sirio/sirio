@@ -5,7 +5,6 @@
 //! — the agents a chat can start with, why a row is unavailable — arrives as
 //! [`OpenListFacts`], pushed every render.
 
-use bezel::ui::tooltip::Tooltip;
 use gpui::{AnyElement, App, Entity, SharedString, Window, div, prelude::*, px};
 use sirio_theme::Theme;
 
@@ -218,7 +217,7 @@ fn row(
     match disabled {
         Some(reason) => element
             .opacity(0.5)
-            .tooltip(move |window, cx| Tooltip::text(reason.clone(), window, cx))
+            .tooltip(crate::controls::tooltip(reason))
             .into_any_element(),
         None => element
             .cursor_pointer()

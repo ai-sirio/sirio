@@ -1,0 +1,23 @@
+# PR C's attribution file: the pixels the move of the text fields and the tooltips to Ely changes.
+# Format and meaning: docs/testing/bezel-off.md ("The allow table"). Each why starts with the first cell of the
+# spec's inventory row that explains the change.
+#
+# The empty composer's caret.
+chat-ui-default/identity/*	43	562	2	18	ui::input::TextField (the empty composer's caret: bezel's field drew a 2 px bar, Ely's draws a 1 px bar at the same x, y and height)
+chat-ui-default/scenarios/effort/frames/effort-low	349	650	2	18	ui::input::TextField (the empty composer's caret: bezel's field drew a 2 px bar, Ely's draws a 1 px bar at the same x, y and height)
+chat-ui-default/scenarios/effort-light/frames/effort-low	349	650	2	18	ui::input::TextField (the empty composer's caret: bezel's field drew a 2 px bar, Ely's draws a 1 px bar at the same x, y and height)
+chat-ui-default/scenarios/wide-content/frames/wide-content-diff	349	650	2	18	ui::input::TextField (the empty composer's caret: bezel's field drew a 2 px bar, Ely's draws a 1 px bar at the same x, y and height)
+chat-ui-default/scenarios/wide-content/frames/wide-content-expanded	349	650	2	18	ui::input::TextField (the empty composer's caret: bezel's field drew a 2 px bar, Ely's draws a 1 px bar at the same x, y and height)
+sweep-*/chat	349	650	2	18	ui::input::TextField (the empty composer's caret: bezel's field drew a 2 px bar, Ely's draws a 1 px bar at the same x, y and height)
+sweep-*/empty-workspace	349	650	2	18	ui::input::TextField (the empty composer's caret: bezel's field drew a 2 px bar, Ely's draws a 1 px bar at the same x, y and height)
+#
+# Settings > Git Hosting, the two sources with a token field: each field is Ely's framed input, 28 px high where
+# bezel's was 34 px with a 13 px placeholder, so the card's rows move up (the box is the union of the moved rows
+# and text, from the first changed row to the card's bottom edge).
+surfaces-*/settings-git-hosting-accounts-*	475	224	720	307	ui::input::TextField (each token field is Ely's framed input, 28 px high where bezel's was 34 px; the rows below it move up)
+#
+# The probe's tooltip: Ely's tooltip is solid, with a smaller radius and a floating shadow, 13 px text, and sits 18 px
+# below the pointer; bezel's was a 12 px popover card at the pointer. The box is the union of both footprints with
+# their shadows (it differs per appearance because the shadow does).
+surfaces-dark/tooltip-dark	255	210	107	79	ui::tooltip::Tooltip (Ely's tooltip in place of bezel's popover card: solid fill, smaller radius, floating shadow, 13 px text, 18 px below the pointer)
+surfaces-light/tooltip-light	243	205	132	86	ui::tooltip::Tooltip (Ely's tooltip in place of bezel's popover card: solid fill, smaller radius, floating shadow, 13 px text, 18 px below the pointer)

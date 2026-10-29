@@ -7629,7 +7629,6 @@ name = "sirio_terminal"
 version = "0.37.0"
 dependencies = [
  "anyhow",
- "bezel",
  "bezel-gpui",
  "bezel-gpui-platform",
  "bezel-theme",

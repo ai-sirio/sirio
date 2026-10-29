@@ -4,7 +4,6 @@
 //! session, same scope as `Sidebar`'s fixture model: the connection lifecycle
 //! and view model live here so the transcript renderer stays deterministic.
 
-use bezel::ui::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, BorderStyle, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
     Edges, Element, ElementId, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
@@ -58,7 +57,7 @@ mod tool_calls;
 pub mod trace;
 mod transcript;
 mod turn_rail;
-use bezel::ui::input::TextField;
+use ely_gpui_component::forms::{InputEvent, TextInput};
 pub use session_panel::{
     RowSnapshot, SectionSnapshot, SessionPanelAction, SessionPanelSnapshot,
 };
@@ -2137,11 +2136,11 @@ pub struct Chat {
     /// A preview the reader has not confirmed yet. One slot: confirming
     /// always answers the latest preview.
     pending_rewind: Option<PendingRewind>,
-    /// The draft, as bezel's field: IME, selection, undo, wrapping and scroll
-    /// are its job. `Chat` observes it and reads `content()`/`cursor()` into
+    /// The draft, in Ely's field: IME, selection, undo, wrapping and scroll
+    /// are its job. `Chat` observes it and reads `text()`/`cursor()` into
     /// `draft`/`draft_caret` on every change — the popups and Send read the
     /// cached pair rather than borrowing the entity mid-render.
-    composer_field: Entity<TextField>,
+    composer_field: Entity<TextInput>,
     draft: SharedString,
     draft_caret: usize,
     /// File paths accepted from the `@` picker while their `@path` token is
@@ -2165,10 +2164,10 @@ pub struct Chat {
     /// QuestionAnswerState so there is one surface, one Blink, one timer.
     answer_blink: caret::Blink,
     answer_caret_visible: bool,
-    /// The model picker's search row: a real bezel field (`Shape::Line`),
+    /// The model picker's search row: a real Ely field (one line),
     /// focused while the picker is open; typing filters, Backspace edits,
     /// and none of it touches the composer's draft.
-    model_search_field: Entity<TextField>,
+    model_search_field: Entity<TextInput>,
     streaming: bool,
     /// Retired with the rotating streaming border: the shared Bezel clock
     /// drives the reasoning header now, so this stays permanently `false`.
@@ -2532,29 +2531,35 @@ impl Chat {
         });
 
         let model_search_field = cx.new(|cx| {
-            TextField::new(cx)
-                .with_placeholder("Search models\u{2026}")
-                .with_key_context("ChatModelSearch")
+            TextInput::detached(cx)
+                .placeholder("Search models\u{2026}")
+                .host_context("ChatModelSearch")
         });
-        cx.observe(&model_search_field, |chat: &mut Self, field, cx| {
-            let query = field.read(cx).content().to_string();
-            if query != chat.picker_query {
-                chat.picker_query = query;
-                chat.picker_cursor = Some(0);
-            }
-            cx.notify();
-        })
+        cx.subscribe(
+            &model_search_field,
+            |chat: &mut Self, field, event: &InputEvent, cx| {
+                if *event != InputEvent::Changed {
+                    return;
+                }
+                let query = field.read(cx).text().to_owned();
+                if query != chat.picker_query {
+                    chat.picker_query = query;
+                    chat.picker_cursor = Some(0);
+                }
+                cx.notify();
+            },
+        )
         .detach();
 
         let composer_field = cx.new(|cx| {
-            TextField::new(cx)
-                .with_shape(bezel::ui::input::Shape::Grow { min: 3, max: 12 })
-                .with_key_context("ChatComposer")
-                // The composer's shell paints the fill; see `render_composer`.
-                .with_transparent_fill()
+            TextInput::detached(cx)
+                .multi_line(3, 12)
+                .host_context("ChatComposer")
         });
-        // Both content and caret changes notify, and the mention behind the
-        // caret changes when either does.
+        // Both text and caret changes notify, and the mention behind the
+        // caret changes when either does: this is an observer, not a
+        // subscription to `Changed`. The blink's notifies reach it too, and
+        // cost one comparison (`reread_composer`).
         cx.observe(&composer_field, |chat: &mut Self, _, cx| {
             chat.reread_composer(cx)
         })
@@ -2874,17 +2879,19 @@ impl Chat {
 
     /// Install the composer keymap in the host application.
     pub fn bind_keys(cx: &mut App) {
+        // Ely's field keys first: a binding of the same depth registered later
+        // wins, and these are the host's, over the ones Ely's field binds in its
+        // own context (`ely::init` binds them once, so a repeat call changes
+        // nothing).
+        crate::ely::init(cx);
         cx.bind_keys([
             KeyBinding::new("enter", Send, Some("ChatComposer")),
             KeyBinding::new("return", Send, Some("ChatComposer")),
-            KeyBinding::new(
-                "shift-enter",
-                bezel::ui::input::InsertNewline,
-                Some("ChatComposer"),
-            ),
+            // Ely's field binds `shift-enter` to its `Newline`; gpui has no
+            // `return` alias for `enter`, so `shift-return` is bound here.
             KeyBinding::new(
                 "shift-return",
-                bezel::ui::input::InsertNewline,
+                ely_gpui_component::forms::Newline,
                 Some("ChatComposer"),
             ),
             KeyBinding::new("escape", Cancel, Some("ChatComposer")),
@@ -2893,8 +2900,8 @@ impl Chat {
             KeyBinding::new("tab", PopupAccept, Some("ChatComposer")),
             // The platform's paste chord reaches the chat first so a picture
             // on the clipboard becomes an attachment; `paste_composer`
-            // propagates everything else to bezel's own `Paste`. Same chords
-            // bezel's `input::init` binds, per platform.
+            // propagates everything else to Ely's own `Paste`. Same chords
+            // Ely's field binds, per platform.
             #[cfg(target_os = "macos")]
             KeyBinding::new("cmd-v", PasteComposer, Some("ChatComposer")),
             #[cfg(not(target_os = "macos"))]
@@ -4453,7 +4460,7 @@ impl Chat {
             // Swift's `@State private var query` starting blank each time
             // the popover view is recreated.
             self.model_search_field
-                .update(cx, |field, cx| field.clear(cx));
+                .update(cx, |field, cx| field.reset_text("", cx));
             self.picker_query.clear();
             self.start_picker_cursor(cx);
             let focus = self.model_search_field.read(cx).focus_handle(cx);
@@ -4806,7 +4813,7 @@ impl Chat {
 
     // --- Paste, and the composer's context menu ---
 
-    /// The platform paste chord, ahead of bezel's field: a picture on the
+    /// The platform paste chord, ahead of Ely's field: a picture on the
     /// clipboard becomes an attachment exactly like the "+" picker's. With
     /// no picture the action propagates, so the field's own `Paste` inserts
     /// the text.
@@ -4864,7 +4871,7 @@ impl Chat {
 
     /// Secondary click on the field: the Cut / Copy / Paste menu at the
     /// pointer. The field takes focus so every item acts on it, and keeps
-    /// whatever it had selected — bezel's field only listens to the left
+    /// whatever it had selected — the field only listens to the left
     /// button.
     fn open_composer_context_menu(
         &mut self,
@@ -4888,7 +4895,7 @@ impl Chat {
         }
     }
 
-    /// One chosen item: bezel's own field action for Cut and Copy, and for
+    /// One chosen item: Ely's own field action for Cut and Copy, and for
     /// Paste the same picture-first path as the chord, so a screenshot
     /// attaches from the menu exactly as it does from Cmd+V.
     fn composer_context_action(
@@ -4901,11 +4908,15 @@ impl Chat {
         let field = self.composer_field.read(cx).focus_handle(cx);
         field.focus(window, cx);
         match item {
-            ComposerContextItem::Cut => field.dispatch_action(&bezel::ui::input::Cut, window, cx),
-            ComposerContextItem::Copy => field.dispatch_action(&bezel::ui::input::Copy, window, cx),
+            ComposerContextItem::Cut => {
+                field.dispatch_action(&ely_gpui_component::forms::Cut, window, cx)
+            }
+            ComposerContextItem::Copy => {
+                field.dispatch_action(&ely_gpui_component::forms::Copy, window, cx)
+            }
             ComposerContextItem::Paste => {
                 if !self.paste_clipboard_image(cx) {
-                    field.dispatch_action(&bezel::ui::input::Paste, window, cx);
+                    field.dispatch_action(&ely_gpui_component::forms::Paste, window, cx);
                 }
             }
         }
@@ -6035,7 +6046,7 @@ impl Chat {
             }
             return;
         }
-        // F-CHAT-16: the model picker's search is a real TextField — typing,
+        // F-CHAT-16: the model picker's search is a real text field — typing,
         // Backspace and Escape are the field's own job; no raw-key redirect
         // lives here any more.
         if event.keystroke.key == "c"
@@ -6082,7 +6093,7 @@ impl Chat {
         // The bar always occupies layout, so the answer text does not shift
         // by two pixels every half second as it blinks. An empty field
         // carries it at the placeholder's start (`caret::field_placeholder`,
-        // bezel's `TextField` convention), a draft after its last character.
+        // the text-field convention), a draft after its last character.
         let answer_caret = || {
             div()
                 .debug_selector(|| "question-answer-caret".into())
@@ -7800,7 +7811,7 @@ pub(crate) mod testing {
     /// The globals a drawn chat reads.
     pub(crate) fn prepare(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
     }
 
@@ -8033,7 +8044,7 @@ mod tests {
 
     fn spinner_test_chat(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -8159,7 +8170,7 @@ mod tests {
         fixture_args: &[&str],
     ) -> (gpui::Entity<Chat>, &'a mut VisualTestContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         let args = fixture_args.to_vec();
         let (chat, cx) = cx.add_window_view(|_, cx| {
@@ -8178,7 +8189,7 @@ mod tests {
     /// "before it connects" surface the affordance check must handle.
     fn chat_with_transport(launch: LaunchSpec, cx: &mut TestAppContext) -> Entity<Chat> {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, _) =
             cx.add_window_view(|_, cx| Chat::new(Some(launch), std::env::temp_dir(), cx));
         chat
@@ -8191,7 +8202,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) -> (Entity<Chat>, &mut VisualTestContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         cx.add_window_view(|_, cx| {
             Chat::new(
@@ -8464,7 +8475,7 @@ mod tests {
 
     /// `up`/`down` drive a picker while one is open and are the field's own
     /// vertical motion otherwise — the handlers propagate when no popup is
-    /// on screen, so gpui reaches the TextField's binding next.
+    /// on screen, so gpui reaches the field's binding next.
     #[gpui::test]
     async fn arrows_move_the_caret_when_no_popup_is_open(cx: &mut TestAppContext) {
         let (chat, cx) = chat_view(cx, &["plain"]);
@@ -8695,7 +8706,7 @@ two"
     #[gpui::test]
     async fn a_tool_call_measures_its_duration_and_persists_it(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         chat.update(cx, |chat, cx| {
             chat.handle_event(
@@ -8800,7 +8811,7 @@ two"
     #[gpui::test]
     async fn a_thought_measures_its_duration_and_persists_it(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         chat.update(cx, |chat, cx| {
             chat.streaming = true;
@@ -8868,7 +8879,7 @@ two"
     #[gpui::test]
     async fn a_turn_end_settles_a_trailing_thought(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         chat.update(cx, |chat, cx| {
             chat.streaming = true;
@@ -8917,7 +8928,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         cx.update(|_window, cx| init(cx));
         chat.update(cx, |chat, cx| {
@@ -8981,7 +8992,7 @@ two"
     #[gpui::test]
     async fn a_restored_thought_opens_closed(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.push_entry(restored_entry(ChatEntry::Thought {
@@ -9007,7 +9018,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let long: String = (0..120).map(|i| format!("line {i}\n")).collect();
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
@@ -9047,7 +9058,7 @@ two"
     /// but not copied out of the well it sits in.
     #[gpui::test]
     async fn the_output_of_a_tool_call_can_be_selected_and_copied(cx: &mut TestAppContext) {
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let output = "error[E0308]: mismatched types\n  --> src/main.rs:4:9";
         let (_chat, _probes, cx) = crate::text_selection::testing::host(cx, |_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
@@ -9080,7 +9091,7 @@ two"
     /// not highlighted and a drag over the card selected nothing.
     #[gpui::test]
     async fn the_message_of_an_error_card_can_be_selected_and_copied(cx: &mut TestAppContext) {
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let message = "connection refused (os error 111)";
         let (_chat, _probes, cx) = crate::text_selection::testing::host(cx, |_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
@@ -9635,6 +9646,150 @@ two"
         });
     }
 
+    /// One chord, pressed in the composer: the draft it starts from, whether the caret first goes
+    /// to the start, the keys, what is typed after them and the draft that must result.
+    struct Chord {
+        draft: &'static str,
+        home: bool,
+        keys: &'static [&'static str],
+        then: &'static str,
+        expect: &'static str,
+    }
+
+    /// Chords bezel's field answered and a composer on Ely's must still answer, on Windows and
+    /// Linux: Ctrl+Delete deletes the next word, Ctrl+Backspace the one before the caret (a
+    /// word is its letters and digits, `world.` goes whole), and Ctrl+A is still select-all.
+    const OTHER_CHORDS: &[Chord] = &[
+        Chord {
+            draft: "Hello world.",
+            home: false,
+            keys: &["ctrl-backspace"],
+            then: "",
+            expect: "Hello ",
+        },
+        Chord {
+            draft: "one two three",
+            home: true,
+            keys: &["ctrl-delete"],
+            then: "",
+            expect: " two three",
+        },
+        Chord {
+            draft: "one two",
+            home: false,
+            keys: &["ctrl-a"],
+            then: "x",
+            expect: "x",
+        },
+    ];
+
+    /// On macOS: Cmd+Backspace deletes to the line's start, Option+Backspace the word before the
+    /// caret, Option+Delete the next word, Ctrl+K to the line's end, and Ctrl+A is the emacs line
+    /// start (select-all is Cmd+A).
+    const MAC_CHORDS: &[Chord] = &[
+        Chord {
+            draft: "Hello world.",
+            home: false,
+            keys: &["alt-backspace"],
+            then: "",
+            expect: "Hello ",
+        },
+        Chord {
+            draft: "one two",
+            home: false,
+            keys: &["cmd-backspace"],
+            then: "",
+            expect: "",
+        },
+        Chord {
+            draft: "one two",
+            home: true,
+            keys: &["alt-delete"],
+            then: "",
+            expect: " two",
+        },
+        Chord {
+            draft: "one two",
+            home: true,
+            keys: &["right", "right", "right", "ctrl-k"],
+            then: "",
+            expect: "one",
+        },
+        Chord {
+            draft: "one two",
+            home: false,
+            keys: &["ctrl-a"],
+            then: "x",
+            expect: "xone two",
+        },
+    ];
+
+    /// The running platform's table. Both compile everywhere; the macOS one runs only on a Mac,
+    /// in the release gate.
+    const CHORDS: &[Chord] = if cfg!(target_os = "macos") { MAC_CHORDS } else { OTHER_CHORDS };
+
+    /// Goal 3, keys work as they do today: the editing chords of bezel's field that Ely's did not
+    /// have, and the word they delete by.
+    #[gpui::test]
+    async fn the_composer_answers_the_editing_chords_of_its_platform(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        let composer = cx.debug_bounds("composer").expect("the composer is drawn");
+        cx.simulate_click(composer.center(), Modifiers::none());
+        cx.run_until_parked();
+
+        for case in CHORDS {
+            chat.update(cx, |chat, cx| chat.set_composer_text(case.draft, cx));
+            cx.run_until_parked();
+            if case.home {
+                cx.simulate_keystrokes("home");
+            }
+            for key in case.keys {
+                cx.simulate_keystrokes(key);
+            }
+            if !case.then.is_empty() {
+                cx.simulate_input(case.then);
+            }
+            cx.run_until_parked();
+            assert_eq!(
+                chat.read_with(&cx.cx, |chat, _| chat.draft_text()),
+                case.expect,
+                "{:?} from {:?}, then {:?}, must leave {:?}",
+                case.keys,
+                case.draft,
+                case.then,
+                case.expect
+            );
+        }
+    }
+
+    /// The keys that move the caret a row in a multi-line field: Ctrl+N and Ctrl+P on macOS, where
+    /// bezel's field bound them, the arrows elsewhere. In the composer these are Ely's caret
+    /// motion, not the host's Up and Down (history, popups).
+    const NEXT_ROW: &str = if cfg!(target_os = "macos") { "ctrl-n" } else { "down" };
+    const PREVIOUS_ROW: &str = if cfg!(target_os = "macos") { "ctrl-p" } else { "up" };
+
+    #[gpui::test]
+    async fn the_composer_moves_the_caret_a_row_with_its_platforms_keys(cx: &mut TestAppContext) {
+        let (chat, cx) = chat_view(cx, &["plain"]);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+
+        focus_and_type(cx, "a");
+        cx.simulate_keystrokes("shift-return");
+        cx.simulate_input("b");
+        let draft = |cx: &mut VisualTestContext| chat.read_with(&cx.cx, |chat, _| chat.draft_text());
+        assert_eq!(draft(cx), "a\nb", "the draft is two rows, the caret at its end");
+
+        cx.simulate_keystrokes(PREVIOUS_ROW);
+        cx.simulate_input("x");
+        assert_eq!(draft(cx), "ax\nb", "{PREVIOUS_ROW} moved the caret up a row");
+        cx.simulate_keystrokes(NEXT_ROW);
+        cx.simulate_input("y");
+        assert_eq!(draft(cx), "ax\nby", "{NEXT_ROW} moved the caret down a row");
+    }
+
     /// F-CORE-DOM-07: before this pass `ChatEvent` had exactly two variants
     /// (`OpenFile`, `OpenLink`) and `AcpEvent::TurnEnded`'s handler -- which
     /// already flips `has_completed_turn`, pushes the footer, and persists
@@ -9686,7 +9841,7 @@ two"
     #[gpui::test]
     async fn a_message_sent_while_connecting_is_the_first_turn(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let command = AgentCommand::new("python3").arg(CHAT_FIXTURE).arg("plain");
@@ -9713,7 +9868,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(
@@ -9740,7 +9895,7 @@ two"
     #[gpui::test]
     async fn a_draft_typed_while_connecting_survives_the_first_message(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let command = AgentCommand::new("python3").arg(CHAT_FIXTURE).arg("plain");
@@ -9771,7 +9926,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(
@@ -9908,7 +10063,7 @@ two"
     #[gpui::test]
     async fn assistant_response_copy_writes_text_and_confirms(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -9954,7 +10109,7 @@ two"
     #[gpui::test]
     async fn code_block_copy_writes_code_and_confirms(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
@@ -10034,7 +10189,7 @@ two"
         std::fs::write(dir.0.join("edited.rs"), "new\n").expect("modify tracked file");
 
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -10530,7 +10685,7 @@ two"
     #[gpui::test]
     async fn offline_enter_never_discards_the_typed_draft(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -11873,7 +12028,7 @@ two"
     #[gpui::test]
     fn the_agent_badge_names_the_chats_own_agent(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.set_agent_name("Codex");
@@ -11895,7 +12050,7 @@ two"
     #[gpui::test]
     fn an_unknown_agent_is_not_silently_named_claude_code(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
 
         let badge = chat.read_with(cx, |chat, _| chat.agent_badge_name());
@@ -11972,7 +12127,7 @@ two"
     #[gpui::test]
     async fn a_user_message_is_stamped_and_the_stamp_persists(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         // `send` refuses while offline (no client here), so drive the exact
         // fn the send path uses to push the `User` entry.
@@ -12026,7 +12181,7 @@ two"
     #[gpui::test]
     async fn a_tool_run_stays_in_view_after_the_turn_ends(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.push_entry(Entry::User {
@@ -12069,7 +12224,7 @@ two"
     #[gpui::test]
     async fn day_headings_are_drawn_above_the_first_question_of_a_day(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let now = chrono::Local::now();
         let yesterday = now - chrono::Duration::days(1);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
@@ -12163,7 +12318,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12218,7 +12373,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let command = LaunchSpec::Acp(
             AgentCommand::new("python3")
                 .arg(CHAT_FIXTURE)
@@ -12290,7 +12445,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let command = LaunchSpec::Acp(
             AgentCommand::new("python3")
                 .arg(CHAT_FIXTURE)
@@ -12378,7 +12533,7 @@ two"
     #[gpui::test]
     async fn a_disconnected_agent_offers_restart_agent_not_retry(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         // `broken-transport` answers initialize and session/new
         // successfully, then on the first prompt replies with a line the
         // protocol layer cannot parse as a response to anything, and exits
@@ -12481,7 +12636,7 @@ two"
     #[gpui::test]
     async fn an_mcp_warning_offers_ok_to_dismiss(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -12545,7 +12700,7 @@ two"
     #[gpui::test]
     async fn a_retryable_turn_error_offers_ok_alongside_retry(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -12601,7 +12756,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12667,7 +12822,7 @@ two"
     #[gpui::test]
     async fn bypass_permissions_applies_only_after_its_confirmation(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12775,7 +12930,7 @@ two"
     #[gpui::test]
     async fn model_picker_search_filters_and_badges_the_recommended_model(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -12814,7 +12969,7 @@ two"
             window.simulate_next_frame(cx);
         });
         assert!(cx.debug_bounds("model-search-input").is_some());
-        // The search row is a real TextField: typing, Backspace and Escape
+        // The search row is a real text field: typing, Backspace and Escape
         // are its own job, and the picker holds focus on it while open.
         let search_focus = chat.read_with(&cx.cx, |chat, cx| {
             chat.model_search_field.read(cx).focus_handle(cx)
@@ -12875,7 +13030,7 @@ two"
     #[gpui::test]
     async fn model_picker_list_scrolls_instead_of_growing_unbounded(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -13068,7 +13223,7 @@ two"
         levels: &[(&str, &str)],
     ) -> (Entity<Chat>, &'a mut VisualTestContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let current = current.to_string();
         let levels: Vec<(String, String)> = levels
             .iter()
@@ -13319,7 +13474,7 @@ two"
         log: &Path,
     ) -> (Entity<Chat>, &'a mut VisualTestContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         let command = AgentCommand::new("env")
             .arg(format!("CHAT_FIXTURE_CONFIG_LOG={}", log.display()))
@@ -13797,7 +13952,7 @@ two"
         log: &Path,
     ) -> (Entity<Chat>, &'a mut VisualTestContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         // The CLI's worker thread wakes the chat's event task, which the
         // test scheduler refuses unless it is told real threads are in play.
@@ -14582,7 +14737,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let long_path = format!("src/{}/edited.rs", "deeply-nested-segment/".repeat(20));
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
@@ -14635,7 +14790,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let long_title = "LongSessionTitle".repeat(20);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
@@ -14678,7 +14833,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -14731,7 +14886,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -14780,7 +14935,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -14847,7 +15002,7 @@ two"
         // F-CHAT-23: a tool call's detail (kind, content, locations) is
         // hidden until the reader clicks it open, same control as F-CHAT-21.
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -14905,7 +15060,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             let mut bare = test_tool_call("bare");
@@ -14995,7 +15150,7 @@ two"
     #[gpui::test]
     async fn a_run_is_one_box_and_same_verb_calls_fold(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             for (id, kind) in [
@@ -15071,7 +15226,7 @@ two"
     #[gpui::test]
     async fn a_tool_row_with_a_multi_line_title_stays_one_line(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.push_entry(test_tool_call("single"));
@@ -15101,7 +15256,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -15144,7 +15299,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -15457,7 +15612,7 @@ two"
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let command =
                 LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]));
@@ -15692,7 +15847,7 @@ two"
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let command =
                 LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]));
@@ -15770,7 +15925,7 @@ two"
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let command =
                 LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]));
@@ -15825,7 +15980,7 @@ two"
         let cwd = dir.0.clone();
 
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let command =
                 LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, "permission"]));
@@ -15974,7 +16129,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -16391,7 +16546,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -16426,7 +16581,7 @@ two"
     #[gpui::test]
     async fn partial_context_usage_without_a_window_size_is_not_zero(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -16466,7 +16621,7 @@ two"
     #[gpui::test]
     async fn no_models_fallback_shows_a_plain_agent_badge(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (_chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::from_test_command(
                 LaunchSpec::Acp(AgentCommand::new("/definitely/missing/sirio-acp-agent")),
@@ -16599,7 +16754,7 @@ two"
     #[gpui::test]
     async fn a_real_click_folds_a_closed_turn_and_unfolds_it_back(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -16694,7 +16849,7 @@ two"
     #[gpui::test]
     async fn a_real_click_on_a_tool_call_location_opens_the_file(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -16770,7 +16925,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
                 Some(LaunchSpec::Acp(AgentCommand::new(
@@ -16942,7 +17097,7 @@ two"
     #[gpui::test]
     async fn an_unavailable_chat_states_the_reason_and_never_connects(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::unavailable(
                 "Codex chat cannot start: it is not installed yet — install it \
@@ -17000,7 +17155,7 @@ two"
     #[gpui::test]
     fn mode_selectable_is_true_with_catalog_before_first_turn(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         chat.update(cx, |chat, _| {
             chat.has_completed_turn = false;
@@ -17037,7 +17192,7 @@ two"
     #[gpui::test]
     fn model_control_visible_with_models_before_first_turn(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         chat.update(cx, |chat, _| {
             chat.has_completed_turn = false;
@@ -17085,7 +17240,7 @@ two"
     }
 
     /// The composer's secondary-click menu carries Cut / Copy / Paste, and
-    /// each acts on bezel's field: Copy writes the selection, Cut removes it
+    /// each acts on the field: Copy writes the selection, Cut removes it
     /// after writing it, Paste inserts the clipboard at the caret.
     #[gpui::test]
     async fn composer_right_click_menu_offers_cut_copy_paste_on_the_field(cx: &mut TestAppContext) {
@@ -17095,10 +17250,10 @@ two"
         refresh_frame(cx);
 
         focus_and_type(cx, "hello menu");
-        // Select-all is bezel's own binding, and `input::init` registers it
+        // Select-all is Ely's own binding, and `ely::init` registers it
         // per platform: cmd-a on macOS, ctrl-a everywhere else. The test has
         // to press the chord this build actually bound — cmd-a on Windows
-        // selects nothing, and bezel's `Copy` writes nothing for an empty
+        // selects nothing, and Ely's `Copy` writes nothing for an empty
         // selection, so the menu would be exercised against no selection at
         // all. Same shape as `file_view.rs`'s Markdown-toolbar test.
         #[cfg(target_os = "macos")]
@@ -17200,7 +17355,7 @@ two"
         cx.simulate_click(composer.center(), Modifiers::none());
         cx.run_until_parked();
         // `PasteComposer` is bound per platform in `Chat::bind_keys` (cmd-v
-        // on macOS, ctrl-v elsewhere, matching bezel's own `Paste`), so press
+        // on macOS, ctrl-v elsewhere, matching Ely's own `Paste`), so press
         // the chord this build bound: cmd-v resolves to no binding on Windows
         // and the picture never reaches `paste_clipboard_image`.
         #[cfg(target_os = "macos")]
@@ -17252,7 +17407,7 @@ two"
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
@@ -17303,7 +17458,7 @@ two"
     #[gpui::test]
     async fn transcript_right_click_menu_copies_and_selects_all(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(
@@ -17901,7 +18056,7 @@ two"
         .unwrap();
 
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (chat, _) = cx.add_window_view(|_, cx| {
             let mut chat = Chat::new(None, std::env::temp_dir(), cx);
             chat.persistence = Some(ChatPersistence {

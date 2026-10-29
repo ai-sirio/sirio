@@ -989,7 +989,7 @@ fn hidden_files_option(
         .text_color(if active { theme.ely.fg } else { theme.ely.fg_subtle })
         .when(active, |this| this.bg(theme.ely.active))
         .hover(|style| style.bg(theme.ely.hover))
-        .tooltip(move |window, cx| crate::controls::sidebar_tooltip(tooltip, window, cx))
+        .tooltip(crate::controls::tooltip(tooltip))
         .on_click(move |_, _, cx| {
             ShowHiddenFilesSetting::set(show_hidden, cx);
             entity.update(cx, |_, cx| cx.notify());

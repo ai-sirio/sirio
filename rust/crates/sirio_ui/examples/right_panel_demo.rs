@@ -10,6 +10,9 @@ use sirio_ui::right_panel::RightPanel;
 fn main() {
     application().run(|cx: &mut App| {
         Theme::init(cx);
+        // The files toggle and the open list's unavailable rows show Ely tooltips,
+        // which read Ely's theme.
+        sirio_ui::ely::init(cx);
         let root = std::env::args_os()
             .nth(1)
             .map(PathBuf::from)

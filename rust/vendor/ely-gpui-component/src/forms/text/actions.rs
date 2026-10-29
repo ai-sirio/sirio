@@ -1,13 +1,13 @@
 use gpui::{
     App, ClipboardItem, Context, CursorStyle, InteractiveElement, IntoElement, KeyBinding,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Render, Styled, Window, actions,
-    div,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Render, ScrollWheelEvent,
+    Styled, Window, actions, div, prelude::FluentBuilder,
 };
 
 use super::{
     InputEvent, TextInput,
     edit::{self, next_grapheme, prev_grapheme},
-    element::TextElement,
+    element::{TextElement, content_height},
 };
 use crate::forms::structure::FORM_CONTEXT;
 
@@ -17,6 +17,9 @@ actions!(
         Backspace,
         Delete,
         DeleteWordLeft,
+        DeleteWordRight,
+        DeleteToLineStart,
+        DeleteToLineEnd,
         Left,
         Right,
         Up,
@@ -46,7 +49,11 @@ actions!(
     ]
 );
 
-const CONTEXT: &str = "ElyInput";
+pub(super) const CONTEXT: &str = "ElyInput";
+
+/// Added to the root's key context while the field has several rows, so a binding can be for
+/// multi-line fields alone: Ctrl+N and Ctrl+P on macOS (below).
+pub const MULTI_LINE_CONTEXT: &str = "ElyMultiLine";
 
 /// Binds the text keys. `init` calls it.
 pub(crate) fn bind_keys(cx: &mut App) {
@@ -59,6 +66,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", Backspace, Some(CONTEXT)),
         KeyBinding::new("delete", Delete, Some(CONTEXT)),
         KeyBinding::new(&format!("{word}-backspace"), DeleteWordLeft, Some(CONTEXT)),
+        KeyBinding::new(&format!("{word}-delete"), DeleteWordRight, Some(CONTEXT)),
         KeyBinding::new("left", Left, Some(CONTEXT)),
         KeyBinding::new("right", Right, Some(CONTEXT)),
         KeyBinding::new("up", Up, Some(CONTEXT)),
@@ -100,6 +108,19 @@ pub(crate) fn bind_keys(cx: &mut App) {
             KeyBinding::new("cmd-shift-left", SelectHome, Some(CONTEXT)),
             KeyBinding::new("cmd-shift-right", SelectEnd, Some(CONTEXT)),
             KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(CONTEXT)),
+            KeyBinding::new("cmd-backspace", DeleteToLineStart, Some(CONTEXT)),
+            // The emacs bindings macOS honours in every native text field.
+            KeyBinding::new("ctrl-a", Home, Some(CONTEXT)),
+            KeyBinding::new("ctrl-e", End, Some(CONTEXT)),
+            KeyBinding::new("ctrl-b", Left, Some(CONTEXT)),
+            KeyBinding::new("ctrl-f", Right, Some(CONTEXT)),
+            KeyBinding::new("ctrl-h", Backspace, Some(CONTEXT)),
+            KeyBinding::new("ctrl-d", Delete, Some(CONTEXT)),
+            KeyBinding::new("ctrl-k", DeleteToLineEnd, Some(CONTEXT)),
+            // Vertical motion is for several rows only: a one-line field is nested in lists that
+            // bind Down and Up (a combobox, a model search) and must not answer these.
+            KeyBinding::new("ctrl-n", Down, Some(MULTI_LINE_CONTEXT)),
+            KeyBinding::new("ctrl-p", Up, Some(MULTI_LINE_CONTEXT)),
         ]);
     } else {
         bindings.push(KeyBinding::new("ctrl-y", Redo, Some(CONTEXT)));
@@ -129,6 +150,40 @@ impl TextInput {
     fn delete_word_left(&mut self, _: &DeleteWordLeft, _: &mut Window, cx: &mut Context<Self>) {
         let range = if self.selection.is_empty() {
             edit::prev_word(&self.text, self.cursor())..self.cursor()
+        } else {
+            self.selection.clone()
+        };
+        self.replace(range, "", false, cx);
+    }
+
+    /// A non-empty selection is what goes; otherwise the unit up to the caret, as `delete_word_left`.
+    fn delete_word_right(&mut self, _: &DeleteWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        let range = if self.selection.is_empty() {
+            self.cursor()..edit::next_word(&self.text, self.cursor())
+        } else {
+            self.selection.clone()
+        };
+        self.replace(range, "", false, cx);
+    }
+
+    /// The line is the logical one, between newlines, not a soft-wrapped row.
+    fn delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = if self.selection.is_empty() {
+            edit::line_start(&self.text, self.cursor())..self.cursor()
+        } else {
+            self.selection.clone()
+        };
+        self.replace(range, "", false, cx);
+    }
+
+    fn delete_to_line_end(&mut self, _: &DeleteToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        let range = if self.selection.is_empty() {
+            self.cursor()..edit::line_end(&self.text, self.cursor())
         } else {
             self.selection.clone()
         };
@@ -353,13 +408,41 @@ impl TextInput {
     fn mouse_up(&mut self, _: &gpui::MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.selecting = false;
     }
+
+    /// The wheel scrolls a multi-line field within the rows it has laid out. It does not move the
+    /// caret, so the view stays where the wheel left it until an edit or a caret command: see
+    /// `wheeled`. It stops here only when it scrolled: at the field's limit, or with nothing to
+    /// scroll, it goes on to whatever scrolls behind the field.
+    fn scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let overflow = (content_height(&layout.lines, layout.line_height)
+            - layout.bounds.size.height)
+            .max(Pixels::ZERO);
+        let delta = event.delta.pixel_delta(window.line_height());
+        let scrolled = (self.scroll.y - delta.y).clamp(Pixels::ZERO, overflow);
+        if scrolled == self.scroll.y {
+            return;
+        }
+        self.scroll.y = scrolled;
+        self.wheeled = self.position_for(self.display_offset(self.cursor()));
+        cx.stop_propagation();
+        cx.notify();
+    }
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.first_frame(window, cx);
         div()
             .id("ely-text-input")
-            .key_context(CONTEXT)
+            .key_context(self.context.as_ref())
             .track_focus(&self.focus)
             .cursor(if self.disabled {
                 CursorStyle::OperationNotAllowed
@@ -369,6 +452,9 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::delete_to_line_end))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::up))
@@ -399,6 +485,9 @@ impl Render for TextInput {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .when(self.rows.is_some(), |root| {
+                root.on_scroll_wheel(cx.listener(Self::scroll_wheel))
+            })
             .child(TextElement::new(cx.entity()))
     }
 }

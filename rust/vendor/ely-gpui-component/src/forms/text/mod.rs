@@ -12,6 +12,10 @@ use gpui::{
     Subscription, Task, Window, WrappedLine,
 };
 
+pub use actions::{
+    Copy, Cut, DeleteToLineEnd, DeleteToLineStart, DeleteWordRight, MULTI_LINE_CONTEXT, Newline,
+    Paste, SelectAll,
+};
 pub(crate) use actions::{Backspace, Down, Enter, Redo, Submit, Undo, Up, bind_keys};
 pub use edit::History;
 use edit::Snapshot;
@@ -62,17 +66,32 @@ pub struct TextInput {
     max_len: Option<usize>,
     highlighter: Option<Highlighter>,
     disabled: bool,
+    /// The host's identifier, if it added one: see [`Self::host_context`].
+    host: Option<SharedString>,
+    /// The root's whole key context, `ElyInput` and, as they apply, `ElyMultiLine` and the host's,
+    /// built when `multi_line` or `host_context` changes what it holds.
+    context: SharedString,
     history: History<Snapshot>,
     /// The selection the last edit replaced.
     edited_from: Range<usize>,
     pub(crate) layout: Option<Layout>,
     pub(crate) scroll: Point<Pixels>,
+    /// Where the caret lay, in the laid-out text, when the wheel last scrolled the view: while
+    /// it lies there still the view stays where the wheel left it instead of following it. An
+    /// edit (`replace`, `restore`) or a caret command (`move_to`, `select_to`) ends the hold, as
+    /// it does in bezel's field (`follow_caret`), so one that leaves the caret where it was still
+    /// brings the view back to it. Other paths (IME composition, select-all, a double or triple
+    /// click) end it only when the caret's laid-out position changes.
+    pub(crate) wheeled: Option<Point<Pixels>>,
     selecting: bool,
     caret_on: bool,
     /// Blink runs only while focused, or unseen carets redraw forever.
     focused: bool,
     blink_epoch: u64,
     _blink: Option<Task<()>>,
+    /// Whether [`Self::attach`] has made the subscriptions: `new` does, a detached field's first
+    /// `render` does.
+    attached: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -86,23 +105,18 @@ impl Focusable for TextInput {
 
 impl TextInput {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus = cx.focus_handle().tab_stop(true);
-        let subscriptions = vec![
-            cx.on_focus(&focus, window, |input, _, cx| {
-                input.focused = true;
-                input.restart_blink(cx);
-                cx.emit(InputEvent::Focus);
-            }),
-            cx.on_blur(&focus, window, |input, _, cx| {
-                input.focused = false;
-                input.selecting = false;
-                input._blink = None;
-                cx.emit(InputEvent::Blur);
-                cx.notify();
-            }),
-        ];
+        let mut input = Self::detached(cx);
+        input.attach(window, cx);
+        input
+    }
+
+    /// `new` for an owner that has no `Window` yet. The focus and blur subscriptions are made at
+    /// the first `render`, and if the handle is already focused by then the field takes the
+    /// focused state, emits one `InputEvent::Focus` and starts its blink. The caret paints from
+    /// the handle's own focus either way.
+    pub fn detached(cx: &mut Context<Self>) -> Self {
         Self {
-            focus,
+            focus: cx.focus_handle().tab_stop(true),
             text: String::new(),
             placeholder: SharedString::default(),
             selection: 0..0,
@@ -116,23 +130,105 @@ impl TextInput {
             max_len: None,
             highlighter: None,
             disabled: false,
+            host: None,
+            context: actions::CONTEXT.into(),
             history: History::default(),
             edited_from: 0..0,
             layout: None,
             scroll: Point::default(),
+            wheeled: None,
             selecting: false,
             caret_on: true,
             focused: false,
             blink_epoch: 0,
             _blink: None,
-            _subscriptions: subscriptions,
+            attached: false,
+            _subscriptions: Vec::new(),
         }
+    }
+
+    /// Follows the handle's focus and blur. The one place both are subscribed: `new` calls it,
+    /// and a detached field's first `render` does.
+    fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.attached = true;
+        self._subscriptions = vec![
+            cx.on_focus(&self.focus, window, |input, _, cx| input.gained_focus(cx)),
+            cx.on_blur(&self.focus, window, |input, _, cx| {
+                input.focused = false;
+                input.selecting = false;
+                input._blink = None;
+                cx.emit(InputEvent::Blur);
+                cx.notify();
+            }),
+        ];
+    }
+
+    fn gained_focus(&mut self, cx: &mut Context<Self>) {
+        self.focused = true;
+        self.restart_blink(cx);
+        cx.emit(InputEvent::Focus);
+    }
+
+    /// A detached field attaches at its first frame, which may find the handle focused already:
+    /// the focus listener `attach` makes sees only the changes after it. In an inactive window
+    /// that listener fires when the window activates (GPUI blanks the focus paths until then), so
+    /// the field takes the focus now only in an active one, or it would report it twice.
+    fn first_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.attached {
+            return;
+        }
+        self.attach(window, cx);
+        if self.focus.is_focused(window) && window.is_window_active() {
+            self.gained_focus(cx);
+        }
+    }
+
+    /// Adds `context` to the root's key context, which becomes the one node `"ElyInput <context>"`
+    /// (`"ElyInput ElyMultiLine <context>"` for a field with rows), so a host can bind keys of its
+    /// own in its context while the field has focus. `context` is
+    /// one identifier: alphanumerics, `_` and `-`. GPUI's context parser recurses forever on a
+    /// `.` and reads `=` as a key/value pair, so anything else is a bug in the host.
+    ///
+    /// The ordering rule: at the same depth GPUI ranks bindings by registration, the later first,
+    /// so the host's bindings must be registered after `ely_gpui_component::init_chat` (or
+    /// `init_editor`, which runs it), which binds Ely's own. Then a host binding in `context`
+    /// outranks Ely's for the same key, and a handler that calls `cx.propagate()` hands the key
+    /// on to Ely's. A later init must not flip this: `init_chat` returns early once Ely's theme
+    /// is installed, so a second call binds nothing again and Ely's keys stay below the host's.
+    pub fn host_context(mut self, context: impl Into<SharedString>) -> Self {
+        let context = context.into();
+        debug_assert!(
+            !context.is_empty()
+                && context
+                    .chars()
+                    .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '-'),
+            "a host context is one identifier (alphanumerics, `_`, `-`), not {context:?}"
+        );
+        self.host = Some(context);
+        self.refresh_context();
+        self
+    }
+
+    /// `ElyInput`, then `ElyMultiLine` for several rows, then the host's: one node, one string
+    /// built here and not on every frame. A plain one-line field keeps `ElyInput` alone.
+    fn refresh_context(&mut self) {
+        let mut context = String::from(actions::CONTEXT);
+        if self.rows.is_some() {
+            context.push(' ');
+            context.push_str(actions::MULTI_LINE_CONTEXT);
+        }
+        if let Some(host) = &self.host {
+            context.push(' ');
+            context.push_str(host);
+        }
+        self.context = context.into();
     }
 
     /// Several lines: grows from `min` rows to `max`, then scrolls.
     pub fn multi_line(mut self, min: usize, max: usize) -> Self {
         assert!(0 < min && min <= max, "text rows {min}..={max} are empty");
         self.rows = Some((min, max));
+        self.refresh_context();
         self
     }
 
@@ -224,6 +320,13 @@ impl TextInput {
         cx.notify();
     }
 
+    /// `set_text` and a fresh undo history, for an owner that clears or refills the field on its
+    /// own account (a prompt sent): an undo must not bring back what it replaced.
+    pub fn reset_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.history = History::default();
+        self.set_text(text, cx);
+    }
+
     /// Replaces all text and puts the caret at its end. Not an undo step.
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         let text = self.admit(&text.into(), 0);
@@ -235,6 +338,7 @@ impl TextInput {
         self.text = text;
         self.marked = None;
         self.composing = None;
+        self.wheeled = None;
         cx.emit(InputEvent::Changed);
         cx.notify();
     }
@@ -287,6 +391,7 @@ impl TextInput {
         if self.disabled {
             return;
         }
+        self.wheeled = None;
         self.edited_from = self.selection.clone();
         let incoming = if self.rows.is_none() {
             incoming.replace(['\n', '\r'], " ")
@@ -338,6 +443,7 @@ impl TextInput {
     }
 
     pub(crate) fn restore(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
+        self.wheeled = None;
         self.text = snapshot.text;
         self.selection = snapshot.selection;
         self.reversed = false;
@@ -348,12 +454,14 @@ impl TextInput {
     }
 
     pub(crate) fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.wheeled = None;
         self.selection = offset..offset;
         self.reversed = false;
         self.restart_blink(cx);
     }
 
     pub(crate) fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.wheeled = None;
         if self.reversed {
             self.selection.start = offset;
         } else {

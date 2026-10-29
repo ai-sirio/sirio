@@ -166,6 +166,150 @@ clickable.
 A sync with upstream must keep both fields, both builders and their two lines in
 `draw::row`.
 
+### Hosting a text field (bezel UI off)
+
+Sirio's composer, model search, combobox and forms move from bezel's text input to
+`forms::TextInput`, and each keeps the keys it has today. The field learns what bezel's
+gave them. Single-line fields, and every other way a field is built or driven, behave as
+before; the one behaviour change for existing callers is that a multi-line field now takes
+the wheel (below), Ely's own chat composer and Sirio's `new_input(.., Some(rows), ..)` sites
+(the change-request composer, compose, edit body, review summary, merge message and hand-off
+fields) included.
+
+- `src/forms/text/mod.rs`:
+  - `TextInput::detached(cx)` is `new` without a `Window`. `new` is now `detached` plus
+    `attach`, the one place the focus and blur subscriptions are made (it sets `attached`). A
+    detached field attaches at its first `render`; if the handle is already focused by then,
+    and the window is active, it takes the focused state, emits one `InputEvent::Focus` and
+    starts its blink (`first_frame`), because the listener `attach` makes only sees changes
+    after it. In an inactive window GPUI blanks the focus paths and that listener fires when
+    the window activates, so taking the focus at the first frame as well would report it twice
+    with no `Blur` between. The focus body is `gained_focus`, shared with the listener.
+  - `TextInput::host_context(context)`: the root's key context becomes the one node
+    `"ElyInput <context>"` (`"ElyInput ElyMultiLine <context>"` for a field with rows, see the entry
+    below), built once and set in `render` (`actions.rs`). `context` is one
+    identifier (alphanumerics, `_`, `-`; a `debug_assert!` says so): GPUI's context parser
+    recurses forever on a `.` and reads `=` as a key/value. A host binding in `context`,
+    registered after `init_chat`, outranks Ely's at equal depth (GPUI: later wins), and a
+    handler that calls `cx.propagate()` hands the key on to Ely's. The doc comment states
+    the ordering rule; `init_chat`'s early return is what keeps a later init from flipping it.
+  - `TextInput::reset_text(text, cx)` is `set_text` plus a fresh undo history, what bezel's
+    `set_content` did: an undo after a send must not bring the prompt back. `set_text` itself
+    is unchanged apart from ending the wheel's hold (below).
+- `src/forms/text/actions.rs`, `element.rs`: a multi-line field takes the wheel. `scroll_wheel`
+  moves `scroll.y` within the overflow of the laid-out rows (`content_height`, the sum
+  `keep_in_view` already took), as bezel's `on_scroll_wheel` does, so a draft over its
+  rows can be read. It stops the event only when it scrolled, so at the field's limits, or with
+  nothing to scroll, the wheel still reaches a page the field sits in (the change-request tab's
+  body). A single-line field gets no handler. Ely follows the caret on every frame, which would
+  undo the wheel at the next one, where bezel kept a `follow_caret` flag. Here the wheel records
+  where the caret lay in the laid-out text (`wheeled`); while it lies there still
+  `keep_in_view` clamps and does not follow. Every edit (`replace`, `restore`) and caret command
+  (`move_to`, `select_to`) ends the hold, as bezel's re-follow on each, even one that leaves
+  the caret where it was (forward Delete, a Left at the start). IME composition, select-all and
+  a double or triple click go through neither, so prepaint drops the hold only when they move the
+  caret's laid-out position. Every other path follows as before.
+- `src/forms/text/mod.rs`, `src/forms/mod.rs`: `Copy`, `Cut`, `Paste`, `Newline` and
+  `SelectAll` are `pub use` from `forms::text` and `forms`, so a host can bind a key of its
+  own to the field's action. `Copy` shadows the prelude trait's name for a module that
+  glob-imports `forms`: none does.
+- `src/menus/draw.rs`, `src/menus/mod.rs`: `menus::row_frame(id, current, disabled, cx)` is the
+  frame of `draw::row` (`relative`, `flex`, `items_center`, `gap_2`, `h(control_height Md)`,
+  `px_2`, radius `Md`, `fg` or `fg_disabled`, the `hover` fill when `current` and enabled,
+  a pointer when enabled) as a `Stateful<Div>`. `draw::row` builds on it, so Ely's menus
+  draw as before, and a host's own list (the model search, the combobox) wears the same frame.
+
+A sync with upstream must keep `detached`/`attach`/`first_frame`, `host_context`,
+`reset_text`, the wheel handler with `wheeled` (set by the wheel, cleared by `replace`,
+`restore`, `move_to`, `select_to` and `set_text`, read by `keep_in_view` and prepaint), the five
+re-exports and `row_frame` under `draw::row`.
+
+Proof: `sirio_ui::ely_ui::tests` hosts a field in a window
+(`a_host_binding_registered_after_ely_wins_and_can_hand_the_key_on`,
+`a_detached_field_focused_before_its_first_frame_reports_focus_and_types`,
+`a_detached_field_first_drawn_in_an_inactive_window_reports_focus_once_it_activates`,
+`reset_text_starts_a_fresh_history`, `a_long_multi_line_draft_scrolls_under_the_wheel`,
+`a_wheeled_draft_follows_the_caret_again_on_the_next_edit`,
+`a_wheel_scrolls_a_draft_alone_and_reaches_the_page_at_its_limit`).
+
+### Editing chords bezel's field had (bezel UI off)
+
+Moving Sirio's fields from bezel's text input to `forms::TextInput` (above) lost chords bezel's
+field bound and Ely's did not answer (spec Goal 3: keys work as they do today). They are Ely's
+now, for every `TextInput` in the app, so the change-request fields (the right panel's search,
+token and comment fields, the compose and hand-off bodies) and the editor-page fields gain them
+too, as do the settings, the forms, the browser's address bar and the composer.
+
+- `src/forms/text/actions.rs`, `mod.rs`, `forms/mod.rs`: three actions, ported from bezel's
+  handlers (`bezel_ui/src/input.rs`), exported beside `Copy`/`Cut`/`Paste`:
+  - `DeleteToLineStart` and `DeleteToLineEnd` delete from the caret to the start or end of the
+    logical line, the one between newlines, never a soft-wrapped row;
+  - `DeleteWordRight` deletes to the end of the word after the caret, by the word unit below;
+  - a non-empty selection is what each deletes, and nothing more. Each is one undo step
+    (`replace(.., "", false, ..)`, as `DeleteWordLeft`), where bezel coalesced a run of
+    adjacent deletes and Ely has never coalesced deletes.
+- Bindings in `ElyInput`, as bezel's:
+  - every platform: `alt-delete` on macOS and `ctrl-delete` elsewhere for `DeleteWordRight`;
+  - macOS only: `cmd-backspace` for `DeleteToLineStart`, `ctrl-k` for `DeleteToLineEnd`, and the
+    emacs set onto Ely's existing actions: `ctrl-a` Home, `ctrl-e` End, `ctrl-b` Left, `ctrl-f`
+    Right, `ctrl-h` Backspace, `ctrl-d` Delete. (Elsewhere `ctrl-a` stays select-all.)
+- `ctrl-n` and `ctrl-p`, macOS only, are Down and Up in multi-line fields alone, as bezel bound
+  them under its `TextArea` context. Ely binds Up and Down in every `ElyInput` and had no
+  multi-line context, so under plain `ElyInput` every one-line field (a model search, a combobox's
+  query, a form's) would answer a chord it never did. A field with rows now adds the identifier
+  `MULTI_LINE_CONTEXT` (`ElyMultiLine`, exported) to its root's key context, built the way
+  `host_context` builds its one node: `ElyInput`, then `ElyMultiLine` when it has rows, then the
+  host's identifier. A one-line field's context is `ElyInput` as before, and the host's
+  identifier is still on the node, so a host binding outranks Ely's as it did (the key context
+  string is built when `multi_line` or `host_context` is called, not on every frame).
+- The word unit is bezel's: `edit::words` keeps a segment only if it has a letter or a digit in it
+  (`is_word`, bezel's own test), where upstream kept any non-whitespace segment, so a run of
+  punctuation was a word of its own. Word motion and deletion (`WordLeft`, `WordRight`, their
+  `Select` variants, `DeleteWordLeft`, `DeleteWordRight`) all go through it and move together:
+  Option+Backspace on `Hello world.` deletes `world.` as it did under bezel and does in macOS's
+  native fields, not `.`. Only `TextInput` uses `edit::words`; the code editor has its own
+  (`editor/buffer.rs`) and is untouched. Double-click selection (`edit::word_at`) segments the text
+  by itself and does not use it, so it is as it was (bezel's field had no double-click selection).
+  Upstream's `words_skip_spaces_and_punctuation_stops` pinned the old unit and is changed with it:
+  going back from `new` in `hello  brave, new` now lands on `brave`, not on the comma.
+- On macOS `ctrl-k` is now `DeleteToLineEnd` in a field that was already Ely's on main too (the
+  change-request panel and tab fields, the editor-page fields, the drawer search, `file_view`'s
+  find and status-action fields), where it used to reach the shell's `readline_safe` palette
+  fallback (`main.rs`, a raw key-down check that runs after bindings). `ctrl-shift-p` still opens the
+  palette everywhere, and native macOS fields behave this way too.
+- A sync with upstream must keep the three actions and their bindings, `MULTI_LINE_CONTEXT`, the
+  `refresh_context` that composes the context, and `is_word` in `edit::words`.
+
+Proof: `forms::text::edit::tests::a_word_is_a_run_with_a_letter_or_digit_in_it` (the word unit, both
+directions); `sirio_ui::ely_ui::tests` dispatches each action and checks text, caret, selection and undo
+(`the_delete_to_line_and_word_actions_delete_what_bezels_did`,
+`a_delete_to_line_end_is_one_undo_step`), checks the multi-line context
+(`only_a_multi_line_field_names_the_multi_line_context`,
+`a_host_binding_still_wins_in_a_multi_line_field`,
+`ctrl_n_and_ctrl_p_do_not_move_a_single_line_field_the_way_down_and_up_do`), and the chat's tests
+press the running platform's chords in the composer
+(`the_composer_answers_the_editing_chords_of_its_platform`, with the word unit,
+`the_composer_moves_the_caret_a_row_with_its_platforms_keys`). The macOS chords' tests run only in
+the release gate: `macos-check.yml` does not run the test suite and this was written on Linux.
+
+### A one-line `Input` grows with its text (bezel UI off)
+
+- `src/forms/input.rs`: the frame of a one-line `Input` (and of `PasswordInput` and `SearchInput`,
+  which build on it) is `min_h(control height)` where it was `h(control height)`. Sirio's interface
+  size is a setting from 12 to 18 and Ely's text follows it through the metrics (`ely.rs` in
+  `sirio_ui`), while the control height is a fixed 28 px at the default density: from interface
+  size 15 the field's line (about 1.6 times the text) is taller than the frame's inner 26 px, so
+  the line, the caret and the selection crossed the border. The frame is now at least its control
+  height and as tall as its line plus its border beyond that. At the default size nothing moves
+  (a 23 px line and a 2 px border are under 28 px). Every `Input` in Sirio gets this: the
+  settings (the Agents search, the git-hosting tokens, the editor page), the change-request
+  fields, the project forms, the address bar, the model search and the combobox query.
+- A sync with upstream must keep `min_h` there.
+
+Proof: `settings::agents_page::tests::the_agents_search_keeps_its_row_inside_its_frame_at_every_interface_size`
+checks the field's row against its frame at every interface size from 12 to 18, and
+`the_project_name_field_tracks_font_preferences_and_keeps_native_editing` checks the project form's field.
+
 ## Final compatibility evidence
 
 Seen on Linux x86_64 (Arch, kernel 7.2.3) with rustc 1.98.1, cargo 1.98.1 and

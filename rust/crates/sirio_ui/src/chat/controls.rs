@@ -5,7 +5,10 @@
 
 use super::composer_view::{EFFORT_RESET, EFFORT_ULTRACODE, effort_rows};
 use super::*;
-use ely_gpui_component::menus::{Hang, Menu, MenuItem, MenuPanel, layer, panel_surface};
+use ely_gpui_component::{
+    forms::Input,
+    menus::{Hang, Menu, MenuItem, MenuPanel, layer, panel_surface},
+};
 use sirio_acp::EffortChoice;
 
 /// A popup's width at the interface's text size: the 13px design size at
@@ -109,7 +112,7 @@ impl Chat {
         // pane has to cut.
         let mode_tooltip = SharedString::from(label.to_string());
         let status_pill = status_pill
-            .tooltip(move |window, cx| Tooltip::text(mode_tooltip.clone(), window, cx))
+            .tooltip(crate::controls::tooltip(mode_tooltip))
             .when(mode_selectable, |this| {
                 this.hover(|style| style.bg(bezel_theme.element_hover))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -161,7 +164,7 @@ impl Chat {
             div()
                 .id("model-chip")
                 .debug_selector(|| "model-chip".into())
-                .tooltip(move |window, cx| Tooltip::text(model_tooltip.clone(), window, cx))
+                .tooltip(crate::controls::tooltip(model_tooltip))
                 .flex()
                 .items_center()
                 .gap(px(6.0))
@@ -336,7 +339,7 @@ impl Chat {
                     })
                     .when_some(blocked, |chip, reason| {
                         let reason = SharedString::from(reason);
-                        chip.tooltip(move |window, cx| Tooltip::text(reason.clone(), window, cx))
+                        chip.tooltip(crate::controls::tooltip(reason))
                     })
                     .child(div().text_color(label_colour).child("Fast"))
             });
@@ -360,17 +363,11 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .text_size(typography.ui_size)
                 .text_color(theme.ely.fg_subtle)
-                .tooltip(move |window, cx| {
-                    Tooltip::text(
-                        SharedString::from(if running == 1 {
-                            "1 background task running".to_string()
-                        } else {
-                            format!("{running} background tasks running")
-                        }),
-                        window,
-                        cx,
-                    )
-                })
+                .tooltip(crate::controls::tooltip(if running == 1 {
+                    "1 background task running".to_string()
+                } else {
+                    format!("{running} background tasks running")
+                }))
                 .child(format!("⌁ {running}"))
         });
 
@@ -604,7 +601,7 @@ impl Chat {
                             .debug_selector(|| "model-search-input".into())
                             .w_full()
                             .mb(px(6.0))
-                            .child(self.model_search_field.clone()),
+                            .child(Input::new(&self.model_search_field)),
                     )
                 });
             layer(
@@ -1037,7 +1034,7 @@ impl Chat {
     /// The rows of whichever catalogue popup is open, in the order drawn.
     pub(super) fn picker_rows(&self, cx: &App) -> Vec<PickerRow> {
         if self.model_picker_open {
-            let query = self.model_search_field.read(cx).content().to_string();
+            let query = self.model_search_field.read(cx).text().to_owned();
             self.available_models
                 .iter()
                 .filter(|option| model_query_matches(option, &query))

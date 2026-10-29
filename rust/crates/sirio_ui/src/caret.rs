@@ -144,7 +144,7 @@ pub fn field_value(text: impl IntoElement) -> Div {
 ///
 /// The bar goes *here*, not after the wrapper the way it follows
 /// [`field_value`]: an empty field's insertion point is offset 0, and
-/// bezel's `TextField` paints it there, over the hint's first glyph, with
+/// Ely's `TextInput` paints it there, over the hint's first glyph, with
 /// the hint where it always is. A bar appended after the hint read
 /// "branch name|", as if the hint had been typed. The bar is positioned
 /// absolutely so it takes no room in the row and the hint does not shift
@@ -337,7 +337,7 @@ mod tests {
         cx
     }
 
-    /// bezel's `TextField` paints an empty, focused field with the caret at
+    /// Ely's `TextInput` paints an empty, focused field with the caret at
     /// offset 0 of the (empty) value — over the placeholder's first glyph —
     /// and the placeholder exactly where it sits unfocused. The bar handed
     /// to [`field_placeholder`] does the same: it stands at the hint's

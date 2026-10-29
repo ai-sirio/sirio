@@ -221,7 +221,7 @@ fn main() {
                         ..Default::default()
                     },
                     |window, cx| {
-                        bezel::ui::input::init(cx);
+                        sirio_ui::ely::init(cx);
                         sirio_ui::chat::init(cx);
                         window.set_window_title("Sirio Ely Chat Probe");
                         let chat = cx.new(|cx| {

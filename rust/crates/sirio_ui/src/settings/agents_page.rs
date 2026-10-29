@@ -7,11 +7,11 @@
 use crate::text_selection::selectable_text;
 use super::*;
 use bezel::ui::icons;
-use bezel::ui::tooltip::Tooltip;
 use bezel::ui::widgets::{
     ButtonStyle, Buttons as _, Content as _, Scaffolding as _, Status as _, card_row_hover,
     status_dot,
 };
+use ely_gpui_component::forms::Input;
 use gpui::Focusable;
 
 /// #334: the old path pill capped the resolved path at 240 px so version plus checksum still fit one meta line.
@@ -58,7 +58,7 @@ impl Settings {
         let query = self
             .agent_search_field
             .read(cx)
-            .content()
+            .text()
             .trim()
             .to_lowercase();
         let first_load = self.provider_availability.is_empty()
@@ -106,7 +106,7 @@ impl Settings {
                             div()
                                 .id(("settings-agent-path", index))
                                 .debug_selector(move || format!("settings-agent-path-{index}"))
-                                .tooltip(move |window, cx| Tooltip::text(full.clone(), window, cx))
+                                .tooltip(crate::controls::tooltip(full))
                                 .font_family(bezel_theme.font_mono.clone())
                                 .text_size(px(11.0))
                                 .max_w(px(PATH_FRAGMENT_MAX_WIDTH))
@@ -456,7 +456,7 @@ impl Settings {
                                                 .focus(window, cx);
                                         },
                                     )
-                                    .child(search_field.clone()),
+                                    .child(Input::new(&search_field)),
                             );
                             // F-SET-16: a "Refreshed …" stamp next to the
                             // button — the conjunct a byte-identical
@@ -581,7 +581,53 @@ mod tests {
         }
     }
 
-    /// F-SET-16: typing in the Agents screen's bezel search field narrows
+    /// The interface size is a setting (12 to 18) and Ely's text follows it while its frame is a
+    /// control height: the field's row, its caret and selection rects included, must lie inside
+    /// the frame's border at every size, or the text is clipped or crosses the border.
+    #[gpui::test]
+    async fn the_agents_search_keeps_its_row_inside_its_frame_at_every_interface_size(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let window = cx.add_window(|_window, cx| {
+            Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(Vec::new())
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        open_agents_category(&window, &mut cx);
+
+        for size in 12..=18 {
+            cx.update(|_, cx| {
+                Theme::set_interface_font_size(size, cx);
+                cx.refresh_windows();
+            });
+            cx.run_until_parked();
+            // The wrapper holds the field and nothing else, so its bounds are the frame's.
+            let frame = cx
+                .debug_bounds("agent-search-field")
+                .expect("the search field's frame is drawn");
+            let row = cx.update(|window, cx| {
+                window
+                    .root::<Settings>()
+                    .flatten()
+                    .expect("settings root")
+                    .read(cx)
+                    .agent_search_field
+                    .read(cx)
+                    .bounds_for(0)
+                    .expect("the field has been laid out")
+            });
+            let border = gpui::px(1.0);
+            assert!(
+                row.top() >= frame.top() + border && row.bottom() <= frame.bottom() - border,
+                "at interface size {size} the field's row {row:?} must lie inside its frame \
+                 {frame:?} less its border"
+            );
+        }
+    }
+
+    /// F-SET-16: typing in the Agents screen's search field narrows
     /// the drawn rows to the matching agent, and clearing it restores every
     /// row — the same contract `sidebar.rs`'s project filter already has.
     /// Filtering must not renumber surviving rows: ids stay keyed to the
@@ -590,7 +636,7 @@ mod tests {
     #[gpui::test]
     async fn agent_search_narrows_rows_and_clearing_restores_them(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![
             AgentAvailability {
                 id: "claude",
@@ -633,7 +679,7 @@ mod tests {
                 .read(cx)
                 .agent_search_field
                 .read(cx)
-                .content()
+                .text()
                 .to_string()
         });
         assert_eq!(
@@ -659,7 +705,7 @@ mod tests {
             let settings = window.root::<Settings>().flatten().expect("settings root");
             settings.update(cx, |settings, cx| {
                 settings.agent_search_field.update(cx, |field, cx| {
-                    field.set_content("", cx);
+                    field.reset_text("", cx);
                 });
                 cx.notify();
             });
@@ -684,7 +730,7 @@ mod tests {
     #[gpui::test]
     async fn the_claude_row_says_which_transport_it_resolved(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![
             AgentAvailability {
                 id: "claude",
@@ -729,7 +775,7 @@ mod tests {
     ) {
         use sirio_registry::LaunchSource;
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![AgentAvailability {
             id: "claude",
             display_name: "Claude Code",
@@ -775,7 +821,7 @@ mod tests {
     ) {
         use sirio_registry::{LaunchSource, UnavailableReason};
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![AgentAvailability {
             id: "omp",
             display_name: "Oh-My-Pi",
@@ -808,7 +854,7 @@ mod tests {
     async fn the_checksum_note_is_a_meta_fragment_on_the_rows_line(cx: &mut TestAppContext) {
         use sirio_registry::{InstalledAgent, Integrity, LaunchSource};
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![AgentAvailability {
             id: "claude",
             display_name: "Claude Code",
@@ -909,7 +955,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (fixture, sources, versions) = outdated_fixture();
         let window = cx.add_window(|_window, cx| {
             Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
@@ -975,7 +1021,7 @@ mod tests {
     #[gpui::test]
     async fn update_all_emits_one_update_per_outdated_agent(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let (fixture, sources, versions) = outdated_fixture();
         let window = cx.add_window(|_window, cx| {
             Settings::with_snapshot(cx, SettingsSnapshot::default()).with_availability(fixture)
@@ -1029,7 +1075,7 @@ mod tests {
     async fn update_all_is_absent_when_nothing_is_outdated(cx: &mut TestAppContext) {
         use sirio_registry::LaunchSource;
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![AgentAvailability {
             id: "claude",
             display_name: "Claude Code",
@@ -1457,7 +1503,7 @@ mod tests {
     #[gpui::test]
     async fn a_search_with_no_match_shows_the_empty_state(cx: &mut TestAppContext) {
         cx.update(Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         let fixture = vec![
             AgentAvailability {
                 id: "claude",

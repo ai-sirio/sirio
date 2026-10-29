@@ -4,6 +4,7 @@ mod menu;
 mod model;
 mod panel;
 
+pub use draw::row_frame;
 pub(crate) use hosts::menu_under;
 pub use hosts::{ContextMenu, DropdownMenu, OverflowMenu, SearchableMenu, SplitButton};
 pub use model::{Menu, MenuItem};

@@ -1015,7 +1015,7 @@ mod tests {
         // test scheduler refuses unless it is told real threads are in play.
         cx.executor().allow_parking();
         cx.update(sirio_theme::Theme::init);
-        cx.update(bezel::ui::input::init);
+        cx.update(crate::ely::init);
         cx.update(crate::chat::init);
         let forge = std::sync::Arc::new(CannedForge::default());
         let source = FakeSource::ready(testing::github_client(forge), Some("feat/y"));

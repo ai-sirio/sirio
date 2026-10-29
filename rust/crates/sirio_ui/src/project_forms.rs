@@ -4,10 +4,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
 
-use bezel::ui::input::TextField;
+use ely_gpui_component::forms::{Input, InputEvent, TextInput};
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent, Render,
-    Task, Window, div, prelude::*, px,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Render, Task, Window,
+    div, prelude::*, px,
 };
 use sirio_git::{GitRemote, clone_repository};
 
@@ -139,7 +139,7 @@ enum CloneWorkerMessage {
 pub struct CloneForm {
     parent: PathBuf,
     state: CloneFormState,
-    url_field: Entity<TextField>,
+    url_field: Entity<TextInput>,
     task: Option<Task<()>>,
 }
 
@@ -149,14 +149,19 @@ impl CloneForm {
     pub fn new(parent: PathBuf, cx: &mut Context<Self>) -> Self {
         ensure_theme(cx);
         let url_field = cx.new(|cx| {
-            TextField::new(cx).with_placeholder("https://github.com/owner/repository.git")
+            TextInput::detached(cx).placeholder("https://github.com/owner/repository.git")
         });
-        cx.observe(&url_field, |form, field, cx| {
-            let url = field.read(cx).content().to_string();
-            if url != form.state.url() {
-                form.state.set_url(url);
-                cx.notify();
+        cx.subscribe(&url_field, |form, field, event: &InputEvent, cx| match event {
+            InputEvent::Changed => {
+                let url = field.read(cx).text().to_owned();
+                if url != form.state.url() {
+                    form.state.set_url(url);
+                    cx.notify();
+                }
             }
+            // Enter starts the clone, as a click on Clone does.
+            InputEvent::Submit => form.submit(cx),
+            InputEvent::Focus | InputEvent::Blur => {}
         })
         .detach();
         Self {
@@ -179,8 +184,9 @@ impl CloneForm {
     pub fn set_url(&mut self, url: impl Into<String>, cx: &mut Context<Self>) {
         let url = url.into();
         self.state.set_url(url.clone());
+        let shown = crate::ely_ui::normalize(&url, false);
         self.url_field
-            .update(cx, |field, cx| field.set_content(url, cx));
+            .update(cx, |field, cx| field.reset_text(shown, cx));
         cx.notify();
     }
 
@@ -201,7 +207,7 @@ impl CloneForm {
     /// Starts the clone worker, or does nothing when the state guard rejects
     /// the click. Progress is forwarded from GitClone's existing parser.
     pub fn submit(&mut self, cx: &mut Context<Self>) {
-        let url = self.url_field.read(cx).content().to_string();
+        let url = self.url_field.read(cx).text().to_owned();
         if url != self.state.url() {
             self.state.set_url(url);
         }
@@ -278,12 +284,6 @@ impl CloneForm {
             }
         }));
     }
-
-    fn on_url_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(event.keystroke.key.as_str(), "enter" | "return") {
-            self.submit(cx);
-        }
-    }
 }
 
 impl Focusable for CloneForm {
@@ -338,7 +338,6 @@ impl Render for CloneForm {
                     .id("clone-url-field")
                     .debug_selector(|| "clone-url-field".to_owned())
                     .w_full()
-                    .on_key_down(cx.listener(Self::on_url_key))
                     .overflow_hidden()
                     .child(
                         div()
@@ -346,7 +345,7 @@ impl Render for CloneForm {
                             .debug_selector(|| "clone-url-field-text".to_owned())
                             .w_full()
                             .min_w_0()
-                            .child(crate::controls::sidebar_text_field(url_field)),
+                            .child(Input::new(&url_field)),
                     ),
             )
             .child(form_label("Destination", &theme))
@@ -480,20 +479,25 @@ pub enum CreateFormEvent {
 pub struct CreateForm {
     parent: PathBuf,
     state: CreateFormState,
-    name_field: Entity<TextField>,
+    name_field: Entity<TextInput>,
     task: Option<Task<()>>,
 }
 
 impl CreateForm {
     pub fn new(parent: PathBuf, cx: &mut Context<Self>) -> Self {
         ensure_theme(cx);
-        let name_field = cx.new(|cx| TextField::new(cx).with_placeholder("project-folder-name"));
-        cx.observe(&name_field, |form, field, cx| {
-            let name = field.read(cx).content().to_string();
-            if name != form.state.name() {
-                form.state.set_name(name);
-                cx.notify();
+        let name_field = cx.new(|cx| TextInput::detached(cx).placeholder("project-folder-name"));
+        cx.subscribe(&name_field, |form, field, event: &InputEvent, cx| match event {
+            InputEvent::Changed => {
+                let name = field.read(cx).text().to_owned();
+                if name != form.state.name() {
+                    form.state.set_name(name);
+                    cx.notify();
+                }
             }
+            // Enter creates the folder, as a click on Create does.
+            InputEvent::Submit => form.submit(cx),
+            InputEvent::Focus | InputEvent::Blur => {}
         })
         .detach();
         Self {
@@ -516,8 +520,9 @@ impl CreateForm {
     pub fn set_name(&mut self, name: impl Into<String>, cx: &mut Context<Self>) {
         let name = name.into();
         self.state.set_name(name.clone());
+        let shown = crate::ely_ui::normalize(&name, false);
         self.name_field
-            .update(cx, |field, cx| field.set_content(name, cx));
+            .update(cx, |field, cx| field.reset_text(shown, cx));
         cx.notify();
     }
 
@@ -535,7 +540,7 @@ impl CreateForm {
 
     /// Starts directory creation, retaining the draft on failure for retry.
     pub fn submit(&mut self, cx: &mut Context<Self>) {
-        let name = self.name_field.read(cx).content().to_string();
+        let name = self.name_field.read(cx).text().to_owned();
         if name != self.state.name() {
             self.state.set_name(name);
         }
@@ -562,12 +567,6 @@ impl CreateForm {
                 cx.notify();
             });
         }));
-    }
-
-    fn on_name_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(event.keystroke.key.as_str(), "enter" | "return") {
-            self.submit(cx);
-        }
     }
 }
 
@@ -622,7 +621,6 @@ impl Render for CreateForm {
                     .id("create-name-field")
                     .debug_selector(|| "create-name-field".to_owned())
                     .w_full()
-                    .on_key_down(cx.listener(Self::on_name_key))
                     .overflow_hidden()
                     .child(
                         div()
@@ -630,7 +628,7 @@ impl Render for CreateForm {
                             .debug_selector(|| "create-name-field-text".to_owned())
                             .w_full()
                             .min_w_0()
-                            .child(crate::controls::sidebar_text_field(name_field)),
+                            .child(Input::new(&name_field)),
                     ),
             )
             .child(form_label("Parent location", &theme))
@@ -765,6 +763,8 @@ fn ensure_theme(cx: &mut Context<impl Sized>) {
     if !cx.has_global::<Theme>() {
         Theme::init(cx);
     }
+    // The URL and name fields are Ely's: its keys are bound once, here or at startup.
+    crate::ely::init(cx);
 }
 
 #[cfg(test)]
@@ -781,7 +781,7 @@ mod tests {
 
     fn init_test_ui(cx: &mut gpui::App) {
         Theme::init(cx);
-        bezel::ui::input::init(cx);
+        crate::ely::init(cx);
     }
 
     #[gpui::test]
@@ -815,7 +815,7 @@ mod tests {
         cx.simulate_input("demo-project");
         cx.run_until_parked();
         form.read_with(&cx.cx, |form, cx| {
-            assert_eq!(form.name_field.read(cx).content().as_ref(), "demo-project");
+            assert_eq!(form.name_field.read(cx).text(), "demo-project");
         });
         cx.simulate_keystrokes(if cfg!(target_os = "macos") {
             "cmd-z"
@@ -824,7 +824,7 @@ mod tests {
         });
         cx.run_until_parked();
         form.read_with(&cx.cx, |form, cx| {
-            assert!(form.name_field.read(cx).content().is_empty());
+            assert!(form.name_field.read(cx).text().is_empty());
         });
     }
 
@@ -1024,13 +1024,12 @@ mod tests {
     }
 
     /// Enter in the clone URL field starts the clone, as a click on Clone does. The key is the
-    /// field's wrapper's own `on_key_down`, not a binding of the field, so a field that takes
-    /// Enter for itself (a replacement for bezel's) silently ends it. Against a local
-    /// repository, so no network and a clone that completes.
+    /// field's `Submit`, which the form answers, so a field that stops reporting it silently ends
+    /// the clone. Against a local repository, so no network and a clone that completes.
     #[gpui::test]
     async fn pressing_enter_in_the_clone_url_field_starts_the_clone(cx: &mut TestAppContext) {
         cx.update(init_test_ui);
-        // Ely's bindings are live, as they are in the app: a replacement field may bind keys.
+        // Ely's bindings are live, as they are in the app.
         cx.update(crate::ely::init);
         let source = TempDir::new("clone-enter-source");
         std::fs::write(source.0.join("file.txt"), "hello\n").expect("seed source file");
@@ -1089,11 +1088,11 @@ mod tests {
     }
 
     /// Enter in the project name field creates the folder, as a click on Create does. The same
-    /// shape as the clone form's: the key is the wrapper's `on_key_down`.
+    /// shape as the clone form's: the key is the field's `Submit`.
     #[gpui::test]
     async fn pressing_enter_in_the_create_name_field_creates_the_folder(cx: &mut TestAppContext) {
         cx.update(init_test_ui);
-        // Ely's bindings are live, as they are in the app: a replacement field may bind keys.
+        // Ely's bindings are live, as they are in the app.
         cx.update(crate::ely::init);
         let parent = TempDir::new("create-enter-parent");
         let window = cx.add_window(|_, cx| CreateForm::new(parent.0.clone(), cx));

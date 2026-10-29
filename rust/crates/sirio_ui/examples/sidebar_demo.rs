@@ -8,6 +8,8 @@ use sirio_ui::sidebar::Sidebar;
 fn main() {
     application().run(|cx: &mut App| {
         Theme::init(cx);
+        // The header's icon buttons show Ely tooltips, which read Ely's theme.
+        sirio_ui::ely::init(cx);
         let bounds = Bounds::centered(None, size(px(280.0), px(833.0)), cx);
         cx.open_window(
             WindowOptions {
