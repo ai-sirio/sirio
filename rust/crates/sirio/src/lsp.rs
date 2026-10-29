@@ -14,6 +14,36 @@ use std::path::{Path, PathBuf};
 
 use sirio_lsp::{Capabilities, ConfigLoader, LanguageEntry, LanguageTable, Reload, Server};
 
+/// How long the full build jdtls is sent after `ServiceReady` (the Lombok
+/// agent's rebuild) may take before it counts as unanswered. A workspace build
+/// is not an editor request: a large project takes minutes.
+pub const FULL_BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How soon after one look at the caches the next may happen, per key: the look
+/// follows a publish, and a publish stream is chatty.
+pub const LOMBOK_RECHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long the old jdtls gets to end after `exit` when it is being replaced.
+/// jdtls ended 1.0 to 4.1 s after `exit` in the live runs, so app quit's 500 ms
+/// would kill it every time; the new launch also waits for the old process to be
+/// gone, since both use one workspace directory.
+pub const RESTART_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether a key's jdtls should be restarted for `newest`, the newest jar in the
+/// caches just now: the project uses Lombok, the restart is still available
+/// ([`LombokState::may_restart`]), and the jar is newer than the launch's agent
+/// (or the launch has none).
+pub fn wants_lombok_restart(state: &LombokState, newest: Option<&sirio_lsp::LombokJar>) -> bool {
+    state.uses_lombok
+        && state.may_restart()
+        && newest.is_some_and(|newest| {
+            state
+                .agent
+                .as_ref()
+                .is_none_or(|agent| newest.version > agent.version)
+        })
+}
+
 /// One running server: the connection, plus the gpui task driving its read
 /// loop. Dropping the task stops the loop, so the handle owning both is what
 /// keeps a server alive.
@@ -202,6 +232,40 @@ pub struct LspSupervisor {
     /// cleared when the launch answers either way. What the status row's
     /// "starting" is read from (`state_of`).
     starting: HashSet<(PathBuf, String)>,
+    /// What each `java` key knows about Lombok (see [`LombokState`]); a key
+    /// whose running launch is not the built-in entry has none.
+    lombok: HashMap<(PathBuf, String), LombokState>,
+}
+
+/// What a `java` key knows about Lombok, kept across the key's launches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LombokState {
+    pub uses_lombok: bool,
+    /// The jar the running launch was given, if any.
+    pub agent: Option<sirio_lsp::LombokJar>,
+    /// This launch has sent its full build.
+    pub built: bool,
+    /// jdtls answered that build (any outcome but a closed stream): the end of
+    /// the fallback window.
+    pub build_answered: bool,
+    /// The one deliberate restart is spent for the session.
+    pub restarted: bool,
+    /// No agent for the rest of the session.
+    pub fallen_back: bool,
+    pub last_check: Option<std::time::Instant>,
+    /// The worktree root the launch was given. With the key's root these are the
+    /// arguments of `project_uses_lombok`, so the re-check reads the build files
+    /// as the launch did.
+    pub worktree_root: Option<PathBuf>,
+}
+
+impl LombokState {
+    /// The key's one restart is still available: it is not spent and the key is
+    /// not in fallback. What the re-check at a publish and the restart's own
+    /// decision share.
+    pub fn may_restart(&self) -> bool {
+        !self.restarted && !self.fallen_back
+    }
 }
 
 /// Why a key has no server and will not be tried again — and, for the arms
@@ -244,7 +308,26 @@ impl LspSupervisor {
             dead: HashMap::new(),
             synced: HashMap::new(),
             starting: HashSet::new(),
+            lombok: HashMap::new(),
         }
+    }
+
+    /// What `key` knows about Lombok, if its built-in `java` entry ever launched.
+    pub fn lombok(&self, key: &(PathBuf, String)) -> Option<&LombokState> {
+        self.lombok.get(key)
+    }
+
+    /// The same, created empty when there is none yet.
+    pub fn lombok_mut(&mut self, key: &(PathBuf, String)) -> &mut LombokState {
+        self.lombok.entry(key.clone()).or_default()
+    }
+
+    /// Drops what `key` knew about Lombok. A launch that is not the built-in
+    /// `java` entry (a `languages.toml` entry of the reader's own) calls it, so
+    /// that state left by an earlier built-in launch of the key never lets the
+    /// restart or the re-check act on a server that is the reader's.
+    pub fn forget_lombok(&mut self, key: &(PathBuf, String)) {
+        self.lombok.remove(key);
     }
 
     /// A launch for `key` is about to be spawned.
@@ -447,6 +530,13 @@ impl LspSupervisor {
             // last step: it ends on its own, so it is not cancelled from inside.
             handle.router.detach();
         }
+    }
+
+    /// Takes the server for `key` out whole, router and read loop with it, and
+    /// detaches nothing: the caller decides what is cancelled and when. The key
+    /// is not marked dead.
+    pub fn take(&mut self, key: &(PathBuf, String)) -> Option<ServerHandle> {
+        self.servers.remove(key)
     }
 
     /// The key of every server that is running.
@@ -765,6 +855,7 @@ mod tests {
                 version: "1.0.0",
                 bin: "never-used",
             }),
+            builtin: false,
         };
         let executable = root
             .join("shared-package")
@@ -843,5 +934,54 @@ mod tests {
         supervisor.revive(&key);
 
         assert!(supervisor.is_dead(&key), "Failed is final");
+    }
+
+    fn jar(version: &str) -> sirio_lsp::LombokJar {
+        sirio_lsp::LombokJar {
+            path: PathBuf::from(format!("/m2/lombok-{version}.jar")),
+            version: sirio_lsp::LombokVersion::parse(version).expect("a version"),
+        }
+    }
+
+    fn state(agent: Option<&str>) -> LombokState {
+        LombokState {
+            uses_lombok: true,
+            agent: agent.map(jar),
+            ..LombokState::default()
+        }
+    }
+
+    #[test]
+    fn a_launch_without_the_agent_restarts_for_any_jar() {
+        assert!(wants_lombok_restart(&state(None), Some(&jar("1.18.30"))));
+    }
+
+    #[test]
+    fn a_launch_restarts_only_for_a_strictly_newer_jar() {
+        // The same version is the jar the launch already has, and an older one
+        // is a cache another project left: neither is worth a restart.
+        assert!(wants_lombok_restart(&state(Some("1.18.30")), Some(&jar("1.18.36"))));
+        assert!(!wants_lombok_restart(&state(Some("1.18.36")), Some(&jar("1.18.36"))));
+        assert!(!wants_lombok_restart(&state(Some("1.18.36")), Some(&jar("1.18.30"))));
+        assert!(!wants_lombok_restart(&state(Some("1.18.30")), Some(&jar("1.18.30-edge"))));
+    }
+
+    #[test]
+    fn no_jar_restarts_nothing() {
+        assert!(!wants_lombok_restart(&state(None), None));
+    }
+
+    #[test]
+    fn a_spent_restart_a_fallback_or_a_project_without_lombok_never_restarts() {
+        let newest = jar("1.18.36");
+        let mut spent = state(None);
+        spent.restarted = true;
+        let mut fallen = state(None);
+        fallen.fallen_back = true;
+        let mut plain = state(None);
+        plain.uses_lombok = false;
+        for state in [spent, fallen, plain] {
+            assert!(!wants_lombok_restart(&state, Some(&newest)), "{state:?}");
+        }
     }
 }

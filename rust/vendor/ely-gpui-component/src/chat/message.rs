@@ -254,7 +254,9 @@ impl RenderOnce for MessageBubble {
                 .py_1()
                 .text_size(theme.text_size(TextSize::Xs))
                 .text_color(colors.fg_muted)
-                .child(body.text_size(theme.text_size(TextSize::Xs)))
+                // A flex item is never narrower than its unbroken text unless told so: a
+                // long line would run off both sides of the centre instead of wrapping.
+                .child(body.min_w_0().text_size(theme.text_size(TextSize::Xs)))
                 .into_any_element(),
             Role::User => div()
                 .flex()

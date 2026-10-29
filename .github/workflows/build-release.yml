@@ -63,7 +63,7 @@ env:
   SIRIO_RELEASE_CHANNEL: ${{ inputs.channel }}
   SIRIO_RELEASE_ACCEPTED_KEYS: ${{ vars.SIRIO_RELEASE_ACCEPTED_KEYS }}
   # The CPU floor of every artifact this workflow publishes, stated rather than
-  # inherited. `rust/vendor/libghostty-vt-sys` already defaults to `baseline`,
+  # inherited. `libghostty-vt-sys` (0.2.2 on) already defaults to `baseline`,
   # so this line changes nothing today -- which is the point: the value a
   # release is compiled against should be readable here, next to the channel
   # and the keys, instead of being whatever a build script happened to default
