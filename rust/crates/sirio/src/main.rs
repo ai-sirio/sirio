@@ -14942,6 +14942,20 @@ impl SirioWorkspace {
         let install = entry.install.clone();
         let language = entry.name.clone();
         let root = key.0.clone();
+        // Only the built-in `java` entry gets Lombok's agent, and not once the
+        // key has fallen back without it. A `languages.toml` entry's argv is
+        // exactly what was written. `root` and `worktree_root` are compared as
+        // given, never canonicalised: both come from the same path.
+        let builtin_java = entry.builtin && entry.name == "java";
+        // A launch from any other entry is not Lombok's business: the state an
+        // earlier built-in launch of this key left must not let the restart or
+        // the re-check stop this one.
+        if !builtin_java {
+            self.lsp.forget_lombok(&key);
+        }
+        let lombok_worktree_root = (builtin_java
+            && !self.lsp.lombok(&key).is_some_and(|state| state.fallen_back))
+        .then_some(worktree_root.clone());
         // Step 2 of the ladder, read here and used only once step 1 has
         // answered `NotInstalled`. Consulting the store before the spawn
         // would be wrong; reading it here is not, because an answer that is
@@ -14953,17 +14967,39 @@ impl SirioWorkspace {
         );
         let view = view.clone();
         let path_for_facts = path.to_path_buf();
+        // What the launch falls back to when the agent breaks it: the entry's
+        // own arguments, behind the program that failed.
+        let plain_args = args.clone();
+        let plain_root = root.clone();
+        let first_program = command.clone();
         cx.spawn(async move |this, cx| {
             // Kept for step 2: the launch below consumes its own copies, and
-            // the fallback launches the same arguments behind a different
-            // binary.
-            let installed_args = args.clone();
+            // step 2 launches the same arguments behind a different binary.
+            // `installed_args` is the argv the first launch used, the Lombok
+            // agent included, so an installed `jdtls` gets the agent too.
             let installed_root = root.clone();
-            let launched = cx
+            let (launched, installed_args, lombok) = cx
                 .background_executor()
                 // The owned String/Vec/PathBuf move in and deref to the
                 // &str/&[String]/&Path the signature wants — no helper needed.
-                .spawn(async move { sirio_lsp::Server::launch(&command, &args, &root).await })
+                .spawn(async move {
+                    let mut args = args;
+                    // Whether the project uses Lombok, and the agent it is
+                    // launched with: both are answered with the launch, for the
+                    // key's `LombokState`.
+                    let lombok = lombok_worktree_root.map(|worktree_root| {
+                        let uses = sirio_lsp::project_uses_lombok(&root, &worktree_root);
+                        let agent = uses
+                            .then(|| sirio_lsp::newest_jar(&sirio_env::for_child()))
+                            .flatten();
+                        if let Some(jar) = &agent {
+                            args.push(sirio_lsp::agent_arg(&jar.path));
+                        }
+                        (uses, agent)
+                    });
+                    let launched = sirio_lsp::Server::launch(&command, &args, &root).await;
+                    (launched, args, lombok)
+                })
                 .await;
             // Step 2. A spawn by name *is* the PATH lookup, so its
             // `NotInstalled` is step 1's answer and this is where step 2
@@ -14971,121 +15007,164 @@ impl SirioWorkspace {
             // never by putting its directory on the child's PATH, so two
             // installed servers cannot see each other and an installed one
             // cannot displace the reader's own choice.
-            let launched = match launched {
+            let (launched, program) = match launched {
                 Err(sirio_lsp::LspError::NotInstalled { command }) => match installed {
                     Some(binary) => {
                         let binary = binary.to_string_lossy().into_owned();
-                        cx.background_executor()
+                        let program = binary.clone();
+                        let launched = cx
+                            .background_executor()
                             .spawn(async move {
                                 sirio_lsp::Server::launch(&binary, &installed_args, &installed_root)
                                     .await
                             })
-                            .await
+                            .await;
+                        (launched, program)
                     }
                     // Nothing in the store, so nothing more to try: the key
                     // dies below, with the arm the recipe dictates.
-                    None => Err(sirio_lsp::LspError::NotInstalled { command }),
+                    None => (
+                        Err(sirio_lsp::LspError::NotInstalled { command }),
+                        first_program,
+                    ),
                 },
                 // Including the fallback's own failures: a binary that is
                 // there and will not start is not a missing one, and
                 // `Failed` is the arm that says so.
-                other => other,
+                other => (other, first_program),
+            };
+            // A launch that carries the Lombok agent and fails for any reason but
+            // a missing program is tried once more, with the same program and the
+            // entry's own arguments. The key gets no agent from here on. A second
+            // failure is an ordinary failure: no third try.
+            let carried_agent = lombok.as_ref().is_some_and(|(_, agent)| agent.is_some());
+            let (launched, lombok, fell_back) = match launched {
+                Err(error)
+                    if carried_agent
+                        && !matches!(error, sirio_lsp::LspError::NotInstalled { .. }) =>
+                {
+                    sirio_perf::event("lsp.lombok.fallback", 0);
+                    let launched = cx
+                        .background_executor()
+                        .spawn(async move {
+                            sirio_lsp::Server::launch(&program, &plain_args, &plain_root).await
+                        })
+                        .await;
+                    (launched, lombok.map(|(uses, _)| (uses, None)), true)
+                }
+                other => (other, lombok, false),
             };
 
-            let _ = this.update(cx, |workspace, cx| match launched {
-                Ok((server, read_loop)) => {
-                    workspace.lsp.finish_starting(&key);
-                    let task = cx.background_executor().spawn(read_loop);
-                    let router = Self::spawn_router(&server, key.clone(), cx);
-                    workspace.lsp.insert(
-                        key.clone(),
-                        crate::lsp::ServerHandle {
-                            server,
-                            read_loop: task,
-                            router,
-                        },
-                    );
-                    // The server exists only now, so the facts that depend
-                    // on it — whether "Go to Definition" is offered — were
-                    // false when the tab opened. Push them again.
-                    let facts = workspace.file_context_facts(&path_for_facts);
-                    view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
-                    workspace.sync_document_with_server(&path_for_facts, &view, cx);
-                    // Files of this key opened while the launch ran were not
-                    // spawned for; the server is theirs now.
-                    for (path, other) in Self::open_file_views(&workspace.tabs, cx) {
-                        if !other.read(cx).is_snapshot() {
-                            workspace.sync_document_with_server(&path, &other, cx);
+            let _ = this.update(cx, |workspace, cx| {
+                if fell_back {
+                    workspace.lombok_fall_back(&key);
+                }
+                match launched {
+                    Ok((server, read_loop)) => {
+                        workspace.lsp.finish_starting(&key);
+                        if let Some((uses, agent)) = lombok {
+                            if agent.is_some() {
+                                sirio_perf::event("lsp.lombok.agent", 0);
+                            }
+                            let state = workspace.lsp.lombok_mut(&key);
+                            state.uses_lombok = uses;
+                            state.worktree_root = Some(worktree_root);
+                            state.agent = agent;
+                            state.built = false;
+                            state.build_answered = false;
                         }
+                        let task = cx.background_executor().spawn(read_loop);
+                        let router = Self::spawn_router(&server, key.clone(), cx);
+                        workspace.lsp.insert(
+                            key.clone(),
+                            crate::lsp::ServerHandle {
+                                server,
+                                read_loop: task,
+                                router,
+                            },
+                        );
+                        // The server exists only now, so the facts that depend
+                        // on it — whether "Go to Definition" is offered — were
+                        // false when the tab opened. Push them again.
+                        let facts = workspace.file_context_facts(&path_for_facts);
+                        view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+                        workspace.sync_document_with_server(&path_for_facts, &view, cx);
+                        // Files of this key opened while the launch ran were not
+                        // spawned for; the server is theirs now.
+                        for (path, other) in Self::open_file_views(&workspace.tabs, cx) {
+                            if !other.read(cx).is_snapshot() {
+                                workspace.sync_document_with_server(&path, &other, cx);
+                            }
+                        }
+                        workspace.push_language_server_status_to_open_files(cx);
+                        workspace.refresh_running_servers(cx);
                     }
-                    workspace.push_language_server_status_to_open_files(cx);
-                    workspace.refresh_running_servers(cx);
-                }
-                Err(sirio_lsp::LspError::NotInstalled { command }) => {
-                    workspace.lsp.finish_starting(&key);
-                    // The shipped table offers a server for every language
-                    // Sirio can open, so "not installed" is the answer for
-                    // most of it on any given machine. Saying so on every
-                    // .yaml file would make the message worthless for the
-                    // case that matters — a server that *is* there and
-                    // broke. So: no card, ever.
-                    //
-                    // The context menu is the other half of that bargain,
-                    // and it is not silence. A reader who right-clicks has
-                    // asked a direct question, and answering it with "no
-                    // language server offers definitions here" describes
-                    // Sirio rather than their machine. The ladder is what
-                    // the menu gives back — the recipe to install, or the
-                    // thing that has to come first — and the facts are
-                    // pushed again because the tab computed them before
-                    // anyone had looked. Marked dead, so it is tried once
-                    // and not again.
-                    let reason = match install {
-                        Some(sirio_lsp::Recipe::Manual { needs, url }) => {
-                            crate::lsp::Dead::Manual { needs, url }
-                        }
-                        Some(recipe) => crate::lsp::Dead::Installable { recipe },
-                        // An entry of the reader's own carries no recipe on
-                        // purpose: Sirio must not offer a second copy of a
-                        // server they already chose. There is nothing to
-                        // fetch and nothing to explain, so what is left is
-                        // the name they wrote, which is what the menu gives
-                        // back — and the key still dies here, so it is tried
-                        // once and not again.
-                        None => crate::lsp::Dead::NotInstalled {
-                            command: command.clone(),
-                        },
-                    };
-                    workspace.lsp.mark_dead(key, reason.clone());
-                    // Nothing to name: the row draws no server for a missing one.
-                    workspace.push_language_server_status_to_open_files(cx);
-                    let facts = workspace.file_context_facts(&path_for_facts);
-                    view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
-                    // The offer, once per language: a silenced language
-                    // costs no card at all, and Failed / the reader's own
-                    // entry offer nothing.
-                    workspace.maybe_offer_language_server(
-                        &language,
-                        &command,
-                        &reason,
-                        &view,
-                        &path_for_facts,
-                        cx,
-                    );
-                }
-                Err(error) => {
-                    workspace.lsp.finish_starting(&key);
-                    workspace.lsp.mark_dead(
-                        key,
-                        crate::lsp::Dead::Failed {
-                            message: error.to_string(),
-                        },
-                    );
-                    workspace.push_language_server_status_to_open_files(cx);
-                    // Naming the command is the point: it came from the
-                    // user's languages.toml, and naming it turns a mystery
-                    // into a line they can edit.
-                    view.update(cx, |view, cx| view.set_message(error.to_string(), cx));
+                    Err(sirio_lsp::LspError::NotInstalled { command }) => {
+                        workspace.lsp.finish_starting(&key);
+                        // The shipped table offers a server for every language
+                        // Sirio can open, so "not installed" is the answer for
+                        // most of it on any given machine. Saying so on every
+                        // .yaml file would make the message worthless for the
+                        // case that matters — a server that *is* there and
+                        // broke. So: no card, ever.
+                        //
+                        // The context menu is the other half of that bargain,
+                        // and it is not silence. A reader who right-clicks has
+                        // asked a direct question, and answering it with "no
+                        // language server offers definitions here" describes
+                        // Sirio rather than their machine. The ladder is what
+                        // the menu gives back — the recipe to install, or the
+                        // thing that has to come first — and the facts are
+                        // pushed again because the tab computed them before
+                        // anyone had looked. Marked dead, so it is tried once
+                        // and not again.
+                        let reason = match install {
+                            Some(sirio_lsp::Recipe::Manual { needs, url }) => {
+                                crate::lsp::Dead::Manual { needs, url }
+                            }
+                            Some(recipe) => crate::lsp::Dead::Installable { recipe },
+                            // An entry of the reader's own carries no recipe on
+                            // purpose: Sirio must not offer a second copy of a
+                            // server they already chose. There is nothing to
+                            // fetch and nothing to explain, so what is left is
+                            // the name they wrote, which is what the menu gives
+                            // back — and the key still dies here, so it is tried
+                            // once and not again.
+                            None => crate::lsp::Dead::NotInstalled {
+                                command: command.clone(),
+                            },
+                        };
+                        workspace.lsp.mark_dead(key, reason.clone());
+                        // Nothing to name: the row draws no server for a missing one.
+                        workspace.push_language_server_status_to_open_files(cx);
+                        let facts = workspace.file_context_facts(&path_for_facts);
+                        view.update(cx, |view, cx| view.set_shell_facts(facts, cx));
+                        // The offer, once per language: a silenced language
+                        // costs no card at all, and Failed / the reader's own
+                        // entry offer nothing.
+                        workspace.maybe_offer_language_server(
+                            &language,
+                            &command,
+                            &reason,
+                            &view,
+                            &path_for_facts,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        workspace.lsp.finish_starting(&key);
+                        workspace.lsp.mark_dead(
+                            key,
+                            crate::lsp::Dead::Failed {
+                                message: error.to_string(),
+                            },
+                        );
+                        workspace.push_language_server_status_to_open_files(cx);
+                        // Naming the command is the point: it came from the
+                        // user's languages.toml, and naming it turns a mystery
+                        // into a line they can edit.
+                        view.update(cx, |view, cx| view.set_message(error.to_string(), cx));
+                    }
                 }
             });
         })
@@ -15357,6 +15436,19 @@ impl SirioWorkspace {
                     {
                         let _ = this.update(cx, |workspace, cx| {
                             workspace.apply_diagnostics(&key, &params, cx);
+                            workspace.lombok_after_publish(&key, cx);
+                        });
+                    }
+                    // jdtls says it can take requests: the one `language/status`
+                    // that is acted on (the Lombok full build). The rest of them
+                    // fall through to the drop below.
+                    sirio_lsp::Incoming::Notification { method, params }
+                        if method == "language/status"
+                            && params.get("type").and_then(serde_json::Value::as_str)
+                                == Some("ServiceReady") =>
+                    {
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.lombok_service_ready(&key, cx);
                         });
                     }
                     // `$/progress`, `window/logMessage` and the rest. Read
@@ -15372,19 +15464,105 @@ impl SirioWorkspace {
         })
     }
 
+    /// jdtls reported `ServiceReady`. A launch that carries the Lombok agent is
+    /// sent one full build then: jdtls keeps a workspace on disk, and one built
+    /// without the agent republishes stale Lombok errors for files that are not
+    /// open until a build runs again. Once per launch (`built`), whatever the
+    /// answer; a launch with no agent, and a `ServiceReady` that comes again,
+    /// do nothing. Nothing is shown. `build_answered` is set when the request
+    /// ends any way but a closed stream: it ends the window in which a crash is
+    /// blamed on the agent.
+    fn lombok_service_ready(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
+        let Some(state) = self.lsp.lombok(key) else {
+            return;
+        };
+        if state.built {
+            return;
+        }
+        let Some(agent) = state.agent.clone() else {
+            return;
+        };
+        let Some(client) = self.lsp.server_for(key).map(|server| server.client().clone()) else {
+            return;
+        };
+        self.lsp.lombok_mut(key).built = true;
+        let key = key.clone();
+        cx.spawn(async move |this, cx| {
+            let answer = cx
+                .background_executor()
+                .spawn(async move {
+                    client
+                        .request_with_timeout::<_, serde_json::Value>(
+                            "java/buildWorkspace",
+                            true,
+                            crate::lsp::FULL_BUILD_TIMEOUT,
+                        )
+                        .await
+                })
+                .await;
+            // CompileWorkspaceStatus: 1 is a build that succeeded, 2 one that
+            // finished with errors in the code. Anything else did not clear
+            // the stale findings.
+            let built = matches!(
+                &answer,
+                Ok(value) if matches!(value.as_i64(), Some(1 | 2))
+            );
+            if !built {
+                sirio_perf::event("lsp.lombok.full_build_failed", 0);
+            }
+            // A closed stream is not an answer: the server died with the build
+            // unanswered, which the agent may have caused.
+            if matches!(answer, Err(sirio_lsp::LspError::Transport(_))) {
+                return;
+            }
+            let _ = this.update(cx, |workspace, _| {
+                // Only while the key is still the launch that sent the build.
+                if let Some(state) = workspace.lsp.lombok(&key)
+                    && state.built
+                    && state.agent.as_ref() == Some(&agent)
+                {
+                    workspace.lsp.lombok_mut(&key).build_answered = true;
+                }
+            });
+        })
+        .detach();
+    }
+
     /// A language server ended. Its handle goes (so it reads as not running
     /// and the next file of its language starts one again), every drawer drops
     /// what it reported, the open files of its key stop showing its findings
     /// and are told to the next server from the start, and the drawers name the
     /// servers still running.
+    ///
+    /// A launch that carried the Lombok agent and ended before jdtls answered
+    /// the full build is blamed on the agent: the key falls back (no agent for
+    /// the rest of the session) and is started once more, after the cleanup.
     fn language_server_gone(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
+        let blame_agent = self.lsp.lombok(key).is_some_and(|state| {
+            state.agent.is_some() && !state.build_answered && !state.fallen_back
+        });
+        if blame_agent {
+            sirio_perf::event("lsp.lombok.fallback", 0);
+            self.lombok_fall_back(key);
+        }
         self.lsp.forget(key);
+        self.clear_server_traces(key, cx);
+        if blame_agent {
+            self.relaunch_key(key, cx);
+        }
+    }
+
+    /// What a server leaves behind when it is no longer the key's: every drawer
+    /// drops what it reported, the documents it held are forgotten (the next
+    /// server is sent them again, in a parked worktree as well as the shown
+    /// one), the open files of the key stop showing its findings, and the
+    /// drawers name the servers still running. The handle is the caller's to
+    /// have removed already.
+    fn clear_server_traces(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
         let drawers: Vec<_> = self.drawers.values().cloned().collect();
         for drawer in drawers {
             drawer.update(cx, |drawer, cx| drawer.server_gone(key, cx));
         }
-        // Its copy of every file died with it, in a parked worktree as well as
-        // the shown one: the next server is sent the text again.
         for path in self.lsp.synced_paths() {
             if self.server_key_for(&path).as_ref() == Some(key) {
                 self.lsp.forget_synced(&path);
@@ -15398,6 +15576,149 @@ impl SirioWorkspace {
         }
         self.refresh_running_servers(cx);
         self.push_language_server_status_to_open_files(cx);
+    }
+
+    /// A key's jdtls published diagnostics: the moment to look for a Lombok jar
+    /// that arrived after it was launched (its own Maven or Gradle import
+    /// downloads one), and for a project that started using Lombok after it was
+    /// launched (its build file gained the dependency). Only for a key launched
+    /// from the built-in entry whose restart is still available
+    /// ([`crate::lsp::LombokState::may_restart`]), and at most once every
+    /// `LOMBOK_RECHECK`: never a timer. For a project not known to use Lombok
+    /// the build files are read again first, and the caches only when they now
+    /// mention it. Both are read on the background executor; the decision is
+    /// taken back here, against the key as it is by then. A project that turns
+    /// out to use Lombok with no jar in the caches restarts nothing, and gets
+    /// the agent at its next launch.
+    fn lombok_after_publish(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
+        let Some(state) = self.lsp.lombok(key) else {
+            return;
+        };
+        if !state.may_restart()
+            || state
+                .last_check
+                .is_some_and(|at| at.elapsed() < crate::lsp::LOMBOK_RECHECK)
+        {
+            return;
+        }
+        // The launch's own arguments, so the read sees what the launch saw.
+        let unknown_project = if state.uses_lombok {
+            None
+        } else {
+            state
+                .worktree_root
+                .clone()
+                .map(|worktree_root| (key.0.clone(), worktree_root))
+        };
+        if !state.uses_lombok && unknown_project.is_none() {
+            return;
+        }
+        self.lsp.lombok_mut(key).last_check = Some(std::time::Instant::now());
+        let key = key.clone();
+        cx.spawn(async move |this, cx| {
+            let (uses_lombok, newest) = cx
+                .background_executor()
+                .spawn(async move {
+                    let uses_lombok = unknown_project.is_none_or(|(root, worktree_root)| {
+                        sirio_lsp::project_uses_lombok(&root, &worktree_root)
+                    });
+                    let newest = uses_lombok
+                        .then(|| sirio_lsp::newest_jar(&sirio_env::for_child()))
+                        .flatten();
+                    (uses_lombok, newest)
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                // The key may have restarted, fallen back or stopped while the
+                // files were read: decide on what it is now.
+                if !workspace
+                    .lsp
+                    .lombok(&key)
+                    .is_some_and(crate::lsp::LombokState::may_restart)
+                {
+                    return;
+                }
+                if uses_lombok {
+                    workspace.lsp.lombok_mut(&key).uses_lombok = true;
+                }
+                let wants = workspace
+                    .lsp
+                    .lombok(&key)
+                    .is_some_and(|state| crate::lsp::wants_lombok_restart(state, newest.as_ref()));
+                if wants && workspace.lsp.is_running(&key) {
+                    workspace.restart_with_newer_lombok(&key, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Replaces the key's jdtls with one that has the Lombok agent, once. The
+    /// old handle is taken out and its router cancelled first, so that the old
+    /// stream's end cannot reach `language_server_gone` and `forget` whatever
+    /// sits under the key by then. The old server is stopped the way `stop`
+    /// does it but with `RESTART_GRACE`, its read loop kept alive until that
+    /// returns (the answer to `shutdown` arrives through it); only then is the
+    /// new one launched, because both use the same workspace directory. The
+    /// status row reads "starting" in between. This is not `revive`.
+    fn restart_with_newer_lombok(
+        &mut self,
+        key: &sirio_ui::drawer::ServerKey,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(handle) = self.lsp.take(key) else {
+            return;
+        };
+        let crate::lsp::ServerHandle {
+            server,
+            read_loop,
+            router,
+        } = handle;
+        drop(router);
+        self.lsp.lombok_mut(key).restarted = true;
+        sirio_perf::event("lsp.lombok.restart", 0);
+        self.clear_server_traces(key, cx);
+        self.lsp.mark_starting(key.clone());
+        self.push_language_server_status_to_open_files(cx);
+        let key = key.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = server.stop_within(crate::lsp::RESTART_GRACE).await;
+                    drop(read_loop);
+                })
+                .await;
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.lsp.finish_starting(&key);
+                workspace.relaunch_key(&key, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The key gets no agent for the rest of the session. What belonged to the
+    /// launch that carried it (`built`, `build_answered`) goes with it.
+    fn lombok_fall_back(&mut self, key: &sirio_ui::drawer::ServerKey) {
+        let state = self.lsp.lombok_mut(key);
+        state.fallen_back = true;
+        state.agent = None;
+        state.built = false;
+        state.build_answered = false;
+    }
+
+    /// Starts the key's server again, for the first open file that belongs to
+    /// it (a revision tab never counts: a snapshot is not opened on a server).
+    /// Nothing happens when no file of the key is open: the next one that
+    /// opens starts it. The key must not be running, starting or dead.
+    fn relaunch_key(&mut self, key: &sirio_ui::drawer::ServerKey, cx: &mut Context<Self>) {
+        let file = Self::open_file_views(&self.tabs, cx)
+            .into_iter()
+            .find(|(path, view)| {
+                !view.read(cx).is_snapshot() && self.server_key_for(path).as_ref() == Some(key)
+            });
+        if let Some((path, view)) = file {
+            self.start_language_server_for(&path, &view, cx);
+        }
     }
 
     /// The key of the server `path` would use, from the table as loaded.

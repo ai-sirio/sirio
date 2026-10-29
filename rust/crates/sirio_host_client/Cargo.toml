@@ -14,7 +14,7 @@ sha2 = "0.11"
 
 [dev-dependencies]
 sirio_term_session = { path = "../sirio_term_session" }
-libghostty-vt = "0.2.1"
+libghostty-vt = "0.2.2"
 
 # Win32_Security is needed by `CreateJobObjectW` and `CreateFileW` (both take a
 # SECURITY_ATTRIBUTES pointer), Win32_Storage_FileSystem by `CreateFileW`, which

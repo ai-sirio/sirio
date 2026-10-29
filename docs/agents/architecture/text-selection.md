@@ -22,6 +22,12 @@ workspace root's `root_focus`) so a terminal or composer is never handed a copy.
   `on_key_down` and stops there unless the handler propagates, so `on_copy` declines
   (`cx.propagate()`) whenever it has nothing to copy or the sink is not focused, and the
   binding is scoped `!Terminal`. A terminal's Ctrl+C stays SIGINT.
+- **Focus taken at the press does not hold inside a pane.** A pane's own press handler
+  (`select_pane`) runs after its content's, ignores `prevent_default`, and hands focus to
+  the pane's surface, which for a chat is the composer. The chat transcript
+  (`TranscriptInteraction::extend_selection`) and `text_selection::extend` therefore take
+  focus on the drag, once something is selected: a plain click leaves the composer
+  focused, and a drag leaves Ctrl/Cmd+C to the selection.
 - Rendered Markdown outside the chat goes through
   `Chat::render_markdown_document_with_link_override` → `SelectableMarkdown`, which
   keeps a link's click when nothing was selected. The chat's own cards use the
