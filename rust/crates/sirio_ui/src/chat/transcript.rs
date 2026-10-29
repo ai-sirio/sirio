@@ -602,13 +602,21 @@ impl Chat {
                         } else {
                             theme.ely.fg_subtle
                         })
-                        .child(Self::render_plain_text(
-                            text.clone(),
-                            theme,
-                            format!("notice-entry-{entry_index}"),
-                            source_start,
-                            Some(&interaction),
-                        ))
+                        // The summary can be the agent's whole answer: the
+                        // text shrinks to the row and wraps.
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .debug_selector(move || format!("{selector}-text"))
+                                .child(Self::render_plain_text(
+                                    text.clone(),
+                                    theme,
+                                    format!("notice-entry-{entry_index}"),
+                                    source_start,
+                                    Some(&interaction),
+                                )),
+                        )
                         .into_any_element(),
                 }
             }

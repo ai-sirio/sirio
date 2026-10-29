@@ -84,12 +84,18 @@ set -euo pipefail
 #                      one), a second click reuses the tab, a Super+Shift click still goes
 #                      to the editor, a drag selects and opens nothing, and the web link
 #                      still reaches the browser stub
+#   clipboard_keys     the clipboard chords with real X keys against the display's real
+#                      CLIPBOARD (read and owned through python3-gi's GTK, as another
+#                      application holds it): in the composer Ctrl+A then Ctrl+C copies,
+#                      Ctrl+A then Ctrl+X cuts, Ctrl+V pastes another application's text;
+#                      a drag across the response then Ctrl+C copies what it selected,
+#                      and a plain click on the response leaves typing in the composer
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
 # whatever the code does.
-# trace_keys and file_links need a framed run at --window-size 2200x1000 (no --state-only): they
-# click at pixels.
+# trace_keys, file_links and clipboard_keys need a framed run at --window-size 2200x1000 (no
+# --state-only): they click at pixels.
 #
 # Isolation: every Sirio starts under `env -i` with an allowlist (see launch()), the
 # stub agent CLIs first on PATH, a private HOME, XDG directories, database, socket,
@@ -124,7 +130,7 @@ CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
-  trace_tab trace_idle trace_keys file_links)
+  trace_tab trace_idle trace_keys file_links clipboard_keys)
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
@@ -151,10 +157,10 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links "
-# trace_keys and file_links send real X clicks, keys and drags at pixels, so they need a
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys "
+# trace_keys, file_links and clipboard_keys send real X clicks, keys and drags at pixels, so they need a
 # framed run (no --state-only) at the 2200x1000 window size.
-FRAMED_SCENARIOS=" trace_keys file_links "
+FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys "
 framed_run() { [ "$STATE_ONLY" -eq 0 ] && [ "$WINDOW_SIZE" = 2200x1000 ]; }
 SCENARIOS=()
 SKIPPED=()
@@ -204,6 +210,11 @@ if [ -n "$DISPLAY_TARGET" ]; then
       || refuse "the display is ${geometry% *}x${geometry#* }, smaller than --window-size $WINDOW_SIZE: start a larger Xvfb (Xvfb $DISPLAY_TARGET -screen 0 2400x1200x24 &)"
   fi
 fi
+# clipboard_keys reads and owns the display's CLIPBOARD through GTK 3.
+if [[ " ${SCENARIOS[*]} " == *" clipboard_keys "* ]]; then
+  python3 -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("Gdk", "3.0"); from gi.repository import Gtk' 2>/dev/null \
+    || refuse "clipboard_keys needs python3-gi with GTK 3 (python-gobject and gtk3) to read and own the clipboard; drop it with --only"
+fi
 
 [ -n "$OUT_DIR" ] || OUT_DIR="$ROOT/artifacts/chat-session-panel-e2e-$(date +%Y%m%d-%H%M%S)-$$"
 if [ -d "$OUT_DIR" ] && [ -n "$(ls -A "$OUT_DIR")" ]; then
@@ -219,7 +230,7 @@ command -v python3 >/dev/null || fail "python3 is required"
 command -v curl >/dev/null || fail "curl is required"
 echo "display: ${DISPLAY_TARGET:-none (--state-only)}; scenarios: ${SCENARIOS[*]}; appearance: ${APPEARANCE:-default}"
 for name in "${SKIPPED[@]:-}"; do
-  [ -z "$name" ] || [ -n "$ONLY" ] || echo "SKIP: scenario $name needs a framed run (a painted column; trace_keys and file_links also the 2200x1000 window and real X input)"
+  [ -z "$name" ] || [ -n "$ONLY" ] || echo "SKIP: scenario $name needs a framed run (a painted column; trace_keys, file_links and clipboard_keys also the 2200x1000 window and real X input)"
 done
 
 # ---- the user's mise config must not move ---------------------------------
@@ -1772,6 +1783,120 @@ PY
   stop_app
   # The fixture worktree is shared with the scenarios that run after this one.
   rm -rf "$LINKED/docs" "$LINKED/README.md"
+  printf 'fn main() {}\n' >"$main_rs"
+}
+
+# The clipboard chords with real X keys (xdotool), in the composer and on a selection dragged
+# across a response, against the display's real CLIPBOARD selection. The harness reads it and
+# owns it through GTK (python3-gi), the way another application holds it. Linux's chords are
+# the ctrl ones; macOS's cmd ones resolve through the same bindings and stay a hand check.
+x_clipboard() { # get | own TEXT SECONDS
+  DISPLAY="$DISPLAY_TARGET" timeout -k 2 $(( ${3:-5} + 5 )) python3 - "$@" <<'PY'
+import sys
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk
+clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+if sys.argv[1] == "get":
+    text = clipboard.wait_for_text()
+    sys.stdout.write("" if text is None else text)
+else:
+    clipboard.set_text(sys.argv[2], -1)
+    GLib.timeout_add_seconds(int(sys.argv[3]), Gtk.main_quit)
+    Gtk.main()
+PY
+}
+# Owns the clipboard with TEXT in the background, as another application would, until
+# SECONDS pass or the app takes the selection.
+own_clipboard() { # text seconds
+  x_clipboard own "$1" "$2" &
+  CLIPBOARD_OWNER=$!
+  local _
+  for _ in $(seq 1 20); do
+    [ "$(x_clipboard get)" = "$1" ] && return 0
+    sleep 0.2
+  done
+  fail "the harness could not own the clipboard with '$1'"
+}
+release_clipboard() {
+  [ -z "${CLIPBOARD_OWNER:-}" ] || { kill "$CLIPBOARD_OWNER" 2>/dev/null || true; wait "$CLIPBOARD_OWNER" 2>/dev/null || true; }
+  CLIPBOARD_OWNER=""
+}
+expect_clipboard() { # desc want
+  local got="" _
+  for _ in $(seq 1 15); do
+    got=$(x_clipboard get)
+    [ "$got" = "$2" ] && { echo "OK: $1 (clipboard '$got')"; return 0; }
+    sleep 0.3
+  done
+  capture "clipboard-keys-fail"
+  fail "$1: the clipboard holds '$got', not '$2'"
+}
+scenario_clipboard_keys() {
+  use_stub file-links
+  local main_rs="$LINKED/src/main.rs"
+  python3 -c 'import sys; open(sys.argv[1], "w").write("".join("// riga %d\n" % n if n != 1 else "fn main() {}\n" for n in range(1, 61)))' "$main_rs"
+  launch clipboard_keys
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  show_chat
+  wait_panel "the chat is ready" 'c["status"] in ("idle", "completed")' 30
+
+  echo "step: typed text reaches the composer"
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool type --delay 60 "hello world" || fail "xdotool could not type"
+  wait_panel "the composer holds the typed text" 'c["composerText"] == "hello world"' 10
+  capture clipboard-keys-typed
+
+  echo "step: Ctrl+A then Ctrl+C in the composer copies its text"
+  own_clipboard "before copy" 8
+  press_key ctrl+a
+  press_key ctrl+c
+  expect_clipboard "Ctrl+C copied the composer's selection" "hello world"
+  release_clipboard
+
+  echo "step: Ctrl+A then Ctrl+X in the composer cuts its text"
+  own_clipboard "before cut" 8
+  press_key ctrl+a
+  press_key ctrl+x
+  wait_panel "Ctrl+X emptied the composer" 'c["composerText"] == ""' 10
+  expect_clipboard "Ctrl+X put the cut text on the clipboard" "hello world"
+  release_clipboard
+
+  echo "step: Ctrl+V in the composer pastes text another application owns"
+  own_clipboard "from another app" 15
+  press_key ctrl+v
+  wait_panel "Ctrl+V pasted the other application's text" 'c["composerText"] == "from another app"' 10
+  release_clipboard
+  press_key ctrl+a
+  press_key BackSpace
+  wait_panel "the composer is empty again" 'c["composerText"] == ""' 10
+
+  echo "step: a drag across the response, then Ctrl+C, copies what the drag selected"
+  send_prompt "mostrami i file"
+  wait_panel "the turn is over" 'c["status"] == "completed"' 40
+  show_chat
+  local xy width
+  xy=$(link_xy file 'src/main.rs:42')
+  width=$(E2E link-width "$SURFACE" file 'src/main.rs:42') || fail "no painted width for src/main.rs:42"
+  own_clipboard "before transcript copy" 15
+  drag_at "${xy% *}" "${xy#* }" $((${xy% *} + width + 10)) "${xy#* }"
+  capture clipboard-keys-dragged
+  press_key ctrl+c
+  local got
+  got=$(x_clipboard get)
+  case "$got" in
+    *main.rs:42*) echo "OK: Ctrl+C copied the transcript selection (clipboard '$got')" ;;
+    *) capture clipboard-keys-fail; fail "Ctrl+C after a drag across the response left the clipboard at '$got'" ;;
+  esac
+  release_clipboard
+
+  echo "step: a plain click on the response, then typing, still writes in the composer"
+  click_at "$((${xy% *} - 40))" "${xy#* }"
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool type --delay 60 "dopo" || fail "xdotool could not type"
+  wait_panel "typing after a click on the response reached the composer" 'c["composerText"] == "dopo"' 10
+  echo "OK: clipboard_keys: copy, cut and paste work in the composer, and Ctrl+C copies a transcript selection"
+  stop_app
   printf 'fn main() {}\n' >"$main_rs"
 }
 

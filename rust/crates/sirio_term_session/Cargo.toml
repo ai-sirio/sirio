@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-libghostty-vt = "0.2.1"
+libghostty-vt = "0.2.2"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 portable-pty = "0.9"
 sirio_perf = { path = "../sirio_perf" }
