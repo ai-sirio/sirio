@@ -886,14 +886,41 @@ impl ProjectCatalog {
             .position(|project| project.id == id)
             .ok_or_else(|| format!("unknown project: {id}"))?;
         let root = self.projects[index].root_path.clone();
+        let discovered = Self::discover_for_refresh(&root)?;
+        self.apply_refresh(id, discovered, mounted_paths)
+    }
+
+    /// The discovery half of a refresh. It shells out to git and touches no
+    /// catalog state, so it can run off the main thread; the result is merged
+    /// by [`Self::apply_refresh`] against the catalog as it is when the
+    /// result lands.
+    pub fn discover_for_refresh(root: &Path) -> Result<DiscoveredProject, String> {
         // An unplugged disk takes the root with it, and discovery would then
         // read the project as a plain folder with one blank row. Leave it as
         // it was until the root is back.
         if !root.is_dir() {
             return Err(format!("{} is not reachable", root.display()));
         }
+        discover_project(root).map_err(|error| error.to_string())
+    }
+
+    /// The merge half of a refresh: folds a discovery result into the project
+    /// `id` of this catalog, which must be the live one. Splitting it from
+    /// [`Self::discover_for_refresh`] lets a background discovery land
+    /// without overwriting catalog writes made while it ran.
+    pub fn apply_refresh(
+        &mut self,
+        id: &str,
+        discovered: DiscoveredProject,
+        mounted_paths: &[PathBuf],
+    ) -> Result<(), String> {
+        let index = self
+            .projects
+            .iter()
+            .position(|project| project.id == id)
+            .ok_or_else(|| format!("unknown project: {id}"))?;
+        let root = self.projects[index].root_path.clone();
         let previous = self.projects[index].worktrees.clone();
-        let discovered = discover_project(&root).map_err(|error| error.to_string())?;
         let mut replacement = catalog_project(&root, discovered);
         replacement.id = id.to_string();
 
