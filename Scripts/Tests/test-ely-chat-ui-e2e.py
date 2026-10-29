@@ -1270,18 +1270,20 @@ def cpu_ticks(pid: int) -> int:
 
 def unfocused_spinner(run: Run) -> str | None:
     """A running turn's status bloom in the sidebar keeps turning while another window holds the
-    X input focus: `sirio` turns bezel's pause-when-inactive off. A second window (the surfaces
-    probe) takes the focus; frames and CPU are sampled while it holds it.
+    X input focus: Sirio's frame clock (`sirio_ui::motion`) has no pause switch, so it does not
+    wait for a window of the app to be active. A second window (the surfaces probe) takes the
+    focus; frames and CPU are sampled while it holds it.
 
     The frames are judged on the sidebar row's bloom and NOT on the transcript. The transcript's
     thinking row carries Ely's `ShimmerText`, a gpui animation that asks for its own frames and
-    never reads the pause, and every repaint of the chat view samples the orb's live phase, so
-    the transcript moves whether or not the pause is on (it did, with the pause turned on: the
-    check could not fail). The row's bloom is drawn through bezel's clock alone, a `Painter`
-    lease taken by the row's own cached view: gpui replays a cached view until it is notified,
-    so nothing but that lease repaints it. Leases are refused while no window of the app is
-    active and the pause is on (`bezel-motion`, `lease`), so the region freezes exactly then.
-    The tab strip's working mark is not such a region: it keeps moving with the pause on.
+    does not go through the clock, and every repaint of the chat view samples the orb's live
+    phase, so the transcript moves whether or not the clock is gated (it did, with the old
+    pause turned on: the check could not fail). The row's bloom is drawn through the clock
+    alone, a `Painter` lease taken by the row's own cached view: gpui replays a cached view
+    until it is notified, so nothing but that lease repaints it. A clock that takes no lease
+    while no window of the app is active (`sirio_ui::motion`'s `lease` gated on
+    `cx.active_window()`) freezes exactly this region, so the check goes red on that gate.
+    The tab strip's working mark is not such a region: it kept moving with the old pause on.
 
     SIRIO_REDUCED_MOTION is removed from the environment: the capture script exports it for every
     source, and it would hold the bloom still.
@@ -1352,10 +1354,10 @@ def unfocused_spinner(run: Run) -> str | None:
         run.log(f"unfocused_spinner: sidebar bloom pixels differing between frames 1-2, 2-3, 1-3: {differences}")
         if not any(differences):
             # Three identical crops have two causes the message has to tell apart: the bloom froze
-            # because the pause is on, or the crop holds no bloom because the row moved (the
-            # rectangle is pixels of the default window). Give Sirio the focus back, with the
-            # second window still mapped, and look at the same crop again: only on this path, so a
-            # green run takes no extra frames.
+            # because the clock stops while Sirio is inactive, or the crop holds no bloom because the
+            # row moved (the rectangle is pixels of the default window). Give Sirio the focus back,
+            # with the second window still mapped, and look at the same crop again: only on this
+            # path, so a green run takes no extra frames.
             x_focus(run, window)
             refocused = x_focused(run)
             run.log(f"unfocused_spinner: control, getwindowfocus is {refocused} after focusing Sirio again")
@@ -1368,7 +1370,8 @@ def unfocused_spinner(run: Run) -> str | None:
             if any(moved):
                 raise Failure(
                     "unfocused_spinner: the sidebar's status bloom froze while Sirio was unfocused and moved "
-                    "again once it was focused: bezel's pause-when-inactive is on (three identical frames)"
+                    "again once it was focused: the frame clock pauses while no window of the app is "
+                    "active (three identical frames)"
                 )
             raise Failure(
                 f"unfocused_spinner: SIDEBAR_BLOOM {SIDEBAR_BLOOM} holds nothing that moves even with "

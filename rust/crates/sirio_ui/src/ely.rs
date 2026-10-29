@@ -3,7 +3,6 @@
 //! bezel-theme's registry following it, and serves Ely's assets beside
 //! Sirio's own.
 use crate::chat::identity;
-use bezel::motion::AppExt;
 use ely_gpui_component::theme::{Mode, Theme as ElyTheme, ThemeMetrics};
 use gpui::{App, AssetSource, Global};
 use sirio_theme::{Appearance, Theme};
@@ -60,7 +59,7 @@ pub(crate) fn sync_theme_if_changed(cx: &mut App) {
     let Some(theme) = cx.try_global::<Theme>().copied() else {
         return;
     };
-    let reduced = cx.reduced_motion();
+    let reduced = cx.reduce_motion();
     if cx.global::<LastTheme>().0 == Some((theme, reduced)) {
         return;
     }

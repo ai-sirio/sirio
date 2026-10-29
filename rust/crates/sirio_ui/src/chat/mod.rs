@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::caret;
+use crate::popup::{Filter, Popup, reap_popup};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 #[cfg(test)]
@@ -58,7 +59,6 @@ pub mod trace;
 mod transcript;
 mod turn_rail;
 use bezel::ui::input::TextField;
-use bezel::ui::popover;
 pub use session_panel::{
     RowSnapshot, SectionSnapshot, SessionPanelAction, SessionPanelSnapshot,
 };
@@ -942,7 +942,7 @@ enum Entry {
     },
     /// A streamed reasoning chunk, visually distinct from the reply.
     ///
-    /// `open` is the reader's say over the body (`widgets::Takeover`): until
+    /// `open` is the reader's say over the body (`thought::Takeover`): until
     /// they press the header it follows the run — open while the thought
     /// streams, folded once it settles. `started` is view state (the first
     /// chunk's instant); `duration_ms` is what the settling entry stored and
@@ -950,7 +950,7 @@ enum Entry {
     /// run, so it opens closed as before (F-CHAT-21).
     Thought {
         text: String,
-        open: bezel::ui::widgets::Takeover,
+        open: thought::Takeover,
         started: Option<std::time::Instant>,
         duration_ms: Option<u64>,
     },
@@ -2320,9 +2320,9 @@ pub struct Chat {
     /// change resets both.
     last_slash_token: Option<String>,
     /// Ranked views over `available_commands` and `mention_candidates`, with
-    /// the keyboard's active row — bezel's own picker state.
-    slash_filter: popover::Filter,
-    mention_filter: popover::Filter,
+    /// the keyboard's active row (`crate::popup::Filter`).
+    slash_filter: Filter,
+    mention_filter: Filter,
     /// File-mention candidates for the current `@token`.
     mention_candidates: Vec<String>,
     /// The `@token` the in-flight candidate walk was started for.
@@ -2335,12 +2335,12 @@ pub struct Chat {
     attach_task: Option<Task<()>>,
     /// The composer's secondary-click Cut / Copy / Paste menu, at the
     /// window point it was opened from.
-    composer_context_menu: popover::Popup<gpui::Point<Pixels>>,
+    composer_context_menu: Popup<gpui::Point<Pixels>>,
     /// The transcript's secondary-click Copy / Select All menu, at the
     /// window point it was opened from. The transcript previously had no
     /// secondary-click handling at all, so agent output could only be
     /// copied through the hover Copy control or the Ctrl/Cmd-C chord.
-    transcript_context_menu: popover::Popup<gpui::Point<Pixels>>,
+    transcript_context_menu: Popup<gpui::Point<Pixels>>,
     /// Overflow menu (Follow Edited Files / New Conversation / Chat History).
     overflow_open: bool,
     overflow_focus: FocusHandle,
@@ -2620,7 +2620,7 @@ impl Chat {
             agent_session_id: None,
             context_usage: None,
             list_state,
-            transcript_bar: list_scroll::ListScrollbarState::new(bezel::motion::Painter::of(cx)),
+            transcript_bar: list_scroll::ListScrollbarState::new(crate::motion::Painter::of(cx)),
             transcript_selection: None,
             transcript_dragging: false,
             transcript_press: None,
@@ -2644,15 +2644,15 @@ impl Chat {
             thinking_picker_focus: cx.focus_handle().tab_stop(true),
             slash_dismissed: false,
             last_slash_token: None,
-            slash_filter: popover::Filter::new(Vec::new()),
+            slash_filter: Filter::new(Vec::new()),
             mention_candidates: Vec::new(),
             mention_query: None,
-            mention_filter: popover::Filter::new(Vec::new()),
+            mention_filter: Filter::new(Vec::new()),
             mention_task: None,
             attach_error: None,
             attach_task: None,
-            composer_context_menu: popover::Popup::default(),
-            transcript_context_menu: popover::Popup::default(),
+            composer_context_menu: Popup::default(),
+            transcript_context_menu: Popup::default(),
             overflow_open: false,
             history_open: false,
             history_sessions: Vec::new(),
@@ -3268,7 +3268,7 @@ impl Chat {
             }
             AcpEvent::AvailableCommands(commands) => {
                 self.available_commands = commands;
-                self.slash_filter = popover::Filter::new(
+                self.slash_filter = Filter::new(
                     self.available_commands
                         .iter()
                         .map(|command| SharedString::from(command.name.clone()))
@@ -4697,7 +4697,7 @@ impl Chat {
             let _ = this.update(cx, |chat, cx| {
                 if chat.mention_query.as_deref() == Some(query.as_str()) {
                     chat.mention_candidates = hits;
-                    chat.mention_filter = popover::Filter::new(
+                    chat.mention_filter = Filter::new(
                         chat.mention_candidates
                             .iter()
                             .map(|path| SharedString::from(path.clone()))
@@ -4719,7 +4719,7 @@ impl Chat {
             self.accepted_mentions.push(path.to_string());
         }
         self.mention_candidates.clear();
-        self.mention_filter = popover::Filter::new(Vec::new());
+        self.mention_filter = Filter::new(Vec::new());
         self.set_composer_text(text, cx);
     }
 
@@ -4883,7 +4883,7 @@ impl Chat {
 
     fn close_composer_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.composer_context_menu.begin_close() {
-            popover::reap_popup(cx, |chat| &mut chat.composer_context_menu);
+            reap_popup(cx, |chat| &mut chat.composer_context_menu);
             cx.notify();
         }
     }
@@ -4932,7 +4932,7 @@ impl Chat {
 
     fn close_transcript_context_menu(&mut self, cx: &mut Context<Self>) {
         if self.transcript_context_menu.begin_close() {
-            popover::reap_popup(cx, |chat| &mut chat.transcript_context_menu);
+            reap_popup(cx, |chat| &mut chat.transcript_context_menu);
             cx.notify();
         }
     }
@@ -5353,7 +5353,7 @@ impl Chat {
         self.last_slash_token = None;
         self.mention_candidates.clear();
         self.mention_query = None;
-        self.mention_filter = popover::Filter::new(Vec::new());
+        self.mention_filter = Filter::new(Vec::new());
         self.attach_error = None;
     }
 
@@ -5640,7 +5640,7 @@ impl Chat {
         } else if self.open_token_popup() != TokenPopup::None {
             self.slash_dismissed = true;
             self.mention_candidates.clear();
-            self.mention_filter = popover::Filter::new(Vec::new());
+            self.mention_filter = Filter::new(Vec::new());
             cx.notify();
         } else {
             self.cancel_turn(cx);
@@ -5663,7 +5663,7 @@ impl Chat {
             mention_token(&self.draft, self.draft_caret).map(|(_, token)| token.to_string());
         if mention != self.mention_query {
             self.mention_candidates.clear();
-            self.mention_filter = popover::Filter::new(Vec::new());
+            self.mention_filter = Filter::new(Vec::new());
             self.mention_query = mention;
             self.schedule_mention_walk(cx);
         }
@@ -6868,8 +6868,8 @@ impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ely::sync_theme_if_changed(cx);
         let _perf = sirio_perf::span("Chat.render", cx.entity_id().as_u64());
-        // Read before any loader renews this view's Bezel lease.
-        if sirio_perf::enabled() && bezel::motion::Painter::of(cx).woken(cx) {
+        // Read before any loader renews this view's lease.
+        if sirio_perf::enabled() && crate::motion::Painter::of(cx).woken(cx) {
             sirio_perf::event("motion.Chat.woken", cx.entity_id().as_u64());
         }
         sirio_perf::event("Chat.entries", self.entries.len() as u64);
@@ -8911,7 +8911,7 @@ two"
 
     /// The body follows the run until the reader presses the header: open
     /// while the thought streams, folded once it settles, and the reader's
-    /// press holds from then on — `widgets::Takeover`.
+    /// press holds from then on — `thought::Takeover`.
     #[gpui::test]
     async fn a_live_thought_opens_while_streaming_folds_on_settle_and_obeys_a_press(
         cx: &mut TestAppContext,
@@ -9295,8 +9295,7 @@ two"
     /// the reveal lands whole on the next frame instead of 150ms of wall
     /// time later.
     fn hover_turn_rail(cx: &mut VisualTestContext) {
-        use bezel::motion::AppExt as _;
-        cx.update(|_, cx| cx.set_reduced_motion(true));
+        cx.update(|_, cx| cx.set_reduce_motion(true));
         let strip = cx
             .debug_bounds("turn-rail")
             .expect("the rail's strip is laid out");

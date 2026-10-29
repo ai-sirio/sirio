@@ -218,7 +218,7 @@ PRs know which ones gate them, and were not mutated for it.
 | The transcript follows its tail, a scrolled-back view does not jump when a turn arrives | `Scripts/Tests/test-ely-chat-ui-e2e.py`, scenario `long_history` |
 | The composer's keys as X delivers them: Return sends, Shift+Return is a newline, Up and Down move the caret with no popup open, the slash popup takes Down and Tab and closes on Escape | the same script, scenario `composer_keys` (fixture `composer`: `plain` advertises no slash commands) |
 | Reduced motion holds the thinking orb and the transcript still | the same script, scenario `reduced_motion` |
-| A running turn's sidebar status bloom keeps turning while another window holds the X focus (bezel's pause-when-inactive stays off), and what that costs in CPU | the same script, scenario `unfocused_spinner`, with `--cpu-ceiling` |
+| A running turn's sidebar status bloom keeps turning while another window holds the X focus (Sirio's frame clock does not wait for an active window), and what that costs in CPU | the same script, scenario `unfocused_spinner`, with `--cpu-ceiling` |
 | Input methods: Enter while a completion or a composition is open | `cargo nextest run -p sirio_ui ely_composer_enter_respects_completion_and_ime` |
 | Paste into the composer (an image attaches and is sent; the right-click menu's Cut, Copy and Paste) | `pasting_an_image_into_the_composer_attaches_it_and_sends_it_to_the_agent`, `composer_right_click_menu_offers_cut_copy_paste_on_the_field` |
 | The composer's keys in gpui: Enter, Shift+Enter, the model search, the `@` popup | `enter_sends_and_shift_return_inserts_a_newline`, `model_search_is_a_text_field_that_never_touches_the_draft`, `at_mention_popup_lists_files_and_inserts_a_mention_token` |
@@ -253,24 +253,35 @@ focus, raises Sirio's window back on top without handing the focus back (it asse
 250 ms apart. At least one pair must differ in the sidebar row's status bloom.
 
 It judges the bloom and not the transcript on purpose. The transcript's thinking row carries Ely's
-`ShimmerText`, a gpui animation that asks for its own frames and never reads the pause, and every
-repaint of the chat view samples the orb's live phase, so the transcript moves whether or not
-bezel's `set_pause_when_inactive(false)` is in force. With the pause turned on the transcript still
-differed in three of three runs: that check could not fail. The row's bloom is drawn through bezel's
-clock alone (a `Painter` lease taken by the row's own cached view, and gpui replays a cached view
-until it is notified), and leases are refused while no window of the app is active and the pause is
-on, so it freezes exactly then. The tab strip's working mark is not such a region: it keeps moving
-with the pause on. Shown red by changing `main.rs`'s `cx.set_pause_when_inactive(false)` to `true`
-(`sirio` rebuilt): the bloom's region was identical in all three frames in 5 of 5 runs, and 40 to
-141 differing pixels per pair with it off in every run.
+`ShimmerText`, a gpui animation that asks for its own frames and does not go through the frame
+clock, and every repaint of the chat view samples the orb's live phase, so the transcript moves
+whether or not the clock is gated on an active window. With bezel's pause turned on the transcript
+still differed in three of three runs: that check could not fail. The row's bloom is drawn through
+the clock alone (a `Painter` lease taken by the row's own cached view, and gpui replays a cached
+view until it is notified), so it freezes exactly when the clock stops leasing. The tab strip's
+working mark is not such a region: it kept moving with bezel's pause on.
+
+Which clock that is changed in PR B. Until Task 6 the bloom drew on bezel-motion's clock, whose
+`lease` is refused while no window of the app is active and the pause is on, and `main.rs`'s
+`cx.set_pause_when_inactive(false)` is what turned the pause off. Shown red then by changing that
+`false` to `true` (`sirio` rebuilt): the bloom's region was identical in all three frames in 5 of 5
+runs, and 40 to 141 differing pixels per pair with it off in every run. Since Task 6 the bloom is
+drawn on `sirio_ui::motion`'s clock, a port that has no pause switch: it keeps turning while no
+window of the app is active, because an agent runs for minutes while the user works elsewhere and
+the bloom is what says it is still going. (`main.rs` still sets bezel's flag, for the clock that
+bezel's menu rows and scrollbars lease, until Task 14 removes the call.) The red proof is now the
+gated lease: `motion::lease` made to return early when `cx.active_window().is_none()`, which is
+what bezel's pause did. Run in Task 6 with `--only unfocused_spinner`, the unfocused crops were
+`[0, 0, 0]` and the focused control `[90, 120, 102]`, and the run failed with the "froze while
+Sirio was unfocused" message below; restored, it was green again. The same gate applied in Task 5,
+before the loaders moved, left the check green because the bloom still ran on bezel's clock.
 
 The rectangle (`SIDEBAR_BLOOM`, in pixels of the default window) has a control on the failure path
 only: when the three crops are identical the scenario gives Sirio the focus back and looks at the
-same crop again. If it moves, the failure says the bloom froze while unfocused, so the pause is on;
-if it still does not, the failure says `SIDEBAR_BLOOM <rect> holds nothing that moves even with Sirio
-focused; the row moved, update the rectangle`. A PR that restyles the sidebar row or its status
-bloom re-runs the `set_pause_when_inactive(true)` mutation too, to be sure the new rectangle still
-discriminates.
+same crop again. If it moves, the failure says the bloom froze while unfocused, so the clock pauses
+without an active window; if it still does not, the failure says `SIDEBAR_BLOOM <rect> holds nothing
+that moves even with Sirio focused; the row moved, update the rectangle`. A PR that restyles the sidebar row or its status
+bloom re-runs the gated-lease mutation too, to be sure the new rectangle still discriminates.
 
 The scenario prints `unfocused-spinner CPU <x>% of one core over 10 s (load average ...)`: the
 utime plus stime of Sirio's process while the second window holds the focus. Mesa's software
@@ -374,12 +385,114 @@ the turn duration, the cancelled line and the crash addresses (1 each), and the 
 scrollbar-thumb mask holds no changed pixel in any frame, so the transcript bar is identical. The one
 frame where the session-dots mask holds a change is `restore/before-restart`; by eye, the base frame
 draws two green connected dots (the `main` row and the corner of the Ely chat tab) and the head frame
-draws none, and nothing else in that crop moves: the fixture-session race the mask names. The renamed
+draws none, and the only other change in that crop is the row's star moving right into the dot's
+place, inside the mask too: the fixture-session race the mask names. The renamed
 paths resolve to the same crate (the lock has one `bezel-theme`, 0.1.4), so no draw call changed.
 
 ### PR B: the pieces Ely lacks, rebuilt in Sirio (`refactor/bezel-off-b`)
 
-To be filled in by Task 7.
+PR B changes no pixel: it ports the parts of `bezel-ui` and `bezel-motion` that Ely has no
+counterpart for into `sirio_ui`, and points Sirio's callers at them. Each ported file carries the
+header `// Ported from bezel-ui 0.1.4 (MIT); see THIRD_PARTY_NOTICES.md.` (or `bezel-motion`) and is
+listed in the "bezel-ui and bezel-motion (ported code)" section of `THIRD_PARTY_NOTICES.md`.
+
+**Base and head.** The "before" set is `artifacts/bezel-off/pr-a/after`, captured at `7ea323c3`. PR
+A's head `dfe14a3b` changed only documentation and a manifest comment after it (`git diff --stat
+7ea323c3 dfe14a3b`: `docs/testing/bezel-off.md`, `rust/crates/sirio_terminal/Cargo.toml` +1,
+`rust/vendor/README.md`), so `7ea323c3`'s pixels are the pixels of PR B's base. The "after" set was
+captured at `04fa408c`, the head of PR B's code (the commits after it change only documentation: this page and
+`docs/agents/e2e-tests.md`).
+
+**What PR B moved into `sirio_ui`.**
+
+| Task | Where | What |
+| --- | --- | --- |
+| 5 | `motion/` | The frame clock (`Painter`, `lease`), with no pause switch; the hover fades; the cubic-bezier curves; the loaders' phase maths. |
+| 6 | `loading.rs` | The orbs, the mini spinner and the skeleton rows. The sidebar row's status bloom now draws on Sirio's clock. |
+| 6 | `popup.rs` | `Popup`, `Filter` and `reap_popup`, the open / closing / closed lifecycle of a menu and the searchable list a picker shows. |
+| 6 | `chat/thought.rs`, `sidebar/tree_keys.rs` | `Takeover` (whether a thought's body follows the run or obeys the reader); the sidebar tree's arrow-key bindings and cursor step. |
+| 7 | `scroll.rs` | `MIN_THUMB`, `thumb` and `offset_for_thumb`, `ScrollbarDrag`, and `FollowState` with `follow` (the pin the thought bodies use). The terminal's, the transcript's and the horizontal bar read them from here. |
+
+**What still reaches bezel, and until which task.** The kept sites are the ones where a value goes
+straight into a bezel item, so a ported type would need a glue type:
+
+- `bezel::ui::scroll::{scrollbar, ScrollbarState}` and the `bezel::motion::Painter::of(cx)` handed
+  to `ScrollbarState::new` (the file view's vertical bar, the thought bodies' bars, the trace tab
+  and the CI log tab): Task 12. Their drag payload is bezel's own `ScrollbarDrag`, a different type
+  from `sirio_ui::scroll::ScrollbarDrag`, so a bezel bar and a Sirio bar no longer answer each
+  other's drags (`on_drag_move` filters by payload type). The probe's pane 1 is a bezel bar next to
+  Sirio's list and horizontal bars.
+- `bezel::ui::popover` (`menu_row`, `popover_card`, ...) and the `Fade`, `Painter` and `menu_in`
+  that feed it, in the sidebar, the tab bar, the files panel and the composer's popups: Task 11.
+  bezel's combobox keeps its own `Popup` and `Filter`: Task 9.
+- `ui::tooltip::Tooltip` in `sirio_terminal`, which is why that crate keeps its `bezel` dependency:
+  Task 10.
+- `main.rs`'s `cx.set_pause_when_inactive(false)` (with a chat test and two examples): Task 14. It
+  sets the flag of the clock bezel's remaining items lease; the clock the bloom draws on has no flag.
+- The rest of `bezel::ui` (`widgets`, `surface`, `icons`, `input`): PRs C to E.
+
+**Reproduce.**
+
+```bash
+# The before set is PR A's after set, already on disk (see above). The after set:
+TMPDIR=$HOME/.cache/sirio-e2e-tmp Scripts/bezel-off-captures.sh --xvfb --out-dir artifacts/bezel-off/pr-b/after
+
+# The diff, then the same pair with the mask table as attributions.
+Scripts/capture-diff.py artifacts/bezel-off/pr-a/after/frames artifacts/bezel-off/pr-b/after/frames \
+  --out artifacts/bezel-off/pr-b/diff --masks Scripts/capture-masks.tsv
+Scripts/capture-diff.py artifacts/bezel-off/pr-a/after/frames artifacts/bezel-off/pr-b/after/frames \
+  --out artifacts/bezel-off/pr-b/diff-unmasked --allow Scripts/capture-masks.tsv
+
+# The behaviour checks (Xvfb :N is any free display, 1920x1080x24; lavapipe as for the captures).
+Scripts/Tests/test-scroll-drag-probe.sh --xvfb
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json \
+  TMPDIR=$HOME/.cache/sirio-e2e-tmp Scripts/Tests/test-ely-chat-ui-e2e.py --display :N \
+  --only composer_keys,reduced_motion,unfocused_spinner,long_history --cpu-ceiling 413.1
+Scripts/Tests/test-text-selection-e2e.sh
+(cd rust && cargo nextest run -p sirio_ui && cargo nextest run -p sirio_terminal)
+```
+
+**The result.** `bezel-off-captures.sh` printed `CAPTURES OK: artifacts/bezel-off/pr-b/after (94
+frames)`; the masked diff printed `compared 94 frames present on both sides (94 before, 94 after),
+tolerance 1` and `CAPTURE DIFF IDENTICAL`. `changed.tsv` has the header only. The artifacts are under
+`artifacts/bezel-off/pr-b/` (gitignored): `after/`, `diff/` and `diff-unmasked/`.
+
+| Check | Line |
+| --- | --- |
+| `Scripts/Tests/test-scroll-drag-probe.sh --xvfb` | `SCROLL DRAG PROBE OK (3 bars)` (each bar's thumb moved 120 px for 120 px of pointer, within the 4 px tolerance, and after +2000 px sat flush with its track's end) |
+| `Scripts/Tests/test-ely-chat-ui-e2e.py ... --cpu-ceiling 413.1` | `ELY CHAT UI E2E OK`; `summary.json`: `long_history`, `composer_keys`, `reduced_motion`, `unfocused_spinner` all `passed`. `reduced_motion`: transcript pixels differing `[0, 0, 0]`. `unfocused_spinner`: bloom pixels differing `[143, 68, 141]`, and `unfocused-spinner CPU 324.9% of one core over 10 s (load average 4.87 8.77 9.27)`, under the ceiling of 413.1 and next to the base of 329.7%. |
+| `Scripts/Tests/test-text-selection-e2e.sh` | `TEXT SELECTION E2E OK (33 tests; ...)` |
+| `cargo nextest run -p sirio_terminal the_scrollbar_follows_the_viewport_and_dragging_it_scrolls_the_terminal` | 1 passed |
+| The twelve gpui tests the table names (Enter and IME, paste, the composer's keys, the model search, Enter in a form's field, Ctrl+C in the composer, the live thought) | all 12 in the passed list of the full `sirio_ui` run |
+
+The suites on the tree before Task 7 and after it: `sirio_ui` 1398 run, 1398 passed, 0 skipped;
+`sirio_terminal` 143 run, 143 passed, 1 skipped; the sorted `cargo nextest list` of each is identical
+before and after, so no test was added, removed or renamed (the terminal's 19 scrollbar unit tests
+and its 3 drag tests are among them). `cargo build --workspace --all-targets` builds.
+
+**The unfocused spinner.** The check that proves the bloom keeps turning while another window holds
+the focus was shown red against the ported clock in Task 6: `motion::lease` made to take no lease
+while no window of the app is active left the unfocused crops identical (`[0, 0, 0]`), the focused
+control moved (`[90, 120, 102]`), and the run failed with the "froze while Sirio was unfocused"
+message; restored, it was green again. Why that is the proof, and why the bloom and not the
+transcript, is under [The unfocused spinner and its CPU base](#the-unfocused-spinner-and-its-cpu-base).
+
+**What the masks hide here.** `IDENTICAL` says nothing about pixels inside a mask, and PR B moved
+code that draws under two of them: the transcript's scrollbar (`chat/list_scroll.rs`, under the
+scrollbar-thumb mask on `long-history/scrolled-up*`) and the sidebar's rows (the session-dots mask).
+So the pair was compared a second time with no `--masks` and the mask table as `--allow`
+(`artifacts/bezel-off/pr-b/diff-unmasked/`): `CAPTURE DIFF OK (62 changed, all attributed)`, the same
+62 frames and the same causes as PR A's pass: the status bar's usage meter (29 frames) and path
+(50), message times (34), the Agents toolbar and subtitle (2), the turn duration, the cancelled line
+and the crash addresses (1 each) and the session dots (1). The scrollbar-thumb mask holds no changed
+pixel in any frame: the four `long-history` frames differ only under the status bar and message-time
+masks, so the transcript bar is identical. The frame where the session-dots mask holds a change is
+`chat-ui-default/scenarios/activity/frames/tools-and-reasoning`; by eye, the base draws two green
+connected dots (the `main` row and the corner of the tab icon) and the head none, and the only other
+change in that crop is the row's star moving right into the dot's place, inside the mask too: the
+fixture-session race the mask names. The captures run with
+`SIRIO_REDUCED_MOTION=1`, which holds every animation at rest, so they cannot see the running bloom
+or orb turn; the `unfocused_spinner` row above is what does.
 
 ### PR C: text fields and tooltips on Ely (`refactor/bezel-off-c`)
 

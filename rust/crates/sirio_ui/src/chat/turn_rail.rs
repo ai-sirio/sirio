@@ -9,7 +9,7 @@
 //! Everything that decides *what* the rail shows is pure and lives up here;
 //! the element itself is built from bezel's tokens in `Chat::render_turn_rail`.
 
-use bezel::motion::{Fade, Painter, hover_listener, hover_t};
+use crate::motion::{Fade, Painter, hover_listener, hover_t};
 use bezel_theme::{Theme as BezelTheme, ink};
 use bezel::ui::widgets::{ButtonStyle, Buttons};
 use bezel::ui::{popover, surface};

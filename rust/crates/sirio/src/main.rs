@@ -27613,13 +27613,11 @@ fn register_fonts(cx: &App) {
 
 /// Sirio is watched from elsewhere: an agent runs for minutes while the user
 /// works in another window or on another monitor, and the sidebar spinner and
-/// the chat's thinking orb are what says it is still going. bezel parks its
-/// animation clock while no window of the app is active, and names this exact
-/// case — a window that must keep moving while something else has focus — as
-/// the one to turn that off for. Left on, the pause does not even freeze the
-/// orb: the chat re-renders on every ACP chunk regardless, and each of those
-/// renders samples the live phase, so the orb jumps from chunk to chunk
-/// instead of turning.
+/// the chat's thinking orb are what says it is still going. Those two draw on
+/// `sirio_ui::motion`'s clock, which never parks. bezel's own clock, still
+/// leased by the menus and scrollbars bezel draws, parks while no window of the
+/// app is active unless told otherwise; this keeps it running too, so nothing
+/// on screen freezes half-way while another window has the focus.
 fn init_motion(cx: &mut App) {
     use bezel::motion::AppExt as _;
     cx.set_pause_when_inactive(false);
@@ -28597,7 +28595,7 @@ fn main() {
         init_motion(cx);
         bezel::ui::input::init(cx);
         bezel::ui::combobox::init(cx);
-        bezel::ui::tree::init(cx);
+        sirio_ui::sidebar::tree_keys::init(cx);
         sirio_ui::chat::init(cx);
         sirio_ui::text_selection::init(cx);
         sirio_ui::file_view::init(cx);

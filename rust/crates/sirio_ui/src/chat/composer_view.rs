@@ -570,6 +570,7 @@ impl Chat {
 }
 
 use super::*;
+use bezel::ui::popover;
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
     chat::{Attachment, AttachmentChip, PromptInput},

@@ -1,8 +1,9 @@
+// Ported from bezel-ui 0.1.4 (MIT); see THIRD_PARTY_NOTICES.md.
 //! The reasoning entry as the gallery's Activity page draws it: an orb while
 //! it streams and a disclosure chevron once it settles, `Thinking` /
 //! `Thought for Ns`, and a body pinned to its newest line —
 //! `crabtalk/bezel` tag `v0.1.4`, `apps/gallery/src/patterns/agent.rs`
-//! (`Activity`). Whether the body is open is `widgets::Takeover`: it follows
+//! (`Activity`). Whether the body is open is [`Takeover`]: it follows
 //! the run until the reader presses the header, then obeys the reader.
 
 #[cfg(test)]
@@ -10,9 +11,11 @@ use std::time::Duration;
 
 use bezel::motion::Painter;
 use bezel::ui::scroll;
-use bezel::ui::scroll::{FollowState, ScrollbarState};
+use bezel::ui::scroll::ScrollbarState;
 use gpui::{AnyElement, ScrollHandle, div, linear_color_stop, linear_gradient, prelude::*, px};
 use sirio_theme::Theme;
+
+use crate::scroll::FollowState;
 
 #[cfg(test)]
 use crate::loading;
@@ -28,6 +31,35 @@ pub(crate) fn thought_header_label(streaming: bool, duration_ms: Option<u64>) ->
         "Thinking".to_string()
     } else {
         loading::thought_label(duration_ms.map(Duration::from_millis))
+    }
+}
+
+/// A flag that follows something else until the user takes it over.
+///
+/// The rule behind a section that opens itself while work streams in and
+/// collapses when it stops: auto-follow is right until the first press, and
+/// wrong immediately after — whatever the flag does next, the person who
+/// clicked has to win.
+///
+/// It is an `Option<bool>` rather than the two flags it reads as (*touched*,
+/// plus the value): "untouched, and here is the manual value" is a state that
+/// cannot mean anything, and this way it cannot be written.
+///
+/// Paint `get(running)`; on the header's click, `toggle(running)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Takeover(Option<bool>);
+
+impl Takeover {
+    /// What to show: `auto` until the first [`Self::toggle`], the user's own
+    /// choice from then on.
+    pub(crate) fn get(self, auto: bool) -> bool {
+        self.0.unwrap_or(auto)
+    }
+
+    /// Flip what is currently on screen — which while nobody has touched it is
+    /// `auto`, *not* the stored value — and take over from here.
+    pub(crate) fn toggle(&mut self, auto: bool) {
+        self.0 = Some(!self.get(auto));
     }
 }
 
@@ -50,14 +82,14 @@ impl ThoughtScroll {
     }
 
     fn follow_element(&self) -> AnyElement {
-        let follow = scroll::follow(&self.scroll, &self.follow);
+        let follow = crate::scroll::follow(&self.scroll, &self.follow);
         if !sirio_perf::enabled() {
             return follow;
         }
-        // Observe Bezel's actual prepaint correction, not a prediction made
-        // from the previous layout. Bezel 0.1.4 requests an animation frame
-        // in the same branch that changes this offset. Do not add a callback
-        // or a notification of our own to observe it.
+        // Observe `scroll::follow`'s actual prepaint correction, not a
+        // prediction made from the previous layout. It requests an animation
+        // frame in the same branch that changes this offset. Do not add a
+        // callback or a notification of our own to observe it.
         let before = std::rc::Rc::new(std::cell::Cell::new(None));
         let capture = before.clone();
         let before_scroll = self.scroll.clone();

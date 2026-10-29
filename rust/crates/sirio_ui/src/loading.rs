@@ -1,23 +1,21 @@
-//! The one place Bezel loading primitives are called from.
+// Ported from bezel-ui 0.1.4 (MIT); see THIRD_PARTY_NOTICES.md.
+//! The one place the loading primitives are called from.
 //!
 //! OWNERSHIP: this module renders; it owns no business state. Every surface
 //! keeps its own task/status state machine and asks here only for a picture of
-//! it. Bezel imports live here and nowhere else, so a Bezel API change is a
-//! one-file change.
+//! it. The orbs, the mini spinner and the skeleton rows are ports of
+//! bezel-ui's, drawn on this crate's own animation clock (`crate::motion`),
+//! so a change to how one looks or moves is a one-file change.
 //!
-//! A note on the `id` every entry point takes: Bezel 0.1.3 currently discards
-//! it (`loaders.rs` binds `let _key`, `popover.rs` takes `_id`), so today it
-//! keys nothing and a collision would be symptomless. Pass a unique one anyway
-//! — it is the identity these primitives are documented to take, and the day
-//! Bezel starts honouring it, duplicates would become state bleeding between
+//! A note on the `id` the orb and skeleton entry points take: the ports
+//! discard it, as bezel's loaders did (`let _key`, `_id`), so today it keys
+//! nothing and a collision would be symptomless. Pass a unique one anyway —
+//! it is the identity these primitives are documented to take, and the day a
+//! loader starts honouring it, duplicates would become state bleeding between
 //! elements with no compile error to warn you.
 
 use std::time::Duration;
 
-use bezel::motion;
-use bezel::motion::Painter;
-use bezel::ui::loaders;
-use bezel::ui::popover;
 use bezel::ui::widgets::Controls;
 use gpui::{
     AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Styled, Window,
@@ -25,14 +23,16 @@ use gpui::{
 };
 use sirio_theme::Theme;
 
+use crate::motion::{self, Painter};
+
 /// The glyph slot in an Activity-derived reasoning header.
 pub const THINKING_GLYPH: f32 = 14.0;
 /// The generic orb for a full-surface first load or empty state.
 pub const GENERIC_ORB: f32 = 44.0;
 /// The status bloom that stands in for a sidebar row's status word.
 pub const BLOOM_GLYPH: f32 = 14.0;
-/// A bloom ring's border as a fraction of the box — Bezel's own figure, from
-/// the `Orb::Bloom` arm of `loaders::orb`.
+/// A bloom ring's border as a fraction of the box, as `orb_bloom` and
+/// `settled_bloom` both draw it.
 pub const BLOOM_BORDER_RATIO: f32 = 0.05;
 /// A settled bloom's ring opacities, outermost first.
 ///
@@ -50,8 +50,8 @@ pub const COMPACT_MINI_CELL: f32 = 2.5;
 pub const PROGRESS_TRACK: f32 = 4.0;
 pub const PROGRESS_MAX_WIDTH: f32 = 280.0;
 /// A subordinate skeleton: three rows, never the sole activity signal. Its
-/// geometry belongs to Bezel's `popover::redacted_rows`: 28px rows, 6px gaps,
-/// and 4px vertical padding.
+/// geometry belongs to `redacted_rows`: 28px rows, 6px gaps, and 4px vertical
+/// padding.
 pub const SKELETON_ROWS: usize = 3;
 
 /// The label for a settled reasoning header.
@@ -77,9 +77,9 @@ pub fn clamp_fraction(fraction: f32) -> f32 {
 }
 
 /// Build the Bezel palette expected by its published UI primitives while
-/// retaining Sirio's appearance and accent. Bezel's loading APIs use their own
-/// theme type, whereas the adapter's public contract intentionally exposes
-/// Sirio's theme type to its callers.
+/// retaining Sirio's appearance and accent. Bezel's progress bar and the
+/// skeleton rows take that theme type, whereas the adapter's public contract
+/// intentionally exposes Sirio's theme type to its callers.
 ///
 /// This module used to push Sirio's appearance into Bezel's process-wide
 /// paint mirror on every call, because `ink`, `wash` and `hairline` are free
@@ -100,77 +100,185 @@ fn loading_accent(theme: &Theme) -> Hsla {
     theme.ely.fg_muted
 }
 
-/// The view whose render is leasing the shared Bezel animation clock.
+/// The view whose render is leasing the shared animation clock.
 fn painter(window: &Window) -> Painter {
     Painter::from(window.current_view())
 }
 
-/// An Activity-derived reasoning indicator using Bezel's Cluster orb.
+/// The orb cluster: blobs whose sizes swing so the count you perceive
+/// changes, drifting far enough to merge and separate. The one a thinking
+/// surface should reach for.
+///
+/// Everything is circles, because that is the whole vocabulary gpui gives: no
+/// rotation transform, no conic gradient, and no blur filter on an element. So
+/// the glow is a `BoxShadow` and every position is arithmetic — all of it pure
+/// and in [`motion::phase`]. One tint, `accent`.
+fn orb_cluster(size_px: f32, accent: Hsla, painter: Painter, cx: &mut App) -> impl IntoElement {
+    let delta = motion::pulse_delta(Duration::from_millis(motion::ORB_MS), painter, cx);
+
+    // A circle placed by its centre, since every seat below is a centre.
+    let dot = move |cx: f32, cy: f32, size: f32, opacity: f32, glow: f32| {
+        div()
+            .absolute()
+            .left(px(cx - size / 2.0))
+            .top(px(cy - size / 2.0))
+            .size(px(size))
+            .rounded_full()
+            .bg(accent.opacity(opacity))
+            .shadow(vec![gpui::BoxShadow {
+                color: accent.opacity(opacity * 0.55),
+                offset: gpui::point(px(0.0), px(0.0)),
+                blur_radius: px(glow),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
+    };
+
+    let cells: Vec<gpui::Div> = (0..motion::ORBS)
+        .map(|index| {
+            // A third of a period apart, so one is always swelling while
+            // another shrinks and the silhouette never repeats.
+            let phase = motion::staggered_phase(delta, index, 1.0 / motion::ORBS as f32);
+            let (seat_x, seat_y) = motion::ORB_SEATS[index];
+            let (drift_x, drift_y) = motion::orb_drift(phase);
+            dot(
+                size_px * (seat_x + drift_x),
+                size_px * (seat_y + drift_y),
+                size_px * motion::orb_size(phase),
+                motion::orb_opacity(phase),
+                size_px * motion::orb_glow(phase),
+            )
+        })
+        .collect();
+
+    div().relative().size(px(size_px)).children(cells)
+}
+
+/// The bloom: rings leaving the centre and fading before the edge. The only
+/// orb that travels outward, which is what makes it read as a signal rather
+/// than a wait.
+fn orb_bloom(size_px: f32, accent: Hsla, painter: Painter, cx: &mut App) -> impl IntoElement {
+    let delta = motion::pulse_delta(Duration::from_millis(motion::ORB_MS), painter, cx);
+
+    let cells: Vec<gpui::Div> = (0..motion::ORB_BLOOM_RINGS)
+        .map(|index| {
+            let phase = motion::staggered_phase(delta, index, 1.0 / motion::ORB_BLOOM_RINGS as f32);
+            let diameter = size_px * motion::orb_bloom_radius(phase);
+            let opacity = motion::orb_bloom_opacity(phase);
+            // A ring, not a disc: the border is the whole element, so this
+            // one is the odd shape out and cannot go through `dot`.
+            div()
+                .absolute()
+                .left(px((size_px - diameter) / 2.0))
+                .top(px((size_px - diameter) / 2.0))
+                .size(px(diameter))
+                .rounded_full()
+                .border(px((size_px * BLOOM_BORDER_RATIO).max(1.0)))
+                .border_color(accent.opacity(opacity))
+        })
+        .collect();
+
+    div().relative().size(px(size_px)).children(cells)
+}
+
+/// A 2×3 miniature of the gradient spinner sized for a status-dot slot: the
+/// brightness SNAKES around the grid's perimeter (every cell of a 2×3 grid is
+/// on the ring) instead of sweeping as a vertical wave — a tiny radial chase.
+/// ~6×10px footprint at the default 2.5px cells.
+fn mini_gradient_spinner(cell_px: f32, painter: Painter, cx: &mut App) -> impl IntoElement {
+    const COLS: usize = 2;
+    const ROWS: usize = 3;
+    /// Clockwise ring position of each `(row, col)` cell, top-left first:
+    /// (0,0) → (0,1) → (1,1) → (2,1) → (2,0) → (1,0).
+    const RING: [[usize; COLS]; ROWS] = [[0, 1], [5, 2], [4, 3]];
+    const RING_LEN: f32 = (COLS * ROWS) as f32;
+    let delta = motion::pulse_delta(
+        Duration::from_millis(motion::GRADIENT_SPIN_MS),
+        painter,
+        cx,
+    );
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(cell_px / 2.0))
+        .children((0..ROWS).map(move |row| {
+            let tint: gpui::Hsla = gpui::rgb(motion::GSPIN_ROW_TINTS[row]).into();
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(cell_px / 2.0))
+                .children((0..COLS).map(move |col| {
+                    let phase = RING[row][col] as f32 / RING_LEN;
+                    div()
+                        .size(px(cell_px))
+                        .rounded(px(cell_px / 2.0))
+                        .bg(tint)
+                        .opacity(motion::gspin_opacity(delta + phase, motion::GSPIN_DIM))
+                }))
+        }))
+}
+
+/// Pulsing skeleton rows shown while a list loads (the reference:
+/// `h-7 animate-pulse rounded-md bg-white/[0.04]`).
+fn redacted_rows(
+    _id: &'static str,
+    _theme: &bezel_theme::Theme,
+    count: usize,
+    painter: Painter,
+    cx: &mut App,
+) -> AnyElement {
+    let wash = bezel_theme::ink(0.04);
+    let delta = motion::pulse_delta(Duration::from_millis(motion::PULSE_MS), painter, cx);
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .py(px(4.0))
+        .children((0..count).map(move |i| {
+            let phase = motion::staggered_phase(delta, i, 0.08);
+            div()
+                .h(px(28.0))
+                .rounded(px(bezel_theme::Theme::control_radius()))
+                .bg(wash)
+                .opacity(0.35 + 0.4 * motion::pulse_wave(phase))
+        }))
+        .into_any_element()
+}
+
+/// An Activity-derived reasoning indicator using the Cluster orb.
 pub fn thinking_indicator(
-    id: &'static str,
+    _id: &'static str,
     theme: &Theme,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let mut bezel_theme = bezel_theme(theme);
-    bezel_theme.accent = loading_accent(theme);
-    loaders::orb(
-        loaders::Orb::Cluster,
-        id,
-        THINKING_GLYPH,
-        &bezel_theme,
-        painter(window),
-        cx,
-    )
-    .into_any_element()
+    orb_cluster(THINKING_GLYPH, loading_accent(theme), painter(window), cx).into_any_element()
 }
 
-/// A generic Bezel Cluster orb at the caller's requested size.
+/// A generic Cluster orb at the caller's requested size.
 pub fn indeterminate(
-    id: &'static str,
+    _id: &'static str,
     size: f32,
     theme: &Theme,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let mut bezel_theme = bezel_theme(theme);
-    bezel_theme.accent = loading_accent(theme);
-    loaders::orb(
-        loaders::Orb::Cluster,
-        id,
-        size,
-        &bezel_theme,
-        painter(window),
-        cx,
-    )
-    .into_any_element()
+    orb_cluster(size, loading_accent(theme), painter(window), cx).into_any_element()
 }
 
-/// The Bezel bloom — rings leaving the centre — in the caller's tint.
+/// The bloom — rings leaving the centre — in the caller's tint.
 ///
-/// Bezel's loaders paint in one colour, the palette's accent, so a tint that
-/// is not the accent is applied by handing the primitive a palette whose
-/// accent is it. That is the mechanism `bezel_theme` already uses to put
-/// Sirio's coral on every loader, one call deeper.
+/// The orbs paint in one colour, the `accent` they are handed, so the tint is
+/// passed straight through.
 pub fn bloom(
-    id: &'static str,
+    _id: &'static str,
     size: f32,
     tint: Hsla,
-    theme: &Theme,
+    _theme: &Theme,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let mut bezel_theme = bezel_theme(theme);
-    bezel_theme.accent = tint;
-    loaders::orb(
-        loaders::Orb::Bloom,
-        id,
-        size,
-        &bezel_theme,
-        painter(window),
-        cx,
-    )
-    .into_any_element()
+    orb_bloom(size, tint, painter(window), cx).into_any_element()
 }
 
 /// How much of its slot a settled bloom's mark actually fills — the widest
@@ -186,9 +294,9 @@ pub fn bloom(
 /// defect this exists to close. Stopping at the ring one stagger step out
 /// puts both on the same footprint.
 ///
-/// Derived from Bezel's own curve rather than written down as a number, so a
-/// `bezel` bump that retunes the bloom carries this with it instead of
-/// silently drifting away from it.
+/// Derived from the bloom's own curve rather than written down as a number,
+/// so a retune of the bloom carries this with it instead of silently drifting
+/// away from it.
 pub fn settled_bloom_span() -> f32 {
     motion::orb_bloom_radius(1.0 / motion::ORB_BLOOM_RINGS as f32)
 }
@@ -196,10 +304,10 @@ pub fn settled_bloom_span() -> f32 {
 /// A settled bloom's rings as `(diameter, opacity)`, outermost first, in the
 /// coordinates of the `slot` the caller reserves for the glyph.
 ///
-/// The proportions are Bezel's: the span a travelling ring interpolates
-/// across (`ORB_BLOOM_MIN`..`ORB_BLOOM_MAX`), sampled at the even steps
-/// `ORB_BLOOM_RINGS` divides the travel into, with the outermost held at the
-/// far end. `orb_bloom_radius` cannot be asked for that far end — it takes
+/// The proportions are the travelling bloom's: the span a travelling ring
+/// interpolates across (`ORB_BLOOM_MIN`..`ORB_BLOOM_MAX`), sampled at the even
+/// steps `ORB_BLOOM_RINGS` divides the travel into, with the outermost held at
+/// the far end. `orb_bloom_radius` cannot be asked for that far end — it takes
 /// `phase.rem_euclid(1.0)`, so a phase of exactly 1 wraps back to the centre
 /// and would silently return the *smallest* ring — hence `lerp` against the
 /// two constants directly.
@@ -226,11 +334,11 @@ pub fn settled_bloom_rings(slot: f32) -> Vec<(f32, f32)> {
 /// A bloom stopped at its fullest frame: the same concentric rings, no clock
 /// and no lease.
 ///
-/// This is the one loader in this module Sirio draws itself, because Bezel
-/// has no static orb — `loaders::orb` always takes the shared clock through
-/// `pulse_delta`. It is built from Bezel's constants and mirrors the geometry
-/// of `loaders::orb`'s `Orb::Bloom` arm (a border, not a fill, centred in the
-/// box) so the moving and settled forms stay the same shape.
+/// This is the one loader in this module that never touches the clock, because
+/// there is no static orb — `orb_bloom` always takes the shared clock through
+/// `pulse_delta`. It is built from the same constants and mirrors the geometry
+/// of `orb_bloom` (a border, not a fill, centred in the box) so the moving and
+/// settled forms stay the same shape.
 /// `size` is the *slot*, not the mark: the rings are drawn at
 /// [`settled_bloom_span`] of it and centred, so the element a caller lays out
 /// keeps the same footprint as the travelling bloom it stands in for.
@@ -261,10 +369,10 @@ pub fn settled_bloom(id: &'static str, size: f32, tint: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-/// The compact Bezel mini gradient spinner for refresh/status slots.
+/// The compact mini gradient spinner for refresh/status slots.
 ///
 /// The spinner sits in a wrapper that carries `id` as its debug selector:
-/// Bezel hangs no selector on the key it takes (see the module note), so
+/// the spinner itself hangs no selector on anything (see the module note), so
 /// without the wrapper no test could tell a slot holding a spinner from
 /// an empty one. Every caller puts it in a centered flex slot, so a flex
 /// wrapper sized by its content is layout-neutral.
@@ -273,8 +381,7 @@ pub fn compact(id: &'static str, window: &mut Window, cx: &mut App) -> AnyElemen
         .id(id)
         .debug_selector(move || id.to_owned())
         .flex()
-        .child(loaders::mini_gradient_spinner(
-            id,
+        .child(mini_gradient_spinner(
             COMPACT_MINI_CELL,
             painter(window),
             cx,
@@ -292,8 +399,8 @@ pub fn progress(fraction: f32, theme: &Theme) -> Div {
         .child(bezel_theme.progress_bar(clamp_fraction(fraction)))
 }
 
-/// A subordinate set of redacted rows. Bezel's `pulse_delta` owns the shared
-/// clock and its `reduced_motion` behavior; no Sirio timer is created here.
+/// A subordinate set of redacted rows. `motion::pulse_delta` owns the shared
+/// clock and its reduced-motion behavior; no timer is created here.
 pub fn skeleton_rows(
     id: &'static str,
     count: usize,
@@ -302,7 +409,7 @@ pub fn skeleton_rows(
     cx: &mut App,
 ) -> AnyElement {
     let bezel_theme = bezel_theme(theme);
-    popover::redacted_rows(id, &bezel_theme, count, painter(window), cx)
+    redacted_rows(id, &bezel_theme, count, painter(window), cx)
 }
 
 #[cfg(test)]

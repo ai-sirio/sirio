@@ -5,7 +5,6 @@
 //! `Scripts/Tests/test-scroll-drag-probe.sh` can drive the three scrollbar implementations the
 //! app uses in one window, before and after a PR changes what draws them.
 
-use bezel::motion::Painter;
 use bezel::ui::scroll::ScrollbarState;
 use gpui::{
     AnyElement, AnyView, App, Context, ListAlignment, ListState, Render, ScrollHandle, Window,
@@ -16,6 +15,7 @@ use sirio_theme::Theme;
 use crate::chat::list_scroll::{ListScrollbarState, list_scrollbar};
 use crate::file_view;
 use crate::horizontal_scroll::{self, HorizontalBarState};
+use crate::motion::Painter;
 
 /// Width of each of the three panes. The window is `3 * PANE_WIDTH` wide and the panes fill its
 /// height, side by side from the left edge with nothing between them. The script reads this
@@ -58,7 +58,7 @@ impl ScrollDragProbe {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
             handle: ScrollHandle::new(),
-            bar: ScrollbarState::new(Painter::of(cx)),
+            bar: ScrollbarState::new(bezel::motion::Painter::of(cx)),
             list: ListState::new(ROWS, ListAlignment::Top, px(2048.0)),
             list_bar: ListScrollbarState::new(Painter::of(cx)),
             wide_handle: ScrollHandle::new(),

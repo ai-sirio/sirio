@@ -92,7 +92,7 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # `composer`, because `plain` advertises no slash commands) and reduced_motion
 # (SIRIO_REDUCED_MOTION=1: the transcript is pixel-identical in three frames 250 ms apart) and
 # unfocused_spinner (a second window, `surfaces_probe --frame tooltip`, takes the X focus, and the
-# sidebar row's status bloom, which only bezel's animation clock repaints, must still turn in three
+# sidebar row's status bloom, which only Sirio's frame clock (`sirio_ui::motion`) repaints, must still turn in three
 # frames 250 ms apart; it logs `unfocused-spinner CPU <x>%` of one core over 10 s, and --cpu-ceiling
 # PCT fails above PCT; --focus-thief-bin PATH names the second window's binary, by default the
 # surfaces_probe example, built with the others unless --no-build; the CPU base and the ceiling
