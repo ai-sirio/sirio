@@ -358,19 +358,14 @@ impl MarkdownBody {
                 window.focus(&down_interaction.focus, cx);
                 window.prevent_default();
             })
-            .on_mouse_move(move |event, _, cx| {
+            .on_mouse_move(move |event, window, cx| {
                 if !event.dragging() || !move_interaction.chat.read(cx).transcript_dragging {
                     return;
                 }
                 let Some(offset) = move_hit.offset_at(event.position) else {
                     return;
                 };
-                move_interaction.chat.update(cx, |chat, cx| {
-                    if let Some(selection) = &mut chat.transcript_selection {
-                        selection.head = offset;
-                    }
-                    cx.notify();
-                });
+                move_interaction.extend_selection(offset, window, cx);
             })
             .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                 up_interaction.chat.update(cx, |chat, cx| {
@@ -1796,6 +1791,26 @@ pub(crate) struct TranscriptInteraction {
     focus: FocusHandle,
 }
 
+impl TranscriptInteraction {
+    /// Moves the drag's head, and the focus into the transcript once the drag
+    /// has selected something — the rule `text_selection::extend` follows.
+    /// Focus taken at the press does not hold: the pane's own press handler
+    /// runs after it and hands focus to the composer (`select_pane`), which is
+    /// where a plain click on the transcript is meant to leave it.
+    fn extend_selection(&self, head: usize, window: &mut Window, cx: &mut App) {
+        let selecting = self.chat.update(cx, |chat, cx| {
+            cx.notify();
+            chat.transcript_selection.as_mut().is_some_and(|selection| {
+                selection.head = head;
+                selection.anchor != selection.head
+            })
+        });
+        if selecting && !self.focus.is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
+    }
+}
+
 /// A styled text run whose selection range is anchored in the complete
 /// transcript rather than in the currently mounted virtualized row.
 struct TranscriptSelectableText {
@@ -2018,12 +2033,7 @@ impl Element for TranscriptSelectableText {
                 let index = match layout_for_move.index_for_position(event.position) {
                     Ok(index) | Err(index) => index.min(source_range.len()),
                 };
-                interaction.chat.update(cx, |chat, cx| {
-                    if let Some(selection) = &mut chat.transcript_selection {
-                        selection.head = source_range.start + index;
-                    }
-                    cx.notify();
-                });
+                interaction.extend_selection(source_range.start + index, window, cx);
             }
         });
 
