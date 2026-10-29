@@ -82,13 +82,13 @@ gpui = { package = "bezel-gpui", version = "=0.3.8", default-features = false }
 gpui_platform = { package = "bezel-gpui-platform", version = "=0.3.8", default-features = false, features = ["font-kit"] }
 # Geist ships from rust/assets/fonts (sirio_theme::register_ui_fonts).
 bezel = { version = "=0.1.4", default-features = false }
-bezel-markdown = "=0.1.4"
-bezel-editor = "=0.1.4"
-bezel-syntax = "=0.1.4"
-# Renamed: the package's lib target is `theme`, so the extern name is
-# `bezel_theme` and `sirio_theme` reads `bezel_theme::…` (the same types as
-# `bezel::theme::…`). Cf. `gpui = { package = "bezel-gpui" }` above.
+# Renamed: each package's lib target is a bare word (`theme`, `markdown`, `syntax`), so the
+# extern name carries the `bezel_` prefix and a path reads `bezel_theme::…`, `bezel_markdown::…`,
+# `bezel_syntax::…` (`bezel_theme` is the same crate as `bezel::theme`). Cf.
+# `gpui = { package = "bezel-gpui" }` above.
 bezel_theme = { version = "=0.1.4", package = "bezel-theme" }
+bezel_markdown = { version = "=0.1.4", package = "bezel-markdown" }
+bezel_syntax = { version = "=0.1.4", package = "bezel-syntax" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

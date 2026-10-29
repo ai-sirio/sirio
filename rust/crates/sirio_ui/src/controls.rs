@@ -1,6 +1,6 @@
 //! Reusable controls used by the settings surface and sidebars.
 //!
-//! This file's spacing and radii come from [`bezel::theme`]'s scale rather
+//! This file's spacing and radii come from [`bezel_theme`]'s scale rather
 //! than bare `px()` literals. They used to come from COSMIC's, which had the
 //! same four steps at the same four values; only the source moved. Two kinds
 //! of literal remain deliberately:
@@ -17,7 +17,7 @@
 //!   `BezelTheme::SPACE_*`, rounded to the nearest step from its original
 //!   waku value.
 
-use bezel::theme::Theme as BezelTheme;
+use bezel_theme::Theme as BezelTheme;
 use bezel::ui::tooltip::Tooltip;
 use gpui::{
     App, ClickEvent, CursorStyle, Div, FontWeight, Hsla, Window, div, prelude::*, px, text,
@@ -82,6 +82,16 @@ impl gpui::Render for SidebarTooltip {
             .child(self.0.clone())
             .surface(&bezel, bezel.popover_surface)
     }
+}
+
+/// A plain-text hover label for `.tooltip(..)`: the one place the app's tooltip
+/// look is chosen, so a surface asks for `controls::tooltip("text")` instead of
+/// naming a tooltip library.
+pub fn tooltip(
+    text: impl Into<gpui::SharedString>,
+) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
+    let text = text.into();
+    move |window, cx| Tooltip::text(text.clone(), window, cx)
 }
 
 /// A segmented control's selection callback.

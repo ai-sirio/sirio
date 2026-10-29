@@ -85,6 +85,19 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # effort list opens and takes a pick through the debug-only `surface.chat.effort`; they capture it.
 # effort_full and effort_full_light run the fixture's effort-full mode (Default, five levels,
 # Ultracode), capture the whole list (the notes, the separator) and choose Default from it.
+# Three scenarios need a display and are skipped under --state-only (`SKIP <name>: needs a
+# display`, recorded as `skipped` in summary.json): composer_keys types through xdotool (Return,
+# Shift+Return, Up and Down moving the caret, the slash popup taken with Down and Tab, closed by
+# Escape, proved by a frame diff of its box against the frame before the `/`; its fixture is
+# `composer`, because `plain` advertises no slash commands) and reduced_motion
+# (SIRIO_REDUCED_MOTION=1: the transcript is pixel-identical in three frames 250 ms apart) and
+# unfocused_spinner (a second window, `surfaces_probe --frame tooltip`, takes the X focus, and the
+# sidebar row's status bloom, which only bezel's animation clock repaints, must still turn in three
+# frames 250 ms apart; it logs `unfocused-spinner CPU <x>%` of one core over 10 s, and --cpu-ceiling
+# PCT fails above PCT; --focus-thief-bin PATH names the second window's binary, by default the
+# surfaces_probe example, built with the others unless --no-build; the CPU base and the ceiling
+# formula `base × 1.25 + 1` are in docs/testing/bezel-off.md, "The unfocused spinner and its CPU
+# base").
 # --display :N (an Xvfb; export VK_DRIVER_FILES and VK_ICD_FILENAMES as lavapipe's lvp_icd.json)
 # takes the captures, --state-only omits them,
 # --only NAME[,NAME] runs some scenarios, --out-dir DIR keeps the artifact.
@@ -150,6 +163,30 @@ Scripts/Tests/test-ely-forge-probe.sh --xvfb   # -> prints "ELY FORGE PROBE OK"
 # private Xvfb; fails when any row's wash starts after its first glyph, the
 # defect the vendored bezel_markdown fixes (rust/vendor/README.md).
 Scripts/Tests/test-markdown-selection-probe.sh --xvfb   # -> prints "MARKDOWN SELECTION PROBE OK"
+
+# The eight Settings pages (and Git Hosting with a hand-written forge source), a
+# tab context menu and a tooltip, drawn by the `surfaces_probe` example (one
+# process per frame and appearance, seeded through the public builders only; a
+# state they cannot reach prints `GAP <frame> <state>`), on a private Xvfb with
+# Mesa's lavapipe: PID-matched captures, at least 200 colours a frame, the
+# tooltip proven by its difference from the pre-hover capture, and a Settings
+# page longer than the window scrolled with the wheel into -p2, -p3, ... frames
+# (printed as `PAGES: <frame>-<appearance> <n>`; a page that still scrolls after 8
+# fails; SURFACES_MAX_PAGES=N changes the cap).
+# They are the probe frames of the bezel-off capture set
+# (docs/testing/bezel-off.md). --xvfb | --display :N, --out-dir DIR,
+# --appearance dark|light (without it both), --no-build.
+Scripts/Tests/test-surfaces-probe.sh --xvfb   # -> prints "SURFACES PROBE OK (<n> frames, <g> gaps)"
+
+# Dragging a scrollbar thumb, for the three bars the app draws (file_view::scrollbar, the
+# transcript's list_scrollbar, horizontal_scroll::bar), side by side in the `scroll_drag_probe`
+# example on a private Xvfb with lavapipe: a real xdotool press at each thumb's centre, 3 px, 1
+# px, then 120 px of travel; the thumb must have moved as far as the pointer did (4 px tolerance)
+# and a second drag of +2000 px must leave it flush with the track's end. This is the "before"
+# behaviour of every PR that changes what draws a bar (docs/testing/bezel-off.md).
+# --xvfb | --display :N, --out-dir DIR, --no-build, --no-software-vulkan;
+# SCROLL_DRAG_PROBE_SKEW=40 expects 40 px too much travel, and the run must fail.
+Scripts/Tests/test-scroll-drag-probe.sh --xvfb   # -> prints "SCROLL DRAG PROBE OK (3 bars)"
 
 # The horizontal bar bezel-markdown draws under a fence or a table wider than
 # its column (the vendored change of rust/vendor/README.md): a real xdotool
@@ -230,4 +267,25 @@ Scripts/Tests/test-jdtls-lombok-live.sh --xvfb --jdtls PATH --java-home DIR   # 
 # and Home). --xvfb or --display :N, --out-dir DIR, --no-build,
 # --no-software-vulkan.
 Scripts/Tests/test-ely-editor-probe.sh --xvfb   # -> prints "ELY EDITOR PROBE OK"
+
+# The contract of Scripts/capture-diff.py, the pixel diff of two capture sets (synthetic 64x64
+# PNGs made with ImageMagick; no display, no build): identical trees, one changed pixel, the
+# tolerance (1 level in one or every channel or in alpha is noise, 2 levels is a change, and
+# --tolerance moves the line), a mask rectangle one pixel short or one pixel off, an
+# allow rectangle that covers half the change or belongs to another frame, a frame only on one
+# side, a size change, a malformed table, a tree with no frame, a file that is not an image, and
+# what changed.tsv and index.html list. Needs `magick` and python3.
+Scripts/Tests/test-capture-diff.sh   # -> prints "CAPTURE DIFF CONTRACT OK"
+
+# The capture set a bezel-off PR is judged by (docs/testing/bezel-off.md): the frames of
+# visual-sweep.sh (dark, light), the surfaces probe (once Scripts/Tests/test-surfaces-probe.sh
+# exists), test-changes-e2e.sh (dark, light) and test-ely-chat-ui-e2e.py (its default only), taken
+# from the tree it runs in, on lavapipe, with SIRIO_REDUCED_MOTION=1 (a debug-only switch that
+# makes gpui snap every animation to its rest state). --out-dir DIR keeps captures.log,
+# runs/<source>/ (each source's own artifact) and frames/<source>-<appearance>/ (the PNG set);
+# --xvfb starts a private 1600x1000 Xvfb, --display :N uses one (the same one for the base and the
+# PR runs). Scripts/capture-diff.py BEFORE/frames AFTER/frames --out DIR [--masks TSV]
+# [--allow TSV] [--tolerance N] compares two sets (Scripts/capture-masks.tsv names the regions a clock drives)
+# and prints CAPTURE DIFF IDENTICAL, CAPTURE DIFF OK (...) or CAPTURE DIFF FAILED (...).
+Scripts/bezel-off-captures.sh --out-dir DIR --xvfb   # -> prints "CAPTURES OK: DIR (<n> frames)"
 ```

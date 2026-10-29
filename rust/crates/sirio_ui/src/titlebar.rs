@@ -101,7 +101,7 @@ use gpui::{
     App, Context, Decorations, EventEmitter, FontWeight, MouseButton, Pixels, Point, Render,
     Hsla, Rgba, SharedString, Window, WindowControlArea, div, prelude::*, px,
 };
-use bezel::theme::Theme as BezelTheme;
+use bezel_theme::Theme as BezelTheme;
 use sirio_theme::{BrowserChrome, Theme, WindowsCaption};
 use std::rc::Rc;
 use std::sync::OnceLock;

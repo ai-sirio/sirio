@@ -200,7 +200,7 @@ Every other file is byte-for-byte the released source, plus the MIT `LICENSE` fr
 `v0.1.4` tag, which the published crate does not ship.
 
 Same manifest conventions as `bezel_ui`, no standalone `Cargo.lock`; `cargo tree -i bezel-markdown`
-shows the path source, used by `sirio_ui` and by `bezel-editor`. The check is
+shows the path source, used by `sirio_ui` alone (`bezel-editor` left the graph). The check is
 `Scripts/Tests/test-markdown-selection-probe.sh --xvfb` (`MARKDOWN SELECTION PROBE OK`): it draws
 `sirio_ui`'s `markdown_selection_probe` example, a selected document whose rows soft-wrap, break
 inside one paragraph and wrap an inline code span, and fails when any row's wash leaves the text's

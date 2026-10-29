@@ -22614,7 +22614,7 @@ impl SirioWorkspace {
         // The app installs this at startup; isolated shell render fixtures set
         // only Sirio's global, so make the same registry invariant explicit
         // before a bezel surface reaches its paint phase.
-        if cx.try_global::<bezel::theme::Theme>().is_none() {
+        if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
         let action_entity = entity.clone();
@@ -28586,6 +28586,12 @@ fn main() {
         native_perf::init(cx);
         // Must land before `Theme::init`: Theme caches resolved font names.
         register_fonts(cx);
+        // The debug switch the capture set uses to make animation deterministic: gpui
+        // snaps every animated element to its rest state. It lands before `ely::init`,
+        // which copies the flag into Ely's theme (a no-op in release builds).
+        if cfg!(debug_assertions) && std::env::var_os("SIRIO_REDUCED_MOTION").is_some() {
+            cx.set_reduce_motion(true);
+        }
         Theme::init(cx);
         sirio_ui::ely::init(cx);
         init_motion(cx);

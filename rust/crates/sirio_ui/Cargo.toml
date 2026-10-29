@@ -11,9 +11,9 @@ sirio_env = { path = "../sirio_env" }
 gpui.workspace = true
 gpui_platform.workspace = true
 bezel = { workspace = true }
-bezel-markdown.workspace = true
-bezel-editor.workspace = true
-bezel-syntax.workspace = true
+bezel_theme.workspace = true
+bezel_markdown.workspace = true
+bezel_syntax.workspace = true
 # The grammars bezel-syntax does not carry: Java, C, C++, Swift, Ruby, …
 sirio_syntax.workspace = true
 anyhow.workspace = true

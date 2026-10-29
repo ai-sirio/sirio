@@ -1023,6 +1023,122 @@ mod tests {
         );
     }
 
+    /// Enter in the clone URL field starts the clone, as a click on Clone does. The key is the
+    /// field's wrapper's own `on_key_down`, not a binding of the field, so a field that takes
+    /// Enter for itself (a replacement for bezel's) silently ends it. Against a local
+    /// repository, so no network and a clone that completes.
+    #[gpui::test]
+    async fn pressing_enter_in_the_clone_url_field_starts_the_clone(cx: &mut TestAppContext) {
+        cx.update(init_test_ui);
+        // Ely's bindings are live, as they are in the app: a replacement field may bind keys.
+        cx.update(crate::ely::init);
+        let source = TempDir::new("clone-enter-source");
+        std::fs::write(source.0.join("file.txt"), "hello\n").expect("seed source file");
+        git(&source.0, &["init", "-q"]);
+        git(&source.0, &["config", "user.email", "test@example.test"]);
+        git(&source.0, &["config", "user.name", "Test"]);
+        git(&source.0, &["add", "file.txt"]);
+        git(&source.0, &["commit", "-q", "-m", "seed"]);
+        let parent = TempDir::new("clone-enter-parent");
+        let window = cx.add_window(|_, cx| CloneForm::new(parent.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let form = cx.update(|window, _| window.root::<CloneForm>().flatten().expect("form root"));
+        cx.run_until_parked();
+
+        let field = cx
+            .debug_bounds("clone-url-field")
+            .expect("the URL field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.simulate_input(&clone_url_for(&source.0));
+        cx.run_until_parked();
+        assert_eq!(
+            form.read_with(&cx.cx, |form, _| form.status().clone()),
+            CloneStatus::Ready,
+            "typing a URL starts nothing"
+        );
+
+        cx.simulate_keystrokes("enter");
+        assert_ne!(
+            form.read_with(&cx.cx, |form, _| form.status().clone()),
+            CloneStatus::Ready,
+            "Enter in the URL field starts the clone"
+        );
+
+        cx.cx.executor().allow_parking();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            cx.cx.executor().advance_clock(Duration::from_millis(25));
+            cx.run_until_parked();
+            if !matches!(
+                form.read_with(&cx.cx, |form, _| form.status().clone()),
+                CloneStatus::Running { .. }
+            ) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let status = form.read_with(&cx.cx, |form, _| form.status().clone());
+        let CloneStatus::Complete { destination, .. } = status else {
+            panic!("the clone Enter started must complete: {status:?}");
+        };
+        assert!(
+            destination.join("file.txt").is_file(),
+            "the clone landed in {destination:?}"
+        );
+    }
+
+    /// Enter in the project name field creates the folder, as a click on Create does. The same
+    /// shape as the clone form's: the key is the wrapper's `on_key_down`.
+    #[gpui::test]
+    async fn pressing_enter_in_the_create_name_field_creates_the_folder(cx: &mut TestAppContext) {
+        cx.update(init_test_ui);
+        // Ely's bindings are live, as they are in the app: a replacement field may bind keys.
+        cx.update(crate::ely::init);
+        let parent = TempDir::new("create-enter-parent");
+        let window = cx.add_window(|_, cx| CreateForm::new(parent.0.clone(), cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        let form = cx.update(|window, _| window.root::<CreateForm>().flatten().expect("form root"));
+        cx.run_until_parked();
+
+        let field = cx
+            .debug_bounds("create-name-field")
+            .expect("the name field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.simulate_input("entered-project");
+        cx.run_until_parked();
+        assert_eq!(
+            form.read_with(&cx.cx, |form, _| form.status().clone()),
+            CreateStatus::Ready,
+            "typing a name creates nothing"
+        );
+
+        cx.simulate_keystrokes("enter");
+        assert_ne!(
+            form.read_with(&cx.cx, |form, _| form.status().clone()),
+            CreateStatus::Ready,
+            "Enter in the name field starts the creation"
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            if !matches!(
+                form.read_with(&cx.cx, |form, _| form.status().clone()),
+                CreateStatus::Running
+            ) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let status = form.read_with(&cx.cx, |form, _| form.status().clone());
+        let CreateStatus::Complete(destination) = status else {
+            panic!("the creation Enter started must complete: {status:?}");
+        };
+        assert_eq!(destination, parent.0.join("entered-project"));
+        assert!(destination.is_dir(), "the folder exists: {destination:?}");
+    }
+
     #[test]
     fn clone_failure_keeps_url_and_allows_retry() {
         let mut state = CloneFormState::default();

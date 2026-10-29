@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use gpui::App;
 
-use markdown::BlockKind;
+use bezel_markdown::BlockKind;
 use sirio_diagram::{DiagramKind, Palette};
 use sirio_markdown::{Document, expand_html};
 use sirio_theme::{Appearance, Theme};
@@ -69,7 +69,7 @@ pub(crate) struct DiagramRequest {
 /// One frame's Preview: the document to draw, and the diagrams it names
 /// that nobody has scheduled yet.
 pub(crate) struct Preview {
-    pub(crate) doc: markdown::Doc,
+    pub(crate) doc: bezel_markdown::Doc,
     pub(crate) missing: Vec<DiagramRequest>,
 }
 
@@ -96,7 +96,7 @@ pub(crate) fn build(
                 code,
             } => {
                 let Some(kind) = DiagramKind::from_fence(&language) else {
-                    blocks.push(markdown::Block::at(
+                    blocks.push(bezel_markdown::Block::at(
                         BlockKind::Code {
                             language: Some(language),
                             code,
@@ -107,7 +107,7 @@ pub(crate) fn build(
                 };
                 let key = sirio_diagram::cache_key(kind, &code.text, palette);
                 let source = code.text.clone();
-                let fence = markdown::Block::at(
+                let fence = bezel_markdown::Block::at(
                     BlockKind::Code {
                         language: Some(language),
                         code,
@@ -116,10 +116,10 @@ pub(crate) fn build(
                 );
                 match diagrams.get(&key) {
                     Some(DiagramState::Ready { path, width }) => {
-                        blocks.push(markdown::Block::at(
+                        blocks.push(bezel_markdown::Block::at(
                             BlockKind::Image {
                                 url: path.to_string_lossy().into_owned(),
-                                alt: markdown::Text::default(),
+                                alt: bezel_markdown::Text::default(),
                                 width: Some(*width),
                             },
                             indent,
@@ -127,8 +127,8 @@ pub(crate) fn build(
                     }
                     Some(DiagramState::Failed(note)) => {
                         blocks.push(fence);
-                        blocks.push(markdown::Block::at(
-                            BlockKind::Quote(markdown::Text::plain(note.clone())),
+                        blocks.push(bezel_markdown::Block::at(
+                            BlockKind::Quote(bezel_markdown::Text::plain(note.clone())),
                             indent,
                         ));
                     }
@@ -150,7 +150,7 @@ pub(crate) fn build(
                     }
                 }
             }
-            BlockKind::Image { url, alt, width } => blocks.push(markdown::Block::at(
+            BlockKind::Image { url, alt, width } => blocks.push(bezel_markdown::Block::at(
                 BlockKind::Image {
                     url: resolve_image(&url, base),
                     alt,
@@ -158,11 +158,11 @@ pub(crate) fn build(
                 },
                 indent,
             )),
-            kind => blocks.push(markdown::Block::at(kind, indent)),
+            kind => blocks.push(bezel_markdown::Block::at(kind, indent)),
         }
     }
     Preview {
-        doc: markdown::Doc { blocks },
+        doc: bezel_markdown::Doc { blocks },
         missing,
     }
 }
@@ -308,7 +308,7 @@ impl PlantUmlQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use markdown::BlockKind;
+    use bezel_markdown::BlockKind;
     use sirio_markdown::parse;
 
     fn test_palette() -> Palette {

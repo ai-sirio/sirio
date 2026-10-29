@@ -86,10 +86,10 @@ pub fn clamp_fraction(fraction: f32) -> f32 {
 /// functions with no `cx` and would otherwise paint for the previous
 /// appearance. `Theme::sync_appearance` now does it wherever the theme global
 /// is written, which is the one place that can be sure it happened.
-fn bezel_theme(theme: &Theme) -> bezel::theme::Theme {
+fn bezel_theme(theme: &Theme) -> bezel_theme::Theme {
     let mut bezel_theme = match theme.appearance {
-        sirio_theme::Appearance::Light => bezel::theme::Theme::light(),
-        sirio_theme::Appearance::Dark => bezel::theme::Theme::dark(),
+        sirio_theme::Appearance::Light => bezel_theme::Theme::light(),
+        sirio_theme::Appearance::Dark => bezel_theme::Theme::dark(),
     };
     bezel_theme.accent = theme.sirio.brand_coral;
     bezel_theme

@@ -23,19 +23,19 @@ large for the context window. Try reading in smaller chunks, or use `/clear to s
 instead.\n\nSecond paragraph, a block of its own.";
 
 struct Probe {
-    document: markdown::Doc,
+    document: bezel_markdown::Doc,
 }
 
 impl Render for Probe {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *sirio_theme::Theme::get(cx);
-        let selection = markdown::Selection::all(&self.document);
-        let rendered = markdown::render_with_selection(
+        let selection = bezel_markdown::Selection::all(&self.document);
+        let rendered = bezel_markdown::render_with_selection(
             &self.document,
             Some(selection),
             None,
             None,
-            markdown::Caption::Shown,
+            bezel_markdown::Caption::Shown,
             window,
             cx,
         );
@@ -71,7 +71,7 @@ fn main() {
                 |window, cx| {
                     window.set_window_title("Markdown Selection Probe");
                     cx.new(|_| Probe {
-                        document: markdown::parse(SOURCE),
+                        document: bezel_markdown::parse(SOURCE),
                     })
                 },
             )

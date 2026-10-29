@@ -1,0 +1,55 @@
+# Regions a clock (or a run-to-run accident) drives, painted black on both sides before
+# Scripts/capture-diff.py compares them. Format and meaning: docs/testing/bezel-off.md.
+# frame_glob<TAB>x<TAB>y<TAB>w<TAB>h<TAB>why
+#
+# Status bar, every main-window frame (1470x833): the usage meter on the left, the path on the right.
+sweep-*/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
+changes-*/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
+chat-ui-default/scenarios/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
+sweep-*/*	780	802	690	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left)
+changes-*/*	780	802	690	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left)
+chat-ui-default/scenarios/*	780	802	690	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left)
+#
+# Chat transcript: the time between turns, centred in the transcript column (HH:MM wall clock).
+chat-ui-default/scenarios/activity/frames/*	689	398	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/cancel/frames/after-cancel	689	479	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/death-recovery/frames/recovered	689	287	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort/frames/*	689	287	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort-full/frames/*	689	287	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort-full-light/frames/*	689	287	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort-light/frames/*	689	287	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/back-at-the-tail	689	173	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/back-at-the-tail	689	365	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/back-at-the-tail	689	557	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up	689	245	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up	689	437	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up-after-new-turn	689	245	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up-after-new-turn	689	437	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/tail	689	173	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/tail	689	365	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/tail	689	557	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/permission/frames/permission-answered	689	326	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/plan/frames/plan-approved	689	417	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/question-options/frames/question-answered	689	445	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/restore/frames/*	689	300	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	689	173	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	689	365	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	689	557	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/subagent/frames/*	689	236	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/wide-content/frames/wide-content	689	557	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/wide-content/frames/wide-content-expanded	689	557	52	17	message time (HH:MM wall clock)
+#
+# Chat transcript: other clocks and run-to-run accidents.
+chat-ui-default/scenarios/cancel/frames/after-cancel	655	287	120	17	message time before the word cancelled (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	1000	133	50	17	turn duration in ms (elapsed wall-clock time)
+chat-ui-default/scenarios/death-recovery/frames/agent-died	547	482	400	45	crash report of the dead fixture agent: process addresses that ASLR moves on every start (not a clock)
+chat-ui-default/scenarios/*	240	194	32	26	sidebar session dots: the green connected indicators appear in some runs and not in others (a timing race of the fixture session, not a clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up*	1133	77	10	540	transcript scrollbar thumb: once a turn completes it follows the transcript's estimated total height, so it sits about 7 px higher in some runs while the visible content is identical (a run-to-run accident, not a clock; found on held-out run 7). The track column only
+#
+# The probe window of the identity lane (820x700): the time of its one message.
+chat-ui-default/identity/*	385	209	52	18	message time (HH:MM wall clock) in the identity probe window
+#
+# The surfaces probe (1470x833, one process per frame): the Agents page.
+# Its toolbar stamps "Refreshed HH:MM:SS" with the wall clock when the page is built, and Geist draws digits at different widths ("12:01:57" is 5 px narrower than "12:02:50"). The toolbar is right-aligned, so the stamp's width moves the search field with it (x 683..686 over 41 runs, every hour 00..23 included) and the header's left column, whose subtitle then wraps differently (three of 15 runs); nothing below y 170 or right of the stamp ever moved. The two rectangles hold everything that moves, and the title row ("Agents 5") stays unmasked.
+surfaces-*/settings-agents-[dl]*	668	54	354	40	Agents toolbar: the "Refreshed HH:MM:SS" stamp (wall clock, set when the page is built) and the search field its width pushes left, x 668..1022
+surfaces-*/settings-agents-[dl]*	475	88	212	82	Agents header subtitle: its soft wrap follows the toolbar's width, which the stamp's digits change

@@ -113,7 +113,7 @@ impl Chat {
         interaction: &TranscriptInteraction,
         scroll: &ThoughtScroll,
         theme: &Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
     ) -> AnyElement {
         let _perf = sirio_perf::span("Chat.render_thought_body", entry_index as u64);
         let typography = theme.typography;

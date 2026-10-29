@@ -7,7 +7,7 @@
 //! `../../../docs/linux-rewrite/SEAMS.md` for the mount seam and the avatar
 //! network-fetch seam this file deliberately does not build.
 
-use bezel::theme::Theme as BezelTheme;
+use bezel_theme::Theme as BezelTheme;
 use std::path::PathBuf;
 use std::rc::Rc;
 

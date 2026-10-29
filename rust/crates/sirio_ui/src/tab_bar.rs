@@ -176,7 +176,7 @@ pub(crate) fn chat_agent_row(
     display_name: &'static str,
     selector: String,
     theme: Theme,
-    bezel_theme: &bezel::theme::Theme,
+    bezel_theme: &bezel_theme::Theme,
     painter: Painter,
 ) -> gpui::Stateful<gpui::Div> {
     let selector_for_debug = selector.clone();
@@ -380,7 +380,7 @@ impl TabBar {
         action: NewTabAction,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         painter: Painter,
         chevron: bool,
     ) -> impl IntoElement {
@@ -439,7 +439,7 @@ impl TabBar {
     fn render_new_chat_item(
         entity: gpui::Entity<Self>,
         theme: Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         painter: Painter,
         expanded: bool,
     ) -> impl IntoElement {
@@ -487,7 +487,7 @@ impl TabBar {
         agent: &AgentAvailability,
         entity: gpui::Entity<Self>,
         theme: Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         painter: Painter,
     ) -> impl IntoElement {
         let id = agent.id;
@@ -511,7 +511,7 @@ impl TabBar {
     fn render_chat_empty(
         entity: gpui::Entity<Self>,
         theme: Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         painter: Painter,
     ) -> impl IntoElement {
         popover::menu_row(bezel_theme, false, Fade::new(painter, "new-chat-empty"))
@@ -545,7 +545,7 @@ impl TabBar {
     fn render_other_agents_link(
         entity: gpui::Entity<Self>,
         theme: Theme,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         painter: Painter,
     ) -> impl IntoElement {
         popover::menu_row(

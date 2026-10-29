@@ -20,7 +20,7 @@
 //! rules (trim-and-no-op-on-empty, in both current uses) in one place.
 
 use crate::text_selection::selectable_text;
-use bezel::theme::Theme as BezelTheme;
+use bezel_theme::Theme as BezelTheme;
 use gpui::{
     AnyElement, App, ClickEvent, FocusHandle, FontWeight, KeyDownEvent, MouseButton, Window, div,
     prelude::*, px,

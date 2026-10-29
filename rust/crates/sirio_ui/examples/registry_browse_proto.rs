@@ -4,7 +4,7 @@
 //! Its small model intentionally lives here instead of depending on
 //! `sirio_registry`: this is a surface to look at, not a new product seam.
 
-use bezel::theme::Theme as BezelTheme;
+use bezel_theme::Theme as BezelTheme;
 use gpui::{
     App, AppContext, Bounds, Context, CursorStyle, Div, Entity, FocusHandle, FontWeight,
     Hsla, KeyDownEvent, MouseButton, Render, TitlebarOptions, Window, WindowBounds, WindowOptions,

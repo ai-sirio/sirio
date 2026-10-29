@@ -66,7 +66,7 @@ impl Chat {
         cx: &Context<Self>,
     ) -> AnyElement {
         let typography = theme.typography;
-        let bezel_theme = bezel::theme::Theme::of(cx).clone();
+        let bezel_theme = bezel_theme::Theme::of(cx).clone();
         let entity = cx.entity();
 
         // Swift's `modePill` (ComposerControlBar.swift) pairs a status dot

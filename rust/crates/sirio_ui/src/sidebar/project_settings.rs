@@ -577,7 +577,7 @@ impl EventEmitter<ProjectSettingsEvent> for ProjectSettingsView {}
 impl Render for ProjectSettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let theme = *Theme::get(cx);
-        if cx.try_global::<bezel::theme::Theme>().is_none() {
+        if cx.try_global::<bezel_theme::Theme>().is_none() {
             theme.install_into_bezel(cx);
         }
         let entity = cx.entity();

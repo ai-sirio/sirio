@@ -10,7 +10,7 @@
 //! the element itself is built from bezel's tokens in `Chat::render_turn_rail`.
 
 use bezel::motion::{Fade, Painter, hover_listener, hover_t};
-use bezel::theme::{Theme as BezelTheme, ink};
+use bezel_theme::{Theme as BezelTheme, ink};
 use bezel::ui::widgets::{ButtonStyle, Buttons};
 use bezel::ui::{popover, surface};
 use chrono::{DateTime, Local};
@@ -254,7 +254,7 @@ impl Chat {
     /// the frame after it first appears rather than after the next scroll.
     pub(crate) fn render_turn_rail(
         &self,
-        bezel_theme: &bezel::theme::Theme,
+        bezel_theme: &bezel_theme::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let ticks = turn_ticks(&self.entries);

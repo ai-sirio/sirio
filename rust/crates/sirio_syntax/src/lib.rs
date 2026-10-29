@@ -11,9 +11,9 @@
 //! table does not carry is a [`Lang::new`] `static` of your own, highlighted
 //! through [`Lang::highlight`] — the same path the built-in rows take" — and
 //! that is exactly what happens below. The consequence worth stating: spans
-//! from a grammar added here are `bezel::theme::HighlightKind` values
+//! from a grammar added here are `bezel_theme::HighlightKind` values
 //! indistinguishable from bezel's own, so they reach
-//! [`SyntaxPalette::color`](theme::SyntaxPalette::color) and the theme with
+//! [`SyntaxPalette::color`](bezel_theme::SyntaxPalette::color) and the theme with
 //! no second code path and no second palette to keep in step.
 //!
 //! [`highlight`] is the whole surface. It answers bezel first, so a language
@@ -29,10 +29,10 @@
 use std::ops::Range;
 use std::sync::OnceLock;
 
-use syntax::lang::Lang;
-use syntax::tree_sitter_language::LanguageFn;
+use bezel_syntax::lang::Lang;
+use bezel_syntax::tree_sitter_language::LanguageFn;
 
-pub use theme::HighlightKind;
+pub use bezel_theme::HighlightKind;
 
 mod captures;
 
@@ -228,7 +228,7 @@ fn resolve(tag: &str) -> Option<&'static Grammar> {
 /// vocabulary by hand and are better than a translated one; this crate's job
 /// is the languages it has nothing to say about.
 pub fn highlight(source: &str, tag: &str) -> Option<Vec<(Range<usize>, HighlightKind)>> {
-    if let Some(spans) = syntax::highlight(source, tag) {
+    if let Some(spans) = bezel_syntax::highlight(source, tag) {
         return Some(spans);
     }
     resolve(tag)?.lang().highlight(source)
@@ -236,7 +236,7 @@ pub fn highlight(source: &str, tag: &str) -> Option<Vec<(Range<usize>, Highlight
 
 /// Whether some grammar answers to `tag`. Cheap: no parse, no query compile.
 pub fn is_supported(tag: &str) -> bool {
-    syntax::lang::resolve(tag).is_some() || resolve(tag).is_some()
+    bezel_syntax::lang::resolve(tag).is_some() || resolve(tag).is_some()
 }
 
 #[cfg(test)]

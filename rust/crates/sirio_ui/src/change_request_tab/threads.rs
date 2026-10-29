@@ -120,7 +120,7 @@ fn annotation_side(side: Side) -> AnnotationSide {
 /// small before/after change.
 #[derive(Clone)]
 pub(crate) enum Part {
-    Doc(markdown::Doc),
+    Doc(bezel_markdown::Doc),
     Suggestion { before: Option<Vec<String>>, after: Vec<String> },
 }
 

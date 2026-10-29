@@ -2,7 +2,7 @@
 //!
 //! The chat has had this for its own transcript — `MarkdownBody::selectable`
 //! — but there it is welded to the chat's one selection. The other places a
-//! `markdown::Doc` is drawn (the file view's Preview, a change request's
+//! `bezel_markdown::Doc` is drawn (the file view's Preview, a change request's
 //! description and timeline) had none: bezel's renderer paints a selection it
 //! is *given* and hands back the glyph layouts it painted, and nothing there
 //! supplied either.
@@ -31,7 +31,7 @@ use std::{panic::Location, rc::Rc};
 /// — under whatever identified elements enclose it.
 #[track_caller]
 pub(crate) fn selectable_markdown(
-    document: markdown::Doc,
+    document: bezel_markdown::Doc,
     link_click: LinkClickOverride,
 ) -> SelectableMarkdown {
     SelectableMarkdown {
@@ -39,7 +39,7 @@ pub(crate) fn selectable_markdown(
         parts: Rc::new(DocParts::of(&document)),
         document: Rc::new(document),
         link_click,
-        layouts: markdown::BlockLayouts::default(),
+        layouts: bezel_markdown::BlockLayouts::default(),
         run: None,
         rendered: None,
     }
@@ -47,12 +47,12 @@ pub(crate) fn selectable_markdown(
 
 pub(crate) struct SelectableMarkdown {
     id: ElementId,
-    document: Rc<markdown::Doc>,
+    document: Rc<bezel_markdown::Doc>,
     parts: Rc<DocParts>,
     link_click: LinkClickOverride,
     /// What the renderer painted last, which is how a pointer position
     /// becomes a place in the document.
-    layouts: markdown::BlockLayouts,
+    layouts: bezel_markdown::BlockLayouts,
     run: Option<RunKey>,
     rendered: Option<AnyElement>,
 }
@@ -64,10 +64,10 @@ pub(crate) struct SelectableMarkdown {
 /// between glyphs, though: the half of the glyph the pointer is in decides
 /// which edge, or the last character dragged over would never be included.
 fn caret(
-    layouts: &markdown::BlockLayouts,
-    document: &markdown::Doc,
+    layouts: &bezel_markdown::BlockLayouts,
+    document: &bezel_markdown::Doc,
     point: Point<Pixels>,
-) -> Option<markdown::Cursor> {
+) -> Option<bezel_markdown::Cursor> {
     let cursor = layouts.hit(point)?;
     let text = document.blocks.get(cursor.block)?.text_at(cursor.part)?;
     let Some(next) = text
@@ -78,7 +78,7 @@ fn caret(
     else {
         return Some(cursor);
     };
-    let after = markdown::Cursor::new(cursor.block, cursor.part, next);
+    let after = bezel_markdown::Cursor::new(cursor.block, cursor.part, next);
     match (layouts.position(cursor), layouts.position(after)) {
         (Some((left, _)), Some((right, _)))
             if left.y == right.y && point.x - left.x > right.x - point.x =>
@@ -242,12 +242,12 @@ impl Element for SelectableMarkdown {
         // bezel paints its editor caret at the selection's head as well — a
         // line at the highlight's edge, only while a selection exists — and
         // has no flag to leave it out; the chat's body carries the same.
-        let mut rendered = markdown::render_with_selection(
+        let mut rendered = bezel_markdown::render_with_selection(
             &self.document,
             selection,
             Some(&self.layouts),
             None,
-            markdown::Caption::Shown,
+            bezel_markdown::Caption::Shown,
             window,
             cx,
         );
@@ -305,7 +305,7 @@ mod tests {
     /// One paragraph with a link in the middle, drawn shrink-wrapped so its
     /// width is the text's own.
     struct Page {
-        doc: markdown::Doc,
+        doc: bezel_markdown::Doc,
         opened: Rc<RefCell<Vec<String>>>,
     }
 
@@ -335,7 +335,7 @@ mod tests {
         let opened = Rc::new(RefCell::new(Vec::new()));
         let shared = opened.clone();
         let (_, _, cx) = testing::host(cx, move |_, _| Page {
-            doc: markdown::parse("see [docs](https://x.test) now"),
+            doc: bezel_markdown::parse("see [docs](https://x.test) now"),
             opened: shared,
         });
         cx.simulate_resize(size(px(800.0), px(400.0)));

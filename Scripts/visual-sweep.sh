@@ -130,7 +130,7 @@ fi
 command -v git >/dev/null || die "git is required to build the fixture repository"
 command -v python3 >/dev/null || die "python3 is required for socket and window inspection"
 
-RUN_DIR="$(mktemp -d /tmp/sirio-visual-sweep-XXXXXX)"
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sirio-visual-sweep-XXXXXX")"
 FIXTURE="$RUN_DIR/fixture"
 SOCKET="$RUN_DIR/control.sock"
 DATABASE="$RUN_DIR/session.sqlite"
