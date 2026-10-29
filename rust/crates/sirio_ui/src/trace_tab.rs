@@ -27,7 +27,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use bezel::ui::scroll::ScrollbarState;
 use ely_gpui_component::{forms::Checkbox, primitives::IconName};
 use gpui::{
     AnyElement, App, Context, Entity, EntityId, EventEmitter, FocusHandle, Focusable, FontWeight,
@@ -102,7 +101,6 @@ pub struct TraceTab {
     folded: HashSet<String>,
     selected: Option<String>,
     scroll: UniformListScrollHandle,
-    vertical_bar: Option<ScrollbarState>,
     /// Shared with the frame loop's timer task, which clears it.
     frame_pending: Pending,
     /// The frames the loop has asked for.
@@ -160,7 +158,6 @@ impl TraceTab {
             folded: HashSet::new(),
             selected: None,
             scroll: UniformListScrollHandle::new(),
-            vertical_bar: None,
             frame_pending: Rc::default(),
             frames: Rc::default(),
             width: Rc::default(),
@@ -626,8 +623,6 @@ impl Render for TraceTab {
         let stacked = self.width.get().is_some_and(|width| width < px(STACK_BELOW));
         // Until the tab has been measured it is drawn wide.
         let track = RowStyle::track_width(self.width.get().map_or(1000.0, f32::from), stacked);
-        self.vertical_bar
-            .get_or_insert_with(|| ScrollbarState::new(bezel::motion::Painter::of(cx)));
         let style = RowStyle {
             theme: theme.clone(),
             range: shown.axis.range,
@@ -654,13 +649,12 @@ impl Render for TraceTab {
         root.child(header)
             .child(axis_row)
             .child(
-                div().flex_1().min_h(px(0.0)).relative().child(list).child(
-                    crate::file_view::scrollbar(
-                        "trace-tab-bar",
-                        &handle,
-                        self.vertical_bar.as_ref().expect("bar initialized above"),
-                    ),
-                ),
+                div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .relative()
+                    .child(list)
+                    .child(crate::file_view::scrollbar("trace-tab-bar", &handle)),
             )
             .child(frame_driver(
                 self.frame_pending.clone(),

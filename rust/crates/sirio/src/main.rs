@@ -22607,12 +22607,6 @@ impl SirioWorkspace {
         entity: Entity<Self>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // The app installs this at startup; isolated shell render fixtures set
-        // only Sirio's global, so make the same registry invariant explicit
-        // before a bezel surface reaches its paint phase.
-        if cx.try_global::<bezel_theme::Theme>().is_none() {
-            theme.install_into_bezel(cx);
-        }
         let action_entity = entity.clone();
         let on_action = Rc::new(move |action, window: &mut Window, cx: &mut App| {
             action_entity.update(cx, |workspace, cx| {
@@ -22637,7 +22631,7 @@ impl SirioWorkspace {
         let menu = menu.when_some(shell_paint_probe("tab-context-menu", cx), |this, probe| {
             this.child(probe)
         });
-        // F-SID-15: `anchored_menu_below` owns the deferred priority-1 layer,
+        // F-SID-15: `hang_below` raises the layer over the page at priority 1,
         // so the later centre-surface sibling cannot paint over the menu or
         // intercept its rows. The zero-sized anchor preserves the tab-local
         // x coordinate in both centre panes.
@@ -22646,10 +22640,12 @@ impl SirioWorkspace {
             .top(px(TAB_BAR_HEIGHT - 6.0))
             .left(px(self.tab_context_menu_left()))
             .size_0()
-            .child(bezel::ui::popover::anchored_menu_below(
+            .child(sirio_ui::popup::hang_below(
                 format!("workspace-tab-menu-layer-{menu_tab_id}"),
-                menu.into_any_element(),
+                sirio_ui::popup::HANG_GAP,
+                menu,
                 None,
+                cx,
             ))
     }
 
@@ -27611,9 +27607,10 @@ fn register_fonts(cx: &App) {
 /// works in another window or on another monitor, and the sidebar spinner and
 /// the chat's thinking orb are what says it is still going. Those two draw on
 /// `sirio_ui::motion`'s clock, which never parks. bezel's own clock, still
-/// leased by the menus and scrollbars bezel draws, parks while no window of the
-/// app is active unless told otherwise; this keeps it running too, so nothing
-/// on screen freezes half-way while another window has the focus.
+/// leased by the scrollbars and Settings widgets bezel draws, parks while no
+/// window of the app is active unless told otherwise; this keeps it running
+/// too, so nothing on screen freezes half-way while another window has the
+/// focus.
 fn init_motion(cx: &mut App) {
     use bezel::motion::AppExt as _;
     cx.set_pause_when_inactive(false);

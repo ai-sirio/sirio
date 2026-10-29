@@ -54,7 +54,6 @@ pub struct CiLogTab {
     folded: BTreeSet<usize>,
     folds_chosen: bool,
     scroll: UniformListScrollHandle,
-    vertical_bar: Option<bezel::ui::scroll::ScrollbarState>,
     horizontal_bar: HorizontalBarState,
     load_task: Option<Task<()>>,
     /// A read is on its way: a tick waits for it rather than starting a
@@ -85,7 +84,6 @@ impl CiLogTab {
             folded: BTreeSet::new(),
             folds_chosen: false,
             scroll: UniformListScrollHandle::new(),
-            vertical_bar: None,
             horizontal_bar: Default::default(),
             load_task: None,
             loading: false,
@@ -451,9 +449,6 @@ impl Render for CiLogTab {
         }
         self.renders = self.renders.wrapping_add(1);
         self.ensure_ticking(cx);
-        self.vertical_bar.get_or_insert_with(|| {
-            bezel::ui::scroll::ScrollbarState::new(bezel::motion::Painter::of(cx))
-        });
         let theme = Theme::get(cx).clone();
         let entity = cx.entity();
         div()
@@ -590,8 +585,7 @@ impl CiLogTab {
         let handle = self.scroll.0.borrow().base_handle.clone();
         body.child(div().flex_1().min_h(px(0.0)).relative()
             .child(list)
-            .child(crate::file_view::scrollbar("ci-log-bar", &handle,
-                self.vertical_bar.as_ref().expect("bar initialized by render")))
+            .child(crate::file_view::scrollbar("ci-log-bar", &handle))
             .child(crate::file_view::horizontal_scrollbar("ci-log-horizontal-bar", &handle,
                 &self.horizontal_bar, entity.clone())))
             .into_any_element()

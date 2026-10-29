@@ -922,7 +922,7 @@ impl Render for RightPanel {
             .child(body)
             .when(self.worktree_selected, |this| {
                 this.when_some(self.file_context_menu.clone(), |this, menu| {
-                    this.child(Self::render_file_context_menu(menu, entity.clone(), theme))
+                    this.child(Self::render_file_context_menu(menu, entity.clone(), theme, cx))
                 })
             })
     }

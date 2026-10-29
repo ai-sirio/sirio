@@ -59,6 +59,8 @@ fn main() {
             Ok("dark") => Theme::install(ThemeMode::Dark, cx),
             _ => Theme::init(cx),
         }
+        // The new-tab menu draws with Ely, which reads Ely's theme.
+        sirio_ui::ely::init(cx);
         let bounds = Bounds::centered(None, size(px(1470.0), px(833.0)), cx);
 
         cx.open_window(

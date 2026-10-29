@@ -6469,24 +6469,15 @@ impl Chat {
                                     gpui::Axis::Horizontal,
                                 )),
                         );
-                    } else {
-                        // Ely's bar reads last frame's geometry: ask for
-                        // the frame that draws it once the rows first lay
-                        // out wider than the box. Self-limiting.
-                        let watched = handle.clone();
-                        frame = frame.child(
-                            canvas(
-                                move |_, window, _| {
-                                    if watched.max_offset().x > Pixels::ZERO {
-                                        window.request_animation_frame();
-                                    }
-                                },
-                                |_, _, _, _| {},
-                            )
-                            .absolute()
-                            .size_full(),
-                        );
                     }
+                    // Ely's bar reads last frame's geometry: ask for the
+                    // frame that draws it once the rows first lay out wider
+                    // than the box, and for the one that redraws it when the
+                    // box or its rows change width. Self-limiting.
+                    frame = frame.child(crate::scroll::request_frame_when_geometry_moves(
+                        &handle,
+                        gpui::Axis::Horizontal,
+                    ));
                     frame.into_any_element()
                 }
             })
@@ -7004,10 +6995,9 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                                 {
                                     let streaming = this.thought_is_streaming(entry_index);
                                     if open.get(streaming) {
-                                        let painter = bezel::motion::Painter::of(cx);
-                                        this.thought_scroll.entry(entry_index).or_insert_with(
-                                            || thought::ThoughtScroll::new(painter),
-                                        );
+                                        this.thought_scroll
+                                            .entry(entry_index)
+                                            .or_insert_with(thought::ThoughtScroll::new);
                                     }
                                 }
                                 // Execute wells: handle persistente per isolare
@@ -15700,6 +15690,47 @@ two"
                     .any(|entry| matches!(entry, Entry::User { text, .. } if text.contains("src/main.rs")))
             }),
             "the mention path must not leak into the user bubble text"
+        );
+    }
+
+    /// A completion popup hangs above the caret's row. When the window is too
+    /// short for it there, it is kept inside the window, with the margin the
+    /// other floating layers keep from its edge: it is not flipped below the
+    /// caret, where it would run off the bottom instead.
+    #[gpui::test]
+    async fn a_mention_popup_on_the_first_line_stays_inside_the_window(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        for name in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+            std::fs::write(dir.0.join(format!("{name}.txt")), name).expect("write a file");
+        }
+        let cwd = dir.0.clone();
+
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            let command =
+                LaunchSpec::Acp(AgentCommand::new("python3").args([CHAT_FIXTURE, "plain"]));
+            Chat::from_test_command(command, cwd, cx)
+        });
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        refresh_frame(cx);
+
+        focus_and_type(cx, "@");
+        pump_chat_until(cx, &chat, |chat| !chat.mention_candidates.is_empty());
+        refresh_frame(cx);
+
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let popup = cx
+            .debug_bounds("mention-popup-card")
+            .expect("typing @ opens the mention popup");
+        let inset = px(8.0);
+        assert!(
+            popup.left() >= inset
+                && popup.top() >= inset
+                && popup.right() <= viewport.width - inset
+                && popup.bottom() <= viewport.height - inset,
+            "the popup lies inside the window inset by {inset:?}: popup={popup:?}, window={viewport:?}"
         );
     }
 

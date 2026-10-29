@@ -5,7 +5,6 @@
 //! `Scripts/Tests/test-scroll-drag-probe.sh` can drive the three scrollbar implementations the
 //! app uses in one window, before and after a PR changes what draws them.
 
-use bezel::ui::scroll::ScrollbarState;
 use gpui::{
     AnyElement, AnyView, App, Context, ListAlignment, ListState, Render, ScrollHandle, Window,
     canvas, div, list, point, prelude::*, px,
@@ -47,7 +46,6 @@ pub fn scroll_drag_view(_window: &mut Window, cx: &mut App) -> AnyView {
 
 struct ScrollDragProbe {
     handle: ScrollHandle,
-    bar: ScrollbarState,
     list: ListState,
     list_bar: ListScrollbarState,
     wide_handle: ScrollHandle,
@@ -58,7 +56,6 @@ impl ScrollDragProbe {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
             handle: ScrollHandle::new(),
-            bar: ScrollbarState::new(bezel::motion::Painter::of(cx)),
             list: ListState::new(ROWS, ListAlignment::Top, px(2048.0)),
             list_bar: ListScrollbarState::new(Painter::of(cx)),
             wide_handle: ScrollHandle::new(),
@@ -112,7 +109,7 @@ impl Render for ScrollDragProbe {
         // not the selector the probe promises, which every bar gets the same way, from the probe.
         let plain = plain.child(bar_overlay(
             1,
-            file_view::scrollbar("probe-file-bar", &self.handle, &self.bar),
+            file_view::scrollbar("probe-file-bar", &self.handle),
         ));
 
         let listed = pane()

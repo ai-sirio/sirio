@@ -20,8 +20,6 @@ sirio_lsp = { path = "../sirio_lsp" }
 notify.workspace = true
 # Sirio uses bezel's UI components; its Geist faces ship from `rust/assets/fonts`.
 bezel.workspace = true
-# `render_tab_context_menu` reads the theme as `bezel_theme::Theme`.
-bezel_theme.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true

@@ -384,36 +384,10 @@ mod tests {
     }
 }
 
-use gpui::{AnyElement, Context, Pixels, Point, SharedString, div, px};
+use gpui::{AnyElement, Context, SharedString, div, px};
 use sirio_acp::{EffortChoice, ModeCatalog};
 
 use super::{Chat, PopupAccept, PopupNext, PopupPrevious};
-
-/// An upward menu at a window point — `popover::anchored_menu_above` with an
-/// explicit position, for a token/caret anchor that is measured in window
-/// coordinates (`TextInput::bounds_for`). Same material
-/// (`ui::surface::popover`), entrance motion, occlusion and window snapping
-/// as bezel's own; bezel's `anchored_menu_above_at` takes an ancestor-relative
-/// point instead, which a caret measurement is not.
-pub(crate) fn menu_above_at(
-    id: impl Into<SharedString>,
-    position: Point<Pixels>,
-    content: AnyElement,
-) -> AnyElement {
-    let content = bezel::ui::surface::popover(bezel_theme::Theme::surface_radius(), content);
-    gpui::deferred(
-        gpui::anchored()
-            .position(position)
-            .anchor(gpui::Anchor::BottomLeft)
-            .snap_to_window_with_margin(px(8.0))
-            .child(bezel::motion::menu_in(
-                id.into(),
-                div().occlude().pb(px(6.0)).child(content),
-            )),
-    )
-    .priority(1)
-    .into_any_element()
-}
 
 /// Which token picker is on screen, if any. Enter/up/down/tab belong to it
 /// while it is; otherwise they fall through to the field.
@@ -574,7 +548,7 @@ impl Chat {
 }
 
 use super::*;
-use bezel::ui::popover;
+use crate::popup::{hang_above_at, menu_card, menu_row};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
     chat::{Attachment, AttachmentChip, PromptInput},
@@ -837,7 +811,6 @@ impl Chat {
         let slash_popup = if self.slash_popup_visible() {
             let candidates = self.slash_candidates();
             let active = self.slash_filter.active();
-            let view = bezel::motion::Painter::of(cx);
             let anchor = self
                 .composer_field
                 .read(cx)
@@ -859,12 +832,12 @@ impl Chat {
                         // One line per row: the name. The description is
                         // the row's tooltip, so ten rows stay ten lines
                         // and the list does not fill the pane.
-                        popover::menu_row(
-                            &bezel_theme,
+                        menu_row(
+                            SharedString::from(format!("slash-option-{name}")),
                             Some(position) == active,
-                            bezel::motion::Fade::new(view, format!("slash-option-{name}")),
+                            false,
+                            cx,
                         )
-                        .id(SharedString::from(format!("slash-option-{name}")))
                         .debug_selector(move || format!("slash-option-{name_for_id}"))
                         .when_some(tooltip, |this, text| {
                             this.tooltip(crate::controls::tooltip(text))
@@ -881,7 +854,6 @@ impl Chat {
                                 })
                                 .flex_none()
                                 .text_size(typography.footnote)
-                                .text_color(bezel_theme.text)
                                 .child(format!("/{name}")),
                         )
                         // The hint rides beside the name rather than under
@@ -905,7 +877,7 @@ impl Chat {
                                     // the two is secondary, and a taller
                                     // line box here would grow the row.
                                     .text_size(typography.footnote)
-                                    .text_color(bezel_theme.text_faint)
+                                    .text_color(theme.ely.fg_subtle)
                                     .child(hint),
                             )
                         })
@@ -913,14 +885,15 @@ impl Chat {
                     })
                     .collect();
                 div()
-                    .child(composer_view::menu_above_at(
+                    .child(hang_above_at(
                         "slash-popup-menu",
                         anchor,
-                        popover::popover_card(&bezel_theme)
+                        menu_card("slash-popup-card", cx)
                             .debug_selector(|| "slash-popup".into())
                             .w(px(280.0))
-                            .child(div().flex().flex_col().children(rows))
-                            .into_any_element(),
+                            .child(div().flex().flex_col().children(rows)),
+                        None,
+                        cx,
                     ))
                     .into_any_element()
             })
@@ -937,7 +910,6 @@ impl Chat {
             let (at, _) = mention_token(&self.draft, self.draft_caret).expect("token");
             let candidates = self.mention_candidates.clone();
             let active = self.mention_filter.active();
-            let view = bezel::motion::Painter::of(cx);
             let anchor = self
                 .composer_field
                 .read(cx)
@@ -951,12 +923,12 @@ impl Chat {
                         let row_entity = entity.clone();
                         let path_for_id = path.clone();
                         let path_for_accept = path.clone();
-                        popover::menu_row(
-                            &bezel_theme,
+                        menu_row(
+                            SharedString::from(format!("mention-option-{path_for_id}")),
                             Some(position) == active,
-                            bezel::motion::Fade::new(view, format!("mention-option-{path}")),
+                            false,
+                            cx,
                         )
-                        .id(SharedString::from(format!("mention-option-{path_for_id}")))
                         .debug_selector(move || format!("mention-option-{path_for_id}"))
                         // Pin the row to the card's inner width instead of
                         // trusting cross-axis stretch, so the path below has
@@ -969,9 +941,9 @@ impl Chat {
                             });
                         })
                         .child(
-                            bezel::ui::icons::icon(bezel::ui::icons::DOCUMENT)
-                                .size(px(12.0))
-                                .text_color(bezel_theme.text_faint),
+                            Icon::new(IconName::FileText)
+                                .size(IconSize::Xs)
+                                .color(theme.ely.fg_subtle),
                         )
                         .child(
                             div()
@@ -981,22 +953,21 @@ impl Chat {
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .text_size(typography.footnote)
-                                .text_color(bezel_theme.text)
                                 .child(path),
                         )
                         .into_any_element()
                     })
                     .collect();
                 div()
-                    .child(composer_view::menu_above_at(
+                    .child(hang_above_at(
                         "mention-popup-menu",
                         anchor,
-                        popover::popover_card(&bezel_theme)
-                            .id("mention-popup-card")
+                        menu_card("mention-popup-card", cx)
                             .debug_selector(|| "mention-popup-card".into())
                             .w(px(360.0))
-                            .child(div().flex().flex_col().children(rows))
-                            .into_any_element(),
+                            .child(div().flex().flex_col().children(rows)),
+                        None,
+                        cx,
                     ))
                     .into_any_element()
             })

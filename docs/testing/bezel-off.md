@@ -240,13 +240,14 @@ same keys is caught by them when it lands.
 ### The thumb drag
 
 `test-scroll-drag-probe.sh` finds each thumb in the capture as the run of pixels in the bar's
-centre line that differ from that line's most common colour, so it does not depend on what draws
-the bar. A 900x600 window of three 300x600 panes (`sirio_ui::probes::scroll_drag_view`); the
-pointer presses a thumb's centre, moves 3 px (past gpui's 2 px threshold, where the drag
-starts) then 1 px (the move whose event is the first drag event, where every bar anchors its
-grab), then 120 px in six steps. The thumb must have moved as far as the pointer did after its
-second move, within 4 px, and a second drag of +2000 px (the pointer stops at the screen's edge,
-past the track's end) must leave it flush with the track's end.
+thumb centre line that differ from that line's most common colour, so it does not depend on what
+draws the bar (the line is 5 px in from the pane's edge, and 9 px in for pane 1, whose bar has been
+Ely's since PR D: a 12 px strip with its 6 px thumb in the strip's left half). A 900x600 window of
+three 300x600 panes (`sirio_ui::probes::scroll_drag_view`); the pointer presses a thumb's centre,
+moves 3 px (past gpui's 2 px threshold, where the drag starts) then 1 px (the move whose event is the
+first drag event, where every bar anchors its grab), then 120 px in six steps. The thumb must have
+moved as far as the pointer did after its second move, within 4 px, and a second drag of +2000 px (the
+pointer stops at the screen's edge, past the track's end) must leave it flush with the track's end.
 
 ### The unfocused spinner and its CPU base
 
@@ -664,7 +665,228 @@ Enzo's verdict: approved on 2026-10-27, on the page built from these captures.
 
 ### PR D: menus, popovers, scrollbars and icons on Ely (`refactor/bezel-off-d`)
 
-To be filled in by Task 12.
+PR D draws every menu and popover, every scrollbar over a gpui `ScrollHandle` and two icons with Ely,
+and changes pixels in 2 of the 94 frames, both the probe's new-tab menu (dark and light), attributed in
+`docs/testing/bezel-off/pr-d-allow.tsv`. No frame draws a scrollbar that moved, nor either icon, so
+Task 12's half of the PR is judged by the probes and by "Changes no capture shows" below, not by frames.
+
+**Base and head.** The "before" set is `artifacts/bezel-off/pr-c/after`, PR C's after set, captured at
+`07580658`. PR D's git base is `64ed9ae2`, and `git diff 07580658 64ed9ae2 -- rust/` is two demos
+gaining `sirio_ui::ely::init` (`right_panel_demo.rs`, `sidebar_demo.rs`) and a function fold in
+`controls.rs` (`segmented_icons_with_tooltip` into `segmented_icons`) with no drawing change, so the
+"before" frames are the frames of PR D's base and the base was not captured again. The "after" set was
+captured on the tree of `89bbd118`, PR D's last code commit (the working tree was clean). PR D's code is
+six commits on `64ed9ae2` and a notices line: the menus and popovers (`06e28245`), the demos that open a
+menu init Ely (`cae7e14a`), labels kept inside their card at large interface sizes (`0644c3ca`), two tests
+(`632645e6`, `a10c6cda`) and the scrollbars and icons (`89bbd118`), with `THIRD_PARTY_NOTICES.md` listing
+`transcript.rs` among the files ported from bezel-ui (`9198f15c`, a `docs:` commit). The commits
+after the capture change no pixel: this page and the allow file, the header of `examples/scroll_drag_probe.rs`
+(the bars' thickness) and of `test-scroll-drag-probe.sh` (where each thumb sits), the module doc of
+`scroll.rs`, one more test of its frame-request helper, and
+`composer_view.rs` and `sidebar/sessions.rs` importing Ely's icon types instead of spelling their paths.
+
+**What PR D moved.**
+
+| Task | Where | What |
+| --- | --- | --- |
+| 11 | `popup.rs` | The drawing half next to Task 6's lifecycle: `menu_card` (Ely's `panel_surface`), `menu_row` (Ely's `row_frame`), `menu_label` (the row-label treatment that ellipsizes), `divider`, `leaving` (the exit, with an occluding overlay), and `hang_below` / `hang_above_at` over one private `hang` (anchored, snapped 8 px inside the window, Ely's fade-in, raised as a layer). |
+| 11 | the sidebar's context, New Chat, add-project and worktree-close menus; the tab context menu and the new-tab menu; the files context menu; the slash and mention popups; the combobox menu; the turn preview | Each is `menu_card` + `menu_row` + `divider` through `hang_below`, `hang_above_at` or Ely's `layer`. `bezel::ui::popover`, `bezel::ui::surface` and `anchored_menu_below` are no longer reached. |
+| 11 | `sirio` | Its `bezel_theme` dependency goes (the guard in `render_tab_context_menu` was its only reader): `Cargo.lock` loses `sirio -> bezel-theme`. |
+| 12 | `file_view::scrollbar` and its callers: the Markdown preview, the CI log, the trace tab; the thought well; pane 1 of the scroll probe | Ely's `layout::Scrollbar` over the tab's `ScrollHandle`. `ScrollbarState` and the bezel `Painter` handed to it are gone from `SurfaceScroll`, `CiLogTab`, `TraceTab`, `ThoughtScroll` (`new()` takes none now) and the probe. `scrollbar(id, handle)` keeps the first-frame canvas and its debug selector. |
+| 12 | `scroll::request_frame_when_geometry_moves` | One helper: a canvas that asks for one more frame when the box's length or overflow along an axis, as this frame laid it out, is not what the bar beside it was built from. `file_view::scrollbar` lays it over a bar that is up, and Ely's horizontal bar under a tool call's diff (`chat/mod.rs`) uses it instead of its own canvas. |
+| 12 | `composer_view.rs`, `sidebar/sessions.rs` | The mention row's `DOCUMENT` is Ely's `FileText` at `IconSize::Xs` (12 px), the closed chat's delete button's `TRASH_BIN_MINIMALISTIC` is `Trash2` at `Sm` (14 px), each in today's colour. |
+| 12 | `Scripts/Tests/test-scroll-drag-probe.sh` | Pane 1's thumb is 4 px nearer the pane's centre (below), so its scan line is 9 px in from the edge instead of 5. Nothing else of the check moved (tolerance, anchoring move, end-flush). |
+| 12 | six sidebar test hosts | `cx.update(crate::ely::init)`: they draw a closed session, whose delete button is an Ely `Icon`, which reads Ely's theme. |
+
+What still reaches bezel after PR D, all of it for PR E (`grep -rn 'bezel::' rust/crates`):
+
+- `bezel::ui::widgets` (the button styles and `Buttons`, `Status` and `status_dot`, `Controls`, `Content` and
+  `Scaffolding`, `card_row_hover`) in `loading.rs`, `settings.rs`, `settings/git_hosting_page.rs`,
+  `settings/agents_page.rs`, `settings/language_servers_page.rs` and `chat/turn_rail.rs`, and in the tests of
+  `chat/tool_calls.rs` and `chat/ely_tests.rs`;
+- `bezel::ui::icons`, read directly at `settings/git_hosting_page.rs:214` (`MAGNIFER`) and
+  `settings/agents_page.rs:9`, and through the `AppAssets` fallback in `ely.rs`;
+- `bezel::motion::AppExt`, in `init_motion` (`sirio/src/main.rs`), in one chat test and in two examples
+  (`scroll_drag_probe.rs`, `surfaces_probe.rs`).
+
+No vendored Ely file changed in Task 12, so `LOCAL-CHANGES.md` has no entry for it.
+
+**Reproduce.**
+
+```bash
+# The before set is PR C's after set, already on disk (see above). The after set. On a busy machine start
+# your own Xvfb (1600x1000x24, a display number nobody else uses) and pass --display instead of --xvfb.
+TMPDIR=$HOME/.cache/sirio-e2e-tmp Scripts/bezel-off-captures.sh --xvfb --out-dir "$PWD/artifacts/bezel-off/pr-d/after"
+
+# The diff, with this PR's attribution file.
+Scripts/capture-diff.py artifacts/bezel-off/pr-c/after/frames artifacts/bezel-off/pr-d/after/frames \
+  --out "$PWD/artifacts/bezel-off/pr-d/diff" --masks Scripts/capture-masks.tsv \
+  --allow docs/testing/bezel-off/pr-d-allow.tsv
+
+# The same pair with no masks, and the masks plus this PR's rows as the allow table.
+cat Scripts/capture-masks.tsv docs/testing/bezel-off/pr-d-allow.tsv > artifacts/bezel-off/pr-d/allow-unmasked.tsv
+Scripts/capture-diff.py artifacts/bezel-off/pr-c/after/frames artifacts/bezel-off/pr-d/after/frames \
+  --out "$PWD/artifacts/bezel-off/pr-d/diff-unmasked" --allow artifacts/bezel-off/pr-d/allow-unmasked.tsv
+
+# The theme sweep (Xvfb :N is any free display, 1920x1080x24; lavapipe as for the captures; the out-dir is absolute).
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json \
+  TMPDIR=$HOME/.cache/sirio-e2e-tmp Scripts/Tests/test-theme-sweep.sh --display :N \
+  --out-dir "$PWD/artifacts/bezel-off/pr-d/theme-sweep"
+
+# The probes and E2Es this PR's code is held to (the lavapipe variables and TMPDIR as above).
+Scripts/Tests/test-scroll-drag-probe.sh --xvfb
+Scripts/Tests/test-markdown-scroll-probe.sh --xvfb
+Scripts/Tests/test-editor-e2e.sh --xvfb
+Scripts/Tests/test-ely-chat-ui-e2e.py --display :N --only composer_keys,reduced_motion,unfocused_spinner,long_history --cpu-ceiling 413.1
+Scripts/Tests/test-text-selection-e2e.sh
+
+(cd rust && cargo build --workspace --all-targets && cargo nextest run -p sirio_ui && cargo nextest run -p sirio \
+  && cargo nextest run -p sirio_terminal)
+```
+
+**The result.** `bezel-off-captures.sh` printed `CAPTURES OK: artifacts/bezel-off/pr-d/after (94
+frames)` (the chat E2E, the sweep, the Changes E2E and both surfaces probes passed). The masked diff
+printed `compared 94 frames present on both sides (94 before, 94 after), tolerance 1` and
+`CAPTURE DIFF OK (2 changed, all attributed)`. The theme sweep printed `THEME SWEEP OK:
+<checkout>/artifacts/bezel-off/pr-d/theme-sweep`. The artifacts are under `artifacts/bezel-off/pr-d/`
+(gitignored): `after/`, `diff/`, `diff-unmasked/`, `crops/`, `icons/`, `menu-size-18/`, `probes/`,
+`theme-sweep/` and `capture-attempts/`.
+
+It took four capture runs, and three of them are not the set. They ran while other worktrees on this
+machine kept its load average between 9 and 20, and the script's own Xvfb and the app's control socket
+did not always survive that (`capture-attempts/`):
+
+- Run 1 completed (94 frames) and had one frame the PR did not change: `chat-ui-default/identity/omp-light`,
+  6929 pixels. The identity probe types `hello`, presses Return and captures at once; this capture caught
+  the composer holding `hello` with the status still `connecting`, before the send landed. The same frame
+  in the final set is the finished conversation, identical to PR C's. That is a race in the identity lane
+  under load, not a drawing change, and it is not in the allow file.
+- Run 2 stopped at `sweep-dark` (`sirioctl: control action dispatch bound (5.0s) fired before the worker
+  replied` on `project.add`; the load average was about 20).
+- Run 3 stopped at `surfaces-light` (`Failed to initialize X11 client` from the probe; the cause is not
+  established).
+- Run 4 ran on an Xvfb started beforehand (`Xvfb :137 -screen 0 1600x1000x24 -nolisten tcp`, passed with
+  `--display :137`) and is the set above.
+
+| Check | Result |
+| --- | --- |
+| `cargo build --workspace --all-targets` | exit 0 on PR D's final tree; 135 warning lines, the count PR C recorded, none at a line Task 12 edited. `Cargo.lock` unchanged by Task 12 (Task 11's one edge is in the same PR) |
+| `cargo nextest run -p sirio_ui` | 1421 run, 1421 passed, 0 skipped; against the 1418 of `a10c6cda` the sorted `cargo nextest list` differs by three additions (below) and no removal |
+| `cargo nextest run -p sirio` | 531 run, 531 passed; the list is identical |
+| `cargo nextest run -p sirio_terminal` | 143 run, 143 passed, 1 skipped; the list is identical |
+| `cargo nextest run -p sirio_ui an_overflowing_tab_draws_a_scrollbar_and_asks_for_no_frame_while_idle a_long_markdown_preview_shows_a_scrollbar a_live_thought_opens_while_streaming` | 3 run, 3 passed |
+| `Scripts/Tests/test-scroll-drag-probe.sh --xvfb` | `SCROLL DRAG PROBE OK (3 bars)`. Pane 1, now Ely's: the pointer moved 120 px after its second move and the thumb 120 px (expected 120, tolerance 4), and after +2000 px the thumb ends at 600 on a 600 px track. With `SCROLL_DRAG_PROBE_SKEW=40` it fails (`the thumb moved 120 px for 160 px of pointer travel`, exit 1) |
+| `Scripts/Tests/test-markdown-scroll-probe.sh --xvfb` | `MARKDOWN SCROLL PROBE OK` (dark and light) |
+| `Scripts/Tests/test-editor-e2e.sh --xvfb` | `EDITOR E2E OK (47 scenarios, appearance dark, state-only 0)` |
+| `Scripts/Tests/test-ely-chat-ui-e2e.py --display :138 --only composer_keys,reduced_motion,unfocused_spinner,long_history --cpu-ceiling 413.1` | `ELY CHAT UI E2E OK`; `unfocused-spinner CPU 313.3% of one core over 10 s (load average 9.75 9.42 9.80)`, against the base of 329.7% and the ceiling of 413.1% |
+| `Scripts/Tests/test-text-selection-e2e.sh` | `TEXT SELECTION E2E OK (33 tests)` |
+
+The first full `-p sirio_ui` run had six failures, all `no state of type ely_gpui_component::theme::Theme
+exists`: the six sidebar tests that draw a closed session now draw the trash icon through Ely, so their
+hosts call `ely::init` (table above). The three added tests are in `scroll.rs`:
+`a_box_that_first_overflows_asks_for_the_frame_that_draws_its_bar` (vertical and horizontal) and
+`content_that_grows_or_shrinks_under_a_bar_asks_for_one_more_frame`, both written before the helper they
+test, and `a_box_resized_along_its_bars_axis_asks_for_one_more_frame_and_across_it_for_none`, added after
+review. The first two were red against a stub that returned an empty element and are red again with the
+helper's `request_animation_frame` call taken out. The third resizes a horizontal box with its content
+changed by the same amount (the overflow stays 700 px) and then changes only its height; it is red with
+the length half of the helper's comparison deleted and red with the helper's `geometry` made to ignore
+its axis, each tried alone.
+
+**Every changed frame** (`artifacts/bezel-off/pr-d/diff/changed.tsv`).
+
+| Frame | Pixels | bbox (x,y,w,h) | Allow rows | What |
+| --- | --- | --- | --- | --- |
+| `surfaces-dark/tab-menu-dark` | 28282 | 178,146,284,282 | `ui::popover`, `ui::surface` | The probe's new-tab menu. Bezel's glass card (12 px radius, a hairline) is Ely's solid panel (smaller radius, a floating shadow, so a wider soft edge). The rows are 28 px where bezel's were 33 px (seven rows, so the card is 35 px shorter), the dividers are inset by the card's padding where bezel's ran border to border, and a disabled row is Ely's disabled colour. The card's width and top-left corner are the same. |
+| `surfaces-light/tab-menu-light` | 29429 | 180,148,280,310 | `ui::popover`, `ui::surface` | The same, in light. |
+
+Task 11 captured the same two frames with the same pixel counts and boxes, before PR D was rebased onto
+PR C and again after its fix round, and nothing else. `crops/tab-menu-{dark,light}-{before,after,stack}.png` has the before and
+after of each. Every other frame (92) is within the tolerance of PR C's.
+
+**Changes no capture shows.** Each is on the list of what Enzo should see.
+
+Menus and popovers (Task 11):
+
+- Every menu other than the tab menu is in no capture: the sidebar's context, close and add-project
+  menus, the files context menu, the mention and slash popups (`composer_keys`' four frames are dropped
+  from the set), the combobox menu and the turn preview. By hand Task 11 saw the slash popup (a frame of
+  the chat E2E), the add-project menu (in `sidebar_demo`) and the worktree-close menu at interface 18.
+- Tab-menu text follows the interface size: the rows take Ely's `Sm`, which `ely::init` maps to
+  Sirio's `ui_size`, where bezel's rows were a fixed 13 px. At the default nothing changes (13 and 13, and the
+  frames agree); at 18 the tab menus' text is 18 px, as the sidebar and files menus already were.
+- A long label is cut with an ellipsis inside its card (`menu_label`, with `overflow_hidden` on the card
+  as a backstop). At interface 18 "Remove from disk and remote branch" ran 80 px past the 280 px card
+  before; `menu-size-18/worktree-close-menu-size-18.png` shows it as "Remove from disk and remot…" inside
+  the card. Only that menu was looked at at 18; the tab and files menus use the same `menu_label`.
+- Ely's rows are a fixed 28 px against bezel's 29 to 33 px, so every menu shrinks a little; at interface
+  sizes above 18 a 28 px row is the tightest.
+- The entrance is Ely's opacity fade (its `FAST` duration), without bezel's 2 px drop; a hover snaps where
+  bezel's rows faded it in; a disabled row is `fg_disabled` where it was faint text.
+- A menu reopened within its exit's ~120 ms snaps to full opacity (Ely's own menus do the same). While a menu
+  closes, an overlay keeps its dying rows from taking a click (a test pins it).
+- `sirio` no longer depends on `bezel_theme` (`Cargo.lock` loses that edge).
+
+Scrollbars and icons (Task 12):
+
+- The CI log's bar goes to Ely although the spec's inventory listed it among the bars Sirio computes
+  itself. Its list hands out a gpui `ScrollHandle`, which Ely's bar reads, and the spec's "left to the
+  builder" allows it. The terminal's, the transcript's and the horizontal bars keep `crate::scroll`'s
+  maths. The bar of the Markdown preview, the CI log, the trace tab and the thought well, none of them in a
+  capture, now looks like this (pane 1 of the scroll probe, `crops/scroll-probe-pane1-{before,after,stack}.png`,
+  bezel's from Task 3's run of the same probe):
+  - the strip is 12 px where it was 10, and the 6 px thumb sits in its left half, so it is 4 px further from
+    the pane's edge (x 288..293 where it was 292..297 in a 300 px pane);
+  - the idle thumb is `fg` at 22% (`#3D3D3D` on the probe's `#131313`) where bezel's ink was 20%
+    (`#424242`); under the pointer it is 42% where it was 32%, and there is no separate colour while it is
+    dragged (bezel's was 38%);
+  - the shortest thumb is 24 px where it was 25 px, and the thickness comes from Ely's theme in rems (6 px
+    at the default);
+  - a drag repaints the whole window (`window.refresh()`) where bezel's asked the owning view to repaint.
+- The Markdown preview and the CI log now pair an Ely vertical bar (`fg` at 22%, a 6 px thumb in the left half
+  of a 12 px strip) with Sirio's own horizontal bar (`ink(0.2)`, a thumb that fills its 10 px strip along the
+  bottom edge), so the two bars of one surface differ in colour, in thickness and in how far they sit from
+  the edge.
+- The drag still anchors at the first move past gpui's 2 px threshold, as bezel's did and as the spec says:
+  the probe reads 120 px of thumb for 120 px of pointer on pane 1.
+- The bar's frame request now also fires when the box is resized or its content grows or shrinks while the
+  bar is up (bezel's compared the track's length only), and the tool diff's horizontal bar asks for the frame
+  that redraws it too (it only asked for its first one). An idle tab asks for none: the trace test still
+  reads 0. No committed test draws an overflowing tool diff, so for that bar a throwaway test (not
+  committed) drew one under a 600 px line in a 700 px window: the bar is up (624 x 12 px), the first
+  round of frames asks for 2 and each of the next five for 0; narrowed to 500 px the bar is redrawn at 424
+  px, one round asks for 1 and the next three for 0.
+- The helper's cost while a thought streams: a thought pinned to its newest line already asks for each
+  frame through `scroll::follow`, so the helper adds nothing there. Once the reader has scrolled up in a
+  streaming thought the pin is released, and from then on the helper adds one more Chat render per change
+  of the thought's height (the bar needs it to draw the right thumb). No test counts a streaming thought's
+  frames.
+- The mention row's icon is Lucide's `file-text` where it was Solar's `document`, and the closed chat's delete
+  button is `trash-2` where it was `trash-bin-minimalistic`. Neither is in a capture (the mention popup is
+  not captured, and the delete button is invisible until the pointer is over a closed row). Ely sizes an icon
+  in rems times its `font_scale`, which Sirio leaves at 1.0, so both stay 12 and 14 px at every interface
+  size: a throwaway test (not committed) read 12 px and 14 px wide at the default and at 18.
+  `crops/icons-document-trash-before-after-x4.png` is a throwaway example (not committed) drawing the old and
+  the new glyph side by side at the real sizes, scaled up four times.
+
+**What the masks hide here.** `CAPTURE DIFF OK` says nothing about pixels inside a mask. PR D touches
+no element under a standing mask except the one named below, so the same pair was compared with no
+`--masks` and the mask table plus this PR's rows as `--allow` (`artifacts/bezel-off/pr-d/diff-unmasked/`):
+`CAPTURE DIFF OK (64 changed, all attributed)`. The 2 frames above, and 62 more that differ only inside
+mask rectangles whose `why` is a clock or a run-to-run accident: the status bar's path (50 frames, the
+`mktemp` directory name) and usage meter (29), message times (34, 10 of them in the identity probe), the
+Agents toolbar's `Refreshed HH:MM:SS` stamp (`surfaces-{dark,light}/settings-agents`, 376 and 1936
+pixels: the digits and, in light, the search field that the stamp's width moved 3 px sideways), the turn duration, the cancelled
+line, the crash addresses, and the session dots (`activity/tools-and-reasoning`). No Ely bar, menu or
+icon lies under any of them.
+
+The scrollbar-thumb mask (`scenarios/long-history/frames/scrolled-up*`, x 1133, y 77, 10 x 540) does
+not hide a change of this PR: it covers the transcript's own bar, `list_scrollbar`, which PR D leaves
+(only its doc comment moved), and the Ely bars are in none of those frames. One of the two frames,
+`scrolled-up-after-new-turn`, has 100 changed pixels in it (x 1135..1140, y 495..526, the track's lower
+part), the accident the mask names, the same figure and place as in PR C's page.
+
+Enzo's verdict: approved on 2026-10-27, on the page built from these captures.
 
 ### PR E: Settings, then the crates out (`refactor/bezel-off-e`)
 

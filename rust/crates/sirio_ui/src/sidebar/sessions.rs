@@ -6,6 +6,10 @@
 use std::path::PathBuf;
 
 use chrono::TimeZone;
+use ely_gpui_component::{
+    primitives::{Icon as EIcon, IconName},
+    theme::IconSize as EIconSize,
+};
 
 use super::*;
 
@@ -744,9 +748,9 @@ impl Sidebar {
                             delete_entity.update(cx, |sidebar, cx| sidebar.arm_delete(id, cx));
                         })
                         .child(
-                            bezel::ui::icons::icon(bezel::ui::icons::TRASH_BIN_MINIMALISTIC)
-                                .size(px(14.0))
-                                .text_color(theme.ely.danger),
+                            EIcon::new(IconName::Trash2)
+                                .size(EIconSize::Sm)
+                                .color(theme.ely.danger),
                         )
                         .into_any_element()
                 })

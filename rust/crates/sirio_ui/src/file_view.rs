@@ -22,8 +22,6 @@
 //!   file's name and its dirty mark belong to the tab that hosts this
 //!   view, and repeating them here cost a whole row of the document.
 
-use bezel::motion::Painter;
-use bezel::ui::scroll::{self, ScrollbarState};
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, HighlightStyle, KeyBinding, MouseButton,
     MouseDownEvent, Pixels, Point, Render, ScrollHandle, SharedString, Subscription, Task,
@@ -251,7 +249,7 @@ pub struct FileView {
     /// Re-check the disk snapshot whenever this tab's editor focus is
     /// regained after another surface owned it.
     focus_subscription: Option<Subscription>,
-    /// Scroll state of the Markdown preview, so it can wear bezel's bars.
+    /// Scroll state of the Markdown preview, so it can wear its bars.
     scroll: SurfaceScroll,
     /// The window-absolute point of the right-click that opened the context
     /// menu, `None` when it is closed. Window-absolute because
@@ -362,23 +360,21 @@ pub struct FileView {
     diagram_generation: u64,
 }
 
-/// The scroll handle of the Markdown preview, plus the bar state each bezel
-/// scrollbar carries its drag in. Tracked because an untracked surface
-/// scrolls just as well but reports no viewport and no overflow — a bar with
-/// nothing to draw from. Held by the view, never rebuilt per frame: the
-/// handle *is* the scroll position across frames. The code editor scrolls
-/// itself.
+/// The scroll handle of the Markdown preview, plus the state its horizontal
+/// bar carries its drag in (the vertical bar is Ely's and keeps its own).
+/// Tracked because an untracked surface scrolls just as well but reports no
+/// viewport and no overflow — a bar with nothing to draw from. Held by the
+/// view, never rebuilt per frame: the handle *is* the scroll position across
+/// frames. The code editor scrolls itself.
 struct SurfaceScroll {
     preview: ScrollHandle,
-    preview_bar: ScrollbarState,
     preview_horizontal_bar: HorizontalBarState,
 }
 
 impl SurfaceScroll {
-    fn new(painter: Painter) -> Self {
+    fn new() -> Self {
         Self {
             preview: ScrollHandle::new(),
-            preview_bar: ScrollbarState::new(painter),
             preview_horizontal_bar: HorizontalBarState::default(),
         }
     }
@@ -589,7 +585,7 @@ impl FileView {
             highlight_drawn: Rc::default(),
             editor_focus: cx.focus_handle().tab_stop(true),
             focus_subscription: None,
-            scroll: SurfaceScroll::new(Painter::of(cx)),
+            scroll: SurfaceScroll::new(),
             context_menu: None,
             definition_gesture: None,
             shell_facts: FileContextFacts::default(),
@@ -2369,11 +2365,7 @@ fn render_content(
                             )),
                     ),
             )
-            .child(scrollbar(
-                "file-markdown-bar",
-                &scroll.preview,
-                &scroll.preview_bar,
-            ))
+            .child(scrollbar("file-markdown-bar", &scroll.preview))
             .child(horizontal_scrollbar(
                 "file-markdown-horizontal-bar",
                 &scroll.preview,
@@ -2454,12 +2446,12 @@ fn render_content(
         .into_any_element()
 }
 
-/// bezel's vertical bar over one tracked surface, under a selector the
-/// drawn-frame tests can find. bezel's strip carries no selector of its own,
-/// so the tag goes on a full-surface overlay that exists only while there is
-/// overflow to show — the same guard bezel applies before it paints a thumb
-/// — and that registers no hitbox, so the pointer still reaches the rows
-/// beneath it.
+/// Ely's vertical bar over one tracked surface, under a selector the
+/// drawn-frame tests can find. Ely's track carries no selector of its own, so
+/// the tag goes on a full-surface overlay that exists only while there is
+/// overflow to show, and that registers no hitbox, so the pointer still
+/// reaches the rows beneath it. `id` names the overlay and, with `-track`,
+/// the bar's own element.
 ///
 /// While there is nothing to show, a canvas watches the handle instead:
 /// the bar can only draw from the geometry the *previous* frame left, so
@@ -2468,7 +2460,12 @@ fn render_content(
 /// paints it (Preview has no caret blink to repaint on). The canvas
 /// prepaints after its sibling has, sees this frame's overflow, and asks
 /// for one more frame. Self-limiting: once the bar is up it is not here.
-pub(crate) fn scrollbar(id: &'static str, handle: &ScrollHandle, state: &ScrollbarState) -> AnyElement {
+/// While the bar is up,
+/// [`request_frame_when_geometry_moves`](crate::scroll::request_frame_when_geometry_moves)
+/// does the same for a viewport that resizes or content that grows or
+/// shrinks under it.
+pub(crate) fn scrollbar(id: impl Into<SharedString>, handle: &ScrollHandle) -> AnyElement {
+    let id: SharedString = id.into();
     let has_overflow = |handle: &ScrollHandle| {
         crate::scroll::thumb(
             handle.bounds().size.height,
@@ -2492,14 +2489,23 @@ pub(crate) fn scrollbar(id: &'static str, handle: &ScrollHandle, state: &Scrollb
         .size_full()
         .into_any_element();
     }
+    let selector = id.clone();
     div()
-        .debug_selector(move || id.to_string())
+        .debug_selector(move || selector.to_string())
         .absolute()
         .top_0()
         .right_0()
         .bottom_0()
         .left_0()
-        .child(scroll::scrollbar(id, handle, state))
+        .child(ely_gpui_component::layout::Scrollbar::new(
+            SharedString::from(format!("{id}-track")),
+            handle,
+            gpui::Axis::Vertical,
+        ))
+        .child(crate::scroll::request_frame_when_geometry_moves(
+            handle,
+            gpui::Axis::Vertical,
+        ))
         .into_any_element()
 }
 

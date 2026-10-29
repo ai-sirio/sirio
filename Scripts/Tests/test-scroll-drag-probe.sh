@@ -19,6 +19,10 @@ set -euo pipefail
 #
 # The layout is the probe's contract: a 900x600 window, three panes of 300x600 from the left, a
 # vertical bar at the right edge of panes 1 and 2, a horizontal one along the bottom of pane 3.
+# Pane 1's bar is Ely's `Scrollbar` (a 12 px strip with its 6 px thumb in the strip's left half,
+# so the thumb's centre line is 9 px in from the pane's edge); pane 2's and pane 3's are Sirio's
+# own, a 10 px strip whose centre line is 5 px in (pane 2's 6 px thumb is centred on it, pane 3's
+# fills the strip).
 # The probe's appearance is dark, pinned (the desktop's colour scheme does not reach it), and
 # probe.log says so.
 #
@@ -114,7 +118,7 @@ out = os.environ["OUT_DIR"]
 skew = int(os.environ["SKEW"])
 env = dict(os.environ, DISPLAY=display)
 
-WINDOW_W, WINDOW_H, PANE_W, TRACK = 900, 600, 300, 10
+WINDOW_W, WINDOW_H, PANE_W = 900, 600, 300
 TOLERANCE = 4
 MIN_THUMB = 25
 MIN_POINTER_TRAVEL = 100
@@ -186,15 +190,16 @@ def pixels(frame, crop):
 class Bar:
     """A bar's scan line in the window: where it is, and which way the thumb runs."""
 
-    def __init__(self, number, vertical):
+    def __init__(self, number, vertical, inset=5):
         self.number, self.vertical = number, vertical
         if vertical:
-            # The track is the pane's right-hand 10 px; its centre line is 5 px in.
-            self.cross = number * PANE_W - TRACK // 2
+            # The thumb's centre line, `inset` px in from the pane's right edge.
+            self.cross = number * PANE_W - inset
             self.length = WINDOW_H
             self.crop = f"1x{WINDOW_H}+{self.cross}+0"
         else:
-            self.cross = WINDOW_H - TRACK // 2
+            # The track is the pane's bottom 10 px; its centre line is 5 px in.
+            self.cross = WINDOW_H - inset
             self.length = PANE_W
             self.crop = f"{PANE_W}x1+{(number - 1) * PANE_W}+{self.cross}"
             self.offset = (number - 1) * PANE_W
@@ -263,7 +268,7 @@ def press(bar, thumb):
     return bar.pointer_along()
 
 
-bars = [Bar(1, True), Bar(2, True), Bar(3, False)]
+bars = [Bar(1, True, inset=9), Bar(2, True), Bar(3, False)]
 time.sleep(2)
 before_thumbs = {bar.number: settled(bar, "before") for bar in bars}
 for bar in bars:

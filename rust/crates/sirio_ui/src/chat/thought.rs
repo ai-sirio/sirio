@@ -9,9 +9,6 @@
 #[cfg(test)]
 use std::time::Duration;
 
-use bezel::motion::Painter;
-use bezel::ui::scroll;
-use bezel::ui::scroll::ScrollbarState;
 use gpui::{AnyElement, ScrollHandle, div, linear_color_stop, linear_gradient, prelude::*, px};
 use sirio_theme::Theme;
 
@@ -63,21 +60,19 @@ impl Takeover {
     }
 }
 
-/// Per-entry scroll state for an open body: the handle the well tracks, the
-/// follow pin, and the scrollbar's own state. Not persisted; created the
-/// first time a thought's body is drawn.
+/// Per-entry scroll state for an open body: the handle the well tracks and
+/// the follow pin. Not persisted; created the first time a thought's body is
+/// drawn.
 pub(crate) struct ThoughtScroll {
     pub scroll: ScrollHandle,
     pub follow: FollowState,
-    pub bar: ScrollbarState,
 }
 
 impl ThoughtScroll {
-    pub(crate) fn new(painter: Painter) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             scroll: ScrollHandle::new(),
             follow: FollowState::new(),
-            bar: ScrollbarState::new(painter),
         }
     }
 
@@ -207,10 +202,9 @@ impl Chat {
                             )),
                     )
                     .child(scroll.follow_element())
-                    .child(scroll::scrollbar(
+                    .child(crate::file_view::scrollbar(
                         format!("thought-bar-{entry_index}"),
                         &scroll.scroll,
-                        &scroll.bar,
                     )),
             )
             .into_any_element()

@@ -12,14 +12,15 @@
 use crate::motion::{Fade, Painter, hover_listener, hover_t};
 use bezel_theme::{Theme as BezelTheme, ink};
 use bezel::ui::widgets::{ButtonStyle, Buttons};
-use bezel::ui::{popover, surface};
 use chrono::{DateTime, Local};
+use ely_gpui_component::theme::ActiveTheme as _;
 use gpui::{
-    AnyElement, AnyView, App, Context, Div, Empty, Entity, FontWeight, ListOffset, Pixels,
-    SharedString, Window, canvas, div, prelude::*, px,
+    AnyElement, AnyView, App, Context, Empty, Entity, FontWeight, ListOffset, Pixels,
+    SharedString, Stateful, Window, canvas, div, prelude::*, px,
 };
 
 use super::{Chat, Entry};
+use crate::popup::menu_card;
 
 /// Longest preview a tick offers on hover — the fold row's own clip, so a
 /// turn reads the same whether it is named by its fold or by its tick.
@@ -144,18 +145,13 @@ pub(crate) fn tick_width(is_active: bool, shown: f32) -> Pixels {
 }
 
 /// The card a tick opens on hover: the message the tick jumps to, and which
-/// turn it is. Sirio's own view over bezel's `popover_card`, at the hover
-/// card's measurements, for two things bezel's `HoverCard` gets wrong here:
-///
-/// - its heading is a flex row, and gpui measures a text's min-content as
-///   the whole unwrapped line, so a message longer than the card runs past
-///   the edge and is clipped instead of wrapping — here the message sits in
-///   the card's own column, where the width is definite and it wraps;
-/// - it mounts through `Surfaced::surface`, which drops the card's fill on
-///   the assumption the surface paints one — off macOS the popover surface is
-///   a translucent tint meant for a blur, so the card came out see-through.
-///   Mounting through `surface::popover` keeps `popover_card`'s opaque fill on
-///   an opaque theme and still lets the lens paint on glass.
+/// turn it is. Sirio's own view over [`menu_card`], at a hover card's
+/// measurements, because a hover card built with a flex-row heading gets one
+/// thing wrong here: gpui measures a text's min-content as the whole
+/// unwrapped line, so a message longer than the card runs past the edge and
+/// is clipped instead of wrapping. Here the message sits in the card's own
+/// column, where the width is definite and it wraps. The card is Ely's panel
+/// surface, so it is opaque: nothing under it shows through.
 pub(crate) struct TurnPreview {
     message: SharedString,
     when: SharedString,
@@ -191,29 +187,26 @@ impl TurnPreview {
         .into()
     }
 
-    /// The card and its contents, before the surface it mounts on.
-    pub(crate) fn card(&self, theme: &BezelTheme) -> Div {
+    /// The card and its contents.
+    pub(crate) fn card(&self, theme: &BezelTheme, cx: &App) -> Stateful<gpui::Div> {
         // Wider and airier than a tooltip: this holds prose, not a label.
-        popover::popover_card(theme)
+        menu_card("turn-preview-card", cx)
             .debug_selector(|| "turn-preview".into())
             .w(px(280.0))
             .p(px(12.0))
-            .flex()
-            .flex_col()
             .gap(px(8.0))
             .child(
                 div()
                     .debug_selector(|| "turn-preview-message".into())
                     .text_size(px(13.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
                     .child(self.message.clone()),
             )
             .child(
                 div()
                     .text_size(px(12.5))
                     .line_height(px(18.0))
-                    .text_color(theme.text_muted)
+                    .text_color(cx.theme().colors.fg_muted)
                     .child(self.when.clone()),
             )
             .when_some(self.rewind.clone(), |card, action| {
@@ -235,7 +228,7 @@ impl TurnPreview {
 impl Render for TurnPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = BezelTheme::of(cx).clone();
-        surface::popover(BezelTheme::surface_radius(), self.card(&theme))
+        self.card(&theme, cx)
     }
 }
 
@@ -488,10 +481,11 @@ mod tests {
     }
 
     /// A message longer than the card is wide wraps inside it rather than
-    /// running past its edge, where `popover_card`'s clip cuts it off.
+    /// running past its edge, where a card's clip cuts it off.
     #[gpui::test]
     async fn the_preview_wraps_a_long_message_inside_the_card(cx: &mut gpui::TestAppContext) {
         cx.update(sirio_theme::Theme::init);
+        cx.update(crate::ely::init);
         let message = "Verifica se c'è lo stesso comportamento in tutti gli altri text input";
         let (_preview, cx) = cx.add_window_view(|_, _| TurnPreview {
             message: message.into(),
