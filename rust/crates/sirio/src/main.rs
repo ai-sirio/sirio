@@ -7994,18 +7994,20 @@ impl SirioWorkspace {
     /// `git worktree list` subprocess `refresh_catalog_project` shells out
     /// to (`ProjectCatalog::refresh_project`/
     /// `refresh_project_with_mounted_worktrees` -> `discover_project`), so
-    /// this looks up the project id synchronously (cheap, in-memory only),
-    /// runs the actual discovery on the background executor against a
-    /// cloned catalog, and applies the result back through
-    /// `apply_catalog_refresh` once it lands -- fire-and-forget, the same
-    /// shape as `ChangesTab::refresh` (`sirio_ui/src/changes.rs`).
+    /// this looks up the project id and root synchronously (cheap,
+    /// in-memory only) and runs only the discovery
+    /// (`ProjectCatalog::discover_for_refresh`) on the background executor.
+    /// The result is merged into the live catalog by id when it lands, so
+    /// catalog writes made meanwhile survive (#682), and goes through
+    /// `apply_catalog_refresh` -- fire-and-forget, the same shape as
+    /// `ChangesTab::refresh` (`sirio_ui/src/changes.rs`).
     ///
     /// Other `refresh_catalog_project` call sites (`add_project`,
     /// `WorktreeCreated`/`WorktreeRemoved`) stay synchronous: they read the
     /// freshly-discovered catalog immediately after the call returns, which
     /// a background refresh would race.
     fn refresh_project_for_path_in_background(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let Some((project_id, is_git_root)) = self
+        let Some((project_id, root, is_git_root)) = self
             .project_catalog
             .projects()
             .iter()
@@ -8015,32 +8017,41 @@ impl SirioWorkspace {
                     .iter()
                     .any(|worktree| paths_name_the_same_document(&worktree.path, path))
             })
-            .map(|project| (project.id.clone(), is_git_repository(&project.root_path)))
+            .map(|project| {
+                (
+                    project.id.clone(),
+                    project.root_path.clone(),
+                    is_git_repository(&project.root_path),
+                )
+            })
         else {
             return;
         };
         if !is_git_root {
             return;
         }
-        let before = self.project_catalog.clone();
-        let mounted_paths = self.mounted_worktree_paths(None);
-        let mut catalog = self.project_catalog.clone();
         cx.spawn(async move |this, cx| {
-            let (catalog, result) = cx
+            let discovered = cx
                 .background_executor()
-                .spawn(async move {
-                    let result = if mounted_paths.is_empty() {
-                        catalog.refresh_project(&project_id)
-                    } else {
-                        catalog.refresh_project_with_mounted_worktrees(&project_id, &mounted_paths)
-                    };
-                    (catalog, result)
-                })
+                .spawn(async move { ProjectCatalog::discover_for_refresh(&root) })
                 .await;
             let _ = this.update(cx, |workspace, cx| {
-                if result.is_ok() {
-                    workspace.project_catalog = catalog;
+                // The project was removed while discovery ran: nothing to refresh.
+                if !workspace
+                    .project_catalog
+                    .projects()
+                    .iter()
+                    .any(|project| project.id == project_id)
+                {
+                    return;
                 }
+                let before = workspace.project_catalog.clone();
+                let mounted_paths = workspace.mounted_worktree_paths(None);
+                let result = discovered.and_then(|discovered| {
+                    workspace
+                        .project_catalog
+                        .apply_refresh(&project_id, discovered, &mounted_paths)
+                });
                 // Read when the result lands, not when the task was spawned:
                 // `select_worktree` now runs this after every switch, and a
                 // second click while discovery was still running must not
@@ -42899,6 +42910,160 @@ done
             Some(before),
             "refresh_project_for_path_in_background must keep the unselected worktree's parked pills once the background refresh lands"
         );
+    }
+
+    /// #682: the focus-regain refresh runs discovery on the background
+    /// executor, and the catalog keeps changing on the main thread while it
+    /// runs -- the window has just regained focus, so a native chooser or
+    /// prompt has usually just closed and written to it. When the result
+    /// lands it must update that one project's worktrees in the live
+    /// catalog, never put back a copy taken before discovery started: such
+    /// a copy drops a project added meanwhile, brings back one removed
+    /// meanwhile, and undoes a label or a primary marker set meanwhile.
+    #[gpui::test]
+    async fn catalog_writes_made_while_a_focus_refresh_runs_survive_its_landing(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let repo = committed_test_repo("focus-regain-concurrent-writes");
+        let linked = repo.with_file_name(format!(
+            "{}-linked",
+            repo.file_name().unwrap().to_string_lossy()
+        ));
+        let added = repo.with_file_name(format!(
+            "{}-added",
+            repo.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&linked);
+        let _ = std::fs::remove_dir_all(&added);
+        std::fs::create_dir_all(&added).expect("create the folder added mid-refresh");
+        let repo_for_constructor = repo.clone();
+        let workspace = cx.new(|cx| {
+            let mut workspace = palette_test_workspace(cx);
+            let project_catalog = ProjectCatalog::from_projects(vec![
+                session::CatalogProject {
+                    id: "focus-regain-writes-project".into(),
+                    name: "Focus Regain Writes Project".into(),
+                    root_path: repo_for_constructor.clone(),
+                    is_git: true,
+                    worktrees: vec![session::CatalogWorktree {
+                        branch: "main".into(),
+                        path: repo_for_constructor.clone(),
+                        is_primary: true,
+                    }],
+                },
+                session::CatalogProject {
+                    id: "removed-mid-refresh".into(),
+                    name: "Removed Mid Refresh".into(),
+                    root_path: PathBuf::from("/nonexistent/sirio-removed-mid-refresh"),
+                    is_git: false,
+                    worktrees: Vec::new(),
+                },
+            ]);
+            workspace.working_directory = repo_for_constructor.clone();
+            workspace.control_state = Arc::new(Mutex::new(ControlState::from_catalog(
+                &project_catalog,
+                &repo_for_constructor,
+            )));
+            workspace.project_catalog = project_catalog;
+            workspace.refresh_sidebar(cx);
+            workspace
+        });
+
+        // Something for discovery to find, so the refresh has a delta of its
+        // own to land: a checkout linked outside the app.
+        git_test(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked",
+                linked.to_str().expect("utf-8 fixture path"),
+            ],
+        );
+
+        workspace.update(cx, |workspace, cx| {
+            let working_directory = workspace.working_directory.clone();
+            workspace.refresh_project_for_path_in_background(&working_directory, cx);
+            // Discovery has not run yet: background tasks only run once the
+            // test parks. Every write below lands while it is in flight.
+            assert_eq!(
+                workspace.project_catalog.add(&added),
+                Ok(true),
+                "the folder added mid-refresh is a new project"
+            );
+            assert!(workspace.project_catalog.remove("removed-mid-refresh"));
+            workspace
+                .project_catalog
+                .update_project_settings(
+                    "focus-regain-writes-project",
+                    session::CatalogProjectSettings {
+                        display_name: Some("Renamed mid-refresh".into()),
+                        ..Default::default()
+                    },
+                )
+                .expect("label the refreshed project");
+            workspace
+                .project_catalog
+                .set_primary(&repo, false)
+                .expect("unset the primary marker");
+        });
+
+        cx.run_until_parked();
+
+        workspace.update(cx, |workspace, _cx| {
+            let catalog = &workspace.project_catalog;
+            let added = added.canonicalize().expect("canonical added folder");
+            assert!(
+                catalog
+                    .projects()
+                    .iter()
+                    .any(|project| project.root_path == added),
+                "a project added while discovery ran must still be listed"
+            );
+            assert!(
+                !catalog
+                    .projects()
+                    .iter()
+                    .any(|project| project.id == "removed-mid-refresh"),
+                "a project removed while discovery ran must not come back"
+            );
+            assert_eq!(
+                catalog
+                    .project_settings("focus-regain-writes-project")
+                    .display_name
+                    .as_deref(),
+                Some("Renamed mid-refresh"),
+                "a label set while discovery ran must not be undone"
+            );
+            let project = catalog
+                .projects()
+                .iter()
+                .find(|project| project.id == "focus-regain-writes-project")
+                .expect("the refreshed project is still listed");
+            let worktree = |path: &Path| {
+                project
+                    .worktrees
+                    .iter()
+                    .find(|worktree| paths_name_the_same_document(&worktree.path, path))
+            };
+            assert_eq!(
+                worktree(&repo).map(|worktree| worktree.is_primary),
+                Some(false),
+                "a primary marker unset while discovery ran must not be set again"
+            );
+            assert!(
+                worktree(&linked).is_some(),
+                "the refresh must still land its own discovery: {:?}",
+                project.worktrees
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&linked);
+        let _ = std::fs::remove_dir_all(&added);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     /// #114: a catalog row's branch label must follow what its checkout
