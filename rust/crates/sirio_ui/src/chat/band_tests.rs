@@ -319,3 +319,128 @@ async fn the_chip_pickers_open_inside_a_narrow_chat(cx: &mut TestAppContext) {
         );
     }
 }
+
+/// Names the mode the chat is in, then lets the frame settle.
+fn set_mode(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>, id: &str) {
+    chat.update(cx, |chat, _| {
+        chat.mode_catalog
+            .as_mut()
+            .expect("a mode catalogue")
+            .current_id = id.into();
+    });
+    refresh_frame(cx);
+}
+
+/// Each Lucide icon the pill can draw, with the selector it carries.
+const MODE_ICON_SELECTORS: [(&str, &str); 6] = [
+    ("hand", "mode-icon-hand"),
+    ("file-pen", "mode-icon-file-pen"),
+    ("clipboard-list", "mode-icon-clipboard-list"),
+    ("sparkles", "mode-icon-sparkles"),
+    ("shield-off", "mode-icon-shield-off"),
+    ("shield", "mode-icon-shield"),
+];
+
+/// Each of Claude's five permission modes has its own icon in the pill, and a
+/// mode id Claude does not use (an ACP agent's own) still draws one.
+#[gpui::test]
+async fn each_claude_mode_draws_its_icon(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+
+    for (id, icon) in [
+        ("default", "hand"),
+        ("acceptEdits", "file-pen"),
+        ("plan", "clipboard-list"),
+        ("auto", "sparkles"),
+        ("bypassPermissions", "shield-off"),
+        ("ask", "shield"),
+    ] {
+        set_mode(cx, &chat, id);
+        for (name, selector) in MODE_ICON_SELECTORS {
+            let drawn = cx.debug_bounds(selector).is_some();
+            assert_eq!(
+                drawn,
+                name == icon,
+                "mode {id:?} draws exactly the {icon} icon, and {selector} is {drawn}"
+            );
+        }
+    }
+}
+
+/// Bypass permissions is the one mode the pill draws as a warning.
+#[gpui::test]
+async fn bypass_is_the_only_mode_drawn_in_danger(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+
+    for id in ["default", "acceptEdits", "plan", "auto", "ask"] {
+        set_mode(cx, &chat, id);
+        assert!(
+            cx.debug_bounds("mode-chip-danger").is_none(),
+            "mode {id:?} is not drawn in danger"
+        );
+    }
+    set_mode(cx, &chat, "bypassPermissions");
+    let pill = drawn(cx, "chat-status");
+    let danger = drawn(cx, "mode-chip-danger");
+    assert!(
+        near(danger.left(), pill.left(), 0.5) && near(danger.right(), pill.right(), 0.5),
+        "the danger fill is the pill itself: pill={pill:?} danger={danger:?}"
+    );
+}
+
+/// The connection dot rides the icon's bottom-right corner.
+#[gpui::test]
+async fn the_connection_dot_sits_on_the_icon_corner(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    refresh_frame(cx);
+
+    let icon = drawn(cx, "mode-icon-file-pen");
+    let dot = drawn(cx, "mode-connection-dot");
+    let inflated = icon.dilate(px(4.0));
+    assert!(
+        inflated.contains(&dot.center()),
+        "the dot's centre is within 4px of the icon: icon={icon:?} dot={dot:?}"
+    );
+    assert!(
+        dot.center().x > icon.center().x && dot.center().y > icon.center().y,
+        "the dot sits on the bottom-right corner: icon={icon:?} dot={dot:?}"
+    );
+}
+
+/// A chat that has not advertised modes has nothing to draw an icon for: the
+/// pill keeps its status dot and the state word.
+#[gpui::test]
+async fn without_a_catalogue_the_pill_keeps_its_dot_and_word(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| {
+        configure_full_row(chat);
+        chat.mode_catalog = None;
+    });
+    refresh_frame(cx);
+
+    for (_, selector) in MODE_ICON_SELECTORS {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "no mode, no {selector}"
+        );
+    }
+    assert!(
+        cx.debug_bounds("mode-connection-dot").is_none(),
+        "the corner dot belongs to the icon"
+    );
+    assert!(
+        cx.debug_bounds("mode-label").is_some(),
+        "the state word stands in for the mode's name"
+    );
+    assert!(
+        cx.debug_bounds("chat-status").is_some(),
+        "the pill is drawn"
+    );
+}

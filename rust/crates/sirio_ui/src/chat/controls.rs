@@ -8,6 +8,8 @@ use super::*;
 use ely_gpui_component::{
     forms::Input,
     menus::{Hang, Menu, MenuItem, MenuPanel, layer, panel_surface},
+    primitives::{Icon, IconName},
+    theme::IconSize,
 };
 use sirio_acp::EffortChoice;
 
@@ -56,6 +58,20 @@ fn effort_steps(
                 })
         }))
         .into_any_element()
+}
+
+/// The Lucide icon the status pill draws for a permission mode: one per
+/// Claude mode, and a shield for any id Claude does not use, such as an ACP
+/// agent's own, so a known catalogue never leaves the pill without one.
+pub(crate) fn mode_icon(mode_id: &str) -> IconName {
+    match mode_id {
+        "default" => IconName::Hand,
+        "acceptEdits" => IconName::FilePen,
+        "plan" => IconName::ClipboardList,
+        "auto" => IconName::Sparkles,
+        BYPASS_PERMISSIONS_MODE => IconName::ShieldOff,
+        _ => IconName::Shield,
+    }
 }
 
 impl Chat {
@@ -111,17 +127,82 @@ impl Chat {
         // The agent's own words for the mode, whole, for a label a narrow
         // pane has to cut.
         let mode_tooltip = SharedString::from(label.to_string());
+        // Once the agent has advertised its modes the pill shows the current
+        // one as an icon, with the connection state a small dot on its
+        // corner; before that it keeps the plain dot and the state word.
+        // Bypass permissions is the one mode drawn as a warning.
+        let current_mode = self
+            .mode_catalog
+            .as_ref()
+            .map(|catalog| catalog.current_id.as_str());
+        let danger = current_mode == Some(BYPASS_PERMISSIONS_MODE);
+        let label_color = if danger {
+            theme.ely.danger
+        } else {
+            theme.ely.fg
+        };
+        let mode_lead = match current_mode {
+            Some(mode_id) => {
+                let icon = mode_icon(mode_id);
+                let icon_selector = format!("mode-icon-{}", icon.name());
+                div()
+                    .relative()
+                    .flex_none()
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .debug_selector(move || icon_selector)
+                    .child(Icon::new(icon).size(IconSize::Sm).color(label_color))
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(-3.5))
+                            .bottom(px(-3.5))
+                            .w(px(9.0))
+                            .h(px(9.0))
+                            .rounded(px(4.5))
+                            .p(px(1.5))
+                            .bg(theme.ely.surface)
+                            .debug_selector(|| "mode-connection-dot".into())
+                            .child(div().size_full().rounded(px(3.0)).bg(dot)),
+                    )
+                    .into_any_element()
+            }
+            None => div()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(3.0))
+                .bg(dot)
+                .into_any_element(),
+        };
         let status_pill = status_pill
             .tooltip(crate::controls::tooltip(mode_tooltip))
+            .when(danger, |this| this.bg(theme.ely.danger_subtle))
             .when(mode_selectable, |this| {
                 this.hover(|style| style.bg(bezel_theme.element_hover))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_mode_picker(window, cx);
                     }))
             })
-            .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
-            .child(div().text_color(theme.ely.fg).child(label))
+            .child(mode_lead)
+            .child(
+                div()
+                    .debug_selector(|| "mode-label".into())
+                    .text_color(label_color)
+                    .child(label),
+            )
             .when(mode_selectable, |this| this.child(picker_chevron(theme)));
+        // The pill's selector is taken, so the danger fill is named on a
+        // wrapper that is exactly as big as the pill.
+        let status_pill = if danger {
+            div()
+                .flex()
+                .flex_none()
+                .debug_selector(|| "mode-chip-danger".into())
+                .child(status_pill)
+                .into_any_element()
+        } else {
+            status_pill.into_any_element()
+        };
 
         let selected_model_name = self
             .selected_model

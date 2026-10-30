@@ -31,7 +31,9 @@ terminal/webview/editor dependencies and Gallery runtime are excluded.
   native probe, allowing Sirio's existing asset-free GPUI test contexts.
 - `src/assets.rs` and `src/primitives/icon.rs`: offline icons use the `ely/`
   namespace in both lookup/list and references. Icon geometry is unchanged;
-  upstream Inter/JetBrains Mono font files are excluded.
+  upstream Inter/JetBrains Mono font files are excluded. `ClipboardList`,
+  `FilePen` and `ShieldOff` (and their SVGs, kept verbatim) were added from
+  lucide-static 1.48.0 for the composer's permission-mode icons.
 - `src/compat.rs`: retains the image-source helper from
   `documents/blocks/media.rs` and code-color helper from `editor/syntax.rs`.
   Message/avatar and code components import these helpers without pulling in
