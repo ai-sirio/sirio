@@ -58,27 +58,17 @@ pub(crate) fn row_layout(row_width: f32, full_needed: f32, current: RowLayout) -
     }
 }
 
-/// The chat width at which `current` gives way, Full strictly below it and Compact at or
-/// above it; None when no chat width changes it.
-pub(crate) fn flip_width(full_needed: f32, docked: bool, current: RowLayout) -> Option<f32> {
-    let beside = if docked { COLUMN_WIDTH } else { 0.0 } + 2.0 * BAND_PAD_X;
-    match current {
-        // Full gives way for every row narrower than `full_needed`. None of the
-        // widest row's width fits more than the column, so beyond that it always does.
-        RowLayout::Full if full_needed > BAND_COLUMN => Some(f32::INFINITY),
-        RowLayout::Full if full_needed > 0.0 => Some(full_needed + beside),
-        RowLayout::Full => None,
-        // Compact gives way from `full_needed + HYSTERESIS`, which a row the column
-        // caps never reaches when that is wider than the column.
-        RowLayout::Compact => {
-            let regained = full_needed + HYSTERESIS;
-            if regained > BAND_COLUMN {
-                None
-            } else {
-                Some(regained.max(0.0) + beside)
-            }
-        }
-    }
+/// Whether the chat-width probe asks for a redraw at `chat_width`: the row's
+/// own decision, taken again, would change the layout it has. The probe asks the
+/// render's question, in the render's arithmetic, so the two never disagree at the
+/// boundary: a width one ulp from it cannot redraw on every paint.
+pub(crate) fn probe_notifies(
+    chat_width: f32,
+    docked: bool,
+    full_needed: f32,
+    current: RowLayout,
+) -> bool {
+    row_layout(row_width(chat_width, docked), full_needed, current) != current
 }
 
 /// Shared between render and the chat-width probe.
@@ -86,8 +76,10 @@ pub(crate) fn flip_width(full_needed: f32, docked: bool, current: RowLayout) -> 
 pub(crate) struct RowFrame {
     /// The layout the last render chose.
     pub layout: Cell<RowLayout>,
-    /// The chat width at which that layout gives way (`flip_width`).
-    pub flip: Cell<Option<f32>>,
+    /// The Full row's width the last render decided from.
+    pub needed: Cell<f32>,
+    /// Whether the session panel was docked beside the band in that render.
+    pub docked: Cell<bool>,
     /// The chat root's bounds, as the probe last measured them.
     pub root: Cell<Option<Bounds<Pixels>>>,
     /// The band's own bounds, as its probe last measured them.
@@ -129,27 +121,40 @@ impl Chat {
                 color: theme.ely.fg,
                 ..Default::default()
             };
-            text_system
+            // The layout rounds a text's box up to whole pixels, so the row needs
+            // at least that much.
+            let width: f32 = text_system
                 .layout_line(text, typography.ui_size, &[run], None)
                 .width
-                .into()
+                .into();
+            width.ceil()
         };
         let chevron: f32 = crate::sidebar::icons::IconSize::XSmall
             .resolve(typography)
             .into();
 
-        let (_, mode_name) = super::composer_view::status_pill_content(
-            self.connecting,
-            self.streaming,
-            self.client.is_some(),
-            self.mode_catalog.as_ref(),
-        );
-        let lead = if self.mode_catalog.is_some() {
-            MODE_ICON
-        } else {
-            STATUS_DOT
+        // Without a catalogue the pill names the connection's state, which moves
+        // with every turn: measured at the widest word it can show, so the layout
+        // does not flip with the turn.
+        let (lead, mode_width) = match self.mode_catalog.as_ref() {
+            Some(_) => {
+                let (_, mode_name) = super::composer_view::status_pill_content(
+                    self.connecting,
+                    self.streaming,
+                    self.client.is_some(),
+                    self.mode_catalog.as_ref(),
+                );
+                (MODE_ICON, measure(&mode_name))
+            }
+            None => (
+                STATUS_DOT,
+                ["connecting", "working", "idle", "offline"]
+                    .into_iter()
+                    .map(measure)
+                    .fold(0.0, f32::max),
+            ),
         };
-        let mut pill = 2.0 * CHIP_PAD_X + lead + CHIP_GAP + measure(&mode_name);
+        let mut pill = 2.0 * CHIP_PAD_X + lead + CHIP_GAP + mode_width;
         if self.mode_selectable() {
             pill += CHIP_GAP + chevron;
         }
@@ -223,26 +228,52 @@ mod tests {
         assert_eq!(row_layout(300.0, 0.0, Compact), Full, "nothing to fit");
     }
 
+    /// A width on the boundary must not redraw on every paint. At every width,
+    /// the boundary's f32 neighbours included: one render lands on a layout, and
+    /// the probe, asked again at that width with that layout, stays quiet. It asks
+    /// from the layout the row had exactly when the render changes it.
     #[test]
-    fn flip_width_agrees_with_row_layout() {
-        for needed in [0.0, 250.0, 400.0, 700.0, 712.0, 800.0] {
+    fn the_probe_and_the_render_decide_alike_at_the_boundary() {
+        let neededs = [
+            0.0,
+            250.0,
+            400.0,
+            491.471_466_064_453_1,
+            537.3,
+            611.7,
+            695.999,
+            700.0,
+            712.0,
+            800.0,
+        ];
+        for needed in neededs {
             for docked in [false, true] {
+                let beside = if docked { 300.0 } else { 0.0 } + 24.0;
                 for current in [RowLayout::Full, RowLayout::Compact] {
-                    let flip = flip_width(needed, docked, current);
-                    for width in 0..=2400 {
-                        let width = width as f32;
-                        let next = row_layout(row_width(width, docked), needed, current);
-                        let predicted = flip.is_some_and(|f| {
-                            if current == RowLayout::Full {
-                                width < f
-                            } else {
-                                width >= f
-                            }
-                        });
+                    let mut widths = vec![0.0, 1.0, 639.0, 640.0, 2400.0];
+                    for edge in [needed, needed + HYSTERESIS] {
+                        let mut at = edge + beside;
+                        for _ in 0..3 {
+                            widths.push(at);
+                            at = at.next_up();
+                        }
+                        let mut at = (edge + beside).next_down();
+                        for _ in 0..3 {
+                            widths.push(at);
+                            at = at.next_down();
+                        }
+                    }
+                    for width in widths {
+                        let rendered = row_layout(row_width(width, docked), needed, current);
+                        assert!(
+                            !probe_notifies(width, docked, needed, rendered),
+                            "redraws forever: needed={needed} docked={docked} \
+                             current={current:?} rendered={rendered:?} width={width}"
+                        );
                         assert_eq!(
-                            next != current,
-                            predicted,
-                            "needed={needed} docked={docked} current={current:?} width={width} flip={flip:?}"
+                            probe_notifies(width, docked, needed, current),
+                            rendered != current,
+                            "needed={needed} docked={docked} current={current:?} width={width}"
                         );
                     }
                 }

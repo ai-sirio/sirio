@@ -15,7 +15,7 @@ mod context;
 mod environment;
 mod trace;
 
-use super::composer_row::RowLayout;
+use super::composer_row::probe_notifies;
 use super::*;
 use ely_gpui_component::{
     primitives::{Icon, IconName},
@@ -569,11 +569,14 @@ impl Chat {
                     || (width < px(MIN_CHAT_WIDTH) && before != Some(width));
                 // The control row's layout gives way at a chat width; the row
                 // reads this width, and never its own, so the layout it picks
-                // cannot move the width it was picked from.
-                moved |= row.flip.get().is_some_and(|flip| match row.layout.get() {
-                    RowLayout::Full => f32::from(width) < flip,
-                    RowLayout::Compact => f32::from(width) >= flip,
-                });
+                // cannot move the width it was picked from. The question is
+                // the render's own, so the two cannot split on a boundary.
+                moved |= probe_notifies(
+                    f32::from(width),
+                    row.docked.get(),
+                    row.needed.get(),
+                    row.layout.get(),
+                );
                 if moved {
                     let entity = entity.clone();
                     cx.defer(move |cx| entity.update(cx, |_, cx| cx.notify()));

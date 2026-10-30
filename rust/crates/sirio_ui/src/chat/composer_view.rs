@@ -547,7 +547,7 @@ impl Chat {
     }
 }
 
-use super::composer_row::{BAND_COLUMN, BAND_TOP_PAD, RowLayout, flip_width, row_layout, row_width};
+use super::composer_row::{BAND_COLUMN, BAND_TOP_PAD, RowLayout, row_layout, row_width};
 use super::*;
 use crate::popup::{hang_above_at, menu_card, menu_row};
 use ely_gpui_component::{
@@ -1045,13 +1045,14 @@ impl Chat {
                 self.composer_row.layout.get(),
             );
             self.composer_row.layout.set(layout);
-            self.composer_row
-                .flip
-                .set(flip_width(needed, docked, layout));
+            self.composer_row.needed.set(needed);
+            self.composer_row.docked.set(docked);
             layout
         } else {
             self.composer_row.layout.set(RowLayout::Full);
-            self.composer_row.flip.set(None);
+            // Nothing to lay out: the probe has nothing to ask about.
+            self.composer_row.needed.set(0.0);
+            self.composer_row.docked.set(false);
             RowLayout::Full
         };
 

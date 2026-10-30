@@ -779,7 +779,10 @@ impl Chat {
             });
             layer(
                 "mode-picker-menu",
-                Hang::AboveEnd,
+                // The pill is the first chip of the right-aligned group: from
+                // its right edge the picker would cross the chat's left edge in
+                // a narrow chat, so it grows rightward from its left.
+                Hang::Above,
                 div()
                     .id("mode-picker")
                     .debug_selector(|| "mode-picker".into())
