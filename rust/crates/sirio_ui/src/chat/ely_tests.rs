@@ -970,7 +970,6 @@ async fn ely_history_opens_the_chosen_session_and_confirms_deletion(cx: &mut Tes
 }
 
 #[gpui::test]
-#[ignore = "rewritten in composer band Task 3"]
 async fn ely_narrow_catalogue_popup_keeps_send_and_focus_reachable(cx: &mut TestAppContext) {
     let (chat, cx) = super::tests::chat_view(cx, &["plain"]);
     pump_chat_until(cx, &chat, |v| v.client.is_some());

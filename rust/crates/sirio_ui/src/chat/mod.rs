@@ -2130,6 +2130,8 @@ pub struct Chat {
     agent_cwd: PathBuf,
     /// The column docked beside the transcript.
     session_panel: session_panel::SessionPanel,
+    /// What the control row and the chat-width probe tell each other.
+    composer_row: Rc<composer_row::RowFrame>,
     entries: Vec<Entry>,
     /// One slot per entry in `entries`: the checkpoint id of a user turn
     /// sent on this connection, `None` everywhere else — restored turns,
@@ -2576,6 +2578,7 @@ impl Chat {
             agent_name: None,
             agent_cwd: cwd,
             session_panel: session_panel::SessionPanel::new(),
+            composer_row: Rc::default(),
             entries: Vec::new(),
             turn_message_ids: Vec::new(),
             pending_rewind: None,
@@ -9369,72 +9372,6 @@ two"
         assert!(
             cx.debug_bounds("chat-jump-latest").is_none(),
             "re-pinned: the disc is gone"
-        );
-    }
-
-    /// At Sirio's real pane width the chip row degrades by wrapping chip
-    /// by chip — never by clipping a chip at the pane's edge — and every
-    /// essential control stays drawn and reachable inside the card.
-    #[gpui::test]
-    #[ignore = "rewritten in composer band Task 3"]
-    async fn narrow_control_row_keeps_every_essential_control_reachable(cx: &mut TestAppContext) {
-        let (chat, cx) = chat_view(cx, &["plain"]);
-        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-        chat.update(cx, |chat, _| configure_test_chat(chat));
-        chat.update(cx, |chat, _| {
-            chat.effort = Some(EffortOption {
-                option_id: "effort".into(),
-                name: Some("Effort".into()),
-                current_value: Some("xhigh".into()),
-                choices: vec![EffortChoice {
-                    value: "xhigh".into(),
-                    name: "Xhigh".into(),
-                }],
-            });
-        });
-        // 320 px: narrow enough that the old above-the-card toolbar
-        // overflows a chip past its edge (the app's wider labels hit the
-        // same wall at ~380 px); the chip row in the card must wrap chip
-        // by chip instead.
-        cx.simulate_resize(size(px(320.0), px(600.0)));
-        refresh_frame(cx);
-
-        let card = cx.debug_bounds("composer").expect("card");
-        let send = cx.debug_bounds("send").expect("send");
-        let attach = cx.debug_bounds("attach-image").expect("attach");
-        let overflow = cx.debug_bounds("composer-overflow").expect("overflow");
-        let context = cx.debug_bounds("context-ring").expect("context ring");
-        let effort = cx.debug_bounds("effort-chip").expect("effort chip");
-        let chip = cx.debug_bounds("model-chip").expect("model chip");
-        // Chip by chip, nothing is clipped by the pane: every control
-        // stays inside the card's own edges.
-        for (name, bounds) in [
-            ("model chip", chip),
-            ("effort chip", effort),
-            ("context", context),
-            ("attach", attach),
-            ("overflow", overflow),
-            ("send", send),
-        ] {
-            assert!(
-                bounds.left() >= card.left() && bounds.right() <= card.right(),
-                "{name} is fully inside the card: {name}={bounds:?} card={card:?}"
-            );
-        }
-        assert!(
-            send.right() <= card.right(),
-            "the send disc stays inside the card: send={send:?} card={card:?}"
-        );
-        assert!(
-            send.left() >= attach.left(),
-            "the trio is one run, never painted over a neighbour: attach={attach:?} send={send:?}"
-        );
-        // Reading order, wrap-aware: effort sits on the model's line to
-        // its right, or wrapped onto a later line — at 320 px line 1 holds
-        // pill + model at full width and effort correctly drops to line 2.
-        assert!(
-            effort.top() > chip.top() || effort.left() >= chip.right(),
-            "model precedes effort in layout order: {chip:?} {effort:?}"
         );
     }
 

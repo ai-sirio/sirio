@@ -3,6 +3,7 @@
 //! the popup each one opens. Every control draws only what the agent reported,
 //! so a catalogue it never sent leaves no chevron and no chip behind.
 
+use super::composer_row::RowLayout;
 use super::composer_view::{EFFORT_RESET, EFFORT_ULTRACODE, effort_rows};
 use super::*;
 use ely_gpui_component::{
@@ -75,15 +76,59 @@ pub(crate) fn mode_icon(mode_id: &str) -> IconName {
 }
 
 impl Chat {
+    /// The name the model chip shows: the selected model's, whatever else the
+    /// agent knows it by.
+    pub(super) fn selected_model_name(&self) -> String {
+        self.selected_model
+            .as_deref()
+            .and_then(|selected| {
+                self.available_models
+                    .iter()
+                    .find(|option| option.id == selected)
+                    .map(|option| option.name.clone())
+            })
+            .or_else(|| self.selected_model.clone())
+            .unwrap_or_else(|| "Claude Code".into())
+    }
+
+    /// The effort level's own name, as the agent reported it. Not uppercased
+    /// any more: it used to be a bare caption that needed to read as chrome,
+    /// and now it stands on its own, as the model's name does.
+    pub(super) fn effort_level_name(&self) -> Option<String> {
+        let effort = self.effort.as_ref()?;
+        let current = effort.current_value.as_ref()?;
+        Some(
+            effort
+                .choices
+                .iter()
+                .find(|choice| choice.value == *current)
+                .map(|choice| choice.name.clone())
+                .unwrap_or_else(|| current.clone()),
+        )
+    }
+
+    /// How many steps the effort bars fill, and of how many, for a level that
+    /// stands on the model's own scale; `None` for one that does not (the reset,
+    /// Ultracode).
+    pub(super) fn effort_bar_position(&self) -> Option<(usize, usize)> {
+        let effort = self.effort.as_ref()?;
+        let levels = effort_rows(&effort.choices).levels;
+        let current = effort.current_value.as_deref()?;
+        let filled = levels.iter().position(|level| level.value == current)? + 1;
+        Some((filled, levels.len()))
+    }
+
     /// The control row's chips, each with the popup it hangs. One element so
     /// the composer takes it as a single trailing slot; it is one line, and
     /// the model chip, which may shrink, is what gives on a narrow one.
     pub(super) fn render_agent_controls(
         &self,
         theme: &Theme,
+        layout: RowLayout,
         _window: &mut Window,
         cx: &Context<Self>,
     ) -> AnyElement {
+        let compact = layout == RowLayout::Compact;
         let typography = theme.typography;
         let bezel_theme = bezel_theme::Theme::of(cx).clone();
         let entity = cx.entity();
@@ -184,12 +229,16 @@ impl Chat {
                     }))
             })
             .child(mode_lead)
-            .child(
-                div()
-                    .debug_selector(|| "mode-label".into())
-                    .text_color(label_color)
-                    .child(label),
-            )
+            // Compact keeps the icon (or the dot) and the chevron: the name is
+            // the tooltip's.
+            .when(!compact, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "mode-label".into())
+                        .text_color(label_color)
+                        .child(label),
+                )
+            })
             .when(mode_selectable, |this| this.child(picker_chevron(theme)));
         // The pill's selector is taken, so the danger fill is named on a
         // wrapper that is exactly as big as the pill.
@@ -204,31 +253,8 @@ impl Chat {
             status_pill.into_any_element()
         };
 
-        let selected_model_name = self
-            .selected_model
-            .as_deref()
-            .and_then(|selected| {
-                self.available_models
-                    .iter()
-                    .find(|option| option.id == selected)
-                    .map(|option| option.name.clone())
-            })
-            .or_else(|| self.selected_model.clone())
-            .unwrap_or_else(|| "Claude Code".into());
-        let effort_label = self.effort.as_ref().and_then(|effort| {
-            effort.current_value.as_ref().map(|current| {
-                let name = effort
-                    .choices
-                    .iter()
-                    .find(|choice| choice.value == *current)
-                    .map(|choice| choice.name.clone())
-                    .unwrap_or_else(|| current.clone());
-                // Not uppercased any more: it used to be a bare caption that
-                // needed to read as chrome, and now it stands on its own, as
-                // the model's name does.
-                name
-            })
-        });
+        let selected_model_name = self.selected_model_name();
+        let effort_label = self.effort_level_name();
         // The picker chip — the value in title text and a chevron, with no key
         // label: the name speaks for itself — opens only once a turn has
         // completed and the agent reported models. Without models the pill
@@ -334,15 +360,11 @@ impl Chat {
         // leads nowhere. `flex_none` keeps it intact while the model chip
         // beside it absorbs the squeeze on a narrow pane. The row is one line
         // and compacts instead of wrapping (the band's Task 3).
-        let effort_bars = self.effort.as_ref().and_then(|effort| {
-            let levels = effort_rows(&effort.choices).levels;
-            let current = effort.current_value.as_deref()?;
-            let filled = levels.iter().position(|level| level.value == current)? + 1;
-            Some((filled, levels.len()))
-        });
+        let effort_bars = self.effort_bar_position();
         let effort_control = effort_label
             .filter(|_| self.model_control_visible())
             .map(|label| {
+                let bars_stand_in = compact && effort_bars.is_some();
                 let effort_entity = entity.clone();
                 div()
                     .id("effort-chip")
@@ -369,17 +391,26 @@ impl Chat {
                             theme.ely.fg_muted.opacity(0.3),
                         )
                     }))
-                    .child(
-                        div()
-                            .id("model-effort-label")
-                            .debug_selector(|| "model-effort-label".into())
-                            .text_color(theme.ely.fg)
-                            .child(
-                                div()
-                                    .debug_selector(|| "effort-chip-level".into())
-                                    .child(label),
-                            ),
-                    )
+                    // Compact drops the level's name where the bars say it;
+                    // a level with no bars has only its name to show.
+                    .when(bars_stand_in, |chip| {
+                        chip.tooltip(crate::controls::tooltip(SharedString::from(
+                            label.clone(),
+                        )))
+                    })
+                    .when(!bars_stand_in, |chip| {
+                        chip.child(
+                            div()
+                                .id("model-effort-label")
+                                .debug_selector(|| "model-effort-label".into())
+                                .text_color(theme.ely.fg)
+                                .child(
+                                    div()
+                                        .debug_selector(|| "effort-chip-level".into())
+                                        .child(label.clone()),
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
@@ -804,6 +835,9 @@ impl Chat {
             .rounded(px(8.0))
             .border_1()
             .border_color(theme.ely.border)
+            .when(compact, |this| {
+                this.tooltip(crate::controls::tooltip("Context"))
+            })
             .hover(|style| style.bg(theme.sirio.overlay))
             .on_click(move |_, window, cx| {
                 context_ring_entity.update(cx, |chat, cx| chat.toggle_context_popover(window, cx));
@@ -1066,8 +1100,16 @@ impl Chat {
                     .children(mode_picker),
             )
             // The one shrinkable chip: on a tight line it ellipsizes its name
-            // down to its 56px floor, never to nothing.
-            .child(div().relative().child(model_control).children(model_picker))
+            // down to its 56px floor, never to nothing. The floor is the
+            // wrapper's too: a wrapper sized to its content would hold the
+            // name whole and leave the row nothing to shrink.
+            .child(
+                div()
+                    .relative()
+                    .min_w(px(56.0))
+                    .child(model_control)
+                    .children(model_picker),
+            )
             .child(
                 div()
                     .relative()
@@ -1096,13 +1138,17 @@ impl Chat {
                     .rounded(theme.radii.control)
                     .text_size(typography.ui_size)
                     .child(context_ring)
-                    .child(
-                        div()
-                            .id("context-label")
-                            .debug_selector(|| "context-label".into())
-                            .text_color(theme.ely.fg_subtle)
-                            .child("Context"),
-                    )
+                    // Compact keeps the ring, which is the control, and leaves
+                    // its caption out.
+                    .when(!compact, |this| {
+                        this.child(
+                            div()
+                                .id("context-label")
+                                .debug_selector(|| "context-label".into())
+                                .text_color(theme.ely.fg_subtle)
+                                .child("Context"),
+                        )
+                    })
                     .children(context_popover),
             )
             .into_any_element()

@@ -1,6 +1,7 @@
 //! The composer as a band under the chat: it spans the chat column, keeps its
 //! content on the transcript's reading column, and holds every control on one
 //! line.
+use super::composer_row::{HYSTERESIS, RowLayout, row_width};
 use super::tests::{
     chat_view, configure_test_chat, focus_and_type, pump_chat_until, refresh_frame,
 };
@@ -190,7 +191,11 @@ async fn narrow_band_stays_inside_the_chat_and_keeps_send_reachable(cx: &mut Tes
 async fn the_model_and_effort_chips_carry_no_key_label(cx: &mut TestAppContext) {
     let (chat, cx) = chat_view(cx, &["plain"]);
     pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-    chat.update(cx, |chat, _| configure_full_row(chat));
+    // The Full row, which is the one that names the effort's level.
+    chat.update(cx, |chat, _| {
+        configure_full_row(chat);
+        without_the_chips_compact_will_move(chat);
+    });
     refresh_frame(cx);
 
     let model = cx.debug_bounds("model-chip").expect("model chip");
@@ -264,45 +269,57 @@ async fn the_overflow_menu_and_chat_history_open_inside_a_narrow_chat(cx: &mut T
 /// window the chat has neighbours, and the window's own snapping does not keep
 /// a picker off them: here the chat fills the window, so containment would
 /// pass either way and the check that carries the test is where each picker
-/// hangs from (its chip's right edge). Until the row compacts, the Thinking
-/// chip is drawn past a 430px chat's edge, where the window snap, not the
-/// hang, places its picker: it is checked in a chat wide enough to hold it.
+/// hangs from (its chip's right edge), and that the picker's left edge is not
+/// past the chat's. The Thinking chip is drawn past a 430px chat's edge until
+/// Compact moves it out of the row, so it is checked in a chat wide enough to
+/// hold it.
 #[gpui::test]
 async fn the_chip_pickers_open_inside_a_narrow_chat(cx: &mut TestAppContext) {
     let (chat, cx) = chat_view(cx, &["plain"]);
     pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-    chat.update(cx, |chat, _| configure_full_row(chat));
 
     type Toggle = fn(&mut Chat, &mut Window, &mut Context<Chat>);
-    let pickers: [(f32, &'static str, &'static str, Toggle); 4] = [
+    // Width, whether Fast/Thinking/tasks are in the row, chip, picker, toggle.
+    let pickers: [(f32, bool, &'static str, &'static str, Toggle); 4] = [
         (
             430.0,
+            false,
             "chat-status",
             "mode-picker",
             Chat::toggle_mode_picker,
         ),
         (
             430.0,
+            false,
             "model-chip",
             "model-picker",
             Chat::toggle_model_picker,
         ),
         (
             430.0,
+            false,
             "effort-chip",
             "effort-picker",
             Chat::toggle_effort_picker,
         ),
         (
             1000.0,
+            true,
             "thinking-chip",
             "thinking-picker",
             Chat::toggle_thinking_picker,
         ),
     ];
-    for (width, chip_selector, picker_selector, toggle) in pickers {
+    for (width, with_extras, chip_selector, picker_selector, toggle) in pickers {
+        chat.update(cx, |chat, _| {
+            configure_full_row(chat);
+            if !with_extras {
+                without_the_chips_compact_will_move(chat);
+            }
+        });
         cx.simulate_resize(size(px(width), px(700.0)));
-        refresh_frame(cx);
+        resize_to(cx, width, 700.0);
+        let root = drawn(cx, "chat-root");
         let chip = drawn(cx, chip_selector);
         cx.update(|window, app| chat.update(app, |chat, cx| toggle(chat, window, cx)));
         refresh_frame(cx);
@@ -310,6 +327,10 @@ async fn the_chip_pickers_open_inside_a_narrow_chat(cx: &mut TestAppContext) {
         assert!(
             near(picker.right(), chip.right(), 0.5),
             "{picker_selector} hangs from its chip's right edge: chip={chip:?} picker={picker:?}"
+        );
+        assert!(
+            picker.left() >= root.left(),
+            "{picker_selector} stays inside the chat: root={root:?} picker={picker:?}"
         );
         cx.update(|window, app| chat.update(app, |chat, cx| toggle(chat, window, cx)));
         refresh_frame(cx);
@@ -443,4 +464,380 @@ async fn without_a_catalogue_the_pill_keeps_its_dot_and_word(cx: &mut TestAppCon
         cx.debug_bounds("chat-status").is_some(),
         "the pill is drawn"
     );
+}
+
+/// The controls on the composer's one line, left to right.
+const ROW_CONTROLS: [&str; 10] = [
+    "attach-image",
+    "session-panel-toggle",
+    "composer-overflow",
+    "chat-status",
+    "model-chip",
+    "effort-chip",
+    "fast-mode-chip",
+    "thinking-chip",
+    "background-tasks-chip",
+    "context-ring",
+];
+
+/// A model name long enough to matter, short enough that the Full row holding it
+/// still fits the widest band.
+const LONG_MODEL_NAME: &str = "claude-opus-5-5-preview";
+
+/// Gives the row [`LONG_MODEL_NAME`].
+fn use_the_long_model_name(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>) {
+    chat.update(cx, |chat, _| {
+        chat.available_models = vec![ModelOption {
+            id: "default".into(),
+            name: LONG_MODEL_NAME.into(),
+            description: None,
+        }];
+    });
+}
+
+/// Takes Fast, Thinking and the background tasks off the full row. The compact
+/// layout moves Fast and Thinking out of the row (and the session panel toggle
+/// with them), but until it does they are drawn, and with them a narrow row
+/// overflows and its chips lose their places: the tests that read where a chip
+/// is leave them out.
+fn without_the_chips_compact_will_move(chat: &mut Chat) {
+    chat.fast_mode = None;
+    chat.thinking_display = None;
+    chat.background_tasks = 0;
+}
+
+fn row_layout_now(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>) -> RowLayout {
+    chat.read_with(cx, |chat, _| chat.composer_row.layout.get())
+}
+
+/// Resizes the window to `width`, lets the probe's deferred redraws land.
+fn resize_to(cx: &mut VisualTestContext, width: f32, height: f32) {
+    cx.simulate_resize(size(px(width), px(height)));
+    refresh_frame(cx);
+    refresh_frame(cx);
+    refresh_frame(cx);
+}
+
+fn assert_one_line_inside_the_band(cx: &mut VisualTestContext, controls: &[&'static str]) {
+    let composer = drawn(cx, "composer");
+    let send = drawn(cx, "send");
+    for name in controls.iter().copied() {
+        let control = drawn(cx, name);
+        assert!(
+            near(control.center().y, send.center().y, 2.0),
+            "{name} shares the send control's line: {name}={control:?} send={send:?}"
+        );
+        assert!(
+            control.left() >= composer.left() && control.right() <= composer.right(),
+            "{name} is inside the band: {name}={control:?} composer={composer:?}"
+        );
+    }
+    assert!(
+        send.right() <= composer.right() - px(12.0),
+        "send keeps the band's side padding: send={send:?} composer={composer:?}"
+    );
+}
+
+/// The Full row is chosen from exactly the width it needs plus the hysteresis,
+/// holds every control on one line there, and gives way one pixel under what it
+/// needs. (With every chip a chat can have and a model name this long the Full row
+/// is wider than the band ever is: see the next test.)
+#[gpui::test]
+async fn full_row_fits_at_the_narrowest_width_it_is_chosen(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| {
+        configure_full_row(chat);
+        without_the_chips_compact_will_move(chat);
+    });
+    use_the_long_model_name(cx, &chat);
+    refresh_frame(cx);
+    let needed = cx.update(|window, app| {
+        let theme = *Theme::get(app);
+        chat.read(app).full_row_needed(&theme, window)
+    });
+    assert!(
+        needed + HYSTERESIS <= row_width(f32::INFINITY, false),
+        "the long model's Full row ({needed}px) can be chosen in the widest band"
+    );
+
+    // The band is `needed + HYSTERESIS` wide: the chat adds the band's side padding.
+    resize_to(cx, needed + HYSTERESIS + 24.0, 700.0);
+    assert_eq!(
+        row_layout_now(cx, &chat),
+        RowLayout::Full,
+        "needed={needed}"
+    );
+    assert_one_line_inside_the_band(
+        cx,
+        &[
+            "attach-image",
+            "session-panel-toggle",
+            "composer-overflow",
+            "chat-status",
+            "model-chip",
+            "effort-chip",
+            "context-ring",
+        ],
+    );
+    assert!(
+        drawn(cx, "mode-label").size.width > px(0.0)
+            && cx.debug_bounds("effort-chip-level").is_some(),
+        "Full names the mode and the effort"
+    );
+
+    // Inside the hysteresis band the layout it had stays: Full while it was Full...
+    resize_to(cx, needed + HYSTERESIS / 2.0 + 24.0, 700.0);
+    assert_eq!(
+        row_layout_now(cx, &chat),
+        RowLayout::Full,
+        "inside the band"
+    );
+    resize_to(cx, needed - 1.0 + 24.0, 700.0);
+    assert_eq!(
+        row_layout_now(cx, &chat),
+        RowLayout::Compact,
+        "one pixel under what Full needs (needed={needed})"
+    );
+    // ... and Compact while it was Compact, until the band is a whole step wider.
+    resize_to(cx, needed + HYSTERESIS / 2.0 + 24.0, 700.0);
+    assert_eq!(
+        row_layout_now(cx, &chat),
+        RowLayout::Compact,
+        "inside the band, from Compact"
+    );
+    resize_to(cx, needed + HYSTERESIS + 24.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Full, "a step wider");
+}
+
+/// A chat that has every chip and a long model name needs a Full row wider than
+/// the band ever is, so it stays Compact however wide the chat gets, and it
+/// does not flip as the frames go by.
+#[gpui::test]
+async fn a_row_wider_than_the_band_ever_gets_stays_compact(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    use_the_long_model_name(cx, &chat);
+    refresh_frame(cx);
+    let needed = cx.update(|window, app| {
+        let theme = *Theme::get(app);
+        chat.read(app).full_row_needed(&theme, window)
+    });
+    assert!(
+        needed > row_width(f32::INFINITY, false),
+        "the row needs {needed}px, more than the widest band"
+    );
+    for width in [1400.0, 900.0, 1400.0] {
+        resize_to(cx, width, 700.0);
+        assert_eq!(
+            row_layout_now(cx, &chat),
+            RowLayout::Compact,
+            "at {width}px"
+        );
+        refresh_frame(cx);
+        assert_eq!(
+            row_layout_now(cx, &chat),
+            RowLayout::Compact,
+            "and it holds at {width}px"
+        );
+    }
+}
+
+/// Compact keeps the mode's icon and the effort's bars and drops their names.
+#[gpui::test]
+async fn compact_drops_the_mode_and_effort_names(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    resize_to(cx, 360.0, 700.0);
+
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    let pill = drawn(cx, "chat-status");
+    assert!(
+        cx.debug_bounds("mode-icon-file-pen").is_some(),
+        "the pill keeps its icon"
+    );
+    assert!(
+        cx.debug_bounds("mode-label").is_none(),
+        "the pill's name is in its tooltip, not drawn: {pill:?}"
+    );
+    let effort = drawn(cx, "effort-chip");
+    assert!(
+        cx.debug_bounds("effort-chip-bars").is_some(),
+        "the effort chip keeps its bars: {effort:?}"
+    );
+    assert!(
+        cx.debug_bounds("effort-chip-level").is_none(),
+        "the effort's level is not drawn"
+    );
+}
+
+/// With the session panel docked beside the band, the band is 300px narrower
+/// than the chat, and the row follows the band, not the chat.
+#[gpui::test]
+async fn a_docked_panel_narrows_the_band_and_the_row_follows_it(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    // A row whose Full layout fits a 700px chat's band, and not what is left of
+    // it beside the panel.
+    chat.update(cx, |chat, _| {
+        configure_full_row(chat);
+        without_the_chips_compact_will_move(chat);
+    });
+    resize_to(cx, 700.0, 700.0);
+    assert_eq!(
+        row_layout_now(cx, &chat),
+        RowLayout::Full,
+        "a 700px chat with no panel has room for the Full row"
+    );
+
+    chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
+    for _ in 0..3 {
+        refresh_frame(cx);
+    }
+    let root = drawn(cx, "chat-root");
+    let composer = drawn(cx, "composer");
+    assert!(
+        near(composer.right(), root.right() - px(300.0), 1.0),
+        "the panel docks beside the band: root={root:?} composer={composer:?}"
+    );
+    assert_eq!(
+        row_layout_now(cx, &chat),
+        RowLayout::Compact,
+        "the band is {}px wide, short of the Full row",
+        f32::from(composer.size.width)
+    );
+}
+
+/// A chat with no mode catalogue has no icon to draw, and its compact pill is the
+/// bare dot; the row still fits at the narrowest pane.
+#[gpui::test]
+async fn compact_without_a_catalogue_keeps_the_dot_and_fits(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    resize_to(cx, 280.0, 600.0);
+
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    for (_, selector) in MODE_ICON_SELECTORS {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "no catalogue, no {selector}"
+        );
+    }
+    assert!(
+        cx.debug_bounds("mode-label").is_none(),
+        "the compact pill is the dot alone"
+    );
+    assert!(cx.debug_bounds("chat-status").is_some(), "the dot is drawn");
+    assert_one_line_inside_the_band(
+        cx,
+        &[
+            "attach-image",
+            "session-panel-toggle",
+            "composer-overflow",
+            "chat-status",
+            "context-ring",
+        ],
+    );
+}
+
+/// Each picker hangs from its compact chip's right edge. The chat fills the
+/// window here and the window snaps a popup back inside it, so containment alone
+/// can never fail; the test asserts both that the picker's right edge is the chip's
+/// and that its left edge is not past the chat's, which together fail if the hang
+/// is wrong or the picker would cross the chat's left edge. The pickers are as wide
+/// as 200 to 280px and hang leftward from a chip, so a chip must sit that far
+/// from the chat's left edge: the mode and model pickers hold from a 430px chat,
+/// the effort picker from a 320px one.
+#[gpui::test]
+async fn a_picker_from_a_compact_chip_stays_inside_a_narrow_pane(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| {
+        configure_full_row(chat);
+        without_the_chips_compact_will_move(chat);
+    });
+
+    type Toggle = fn(&mut Chat, &mut Window, &mut Context<Chat>);
+    let pickers: [(f32, &'static str, &'static str, Toggle); 3] = [
+        (
+            430.0,
+            "chat-status",
+            "mode-picker",
+            Chat::toggle_mode_picker,
+        ),
+        (
+            430.0,
+            "model-chip",
+            "model-picker",
+            Chat::toggle_model_picker,
+        ),
+        (
+            320.0,
+            "effort-chip",
+            "effort-picker",
+            Chat::toggle_effort_picker,
+        ),
+    ];
+    for (width, chip_selector, picker_selector, toggle) in pickers {
+        resize_to(cx, width, 700.0);
+        assert_eq!(
+            row_layout_now(cx, &chat),
+            RowLayout::Compact,
+            "at {width}px"
+        );
+        let root = drawn(cx, "chat-root");
+        let chip = drawn(cx, chip_selector);
+        cx.update(|window, app| chat.update(app, |chat, cx| toggle(chat, window, cx)));
+        refresh_frame(cx);
+        let picker = drawn(cx, picker_selector);
+        assert!(
+            near(picker.right(), chip.right(), 0.5),
+            "{picker_selector} hangs from its chip's right edge at {width}px: chip={chip:?} picker={picker:?}"
+        );
+        assert!(
+            picker.left() >= root.left(),
+            "{picker_selector} stays inside the chat at {width}px: root={root:?} picker={picker:?}"
+        );
+        cx.update(|window, app| chat.update(app, |chat, cx| toggle(chat, window, cx)));
+        refresh_frame(cx);
+    }
+}
+
+/// At 320px every control the row still draws is on the band's one line, and send
+/// is inside it.
+#[gpui::test]
+async fn narrow_control_row_keeps_every_essential_control_reachable(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| {
+        configure_test_chat(chat);
+        chat.effort = Some(EffortOption {
+            option_id: "effort".into(),
+            name: Some("Effort".into()),
+            current_value: Some("xhigh".into()),
+            choices: vec![EffortChoice {
+                value: "xhigh".into(),
+                name: "Xhigh".into(),
+            }],
+        });
+    });
+    resize_to(cx, 320.0, 600.0);
+
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    assert_one_line_inside_the_band(
+        cx,
+        &[
+            "attach-image",
+            "session-panel-toggle",
+            "composer-overflow",
+            "model-chip",
+            "effort-chip",
+            "context-ring",
+        ],
+    );
+    let composer = drawn(cx, "composer");
+    let send = drawn(cx, "send");
+    assert!(send.right() <= composer.right(), "{send:?} in {composer:?}");
 }

@@ -384,7 +384,7 @@ mod tests {
     }
 }
 
-use gpui::{AnyElement, Context, SharedString, div, px};
+use gpui::{AnyElement, Context, SharedString, canvas, div, px};
 use sirio_acp::{EffortChoice, ModeCatalog};
 
 use super::{Chat, PopupAccept, PopupNext, PopupPrevious};
@@ -547,7 +547,7 @@ impl Chat {
     }
 }
 
-use super::composer_row::{BAND_COLUMN, BAND_TOP_PAD};
+use super::composer_row::{BAND_COLUMN, BAND_TOP_PAD, RowLayout, flip_width, row_layout, row_width};
 use super::*;
 use crate::popup::{hang_above_at, menu_card, menu_row};
 use ely_gpui_component::{
@@ -1028,6 +1028,33 @@ impl Chat {
         // With no agent configured the tool row holds only the send control.
         let has_agent = self.agent_launch.is_some();
 
+        // Which layout the row takes follows the chat's width (the probe's),
+        // never what the row itself measures, so the choice cannot move the
+        // width it is made from. Before the first paint nothing is known and
+        // the row is as wide as it can be.
+        let layout = if has_agent {
+            let docked = matches!(
+                self.session_panel_placement(),
+                Some(session_panel::Placement::Docked)
+            );
+            let chat_width = self.chat_width().map_or(f32::INFINITY, f32::from);
+            let needed = self.full_row_needed(theme, window);
+            let layout = row_layout(
+                row_width(chat_width, docked),
+                needed,
+                self.composer_row.layout.get(),
+            );
+            self.composer_row.layout.set(layout);
+            self.composer_row
+                .flip
+                .set(flip_width(needed, docked, layout));
+            layout
+        } else {
+            self.composer_row.layout.set(RowLayout::Full);
+            self.composer_row.flip.set(None);
+            RowLayout::Full
+        };
+
         let composer_context_menu = self
             .composer_context_menu
             .get()
@@ -1116,6 +1143,7 @@ impl Chat {
                 )
             });
 
+        let row_frame = self.composer_row.clone();
         let streaming = self.streaming;
         let mut prompt = PromptInput::custom("composer-shell", editor, can_send, move |_, cx| {
             send_entity.update(cx, |chat, cx| chat.send(cx));
@@ -1142,7 +1170,7 @@ impl Chat {
                         .children(overflow_menu)
                         .children(chat_history_menu),
                 )
-                .trailing(self.render_agent_controls(theme, window, cx));
+                .trailing(self.render_agent_controls(theme, layout, window, cx));
         }
 
         div()
@@ -1164,7 +1192,16 @@ impl Chat {
                                 .focus(window, cx);
                         }),
                     )
-                    .child(prompt),
+                    .child(prompt)
+                    // Measures the band; paints nothing.
+                    .child(
+                        canvas(
+                            move |bounds, _, _| row_frame.band.set(Some(bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    ),
             )
             .into_any_element()
     }
