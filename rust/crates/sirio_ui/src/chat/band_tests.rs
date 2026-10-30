@@ -218,3 +218,43 @@ async fn the_model_and_effort_chips_carry_no_key_label(cx: &mut TestAppContext) 
         "bars, then the level, inside the chip: chip={effort:?} bars={bars:?} level={level:?}"
     );
 }
+
+/// ⋯ sits in the band's left group, so its menu and the Chat History popover
+/// must grow rightward from it into the chat. In a real window the chat has
+/// neighbours, and the window's own snapping does not keep a menu off them:
+/// here the chat fills the window, so the check is where the menu hangs from
+/// (⋯'s left edge) as well as that it stays inside the chat.
+#[gpui::test]
+async fn the_overflow_menu_and_chat_history_open_inside_a_narrow_chat(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    cx.simulate_resize(size(px(430.0), px(700.0)));
+    refresh_frame(cx);
+    let root = drawn(cx, "chat-root");
+    let overflow = drawn(cx, "composer-overflow");
+
+    cx.update(|window, app| chat.update(app, |chat, cx| chat.toggle_overflow(window, cx)));
+    refresh_frame(cx);
+    let menu = drawn(cx, "composer-overflow-menu");
+    assert!(
+        menu.left() >= root.left() - px(0.5) && menu.right() <= root.right() + px(0.5),
+        "the overflow menu stays inside the chat: root={root:?} menu={menu:?}"
+    );
+    assert!(
+        near(menu.left(), overflow.left(), 0.5),
+        "the overflow menu grows rightward from the control: overflow={overflow:?} menu={menu:?}"
+    );
+
+    cx.update(|window, app| chat.update(app, |chat, cx| chat.toggle_chat_history(window, cx)));
+    refresh_frame(cx);
+    let history = drawn(cx, "chat-history-menu");
+    assert!(
+        history.left() >= root.left() - px(0.5) && history.right() <= root.right() + px(0.5),
+        "the chat history stays inside the chat: root={root:?} history={history:?}"
+    );
+    assert!(
+        near(history.left(), overflow.left(), 0.5),
+        "the chat history grows rightward from the control: overflow={overflow:?} history={history:?}"
+    );
+}

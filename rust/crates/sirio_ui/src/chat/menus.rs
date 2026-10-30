@@ -120,7 +120,7 @@ impl Chat {
         });
         layer(
             "composer-overflow-menu-menu",
-            Hang::AboveEnd,
+            Hang::Above,
             div()
                 .id("composer-overflow-menu")
                 .debug_selector(|| "composer-overflow-menu".into())
