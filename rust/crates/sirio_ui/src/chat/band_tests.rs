@@ -1250,6 +1250,11 @@ async fn the_chips_never_cover_send(cx: &mut TestAppContext) {
             chips.left() >= composer.left() && chips.right() <= composer.right(),
             "the chips are inside the band at {width}px: chips={chips:?} composer={composer:?}"
         );
+        let overflow = drawn(cx, "composer-overflow");
+        assert!(
+            chips.left() >= overflow.right(),
+            "the chips never reach the left tools at {width}px: overflow={overflow:?} chips={chips:?}"
+        );
     }
 }
 
@@ -1273,7 +1278,7 @@ fn chips_fit_whole(cx: &mut VisualTestContext) -> bool {
 }
 
 /// Below a measured width the Compact row cannot hold every chip whole, and the
-/// rightmost ones (the task count, then the ring) are what gets cut. The real
+/// rightmost ones (the ring first, then the task count) are what gets cut. The real
 /// minimum with every chip a chat can have (mode, model at its 56px floor,
 /// effort, two background tasks, ring) is 346px on the test font (7.8px a
 /// character); it is found here by search, and the width one pixel under it
@@ -1321,4 +1326,65 @@ async fn compact_row_fits_every_chip_from_its_measured_minimum(cx: &mut TestAppC
             "{name} is not cut: the cut falls on the right"
         );
     }
+}
+
+/// The chips are clipped, not merely sized to fit: a chip that does not fit is
+/// still laid out past the band's edge, and only the clip keeps it from taking
+/// presses there. This test cannot compare boxes for that, because the layout
+/// boxes come out the same with and without the clip (Taffy ignores `overflow`
+/// once `min_w_0` is set), and child `debug_bounds` are not clipped. What does
+/// see the clip is hit-testing, which intersects every hitbox with its content
+/// mask: it picks a width where the overflowing context ring's layout box covers
+/// a point in the band's right padding (past send), and clicks that point. The
+/// ring's press, opening the context popover, must not fire. The control case
+/// is the same press on the ring in a roomy row, which does.
+#[gpui::test]
+async fn a_chip_that_does_not_fit_takes_no_press_in_the_band_padding(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    let popover_open =
+        |cx: &mut VisualTestContext| chat.read_with(cx, |chat, _| chat.context_popover_open);
+
+    // Control: the ring opens the popover when it is where the row draws it.
+    chat.update(cx, |chat, _| configure_fitting_full_row(chat));
+    resize_to(cx, 1920.0, 700.0);
+    click_drawn(cx, "context-ring");
+    assert!(popover_open(cx), "a press on the ring opens the popover");
+    chat.update(cx, |chat, _| chat.context_popover_open = false);
+
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    let mut found = None;
+    for width in 281..346 {
+        resize_to(cx, width as f32, 700.0);
+        let composer = drawn(cx, "composer");
+        let send = drawn(cx, "send");
+        let ring = drawn(cx, "context-ring");
+        // A point in the padding between send and the band's edge, inside the
+        // ring's layout box, on the row's line.
+        let from = f32::from(send.right()).max(f32::from(ring.left())) + 1.0;
+        let to = f32::from(composer.right()).min(f32::from(ring.right())) - 1.0;
+        if from < to {
+            found = Some((width, gpui::point(px((from + to) / 2.0), send.center().y)));
+            break;
+        }
+    }
+    let (width, point) = found.expect("a width where the ring's box reaches into the padding");
+    let ring = drawn(cx, "context-ring");
+    let composer = drawn(cx, "composer");
+    let send = drawn(cx, "send");
+    assert!(
+        ring.contains(&point) && point.x > send.right() && point.x < composer.right(),
+        "the point is in the ring's box and the band's padding at {width}px: \
+         point={point:?} ring={ring:?} send={send:?} composer={composer:?}"
+    );
+
+    cx.simulate_click(point, gpui::Modifiers::none());
+    cx.run_until_parked();
+    for _ in 0..3 {
+        refresh_frame(cx);
+    }
+    assert!(
+        !popover_open(cx),
+        "a ring laid out past the band's edge took a press at {point:?} at {width}px"
+    );
 }

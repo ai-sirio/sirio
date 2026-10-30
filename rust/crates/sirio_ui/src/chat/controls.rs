@@ -1413,11 +1413,11 @@ impl Chat {
     }
 
     fn step_picker(&mut self, by: isize, cx: &mut Context<Self>) {
-        let rows = self.picker_rows(cx).len() as isize;
+        let all = self.picker_rows(cx);
+        let rows = all.len() as isize;
         if rows == 0 {
             return;
         }
-        let all = self.picker_rows(cx);
         let mut at = self.marked_picker_row(rows as usize).unwrap_or(0) as isize;
         // The next row that can be chosen, wrapping; none at all leaves the
         // cursor where it is.
