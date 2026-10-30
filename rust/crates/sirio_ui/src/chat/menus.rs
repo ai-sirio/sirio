@@ -96,27 +96,58 @@ impl Chat {
     }
 
     /// The composer's "more" menu (F-CHAT-14): Follow Edited Files, New
-    /// Conversation and Chat History. Follow is a toggle and leaves the menu
-    /// open; the other two close it.
+    /// Conversation and Chat History, and, while the row is Compact, the
+    /// Fast, Thinking and session panel rows above them. Follow and Fast are
+    /// toggles and leave the menu open; the others close it.
     pub(super) fn render_chat_menu(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let rows = self.picker_rows(cx);
         let menu = rows.iter().fold(Menu::new(), |menu, row| {
             let PickerRow::Overflow(which) = row else {
                 return menu;
             };
-            let (label, selector) = match which {
-                OverflowRow::Follow if self.following_edited_files => {
-                    ("Stop Following", "overflow-follow")
+            let item = match which {
+                OverflowRow::Fast => {
+                    let fast = self.fast_mode.clone().unwrap_or(FastMode {
+                        enabled: false,
+                        blocked_by: None,
+                    });
+                    let item =
+                        MenuItem::check("Fast mode", fast.enabled).selectors("overflow-fast", None);
+                    match fast.blocked_by {
+                        Some(reason) => item.disabled(true).tooltip(reason),
+                        None => item,
+                    }
                 }
-                OverflowRow::Follow => ("Follow Edited Files", "overflow-follow"),
-                OverflowRow::NewConversation => ("New Conversation", "overflow-new-conversation"),
-                OverflowRow::History => ("Chat History", "overflow-chat-history"),
+                OverflowRow::Thinking => {
+                    let chosen = self.thinking_state().and_then(|state| state.chosen);
+                    let label = match chosen {
+                        Some(chosen) => format!("Thinking: {}", thinking_display_name(&chosen)),
+                        None => "Thinking".to_string(),
+                    };
+                    MenuItem::new(label).selectors("overflow-thinking", None)
+                }
+                OverflowRow::SessionPanel => {
+                    let label = if self.session_panel_open() {
+                        "Hide session panel"
+                    } else {
+                        "Show session panel"
+                    };
+                    MenuItem::new(label).selectors("overflow-session-panel", None)
+                }
+                OverflowRow::Follow if self.following_edited_files => {
+                    MenuItem::new("Stop Following").selectors("overflow-follow", None)
+                }
+                OverflowRow::Follow => {
+                    MenuItem::new("Follow Edited Files").selectors("overflow-follow", None)
+                }
+                OverflowRow::NewConversation => {
+                    MenuItem::new("New Conversation").selectors("overflow-new-conversation", None)
+                }
+                OverflowRow::History => {
+                    MenuItem::new("Chat History").selectors("overflow-chat-history", None)
+                }
             };
-            menu.item(
-                MenuItem::new(label)
-                    .selectors(selector, None)
-                    .on_click(self.picker_click(row.clone(), cx)),
-            )
+            menu.item(item.on_click(self.picker_click(row.clone(), cx)))
         });
         layer(
             "composer-overflow-menu-menu",

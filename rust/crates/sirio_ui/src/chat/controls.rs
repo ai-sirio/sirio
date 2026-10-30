@@ -118,6 +118,70 @@ impl Chat {
         Some((filled, levels.len()))
     }
 
+    /// The thinking display, while there is one to draw: the transport has it
+    /// and the CLI has not refused the verb. The chip in the Full row and the
+    /// row in ⋯ in the Compact one both ask this, so they appear together.
+    pub(super) fn thinking_state(&self) -> Option<ThinkingDisplay> {
+        self.thinking_display
+            .clone()
+            .filter(|state| !state.unsupported)
+            .filter(|_| self.model_control_visible())
+    }
+
+    /// The thinking picker while it is open, hung from the control the caller
+    /// puts it in: the chip in the Full row (`Hang::AboveEnd`, growing leftward
+    /// from the right-aligned group) or ⋯ in the Compact one (`Hang::Above`,
+    /// growing rightward from the first control on the left).
+    pub(super) fn render_thinking_picker(
+        &self,
+        theme: &Theme,
+        hang: Hang,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.thinking_picker_open {
+            return None;
+        }
+        let chosen = self.thinking_state().and_then(|state| state.chosen);
+        let rows = self.picker_rows(cx);
+        // The agent's own answer is a row, not the absence of one:
+        // choosing it is how a user undoes a choice they made.
+        let menu = rows.iter().fold(Menu::new(), |menu, row| {
+            let PickerRow::Thinking(value) = row else {
+                return menu;
+            };
+            let id = value.unwrap_or("default");
+            let label = value.map_or("Agent's own", thinking_display_name);
+            menu.item(
+                MenuItem::radio(label, chosen.as_deref() == *value)
+                    .selectors(format!("thinking-option-{id}"), None)
+                    .on_click(self.picker_click(row.clone(), cx)),
+            )
+        });
+        Some(layer(
+            "thinking-picker-menu",
+            hang,
+            div()
+                .id("thinking-picker")
+                .debug_selector(|| "thinking-picker".into())
+                .key_context("ChatThinkingPicker")
+                .track_focus(&self.thinking_picker_focus)
+                .on_action(cx.listener(Self::cancel))
+                .on_action(cx.listener(Self::picker_previous))
+                .on_action(cx.listener(Self::picker_next))
+                .on_action(cx.listener(Self::picker_choose))
+                .w(popup_width(theme, 200.0))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.thinking_picker_open = false;
+                    cx.notify();
+                }))
+                .child(
+                    MenuPanel::new("thinking-picker-rows", menu)
+                        .current(self.marked_picker_row(rows.len())),
+                ),
+            cx,
+        ))
+    }
+
     /// The control row's chips, each with the popup it hangs. One element so
     /// the composer takes it as a single trailing slot; it is one line, and
     /// the model chip, which may shrink, is what gives on a narrow one.
@@ -430,7 +494,7 @@ impl Chat {
         let fast_control = self
             .fast_mode
             .clone()
-            .filter(|_| self.model_control_visible())
+            .filter(|_| self.model_control_visible() && !compact)
             .map(|fast| {
                 let blocked = fast.blocked_by.clone();
                 let fast_entity = entity.clone();
@@ -506,12 +570,8 @@ impl Chat {
         // because nothing reports the session's own and a word here would
         // be one nobody read (F-CHAT-18's rule, as the effort chip already
         // applies it).
-        let thinking = self
-            .thinking_display
-            .clone()
-            .filter(|state| !state.unsupported)
-            .filter(|_| self.model_control_visible());
-        let thinking_control = thinking.clone().map(|state| {
+        // Compact leaves Fast and Thinking out of the row: they are rows in ⋯.
+        let thinking_control = self.thinking_state().filter(|_| !compact).map(|state| {
             let thinking_entity = entity.clone();
             let chosen = state.chosen.clone();
             div()
@@ -540,47 +600,9 @@ impl Chat {
                 })
         });
 
-        let thinking_picker = self.thinking_picker_open.then(|| {
-            let chosen = thinking.and_then(|state| state.chosen);
-            let rows = self.picker_rows(cx);
-            // The agent's own answer is a row, not the absence of one:
-            // choosing it is how a user undoes a choice they made.
-            let menu = rows.iter().fold(Menu::new(), |menu, row| {
-                let PickerRow::Thinking(value) = row else {
-                    return menu;
-                };
-                let id = value.unwrap_or("default");
-                let label = value.map_or("Agent's own", thinking_display_name);
-                menu.item(
-                    MenuItem::radio(label, chosen.as_deref() == *value)
-                        .selectors(format!("thinking-option-{id}"), None)
-                        .on_click(self.picker_click(row.clone(), cx)),
-                )
-            });
-            layer(
-                "thinking-picker-menu",
-                Hang::AboveEnd,
-                div()
-                    .id("thinking-picker")
-                    .debug_selector(|| "thinking-picker".into())
-                    .key_context("ChatThinkingPicker")
-                    .track_focus(&self.thinking_picker_focus)
-                    .on_action(cx.listener(Self::cancel))
-                    .on_action(cx.listener(Self::picker_previous))
-                    .on_action(cx.listener(Self::picker_next))
-                    .on_action(cx.listener(Self::picker_choose))
-                    .w(popup_width(theme, 200.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.thinking_picker_open = false;
-                        cx.notify();
-                    }))
-                    .child(
-                        MenuPanel::new("thinking-picker-rows", menu)
-                            .current(self.marked_picker_row(rows.len())),
-                    ),
-                cx,
-            )
-        });
+        let thinking_picker = (!compact)
+            .then(|| self.render_thinking_picker(theme, Hang::AboveEnd, cx))
+            .flatten();
 
         // The effort list, anchored to the chip above. The levels are the
         // session's own — `supportedEffortLevels` differs per model — so the
@@ -1172,6 +1194,12 @@ pub(super) enum PickerRow {
 /// The rows of the composer's "more" menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OverflowRow {
+    /// Fast mode, a toggle. Only in the Compact row, which has no chip for it.
+    Fast,
+    /// The thinking picker. Only in the Compact row.
+    Thinking,
+    /// The session panel's toggle. Only in the Compact row.
+    SessionPanel,
     Follow,
     NewConversation,
     History,
@@ -1213,12 +1241,20 @@ impl Chat {
                 })
                 .unwrap_or_default()
         } else if self.overflow_open {
+            // What the Compact row has no room for is a row here, ahead of the
+            // menu's own: the Full row draws those controls itself.
+            let compact = self.composer_row.layout.get() == RowLayout::Compact;
+            let fast = self.fast_mode.is_some() && self.model_control_visible();
             [
-                OverflowRow::Follow,
-                OverflowRow::NewConversation,
-                OverflowRow::History,
+                (compact && fast).then_some(OverflowRow::Fast),
+                (compact && self.thinking_state().is_some()).then_some(OverflowRow::Thinking),
+                compact.then_some(OverflowRow::SessionPanel),
+                Some(OverflowRow::Follow),
+                Some(OverflowRow::NewConversation),
+                Some(OverflowRow::History),
             ]
             .into_iter()
+            .flatten()
             .map(PickerRow::Overflow)
             .collect()
         } else {
@@ -1288,6 +1324,22 @@ impl Chat {
             PickerRow::Effort(value) => {
                 self.select_effort(value, cx);
                 self.effort_picker_open = false;
+            }
+            // Fast is a toggle like Follow: the menu stays open with the focus
+            // where it is, and its check moves when the CLI has agreed.
+            PickerRow::Overflow(OverflowRow::Fast) => {
+                self.toggle_fast_mode(cx);
+                return;
+            }
+            // The picker takes the focus itself, and keeps it.
+            PickerRow::Overflow(OverflowRow::Thinking) => {
+                self.overflow_open = false;
+                self.toggle_thinking_picker(window, cx);
+                return;
+            }
+            PickerRow::Overflow(OverflowRow::SessionPanel) => {
+                self.overflow_open = false;
+                self.toggle_session_panel(cx);
             }
             // Follow is a toggle: the menu stays open, with the focus where it is.
             PickerRow::Overflow(OverflowRow::Follow) => {

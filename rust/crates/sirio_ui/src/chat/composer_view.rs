@@ -553,6 +553,7 @@ use crate::popup::{hang_above_at, menu_card, menu_row};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
     chat::{Attachment, AttachmentChip, PromptInput},
+    menus::Hang,
     primitives::{Icon, IconName},
     theme::{ActiveTheme as _, ControlSize, IconSize, Radius, TextSize},
     typography::EllipsisTooltip,
@@ -976,10 +977,6 @@ impl Chat {
             None
         };
 
-        // Overflow menu (F-CHAT-14) and the Chat History popover
-        // (F-CHAT-34/35): the two secondary composer actions the control row
-        // does not carry inline.
-        let overflow_menu = self.overflow_open.then(|| self.render_chat_menu(theme, cx));
         let chat_history_menu = self.history_open.then(|| self.render_history(theme, cx));
 
         let attach_button = div()
@@ -1055,6 +1052,18 @@ impl Chat {
             self.composer_row.docked.set(false);
             RowLayout::Full
         };
+
+        // Overflow menu (F-CHAT-14) and the Chat History popover
+        // (F-CHAT-34/35): the secondary composer actions the control row does
+        // not carry inline. Built after the layout is known, because a Compact
+        // row hands Fast, Thinking and the panel toggle to this menu.
+        let overflow_menu = self.overflow_open.then(|| self.render_chat_menu(theme, cx));
+        // The thinking picker hangs from ⋯ in a Compact row, which has no chip
+        // for it (the Full row's chip hangs its own). ⋯ is the first control on
+        // the left, so the picker grows rightward into the chat.
+        let compact_thinking_picker = (layout == RowLayout::Compact)
+            .then(|| self.render_thinking_picker(theme, Hang::Above, cx))
+            .flatten();
 
         let composer_context_menu = self
             .composer_context_menu
@@ -1161,14 +1170,18 @@ impl Chat {
             prompt = prompt.above(chips);
         }
         if has_agent {
+            prompt = prompt.tool(attach_button);
+            // Compact moves the panel's toggle into ⋯.
+            if layout == RowLayout::Full {
+                prompt = prompt.tool(panel_button);
+            }
             prompt = prompt
-                .tool(attach_button)
-                .tool(panel_button)
                 .tool(
                     div()
                         .relative()
                         .child(overflow_button)
                         .children(overflow_menu)
+                        .children(compact_thinking_picker)
                         .children(chat_history_menu),
                 )
                 .trailing(self.render_agent_controls(theme, layout, window, cx));

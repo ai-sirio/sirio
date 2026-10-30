@@ -1032,8 +1032,11 @@ mod tests {
         let panel = cx.debug_bounds("session-panel").expect("still drawn");
         assert_eq!(panel.size.width, px(264.0), "the chat's width less 16");
 
-        // The toggle still closes it.
-        click(cx, "session-panel-toggle");
+        // At 280px the row is Compact, and the toggle is a row in ⋯: it still
+        // closes the column.
+        assert!(cx.debug_bounds("session-panel-toggle").is_none());
+        click(cx, "composer-overflow");
+        click(cx, "overflow-session-panel");
         assert!(cx.debug_bounds("session-panel").is_none());
 
         // Wide again, it docks and the transcript gives it room.

@@ -69,8 +69,14 @@ fn near(a: Pixels, b: Pixels, tolerance: f32) -> bool {
 async fn composer_band_spans_the_chat_column_on_one_row(cx: &mut TestAppContext) {
     let (chat, cx) = chat_view(cx, &["plain"]);
     pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-    chat.update(cx, |chat, _| configure_full_row(chat));
-    refresh_frame(cx);
+    // The Full row, which holds every control ROW_CONTROLS names.
+    chat.update(cx, |chat, _| {
+        configure_fitting_full_row(chat);
+        chat.background_tasks = 2;
+    });
+    assert_fits(cx, &chat);
+    resize_to(cx, 1920.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Full);
 
     let root = cx.debug_bounds("chat-root").expect("the chat pane");
     let composer = cx.debug_bounds("composer").expect("the band");
@@ -533,11 +539,10 @@ fn use_the_long_model_name(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>
     });
 }
 
-/// Takes Fast, Thinking and the background tasks off the full row. The compact
-/// layout moves Fast and Thinking out of the row (and the session panel toggle
-/// with them), but until it does they are drawn, and with them a narrow row
-/// overflows and its chips lose their places: the tests that read where a chip
-/// is leave them out.
+/// Takes Fast, Thinking and the background tasks off the row. The Full row
+/// draws Fast and Thinking, and a row that draws them and does not fit has its
+/// chips lose their places: the tests that read where a chip is, in a row they
+/// need to be Full, leave them out. (The Compact row moves them into ⋯.)
 fn without_the_chips_compact_will_move(chat: &mut Chat) {
     chat.fast_mode = None;
     chat.thinking_display = None;
@@ -868,7 +873,6 @@ async fn compact_without_a_catalogue_keeps_the_dot_and_fits(cx: &mut TestAppCont
         cx,
         &[
             "attach-image",
-            "session-panel-toggle",
             "composer-overflow",
             "chat-status",
             "context-ring",
@@ -949,12 +953,197 @@ async fn narrow_control_row_keeps_every_essential_control_reachable(cx: &mut Tes
         cx,
         &[
             "attach-image",
-            "session-panel-toggle",
             "composer-overflow",
             "chat-status",
             "model-chip",
             "effort-chip",
             "context-ring",
         ],
+    );
+}
+
+/// Opens the ⋯ menu and lets the frame settle.
+fn open_overflow(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>) {
+    cx.update(|window, app| chat.update(app, |chat, cx| chat.toggle_overflow(window, cx)));
+    refresh_frame(cx);
+}
+
+/// Clicks the centre of a drawn control and lets the frames settle.
+fn click_drawn(cx: &mut VisualTestContext, name: &'static str) {
+    let control = drawn(cx, name);
+    cx.simulate_click(control.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    for _ in 0..3 {
+        refresh_frame(cx);
+    }
+}
+
+/// A Full row holds Fast, Thinking and the panel toggle on its one line; a
+/// Compact one hands all three to ⋯, as rows above Follow, in that order.
+#[gpui::test]
+async fn compact_moves_fast_thinking_and_the_panel_into_the_overflow_menu(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    let moved = ["fast-mode-chip", "thinking-chip", "session-panel-toggle"];
+    let rows = [
+        "overflow-fast",
+        "overflow-thinking",
+        "overflow-session-panel",
+    ];
+
+    // Full: the chips are in the row, and ⋯ does not repeat them.
+    chat.update(cx, |chat, _| configure_fitting_full_row(chat));
+    assert_fits(cx, &chat);
+    resize_to(cx, 1920.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Full);
+    for name in moved {
+        drawn(cx, name);
+    }
+    // Every control the row holds, Fast and Thinking among them, is on its one
+    // line inside the band.
+    assert_one_line_inside_the_band(
+        cx,
+        &[
+            "attach-image",
+            "session-panel-toggle",
+            "composer-overflow",
+            "chat-status",
+            "model-chip",
+            "effort-chip",
+            "fast-mode-chip",
+            "thinking-chip",
+            "context-ring",
+        ],
+    );
+    open_overflow(cx, &chat);
+    drawn(cx, "overflow-follow");
+    for name in rows {
+        assert!(
+            cx.debug_bounds(name).is_none(),
+            "{name} is not in ⋯ while the row is Full"
+        );
+    }
+
+    // Compact: the chips are gone from the row and are rows in ⋯.
+    chat.update(cx, |chat, _| {
+        chat.overflow_open = false;
+        configure_full_row(chat);
+    });
+    resize_to(cx, 360.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    for name in moved {
+        assert!(
+            cx.debug_bounds(name).is_none(),
+            "{name} left the Compact row"
+        );
+    }
+    open_overflow(cx, &chat);
+    let follow = drawn(cx, "overflow-follow");
+    let mut above = None;
+    for name in rows {
+        let row = drawn(cx, name);
+        if let Some(previous) = above {
+            assert!(
+                previous < row.top(),
+                "{name} sits below the row before it: {previous:?} then {row:?}"
+            );
+        }
+        above = Some(row.top());
+    }
+    assert!(
+        above.expect("three rows") < follow.top(),
+        "the three rows are above Follow Edited Files"
+    );
+}
+
+/// Choosing Thinking in ⋯ closes the menu and opens the same picker, which
+/// grows rightward from ⋯ (the control is the first on the left) and has the
+/// focus. The chat fills the window here and the window snaps a popup back
+/// inside it, so the containment check alone could never fail: the picker's
+/// left edge on ⋯'s is what proves where it hangs.
+#[gpui::test]
+async fn the_overflow_thinking_row_opens_its_picker_inside_the_pane(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    resize_to(cx, 360.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    let root = drawn(cx, "chat-root");
+    let overflow = drawn(cx, "composer-overflow");
+
+    open_overflow(cx, &chat);
+    click_drawn(cx, "overflow-thinking");
+
+    assert!(
+        cx.debug_bounds("composer-overflow-menu").is_none(),
+        "choosing Thinking closes ⋯"
+    );
+    let picker = drawn(cx, "thinking-picker");
+    assert!(
+        picker.left() >= root.left() - px(0.5) && picker.right() <= root.right() + px(0.5),
+        "the thinking picker stays inside the chat: root={root:?} picker={picker:?}"
+    );
+    assert!(
+        near(picker.left(), overflow.left(), 0.5),
+        "the picker grows rightward from ⋯: overflow={overflow:?} picker={picker:?}"
+    );
+    assert!(
+        cx.update(|window, app| chat.read(app).thinking_picker_focus.is_focused(window)),
+        "the picker keeps the focus"
+    );
+}
+
+/// A Fast mode the CLI has refused is a row that is off and says why; pressing
+/// it changes nothing.
+#[gpui::test]
+async fn a_blocked_fast_row_says_why_and_does_nothing(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| {
+        configure_full_row(chat);
+        chat.fast_mode = Some(FastMode {
+            enabled: false,
+            blocked_by: Some("sdk_opt_in_required".into()),
+        });
+    });
+    resize_to(cx, 360.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+
+    open_overflow(cx, &chat);
+    drawn(cx, "overflow-fast");
+    click_drawn(cx, "overflow-fast");
+
+    chat.read_with(cx, |chat, _| {
+        let fast = chat
+            .fast_mode
+            .as_ref()
+            .expect("fast mode is still reported");
+        assert!(
+            !fast.enabled && fast.blocked_by.as_deref() == Some("sdk_opt_in_required"),
+            "a blocked row changes nothing: {fast:?}"
+        );
+    });
+    assert!(
+        cx.debug_bounds("composer-overflow-menu").is_some(),
+        "a blocked row leaves the menu where it is"
+    );
+}
+
+/// ⋯ carries the session panel's toggle once the row is Compact.
+#[gpui::test]
+async fn the_overflow_panel_row_opens_the_session_panel(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    resize_to(cx, 360.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    assert!(!chat.read_with(cx, |chat, _| chat.session_panel_open()));
+
+    open_overflow(cx, &chat);
+    click_drawn(cx, "overflow-session-panel");
+
+    assert!(
+        chat.read_with(cx, |chat, _| chat.session_panel_open()),
+        "the row opens the session panel"
     );
 }
