@@ -2,6 +2,7 @@
 //! content on the transcript's reading column, and holds every control on one
 //! line.
 use super::composer_row::{BAND_COLUMN, HYSTERESIS, RowLayout, row_width};
+use super::controls::OverflowRow;
 use super::tests::{
     chat_view, configure_test_chat, focus_and_type, pump_chat_until, refresh_frame,
 };
@@ -960,6 +961,9 @@ async fn narrow_control_row_keeps_every_essential_control_reachable(cx: &mut Tes
             "context-ring",
         ],
     );
+    // The session panel's toggle left the row, so ⋯ is where it is reached.
+    open_overflow(cx, &chat);
+    drawn(cx, "overflow-session-panel");
 }
 
 /// Opens the ⋯ menu and lets the frame settle.
@@ -1057,7 +1061,7 @@ async fn compact_moves_fast_thinking_and_the_panel_into_the_overflow_menu(cx: &m
 }
 
 /// Choosing Thinking in ⋯ closes the menu and opens the same picker, which
-/// grows rightward from ⋯ (the control is the first on the left) and has the
+/// grows rightward from ⋯ (it is in the left group) and has the
 /// focus. The chat fills the window here and the window snaps a popup back
 /// inside it, so the containment check alone could never fail: the picker's
 /// left edge on ⋯'s is what proves where it hangs.
@@ -1093,10 +1097,49 @@ async fn the_overflow_thinking_row_opens_its_picker_inside_the_pane(cx: &mut Tes
     );
 }
 
-/// A Fast mode the CLI has refused is a row that is off and says why; pressing
-/// it changes nothing.
+/// Fast mode the CLI has refused is a disabled row in ⋯: Ely's menu model
+/// steps over it and will not run it. (Rendering the menu and pressing the row
+/// proves nothing here: Ely gives a disabled row no mouse handler, the ACP test
+/// client accepts any request, and the check moves only on the CLI's echo. The
+/// menu model is what carries the disabling.) An enabled Fast row is the control
+/// case, so the assertions can tell the two apart.
 #[gpui::test]
-async fn a_blocked_fast_row_says_why_and_does_nothing(cx: &mut TestAppContext) {
+async fn a_blocked_fast_row_is_disabled(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    resize_to(cx, 360.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+
+    let menu_with = |cx: &mut VisualTestContext, blocked_by: Option<&str>| {
+        chat.update(cx, |chat, cx| {
+            chat.fast_mode = Some(FastMode {
+                enabled: false,
+                blocked_by: blocked_by.map(str::to_string),
+            });
+            chat.overflow_menu(cx)
+        })
+    };
+    let open = menu_with(cx, None);
+    assert_eq!(open.step(None, 1), Some(0), "Fast is the menu's first row");
+    assert!(cx.update(|window, app| open.run(0, window, app)));
+
+    let blocked = menu_with(cx, Some("sdk_opt_in_required"));
+    assert_eq!(
+        blocked.step(None, 1),
+        Some(1),
+        "the keys step over a blocked Fast row"
+    );
+    assert!(
+        !cx.update(|window, app| blocked.run(0, window, app)),
+        "a blocked Fast row does not run"
+    );
+}
+
+/// ⋯ opened from the keyboard starts on the first row that can be chosen, and
+/// the arrows step over a blocked Fast row in both directions.
+#[gpui::test]
+async fn the_keyboard_skips_a_blocked_fast_row(cx: &mut TestAppContext) {
     let (chat, cx) = chat_view(cx, &["plain"]);
     pump_chat_until(cx, &chat, |chat| chat.client.is_some());
     chat.update(cx, |chat, _| {
@@ -1108,24 +1151,36 @@ async fn a_blocked_fast_row_says_why_and_does_nothing(cx: &mut TestAppContext) {
     });
     resize_to(cx, 360.0, 700.0);
     assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    let rows = chat.read_with(cx, |chat, _| chat.overflowed_rows());
+    assert_eq!(
+        rows,
+        [
+            OverflowRow::Fast,
+            OverflowRow::Thinking,
+            OverflowRow::SessionPanel
+        ]
+    );
 
     open_overflow(cx, &chat);
-    drawn(cx, "overflow-fast");
-    click_drawn(cx, "overflow-fast");
-
-    chat.read_with(cx, |chat, _| {
-        let fast = chat
-            .fast_mode
-            .as_ref()
-            .expect("fast mode is still reported");
-        assert!(
-            !fast.enabled && fast.blocked_by.as_deref() == Some("sdk_opt_in_required"),
-            "a blocked row changes nothing: {fast:?}"
-        );
+    let cursor = |cx: &mut VisualTestContext| chat.read_with(cx, |chat, _| chat.picker_cursor);
+    assert_eq!(
+        cursor(cx),
+        Some(1),
+        "the cursor starts on Thinking, not Fast"
+    );
+    cx.update(|window, app| chat.update(app, |chat, cx| chat.picker_next(&PickerNext, window, cx)));
+    assert_eq!(cursor(cx), Some(2), "Down moves to the next enabled row");
+    chat.update(cx, |chat, _| chat.picker_cursor = Some(1));
+    cx.update(|window, app| {
+        chat.update(app, |chat, cx| {
+            chat.picker_previous(&PickerPrevious, window, cx)
+        })
     });
-    assert!(
-        cx.debug_bounds("composer-overflow-menu").is_some(),
-        "a blocked row leaves the menu where it is"
+    let rows = chat.update(cx, |chat, cx| chat.picker_rows(cx).len());
+    assert_eq!(
+        cursor(cx),
+        Some(rows - 1),
+        "Up from Thinking wraps past the blocked Fast row"
     );
 }
 
@@ -1146,4 +1201,124 @@ async fn the_overflow_panel_row_opens_the_session_panel(cx: &mut TestAppContext)
         chat.read_with(cx, |chat, _| chat.session_panel_open()),
         "the row opens the session panel"
     );
+    assert!(
+        cx.debug_bounds("composer-overflow-menu").is_none(),
+        "choosing the row closes ⋯"
+    );
+    assert!(
+        cx.update(|window, app| {
+            chat.read(app)
+                .composer_field
+                .read(app)
+                .focus_handle(app)
+                .is_focused(window)
+        }),
+        "the composer has the focus again"
+    );
+}
+
+/// With every chip present, nothing in the row covers send or paints outside
+/// the band, at 280px and at the 160px a pane can be dragged down to. Child
+/// `debug_bounds` are the boxes layout gave the children, not what their parent
+/// clips, so the chips are checked through the container that does the clipping
+/// (`composer-chips`): it ends before send, inside the band.
+#[gpui::test]
+async fn the_chips_never_cover_send(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+
+    for width in [280.0, 160.0] {
+        resize_to(cx, width, 700.0);
+        assert_eq!(
+            row_layout_now(cx, &chat),
+            RowLayout::Compact,
+            "at {width}px"
+        );
+        let composer = drawn(cx, "composer");
+        let send = drawn(cx, "send");
+        let chips = drawn(cx, "composer-chips");
+        assert!(
+            send.left() >= composer.left() && send.right() <= composer.right(),
+            "send is inside the band at {width}px: send={send:?} composer={composer:?}"
+        );
+        assert!(
+            chips.right() <= send.left() + px(0.5),
+            "the chips end before send at {width}px: chips={chips:?} send={send:?}"
+        );
+        assert!(
+            chips.left() >= composer.left() && chips.right() <= composer.right(),
+            "the chips are inside the band at {width}px: chips={chips:?} composer={composer:?}"
+        );
+    }
+}
+
+/// The chips of the Compact row, left to right, that a full chat holds.
+const COMPACT_CHIPS: [&str; 5] = [
+    "chat-status",
+    "model-chip",
+    "effort-chip",
+    "background-tasks-chip",
+    "context-ring",
+];
+
+/// Whether every chip is drawn whole inside `composer-chips`, on one line.
+fn chips_fit_whole(cx: &mut VisualTestContext) -> bool {
+    let chips = drawn(cx, "composer-chips");
+    let send = drawn(cx, "send");
+    COMPACT_CHIPS.iter().all(|name| {
+        let chip = drawn(cx, name);
+        chip.right() <= chips.right() + px(0.5) && near(chip.center().y, send.center().y, 2.0)
+    })
+}
+
+/// Below a measured width the Compact row cannot hold every chip whole, and the
+/// rightmost ones (the task count, then the ring) are what gets cut. The real
+/// minimum with every chip a chat can have (mode, model at its 56px floor,
+/// effort, two background tasks, ring) is 346px on the test font (7.8px a
+/// character); it is found here by search, and the width one pixel under it
+/// cuts the last chip, which is the ring.
+#[gpui::test]
+async fn compact_row_fits_every_chip_from_its_measured_minimum(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+
+    let mut minimum = None;
+    for width in 280..=480 {
+        resize_to(cx, width as f32, 700.0);
+        assert_eq!(
+            row_layout_now(cx, &chat),
+            RowLayout::Compact,
+            "at {width}px"
+        );
+        if chips_fit_whole(cx) {
+            minimum = Some(width);
+            break;
+        }
+    }
+    let minimum = minimum.expect("some width up to 480px holds every chip");
+    assert!(
+        (330..=360).contains(&minimum),
+        "the measured minimum is about 346px, got {minimum}px"
+    );
+    // It holds from there up, and one pixel under it the ring is cut.
+    for width in minimum..minimum + 20 {
+        resize_to(cx, width as f32, 700.0);
+        assert!(chips_fit_whole(cx), "every chip fits whole at {width}px");
+        assert_one_line_inside_the_band(cx, &COMPACT_CHIPS);
+    }
+    resize_to(cx, (minimum - 1) as f32, 700.0);
+    assert!(!chips_fit_whole(cx), "one pixel under, a chip is cut");
+    let chips = drawn(cx, "composer-chips");
+    assert!(
+        drawn(cx, "context-ring").right() > chips.right() + px(0.5),
+        "the ring, the last chip, is the one cut"
+    );
+    for name in &COMPACT_CHIPS[..4] {
+        assert!(
+            drawn(cx, name).right() <= chips.right() + px(0.5),
+            "{name} is not cut: the cut falls on the right"
+        );
+    }
 }

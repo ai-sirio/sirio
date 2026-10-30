@@ -1059,8 +1059,8 @@ impl Chat {
         // row hands Fast, Thinking and the panel toggle to this menu.
         let overflow_menu = self.overflow_open.then(|| self.render_chat_menu(theme, cx));
         // The thinking picker hangs from ⋯ in a Compact row, which has no chip
-        // for it (the Full row's chip hangs its own). ⋯ is the first control on
-        // the left, so the picker grows rightward into the chat.
+        // for it (the Full row's chip hangs its own). ⋯ is in the left group, so
+        // the picker grows rightward into the chat.
         let compact_thinking_picker = (layout == RowLayout::Compact)
             .then(|| self.render_thinking_picker(theme, Hang::Above, cx))
             .flatten();

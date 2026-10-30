@@ -177,23 +177,16 @@ impl Chat {
             });
 
         let fast = self
-            .fast_mode
-            .as_ref()
-            .filter(|_| model_visible)
+            .fast_state()
             .map_or(0.0, |_| 2.0 * CHIP_PAD_X + measure("Fast"));
         let background = (self.background_tasks > 0)
             .then(|| 2.0 * CHIP_PAD_X + measure(&format!("⌁ {}", self.background_tasks)));
-        let thinking = self
-            .thinking_display
-            .as_ref()
-            .filter(|state| !state.unsupported)
-            .filter(|_| model_visible)
-            .map_or(0.0, |state| {
-                let value = state.chosen.as_deref().map_or(0.0, |chosen| {
-                    CHIP_GAP + measure(super::thinking_display_name(chosen))
-                });
-                2.0 * CHIP_PAD_X + measure("Thinking") + value
+        let thinking = self.thinking_state().map_or(0.0, |state| {
+            let value = state.chosen.as_deref().map_or(0.0, |chosen| {
+                CHIP_GAP + measure(super::thinking_display_name(chosen))
             });
+            2.0 * CHIP_PAD_X + measure("Thinking") + value
+        });
         let context = 2.0 * CHIP_PAD_X + CONTEXT_RING + CHIP_GAP + measure("Context");
 
         let chips = pill + model + effort + fast + background.unwrap_or(0.0) + thinking + context;

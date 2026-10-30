@@ -118,6 +118,16 @@ impl Chat {
         Some((filled, levels.len()))
     }
 
+    /// Fast mode, while there is a control to draw for it: the session reported
+    /// the feature and the model controls are shown. The chip in the Full row,
+    /// the row in ⋯ in the Compact one and the width the Full row needs all ask
+    /// this, so they agree.
+    pub(super) fn fast_state(&self) -> Option<&FastMode> {
+        self.fast_mode
+            .as_ref()
+            .filter(|_| self.model_control_visible())
+    }
+
     /// The thinking display, while there is one to draw: the transport has it
     /// and the CLI has not refused the verb. The chip in the Full row and the
     /// row in ⋯ in the Compact one both ask this, so they appear together.
@@ -131,7 +141,7 @@ impl Chat {
     /// The thinking picker while it is open, hung from the control the caller
     /// puts it in: the chip in the Full row (`Hang::AboveEnd`, growing leftward
     /// from the right-aligned group) or ⋯ in the Compact one (`Hang::Above`,
-    /// growing rightward from the first control on the left).
+    /// growing rightward from ⋯, which is in the left group).
     pub(super) fn render_thinking_picker(
         &self,
         theme: &Theme,
@@ -492,9 +502,9 @@ impl Chat {
         // refused it, the chip stays and carries the CLI's own sentence,
         // the way a missing language server names the program.
         let fast_control = self
-            .fast_mode
-            .clone()
-            .filter(|_| self.model_control_visible() && !compact)
+            .fast_state()
+            .cloned()
+            .filter(|_| !compact)
             .map(|fast| {
                 let blocked = fast.blocked_by.clone();
                 let fast_entity = entity.clone();
@@ -1112,11 +1122,16 @@ impl Chat {
             None
         };
 
+        // The chips clip: on a pane too narrow for all of them the rightmost
+        // are cut at this element's edge, and send, which the band keeps after
+        // it, is never covered.
         div()
+            .debug_selector(|| "composer-chips".into())
             .flex()
             .items_center()
             .gap_1()
             .min_w_0()
+            .overflow_hidden()
             .child(
                 div()
                     .relative()
@@ -1241,24 +1256,53 @@ impl Chat {
                 })
                 .unwrap_or_default()
         } else if self.overflow_open {
-            // What the Compact row has no room for is a row here, ahead of the
-            // menu's own: the Full row draws those controls itself.
-            let compact = self.composer_row.layout.get() == RowLayout::Compact;
-            let fast = self.fast_mode.is_some() && self.model_control_visible();
-            [
-                (compact && fast).then_some(OverflowRow::Fast),
-                (compact && self.thinking_state().is_some()).then_some(OverflowRow::Thinking),
-                compact.then_some(OverflowRow::SessionPanel),
-                Some(OverflowRow::Follow),
-                Some(OverflowRow::NewConversation),
-                Some(OverflowRow::History),
-            ]
-            .into_iter()
-            .flatten()
-            .map(PickerRow::Overflow)
-            .collect()
+            self.overflow_rows()
+                .into_iter()
+                .map(PickerRow::Overflow)
+                .collect()
         } else {
             Vec::new()
+        }
+    }
+
+    /// What the current layout moves out of the row and into ⋯, whether or not
+    /// ⋯ is open: in the Full row, nothing. In order, these are the rows ahead
+    /// of the menu's own.
+    pub(super) fn overflowed_rows(&self) -> Vec<OverflowRow> {
+        if self.composer_row.layout.get() != RowLayout::Compact {
+            return Vec::new();
+        }
+        [
+            self.fast_state().map(|_| OverflowRow::Fast),
+            self.thinking_state().map(|_| OverflowRow::Thinking),
+            Some(OverflowRow::SessionPanel),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Every row of ⋯, in the order drawn: what the layout moved out of the
+    /// row, then the menu's own.
+    pub(super) fn overflow_rows(&self) -> Vec<OverflowRow> {
+        let mut rows = self.overflowed_rows();
+        rows.extend([
+            OverflowRow::Follow,
+            OverflowRow::NewConversation,
+            OverflowRow::History,
+        ]);
+        rows
+    }
+
+    /// Whether a row can be chosen. The only one that cannot is Fast mode while
+    /// the CLI has refused it; the menu draws that row disabled, and the keys
+    /// step over it.
+    pub(super) fn picker_row_enabled(&self, row: &PickerRow) -> bool {
+        match row {
+            PickerRow::Overflow(OverflowRow::Fast) => self
+                .fast_state()
+                .is_some_and(|fast| fast.blocked_by.is_none()),
+            _ => true,
         }
     }
 
@@ -1289,7 +1333,9 @@ impl Chat {
             PickerRow::Effort(value) => value == effort,
             PickerRow::Overflow(_) => false,
         });
-        self.picker_cursor = current.or((!rows.is_empty()).then_some(0));
+        // A row that cannot be chosen is never where the cursor starts.
+        let first_enabled = rows.iter().position(|row| self.picker_row_enabled(row));
+        self.picker_cursor = current.or(first_enabled);
     }
 
     /// The press a row runs. It is the path the keys take, so a click and
@@ -1371,8 +1417,17 @@ impl Chat {
         if rows == 0 {
             return;
         }
-        let at = self.marked_picker_row(rows as usize).unwrap_or(0) as isize;
-        self.picker_cursor = Some((at + by).rem_euclid(rows) as usize);
+        let all = self.picker_rows(cx);
+        let mut at = self.marked_picker_row(rows as usize).unwrap_or(0) as isize;
+        // The next row that can be chosen, wrapping; none at all leaves the
+        // cursor where it is.
+        for _ in 0..rows {
+            at = (at + by).rem_euclid(rows);
+            if self.picker_row_enabled(&all[at as usize]) {
+                self.picker_cursor = Some(at as usize);
+                break;
+            }
+        }
         cx.notify();
     }
 
