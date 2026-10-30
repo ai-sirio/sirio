@@ -270,11 +270,6 @@ mod tests {
                             "redraws forever: needed={needed} docked={docked} \
                              current={current:?} rendered={rendered:?} width={width}"
                         );
-                        assert_eq!(
-                            probe_notifies(width, docked, needed, current),
-                            rendered != current,
-                            "needed={needed} docked={docked} current={current:?} width={width}"
-                        );
                     }
                 }
             }

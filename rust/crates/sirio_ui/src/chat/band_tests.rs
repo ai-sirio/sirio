@@ -420,8 +420,8 @@ async fn bypass_is_the_only_mode_drawn_in_danger(cx: &mut TestAppContext) {
     let (chat, cx) = chat_view(cx, &["plain"]);
     pump_chat_until(cx, &chat, |chat| chat.client.is_some());
     chat.update(cx, |chat, _| configure_fitting_full_row(chat));
-    // Bypass has the longest name of the five, and the row is Full at 1920px
-    // whatever the mode.
+    // The fixture fits with Accept edits; Bypass, the longest name, is checked
+    // where it is drawn.
     assert_fits(cx, &chat);
 
     for (width, layout) in [(1920.0, RowLayout::Full), (360.0, RowLayout::Compact)] {
@@ -435,6 +435,11 @@ async fn bypass_is_the_only_mode_drawn_in_danger(cx: &mut TestAppContext) {
             );
         }
         set_mode(cx, &chat, "bypassPermissions");
+        assert_eq!(
+            row_layout_now(cx, &chat),
+            layout,
+            "Bypass keeps the row {layout:?} at {width}px"
+        );
         let pill = drawn(cx, "chat-status");
         let danger = drawn(cx, "mode-chip-danger");
         assert!(
@@ -566,7 +571,7 @@ fn needed_now(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>) -> f32 {
     })
 }
 
-/// Asserts the Full row fits the band with room to spare, whatever the mode.
+/// Asserts the Full row fits the band with room to spare, in the current mode.
 fn assert_fits(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>) -> f32 {
     let needed = needed_now(cx, chat);
     assert!(
@@ -629,7 +634,7 @@ fn assert_one_line_inside_the_band(cx: &mut VisualTestContext, controls: &[&'sta
 }
 
 /// The Full row is chosen from exactly the width it needs plus the hysteresis,
-/// holds every control on one line there, and gives way one f32 step under what
+/// holds every control on one line there, and gives way one whole pixel under what
 /// it needs. At exactly what it needs the model's name is still drawn whole, so a
 /// measure that came up short would show as an ellipsized name. (With every chip a
 /// chat can have and a model name this long the Full row is wider than the band
@@ -696,7 +701,7 @@ async fn full_row_fits_at_the_narrowest_width_it_is_chosen(cx: &mut TestAppConte
     assert_eq!(
         row_layout_now(cx, &chat),
         RowLayout::Compact,
-        "one f32 step under what Full needs (needed={needed})"
+        "one pixel under what Full needs (needed={needed})"
     );
     // From Compact it takes a whole hysteresis step to go back.
     resize_to(cx, chat_width_for(needed + HYSTERESIS / 2.0, false), 700.0);
@@ -709,7 +714,7 @@ async fn full_row_fits_at_the_narrowest_width_it_is_chosen(cx: &mut TestAppConte
     assert_eq!(
         row_layout_now(cx, &chat),
         RowLayout::Compact,
-        "one f32 step short of it"
+        "one pixel short of it"
     );
     resize_to(cx, chat_width_for(needed + HYSTERESIS, false), 700.0);
     assert_eq!(row_layout_now(cx, &chat), RowLayout::Full, "a step wider");
