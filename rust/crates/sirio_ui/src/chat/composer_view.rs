@@ -547,6 +547,7 @@ impl Chat {
     }
 }
 
+use super::composer_row::{BAND_COLUMN, BAND_TOP_PAD};
 use super::*;
 use crate::popup::{hang_above_at, menu_card, menu_row};
 use ely_gpui_component::{
@@ -561,11 +562,11 @@ use ely_gpui_component::{
 /// card's field always had between its edge and its text.
 const FIELD_PAD_Y: f32 = 5.0;
 
-/// The distance from the shell's top edge to the field's first row: its 1px
-/// border and 12px padding. The completion popups hang above the token that
-/// opened them, and this keeps one opened on the first row above the card
-/// instead of over its border.
-const SHELL_TOP_INSET: f32 = 13.0;
+/// The distance from the band's top edge to the field's first row: its 1px
+/// rule and its top padding. The completion popups hang above the token that
+/// opened them, and this keeps one opened on the first row above the band
+/// instead of over its rule.
+const SHELL_TOP_INSET: f32 = 1.0 + BAND_TOP_PAD;
 
 /// What the chip calls an attached picture: the kind of file it will be sent as.
 fn attachment_chip_name(mime_type: &str) -> String {
@@ -985,7 +986,7 @@ impl Chat {
             .flex_none()
             .debug_selector(|| "attach-image".into())
             .child(
-                IconButton::new("attach-image-button", IconName::Paperclip)
+                IconButton::new("attach-image-button", IconName::Plus)
                     .variant(ButtonVariant::Ghost)
                     .size(ControlSize::Sm)
                     .tooltip("Attach image")
@@ -1118,7 +1119,8 @@ impl Chat {
         let streaming = self.streaming;
         let mut prompt = PromptInput::custom("composer-shell", editor, can_send, move |_, cx| {
             send_entity.update(cx, |chat, cx| chat.send(cx));
-        });
+        })
+        .band(px(BAND_COLUMN));
         if streaming {
             // While a turn runs the send control is stop: the same path Escape
             // takes, and it leaves the draft alone.
@@ -1131,21 +1133,20 @@ impl Chat {
         }
         if has_agent {
             prompt = prompt
-                .tool(self.render_agent_controls(theme, window, cx))
-                .trailing(attach_button)
-                .trailing(panel_button)
-                .trailing(
+                .tool(attach_button)
+                .tool(panel_button)
+                .tool(
                     div()
                         .relative()
                         .child(overflow_button)
                         .children(overflow_menu)
                         .children(chat_history_menu),
-                );
+                )
+                .trailing(self.render_agent_controls(theme, window, cx));
         }
 
         div()
             .w_full()
-            .max_w(px(TRANSCRIPT_WIDTH))
             .flex()
             .flex_col()
             .child(

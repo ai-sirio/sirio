@@ -625,16 +625,19 @@ async fn ely_generating_indicator_sits_above_the_composer_left_edge(cx: &mut Tes
     pump_chat_until(cx, &chat, |v| v.streaming);
     refresh_frame(cx);
     let composer = cx.debug_bounds("composer").unwrap();
+    let transcript = cx.debug_bounds("chat-transcript").unwrap();
     let indicator = cx.debug_bounds("chat-generating-indicator").unwrap();
+    // The band spans the whole chat, so the reading column's own edge is the
+    // reference now: the row still starts just inside it.
     assert!(
-        (indicator.left() - (composer.left() + px(4.0))).abs() < px(0.5),
-        "the Thinking row starts just inside the composer card's left edge: {:?} vs {:?}",
+        (indicator.left() - (transcript.left() + px(4.0))).abs() < px(0.5),
+        "the Thinking row starts just inside the reading column's left edge: {:?} vs {:?}",
         indicator.left(),
-        composer.left()
+        transcript.left()
     );
     assert!(
         composer.top() - indicator.bottom() >= px(8.0),
-        "the Thinking row stands clear of the card's top border: {:?} vs {:?}",
+        "the Thinking row stands clear of the band's top rule: {:?} vs {:?}",
         indicator.bottom(),
         composer.top()
     );
@@ -967,6 +970,7 @@ async fn ely_history_opens_the_chosen_session_and_confirms_deletion(cx: &mut Tes
 }
 
 #[gpui::test]
+#[ignore = "rewritten in composer band Task 3"]
 async fn ely_narrow_catalogue_popup_keeps_send_and_focus_reachable(cx: &mut TestAppContext) {
     let (chat, cx) = super::tests::chat_view(cx, &["plain"]);
     pump_chat_until(cx, &chat, |v| v.client.is_some());

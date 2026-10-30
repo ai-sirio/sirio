@@ -60,8 +60,8 @@ fn effort_steps(
 
 impl Chat {
     /// The control row's chips, each with the popup it hangs. One element so
-    /// the composer takes it as a single tool slot; its own wrapping keeps
-    /// the chips inside a narrow pane.
+    /// the composer takes it as a single trailing slot; it is one line, and
+    /// the model chip, which may shrink, is what gives on a narrow one.
     pub(super) fn render_agent_controls(
         &self,
         theme: &Theme,
@@ -143,17 +143,15 @@ impl Chat {
                     .map(|choice| choice.name.clone())
                     .unwrap_or_else(|| current.clone());
                 // Not uppercased any more: it used to be a bare caption that
-                // needed to read as chrome, and now it sits beside its own
-                // "Effort" label exactly the way the model value sits beside
-                // "Model".
+                // needed to read as chrome, and now it stands on its own, as
+                // the model's name does.
                 name
             })
         });
-        // The picker chip — "Model" in muted chrome text, the value in
-        // title text, the effort level when one is selected — opens only
-        // once a turn has completed and the agent reported models. Without
-        // models the pill degrades to a plain agent badge (F-CHAT-36): no
-        // label, no chevron, no picker.
+        // The picker chip — the value in title text and a chevron, with no key
+        // label: the name speaks for itself — opens only once a turn has
+        // completed and the agent reported models. Without models the pill
+        // degrades to a plain agent badge (F-CHAT-36): no chevron, no picker.
         let model_control = if self.model_control_visible() {
             let model_selection_id = self
                 .selected_model
@@ -180,14 +178,14 @@ impl Chat {
                 // caption rather than a picker. It still shrinks on a tight
                 // row -- that is what keeps the name's ellipsis working --
                 // but a 56px floor stops it collapsing to nothing: the name
-                // ellipsizes while the row wraps around it, never erasing
-                // the picker.
+                // ellipsizes down to the floor, never erasing the picker. The
+                // row is one line and compacts instead of wrapping (the
+                // compact layout is the band's Task 3).
                 .min_w(px(56.0))
                 .hover(|style| style.bg(bezel_theme.element_hover))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_model_picker(window, cx);
                 }))
-                .child(div().text_color(theme.ely.fg_subtle).child("Model"))
                 .child(
                     div()
                         .id(model_selection_id.clone())
@@ -248,12 +246,19 @@ impl Chat {
         };
 
         // The effort level is a peer of the model, not a caption inside it:
-        // it is changed about as often, so it belongs at the same depth and
-        // carries its own label. Drawn only when the agent reports a value
-        // AND the picker can actually open, so this is never a click target
-        // that leads nowhere. `flex_none` keeps it intact while the model
-        // chip beside it absorbs the squeeze on a narrow pane — past that
-        // the chip wraps whole to the next line, never over the send disc.
+        // it is changed about as often, so it belongs at the same depth. It
+        // reads as its bars (how high the level stands on the model's own
+        // scale) and its name. Drawn only when the agent reports a value AND
+        // the picker can actually open, so this is never a click target that
+        // leads nowhere. `flex_none` keeps it intact while the model chip
+        // beside it absorbs the squeeze on a narrow pane. The row is one line
+        // and compacts instead of wrapping (the band's Task 3).
+        let effort_bars = self.effort.as_ref().and_then(|effort| {
+            let levels = effort_rows(&effort.choices).levels;
+            let current = effort.current_value.as_deref()?;
+            let filled = levels.iter().position(|level| level.value == current)? + 1;
+            Some((filled, levels.len()))
+        });
         let effort_control = effort_label
             .filter(|_| self.model_control_visible())
             .map(|label| {
@@ -273,13 +278,26 @@ impl Chat {
                     .on_click(move |_, window, cx| {
                         effort_entity.update(cx, |chat, cx| chat.toggle_effort_picker(window, cx));
                     })
-                    .child(div().text_color(theme.ely.fg_subtle).child("Effort"))
+                    // Not a level (the reset, Ultracode): no bars.
+                    .children(effort_bars.map(|(filled, total)| {
+                        effort_steps(
+                            "effort-chip-bars".into(),
+                            filled,
+                            total,
+                            theme.ely.fg_muted,
+                            theme.ely.fg_muted.opacity(0.3),
+                        )
+                    }))
                     .child(
                         div()
                             .id("model-effort-label")
                             .debug_selector(|| "model-effort-label".into())
                             .text_color(theme.ely.fg)
-                            .child(label),
+                            .child(
+                                div()
+                                    .debug_selector(|| "effort-chip-level".into())
+                                    .child(label),
+                            ),
                     )
                     .child(
                         div()
@@ -956,7 +974,6 @@ impl Chat {
 
         div()
             .flex()
-            .flex_wrap()
             .items_center()
             .gap_1()
             .min_w_0()
