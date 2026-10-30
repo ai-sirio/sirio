@@ -447,7 +447,7 @@ impl Chat {
             });
             layer(
                 "thinking-picker-menu",
-                Hang::Above,
+                Hang::AboveEnd,
                 div()
                     .id("thinking-picker")
                     .debug_selector(|| "thinking-picker".into())
@@ -533,7 +533,7 @@ impl Chat {
 
                 layer(
                     "effort-picker-menu",
-                    Hang::Above,
+                    Hang::AboveEnd,
                     div()
                         .id("effort-picker")
                         .debug_selector(|| "effort-picker".into())
@@ -624,7 +624,7 @@ impl Chat {
                 });
             layer(
                 "model-picker-menu",
-                Hang::Above,
+                Hang::AboveEnd,
                 div()
                     .id("model-picker")
                     .debug_selector(|| "model-picker".into())
@@ -667,7 +667,7 @@ impl Chat {
             });
             layer(
                 "mode-picker-menu",
-                Hang::Above,
+                Hang::AboveEnd,
                 div()
                     .id("mode-picker")
                     .debug_selector(|| "mode-picker".into())

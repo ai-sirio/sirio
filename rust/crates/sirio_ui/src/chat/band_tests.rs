@@ -258,3 +258,64 @@ async fn the_overflow_menu_and_chat_history_open_inside_a_narrow_chat(cx: &mut T
         "the chat history grows rightward from the control: overflow={overflow:?} history={history:?}"
     );
 }
+
+/// The chips sit in the band's right-aligned group, so each picker hangs from
+/// its chip's right edge and grows toward the chat's interior. In a real
+/// window the chat has neighbours, and the window's own snapping does not keep
+/// a picker off them: here the chat fills the window, so containment would
+/// pass either way and the check that carries the test is where each picker
+/// hangs from (its chip's right edge). Until the row compacts, the Thinking
+/// chip is drawn past a 430px chat's edge, where the window snap, not the
+/// hang, places its picker: it is checked in a chat wide enough to hold it.
+#[gpui::test]
+async fn the_chip_pickers_open_inside_a_narrow_chat(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+
+    type Toggle = fn(&mut Chat, &mut Window, &mut Context<Chat>);
+    let pickers: [(f32, &'static str, &'static str, Toggle); 4] = [
+        (
+            430.0,
+            "chat-status",
+            "mode-picker",
+            Chat::toggle_mode_picker,
+        ),
+        (
+            430.0,
+            "model-chip",
+            "model-picker",
+            Chat::toggle_model_picker,
+        ),
+        (
+            430.0,
+            "effort-chip",
+            "effort-picker",
+            Chat::toggle_effort_picker,
+        ),
+        (
+            1000.0,
+            "thinking-chip",
+            "thinking-picker",
+            Chat::toggle_thinking_picker,
+        ),
+    ];
+    for (width, chip_selector, picker_selector, toggle) in pickers {
+        cx.simulate_resize(size(px(width), px(700.0)));
+        refresh_frame(cx);
+        let chip = drawn(cx, chip_selector);
+        cx.update(|window, app| chat.update(app, |chat, cx| toggle(chat, window, cx)));
+        refresh_frame(cx);
+        let picker = drawn(cx, picker_selector);
+        assert!(
+            near(picker.right(), chip.right(), 0.5),
+            "{picker_selector} hangs from its chip's right edge: chip={chip:?} picker={picker:?}"
+        );
+        cx.update(|window, app| chat.update(app, |chat, cx| toggle(chat, window, cx)));
+        refresh_frame(cx);
+        assert!(
+            cx.debug_bounds(picker_selector).is_none(),
+            "{picker_selector} closes again"
+        );
+    }
+}
