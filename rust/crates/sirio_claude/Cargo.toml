@@ -6,7 +6,7 @@ publish.workspace = true
 
 [dependencies]
 # The whole crate is serde types and pure functions over them: no process,
-# no channels, no local crates. That is what keeps it a leaf both sirio_acp
+# no channels, no local crates. That is what keeps it a leaf both sirio_chat
 # and sirio_usage can depend on without inverting the graph.
 serde = { workspace = true }
 serde_json.workspace = true

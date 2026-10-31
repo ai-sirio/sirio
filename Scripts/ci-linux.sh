@@ -234,7 +234,7 @@ run_cargo_stage "cargo build" cargo build -p sirio -p sirio_control
 WORKSPACE_CRATES=(
     sirio sirio_acp sirio_persistence sirio_activity sirio_agents sirio_control
     sirio_git sirio_project sirio_terminal sirio_theme sirio_ui sirio_markdown
-    sirio_usage
+    sirio_usage sirio_chat sirio_chat_vocab sirio_chat_child
 )
 for crate in "${WORKSPACE_CRATES[@]}"; do
     run_cargo_stage "cargo test -p $crate" cargo test -p "$crate"

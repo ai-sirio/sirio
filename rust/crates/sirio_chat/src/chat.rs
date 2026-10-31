@@ -1,9 +1,10 @@
 //! Non-drawing chat session state over one live ACP connection.
 //!
-//! [`AcpClient`](sirio_acp::AcpClient) deliberately exposes protocol-shaped events. This module is
-//! the seam a surface or a control socket uses instead: it owns one chat's
-//! lifecycle, folds streamed events into rendered transcript entries, and
-//! persists settled turns without involving GPUI or a window.
+//! [`AcpClient`](sirio_acp::AcpClient) deliberately exposes protocol-shaped
+//! events. This module is the seam a surface or a control socket uses instead:
+//! it owns one chat's lifecycle, folds streamed events into rendered
+//! transcript entries, and persists settled turns without involving GPUI or a
+//! window.
 
 use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
