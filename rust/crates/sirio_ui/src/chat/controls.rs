@@ -3,7 +3,7 @@
 //! the popup each one opens. Every control draws only what the agent reported,
 //! so a catalogue it never sent leaves no chevron and no chip behind.
 
-use super::composer_row::RowLayout;
+use super::composer_row::{CHIP_GAP, CHIP_PAD_X, MODEL_FLOOR, RowLayout};
 use super::composer_view::{EFFORT_RESET, EFFORT_ULTRACODE, effort_rows};
 use super::*;
 use ely_gpui_component::{
@@ -415,9 +415,9 @@ impl Chat {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(CHIP_GAP))
             .h(px(24.0))
-            .px(px(7.0))
+            .px(px(CHIP_PAD_X))
             .rounded(theme.radii.control)
             .text_size(typography.ui_size);
         let status_pill = if connecting {
@@ -532,9 +532,9 @@ impl Chat {
                 .tooltip(crate::controls::tooltip(model_tooltip))
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(CHIP_GAP))
                 .h(px(24.0))
-                .px(px(7.0))
+                .px(px(CHIP_PAD_X))
                 .rounded(theme.radii.control)
                 .text_size(typography.ui_size)
                 // Sized to its content, not to the row. It used to carry
@@ -548,7 +548,7 @@ impl Chat {
                 // ellipsizes down to the floor, never erasing the picker. The
                 // row is one line and compacts instead of wrapping (the
                 // compact layout is the band's Task 3).
-                .min_w(px(56.0))
+                .min_w(px(MODEL_FLOOR))
                 .hover(|style| style.bg(bezel_theme.element_hover))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.toggle_model_picker(window, cx);
@@ -596,9 +596,9 @@ impl Chat {
                 .debug_selector(|| "agent-badge".into())
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(CHIP_GAP))
                 .h(px(24.0))
-                .px(px(7.0))
+                .px(px(CHIP_PAD_X))
                 .rounded(theme.radii.control)
                 .text_size(typography.ui_size)
                 // Same rule as the chip above: hug the content.
@@ -632,9 +632,9 @@ impl Chat {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(CHIP_GAP))
                     .h(px(24.0))
-                    .px(px(7.0))
+                    .px(px(CHIP_PAD_X))
                     .rounded(theme.radii.control)
                     .text_size(typography.ui_size)
                     .hover(|style| style.bg(bezel_theme.element_hover))
@@ -713,9 +713,9 @@ impl Chat {
                     .flex()
                     .flex_none()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(px(CHIP_GAP))
                     .h(px(24.0))
-                    .px(px(7.0))
+                    .px(px(CHIP_PAD_X))
                     .rounded(theme.radii.control)
                     .text_size(typography.ui_size)
                     .when(fast.enabled && blocked.is_none(), |chip| {
@@ -747,9 +747,9 @@ impl Chat {
                 .flex()
                 .flex_none()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(CHIP_GAP))
                 .h(px(24.0))
-                .px(px(7.0))
+                .px(px(CHIP_PAD_X))
                 .rounded(theme.radii.control)
                 .text_size(typography.ui_size)
                 .text_color(theme.ely.fg_subtle)
@@ -772,9 +772,9 @@ impl Chat {
                 .flex()
                 .flex_none()
                 .items_center()
-                .gap(px(6.0))
+                .gap(px(CHIP_GAP))
                 .h(px(24.0))
-                .px(px(7.0))
+                .px(px(CHIP_PAD_X))
                 .rounded(theme.radii.control)
                 .text_size(typography.ui_size)
                 .hover(|style| style.bg(bezel_theme.element_hover))
@@ -1172,7 +1172,7 @@ impl Chat {
             .child(
                 div()
                     .relative()
-                    .min_w(px(56.0))
+                    .min_w(px(MODEL_FLOOR))
                     .child(model_control)
                     .children(model_picker),
             )
@@ -1204,9 +1204,9 @@ impl Chat {
                         .flex()
                         .flex_none()
                         .items_center()
-                        .gap(px(6.0))
+                        .gap(px(CHIP_GAP))
                         .h(px(24.0))
-                        .px(px(7.0))
+                        .px(px(CHIP_PAD_X))
                         .rounded(theme.radii.control)
                         .text_size(typography.ui_size)
                         .child(context_ring)

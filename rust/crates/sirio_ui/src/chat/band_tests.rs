@@ -726,6 +726,119 @@ async fn full_row_fits_at_the_narrowest_width_it_is_chosen(cx: &mut TestAppConte
     assert_eq!(row_layout_now(cx, &chat), RowLayout::Full, "a step wider");
 }
 
+/// A catalogue whose current mode is `default` ("Ask"), the shortest pill a
+/// catalogue gives.
+fn ask_catalog() -> ModeCatalog {
+    ModeCatalog {
+        current_id: "default".into(),
+        options: vec![AgentMode {
+            id: "default".into(),
+            name: "Ask".into(),
+            description: None,
+        }],
+        config_option_id: None,
+    }
+}
+
+/// Starts wide (Full), then holds Full down to exactly what the row says it
+/// needs, and asserts that at that width every chip of `chips` is whole inside
+/// the clip the chips sit in, the "Context" caption's chip included.
+fn assert_full_holds_every_chip_at_its_need(
+    cx: &mut VisualTestContext,
+    chat: &gpui::Entity<Chat>,
+    chips: &[&'static str],
+) -> f32 {
+    refresh_frame(cx);
+    let needed = needed_now(cx, chat);
+    assert!(
+        needed + HYSTERESIS <= row_width(f32::INFINITY, false),
+        "the row ({needed}px) can be chosen in the widest band"
+    );
+    resize_to(cx, 1920.0, 700.0);
+    resize_to(cx, chat_width_for(needed, false), 700.0);
+    assert_eq!(
+        row_layout_now(cx, chat),
+        RowLayout::Full,
+        "at exactly what it needs (needed={needed})"
+    );
+    for name in chips {
+        assert!(
+            cx.debug_bounds(name).is_some(),
+            "{name} is drawn in the Full row"
+        );
+    }
+    let container = drawn(cx, "composer-chips");
+    for name in chips {
+        let chip = drawn(cx, name);
+        assert!(
+            chips_fit_whole(cx, &[name]),
+            "{name} is cut by the chips' clip at exactly what Full needs ({needed}px): \
+             {name}={chip:?} clip={container:?}"
+        );
+    }
+    needed
+}
+
+/// The model's chip and the agent's badge are drawn at least 56px wide, however
+/// short their text: the Full row counts that floor, not the text. With a short
+/// agent badge ("Pi") and no models, a row sized to the text is 26px short and
+/// the clip cuts the ring's chip. (The catalogue stays: without one the pill is
+/// measured at its widest word and that slack hides the shortfall.)
+#[gpui::test]
+async fn full_row_counts_the_floor_under_a_short_agent_badge(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| {
+        configure_test_chat(chat);
+        chat.available_models = Vec::new();
+        chat.mode_catalog = Some(ask_catalog());
+        chat.agent_name = Some("Pi".into());
+        chat.fast_mode = None;
+        chat.thinking_display = None;
+        chat.background_tasks = 0;
+    });
+    assert_full_holds_every_chip_at_its_need(
+        cx,
+        &chat,
+        &["chat-status", "agent-badge", "context-chip"],
+    );
+}
+
+/// The same with a short model name and every chip a Full row can hold: the
+/// name "o3" is narrower than the floor, so the chip is drawn at the floor, and
+/// the row has to count it.
+#[gpui::test]
+async fn full_row_counts_the_floor_under_a_short_model_name(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| {
+        configure_full_row(chat);
+        chat.mode_catalog = Some(ask_catalog());
+        chat.available_models = vec![ModelOption {
+            id: "default".into(),
+            name: "o3".into(),
+            description: None,
+        }];
+        chat.thinking_display = Some(ThinkingDisplay {
+            chosen: Some("omitted".into()),
+            unsupported: false,
+        });
+    });
+    assert_full_holds_every_chip_at_its_need(
+        cx,
+        &chat,
+        &[
+            "chat-status",
+            "model-chip",
+            "effort-chip",
+            "fast-mode-chip",
+            "background-tasks-chip",
+            "thinking-chip",
+            "context-chip",
+        ],
+    );
+}
+
 /// Crossing the threshold asks the chat to redraw by itself: a single draw at the
 /// new width, with nothing else drawing it again, leaves a notification behind,
 /// and the next draw lays the row out Compact. (Docked, so the width stays above the overlay's 640px,

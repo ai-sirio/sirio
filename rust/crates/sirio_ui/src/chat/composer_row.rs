@@ -166,9 +166,9 @@ const TOOLS_WIDTH: f32 = 3.0 * TOOL_WIDTH + 2.0 * ROW_GAP;
 /// The gap between the row's children, `gap_1` everywhere in it.
 const ROW_GAP: f32 = 4.0;
 /// A chip's padding on each side.
-const CHIP_PAD_X: f32 = 7.0;
+pub(crate) const CHIP_PAD_X: f32 = 7.0;
 /// The gap between a chip's parts.
-const CHIP_GAP: f32 = 6.0;
+pub(crate) const CHIP_GAP: f32 = 6.0;
 /// The permission pill's icon box, and its plain dot without a catalogue.
 const MODE_ICON: f32 = 14.0;
 const STATUS_DOT: f32 = 6.0;
@@ -176,8 +176,9 @@ const STATUS_DOT: f32 = 6.0;
 const CONTEXT_RING: f32 = 16.0;
 /// The send control.
 const SEND_WIDTH: f32 = 24.0;
-/// The least width the model's chip shrinks to (its `min_w(px(56.0))`).
-const MODEL_FLOOR: f32 = 56.0;
+/// The least width the model's chip, or the agent's badge, is drawn at, whatever
+/// its text (`min_w` on both the chip and its wrapper).
+pub(crate) const MODEL_FLOOR: f32 = 56.0;
 /// The children of the chips' row: the pill, model, effort, Fast, background
 /// tasks, Thinking and the context chip, each in a wrapper that is drawn
 /// whether or not its chip is, so each pays a gap.
@@ -296,11 +297,14 @@ impl Chat {
         }
 
         let model_visible = self.model_control_visible();
+        // Drawn at least `MODEL_FLOOR` wide, however short its text: the row
+        // counts the floor, or the overflow lands in the chips' clip.
         let model = if model_visible {
             2.0 * CHIP_PAD_X + measure(&self.selected_model_name()) + CHIP_GAP + chevron
         } else {
             2.0 * CHIP_PAD_X + measure(&self.agent_badge_name())
-        };
+        }
+        .max(MODEL_FLOOR);
 
         let effort = self
             .effort_level_name()
