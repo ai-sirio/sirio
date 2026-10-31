@@ -14,10 +14,10 @@ use gpui::{
     transparent_black,
 };
 use sirio_chat::{
-    AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage,
-    EffortOption, FastMode, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption,
-    SessionNotice, THINKING_DISPLAYS, ThinkingDisplay, ToolCallContentInfo, ToolCallDiff,
-    ToolCallLocationInfo, TraceEvent,
+    AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage, EffortOption,
+    FastMode, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption, SessionNotice,
+    THINKING_DISPLAYS, ThinkingDisplay, ToolCallContentInfo, ToolCallDiff, ToolCallLocationInfo,
+    TraceEvent,
 };
 use sirio_git::{GitActions, status as git_status};
 use sirio_markdown::{
@@ -3520,7 +3520,10 @@ impl Chat {
                     Some(client @ ChatClient::Claude(_)) => {
                         Some((client.resumed_session_refused(), client.session_id()))
                     }
-                    _ => None,
+                    // Named rather than `_`: a transport added to `ChatClient`
+                    // must decide here whether it reports `SessionIdentified`,
+                    // or its resume id is silently never stored.
+                    Some(ChatClient::Acp(_)) | None => None,
                 };
                 match identified {
                     Some((true, _)) => {

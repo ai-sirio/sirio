@@ -94,7 +94,7 @@ pub struct AuthMethodInfo {
     pub description: Option<String>,
 }
 
-/// The asynchronous event stream returned by `AcpClient::launch`.
+/// The asynchronous event stream returned by every transport's `launch`.
 pub type EventStream = async_channel::Receiver<ChatEvent>;
 
 /// A permission option exposed to the caller.
@@ -409,7 +409,7 @@ pub enum ChatEvent {
     },
     /// The agent is waiting for a caller decision.
     PermissionRequest {
-        /// Handle passed to `AcpClient::respond_permission`.
+        /// Handle passed back to the transport's `respond_permission`.
         request_id: u64,
         /// Session that owns the request.
         session_id: String,
