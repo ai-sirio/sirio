@@ -118,7 +118,11 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # chat pane never goes under 320 px) are the compact row with send inside the band and the chips ending
 # before it, docked (the session panel open, a chat about 690 px wide) ends the band at the panel; every lane
 # also asserts the row is one line (the band as tall as the default window's, the chips level with send);
-# frames per lane. Each then runs a narrow lane against the `ely-catalogue` fixture, which advertises
+# the minimal lane (last) splits the chat's pane with `pane.split` (focus it with `pane.focus left`, split
+# right, until `layout` is `minimal`, about 209 px, since the window itself cannot go under 320 px), asserts
+# the same geometry and that `overflow` starts `model`, `attach`, then clicks the measured `overflowButton`,
+# reads `menu` (model first, attach second, both enabled), presses Enter (`picker` is `model`) and Escape;
+# frames per lane (minimal, minimal-overflow, minimal-model). Each then runs a narrow lane against the `ely-catalogue` fixture, which advertises
 # modes (current `ask`): `modeIcon` is what the render drew for the pill, the shield every id
 # without an icon gets, and `modeDanger` is false (the `composer` fixture, with no modes, draws none).
 # The record also carries `overflowButton`, `menu` (the rows ⋯ drew, while open) and `picker`.

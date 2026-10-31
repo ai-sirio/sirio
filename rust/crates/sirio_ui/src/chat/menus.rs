@@ -116,6 +116,18 @@ impl Chat {
                             None => item,
                         }
                     }
+                    OverflowRow::Model => MenuItem::new(format!(
+                        "Model: {}",
+                        self.selected_model_name()
+                    ))
+                    .selectors("overflow-model", None),
+                    // Information: a disabled row, which the menu steps over.
+                    OverflowRow::Agent => MenuItem::new(self.agent_badge_name())
+                        .disabled(true)
+                        .selectors("overflow-agent", None),
+                    OverflowRow::Attach => {
+                        MenuItem::new("Attach file").selectors("overflow-attach", None)
+                    }
                     OverflowRow::Thinking => {
                         let chosen = self.thinking_state().and_then(|state| state.chosen);
                         let label = match chosen {
@@ -161,9 +173,10 @@ impl Chat {
 
     /// The composer's "more" menu (F-CHAT-14): Follow Edited Files, New
     /// Conversation and Chat History, and, while the row is Compact, the
-    /// Fast, Thinking and session panel rows above them, and in a Narrow one
-    /// the task count and the context ring's row too. Follow and Fast are
-    /// toggles and leave the menu open; the others close it.
+    /// Fast, Thinking and session panel rows above them, in a Narrow one
+    /// the task count and the context ring's row too, and in a Minimal one the
+    /// model's and attach. Follow and Fast are toggles and leave the menu open;
+    /// the others close it.
     pub(super) fn render_chat_menu(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let rows = self.picker_rows(cx);
         let menu = self.overflow_menu(cx);

@@ -26,20 +26,38 @@ pub(crate) const BAND_TOP_PAD: f32 = 10.0;
 /// pane's field lines up with the text above it.
 pub(crate) const BAND_COLUMN: f32 = TRANSCRIPT_WIDTH - 2.0 * TRANSCRIPT_PAD_X;
 
-/// How the control row is laid out: every control whole, the compact set that
-/// fits a narrow band on one line, or, below that, the compact set without the
-/// background-task count and the context ring, which are rows in ⋯ then.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// How the control row is laid out, widest first (the variants are ordered, so
+/// `Full < Compact < Narrow < Minimal`): every control whole; the compact set that
+/// fits a narrow band on one line; below that, the compact set without the
+/// background-task count and the context ring, which are rows in ⋯ then; and, under
+/// that, the model chip (or the agent's badge) and the attach button are rows of ⋯ too
+/// and the chips that stay, the permission pill and the effort, lose their chevrons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum RowLayout {
     #[default]
     Full,
     Compact,
     Narrow,
+    Minimal,
 }
 
-/// How much wider than its need a row has to get before it goes back to the
-/// wider layout (Compact to Full, Narrow to Compact or Full), so a width sitting
-/// on the boundary does not flip each frame.
+impl RowLayout {
+    /// Narrow or narrower: the task count and the ring are rows of ⋯.
+    pub(crate) fn is_narrow(self) -> bool {
+        self >= RowLayout::Narrow
+    }
+
+    /// The narrowest layout: the model is a row of ⋯ and the chips that stay have
+    /// no chevrons.
+    pub(crate) fn is_minimal(self) -> bool {
+        self == RowLayout::Minimal
+    }
+}
+
+/// How much wider than its need a row has to get before it goes back to a
+/// wider layout (from Minimal to Narrow, Compact or Full, from Narrow to Compact or
+/// Full, from Compact to Full), so a width sitting on the boundary does not flip
+/// each frame.
 pub(crate) const HYSTERESIS: f32 = 16.0;
 
 /// The width the row lays its controls in: the band's content column, for a chat
@@ -51,32 +69,35 @@ pub(crate) fn row_width(chat_width: f32, docked: bool) -> f32 {
         .max(0.0)
 }
 
-/// The layout for a row `row_width` wide, from `current`. Full needs `full_needed`
-/// and Compact `compact_needed` (never more than Full: a larger figure is held to
-/// it). Full gives way below `full_needed`, to Compact when Compact fits and to
-/// Narrow when it does not. Compact gives way to Full at or above
-/// `full_needed + HYSTERESIS` and to Narrow below `compact_needed`. Narrow gives
-/// way to Full at or above `full_needed + HYSTERESIS`, and to Compact at or above
-/// `compact_needed + HYSTERESIS`. A width inside either band keeps the layout it
-/// had.
+/// The layout for a row `row_width` wide, from `current`: the widest of Full,
+/// Compact, Narrow and Minimal whose need the row meets. A layout wider than
+/// `current` needs a hysteresis step more than its own need, so that a width on
+/// the boundary does not flip each frame; `current` and any narrower layout need
+/// only their own. Full needs `full_needed`, Compact `compact_needed` and Narrow
+/// `narrow_needed`, each held to the need above it (a larger figure is lowered to
+/// it, so no band is unreachable); Minimal needs nothing, so it is the layout of
+/// every width the others do not fit.
 pub(crate) fn row_layout(
     row_width: f32,
     full_needed: f32,
     compact_needed: f32,
+    narrow_needed: f32,
     current: RowLayout,
 ) -> RowLayout {
     let compact_needed = compact_needed.min(full_needed);
-    match current {
-        RowLayout::Full if row_width >= full_needed => RowLayout::Full,
-        RowLayout::Full if row_width >= compact_needed => RowLayout::Compact,
-        RowLayout::Full => RowLayout::Narrow,
-        RowLayout::Compact if row_width >= full_needed + HYSTERESIS => RowLayout::Full,
-        RowLayout::Compact if row_width < compact_needed => RowLayout::Narrow,
-        RowLayout::Compact => RowLayout::Compact,
-        RowLayout::Narrow if row_width >= full_needed + HYSTERESIS => RowLayout::Full,
-        RowLayout::Narrow if row_width >= compact_needed + HYSTERESIS => RowLayout::Compact,
-        RowLayout::Narrow => RowLayout::Narrow,
-    }
+    let narrow_needed = narrow_needed.min(compact_needed);
+    [
+        (RowLayout::Full, full_needed),
+        (RowLayout::Compact, compact_needed),
+        (RowLayout::Narrow, narrow_needed),
+        (RowLayout::Minimal, 0.0),
+    ]
+    .into_iter()
+    .find(|(layout, needed)| {
+        let wider = *layout < current;
+        row_width >= if wider { needed + HYSTERESIS } else { *needed }
+    })
+    .map_or(RowLayout::Minimal, |(layout, _)| layout)
 }
 
 /// Whether the chat-width probe asks for a redraw at `chat_width`: the row's
@@ -88,12 +109,14 @@ pub(crate) fn probe_notifies(
     docked: bool,
     full_needed: f32,
     compact_needed: f32,
+    narrow_needed: f32,
     current: RowLayout,
 ) -> bool {
     row_layout(
         row_width(chat_width, docked),
         full_needed,
         compact_needed,
+        narrow_needed,
         current,
     ) != current
 }
@@ -107,6 +130,8 @@ pub(crate) struct RowFrame {
     pub needed: Cell<f32>,
     /// The Compact row's width the last render decided from.
     pub compact_needed: Cell<f32>,
+    /// The Narrow row's width the last render decided from.
+    pub narrow_needed: Cell<f32>,
     /// Whether the session panel was docked beside the band in that render.
     pub docked: Cell<bool>,
     /// The chat root's bounds, as the probe last measured them.
@@ -132,8 +157,8 @@ pub(crate) struct RowFrame {
 /// One row of ⋯ as the render built it.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub struct MenuRow {
-    /// `fast`, `thinking`, `session-panel`, `background-tasks`, `context`,
-    /// `follow`, `new-conversation` or `history`.
+    /// `model`, `agent`, `attach`, `fast`, `thinking`, `session-panel`, `background-tasks`,
+    /// `context`, `follow`, `new-conversation` or `history`.
     pub id: String,
     /// Whether a press on the row does anything.
     pub enabled: bool,
@@ -148,7 +173,7 @@ pub struct MenuRow {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComposerSnapshot {
-    /// `full`, `compact` or `narrow`.
+    /// `full`, `compact`, `narrow` or `minimal`.
     pub layout: &'static str,
     pub band: Option<[f32; 4]>,
     /// The chat root, whose width the layout is decided from.
@@ -159,8 +184,8 @@ pub struct ComposerSnapshot {
     pub chips: Option<[f32; 4]>,
     /// Whether the session panel is docked beside the band.
     pub docked: bool,
-    /// `fast`, `thinking`, `session-panel`, `background-tasks` and `context`:
-    /// what the layout moved into ⋯.
+    /// `model`, `agent`, `attach`, `fast`, `thinking`, `session-panel`, `background-tasks`
+    /// and `context`: what the layout moved into ⋯.
     pub overflow: Vec<&'static str>,
     /// The Lucide name of the icon the permission pill drew; `None` when it drew
     /// none, which is without a catalogue, where the pill is a dot.
@@ -186,6 +211,17 @@ fn boxed(bounds: Option<Bounds<Pixels>>) -> Option<[f32; 4]> {
         ]
     })
 }
+
+/// The room a popup hung from ⋯ has in a Minimal row, between ⋯'s left edge and the
+/// right edge of a chat `chat_width` wide, less the margin the layer keeps from the
+/// window's edge. ⋯ is alone in the left group there, so its left edge is the band's
+/// padding.
+pub(crate) fn overflow_popup_room(chat_width: f32) -> f32 {
+    (chat_width - BAND_PAD_X - POPUP_MARGIN).max(0.0)
+}
+
+/// How far `layer` keeps a popup from the window's edge (`snap_to_window_with_margin`).
+const POPUP_MARGIN: f32 = 8.0;
 
 /// One of the tool group's 24px icon buttons.
 const TOOL_WIDTH: f32 = 24.0;
@@ -257,6 +293,7 @@ impl Chat {
                 RowLayout::Full => "full",
                 RowLayout::Compact => "compact",
                 RowLayout::Narrow => "narrow",
+                RowLayout::Minimal => "minimal",
             },
             band: boxed(frame.band.get()),
             root: boxed(frame.root.get()),
@@ -267,6 +304,9 @@ impl Chat {
                 .overflowed_rows()
                 .into_iter()
                 .filter_map(|row| match row {
+                    OverflowRow::Model => Some("model"),
+                    OverflowRow::Agent => Some("agent"),
+                    OverflowRow::Attach => Some("attach"),
                     OverflowRow::Fast => Some("fast"),
                     OverflowRow::Thinking => Some("thinking"),
                     OverflowRow::SessionPanel => Some("session-panel"),
@@ -422,6 +462,43 @@ impl Chat {
         // Attach and ⋯: two buttons and the gap between them.
         row_total(2.0 * TOOL_WIDTH + ROW_GAP, chips, slots)
     }
+
+    /// The width the Narrow row needs to hold the chips it draws, whole, on one
+    /// line, with the model at its floor: the Compact row's tools, pill and
+    /// effort, and nothing else but the model's (or the badge's) slot; the task
+    /// count and the ring are rows in ⋯. Summed like `compact_row_needed`, each
+    /// text rounded up the same way. Below it the row is Minimal.
+    pub(super) fn narrow_row_needed(&self, theme: &Theme, window: &mut Window) -> f32 {
+        let measure = text_measurer(theme, window);
+        let chevron = chevron_width(theme);
+
+        let lead = match self.mode_catalog.as_ref() {
+            Some(_) => MODE_ICON,
+            None => STATUS_DOT,
+        };
+        let mut pill = 2.0 * CHIP_PAD_X + lead;
+        if self.mode_selectable() {
+            pill += CHIP_GAP + chevron;
+        }
+
+        // The model's chip, or the agent's badge, is the one that gives.
+        let model = MODEL_FLOOR;
+
+        let effort = self
+            .effort_level_name()
+            .filter(|_| self.effort_chip_drawn())
+            .map_or(0.0, |level| match self.effort_bar_position() {
+                Some((_, total)) => 2.0 * CHIP_PAD_X + bars_width(total) + CHIP_GAP + chevron,
+                None => 2.0 * CHIP_PAD_X + measure(&level) + CHIP_GAP + chevron,
+            });
+
+        let chips = pill + model + effort;
+        // The pill and the model's or the badge's slot are always drawn; the
+        // effort is a slot when `render_agent_controls` draws it.
+        let slots = 2 + usize::from(self.effort_chip_drawn());
+        // Attach and ⋯: two buttons and the gap between them.
+        row_total(2.0 * TOOL_WIDTH + ROW_GAP, chips, slots)
+    }
 }
 
 #[cfg(test)]
@@ -440,9 +517,10 @@ mod tests {
 
     #[test]
     fn row_layout_cases() {
-        use RowLayout::{Compact, Full, Narrow};
-        // Full needs 400, Compact 300; the hysteresis is 16.
-        let at = |row: f32, current| row_layout(row, 400.0, 300.0, current);
+        use RowLayout::{Compact, Full, Minimal, Narrow};
+        // Full needs 400, Compact 300; the hysteresis is 16. Narrow needs nothing
+        // here, which is the row as it was before Minimal: never below Narrow.
+        let at = |row: f32, current| row_layout(row, 400.0, 300.0, 0.0, current);
 
         // From Full: whole down to what it needs, Compact down to what Compact
         // needs, Narrow under that, and straight to Narrow in one step.
@@ -475,51 +553,130 @@ mod tests {
         assert_eq!(at(2000.0, Narrow), Full);
 
         // A row nothing needs room for is whole at any width.
-        assert_eq!(row_layout(300.0, 0.0, 0.0, Compact), Full, "nothing to fit");
-        assert_eq!(row_layout(300.0, 0.0, 0.0, Narrow), Full, "nothing to fit");
         assert_eq!(
-            row_layout(10.0, 400.0, 0.0, Full),
+            row_layout(300.0, 0.0, 0.0, 0.0, Compact),
+            Full,
+            "nothing to fit"
+        );
+        assert_eq!(
+            row_layout(300.0, 0.0, 0.0, 0.0, Narrow),
+            Full,
+            "nothing to fit"
+        );
+        assert_eq!(
+            row_layout(10.0, 400.0, 0.0, 0.0, Full),
             Compact,
             "Compact needs 0"
         );
         // Compact never needs more than Full: a larger figure is held to it, so
         // the Compact band cannot be unreachable.
-        assert_eq!(row_layout(310.0, 300.0, 400.0, Compact), Compact);
-        assert_eq!(row_layout(320.0, 300.0, 400.0, Narrow), Full);
-        assert_eq!(row_layout(310.0, 300.0, 400.0, Narrow), Narrow);
-        assert_eq!(row_layout(299.9, 300.0, 400.0, Full), Narrow);
+        assert_eq!(row_layout(310.0, 300.0, 400.0, 0.0, Compact), Compact);
+        assert_eq!(row_layout(320.0, 300.0, 400.0, 0.0, Narrow), Full);
+        assert_eq!(row_layout(310.0, 300.0, 400.0, 0.0, Narrow), Narrow);
+        assert_eq!(row_layout(299.9, 300.0, 400.0, 0.0, Full), Narrow);
         // Equal needs leave no Compact range at all.
-        assert_eq!(row_layout(399.0, 400.0, 400.0, Full), Narrow);
-        assert_eq!(row_layout(399.0, 400.0, 400.0, Compact), Narrow);
+        assert_eq!(row_layout(399.0, 400.0, 400.0, 0.0, Full), Narrow);
+        assert_eq!(row_layout(399.0, 400.0, 400.0, 0.0, Compact), Narrow);
+
+        // Minimal, the layout below Narrow's fit: Full needs 400, Compact 300 and
+        // Narrow 200. Minimal itself needs nothing, so it holds at any width.
+        let at = |row: f32, current| row_layout(row, 400.0, 300.0, 200.0, current);
+        // From Full, down in one step to whichever layout the row still fits.
+        assert_eq!(at(399.9, Full), Compact);
+        assert_eq!(at(299.9, Full), Narrow);
+        assert_eq!(at(200.0, Full), Narrow);
+        assert_eq!(at(199.9, Full), Minimal, "Full to Minimal in one step");
+        assert_eq!(at(0.0, Full), Minimal);
+        // From Compact and Narrow, under Narrow's need.
+        assert_eq!(at(200.0, Compact), Narrow);
+        assert_eq!(at(199.9, Compact), Minimal);
+        assert_eq!(at(200.0, Narrow), Narrow);
+        assert_eq!(at(199.9, Narrow), Minimal);
+        assert_eq!(at(0.0, Narrow), Minimal);
+        // From Minimal: Narrow a hysteresis step above Narrow's need, Compact a step
+        // above Compact's and Full a step above Full's, each skipping what is
+        // between; nothing in between a need and its step.
+        assert_eq!(at(0.0, Minimal), Minimal);
+        assert_eq!(
+            at(200.0, Minimal),
+            Minimal,
+            "Narrow's need alone is not enough"
+        );
+        assert_eq!(at(215.9, Minimal), Minimal);
+        assert_eq!(at(216.0, Minimal), Narrow);
+        assert_eq!(at(299.9, Minimal), Narrow);
+        assert_eq!(at(315.9, Minimal), Narrow);
+        assert_eq!(
+            at(316.0, Minimal),
+            Compact,
+            "Minimal to Compact in one step"
+        );
+        assert_eq!(at(415.9, Minimal), Compact);
+        assert_eq!(at(416.0, Minimal), Full, "Minimal to Full in one step");
+        assert_eq!(at(2000.0, Minimal), Full);
+        // Narrow inside Compact's band holds, as it did before Minimal.
+        assert_eq!(at(310.0, Narrow), Narrow);
+        assert_eq!(at(316.0, Narrow), Compact);
+
+        // Each need is held to the one above it, so no band is unreachable: a
+        // Narrow need over Compact's is Compact's, over Full's too.
+        assert_eq!(row_layout(300.0, 400.0, 300.0, 350.0, Narrow), Narrow);
+        assert_eq!(row_layout(299.9, 400.0, 300.0, 350.0, Narrow), Minimal);
+        assert_eq!(row_layout(316.0, 400.0, 300.0, 350.0, Minimal), Compact);
+        // The held need leaves Narrow no range of its own: from Minimal it is
+        // Compact's step or nothing.
+        assert_eq!(row_layout(315.9, 400.0, 300.0, 350.0, Minimal), Minimal);
+        assert_eq!(row_layout(250.0, 300.0, 400.0, 500.0, Full), Minimal);
+        assert_eq!(row_layout(299.9, 300.0, 400.0, 500.0, Narrow), Minimal);
+        // Equal needs leave no Narrow range at all.
+        assert_eq!(row_layout(299.0, 300.0, 300.0, 300.0, Full), Minimal);
+        assert_eq!(row_layout(299.0, 300.0, 300.0, 300.0, Narrow), Minimal);
+        // A row nothing needs room for is whole at any width.
+        assert_eq!(
+            row_layout(300.0, 0.0, 0.0, 0.0, Minimal),
+            Full,
+            "nothing to fit"
+        );
     }
 
     /// A width on the boundary must not redraw on every paint. At every width,
     /// the boundary's f32 neighbours included: one render lands on a layout, and
     /// the probe, asked again at that width with that layout, stays quiet. It asks
     /// from the layout the row had exactly when the render changes it. Swept over
-    /// (Full, Compact) needs with fractions, equal needs and a Compact need the
-    /// Full one is meant to hold to.
+    /// (Full, Compact, Narrow) needs with fractions, equal needs, zero needs, and
+    /// a Compact or Narrow need the one above it is meant to hold to.
     #[test]
     fn the_probe_and_the_render_decide_alike_at_the_boundary() {
         let needs = [
-            (0.0, 0.0),
-            (250.0, 0.0),
-            (250.0, 180.5),
-            (400.0, 300.0),
-            (400.0, 399.999),
-            (491.471_466_064_453_1, 380.25),
-            (537.3, 537.3),
-            (300.0, 400.0),
-            (611.7, 322.7),
-            (695.999, 611.7),
-            (712.0, 321.999_97),
-            (800.0, 0.4),
+            (0.0, 0.0, 0.0),
+            (250.0, 0.0, 0.0),
+            (250.0, 180.5, 0.0),
+            (250.0, 180.5, 120.25),
+            (400.0, 300.0, 200.0),
+            (400.0, 399.999, 399.998),
+            (491.471_466_064_453_1, 380.25, 268.9),
+            (537.3, 537.3, 537.3),
+            (537.3, 537.3, 211.7),
+            (300.0, 400.0, 500.0),
+            (611.7, 322.7, 322.7),
+            (611.7, 322.7, 400.0),
+            (695.999, 611.7, 301.3),
+            (712.0, 321.999_97, 261.000_03),
+            (800.0, 0.4, 0.2),
+            (800.0, 0.4, 0.9),
         ];
-        for (full, compact) in needs {
+        let currents = [
+            RowLayout::Full,
+            RowLayout::Compact,
+            RowLayout::Narrow,
+            RowLayout::Minimal,
+        ];
+        for (full, compact, narrow) in needs {
             let held = f32::min(compact, full);
+            let held_narrow = f32::min(narrow, held);
             for docked in [false, true] {
                 let beside = if docked { 300.0 } else { 0.0 } + 24.0;
-                for current in [RowLayout::Full, RowLayout::Compact, RowLayout::Narrow] {
+                for current in currents {
                     let mut widths = vec![0.0, 1.0, 639.0, 640.0, 2400.0];
                     for edge in [
                         full,
@@ -528,6 +685,10 @@ mod tests {
                         compact + HYSTERESIS,
                         held,
                         held + HYSTERESIS,
+                        narrow,
+                        narrow + HYSTERESIS,
+                        held_narrow,
+                        held_narrow + HYSTERESIS,
                     ] {
                         let mut at = edge + beside;
                         for _ in 0..3 {
@@ -541,11 +702,13 @@ mod tests {
                         }
                     }
                     for width in widths {
-                        let rendered = row_layout(row_width(width, docked), full, compact, current);
+                        let rendered =
+                            row_layout(row_width(width, docked), full, compact, narrow, current);
                         assert!(
-                            !probe_notifies(width, docked, full, compact, rendered),
-                            "redraws forever: full={full} compact={compact} docked={docked} \
-                             current={current:?} rendered={rendered:?} width={width}"
+                            !probe_notifies(width, docked, full, compact, narrow, rendered),
+                            "redraws forever: full={full} compact={compact} narrow={narrow} \
+                             docked={docked} current={current:?} rendered={rendered:?} \
+                             width={width}"
                         );
                     }
                 }

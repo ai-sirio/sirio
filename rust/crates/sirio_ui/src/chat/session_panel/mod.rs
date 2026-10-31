@@ -576,6 +576,7 @@ impl Chat {
                     row.docked.get(),
                     row.needed.get(),
                     row.compact_needed.get(),
+                    row.narrow_needed.get(),
                     row.layout.get(),
                 );
                 if moved {

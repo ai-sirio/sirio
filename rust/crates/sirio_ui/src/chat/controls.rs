@@ -199,6 +199,112 @@ impl Chat {
         ))
     }
 
+    /// The model picker while it is open, hung from the control the caller puts
+    /// it in: the chip in a Full, Compact or Narrow row (`Hang::AboveEnd`, growing
+    /// leftward from the right-aligned group) or ⋯ in a Minimal one (`Hang::Above`,
+    /// growing rightward from ⋯, which is in the left group). A `width` holds it to
+    /// the room a narrow pane leaves it; without one it is its usual width.
+    pub(super) fn render_model_picker(
+        &self,
+        theme: &Theme,
+        hang: Hang,
+        width: Option<Pixels>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.model_picker_open {
+            return None;
+        }
+        let typography = theme.typography;
+        // F-CHAT-16: "Recommended" is not a protocol flag — `ModelOption`
+        // has none, and the ACP layer never carries one — it is purely
+        // the driver's own first-listed choice, matching Swift's
+        // `recommendedId = models.first?.modelId` exactly. The search
+        // filter runs over the full, unfiltered list order (`filter`,
+        // not `sort`) so a query never reorders results.
+        let recommended_id = self
+            .available_models
+            .first()
+            .map(|option| option.id.clone());
+        let selected_id = self.selected_model.clone();
+        let rows = self.picker_rows(cx);
+        let menu = rows.iter().fold(Menu::new(), |menu, row| {
+            let PickerRow::Model(option) = row else {
+                return menu;
+            };
+            let is_recommended = recommended_id.as_deref() == Some(option.id.as_str());
+            let item = MenuItem::radio(
+                option.name.clone(),
+                selected_id.as_deref() == Some(option.id.as_str()),
+            )
+            .tooltip(option.name.clone())
+            .selectors(
+                format!("model-option-{}", option.id),
+                is_recommended.then(|| "model-option-recommended".into()),
+            )
+            .on_click(self.picker_click(row.clone(), cx));
+            menu.item(if is_recommended {
+                item.note("Recommended")
+            } else {
+                item
+            })
+        });
+        let no_models = self.available_models.is_empty();
+        let empty = if no_models {
+            div()
+                .px_2()
+                .py_1p5()
+                .text_size(typography.footnote)
+                .text_color(theme.ely.fg_subtle)
+                .child("The connected agent did not report any models.")
+                .into_any_element()
+        } else {
+            div()
+                .id("model-picker-no-match")
+                .debug_selector(|| "model-picker-no-match".into())
+                .px_2()
+                .py_1p5()
+                .text_size(typography.footnote)
+                .text_color(theme.ely.fg_subtle)
+                .child("No models match")
+                .into_any_element()
+        };
+        let panel = MenuPanel::new("model-picker-rows", menu)
+            .current(self.marked_picker_row(rows.len()))
+            .scroll(&self.model_picker_scroll, px(MODEL_PICKER_LIST_MAX_H))
+            .selector("model-picker-list")
+            .empty(empty)
+            .when(!no_models, |panel| {
+                panel.head(
+                    div()
+                        .id("model-search-input")
+                        .debug_selector(|| "model-search-input".into())
+                        .w_full()
+                        .mb(px(6.0))
+                        .child(Input::new(&self.model_search_field)),
+                )
+            });
+        let usual = popup_width(theme, 245.0);
+        Some(layer(
+            "model-picker-menu",
+            hang,
+            div()
+                .id("model-picker")
+                .debug_selector(|| "model-picker".into())
+                .key_context("ChatModelPicker")
+                .on_action(cx.listener(Self::cancel))
+                .on_action(cx.listener(Self::picker_previous))
+                .on_action(cx.listener(Self::picker_next))
+                .on_action(cx.listener(Self::picker_choose))
+                .w(width.map_or(usual, |room| room.min(usual)))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.model_picker_open = false;
+                    cx.notify();
+                }))
+                .child(panel),
+            cx,
+        ))
+    }
+
     /// The context popover while it is open, hung from the control the caller
     /// puts it in: the ring in a Full or Compact row (`Hang::AboveEnd`, growing
     /// leftward from the right-aligned group) or ⋯ in a Narrow one
@@ -385,9 +491,11 @@ impl Chat {
         _window: &mut Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        // Narrow draws what Compact does, less the task count and the ring.
+        // Narrow draws what Compact does, less the task count and the ring;
+        // Minimal, less the model chip too, and the chevrons of the chips it keeps.
         let compact = layout != RowLayout::Full;
-        let narrow = layout == RowLayout::Narrow;
+        let narrow = layout.is_narrow();
+        let minimal = layout.is_minimal();
         let typography = theme.typography;
         let bezel_theme = bezel_theme::Theme::of(cx).clone();
         let entity = cx.entity();
@@ -511,7 +619,15 @@ impl Chat {
                         .child(label),
                 )
             })
-            .when(mode_selectable, |this| this.child(picker_chevron(theme)));
+            // Minimal leaves the chevron out: the pill is the icon, and still opens
+            // its picker.
+            .when(mode_selectable && !minimal, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "mode-chip-chevron".into())
+                        .child(picker_chevron(theme)),
+                )
+            });
         // The pill's selector is taken, so the danger fill is named on a
         // wrapper that is exactly as big as the pill.
         let status_pill = if danger {
@@ -684,14 +800,18 @@ impl Chat {
                                 ),
                         )
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .child(picker_chevron(theme)),
-                    )
+                    // Minimal leaves the chevron out, as it does the pill's.
+                    .when(!minimal, |chip| {
+                        chip.child(
+                            div()
+                                .debug_selector(|| "effort-chip-chevron".into())
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .child(picker_chevron(theme)),
+                        )
+                    })
             });
 
         // Fast mode: a toggle, not a picker, so it is a chip that shows its
@@ -892,95 +1012,10 @@ impl Chat {
                 )
             });
 
-        let model_picker = self.model_picker_open.then(|| {
-            // F-CHAT-16: "Recommended" is not a protocol flag — `ModelOption`
-            // has none, and the ACP layer never carries one — it is purely
-            // the driver's own first-listed choice, matching Swift's
-            // `recommendedId = models.first?.modelId` exactly. The search
-            // filter runs over the full, unfiltered list order (`filter`,
-            // not `sort`) so a query never reorders results.
-            let recommended_id = self
-                .available_models
-                .first()
-                .map(|option| option.id.clone());
-            let selected_id = self.selected_model.clone();
-            let rows = self.picker_rows(cx);
-            let menu = rows.iter().fold(Menu::new(), |menu, row| {
-                let PickerRow::Model(option) = row else {
-                    return menu;
-                };
-                let is_recommended = recommended_id.as_deref() == Some(option.id.as_str());
-                let item = MenuItem::radio(
-                    option.name.clone(),
-                    selected_id.as_deref() == Some(option.id.as_str()),
-                )
-                .tooltip(option.name.clone())
-                .selectors(
-                    format!("model-option-{}", option.id),
-                    is_recommended.then(|| "model-option-recommended".into()),
-                )
-                .on_click(self.picker_click(row.clone(), cx));
-                menu.item(if is_recommended {
-                    item.note("Recommended")
-                } else {
-                    item
-                })
-            });
-            let no_models = self.available_models.is_empty();
-            let empty = if no_models {
-                div()
-                    .px_2()
-                    .py_1p5()
-                    .text_size(typography.footnote)
-                    .text_color(theme.ely.fg_subtle)
-                    .child("The connected agent did not report any models.")
-                    .into_any_element()
-            } else {
-                div()
-                    .id("model-picker-no-match")
-                    .debug_selector(|| "model-picker-no-match".into())
-                    .px_2()
-                    .py_1p5()
-                    .text_size(typography.footnote)
-                    .text_color(theme.ely.fg_subtle)
-                    .child("No models match")
-                    .into_any_element()
-            };
-            let panel = MenuPanel::new("model-picker-rows", menu)
-                .current(self.marked_picker_row(rows.len()))
-                .scroll(&self.model_picker_scroll, px(MODEL_PICKER_LIST_MAX_H))
-                .selector("model-picker-list")
-                .empty(empty)
-                .when(!no_models, |panel| {
-                    panel.head(
-                        div()
-                            .id("model-search-input")
-                            .debug_selector(|| "model-search-input".into())
-                            .w_full()
-                            .mb(px(6.0))
-                            .child(Input::new(&self.model_search_field)),
-                    )
-                });
-            layer(
-                "model-picker-menu",
-                Hang::AboveEnd,
-                div()
-                    .id("model-picker")
-                    .debug_selector(|| "model-picker".into())
-                    .key_context("ChatModelPicker")
-                    .on_action(cx.listener(Self::cancel))
-                    .on_action(cx.listener(Self::picker_previous))
-                    .on_action(cx.listener(Self::picker_next))
-                    .on_action(cx.listener(Self::picker_choose))
-                    .w(popup_width(theme, 245.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.model_picker_open = false;
-                        cx.notify();
-                    }))
-                    .child(panel),
-                cx,
-            )
-        });
+        // Minimal has no chip to hang it from: `composer_view` hangs it from ⋯.
+        let model_picker = (!minimal)
+            .then(|| self.render_model_picker(theme, Hang::AboveEnd, None, cx))
+            .flatten();
 
         // F-CHAT-15: the session-mode picker, anchored above the status
         // pill the same way `model_picker` anchors above the model chip.
@@ -1181,14 +1216,17 @@ impl Chat {
             // The one shrinkable chip: on a tight line it ellipsizes its name
             // down to its 56px floor, never to nothing. The floor is the
             // wrapper's too: a wrapper sized to its content would hold the
-            // name whole and leave the row nothing to shrink.
-            .child(
-                div()
-                    .relative()
-                    .min_w(px(MODEL_FLOOR))
-                    .child(model_control)
-                    .children(model_picker),
-            )
+            // name whole and leave the row nothing to shrink. Minimal has no
+            // slot for it: the model is a row of ⋯ there.
+            .when(!minimal, |row| {
+                row.child(
+                    div()
+                        .relative()
+                        .min_w(px(MODEL_FLOOR))
+                        .child(model_control)
+                        .children(model_picker),
+                )
+            })
             // A slot is in the row only when it draws something: a wrapper left
             // empty would still take its gap. `composer_row`'s estimates count the
             // slots by the same tests.
@@ -1283,6 +1321,15 @@ pub(super) enum PickerRow {
 /// The rows of the composer's "more" menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OverflowRow {
+    /// The model picker. Only in the Minimal row, which has no chip for it, when
+    /// there are models to pick from.
+    Model,
+    /// The agent's name, as information. Only in the Minimal row, which has no
+    /// badge for it, when there are no models to pick from.
+    Agent,
+    /// Attach a file, which is what `+` does. Only in the Minimal row, which has no
+    /// button for it.
+    Attach,
     /// Fast mode, a toggle. Only in the Compact and Narrow rows, which have no
     /// chip for it.
     Fast,
@@ -1347,14 +1394,21 @@ impl Chat {
     /// What the current layout moves out of the row and into ⋯, whether or not
     /// ⋯ is open: in the Full row, nothing; in the Compact row Fast, Thinking and
     /// the session panel; in the Narrow row those and the task count and the
-    /// context ring. In order, these are the rows ahead of the menu's own.
+    /// context ring; in the Minimal row the model (or, with no models, the agent's
+    /// name) and attach ahead of all of them. In order, these are the rows ahead of the menu's
+    /// own.
     pub(super) fn overflowed_rows(&self) -> Vec<OverflowRow> {
         let layout = self.composer_row.layout.get();
         if layout == RowLayout::Full {
             return Vec::new();
         }
-        let narrow = layout == RowLayout::Narrow;
+        let narrow = layout.is_narrow();
+        let minimal = layout.is_minimal();
+        let models = self.model_control_visible();
         [
+            (minimal && models).then_some(OverflowRow::Model),
+            (minimal && !models).then_some(OverflowRow::Agent),
+            minimal.then_some(OverflowRow::Attach),
             self.fast_state().map(|_| OverflowRow::Fast),
             self.thinking_state().map(|_| OverflowRow::Thinking),
             Some(OverflowRow::SessionPanel),
@@ -1393,7 +1447,7 @@ impl Chat {
     /// run; the menu draws those rows disabled, and the keys step over them.
     pub(super) fn picker_row_enabled(&self, row: &PickerRow) -> bool {
         match row {
-            PickerRow::Overflow(OverflowRow::BackgroundTasks) => false,
+            PickerRow::Overflow(OverflowRow::BackgroundTasks | OverflowRow::Agent) => false,
             PickerRow::Overflow(OverflowRow::Fast) => self
                 .fast_state()
                 .is_some_and(|fast| fast.blocked_by.is_none()),
@@ -1522,8 +1576,21 @@ impl Chat {
                 self.overflow_open = false;
                 self.toggle_session_panel(cx);
             }
+            // The picker takes the focus itself, and keeps it. It opens, never
+            // toggles: the row is chosen to see it.
+            PickerRow::Overflow(OverflowRow::Model) => {
+                self.overflow_open = false;
+                self.model_picker_open = false;
+                self.toggle_model_picker(window, cx);
+                return;
+            }
+            // The same action the `+` button runs.
+            PickerRow::Overflow(OverflowRow::Attach) => {
+                self.overflow_open = false;
+                self.attach_image(window, cx);
+            }
             // Information, not an action: nothing to run, and ⋯ stays as it is.
-            PickerRow::Overflow(OverflowRow::BackgroundTasks) => return,
+            PickerRow::Overflow(OverflowRow::BackgroundTasks | OverflowRow::Agent) => return,
             // The popover takes the focus itself, and keeps it. It opens, never
             // toggles: the row is chosen to see it.
             PickerRow::Overflow(OverflowRow::Context) => {

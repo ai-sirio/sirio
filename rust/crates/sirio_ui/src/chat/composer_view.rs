@@ -547,7 +547,9 @@ impl Chat {
     }
 }
 
-use super::composer_row::{BAND_COLUMN, BAND_TOP_PAD, RowLayout, row_layout, row_width};
+use super::composer_row::{
+    BAND_COLUMN, BAND_TOP_PAD, RowLayout, overflow_popup_room, row_layout, row_width,
+};
 use super::*;
 use crate::popup::{hang_above_at, menu_card, menu_row};
 use ely_gpui_component::{
@@ -1048,13 +1050,16 @@ impl Chat {
             let chat_width = self.chat_width().map_or(f32::INFINITY, f32::from);
             let needed = self.full_row_needed(theme, window);
             let compact_needed = self.compact_row_needed(theme, window);
+            let narrow_needed = self.narrow_row_needed(theme, window);
             let layout = row_layout(
                 row_width(chat_width, docked),
                 needed,
                 compact_needed,
+                narrow_needed,
                 self.composer_row.layout.get(),
             );
             self.composer_row.compact_needed.set(compact_needed);
+            self.composer_row.narrow_needed.set(narrow_needed);
             self.composer_row.layout.set(layout);
             self.composer_row.needed.set(needed);
             self.composer_row.docked.set(docked);
@@ -1064,6 +1069,7 @@ impl Chat {
             // Nothing to lay out: the probe has nothing to ask about.
             self.composer_row.needed.set(0.0);
             self.composer_row.compact_needed.set(0.0);
+            self.composer_row.narrow_needed.set(0.0);
             self.composer_row.docked.set(false);
             RowLayout::Full
         };
@@ -1084,8 +1090,20 @@ impl Chat {
             .flatten();
         // A Narrow row has no ring for the context popover to hang from either,
         // so it hangs from ⋯ the same way.
-        let narrow_context_popover = (layout == RowLayout::Narrow)
+        let narrow_context_popover = layout
+            .is_narrow()
             .then(|| self.render_context_popover(theme, Hang::Above, cx))
+            .flatten();
+        // A Minimal row has no model chip for the model picker to hang from, so it
+        // hangs from ⋯ too, held to the room a narrow pane leaves it.
+        let minimal_model_picker = layout
+            .is_minimal()
+            .then(|| {
+                let room = self.chat_width().map(|width| {
+                    px(overflow_popup_room(f32::from(width)))
+                });
+                self.render_model_picker(theme, Hang::Above, room, cx)
+            })
             .flatten();
 
         let composer_context_menu = self
@@ -1195,8 +1213,12 @@ impl Chat {
             prompt = prompt.above(chips);
         }
         if has_agent {
-            prompt = prompt.tool(attach_button);
-            // Compact and Narrow move the panel's toggle into ⋯.
+            // Minimal has room for ⋯ alone: attach is a row of it there, running
+            // the same `attach_image`.
+            if !layout.is_minimal() {
+                prompt = prompt.tool(attach_button);
+            }
+            // Every layout under Full moves the panel's toggle into ⋯.
             if layout == RowLayout::Full {
                 prompt = prompt.tool(panel_button);
             }
@@ -1208,6 +1230,7 @@ impl Chat {
                         .children(overflow_menu)
                         .children(compact_thinking_picker)
                         .children(narrow_context_popover)
+                        .children(minimal_model_picker)
                         .children(chat_history_menu),
                 )
                 .trailing(self.render_agent_controls(theme, layout, window, cx));

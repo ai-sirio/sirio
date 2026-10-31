@@ -44,8 +44,8 @@ agents get a total-only Context. The debug-only `surface.chat.panel`
 it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
 JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` asserts on.
 `surface.chat.read` also carries `composerRow`, the composer band as a JSON string (`layout` `full`,
-`compact` or `narrow`, the `band`, `root`, `send`, `chips` and `overflowButton` boxes as `[x, y, w, h]`,
-`docked`, `overflow` (what the layout moved into ⋯: `fast`, `thinking`, `session-panel`,
+`compact`, `narrow` or `minimal`, the `band`, `root`, `send`, `chips` and `overflowButton` boxes as `[x, y, w, h]`,
+`docked`, `overflow` (what the layout moved into ⋯: `model` or `agent`, `attach` (both only in `minimal`), `fast`, `thinking`, `session-panel`,
 `background-tasks`, `context`), `modeIcon` and `modeDanger` (what the render drew for the permission
 pill, null and false when it drew no icon), `menu` (while ⋯ is open, the rows its render built, in order,
 as `{id, enabled, tooltip}`; Fast's tooltip is the CLI's reason it is blocked) and `picker` (the open

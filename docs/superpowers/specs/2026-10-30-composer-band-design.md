@@ -137,6 +137,29 @@ Fast, background tasks, Thinking, context ring.
   - the context ring: the ring's own words ("45% of context used", or "Context"
     until the agent has said how full its context is). Choosing it closes ⋯ and
     opens the context popover, which hangs from ⋯ since the ring is not drawn.
+- **Minimal** (the user's choice, 2026-10-31), whenever Narrow does not fit on
+  one line (269 px on the test font, with three effort bars). The row is
+  `[⋯] ······ [pill][effort][send]`:
+  - the permission pill draws its icon and dot and the effort chip its bars (or,
+    for a level with none, its label), both with no chevron, and both still open
+    their pickers; their padding is as in every layout;
+  - the model chip, or the agent's badge, leaves the row. The model becomes the
+    first row of ⋯ ("Model: <name>"); choosing it closes ⋯ and opens the model
+    picker, with its search field focused, hung from ⋯ and held to the room the
+    pane leaves it. With no models the row is the agent's name instead, a
+    disabled row the keys skip;
+  - attach (`+`) leaves the row and becomes the second row of ⋯ ("Attach file"),
+    which runs the action the button runs; attach stays reachable through `@` in
+    the field and through drag and drop (the user's choice, 2026-10-31). ⋯ is
+    alone in the left group;
+  - ⋯ then lists, in order, the model (or agent), attach, Fast, Thinking, the
+    session panel, the task count and the context ring, ahead of Follow;
+  - its measured minimum on the test font is 153 px with the five-level effort
+    the real Claude CLI offers (143 px with three levels), so 160 px, the least a
+    split pane can be (`MIN_SPLIT_PANE_SIZE`), holds every chip whole.
+- A slot with nothing to draw takes no room: the chips' row puts its gap between
+  the chips it draws and none for an empty slot, in every layout, and the width
+  estimates count the slots the render draws.
 - **Which one applies** is decided from the width the band actually has. The
   probe in `render_session_panel_probe` measures the whole chat root, and a docked
   session panel (`COLUMN_WIDTH`, 300 px) sits beside the band inside that root.
@@ -154,7 +177,7 @@ Fast, background tasks, Thinking, context ring.
   chat pane go down to 160 px (`MIN_SPLIT_PANE_SIZE`). Below the Compact fit the
   row is Narrow, which needs 269 px for its three chips (mode, model at its 56 px
   floor, effort) on the same font, so a 280 px chat holds them whole, and under
-  that the clip on the chips keeps send clear and cuts from the right. The
+  that the row is Minimal (below), which holds down to 160 px. The
   thresholds are computed from the chips present, never constants: the Compact
   one is `compact_row_needed`, and Narrow gives way to Compact, as Compact to
   Full, a hysteresis step above it.
@@ -329,6 +352,7 @@ owed before release and listed in the PR.
    extends one step (model and effort become ⋯ rows below the Narrow fit, their
    pickers hanging from ⋯ as Thinking and Context already do), or the user names
    a floor below which the row is allowed to cut them.
+   Resolved by the user, 2026-10-31: the Minimal row (§3).
 
 **Left to the builder:** exact paddings, how the threshold is computed, the shape
 of the Ely API, the ⋯ rows' and mode icon's selectors, the icons for Fast and

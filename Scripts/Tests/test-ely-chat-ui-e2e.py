@@ -1404,6 +1404,42 @@ def send_stays_clear(lane: str, row: dict) -> None:
         raise Failure(f"composer_band {lane}: the chips {chips} are not inside the band {band}")
 
 
+def composer_band_minimal_lane(run: Run, chat: Instance, window: str, name: str) -> dict:
+    """Split the chat's pane beside itself until its `root` is in Minimal's range (the row is
+    `minimal`), and return a read that still says so after the layout has settled. Each round
+    focuses the chat's pane, splits it to the right and waits for the chat to get narrower; a split
+    that no longer narrows it means the 160 px pane floor, which is reported with the root there."""
+    narrowest = chat.read()["composerRow"]
+    for _ in range(6):
+        if narrowest["layout"] == "minimal":
+            break
+        before = narrowest["root"][2]
+        chat.call("pane.focus", direction="left")
+        split = chat.call("pane.split", direction="right")
+        if not split.get("ok"):
+            raise Failure(f"{name} minimal: pane.split failed: {split}")
+        try:
+            chat.until(
+                f"minimal: the chat is narrower than {before:.0f} px",
+                lambda s: s["composerRow"]["root"] is not None and s["composerRow"]["root"][2] < before - 5,
+                timeout=15,
+            )
+        except Failure:
+            raise Failure(
+                f"{name} minimal: splitting stopped narrowing the chat: root {chat.read()['composerRow']['root']} "
+                f"layout {chat.read()['composerRow']['layout']}"
+            ) from None
+        time.sleep(1.0)
+        narrowest = chat.read()["composerRow"]
+        run.log(f"{name}: minimal lane: root {narrowest['root']} layout {narrowest['layout']}")
+    if narrowest["layout"] != "minimal":
+        raise Failure(f"{name} minimal: splits reached root {narrowest['root']} and layout {narrowest['layout']}, not minimal")
+    state = chat.read()
+    if state["composerRow"]["layout"] != "minimal":
+        raise Failure(f"{name} minimal: the chat left the minimal layout while settling: {state['composerRow']}")
+    return state
+
+
 def composer_band_steps(run: Run, name: str, appearance: str) -> None:
     """The composer band in the real app against the ACP fixture, in four widths: wide (the full
     row), narrow (the compact row: Fast, Thinking and the session panel moved into the overflow
@@ -1504,6 +1540,42 @@ def composer_band_steps(run: Run, name: str, appearance: str) -> None:
         raise Failure(f"{failure}; now {chat.read()['composerRow']} in a {window_width(run, window)} px window") from None
     band_spans_the_chat("back", back["composerRow"])
     row_is_one_line("back", back["composerRow"], band_height)
+
+    # 6. Minimal: the window cannot make the chat narrower than the 320 px floor, but a split
+    # pane can be 160 px (`MIN_SPLIT_PANE_SIZE`). `pane.split` (served in release builds too) puts a
+    # terminal beside the focused pane; each split of the chat's own pane halves it. The row is
+    # Minimal there: attach and the model are the first rows of the overflow menu, the pill and the
+    # effort have no chevrons, and the chat's chips still end before send.
+    minimal = composer_band_minimal_lane(run, chat, window, name)
+    row = minimal["composerRow"]
+    run.log(
+        f"{name}: minimal root {row['root']} band {row['band']} layout {row['layout']} overflow {row['overflow']}"
+    )
+    chat.frame("minimal")
+    band_spans_the_chat("minimal", row)
+    row_is_one_line("minimal", row, band_height)
+    send_stays_clear("minimal", row)
+    if row["overflow"][:2] != ["model", "attach"]:
+        raise Failure(f"{name} minimal: the model and attach are not the first rows moved into the menu: {row}")
+    if row["overflowButton"] is None:
+        raise Failure(f"{name} minimal: the overflow button was not measured: {row}")
+    # A real click on the measured overflow button opens the menu: the model first, attach second.
+    x_focus(run, window)
+    x, y, width, height = row["overflowButton"]
+    x_run(run, "mousemove", "--window", window, str(round(x + width / 2)), str(round(y + height / 2)), "click", "1")
+    opened = chat.until(
+        "the overflow menu is open", lambda s: s["composerRow"]["picker"] == "overflow" and s["composerRow"]["menu"]
+    )["composerRow"]
+    ids = [item["id"] for item in opened["menu"]]
+    if ids[:2] != ["model", "attach"] or not all(item["enabled"] for item in opened["menu"][:2]):
+        raise Failure(f"{name} minimal: the menu does not list the model, then attach, both enabled: {opened['menu']}")
+    chat.frame("minimal-overflow")
+    # Enter chooses the marked row, the model: its picker opens.
+    x_key(run, "Return")
+    chat.until("Enter on the model row opens the model picker", lambda s: s["composerRow"]["picker"] == "model")
+    chat.frame("minimal-model")
+    x_key(run, "Escape")
+    chat.until("Escape closes the model picker", lambda s: s["composerRow"]["picker"] is None)
     scenario.finish()
 
 
