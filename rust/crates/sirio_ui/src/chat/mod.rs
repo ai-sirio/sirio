@@ -1617,11 +1617,11 @@ const DISCONNECTED_MESSAGE: &str = "Agent disconnected — the process has termi
 /// conversation or the user choosing a model do.
 const EFFORT_AUTO_REQUESTS: u8 = 2;
 
-/// A mid-session `TransportError` never carries the typed `AcpError` that
+/// A mid-session `TransportError` never carries the typed `ChatError` that
 /// caused it — the ACP layer folds it to a plain `String` before it crosses
 /// the crate boundary (`sirio_acp::ChatEvent::TransportError`'s own doc comment: "a
 /// mid-session request rejected with ACP's `auth_required` error... arrives
-/// here rather than as its own variant... `AcpError::AuthRequired`'s
+/// here rather than as its own variant... `ChatError::AuthRequired`'s
 /// `Display` renders the same auth-guidance text `AcpClient::launch` uses
 /// for a startup failure, so the message string alone still carries it").
 /// This is the one place both the launch-failure and mid-session paths
