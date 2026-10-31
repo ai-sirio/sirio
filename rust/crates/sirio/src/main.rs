@@ -36110,14 +36110,23 @@ done
     #[cfg(target_os = "linux")]
     #[gpui::test]
     async fn workspace_wires_real_process_signal_without_title_clobber(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+
         cx.set_global(Theme::light());
         let working_directory = std::env::temp_dir().join(format!(
             "sirio-activity-process-wiring-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&working_directory).expect("create process test directory");
+        // A script, not a copy of `sleep`: comm is the name of the file
+        // exec'd, and a multicall coreutils (uutils, Ubuntu 26.04's) run as
+        // `codex` looks for a utility of that name and exits at once. The
+        // trailing `true` keeps the script's own process, named `codex`, alive.
         let agent = working_directory.join("codex");
-        std::fs::copy("/bin/sleep", &agent).expect("create matching agent binary");
+        std::fs::write(&agent, "#!/bin/sh\n/bin/sleep \"$1\"\ntrue\n")
+            .expect("write matching agent script");
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755))
+            .expect("make matching agent script executable");
         // The trailing `true` keeps the shell alive as the parent: bash and
         // dash exec-replace themselves with the last command of a `-c`
         // script, and the walk reads comm for descendants only.

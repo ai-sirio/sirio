@@ -184,7 +184,10 @@ jobs:
       # neighbours. The prebuilt binary rather than `cargo install`, which
       # would compile it here and cost more than it saves.
       - name: Install cargo-nextest
+        # The bin directory is made first: since 2026-10-30 the macOS image
+        # no longer ships one under CARGO_HOME, and tar will not create it.
         run: |
+          mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
           curl -LsSf https://get.nexte.st/latest/mac \
             | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
           cargo nextest --version
