@@ -123,7 +123,17 @@ Fast, background tasks, Thinking, context ring.
     toggle that keeps its blocked reason. Thinking opens the same picker;
   - the session panel toggle leaves the row and becomes a row in ⋯;
   - the model name ellipsizes down to its existing 56 px floor;
-  - the background-task count and the context ring stay.
+  - the background-task count and the context ring stay in Compact; in Narrow
+    they move into ⋯ (below).
+- **Narrow** (the user's option A, 2026-10-31), whenever Compact with every chip
+  does not fit on one line. It draws what Compact does, less the background-task
+  count and the context ring, which become the last two rows of ⋯ ahead of
+  Follow, after the session panel row:
+  - the task count, only while tasks run: "N background tasks running", a
+    disabled row, which the keys step over and which does nothing when chosen;
+  - the context ring: the ring's own words ("45% of context used", or "Context"
+    until the agent has said how full its context is). Choosing it closes ⋯ and
+    opens the context popover, which hangs from ⋯ since the ring is not drawn.
 - **Which one applies** is decided from the width the band actually has. The
   probe in `render_session_panel_probe` measures the whole chat root, and a docked
   session panel (`COLUMN_WIDTH`, 300 px) sits beside the band inside that root.
@@ -135,10 +145,16 @@ Fast, background tasks, Thinking, context ring.
   line, given the chips actually present. How to compute it (measured once, or
   derived from what is present) is the builder's call. The layout must not flip
   back and forth when a single redraw lands on the boundary.
-- **Floor.** Compact fits on one line down to a 280 px chat with every chip
-  present. Below that the model name is what gives. If Sirio lets a chat pane get
-  narrower than that, the builder states the real minimum and checks the row
-  there.
+- **Floor** (amended: the user's option A, 2026-10-31). The original floor, a
+  Compact row with every chip down to a 280 px chat, cannot be met: Compact with
+  every chip needs 353 px on the test font (7.8 px a character), and Sirio lets a
+  chat pane go down to 160 px (`MIN_SPLIT_PANE_SIZE`). Below the Compact fit the
+  row is Narrow, which needs 269 px for its three chips (mode, model at its 56 px
+  floor, effort) on the same font, so a 280 px chat holds them whole, and under
+  that the clip on the chips keeps send clear and cuts from the right. The
+  thresholds are computed from the chips present, never constants: the Compact
+  one is `compact_row_needed`, and Narrow gives way to Compact, as Compact to
+  Full, a hysteresis step above it.
 
 **Deliberate.** `controls.rs` defends a readable mode name (F-CHAT-15, #136).
 Full keeps it. Compact trading it for the icon plus tooltip is this design's
@@ -290,7 +306,8 @@ owed before release and listed in the PR.
 5. The question dock and the queue stay as cards.
 6. The field still grows from 3 to 12 rows.
 7. With the session panel docked, the band stops at the panel.
-8. The compact floor is 280 px.
+8. The compact floor is 280 px (amended: Compact with every chip needs more,
+   and Narrow takes over below it; see §3).
 9. Full or compact follows the band's own width (so a docked panel counts), not
    the whole pane.
 10. The Fast and Thinking rows in ⋯ are proven on the native-Claude stub; the

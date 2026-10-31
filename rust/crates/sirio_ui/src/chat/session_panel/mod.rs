@@ -575,6 +575,7 @@ impl Chat {
                     f32::from(width),
                     row.docked.get(),
                     row.needed.get(),
+                    row.compact_needed.get(),
                     row.layout.get(),
                 );
                 if moved {

@@ -2,7 +2,7 @@
 //! content on the transcript's reading column, and holds every control on one
 //! line.
 use super::composer_row::{BAND_COLUMN, HYSTERESIS, RowLayout, row_width};
-use super::controls::OverflowRow;
+use super::controls::{OverflowRow, PickerRow};
 use super::tests::{
     chat_view, configure_test_chat, focus_and_type, pump_chat_until, refresh_frame,
 };
@@ -1230,11 +1230,9 @@ async fn the_chips_never_cover_send(cx: &mut TestAppContext) {
 
     for width in [280.0, 160.0] {
         resize_to(cx, width, 700.0);
-        assert_eq!(
-            row_layout_now(cx, &chat),
-            RowLayout::Compact,
-            "at {width}px"
-        );
+        // Both are under what the Compact row needs with the task count and
+        // the ring, so both are Narrow.
+        assert_eq!(row_layout_now(cx, &chat), RowLayout::Narrow, "at {width}px");
         let composer = drawn(cx, "composer");
         let send = drawn(cx, "send");
         let chips = drawn(cx, "composer-chips");
@@ -1264,63 +1262,442 @@ const COMPACT_CHIPS: [&str; 5] = [
     "model-chip",
     "effort-chip",
     "background-tasks-chip",
-    "context-ring",
+    "context-chip",
 ];
 
-/// Whether every chip is drawn whole inside `composer-chips`, on one line.
-fn chips_fit_whole(cx: &mut VisualTestContext) -> bool {
-    let chips = drawn(cx, "composer-chips");
+/// The chips of the Narrow row: the Compact ones less the task count and the ring,
+/// which are rows in ⋯ there.
+const NARROW_CHIPS: [&str; 3] = ["chat-status", "model-chip", "effort-chip"];
+
+/// Whether every chip of `chips` is drawn whole inside `composer-chips`, on one
+/// line.
+fn chips_fit_whole(cx: &mut VisualTestContext, chips: &[&'static str]) -> bool {
+    let container = drawn(cx, "composer-chips");
     let send = drawn(cx, "send");
-    COMPACT_CHIPS.iter().all(|name| {
+    chips.iter().all(|name| {
         let chip = drawn(cx, name);
-        chip.right() <= chips.right() + px(0.5) && near(chip.center().y, send.center().y, 2.0)
+        chip.right() <= container.right() + px(0.5) && near(chip.center().y, send.center().y, 2.0)
     })
 }
 
+/// The narrowest whole-pixel chat width at which the Compact row holds every chip
+/// whole, found by walking down from a roomy Compact row until the layout leaves
+/// Compact or a chip is cut. Leaves the chat at that width, in Compact.
+fn compact_minimum(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>) -> u32 {
+    resize_to(cx, 480.0, 700.0);
+    assert_eq!(row_layout_now(cx, chat), RowLayout::Compact, "at 480px");
+    let mut minimum = 480;
+    for width in (200..480).rev() {
+        resize_to(cx, width as f32, 700.0);
+        if row_layout_now(cx, chat) != RowLayout::Compact || !chips_fit_whole(cx, &COMPACT_CHIPS) {
+            break;
+        }
+        minimum = width;
+    }
+    // The walk ended one pixel under it, in Narrow, which holds until a whole
+    // hysteresis step above: back up over that, and down to the minimum.
+    resize_to(cx, (minimum + HYSTERESIS as u32) as f32, 700.0);
+    resize_to(cx, minimum as f32, 700.0);
+    assert_eq!(
+        row_layout_now(cx, chat),
+        RowLayout::Compact,
+        "at {minimum}px"
+    );
+    minimum
+}
+
 /// Below a measured width the Compact row cannot hold every chip whole, and the
-/// rightmost ones (the ring first, then the task count) are what gets cut. The real
-/// minimum with every chip a chat can have (mode, model at its 56px floor,
-/// effort, two background tasks, ring) is 346px on the test font (7.8px a
-/// character); it is found here by search, and the width one pixel under it
-/// cuts the last chip, which is the ring.
+/// layout gives way to Narrow, which moves the task count and the ring into ⋯.
+/// The real minimum with every chip a chat can have (mode, model at its 56px floor,
+/// effort, two background tasks, ring) is 353px on the test font
+/// (7.8px a character; the ring's glyph alone fits from 346px, its chip with the
+/// padding it carries from 353px); it is found here by search, walking down from
+/// a roomy row.
+/// The measure is checked from both sides: at the minimum every chip is whole and the
+/// model sits on its 56px floor (a Compact need that came out too high would hand
+/// the model more than that), and one pixel under it the row is Narrow (one that
+/// came out too low would leave a chip cut in a Compact row).
 #[gpui::test]
 async fn compact_row_fits_every_chip_from_its_measured_minimum(cx: &mut TestAppContext) {
     let (chat, cx) = chat_view(cx, &["plain"]);
     pump_chat_until(cx, &chat, |chat| chat.client.is_some());
     chat.update(cx, |chat, _| configure_full_row(chat));
+    resize_to(cx, 1920.0, 700.0);
+    let natural = drawn(cx, "model-chip").size.width;
+    assert!(
+        natural > px(56.0 + 20.0),
+        "the fixture's model chip needs more than its 56px floor: {natural:?}"
+    );
 
-    let mut minimum = None;
-    for width in 280..=480 {
+    let minimum = compact_minimum(cx, &chat);
+    assert!(
+        (345..=360).contains(&minimum),
+        "the measured minimum is about 353px, got {minimum}px"
+    );
+    let model = drawn(cx, "model-chip").size.width;
+    assert!(
+        near(model, px(56.0), 1.0),
+        "the model sits on its floor at the minimum: {model:?}"
+    );
+    // It holds from there up.
+    for width in minimum..minimum + 20 {
         resize_to(cx, width as f32, 700.0);
         assert_eq!(
             row_layout_now(cx, &chat),
             RowLayout::Compact,
             "at {width}px"
         );
-        if chips_fit_whole(cx) {
+        assert!(
+            chips_fit_whole(cx, &COMPACT_CHIPS),
+            "every chip fits whole at {width}px"
+        );
+        assert_one_line_inside_the_band(cx, &COMPACT_CHIPS);
+    }
+    // One pixel under it the row is Narrow, and the two chips it cannot hold are
+    // not drawn at all rather than cut.
+    resize_to(cx, (minimum - 1) as f32, 700.0);
+    assert_eq!(
+        row_layout_now(cx, &chat),
+        RowLayout::Narrow,
+        "one pixel under the Compact minimum"
+    );
+    for name in ["background-tasks-chip", "context-chip", "context-ring"] {
+        assert!(cx.debug_bounds(name).is_none(), "{name} left the row");
+    }
+}
+
+/// The Narrow row: the task count and the ring are not in the row and are the
+/// last two rows ahead of Follow in ⋯; Fast, Thinking, the panel toggle and the
+/// permission name are as absent as in Compact. From Narrow the row holds until a
+/// whole hysteresis step above the Compact minimum, and there it is Compact with
+/// both chips back and ⋯ without their rows.
+#[gpui::test]
+async fn narrow_moves_the_task_count_and_the_ring_into_the_overflow_menu(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    let minimum = compact_minimum(cx, &chat) as f32;
+    let rows = [
+        "overflow-fast",
+        "overflow-thinking",
+        "overflow-session-panel",
+        "overflow-background-tasks",
+        "overflow-context",
+    ];
+
+    resize_to(cx, minimum - 1.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Narrow);
+    for name in [
+        "background-tasks-chip",
+        "context-chip",
+        "context-ring",
+        "context-label",
+        "fast-mode-chip",
+        "thinking-chip",
+        "session-panel-toggle",
+        "mode-label",
+    ] {
+        assert!(cx.debug_bounds(name).is_none(), "{name} is not in Narrow");
+    }
+    assert_one_line_inside_the_band(cx, &NARROW_CHIPS);
+    let snapshot = chat.read_with(cx, |chat, _| chat.composer_snapshot());
+    assert_eq!(snapshot.layout, "narrow");
+    assert_eq!(
+        snapshot.overflow,
+        [
+            "fast",
+            "thinking",
+            "session-panel",
+            "background-tasks",
+            "context"
+        ]
+    );
+
+    open_overflow(cx, &chat);
+    let follow = drawn(cx, "overflow-follow");
+    let mut above = None;
+    for name in rows {
+        let row = drawn(cx, name);
+        if let Some(previous) = above {
+            assert!(
+                previous < row.top(),
+                "{name} sits below the row before it: {previous:?} then {row:?}"
+            );
+        }
+        above = Some(row.top());
+    }
+    assert!(
+        above.expect("five rows") < follow.top(),
+        "the five rows are above Follow Edited Files"
+    );
+    chat.update(cx, |chat, _| chat.overflow_open = false);
+
+    // A step under the hysteresis the row stays Narrow; at it, it is Compact.
+    resize_to(cx, minimum + HYSTERESIS - 1.0, 700.0);
+    assert_eq!(
+        row_layout_now(cx, &chat),
+        RowLayout::Narrow,
+        "inside the band, from Narrow"
+    );
+    resize_to(cx, minimum + HYSTERESIS, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    for name in ["background-tasks-chip", "context-chip", "context-ring"] {
+        drawn(cx, name);
+    }
+    open_overflow(cx, &chat);
+    drawn(cx, "overflow-session-panel");
+    for name in ["overflow-background-tasks", "overflow-context"] {
+        assert!(
+            cx.debug_bounds(name).is_none(),
+            "{name} is not in ⋯ while the row is Compact"
+        );
+    }
+    assert_eq!(
+        chat.read_with(cx, |chat, _| chat.composer_snapshot().overflow),
+        ["fast", "thinking", "session-panel"]
+    );
+}
+
+/// Choosing the context row in a Narrow ⋯ closes the menu and opens the context
+/// popover, which hangs from ⋯ (the ring is not drawn) with the focus in it. The
+/// chat fills the window here and the window snaps a popup back inside it, so
+/// containment alone could never fail: the popover's left edge on ⋯'s is what
+/// proves where it hangs.
+#[gpui::test]
+async fn the_overflow_context_row_opens_its_popover_inside_the_pane(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    let minimum = compact_minimum(cx, &chat) as f32;
+    resize_to(cx, minimum - 1.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Narrow);
+    let root = drawn(cx, "chat-root");
+    let overflow = drawn(cx, "composer-overflow");
+
+    open_overflow(cx, &chat);
+    click_drawn(cx, "overflow-context");
+
+    assert!(
+        cx.debug_bounds("composer-overflow-menu").is_none(),
+        "choosing Context closes ⋯"
+    );
+    let popover = drawn(cx, "context-popover");
+    assert!(
+        popover.left() >= root.left() - px(0.5) && popover.right() <= root.right() + px(0.5),
+        "the context popover stays inside the chat: root={root:?} popover={popover:?}"
+    );
+    assert!(
+        near(popover.left(), overflow.left(), 0.5),
+        "the popover hangs from ⋯: overflow={overflow:?} popover={popover:?}"
+    );
+    assert!(
+        cx.update(|window, app| chat.read(app).context_popover_focus.is_focused(window)),
+        "the popover has the focus"
+    );
+
+    // Chosen again with the popover already open, the row opens it, never closes it.
+    chat.update(cx, |chat, _| chat.overflow_open = false);
+    open_overflow(cx, &chat);
+    click_drawn(cx, "overflow-context");
+    drawn(cx, "context-popover");
+}
+
+/// In Compact the ring keeps its popover: it hangs from the ring's chip and ends
+/// on that chip's right edge, growing leftward. (⋯'s placement is for Narrow.)
+/// The chat fills the window and the window snaps a popup back inside it, so it is
+/// the right edge on the chip's that proves where it hangs.
+#[gpui::test]
+async fn the_ring_still_opens_its_popover_from_the_ring_in_compact(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    let minimum = compact_minimum(cx, &chat) as f32;
+    resize_to(cx, minimum + 40.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+
+    click_drawn(cx, "context-ring");
+    let popover = drawn(cx, "context-popover");
+    let chip = drawn(cx, "context-chip");
+    assert!(
+        near(popover.right(), chip.right(), 0.5),
+        "in Compact the popover ends on the ring's chip: chip={chip:?} popover={popover:?}"
+    );
+}
+
+/// Narrow keeps what Compact does for Thinking: the row is in ⋯, and the picker
+/// it opens hangs from ⋯.
+#[gpui::test]
+async fn the_overflow_thinking_row_opens_its_picker_from_a_narrow_row_too(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    resize_to(cx, 300.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Narrow);
+    let overflow = drawn(cx, "composer-overflow");
+
+    open_overflow(cx, &chat);
+    click_drawn(cx, "overflow-thinking");
+
+    let picker = drawn(cx, "thinking-picker");
+    assert!(
+        near(picker.left(), overflow.left(), 0.5),
+        "the picker hangs from ⋯: overflow={overflow:?} picker={picker:?}"
+    );
+}
+
+/// The task count in ⋯ is information, not an action: Ely's menu steps over it
+/// and will not run it, the keys step over it, and the row has no effect when
+/// chosen. An enabled neighbour (Follow) is the control case, so the assertions
+/// can tell a disabled row from one that merely does nothing visible.
+#[gpui::test]
+async fn the_background_tasks_row_is_informational(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    resize_to(cx, 300.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Narrow);
+    let rows = chat.read_with(cx, |chat, _| chat.overflow_rows());
+    let tasks = rows
+        .iter()
+        .position(|row| *row == OverflowRow::BackgroundTasks)
+        .expect("the task count is a row of ⋯");
+    let follow = rows
+        .iter()
+        .position(|row| *row == OverflowRow::Follow)
+        .expect("Follow is a row of ⋯");
+
+    // The menu model.
+    let menu = chat.update(cx, |chat, cx| chat.overflow_menu(cx));
+    assert_eq!(
+        menu.step(Some(tasks - 1), 1),
+        Some(tasks + 1),
+        "down skips it"
+    );
+    assert_eq!(
+        menu.step(Some(tasks + 1), -1),
+        Some(tasks - 1),
+        "up skips it"
+    );
+    assert!(
+        !cx.update(|window, app| menu.run(tasks, window, app)),
+        "the menu does not run the task count"
+    );
+    assert!(
+        cx.update(|window, app| menu.run(follow, window, app)),
+        "the control: an enabled row runs"
+    );
+    assert!(
+        chat.read_with(cx, |chat, _| chat.following_edited_files),
+        "the control ran Follow"
+    );
+
+    // The chat's own keys.
+    assert!(!chat.read_with(cx, |chat, _| {
+        chat.picker_row_enabled(&PickerRow::Overflow(OverflowRow::BackgroundTasks))
+    }));
+    open_overflow(cx, &chat);
+    let cursor = |cx: &mut VisualTestContext| chat.read_with(cx, |chat, _| chat.picker_cursor);
+    chat.update(cx, |chat, _| chat.picker_cursor = Some(tasks - 1));
+    cx.update(|window, app| chat.update(app, |chat, cx| chat.picker_next(&PickerNext, window, cx)));
+    assert_eq!(
+        cursor(cx),
+        Some(tasks + 1),
+        "Down steps over the task count"
+    );
+    cx.update(|window, app| {
+        chat.update(app, |chat, cx| {
+            chat.picker_previous(&PickerPrevious, window, cx)
+        })
+    });
+    assert_eq!(cursor(cx), Some(tasks - 1), "Up steps over it");
+
+    // Choosing it by any path does nothing.
+    chat.update(cx, |chat, _| chat.picker_cursor = Some(tasks));
+    cx.update(|window, app| {
+        chat.update(app, |chat, cx| {
+            chat.picker_choose(&PickerChoose, window, cx)
+        })
+    });
+    assert!(
+        chat.read_with(cx, |chat, _| chat.overflow_open
+            && !chat.context_popover_open),
+        "choosing the task count leaves ⋯ as it was"
+    );
+}
+
+/// The row's words: the ring's own sentence once the agent has said how full its
+/// context is, "Context" until then, and never a zero nobody measured.
+#[gpui::test]
+async fn the_context_row_reads_as_the_ring_does(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    let label = |cx: &mut VisualTestContext, usage: Option<(u64, u64)>| {
+        chat.update(cx, |chat, _| {
+            chat.context_usage = usage.map(|(used, size)| ContextUsage {
+                used,
+                size,
+                ..Default::default()
+            });
+            chat.context_row_label()
+        })
+    };
+    assert_eq!(label(cx, None), "Context");
+    assert_eq!(
+        label(cx, Some((0, 0))),
+        "Context",
+        "no window size, no percent"
+    );
+    assert_eq!(label(cx, Some((45, 100))), "45% of context used");
+    assert_eq!(label(cx, Some((2, 3))), "67% of context used", "rounded");
+}
+
+/// Below its measured minimum the Narrow row cannot hold its three chips whole,
+/// and the last of them, the effort, is what is cut. The real minimum with a
+/// mode, a model at its 56px floor and an effort is 269px on the
+/// test font: found by search, walking up from a chat far narrower than that.
+#[gpui::test]
+async fn narrow_row_fits_from_its_measured_minimum(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    // Narrow before the search starts, and from there up it stays Narrow until a
+    // hysteresis step over the Compact minimum.
+    resize_to(cx, 200.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Narrow);
+
+    let mut minimum = None;
+    for width in 200..=360 {
+        resize_to(cx, width as f32, 700.0);
+        assert_eq!(row_layout_now(cx, &chat), RowLayout::Narrow, "at {width}px");
+        if chips_fit_whole(cx, &NARROW_CHIPS) {
             minimum = Some(width);
             break;
         }
     }
-    let minimum = minimum.expect("some width up to 480px holds every chip");
+    let minimum = minimum.expect("some width up to 360px holds the Narrow chips");
     assert!(
-        (330..=360).contains(&minimum),
-        "the measured minimum is about 346px, got {minimum}px"
+        (260..=280).contains(&minimum),
+        "the measured minimum is about 269px, got {minimum}px"
     );
-    // It holds from there up, and one pixel under it the ring is cut.
     for width in minimum..minimum + 20 {
         resize_to(cx, width as f32, 700.0);
-        assert!(chips_fit_whole(cx), "every chip fits whole at {width}px");
-        assert_one_line_inside_the_band(cx, &COMPACT_CHIPS);
+        assert!(
+            chips_fit_whole(cx, &NARROW_CHIPS),
+            "every Narrow chip fits whole at {width}px"
+        );
+        assert_one_line_inside_the_band(cx, &NARROW_CHIPS);
     }
     resize_to(cx, (minimum - 1) as f32, 700.0);
-    assert!(!chips_fit_whole(cx), "one pixel under, a chip is cut");
+    assert!(
+        !chips_fit_whole(cx, &NARROW_CHIPS),
+        "one pixel under, a chip is cut"
+    );
     let chips = drawn(cx, "composer-chips");
     assert!(
-        drawn(cx, "context-ring").right() > chips.right() + px(0.5),
-        "the ring, the last chip, is the one cut"
+        drawn(cx, "effort-chip").right() > chips.right() + px(0.5),
+        "the effort, the last chip, is the one cut"
     );
-    for name in &COMPACT_CHIPS[..4] {
+    for name in &NARROW_CHIPS[..2] {
         assert!(
             drawn(cx, name).right() <= chips.right() + px(0.5),
             "{name} is not cut: the cut falls on the right"
@@ -1334,48 +1711,53 @@ async fn compact_row_fits_every_chip_from_its_measured_minimum(cx: &mut TestAppC
 /// boxes come out the same with and without the clip (Taffy ignores `overflow`
 /// once `min_w_0` is set), and child `debug_bounds` are not clipped. What does
 /// see the clip is hit-testing, which intersects every hitbox with its content
-/// mask: it picks a width where the overflowing context ring's layout box covers
+/// mask: it picks a width where the overflowing effort chip's layout box covers
 /// a point in the band's right padding (past send), and clicks that point. The
-/// ring's press, opening the context popover, must not fire. The control case
-/// is the same press on the ring in a roomy row, which does.
+/// chip's press, opening the effort picker, must not fire. The control case is
+/// the same press on the chip in a roomy row, which does. (The effort chip is
+/// the last one the Narrow row draws, so it is what overflows first.)
 #[gpui::test]
 async fn a_chip_that_does_not_fit_takes_no_press_in_the_band_padding(cx: &mut TestAppContext) {
     let (chat, cx) = chat_view(cx, &["plain"]);
     pump_chat_until(cx, &chat, |chat| chat.client.is_some());
-    let popover_open =
-        |cx: &mut VisualTestContext| chat.read_with(cx, |chat, _| chat.context_popover_open);
+    let picker_open =
+        |cx: &mut VisualTestContext| chat.read_with(cx, |chat, _| chat.effort_picker_open);
 
-    // Control: the ring opens the popover when it is where the row draws it.
+    // Control: the chip opens its picker when it is where the row draws it.
     chat.update(cx, |chat, _| configure_fitting_full_row(chat));
     resize_to(cx, 1920.0, 700.0);
-    click_drawn(cx, "context-ring");
-    assert!(popover_open(cx), "a press on the ring opens the popover");
-    chat.update(cx, |chat, _| chat.context_popover_open = false);
+    click_drawn(cx, "effort-chip");
+    assert!(
+        picker_open(cx),
+        "a press on the effort chip opens its picker"
+    );
+    chat.update(cx, |chat, _| chat.effort_picker_open = false);
 
     chat.update(cx, |chat, _| configure_full_row(chat));
     let mut found = None;
-    for width in 281..346 {
+    for width in 160..281 {
         resize_to(cx, width as f32, 700.0);
+        assert_eq!(row_layout_now(cx, &chat), RowLayout::Narrow, "at {width}px");
         let composer = drawn(cx, "composer");
         let send = drawn(cx, "send");
-        let ring = drawn(cx, "context-ring");
+        let chip = drawn(cx, "effort-chip");
         // A point in the padding between send and the band's edge, inside the
-        // ring's layout box, on the row's line.
-        let from = f32::from(send.right()).max(f32::from(ring.left())) + 1.0;
-        let to = f32::from(composer.right()).min(f32::from(ring.right())) - 1.0;
+        // chip's layout box, on the row's line.
+        let from = f32::from(send.right()).max(f32::from(chip.left())) + 1.0;
+        let to = f32::from(composer.right()).min(f32::from(chip.right())) - 1.0;
         if from < to {
             found = Some((width, gpui::point(px((from + to) / 2.0), send.center().y)));
             break;
         }
     }
-    let (width, point) = found.expect("a width where the ring's box reaches into the padding");
-    let ring = drawn(cx, "context-ring");
+    let (width, point) = found.expect("a width where the chip's box reaches into the padding");
+    let chip = drawn(cx, "effort-chip");
     let composer = drawn(cx, "composer");
     let send = drawn(cx, "send");
     assert!(
-        ring.contains(&point) && point.x > send.right() && point.x < composer.right(),
-        "the point is in the ring's box and the band's padding at {width}px: \
-         point={point:?} ring={ring:?} send={send:?} composer={composer:?}"
+        chip.contains(&point) && point.x > send.right() && point.x < composer.right(),
+        "the point is in the chip's box and the band's padding at {width}px: \
+         point={point:?} chip={chip:?} send={send:?} composer={composer:?}"
     );
 
     cx.simulate_click(point, gpui::Modifiers::none());
@@ -1384,7 +1766,48 @@ async fn a_chip_that_does_not_fit_takes_no_press_in_the_band_padding(cx: &mut Te
         refresh_frame(cx);
     }
     assert!(
-        !popover_open(cx),
-        "a ring laid out past the band's edge took a press at {point:?} at {width}px"
+        !picker_open(cx),
+        "a chip laid out past the band's edge took a press at {point:?} at {width}px"
     );
+}
+
+/// The Compact row gives way to Narrow, from a docked width, without anything else
+/// drawing the chat: a single draw across what Compact needs leaves a
+/// notification behind, and the next draw lays the row out Narrow. (Docked, so
+/// the width stays above the overlay's 640px, where any change of width redraws.)
+#[gpui::test]
+async fn crossing_into_narrow_asks_for_a_redraw(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    chat.update(cx, |chat, cx| chat.set_session_panel_open(true, cx));
+    resize_to(cx, 1200.0, 700.0);
+    let (full, compact) = chat.read_with(cx, |chat, _| {
+        (
+            chat.composer_row.needed.get(),
+            chat.composer_row.compact_needed.get(),
+        )
+    });
+    let beside = 300.0 + 24.0;
+    assert!(
+        compact > 640.0 - beside && compact < full,
+        "Compact's need is a docked width: compact={compact} full={full}"
+    );
+
+    resize_to(cx, chat_width_for(compact, true), 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    let notified = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let _count = cx.update(|_, app| {
+        let notified = notified.clone();
+        app.observe(&chat, move |_, _| notified.set(notified.get() + 1))
+    });
+    cx.simulate_resize(size(px(chat_width_just_below(compact, true)), px(700.0)));
+    cx.update(|window, app| window.draw(app).clear(app));
+    cx.run_until_parked();
+    assert!(
+        notified.get() > 0,
+        "the width crossed what Compact needs and nothing asked the chat to redraw"
+    );
+    cx.update(|window, app| window.draw(app).clear(app));
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Narrow);
 }

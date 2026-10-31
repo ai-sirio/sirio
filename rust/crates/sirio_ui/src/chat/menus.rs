@@ -2,7 +2,7 @@
 //! the transcript, and the composer's "more" menu. Rows are Ely's; whether a
 //! menu is open, where it hangs and what Escape does stay with `Chat`.
 
-use super::controls::{OverflowRow, PickerRow, popup_width};
+use super::controls::{OverflowRow, PickerRow, background_tasks_label, popup_width};
 use super::*;
 use ely_gpui_component::menus::{Hang, Menu, MenuItem, MenuPanel, layer};
 
@@ -133,6 +133,15 @@ impl Chat {
                         };
                         MenuItem::new(label).selectors("overflow-session-panel", None)
                     }
+                    // Information: a disabled row, which the menu steps over.
+                    OverflowRow::BackgroundTasks => {
+                        MenuItem::new(background_tasks_label(self.background_tasks))
+                            .disabled(true)
+                            .selectors("overflow-background-tasks", None)
+                    }
+                    OverflowRow::Context => {
+                        MenuItem::new(self.context_row_label()).selectors("overflow-context", None)
+                    }
                     OverflowRow::Follow if self.following_edited_files => {
                         MenuItem::new("Stop Following").selectors("overflow-follow", None)
                     }
@@ -151,7 +160,8 @@ impl Chat {
 
     /// The composer's "more" menu (F-CHAT-14): Follow Edited Files, New
     /// Conversation and Chat History, and, while the row is Compact, the
-    /// Fast, Thinking and session panel rows above them. Follow and Fast are
+    /// Fast, Thinking and session panel rows above them, and in a Narrow one
+    /// the task count and the context ring's row too. Follow and Fast are
     /// toggles and leave the menu open; the others close it.
     pub(super) fn render_chat_menu(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let rows = self.picker_rows(cx);

@@ -192,6 +192,190 @@ impl Chat {
         ))
     }
 
+    /// The context popover while it is open, hung from the control the caller
+    /// puts it in: the ring in a Full or Compact row (`Hang::AboveEnd`, growing
+    /// leftward from the right-aligned group) or ⋯ in a Narrow one
+    /// (`Hang::Above`, growing rightward from ⋯, which is in the left group).
+    pub(super) fn render_context_popover(
+        &self,
+        theme: &Theme,
+        hang: Hang,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let typography = theme.typography;
+        let context_usage = self.context_usage.clone();
+        if self.context_popover_open {
+            let usage = context_usage.clone();
+            Some(layer(
+                "context-popover-menu",
+                hang,
+                div()
+                    .id("context-popover")
+                    .debug_selector(|| "context-popover".into())
+                    .key_context("ChatContextPopover")
+                    .track_focus(&self.context_popover_focus)
+                    .on_action(cx.listener(Self::cancel))
+                    .w(popup_width(theme, 285.0))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.context_popover_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        panel_surface("context-popover-surface", cx).p_2().child(
+                            div()
+                                .when_some(usage, |this, usage| {
+                                    // `None` is a state of its own, not a zero: a
+                                    // session whose `usage_update` named no window size
+                                    // has nothing to report, and folding that into "0%"
+                                    // would claim an empty context nobody measured.
+                                    // Agents that never send a usage update (Pi's ACP
+                                    // adapter among them) are exactly the ones a
+                                    // fabricated zero would libel.
+                                    let percent = if usage.size == 0 {
+                                        None
+                                    } else {
+                                        Some(
+                                            ((usage.used as f64 / usage.size as f64) * 100.0)
+                                                .round()
+                                                as u64,
+                                        )
+                                    };
+                                    let cost = usage.cost.map(|cost| {
+                                        format!("Cost: {:.2} {}", cost.amount, cost.currency)
+                                    });
+                                    let this = match percent {
+                            Some(percent) => this
+                                .child(
+                                    div()
+                                        .id(format!(
+                                            "context-usage-{}-of-{}",
+                                            usage.used, usage.size
+                                        ))
+                                        .debug_selector(move || {
+                                            format!(
+                                                "context-usage-{}-of-{}",
+                                                usage.used, usage.size
+                                            )
+                                        })
+                                        .text_size(typography.footnote)
+                                        .text_color(theme.ely.fg)
+                                        .child(context_percent_label(percent)),
+                                )
+                                .child(
+                                    div()
+                                        .mt(px(4.0))
+                                        .text_size(typography.caption2)
+                                        .text_color(theme.ely.fg_subtle)
+                                        .child(format!("{} / {} tokens", usage.used, usage.size)),
+                                ),
+                            // A partial update — the breakdown merged in
+                            // before any used/size pair, or one that named
+                            // no window — must not read as "0 of 0 tokens":
+                            // the breakdown rows below are real, the
+                            // fraction simply is not known.
+                            None => this.child(
+                                div()
+                                    .id("context-usage-unreported")
+                                    .debug_selector(|| "context-usage-unreported".into())
+                                    .text_size(typography.footnote)
+                                    .text_color(theme.ely.fg_subtle)
+                                    .child("The agent has not reported its context window size."),
+                            ),
+                        };
+                                    this.when_some(cost, |this, cost| {
+                                        this.child(
+                                            div()
+                                                .mt(px(4.0))
+                                                .text_size(typography.caption2)
+                                                .text_color(theme.ely.fg_subtle)
+                                                .child(cost),
+                                        )
+                                    })
+                                    // F-CHAT-18: input/output/cache breakdown, present
+                                    // only for agents that report end-of-turn usage
+                                    // (`unstable_end_turn_token_usage`) -- absent for
+                                    // every other agent, so the rows are opt-in rather
+                                    // than showing zeros.
+                                    .when(
+                                        usage.input_tokens.is_some()
+                                            || usage.output_tokens.is_some()
+                                            || usage.cached_read_tokens.is_some(),
+                                        |this| {
+                                            this.child(
+                                                div()
+                                                    .id("context-usage-breakdown")
+                                                    .debug_selector(|| {
+                                                        "context-usage-breakdown".into()
+                                                    })
+                                                    .mt(px(6.0))
+                                                    .pt(px(6.0))
+                                                    .border_t_1()
+                                                    .border_color(theme.ely.border)
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(2.0))
+                                                    .when_some(
+                                                        usage.input_tokens,
+                                                        |this, tokens| {
+                                                            this.child(
+                                                                div()
+                                                                    .text_size(typography.caption2)
+                                                                    .text_color(theme.ely.fg_subtle)
+                                                                    .child(format!(
+                                                                        "Input: {tokens} tokens"
+                                                                    )),
+                                                            )
+                                                        },
+                                                    )
+                                                    .when_some(
+                                                        usage.output_tokens,
+                                                        |this, tokens| {
+                                                            this.child(
+                                                                div()
+                                                                    .text_size(typography.caption2)
+                                                                    .text_color(theme.ely.fg_subtle)
+                                                                    .child(format!(
+                                                                        "Output: {tokens} tokens"
+                                                                    )),
+                                                            )
+                                                        },
+                                                    )
+                                                    .when_some(
+                                                        usage.cached_read_tokens,
+                                                        |this, tokens| {
+                                                            this.child(
+                                                div()
+                                                    .text_size(typography.caption2)
+                                                    .text_color(theme.ely.fg_subtle)
+                                                    .child(format!("Cache read: {tokens} tokens")),
+                                            )
+                                                        },
+                                                    ),
+                                            )
+                                        },
+                                    )
+                                })
+                                .when(self.context_usage.is_none(), |this| {
+                                    this.child(
+                                        div()
+                                            .id("context-usage-never-reported")
+                                            .debug_selector(|| {
+                                                "context-usage-never-reported".into()
+                                            })
+                                            .text_size(typography.footnote)
+                                            .text_color(theme.ely.fg_subtle)
+                                            .child("The agent has not reported context usage yet."),
+                                    )
+                                }),
+                        ),
+                    ),
+                cx,
+            ))
+        } else {
+            None
+        }
+    }
+
     /// The control row's chips, each with the popup it hangs. One element so
     /// the composer takes it as a single trailing slot; it is one line, and
     /// the model chip, which may shrink, is what gives on a narrow one.
@@ -202,7 +386,9 @@ impl Chat {
         _window: &mut Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let compact = layout == RowLayout::Compact;
+        // Narrow draws what Compact does, less the task count and the ring.
+        let compact = layout != RowLayout::Full;
+        let narrow = layout == RowLayout::Narrow;
         let typography = theme.typography;
         let bezel_theme = bezel_theme::Theme::of(cx).clone();
         let entity = cx.entity();
@@ -567,11 +753,7 @@ impl Chat {
                 .rounded(theme.radii.control)
                 .text_size(typography.ui_size)
                 .text_color(theme.ely.fg_subtle)
-                .tooltip(crate::controls::tooltip(if running == 1 {
-                    "1 background task running".to_string()
-                } else {
-                    format!("{running} background tasks running")
-                }))
+                .tooltip(crate::controls::tooltip(background_tasks_label(running)))
                 .child(format!("⌁ {running}"))
         });
 
@@ -951,177 +1133,10 @@ impl Chat {
                     }),
             );
 
-        let context_popover = if self.context_popover_open {
-            let usage = context_usage.clone();
-            Some(layer(
-                "context-popover-menu",
-                Hang::AboveEnd,
-                div()
-                    .id("context-popover")
-                    .debug_selector(|| "context-popover".into())
-                    .key_context("ChatContextPopover")
-                    .track_focus(&self.context_popover_focus)
-                    .on_action(cx.listener(Self::cancel))
-                    .w(popup_width(theme, 285.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.context_popover_open = false;
-                        cx.notify();
-                    }))
-                    .child(
-                        panel_surface("context-popover-surface", cx).p_2().child(
-                            div()
-                                .when_some(usage, |this, usage| {
-                                    // `None` is a state of its own, not a zero: a
-                                    // session whose `usage_update` named no window size
-                                    // has nothing to report, and folding that into "0%"
-                                    // would claim an empty context nobody measured.
-                                    // Agents that never send a usage update (Pi's ACP
-                                    // adapter among them) are exactly the ones a
-                                    // fabricated zero would libel.
-                                    let percent = if usage.size == 0 {
-                                        None
-                                    } else {
-                                        Some(
-                                            ((usage.used as f64 / usage.size as f64) * 100.0)
-                                                .round()
-                                                as u64,
-                                        )
-                                    };
-                                    let cost = usage.cost.map(|cost| {
-                                        format!("Cost: {:.2} {}", cost.amount, cost.currency)
-                                    });
-                                    let this = match percent {
-                            Some(percent) => this
-                                .child(
-                                    div()
-                                        .id(format!(
-                                            "context-usage-{}-of-{}",
-                                            usage.used, usage.size
-                                        ))
-                                        .debug_selector(move || {
-                                            format!(
-                                                "context-usage-{}-of-{}",
-                                                usage.used, usage.size
-                                            )
-                                        })
-                                        .text_size(typography.footnote)
-                                        .text_color(theme.ely.fg)
-                                        .child(format!("{percent}% of context used")),
-                                )
-                                .child(
-                                    div()
-                                        .mt(px(4.0))
-                                        .text_size(typography.caption2)
-                                        .text_color(theme.ely.fg_subtle)
-                                        .child(format!("{} / {} tokens", usage.used, usage.size)),
-                                ),
-                            // A partial update — the breakdown merged in
-                            // before any used/size pair, or one that named
-                            // no window — must not read as "0 of 0 tokens":
-                            // the breakdown rows below are real, the
-                            // fraction simply is not known.
-                            None => this.child(
-                                div()
-                                    .id("context-usage-unreported")
-                                    .debug_selector(|| "context-usage-unreported".into())
-                                    .text_size(typography.footnote)
-                                    .text_color(theme.ely.fg_subtle)
-                                    .child("The agent has not reported its context window size."),
-                            ),
-                        };
-                                    this.when_some(cost, |this, cost| {
-                                        this.child(
-                                            div()
-                                                .mt(px(4.0))
-                                                .text_size(typography.caption2)
-                                                .text_color(theme.ely.fg_subtle)
-                                                .child(cost),
-                                        )
-                                    })
-                                    // F-CHAT-18: input/output/cache breakdown, present
-                                    // only for agents that report end-of-turn usage
-                                    // (`unstable_end_turn_token_usage`) -- absent for
-                                    // every other agent, so the rows are opt-in rather
-                                    // than showing zeros.
-                                    .when(
-                                        usage.input_tokens.is_some()
-                                            || usage.output_tokens.is_some()
-                                            || usage.cached_read_tokens.is_some(),
-                                        |this| {
-                                            this.child(
-                                                div()
-                                                    .id("context-usage-breakdown")
-                                                    .debug_selector(|| {
-                                                        "context-usage-breakdown".into()
-                                                    })
-                                                    .mt(px(6.0))
-                                                    .pt(px(6.0))
-                                                    .border_t_1()
-                                                    .border_color(theme.ely.border)
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap(px(2.0))
-                                                    .when_some(
-                                                        usage.input_tokens,
-                                                        |this, tokens| {
-                                                            this.child(
-                                                                div()
-                                                                    .text_size(typography.caption2)
-                                                                    .text_color(theme.ely.fg_subtle)
-                                                                    .child(format!(
-                                                                        "Input: {tokens} tokens"
-                                                                    )),
-                                                            )
-                                                        },
-                                                    )
-                                                    .when_some(
-                                                        usage.output_tokens,
-                                                        |this, tokens| {
-                                                            this.child(
-                                                                div()
-                                                                    .text_size(typography.caption2)
-                                                                    .text_color(theme.ely.fg_subtle)
-                                                                    .child(format!(
-                                                                        "Output: {tokens} tokens"
-                                                                    )),
-                                                            )
-                                                        },
-                                                    )
-                                                    .when_some(
-                                                        usage.cached_read_tokens,
-                                                        |this, tokens| {
-                                                            this.child(
-                                                div()
-                                                    .text_size(typography.caption2)
-                                                    .text_color(theme.ely.fg_subtle)
-                                                    .child(format!("Cache read: {tokens} tokens")),
-                                            )
-                                                        },
-                                                    ),
-                                            )
-                                        },
-                                    )
-                                })
-                                .when(self.context_usage.is_none(), |this| {
-                                    this.child(
-                                        div()
-                                            .id("context-usage-never-reported")
-                                            .debug_selector(|| {
-                                                "context-usage-never-reported".into()
-                                            })
-                                            .text_size(typography.footnote)
-                                            .text_color(theme.ely.fg_subtle)
-                                            .child("The agent has not reported context usage yet."),
-                                    )
-                                }),
-                        ),
-                    ),
-                cx,
-            ))
-        } else {
-            None
-        };
-
+        // Hung from the ring, in the row that draws it.
+        let context_popover = (!narrow)
+            .then(|| self.render_context_popover(theme, Hang::AboveEnd, cx))
+            .flatten();
         // The chips clip: on a pane too narrow for all of them the rightmost
         // are cut at this element's edge, and send, which the band keeps after
         // it, is never covered.
@@ -1169,7 +1184,11 @@ impl Chat {
                     .children(effort_picker),
             )
             .child(div().relative().flex_none().children(fast_control))
-            .child(div().relative().flex_none().children(background_tasks))
+            // Narrow has neither the task count nor the ring: they are rows in ⋯,
+            // and a wrapper left empty would still take its gap and padding.
+            .when(!narrow, |row| {
+                row.child(div().relative().flex_none().children(background_tasks))
+            })
             .child(
                 div()
                     .relative()
@@ -1177,33 +1196,50 @@ impl Chat {
                     .children(thinking_control)
                     .children(thinking_picker),
             )
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(24.0))
-                    .px(px(7.0))
-                    .rounded(theme.radii.control)
-                    .text_size(typography.ui_size)
-                    .child(context_ring)
-                    // Compact keeps the ring, which is the control, and leaves
-                    // its caption out.
-                    .when(!compact, |this| {
-                        this.child(
-                            div()
-                                .id("context-label")
-                                .debug_selector(|| "context-label".into())
-                                .text_color(theme.ely.fg_subtle)
-                                .child("Context"),
-                        )
-                    })
-                    .children(context_popover),
-            )
+            .when(!narrow, |row| {
+                row.child(
+                    div()
+                        .debug_selector(|| "context-chip".into())
+                        .relative()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(6.0))
+                        .h(px(24.0))
+                        .px(px(7.0))
+                        .rounded(theme.radii.control)
+                        .text_size(typography.ui_size)
+                        .child(context_ring)
+                        // Compact keeps the ring, which is the control, and leaves
+                        // its caption out.
+                        .when(!compact, |this| {
+                            this.child(
+                                div()
+                                    .id("context-label")
+                                    .debug_selector(|| "context-label".into())
+                                    .text_color(theme.ely.fg_subtle)
+                                    .child("Context"),
+                            )
+                        })
+                        .children(context_popover),
+                )
+            })
             .into_any_element()
     }
+}
+
+/// The background-task count in words: the chip's tooltip, and the row in ⋯.
+pub(super) fn background_tasks_label(running: usize) -> String {
+    if running == 1 {
+        "1 background task running".to_string()
+    } else {
+        format!("{running} background tasks running")
+    }
+}
+
+/// The context popover's headline, and the row in ⋯ that reads like it.
+fn context_percent_label(percent: u64) -> String {
+    format!("{percent}% of context used")
 }
 
 /// One row of the open catalogue popup, as a press and the keys both see it.
@@ -1220,12 +1256,17 @@ pub(super) enum PickerRow {
 /// The rows of the composer's "more" menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OverflowRow {
-    /// Fast mode, a toggle. Only in the Compact row, which has no chip for it.
+    /// Fast mode, a toggle. Only in the Compact and Narrow rows, which have no
+    /// chip for it.
     Fast,
-    /// The thinking picker. Only in the Compact row.
+    /// The thinking picker. Only in the Compact and Narrow rows.
     Thinking,
-    /// The session panel's toggle. Only in the Compact row.
+    /// The session panel's toggle. Only in the Compact and Narrow rows.
     SessionPanel,
+    /// How many background tasks run. Only in the Narrow row.
+    BackgroundTasks,
+    /// The context ring's popover. Only in the Narrow row.
+    Context,
     Follow,
     NewConversation,
     History,
@@ -1277,16 +1318,21 @@ impl Chat {
     }
 
     /// What the current layout moves out of the row and into ⋯, whether or not
-    /// ⋯ is open: in the Full row, nothing. In order, these are the rows ahead
-    /// of the menu's own.
+    /// ⋯ is open: in the Full row, nothing; in the Compact row Fast, Thinking and
+    /// the session panel; in the Narrow row those and the task count and the
+    /// context ring. In order, these are the rows ahead of the menu's own.
     pub(super) fn overflowed_rows(&self) -> Vec<OverflowRow> {
-        if self.composer_row.layout.get() != RowLayout::Compact {
+        let layout = self.composer_row.layout.get();
+        if layout == RowLayout::Full {
             return Vec::new();
         }
+        let narrow = layout == RowLayout::Narrow;
         [
             self.fast_state().map(|_| OverflowRow::Fast),
             self.thinking_state().map(|_| OverflowRow::Thinking),
             Some(OverflowRow::SessionPanel),
+            (narrow && self.background_tasks > 0).then_some(OverflowRow::BackgroundTasks),
+            narrow.then_some(OverflowRow::Context),
         ]
         .into_iter()
         .flatten()
@@ -1305,11 +1351,28 @@ impl Chat {
         rows
     }
 
-    /// Whether a row can be chosen. The only one that cannot is Fast mode while
-    /// the CLI has refused it; the menu draws that row disabled, and the keys
-    /// step over it.
+    /// The context row's words in ⋯: the ring's own sentence once the agent has
+    /// said how full its context is, "Context" until then (a window of no size
+    /// gives no percentage, and never a zero nobody measured).
+    pub(super) fn context_row_label(&self) -> String {
+        self.context_usage
+            .as_ref()
+            .filter(|usage| usage.size > 0)
+            .map_or_else(
+                || "Context".to_string(),
+                |usage| {
+                    let percent = ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64;
+                    context_percent_label(percent)
+                },
+            )
+    }
+
+    /// Whether a row can be chosen. The two that cannot are Fast mode while the
+    /// CLI has refused it, and the task count, which only says how many tasks
+    /// run; the menu draws those rows disabled, and the keys step over them.
     pub(super) fn picker_row_enabled(&self, row: &PickerRow) -> bool {
         match row {
+            PickerRow::Overflow(OverflowRow::BackgroundTasks) => false,
             PickerRow::Overflow(OverflowRow::Fast) => self
                 .fast_state()
                 .is_some_and(|fast| fast.blocked_by.is_none()),
@@ -1397,6 +1460,17 @@ impl Chat {
             PickerRow::Overflow(OverflowRow::SessionPanel) => {
                 self.overflow_open = false;
                 self.toggle_session_panel(cx);
+            }
+            // Information, not an action: nothing to run, and ⋯ stays as it is.
+            PickerRow::Overflow(OverflowRow::BackgroundTasks) => return,
+            // The popover takes the focus itself, and keeps it. It opens, never
+            // toggles: the row is chosen to see it.
+            PickerRow::Overflow(OverflowRow::Context) => {
+                self.overflow_open = false;
+                self.picker_cursor = None;
+                self.context_popover_open = false;
+                self.toggle_context_popover(window, cx);
+                return;
             }
             // Follow is a toggle: the menu stays open, with the focus where it is.
             PickerRow::Overflow(OverflowRow::Follow) => {

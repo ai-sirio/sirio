@@ -1036,11 +1036,14 @@ impl Chat {
             );
             let chat_width = self.chat_width().map_or(f32::INFINITY, f32::from);
             let needed = self.full_row_needed(theme, window);
+            let compact_needed = self.compact_row_needed(theme, window);
             let layout = row_layout(
                 row_width(chat_width, docked),
                 needed,
+                compact_needed,
                 self.composer_row.layout.get(),
             );
+            self.composer_row.compact_needed.set(compact_needed);
             self.composer_row.layout.set(layout);
             self.composer_row.needed.set(needed);
             self.composer_row.docked.set(docked);
@@ -1049,6 +1052,7 @@ impl Chat {
             self.composer_row.layout.set(RowLayout::Full);
             // Nothing to lay out: the probe has nothing to ask about.
             self.composer_row.needed.set(0.0);
+            self.composer_row.compact_needed.set(0.0);
             self.composer_row.docked.set(false);
             RowLayout::Full
         };
@@ -1061,8 +1065,13 @@ impl Chat {
         // The thinking picker hangs from ⋯ in a Compact row, which has no chip
         // for it (the Full row's chip hangs its own). ⋯ is in the left group, so
         // the picker grows rightward into the chat.
-        let compact_thinking_picker = (layout == RowLayout::Compact)
+        let compact_thinking_picker = (layout != RowLayout::Full)
             .then(|| self.render_thinking_picker(theme, Hang::Above, cx))
+            .flatten();
+        // A Narrow row has no ring for the context popover to hang from either,
+        // so it hangs from ⋯ the same way.
+        let narrow_context_popover = (layout == RowLayout::Narrow)
+            .then(|| self.render_context_popover(theme, Hang::Above, cx))
             .flatten();
 
         let composer_context_menu = self
@@ -1173,7 +1182,7 @@ impl Chat {
         }
         if has_agent {
             prompt = prompt.tool(attach_button);
-            // Compact moves the panel's toggle into ⋯.
+            // Compact and Narrow move the panel's toggle into ⋯.
             if layout == RowLayout::Full {
                 prompt = prompt.tool(panel_button);
             }
@@ -1184,6 +1193,7 @@ impl Chat {
                         .child(overflow_button)
                         .children(overflow_menu)
                         .children(compact_thinking_picker)
+                        .children(narrow_context_popover)
                         .children(chat_history_menu),
                 )
                 .trailing(self.render_agent_controls(theme, layout, window, cx));
