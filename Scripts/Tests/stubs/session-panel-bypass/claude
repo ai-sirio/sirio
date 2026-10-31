@@ -1,0 +1,14 @@
+#!/bin/sh
+# The `claude` of test-chat-session-panel-e2e.sh: the version probe answers at
+# once (above sirio_claude::MIN_CLAUDE_VERSION, so the chat is native), and any
+# other call is the stream-json fixture in its session_panel_bypass mode, the
+# session_panel one with the CLI started in bypassPermissions. Every call is
+# recorded in $SIRIO_STUB_LOG when the run names one.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+[ -z "${SIRIO_STUB_LOG:-}" ] || printf 'claude %s\n' "$*" >>"$SIRIO_STUB_LOG"
+case "$1" in
+  --version|-V|version)
+    echo "9.9.9 (Claude Code)"
+    exit 0 ;;
+esac
+exec python3 "$here/../../../../rust/crates/sirio_acp/tests/fixtures/claude_fixture.py" session_panel_bypass "$@"

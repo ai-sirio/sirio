@@ -21,7 +21,11 @@ REFUSE_RECONNECT = MODE == "session_panel_refuse"
 # `mcp_status` answer, `session_panel_pending` for ever: a server that is
 # still starting, and one that never gets there.
 STARTS_AFTER = {"session_panel_starting": 2, "session_panel_pending": None}.get(MODE, 0)
-if REFUSE_RECONNECT or MODE in ("session_panel_starting", "session_panel_pending"):
+# `session_panel_bypass` is `session_panel` with the CLI started in
+# `bypassPermissions`: its init and its handshake both say so, which is what
+# draws the chat's mode pill as the danger shield.
+START_BYPASS = MODE == "session_panel_bypass"
+if REFUSE_RECONNECT or MODE in ("session_panel_starting", "session_panel_pending", "session_panel_bypass"):
     MODE = "session_panel"
 # `effort_ladder` gives the session's first model an effort ladder, as the
 # real CLI's handshake does; `effort_refused` is the same with every change of
@@ -101,7 +105,7 @@ def initialize_payload():
         "agents": [],
         "output_style": "default",
         "available_output_styles": ["default"],
-        "current_permission_mode": "default",
+        "current_permission_mode": "bypassPermissions" if START_BYPASS else "default",
         "fast_mode_state": "off",
         "fast_mode_disabled_reason": "sdk_opt_in_required",
         "account": account,
@@ -123,7 +127,7 @@ def init_line(version="2.1.273"):
         "claude_code_version": version,
         "cwd": os.getcwd(),
         "model": "claude-fable-5-1",
-        "permissionMode": "default",
+        "permissionMode": "bypassPermissions" if START_BYPASS else "default",
         "tools": ["Bash", "Read", "Edit"],
         "mcp_servers": mcp_servers,
         "slash_commands": ["usage"],

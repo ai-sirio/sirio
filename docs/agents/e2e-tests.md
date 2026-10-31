@@ -76,8 +76,15 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # captures; --display :N is a private Xvfb (at least --window-size, default 2200x1000)
 # with Mesa's lavapipe, and trace_tab and trace_idle need one (--state-only with it paints
 # but takes no captures), trace_keys, file_links and clipboard_keys a framed run at --window-size 2200x1000;
-# --appearance light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL".
-Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
+# --appearance light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL". The
+# composer_compact scenario uses Scripts/Tests/stubs/session-panel-bypass/claude, the fixture's
+# session_panel_bypass mode (the CLI starts in bypassPermissions), and proves the native Claude
+# chat's compact composer row at the default window (about 430 px) on the `composerRow` of
+# `surface.chat.read`: Fast, Thinking and the session panel in the overflow menu, the mode pill
+# the danger shield-off, the band spanning the chat, send inside it, the chips ending before send
+# and level with it (one line); it needs a painted chat (--display :N) and captures
+# frames/composer-compact.png.
+Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the
 # control socket (docs/testing/ely-agent-chat.md). The effort and effort_light scenarios (dark and

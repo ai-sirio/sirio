@@ -90,6 +90,14 @@ set -euo pipefail
 #                      Ctrl+A then Ctrl+X cuts, Ctrl+V pastes another application's text;
 #                      a drag across the response then Ctrl+C copies what it selected,
 #                      and a plain click on the response leaves typing in the composer
+# The composer_compact scenario (spec 2026-10-30-composer-band) uses a fourth stub,
+# Scripts/Tests/stubs/session-panel-bypass/claude, the fixture in its session_panel_bypass mode
+# (the CLI starts in bypassPermissions):
+#   composer_compact   the native Claude chat at the default window (about 430 px): the compact
+#                      composer row (Fast, Thinking and the session panel in the overflow menu),
+#                      the mode pill the danger shield-off, the band spanning the chat, send inside
+#                      it, the chips ending before send and level with it; read on `composerRow`
+#                      of `surface.chat.read`, which exists only once a frame paints (--display :N)
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
@@ -130,7 +138,7 @@ CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
-  trace_tab trace_idle trace_keys file_links clipboard_keys)
+  trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact)
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
@@ -153,11 +161,12 @@ refuse() { echo "refused: $*" >&2; exit 2; }
 case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark, not $APPEARANCE" ;; esac
 [ -z "$WINDOW_SIZE" ] || [[ "$WINDOW_SIZE" =~ ^[0-9]+x[0-9]+$ ]] || refuse "--window-size is WxH, not $WINDOW_SIZE"
 # The scenarios that read the forge through the change request card, which reads only
-# while a frame paints the column, and the two that need a frame for what they assert:
+# while a frame paints the column, composer_compact (the composer's layout and the measured
+# band exist only once a frame paints the chat), and the two that need a frame for what they assert:
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact "
 # trace_keys, file_links and clipboard_keys send real X clicks, keys and drags at pixels, so they need a
 # framed run (no --state-only) at the 2200x1000 window size.
 FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys "
@@ -386,17 +395,18 @@ STUB_EOF
   chmod +x "$CLI_STUBS/$name"
 done
 # Which claude shim the next launch puts first on the app's PATH: session-panel (the
-# column's own scenarios), trace (the trace scenarios) or file-links (file_links). A scenario picks its stub by
+# column's own scenarios), session-panel-bypass (the same, the CLI in bypassPermissions), trace (the trace
+# scenarios) or file-links (file_links). A scenario picks its stub by
 # naming it in SIRIO_E2E_CLAUDE_STUB through use_stub, and the run loop puts the default
 # back before the next scenario.
-use_stub() { # session-panel|trace|file-links
+use_stub() { # session-panel|session-panel-bypass|trace|file-links
   SIRIO_E2E_CLAUDE_STUB=$1
   local stubs="$ROOT/Scripts/Tests/stubs/$SIRIO_E2E_CLAUDE_STUB" resolved
   APP_PATH="$stubs:$RUN_DIR/bin:/usr/local/bin:/usr/bin:/bin"
   resolved=$(PATH="$APP_PATH" command -v claude || true)
   [ "$resolved" = "$stubs/claude" ] || fail "claude resolves to '$resolved' under the app's PATH, not the $SIRIO_E2E_CLAUDE_STUB shim"
 }
-for stub in session-panel trace file-links; do
+for stub in session-panel session-panel-bypass trace file-links; do
   use_stub "$stub"
   echo "OK: claude resolves to the $stub shim"
 done
@@ -447,6 +457,8 @@ def state(surface):
     panel = json.loads(result["sessionPanel"])
     chat = {k: v for k, v in result.items() if k != "sessionPanel"}
     chat["transcript"] = json.loads(chat.get("transcript") or "[]")
+    # The composer band's record (layout, geometry, overflow, mode icon) is JSON in a string.
+    chat["composerRow"] = json.loads(chat.get("composerRow") or "{}")
     chat["first"] = int(chat.get("firstVisibleEntry") or 0)
     chat["last"] = int(chat.get("lastVisibleEntry") or 0)
     return panel, chat
@@ -549,6 +561,56 @@ elif command in ("wait", "find"):
             print(f"FAIL: {desc}: not true within {seconds:.0f} s: {expr}" + (f" ({error})" if error else ""), file=sys.stderr)
             sys.exit(1)
         time.sleep(0.3)
+elif command == "composer-compact":
+    # composer-compact SURFACE SECONDS: wait for the compact row the Claude chat draws at the
+    # default window (its measured band, send and chips), assert it and print what was read.
+    surface, seconds = sys.argv[2], float(sys.argv[3])
+    deadline = time.time() + seconds
+    row = None
+    while True:
+        try:
+            row = state(surface)[1]["composerRow"]
+            if row.get("band") and row.get("send") and row.get("chips") and row.get("layout") == "compact":
+                break
+        except Exception as e:  # a read that fails is tried again until the time is up
+            print(f"  read failed: {e}", file=sys.stderr)
+        if time.time() > deadline:
+            print(f"FAIL: composer-compact: no measured compact row within {seconds:.0f} s: {json.dumps(row)}", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+    print("  composerRow: " + json.dumps(row, separators=(",", ":")), file=sys.stderr)
+
+    def near(a, b):
+        return abs(a - b) <= 1.0
+
+    def fail(why):
+        print(f"FAIL: composer-compact: {why}: {json.dumps(row)}", file=sys.stderr)
+        sys.exit(1)
+
+    # The spec's own text, as Enzo's native-Claude chat shows it: Fast, Thinking and the
+    # session panel in the overflow menu, and Bypass as a struck-through shield, in danger.
+    if row["overflow"] != ["fast", "thinking", "session-panel"]:
+        fail("the overflow menu is not fast, thinking, session-panel")
+    print("OK: the overflow menu holds fast, thinking and session-panel")
+    if row["modeIcon"] != "shield-off" or row["modeDanger"] is not True:
+        fail("the mode pill is not the danger shield-off")
+    print("OK: bypass permissions is the shield-off icon, drawn as danger")
+    root, band, send, chips = row["root"], row["band"], row["send"], row["chips"]
+    if root is None:
+        fail("the chat's root was not measured")
+    if not (near(band[0], root[0]) and near(band[0] + band[2], root[0] + root[2]) and near(band[1] + band[3], root[1] + root[3])):
+        fail("the band does not span the chat and end on its bottom")
+    print("OK: the band spans the chat and ends on its bottom")
+    if not (send[0] >= band[0] - 1 and send[1] >= band[1] - 1 and send[0] + send[2] <= band[0] + band[2] + 1 and send[1] + send[3] <= band[1] + band[3] + 1):
+        fail("send is outside the band")
+    if chips[0] + chips[2] > send[0] + 1:
+        fail("the chips reach past send's left edge")
+    if not (chips[0] >= band[0] - 1 and chips[1] >= band[1] - 1 and chips[0] + chips[2] <= band[0] + band[2] + 1 and chips[1] + chips[3] <= band[1] + band[3] + 1):
+        fail("the chips are outside the band")
+    print("OK: send is inside the band and the chips end before it")
+    if not near(chips[1], send[1]) or not near(chips[3], send[3]):
+        fail("the chips and send are not one line")
+    print("OK: the chips and send share one line")
 elif command == "check":
     # check SURFACE DESC EXPR: one read, no waiting.
     surface, desc, expr = sys.argv[2], sys.argv[3], sys.argv[4]
@@ -1898,6 +1960,23 @@ scenario_clipboard_keys() {
   echo "OK: clipboard_keys: copy, cut and paste work in the composer, and Ctrl+C copies a transcript selection"
   stop_app
   printf 'fn main() {}\n' >"$main_rs"
+}
+
+# The compact composer row on a native Claude chat (spec 2026-10-30-composer-band): the
+# session-panel-bypass stub has the CLI start in bypassPermissions, and the chat at the default
+# window (about 430 px wide) draws the compact row -- Fast, Thinking and the session panel in
+# the overflow menu, the mode pill the danger shield-off -- on one line, with the chips clear
+# of send. Asserted on the `composerRow` of `surface.chat.read`.
+scenario_composer_compact() {
+  use_stub session-panel-bypass
+  launch composer_compact
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  send_prompt hello
+  wait_panel "the turn completed, so the model controls show" 'c["status"] == "completed"' 30
+  E2E composer-compact "$SURFACE" 30 || fail "the compact composer row is not what the spec draws"
+  capture composer-compact
+  stop_app
 }
 
 ran=0
