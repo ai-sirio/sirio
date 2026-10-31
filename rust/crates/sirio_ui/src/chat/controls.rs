@@ -107,6 +107,13 @@ impl Chat {
         )
     }
 
+    /// Whether the effort chip is drawn: the agent reports a level and the model
+    /// controls are shown. The render and the row's width estimates ask this, so
+    /// they agree on whether its slot is in the row.
+    pub(super) fn effort_chip_drawn(&self) -> bool {
+        self.model_control_visible() && self.effort_level_name().is_some()
+    }
+
     /// How many steps the effort bars fill, and of how many, for a level that
     /// stands on the model's own scale; `None` for one that does not (the reset,
     /// Ultracode).
@@ -628,7 +635,7 @@ impl Chat {
         // and goes Compact, then Narrow, instead of wrapping.
         let effort_bars = self.effort_bar_position();
         let effort_control = effort_label
-            .filter(|_| self.model_control_visible())
+            .filter(|_| self.effort_chip_drawn())
             .map(|label| {
                 let bars_stand_in = compact && effort_bars.is_some();
                 let effort_entity = entity.clone();
@@ -1182,26 +1189,34 @@ impl Chat {
                     .child(model_control)
                     .children(model_picker),
             )
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .children(effort_control)
-                    .children(effort_picker),
-            )
-            .child(div().relative().flex_none().children(fast_control))
-            // Narrow has neither the task count nor the ring: they are rows in ⋯,
-            // and a wrapper left empty would still take its gap and padding.
-            .when(!narrow, |row| {
+            // A slot is in the row only when it draws something: a wrapper left
+            // empty would still take its gap. `composer_row`'s estimates count the
+            // slots by the same tests.
+            .when(effort_control.is_some(), |row| {
+                row.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .children(effort_control)
+                        .children(effort_picker),
+                )
+            })
+            .when(fast_control.is_some(), |row| {
+                row.child(div().relative().flex_none().children(fast_control))
+            })
+            // Narrow has neither the task count nor the ring: they are rows in ⋯.
+            .when(background_tasks.is_some() && !narrow, |row| {
                 row.child(div().relative().flex_none().children(background_tasks))
             })
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .children(thinking_control)
-                    .children(thinking_picker),
-            )
+            .when(thinking_control.is_some(), |row| {
+                row.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .children(thinking_control)
+                        .children(thinking_picker),
+                )
+            })
             .when(!narrow, |row| {
                 row.child(
                     div()

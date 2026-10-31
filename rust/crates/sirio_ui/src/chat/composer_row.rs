@@ -207,11 +207,6 @@ const SEND_WIDTH: f32 = 24.0;
 /// The least width the model's chip, or the agent's badge, is drawn at, whatever
 /// its text (`min_w` on both the chip and its wrapper).
 pub(crate) const MODEL_FLOOR: f32 = 56.0;
-/// The children of the chips' row: the pill, model, effort, Fast, background
-/// tasks, Thinking and the context chip, each in a wrapper that is drawn
-/// whether or not its chip is, so each pays a gap.
-const CHIP_SLOTS: f32 = 7.0;
-
 /// Measures a text in the UI font at its own size, as the row lays it out. The
 /// layout rounds a text's box up to whole pixels, so the row needs at least
 /// that much.
@@ -247,9 +242,10 @@ fn bars_width(total: usize) -> f32 {
 }
 
 /// The row around `chips`: the tools, a gap, the least spacer, a gap, the chips
-/// (whose slots each pay a gap) and send.
-fn row_total(tools: f32, chips: f32) -> f32 {
-    tools + 2.0 * ROW_GAP + chips + (CHIP_SLOTS - 1.0) * ROW_GAP + ROW_GAP + SEND_WIDTH
+/// (`slots` of them in the chips' row, a gap between each pair: a slot that draws
+/// nothing is not in the row and pays none) and send.
+fn row_total(tools: f32, chips: f32, slots: usize) -> f32 {
+    tools + 2.0 * ROW_GAP + chips + slots.saturating_sub(1) as f32 * ROW_GAP + ROW_GAP + SEND_WIDTH
 }
 
 impl Chat {
@@ -372,7 +368,14 @@ impl Chat {
         let context = 2.0 * CHIP_PAD_X + CONTEXT_RING + CHIP_GAP + measure("Context");
 
         let chips = pill + model + effort + fast + background.unwrap_or(0.0) + thinking + context;
-        row_total(TOOLS_WIDTH, chips)
+        // The pill, the model's or the badge's slot and the context chip are always
+        // drawn; the rest are slots when `render_agent_controls` draws them.
+        let slots = 3
+            + usize::from(self.effort_chip_drawn())
+            + usize::from(self.fast_state().is_some())
+            + usize::from(self.background_tasks > 0)
+            + usize::from(self.thinking_state().is_some());
+        row_total(TOOLS_WIDTH, chips, slots)
     }
 
     /// The width the Compact row needs to hold every chip it draws, whole, on
@@ -411,8 +414,13 @@ impl Chat {
         let context = 2.0 * CHIP_PAD_X + CONTEXT_RING;
 
         let chips = pill + model + effort + background.unwrap_or(0.0) + context;
+        // The pill, the model's or the badge's slot and the ring are always drawn;
+        // the effort and the task count are slots when `render_agent_controls`
+        // draws them.
+        let slots =
+            3 + usize::from(self.effort_chip_drawn()) + usize::from(self.background_tasks > 0);
         // Attach and ⋯: two buttons and the gap between them.
-        row_total(2.0 * TOOL_WIDTH + ROW_GAP, chips)
+        row_total(2.0 * TOOL_WIDTH + ROW_GAP, chips, slots)
     }
 }
 

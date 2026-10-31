@@ -150,7 +150,7 @@ Fast, background tasks, Thinking, context ring.
   back and forth when a single redraw lands on the boundary.
 - **Floor** (amended: the user's option A, 2026-10-31). The original floor, a
   Compact row with every chip down to a 280 px chat, cannot be met: Compact with
-  every chip needs 353 px on the test font (7.8 px a character), and Sirio lets a
+  every chip needs 345 px on the test font (7.8 px a character), and Sirio lets a
   chat pane go down to 160 px (`MIN_SPLIT_PANE_SIZE`). Below the Compact fit the
   row is Narrow, which needs 269 px for its three chips (mode, model at its 56 px
   floor, effort) on the same font, so a 280 px chat holds them whole, and under

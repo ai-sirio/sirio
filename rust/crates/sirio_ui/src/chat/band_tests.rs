@@ -926,6 +926,31 @@ async fn compact_drops_the_mode_and_effort_names(cx: &mut TestAppContext) {
     );
 }
 
+/// A slot with nothing to draw takes no room: the chips' row puts a gap between
+/// the chips it draws and no gap for a slot that is empty. In a Compact row with
+/// no background tasks the effort chip and the context chip are neighbours, and
+/// the room between them is one `gap_1`, not one more for each empty Fast,
+/// task-count and Thinking slot between them.
+#[gpui::test]
+async fn an_empty_slot_takes_no_gap(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| {
+        configure_full_row(chat);
+        chat.background_tasks = 0;
+    });
+    resize_to(cx, 480.0, 700.0);
+
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    let effort = drawn(cx, "effort-chip");
+    let context = drawn(cx, "context-chip");
+    let between = f32::from(context.left() - effort.right());
+    assert!(
+        (between - 4.0).abs() <= 0.5,
+        "one gap between the effort chip and the context chip: effort={effort:?} context={context:?}"
+    );
+}
+
 /// With the session panel docked beside the band, the band is 300px narrower
 /// than the chat, and the row follows the band, not the chat.
 #[gpui::test]
@@ -1422,9 +1447,9 @@ fn compact_minimum(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>) -> u32
 /// Below a measured width the Compact row cannot hold every chip whole, and the
 /// layout gives way to Narrow, which moves the task count and the ring into ⋯.
 /// On the test font, the real minimum with every chip a chat can have (mode, model
-/// at its 56px floor, effort, two background tasks, ring) is 353px
-/// (7.8px a character; the ring's glyph alone fits from 346px, its chip with the
-/// padding it carries from 353px); it is found here by search, walking down from
+/// at its 56px floor, effort, two background tasks, ring) is 345px
+/// (7.8px a character; the ring's glyph alone fits from 338px, its chip with the
+/// padding it carries from 345px); it is found here by search, walking down from
 /// a roomy row.
 /// The measure is checked from both sides: at the minimum every chip is whole and the
 /// model sits on its 56px floor (a Compact need that came out too high would hand
