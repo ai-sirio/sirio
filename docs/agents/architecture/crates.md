@@ -72,8 +72,9 @@ sirio_chat_child (-> sirio_chat_vocab; the supervision every transport's child
                       process shares — activity clock, stderr tail, timeouts, exit reports)
 sirio_acp        (-> sirio_chat_vocab, sirio_chat_child; the ACP client and nothing else)
 sirio_chat       (-> sirio_acp, sirio_chat_vocab, sirio_chat_child, sirio_claude,
-                      sirio_persistence; `ChatClient`, the transport choice and
-                      Claude's native transport, and the one crate the app names for chat)
+                      sirio_persistence; `ChatClient`, `LaunchSpec`, `ChatSession` and
+                      Claude's native transport, re-exporting the chat vocabulary; `sirio`'s
+                      `claude_transport` decides which transport a chat launches)
 sirio_terminal    (-> sirio_project, sirio_theme, sirio_ui, sirio_host_client, sirio_host_protocol, sirio_term_session, and `bezel-theme` directly for its scrollbar's colour)
 sirio_control    (-> sirio_chat, sirio_persistence, sirio_ipc, sirio_host_client, sirio_host_protocol)
 sirio_host       (-> sirio_ipc, sirio_host_protocol, sirio_term_session; the `sirio-host` binary)
