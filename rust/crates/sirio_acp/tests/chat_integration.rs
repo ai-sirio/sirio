@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use sirio_acp::{AcpError, AgentCommand, ChatSession, ChatSessionConfig, ChatStatus, LaunchSpec};
+use sirio_acp::{ChatError, AgentCommand, ChatSession, ChatSessionConfig, ChatStatus, LaunchSpec};
 use sirio_persistence::{AppDatabase, ProjectRecord, TabRecord, WorktreeRecord};
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/acp_fixture.py");
@@ -186,7 +186,7 @@ fn chat_session_reports_launch_failures_without_a_fake_transcript() {
     ))
     .expect_err("missing agent must fail launch");
     assert!(
-        error.downcast_ref::<AcpError>().is_some(),
+        error.downcast_ref::<ChatError>().is_some(),
         "launch error should retain its ACP type: {error:?}"
     );
     assert!(

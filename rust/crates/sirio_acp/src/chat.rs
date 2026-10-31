@@ -15,7 +15,7 @@ use sirio_persistence::{
     ChatToolLocation, ChatTranscript, ChatTurn,
 };
 
-use crate::{AcpEvent, ChatClient, EventStream, LaunchSpec, ToolCallLocationInfo};
+use crate::{ChatEvent, ChatClient, EventStream, LaunchSpec, ToolCallLocationInfo};
 
 /// Observable state of a non-drawing chat session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -484,7 +484,7 @@ fn run_event_worker(
         // the live id so readback names the session like the ACP arm does.
         let identified = matches!(
             &event,
-            AcpEvent::OtherSessionUpdate { kind } if kind == "SessionIdentified"
+            ChatEvent::OtherSessionUpdate { kind } if kind == "SessionIdentified"
         );
         let fold = {
             let Ok(mut state) = state.lock() else {
@@ -542,19 +542,19 @@ struct EventFold {
     next_prompt: Option<String>,
 }
 
-fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
+fn apply_event(state: &mut ChatState, event: ChatEvent) -> EventFold {
     match event {
-        AcpEvent::AgentMessageChunk(text) => {
+        ChatEvent::AgentMessageChunk(text) => {
             append_assistant(&mut state.current_turn, text);
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
-        AcpEvent::ThoughtChunk(text) => {
+        ChatEvent::ThoughtChunk(text) => {
             append_thought(&mut state.current_turn, text);
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
-        AcpEvent::ToolCallStarted {
+        ChatEvent::ToolCallStarted {
             id,
             title,
             status,
@@ -576,19 +576,19 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
-        AcpEvent::ToolCallUpdated {
+        ChatEvent::ToolCallUpdated {
             id, title, status, ..
         } => {
             update_tool(&mut state.current_turn, &id, title, status);
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
-        AcpEvent::ToolCallCompleted { id, status, .. } => {
+        ChatEvent::ToolCallCompleted { id, status, .. } => {
             update_tool(&mut state.current_turn, &id, None, Some(status));
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
-        AcpEvent::PermissionRequest {
+        ChatEvent::PermissionRequest {
             request_id,
             title,
             options,
@@ -610,7 +610,7 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
-        AcpEvent::PlanUpdate { entries } => {
+        ChatEvent::PlanUpdate { entries } => {
             let entries = entries
                 .into_iter()
                 .map(|entry| ChatPlanEntry {
@@ -633,7 +633,7 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
-        AcpEvent::TurnEnded { stop_reason } => {
+        ChatEvent::TurnEnded { stop_reason } => {
             let stopped = is_stopped_reason(&stop_reason);
             // F-CHAT-27: a turn that ends while a permission card is still
             // unanswered leaves that card permanently unanswerable — the
@@ -669,24 +669,24 @@ fn apply_event(state: &mut ChatState, event: AcpEvent) -> EventFold {
                 next_prompt,
             }
         }
-        AcpEvent::TransportError(message) => EventFold {
+        ChatEvent::TransportError(message) => EventFold {
             persisted: state.mark_error(message),
             next_prompt: None,
         },
-        AcpEvent::Timeout {
+        ChatEvent::Timeout {
             operation,
             duration,
         } => EventFold {
             persisted: state.mark_error(format!("ACP {operation:?} timed out after {duration:?}")),
             next_prompt: None,
         },
-        AcpEvent::ModelCatalog(_)
-        | AcpEvent::AvailableCommands(_)
-        | AcpEvent::Effort(_)
-        | AcpEvent::ContextUsage(_)
-        | AcpEvent::TokenUsageBreakdown { .. }
-        | AcpEvent::OtherSessionUpdate { .. }
-        | AcpEvent::Trace(_) => EventFold::default(),
+        ChatEvent::ModelCatalog(_)
+        | ChatEvent::AvailableCommands(_)
+        | ChatEvent::Effort(_)
+        | ChatEvent::ContextUsage(_)
+        | ChatEvent::TokenUsageBreakdown { .. }
+        | ChatEvent::OtherSessionUpdate { .. }
+        | ChatEvent::Trace(_) => EventFold::default(),
     }
 }
 
@@ -799,10 +799,10 @@ mod tests {
     #[test]
     fn consecutive_thought_chunks_grow_one_entry() {
         let mut state = state();
-        apply_event(&mut state, AcpEvent::ThoughtChunk("weighing ".into()));
-        apply_event(&mut state, AcpEvent::ThoughtChunk("the options".into()));
-        apply_event(&mut state, AcpEvent::AgentMessageChunk("done".into()));
-        apply_event(&mut state, AcpEvent::ThoughtChunk("second".into()));
+        apply_event(&mut state, ChatEvent::ThoughtChunk("weighing ".into()));
+        apply_event(&mut state, ChatEvent::ThoughtChunk("the options".into()));
+        apply_event(&mut state, ChatEvent::AgentMessageChunk("done".into()));
+        apply_event(&mut state, ChatEvent::ThoughtChunk("second".into()));
         assert_eq!(
             state.current_turn,
             vec![

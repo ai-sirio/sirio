@@ -33,12 +33,11 @@ use std::time::Duration;
 mod chat;
 mod claude;
 mod mcp_config;
-mod trace_event;
 
 pub use chat::{ChatSession, ChatSessionConfig, ChatSnapshot, ChatStatus};
 pub use claude::{ClaudeClient, ClaudeLaunch, McpControl};
 pub use mcp_config::discover_mcp_servers;
-pub use trace_event::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
+pub use sirio_chat_vocab::*;
 
 // `npx -y` may have to download and unpack the ACP adapter before the first
 // protocol byte exists. Keep that cold-start budget bounded, but long enough
@@ -56,85 +55,6 @@ pub(crate) const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) type ChildHandle = Arc<Mutex<Option<Child>>>;
 
-/// The operation that exceeded its bounded wait.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TimeoutOperation {
-    /// ACP initialize plus session creation.
-    Startup,
-    /// A submitted prompt turn.
-    Prompt,
-    /// A permission request awaiting the caller's choice.
-    Permission,
-    /// The client shutdown handshake and worker join.
-    Shutdown,
-}
-
-/// A typed client failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AcpError {
-    /// An external-process wait exceeded its configured deadline.
-    Timeout {
-        /// Which wait exceeded its deadline.
-        operation: TimeoutOperation,
-        /// The configured deadline.
-        duration: Duration,
-    },
-    /// The ACP transport failed independently of a deadline.
-    Transport(String),
-    /// The agent rejected a request or reported an agent-level failure.
-    Agent(String),
-    /// The agent rejected `initialize` or `session/new` with ACP's
-    /// `auth_required` error (wire code -32000). The agent has already
-    /// exited by the time this reaches the caller — there is no live
-    /// connection left to authenticate on — so recovery is: run the
-    /// agent's own CLI login out-of-band, then relaunch (F-CHAT-02).
-    AuthRequired {
-        /// Authentication methods the agent advertised during `initialize`,
-        /// when it reported any before the request that failed.
-        methods: Vec<AuthMethodInfo>,
-    },
-}
-
-impl std::fmt::Display for AcpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Timeout {
-                operation,
-                duration,
-            } => write!(f, "ACP {operation:?} timed out after {duration:?}"),
-            Self::Transport(message) => write!(f, "ACP transport error: {message}"),
-            Self::Agent(message) => write!(f, "ACP agent error: {message}"),
-            Self::AuthRequired { methods } if methods.is_empty() => {
-                write!(f, "ACP agent requires authentication before it can be used")
-            }
-            Self::AuthRequired { methods } => {
-                let names = methods
-                    .iter()
-                    .map(|method| method.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                write!(f, "ACP agent requires authentication ({names})")
-            }
-        }
-    }
-}
-
-impl std::error::Error for AcpError {}
-
-/// One authentication method the agent advertised in its `initialize`
-/// response (ACP's `AuthMethod`, flattened to what a caller needs to render
-/// CLI login guidance — the wire `id` doubles as the `authenticate` RPC's
-/// `method_id` for a future live-authenticate flow).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AuthMethodInfo {
-    /// Protocol identifier for this method.
-    pub id: String,
-    /// Human-readable name.
-    pub name: String,
-    /// Optional agent-provided description.
-    pub description: Option<String>,
-}
-
 fn auth_method_info(method: &AuthMethod) -> AuthMethodInfo {
     AuthMethodInfo {
         id: method.id().to_string(),
@@ -142,9 +62,6 @@ fn auth_method_info(method: &AuthMethod) -> AuthMethodInfo {
         description: method.description().map(str::to_string),
     }
 }
-
-/// The asynchronous event stream returned by [`AcpClient::launch`].
-pub type EventStream = async_channel::Receiver<AcpEvent>;
 
 /// A process to launch as an ACP agent.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -281,7 +198,7 @@ impl ChatClient {
     }
 
     /// Notices posted since the last read, draining them. Read on an
-    /// [`AcpEvent::OtherSessionUpdate`] named `SessionNotice`. The ACP
+    /// [`ChatEvent::OtherSessionUpdate`] named `SessionNotice`. The ACP
     /// transport reports none: the protocol carries no equivalent.
     pub fn take_notices(&self) -> Vec<SessionNotice> {
         match self {
@@ -393,7 +310,7 @@ impl ChatClient {
         }
     }
 
-    /// Answer a permission request surfaced in [`AcpEvent::PermissionRequest`].
+    /// Answer a permission request surfaced in [`ChatEvent::PermissionRequest`].
     pub fn respond_permission(&self, request_id: u64, option_id: impl Into<String>) -> Result<()> {
         match self {
             Self::Acp(client) => client.respond_permission(request_id, option_id),
@@ -515,79 +432,6 @@ impl ChatClient {
     }
 }
 
-/// A permission option exposed to the caller.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PermissionOption {
-    /// The protocol option identifier to send back to the agent.
-    pub id: String,
-    /// Human-readable label.
-    pub name: String,
-    /// Protocol-defined permission kind.
-    pub kind: String,
-    /// What choosing it means, when the agent says. Only a native
-    /// `AskUserQuestion` option carries one; ACP options have no such field.
-    pub description: Option<String>,
-}
-
-/// A model choice advertised by the agent for this session.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ModelOption {
-    /// Protocol value sent by the agent.
-    pub id: String,
-    /// Human-readable name.
-    pub name: String,
-    /// Optional agent-provided description.
-    pub description: Option<String>,
-}
-
-/// The model selector advertised by an ACP session.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ModelCatalog {
-    /// Configuration option identifier used by `session/set_config_option`.
-    pub config_id: String,
-    /// Available model choices.
-    pub options: Vec<ModelOption>,
-    /// Current value selected by the agent.
-    pub selected_id: String,
-}
-
-/// Context usage reported by the agent for the current session.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ContextUsage {
-    /// Tokens currently in the context window.
-    pub used: u64,
-    /// Total context window size in tokens.
-    pub size: u64,
-    /// Cumulative cost when the agent reports it.
-    pub cost: Option<ContextCost>,
-    /// Cumulative input tokens, when the agent reports end-of-turn usage
-    /// (F-CHAT-18; requires `unstable_end_turn_token_usage`, so it stays
-    /// `None` against agents that never send a `PromptResponse.usage`).
-    pub input_tokens: Option<u64>,
-    /// Cumulative output tokens, same source and caveat as `input_tokens`.
-    pub output_tokens: Option<u64>,
-    /// Cumulative cache-read tokens, same source and caveat as `input_tokens`.
-    pub cached_read_tokens: Option<u64>,
-}
-
-/// Cumulative cost attached to an ACP usage update.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ContextCost {
-    /// Amount in the reported currency.
-    pub amount: f64,
-    /// ISO 4217 currency code.
-    pub currency: String,
-}
-
-/// An image the user attached to the composer, ready for an ACP image block.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ImageAttachment {
-    /// Media type, e.g. `image/png`.
-    pub mime_type: String,
-    /// Base64-encoded media payload.
-    pub base64_data: String,
-}
-
 /// What a session says about fast mode, and the context breakdown folded by
 /// origin. Re-exported because `sirio_ui` reads them and does not depend on
 /// `sirio_claude`.
@@ -595,331 +439,6 @@ pub use sirio_claude::{
     ContextBreakdown, ContextOrigins, FastMode, McpAuthStart, McpOrigin, McpServer, McpState,
     OriginNode, Standing, THINKING_DISPLAYS,
 };
-
-/// How much of the model's reasoning the session sends.
-///
-/// Unlike every other picker's state this is not read from the agent:
-/// neither the handshake nor `get_settings` reports the session's current
-/// thinking display, so all a surface can honestly know is what it has
-/// itself chosen.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ThinkingDisplay {
-    /// What this session chose, or `None` while nothing has been chosen.
-    pub chosen: Option<String>,
-    /// The agent refused the request — an older CLI — so the control is
-    /// not worth offering again.
-    pub unsupported: bool,
-}
-
-/// One slash command advertised by the agent.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AvailableCommandInfo {
-    /// Command name (e.g. `create_plan`).
-    pub name: String,
-    /// Human-readable description of what the command does.
-    pub description: String,
-    /// The arguments it takes, as the agent spells them for its own help.
-    /// `None` when it takes none — which is how both transports say it:
-    /// Claude Code sends an empty `argumentHint`, ACP sends no `input`.
-    pub argument_hint: Option<String>,
-}
-
-/// One choice in an effort-level selector.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EffortChoice {
-    /// Protocol value sent to the agent.
-    pub value: String,
-    /// Human-readable label.
-    pub name: String,
-}
-
-/// The effort-level selector advertised by the session, when the agent
-/// offers one (OpenCode reports it as a `configOptions` select with id
-/// `effort`; standard ACP agents may tag it with another category).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EffortOption {
-    /// Configuration option identifier used by `session/set_config_option`.
-    pub option_id: String,
-    /// Human-readable label for the option, when the agent provides one.
-    pub name: Option<String>,
-    /// Currently selected value, when the agent reports one.
-    pub current_value: Option<String>,
-    /// The offered levels.
-    pub choices: Vec<EffortChoice>,
-}
-
-/// A mode the agent can operate in for this session (ACP's `SessionMode`,
-/// e.g. "ask"/"plan"/"auto" — the offered granularity is entirely
-/// agent-defined; see the ACP session-modes spec) (F-CHAT-15).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AgentMode {
-    /// Protocol identifier sent back via `session/set_mode`.
-    pub id: String,
-    /// Human-readable name.
-    pub name: String,
-    /// Optional agent-provided description.
-    pub description: Option<String>,
-}
-
-/// The session-mode selector advertised by an ACP session (ACP's
-/// `SessionModeState`) — a distinct wire concept from [`ModelCatalog`] and
-/// [`EffortOption`], which ride the separate `SessionConfigOption`
-/// mechanism (F-CHAT-15).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ModeCatalog {
-    /// The mode currently active.
-    pub current_id: String,
-    /// Every mode the agent offers.
-    pub options: Vec<AgentMode>,
-    /// When `Some`, this mode is applied with `session/set_config_option`
-    /// against this option id — OpenCode reports its mode as a `configOptions`
-    /// select tagged `category: "mode"`, not through ACP's session-modes API.
-    /// When `None`, it is applied with `session/set_mode` as before.
-    pub config_option_id: Option<String>,
-}
-
-/// A structured question folded out of an `AskUserQuestion`-shaped tool
-/// input attached to a permission request. The permission's own options
-/// remain the wire of record; this only adds the free-text prompt and text
-/// input affordances the raw options cannot carry.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PermissionQuestion {
-    /// The question's header, falling back to the prompt text.
-    pub header: String,
-    /// The question body; empty when it duplicates the header.
-    pub prompt: String,
-    /// A free-text input offered alongside the options, when declared.
-    pub text_input: Option<PermissionTextInput>,
-}
-
-/// Free-text input configuration for a structured question.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PermissionTextInput {
-    /// Placeholder shown in the empty field.
-    pub placeholder: Option<String>,
-    /// Text prefilled into the field.
-    pub prefill: Option<String>,
-}
-
-/// One row of the agent's execution plan (F-CHAT-24).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlanEntryInfo {
-    /// Human-readable description of what this task aims to accomplish.
-    pub content: String,
-    /// Wire status: `pending`, `in_progress`, or `completed`.
-    pub status: String,
-}
-
-/// A file diff a tool call produced (F-CHAT-31/32).
-#[derive(Clone, Debug, PartialEq)]
-pub struct ToolCallDiff {
-    /// The file path being modified.
-    pub path: PathBuf,
-    /// The original content; `None` for a newly created file.
-    pub old_text: Option<String>,
-    /// The content after modification.
-    pub new_text: String,
-}
-
-/// One piece of content a tool call produced (F-CHAT-23).
-#[derive(Clone, Debug, PartialEq)]
-pub enum ToolCallContentInfo {
-    /// Plain text content — the common case for command output, search
-    /// results, or file contents.
-    Text(String),
-    /// A file modification, shown as a diff.
-    Diff(ToolCallDiff),
-    /// Content the protocol carries in a shape this client does not render
-    /// (an embedded terminal, image, or audio block) — named so a caller
-    /// can show that *something* arrived without inventing detail the
-    /// protocol did not provide as text or diff.
-    Other,
-}
-
-/// A file location a tool call read or touched (F-CHAT-32), enabling
-/// "follow-along" treatment.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ToolCallLocationInfo {
-    /// The absolute file path being accessed or modified.
-    pub path: PathBuf,
-    /// Optional line number within the file.
-    pub line: Option<u32>,
-}
-
-/// Typed events emitted by one ACP session.
-#[derive(Clone, Debug, PartialEq)]
-pub enum AcpEvent {
-    /// A streamed assistant response chunk.
-    AgentMessageChunk(String),
-    /// A streamed internal reasoning chunk.
-    ThoughtChunk(String),
-    /// A newly started tool call.
-    ToolCallStarted {
-        /// Tool call identifier.
-        id: String,
-        /// Human-readable tool title.
-        title: String,
-        /// Initial protocol status.
-        status: String,
-        /// Tool category (`Read`, `Edit`, `Execute`, ...), for icon and
-        /// detail treatment (F-CHAT-23). Formatted from the protocol's
-        /// `ToolKind` — `"Other"` when the agent did not report one.
-        kind: String,
-        /// Content produced by the call so far — text output or diffs.
-        content: Vec<ToolCallContentInfo>,
-        /// File locations this call touches (F-CHAT-32).
-        locations: Vec<ToolCallLocationInfo>,
-        /// Raw input sent to the tool, pretty-printed JSON, when present.
-        raw_input: Option<String>,
-        /// Raw output the tool returned, pretty-printed JSON, when present.
-        raw_output: Option<String>,
-    },
-    /// A non-terminal tool call update.
-    ToolCallUpdated {
-        /// Tool call identifier.
-        id: String,
-        /// Updated title, when present.
-        title: Option<String>,
-        /// Updated status, when present.
-        status: Option<String>,
-        /// Updated tool category, when present.
-        kind: Option<String>,
-        /// Replacement content collection, when the update carries one —
-        /// the protocol overwrites rather than extends (F-CHAT-23/31).
-        content: Option<Vec<ToolCallContentInfo>>,
-        /// Replacement locations collection, when the update carries one.
-        locations: Option<Vec<ToolCallLocationInfo>>,
-        /// Updated raw input, pretty-printed JSON, when present.
-        raw_input: Option<String>,
-        /// Updated raw output, pretty-printed JSON, when present.
-        raw_output: Option<String>,
-    },
-    /// A tool call reached a terminal status.
-    ToolCallCompleted {
-        /// Tool call identifier.
-        id: String,
-        /// Terminal protocol status.
-        status: String,
-        /// Updated tool category, when the completing update carries one.
-        kind: Option<String>,
-        /// Replacement content collection, when the completing update
-        /// carries one — the final diff/output commonly arrives here.
-        content: Option<Vec<ToolCallContentInfo>>,
-        /// Replacement locations collection, when the completing update
-        /// carries one.
-        locations: Option<Vec<ToolCallLocationInfo>>,
-        /// Updated raw input, pretty-printed JSON, when present.
-        raw_input: Option<String>,
-        /// Updated raw output, pretty-printed JSON, when present.
-        raw_output: Option<String>,
-    },
-    /// The model selector changed or became available.
-    ModelCatalog(ModelCatalog),
-    /// The agent advertised its slash-command list.
-    AvailableCommands(Vec<AvailableCommandInfo>),
-    /// The agent advertised an effort-level selector.
-    Effort(EffortOption),
-    /// The agent reported current context-window usage.
-    ContextUsage(ContextUsage),
-    /// The agent reported an input/output/cache token breakdown for the
-    /// turn that just ended (F-CHAT-18; requires the ACP-agent-side
-    /// `unstable_end_turn_token_usage` extension, so this fires only for
-    /// agents that opt in).
-    TokenUsageBreakdown {
-        /// Cumulative input tokens across the session.
-        input_tokens: u64,
-        /// Cumulative output tokens across the session.
-        output_tokens: u64,
-        /// Cumulative cache-read tokens across the session, when reported.
-        cached_read_tokens: Option<u64>,
-    },
-    /// The agent is waiting for a caller decision.
-    PermissionRequest {
-        /// Handle passed to [`AcpClient::respond_permission`].
-        request_id: u64,
-        /// Session that owns the request.
-        session_id: String,
-        /// Title of the tool call asking for the decision.
-        title: String,
-        /// Available choices.
-        options: Vec<PermissionOption>,
-        /// A structured question carried by the tool input, when present.
-        question: Option<PermissionQuestion>,
-    },
-    /// The agent published or advanced its execution plan.
-    PlanUpdate {
-        /// Current plan rows; the client replaces any earlier plan.
-        entries: Vec<PlanEntryInfo>,
-    },
-    /// A session update outside the chat/tool subset, retained so callers can
-    /// observe protocol traffic without treating it as a transport failure.
-    OtherSessionUpdate {
-        /// The debug name of the protocol update variant.
-        kind: String,
-    },
-    /// The current prompt turn finished.
-    TurnEnded {
-        /// Protocol stop reason, retained as text to remain forward-compatible.
-        stop_reason: String,
-    },
-    /// The agent transport failed or closed before the client shut it down.
-    /// A mid-session request rejected with ACP's `auth_required` error
-    /// (F-CHAT-02) also arrives here rather than as its own variant — this
-    /// enum is matched exhaustively by every ACP event consumer in the
-    /// workspace, so widening it is a breaking change across crates this
-    /// slice does not own; [`AcpError::AuthRequired`]'s `Display` renders
-    /// the same auth-guidance text `AcpClient::launch` uses for a startup
-    /// failure, so the message string alone still carries it.
-    TransportError(String),
-    /// A bounded wait on the agent expired; the child was terminated.
-    Timeout {
-        /// Which wait expired.
-        operation: TimeoutOperation,
-        /// The configured deadline.
-        duration: Duration,
-    },
-    /// One step in the life of the turn, for the chat's trace. Only the
-    /// native Claude client emits these; an ACP agent never does, so a chat
-    /// on one has no trace and the transcript is its only record.
-    Trace(TraceEvent),
-}
-
-/// Something that happened to the session and belongs in the transcript at
-/// the point it happened, rather than in a corner of the chrome.
-///
-/// These ride a drainable queue rather than an [`AcpEvent`] variant on
-/// purpose: that enum is matched exhaustively by every consumer in the
-/// workspace, so widening it is a breaking change across crates. The
-/// signal is an [`AcpEvent::OtherSessionUpdate`] named `SessionNotice`,
-/// and the surface drains the queue when it sees one — which keeps the
-/// notices in stream order with the rows around them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SessionNotice {
-    /// The context window was compacted and part of the conversation is
-    /// no longer in it.
-    Compacted {
-        /// `manual` when the user asked for it, `auto` when the window
-        /// forced it. The second is the one worth reading.
-        trigger: Option<String>,
-        /// Context size in tokens before and after.
-        pre_tokens: Option<u64>,
-        post_tokens: Option<u64>,
-    },
-    /// A task that had been sent to the background reached its end.
-    BackgroundTaskEnded {
-        /// The CLI's own sentence, already written for a reader.
-        summary: String,
-    },
-    /// The plan stopped allowing turns.
-    RateLimited {
-        /// The CLI's own word for the refusal.
-        status: String,
-        /// Which window ran out, when it named one.
-        window: Option<String>,
-        /// When that window resets, in unix seconds.
-        resets_at: Option<i64>,
-    },
-}
 
 #[derive(Debug)]
 enum Command {
@@ -942,7 +461,7 @@ type PermissionWaiters = Arc<Mutex<HashMap<u64, async_channel::Sender<Permission
 
 enum WorkerSignal {
     Process(ChildHandle),
-    Startup(std::result::Result<Startup, AcpError>),
+    Startup(std::result::Result<Startup, ChatError>),
 }
 
 /// Negotiated information from the ACP initialize handshake.
@@ -971,7 +490,7 @@ pub struct AcpClient {
     // in place as `session/set_mode` is confirmed or the agent pushes a
     // `CurrentModeUpdate`, so a caller can re-read it after any signal that
     // something changed rather than needing a dedicated typed event
-    // (F-CHAT-15; see `AcpEvent::TransportError`'s doc for why this crate's
+    // (F-CHAT-15; see `ChatEvent::TransportError`'s doc for why this crate's
     // event enum cannot grow a new variant this wave).
     mode_catalog: Arc<Mutex<Option<ModeCatalog>>>,
     // MCP-configuration-flavored lines observed on the agent's stderr
@@ -1061,7 +580,7 @@ impl AcpClient {
                         terminate_and_reap_blocking(&process);
                     }
                     detach_worker(worker);
-                    return Err(anyhow::Error::new(AcpError::Timeout {
+                    return Err(anyhow::Error::new(ChatError::Timeout {
                         operation: TimeoutOperation::Startup,
                         duration: startup_timeout,
                     }));
@@ -1071,7 +590,7 @@ impl AcpClient {
                         terminate_and_reap_blocking(&process);
                     }
                     detach_worker(worker);
-                    return Err(anyhow::Error::new(AcpError::Transport(
+                    return Err(anyhow::Error::new(ChatError::Transport(
                         "ACP worker exited before initialization".into(),
                     )));
                 }
@@ -1218,7 +737,7 @@ impl AcpClient {
             .map_err(|error| anyhow!("ACP worker is not running: {error}"))
     }
 
-    /// Answer a permission request surfaced in [`AcpEvent::PermissionRequest`].
+    /// Answer a permission request surfaced in [`ChatEvent::PermissionRequest`].
     pub fn respond_permission(&self, request_id: u64, option_id: impl Into<String>) -> Result<()> {
         let waiter = self
             .pending_permissions
@@ -1270,14 +789,14 @@ impl AcpClient {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 terminate_and_reap_blocking(&self.child);
                 let _ = worker.join();
-                Err(anyhow::Error::new(AcpError::Timeout {
+                Err(anyhow::Error::new(ChatError::Timeout {
                     operation: TimeoutOperation::Shutdown,
                     duration: SHUTDOWN_TIMEOUT,
                 }))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = worker.join();
-                Err(anyhow::Error::new(AcpError::Transport(
+                Err(anyhow::Error::new(ChatError::Transport(
                     "ACP worker exited during shutdown".into(),
                 )))
             }
@@ -1453,7 +972,7 @@ fn run_connection(
     let permission_counter = Arc::new(AtomicU64::new(1));
     let prompt_counter = Arc::new(AtomicU64::new(1));
     let active_prompt = Arc::new(AtomicU64::new(0));
-    let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
+    let timeout_reason: Arc<Mutex<Option<ChatError>>> = Arc::new(Mutex::new(None));
     // Captured right after `initialize` succeeds so it survives a later
     // `session/new` failure — that failure aborts the connection closure via
     // `?` before a `Startup` carrying this can ever be built, and the AUTH
@@ -1504,7 +1023,7 @@ fn run_connection(
     let (stdin, stdout, stderr, child) = match spawned {
         Ok(process) => process,
         Err(error) => {
-            let _ = worker_tx.send(WorkerSignal::Startup(Err(AcpError::Transport(format!(
+            let _ = worker_tx.send(WorkerSignal::Startup(Err(ChatError::Transport(format!(
                 "could not launch `{}`: {error}",
                 attempted_program.display()
             )))));
@@ -1650,7 +1169,7 @@ fn run_connection(
                     // the prompt watchdog measures silence, not turn length.
                     touch_activity(&notification_activity);
                     // Applied before `notification_to_events` folds the
-                    // update into an `AcpEvent`, so `AcpClient::mode_catalog`
+                    // update into an `ChatEvent`, so `AcpClient::mode_catalog`
                     // is already current by the time a caller reacts to that
                     // event (F-CHAT-15).
                     if let SessionUpdate::ConfigOptionUpdate(ref update) = notification.update
@@ -1703,7 +1222,7 @@ fn run_connection(
                         .as_ref()
                         .and_then(parse_permission_question);
                     let _ = permission_events
-                        .send(AcpEvent::PermissionRequest {
+                        .send(ChatEvent::PermissionRequest {
                             request_id,
                             session_id: request.session_id.to_string(),
                             title,
@@ -1740,7 +1259,7 @@ fn run_connection(
                                 // so the death report can name it.
                                 record_timeout(
                                     &expiry_reason,
-                                    AcpError::Timeout {
+                                    ChatError::Timeout {
                                         operation: TimeoutOperation::Permission,
                                         duration: permission_timeout,
                                     },
@@ -1822,7 +1341,7 @@ fn run_connection(
                         *catalog = Some(fallback);
                     }
                 }
-                let model_event = model_catalog.clone().map(AcpEvent::ModelCatalog);
+                let model_event = model_catalog.clone().map(ChatEvent::ModelCatalog);
                 startup_sender
                     .send(WorkerSignal::Startup(Ok(Startup {
                         session_id: session.session_id.to_string(),
@@ -1834,7 +1353,7 @@ fn run_connection(
                     let _ = connection_events.send(model_event).await;
                 }
                 if let Some(effort) = effort {
-                    let _ = connection_events.send(AcpEvent::Effort(effort)).await;
+                    let _ = connection_events.send(ChatEvent::Effort(effort)).await;
                 }
                 started.store(true, Ordering::Release);
                 while let Ok(command) = command_rx.recv().await {
@@ -1871,7 +1390,7 @@ fn run_connection(
                                         Ok(response) => {
                                             if let Some(usage) = response.usage {
                                                 let _ = event_tx
-                                                    .send(AcpEvent::TokenUsageBreakdown {
+                                                    .send(ChatEvent::TokenUsageBreakdown {
                                                         input_tokens: usage.input_tokens,
                                                         output_tokens: usage.output_tokens,
                                                         cached_read_tokens: usage
@@ -1880,7 +1399,7 @@ fn run_connection(
                                                     .await;
                                             }
                                             let _ = event_tx
-                                                .send(AcpEvent::TurnEnded {
+                                                .send(ChatEvent::TurnEnded {
                                                     stop_reason: format!(
                                                         "{:?}",
                                                         response.stop_reason
@@ -1895,12 +1414,12 @@ fn run_connection(
                                         // failure gets (F-CHAT-02) rather
                                         // than the bare transport string.
                                         Err(error) if error.code == ErrorCode::AuthRequired => {
-                                            let message = AcpError::AuthRequired {
+                                            let message = ChatError::AuthRequired {
                                                 methods: prompt_auth_methods,
                                             }
                                             .to_string();
                                             let _ = event_tx
-                                                .send(AcpEvent::TransportError(message))
+                                                .send(ChatEvent::TransportError(message))
                                                 .await;
                                         }
                                         Err(error) => {
@@ -1922,7 +1441,7 @@ fn run_connection(
                                             wait_for_stderr_drain(&prompt_stderr_drained).await;
                                             let report = stderr_tail_report(&prompt_stderr_tail);
                                             let _ = event_tx
-                                                .send(AcpEvent::TransportError(format!(
+                                                .send(ChatEvent::TransportError(format!(
                                                     "prompt failed: {error}{cause}{exit}{report}"
                                                 )))
                                                 .await;
@@ -1974,7 +1493,7 @@ fn run_connection(
                                         )
                                         .is_ok()
                                     {
-                                        let timeout = AcpError::Timeout {
+                                        let timeout = ChatError::Timeout {
                                             operation: TimeoutOperation::Prompt,
                                             duration: prompt_timeout,
                                         };
@@ -2002,7 +1521,7 @@ fn run_connection(
                                                 &response.config_options,
                                             )) {
                                                 let _ = event_tx
-                                                    .send(AcpEvent::ModelCatalog(catalog))
+                                                    .send(ChatEvent::ModelCatalog(catalog))
                                                     .await;
                                             }
                                             // The answer to a model switch carries
@@ -2018,12 +1537,12 @@ fn run_connection(
                                                     *guard = Some(effort.clone());
                                                 }
                                                 let _ =
-                                                    event_tx.send(AcpEvent::Effort(effort)).await;
+                                                    event_tx.send(ChatEvent::Effort(effort)).await;
                                             }
                                         }
                                         Err(error) => {
                                             let _ = event_tx
-                                                .send(AcpEvent::TransportError(format!(
+                                                .send(ChatEvent::TransportError(format!(
                                                     "model selection failed: {error}"
                                                 )))
                                                 .await;
@@ -2061,7 +1580,7 @@ fn run_connection(
                                                     *guard = Some(effort.clone());
                                                 }
                                                 let _ =
-                                                    event_tx.send(AcpEvent::Effort(effort)).await;
+                                                    event_tx.send(ChatEvent::Effort(effort)).await;
                                             }
                                         }
                                         Err(error) => {
@@ -2082,8 +1601,8 @@ fn run_connection(
                                                     effort.option_id == requested_option
                                                 });
                                             let event = match refused_effort {
-                                                Some(effort) => AcpEvent::Effort(effort),
-                                                None => AcpEvent::TransportError(format!(
+                                                Some(effort) => ChatEvent::Effort(effort),
+                                                None => ChatEvent::TransportError(format!(
                                                     "config option selection failed: {error}"
                                                 )),
                                             };
@@ -2119,7 +1638,7 @@ fn run_connection(
                                         }
                                         Err(error) => {
                                             let _ = event_tx
-                                                .send(AcpEvent::TransportError(format!(
+                                                .send(ChatEvent::TransportError(format!(
                                                     "set mode failed: {error}"
                                                 )))
                                                 .await;
@@ -2171,7 +1690,7 @@ fn run_connection(
                     .lock()
                     .map(|seen| seen.clone())
                     .unwrap_or_default();
-                AcpError::AuthRequired { methods }
+                ChatError::AuthRequired { methods }
             } else {
                 // The agent went away before the handshake finished. Its exit
                 // status and its stderr are the diagnosis; the closed transport
@@ -2187,16 +1706,16 @@ fn run_connection(
                     Err(error) => error.to_string(),
                     Ok(()) => "ACP worker exited before initialization".into(),
                 };
-                AcpError::Transport(format!("{detail}{exit}{report}"))
+                ChatError::Transport(format!("{detail}{exit}{report}"))
             };
         let _ = worker_tx.send(WorkerSignal::Startup(Err(error)));
     } else if !clean_shutdown.load(Ordering::Acquire) {
-        if let Some(AcpError::Timeout {
+        if let Some(ChatError::Timeout {
             operation,
             duration,
         }) = timeout_reason.lock().ok().and_then(|reason| reason.clone())
         {
-            let _ = event_tx.send_blocking(AcpEvent::Timeout {
+            let _ = event_tx.send_blocking(ChatEvent::Timeout {
                 operation,
                 duration,
             });
@@ -2208,14 +1727,14 @@ fn run_connection(
                 Err(error) => format!(": {error}"),
                 Ok(()) => String::new(),
             };
-            let _ = event_tx.send_blocking(AcpEvent::TransportError(format!(
+            let _ = event_tx.send_blocking(ChatEvent::TransportError(format!(
                 "ACP transport closed unexpectedly{detail}{exit}{report}"
             )));
         }
     }
 }
 
-type EventStreamSender = async_channel::Sender<AcpEvent>;
+type EventStreamSender = async_channel::Sender<ChatEvent>;
 
 /// Drains the agent subprocess's stderr so its pipe never backs up and
 /// blocks the child, scanning each line for an MCP-configuration-flavored
@@ -2347,7 +1866,7 @@ pub(crate) fn looks_like_mcp_warning(line: &str) -> bool {
     FAILURE_WORDS.iter().any(|word| lower.contains(word))
 }
 
-pub(crate) fn record_timeout(reason: &Arc<Mutex<Option<AcpError>>>, timeout: AcpError) {
+pub(crate) fn record_timeout(reason: &Arc<Mutex<Option<ChatError>>>, timeout: ChatError) {
     if let Ok(mut reason) = reason.lock() {
         *reason = Some(timeout);
     }
@@ -2442,16 +1961,16 @@ pub(crate) fn describe_exit(status: ExitStatus) -> String {
 
 /// The deadline Sirio itself enforced, when one fired. Without this the turn
 /// error blames the transport for a kill Sirio decided on.
-pub(crate) fn timeout_cause(reason: &Arc<Mutex<Option<AcpError>>>) -> String {
+pub(crate) fn timeout_cause(reason: &Arc<Mutex<Option<ChatError>>>) -> String {
     match reason.lock().ok().and_then(|reason| reason.clone()) {
-        Some(AcpError::Timeout {
+        Some(ChatError::Timeout {
             operation: TimeoutOperation::Prompt,
             duration,
         }) => format!(
             "\nSirio reaped the agent after {}s without a single update from it (prompt watchdog)",
             duration.as_secs()
         ),
-        Some(AcpError::Timeout {
+        Some(ChatError::Timeout {
             operation,
             duration,
         }) => format!(
@@ -2483,56 +2002,6 @@ fn permission_option(option: &ProtocolPermissionOption) -> PermissionOption {
         kind: format!("{:?}", option.kind),
         description: None,
     }
-}
-
-/// Folds an `AskUserQuestion`-shaped tool input (`{questions: [{header,
-/// question, options: [{label, description}]}]}`) into the display fields a
-/// question card needs. Only the first question is surfaced; multi-question
-/// payloads are rare and the extra ones would need a second card. A
-/// `_sirioTextInput` metadata object declares the free-text affordance.
-pub(crate) fn parse_permission_question(
-    raw_input: &serde_json::Value,
-) -> Option<PermissionQuestion> {
-    let input = raw_input.as_object()?;
-    let questions = input.get("questions")?.as_array()?;
-    let first = questions.first()?.as_object()?;
-    let prompt = first.get("question")?.as_str()?.to_string();
-    let header = first
-        .get("header")
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| prompt.clone());
-    // Pi's `ui/select` repeats its header in `question`; a card that prints
-    // both would show the same sentence twice.
-    let body = if header.trim() == prompt.trim() {
-        String::new()
-    } else {
-        prompt
-    };
-    // The key is part of the contract an agent writes, not one we control, so
-    // the pre-rename spelling stays readable: an agent still emitting
-    // `_tillerTextInput` would otherwise lose its text field with no error.
-    let text_input = input
-        .get("_sirioTextInput")
-        .or_else(|| input.get("_tillerTextInput"))
-        .and_then(|value| {
-            let object = value.as_object()?;
-            Some(PermissionTextInput {
-                placeholder: object
-                    .get("placeholder")
-                    .and_then(|value| value.as_str())
-                    .map(ToOwned::to_owned),
-                prefill: object
-                    .get("prefill")
-                    .and_then(|value| value.as_str())
-                    .map(ToOwned::to_owned),
-            })
-        });
-    Some(PermissionQuestion {
-        header,
-        prompt: body,
-        text_input,
-    })
 }
 
 fn plan_entry(entry: &ProtocolPlanEntry) -> PlanEntryInfo {
@@ -2595,12 +2064,12 @@ fn tool_call_raw_json(value: Option<serde_json::Value>) -> Option<String> {
     value.map(|value| serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
 }
 
-fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
+fn notification_to_events(notification: SessionNotification) -> Vec<ChatEvent> {
     match notification.update {
         SessionUpdate::AgentMessageChunk(content) => vec![
             content_text(content)
-                .map(AcpEvent::AgentMessageChunk)
-                .unwrap_or_else(|| AcpEvent::OtherSessionUpdate {
+                .map(ChatEvent::AgentMessageChunk)
+                .unwrap_or_else(|| ChatEvent::OtherSessionUpdate {
                     kind: "AgentMessageChunk(non-text)".into(),
                 }),
         ],
@@ -2608,12 +2077,12 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
             // The same empty thinking the native transport drops: this
             // wrapper drives the same `claude`. See `claude::events`.
             Some(text) if text.is_empty() => Vec::new(),
-            Some(text) => vec![AcpEvent::ThoughtChunk(text)],
-            None => vec![AcpEvent::OtherSessionUpdate {
+            Some(text) => vec![ChatEvent::ThoughtChunk(text)],
+            None => vec![ChatEvent::OtherSessionUpdate {
                 kind: "AgentThoughtChunk(non-text)".into(),
             }],
         },
-        SessionUpdate::ToolCall(tool) => vec![AcpEvent::ToolCallStarted {
+        SessionUpdate::ToolCall(tool) => vec![ChatEvent::ToolCallStarted {
             id: tool.tool_call_id.to_string(),
             title: tool.title,
             status: format!("{:?}", tool.status),
@@ -2634,7 +2103,7 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
                 update.fields.status,
                 Some(ToolCallStatus::Completed | ToolCallStatus::Failed)
             ) {
-                AcpEvent::ToolCallCompleted {
+                ChatEvent::ToolCallCompleted {
                     id: update.tool_call_id.to_string(),
                     status: status.unwrap_or_else(|| "Unknown".into()),
                     kind,
@@ -2644,7 +2113,7 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
                     raw_output,
                 }
             } else {
-                AcpEvent::ToolCallUpdated {
+                ChatEvent::ToolCallUpdated {
                     id: update.tool_call_id.to_string(),
                     title: update.fields.title,
                     status,
@@ -2656,7 +2125,7 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
                 }
             }]
         }
-        SessionUpdate::UsageUpdate(usage) => vec![AcpEvent::ContextUsage(ContextUsage {
+        SessionUpdate::UsageUpdate(usage) => vec![ChatEvent::ContextUsage(ContextUsage {
             used: usage.used,
             size: usage.size,
             cost: usage.cost.map(|cost| ContextCost {
@@ -2668,7 +2137,7 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
             cached_read_tokens: None,
         })],
         SessionUpdate::AvailableCommandsUpdate(update) => {
-            vec![AcpEvent::AvailableCommands(
+            vec![ChatEvent::AvailableCommands(
                 update
                     .available_commands
                     .into_iter()
@@ -2692,19 +2161,19 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
             let options = update.config_options;
             let mut events = Vec::with_capacity(2);
             if let Some(catalog) = model_catalog_from_options(Some(&options)) {
-                events.push(AcpEvent::ModelCatalog(catalog));
+                events.push(ChatEvent::ModelCatalog(catalog));
             }
             if let Some(effort) = effort_from_options(Some(&options)) {
-                events.push(AcpEvent::Effort(effort));
+                events.push(ChatEvent::Effort(effort));
             }
             if events.is_empty() {
-                events.push(AcpEvent::OtherSessionUpdate {
+                events.push(ChatEvent::OtherSessionUpdate {
                     kind: "ConfigOptionUpdate".into(),
                 });
             }
             events
         }
-        SessionUpdate::Plan(plan) => vec![AcpEvent::PlanUpdate {
+        SessionUpdate::Plan(plan) => vec![ChatEvent::PlanUpdate {
             entries: plan.entries.iter().map(plan_entry).collect(),
         }],
         // The cell update that actually matters already happened at the
@@ -2713,10 +2182,10 @@ fn notification_to_events(notification: SessionNotification) -> Vec<AcpEvent> {
         // gets out of the generic "other" bucket so it knows to re-read
         // `AcpClient::mode_catalog` rather than mistaking this for
         // unmodeled protocol traffic.
-        SessionUpdate::CurrentModeUpdate(update) => vec![AcpEvent::OtherSessionUpdate {
+        SessionUpdate::CurrentModeUpdate(update) => vec![ChatEvent::OtherSessionUpdate {
             kind: format!("CurrentModeUpdate({})", update.current_mode_id),
         }],
-        _ => vec![AcpEvent::OtherSessionUpdate {
+        _ => vec![ChatEvent::OtherSessionUpdate {
             kind: "other".into(),
         }],
     }
@@ -3033,7 +2502,7 @@ mod tests {
         let events = notification_to_events(update);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            AcpEvent::ToolCallStarted {
+            ChatEvent::ToolCallStarted {
                 id,
                 title,
                 kind,
@@ -3084,7 +2553,7 @@ mod tests {
         );
         assert_eq!(
             notification_to_events(update),
-            vec![AcpEvent::ToolCallUpdated {
+            vec![ChatEvent::ToolCallUpdated {
                 id: "tool-1".into(),
                 title: None,
                 status: Some("InProgress".into()),
@@ -3126,7 +2595,7 @@ mod tests {
         );
         assert_eq!(
             notification_to_events(update),
-            vec![AcpEvent::AvailableCommands(vec![
+            vec![ChatEvent::AvailableCommands(vec![
                 AvailableCommandInfo {
                     name: "cr".into(),
                     description: "Code review the diff".into(),
@@ -3181,7 +2650,7 @@ mod tests {
         assert_eq!(
             notification_to_events(update),
             vec![
-                AcpEvent::ModelCatalog(ModelCatalog {
+                ChatEvent::ModelCatalog(ModelCatalog {
                     config_id: "model".into(),
                     selected_id: "sonnet".into(),
                     options: vec![ModelOption {
@@ -3190,7 +2659,7 @@ mod tests {
                         description: None,
                     }],
                 }),
-                AcpEvent::Effort(EffortOption {
+                ChatEvent::Effort(EffortOption {
                     option_id: "effort".into(),
                     name: Some("Reasoning effort".into()),
                     current_value: Some("medium".into()),
@@ -3356,8 +2825,8 @@ mod tests {
 
         assert!(
             matches!(
-                error.downcast_ref::<AcpError>(),
-                Some(AcpError::Timeout {
+                error.downcast_ref::<ChatError>(),
+                Some(ChatError::Timeout {
                     operation: TimeoutOperation::Startup,
                     ..
                 })
@@ -3404,8 +2873,8 @@ mod tests {
             Err(error) => error,
         };
 
-        match error.downcast_ref::<AcpError>() {
-            Some(AcpError::AuthRequired { methods }) => {
+        match error.downcast_ref::<ChatError>() {
+            Some(ChatError::AuthRequired { methods }) => {
                 assert_eq!(
                     methods,
                     &[AuthMethodInfo {
@@ -3527,7 +2996,7 @@ mod tests {
 
         let event = block_on(events.recv()).expect("worker should report the auth failure");
         match event {
-            AcpEvent::TransportError(message) => {
+            ChatEvent::TransportError(message) => {
                 assert!(
                     message.contains("Login") && message.contains("authentication"),
                     "expected auth guidance in the transport message, got {message:?}"
@@ -3784,7 +3253,7 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
     }
 
     #[cfg(unix)]
-    fn drain_until_turn_end(events: &EventStream, budget: Duration) -> Vec<AcpEvent> {
+    fn drain_until_turn_end(events: &EventStream, budget: Duration) -> Vec<ChatEvent> {
         let deadline = std::time::Instant::now() + budget;
         let mut seen = Vec::new();
         while std::time::Instant::now() < deadline {
@@ -3795,9 +3264,9 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
                 futures::future::Either::Left((Ok(event), _)) => {
                     let done = matches!(
                         event,
-                        AcpEvent::TurnEnded { .. }
-                            | AcpEvent::Timeout { .. }
-                            | AcpEvent::TransportError(_)
+                        ChatEvent::TurnEnded { .. }
+                            | ChatEvent::Timeout { .. }
+                            | ChatEvent::TransportError(_)
                     );
                     seen.push(event);
                     if done {
@@ -3851,13 +3320,13 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
 
         assert!(
             seen.iter()
-                .any(|event| matches!(event, AcpEvent::TurnEnded { .. })),
+                .any(|event| matches!(event, ChatEvent::TurnEnded { .. })),
             "a turn that kept reporting never finished: {seen:?}"
         );
         assert!(
             !seen.iter().any(|event| matches!(
                 event,
-                AcpEvent::Timeout {
+                ChatEvent::Timeout {
                     operation: TimeoutOperation::Prompt,
                     ..
                 }
@@ -3896,7 +3365,7 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         assert!(
             seen.iter().any(|event| matches!(
                 event,
-                AcpEvent::TransportError(_) | AcpEvent::Timeout { .. }
+                ChatEvent::TransportError(_) | ChatEvent::Timeout { .. }
             )),
             "a silent agent was never reaped: {seen:?}"
         );
@@ -3935,7 +3404,7 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
         let message = seen
             .iter()
             .find_map(|event| match event {
-                AcpEvent::TransportError(message) => Some(message.clone()),
+                ChatEvent::TransportError(message) => Some(message.clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("the reaped turn reported no error at all: {seen:?}"));
@@ -3972,13 +3441,13 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
 
         assert!(
             seen.iter()
-                .any(|event| matches!(event, AcpEvent::PermissionRequest { .. })),
+                .any(|event| matches!(event, ChatEvent::PermissionRequest { .. })),
             "the fixture's permission request never surfaced: {seen:?}"
         );
         assert!(
             !seen.iter().any(|event| matches!(
                 event,
-                AcpEvent::Timeout { .. } | AcpEvent::TransportError(_)
+                ChatEvent::Timeout { .. } | ChatEvent::TransportError(_)
             )),
             "an agent waiting on an unanswered card was reaped: {seen:?}"
         );
@@ -4010,7 +3479,7 @@ while IFS= read -r line; do id=$(printf '%s' "$line" | sed -E 's/.*"id":([^,]+),
 
         assert!(
             seen.iter()
-                .any(|event| matches!(event, AcpEvent::TurnEnded { .. })),
+                .any(|event| matches!(event, ChatEvent::TurnEnded { .. })),
             "the agent never saw a cancelled outcome for the expired card: {seen:?}"
         );
 

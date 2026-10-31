@@ -3,7 +3,7 @@
 //!
 //! The shape mirrors the ACP client next door — one worker thread, a
 //! command channel in, an unbounded event channel out, four bounded waits —
-//! and, crucially, emits the same [`AcpEvent`](crate::AcpEvent) values. The
+//! and, crucially, emits the same [`ChatEvent`](crate::ChatEvent) values. The
 //! chat surface is written against that vocabulary, so which transport a
 //! tab uses is invisible above this line.
 
@@ -22,7 +22,7 @@ use anyhow::{Result, anyhow};
 use sirio_claude::{ContextBreakdown, McpAuthStart, McpServer, RewindOutcome};
 
 use crate::{
-    AcpError, ChildHandle, EventStream, ModeCatalog, ModelCatalog, SHUTDOWN_TIMEOUT,
+    ChatError, ChildHandle, EventStream, ModeCatalog, ModelCatalog, SHUTDOWN_TIMEOUT,
     TimeoutOperation, terminate_and_reap_blocking,
 };
 
@@ -78,7 +78,7 @@ impl ClaudeLaunch {
 /// A live connection to one `claude` subprocess.
 pub struct ClaudeClient {
     command_tx: async_channel::Sender<worker::Command>,
-    event_tx: Option<async_channel::Sender<crate::AcpEvent>>,
+    event_tx: Option<async_channel::Sender<crate::ChatEvent>>,
     child: ChildHandle,
     shared: Arc<worker::Shared>,
     worker: Option<JoinHandle<()>>,
@@ -156,7 +156,7 @@ impl ClaudeClient {
                         terminate_and_reap_blocking(&child);
                     }
                     crate::detach_worker(worker);
-                    return Err(anyhow::Error::new(AcpError::Timeout {
+                    return Err(anyhow::Error::new(ChatError::Timeout {
                         operation: TimeoutOperation::Startup,
                         duration: startup_timeout,
                     }));
@@ -166,7 +166,7 @@ impl ClaudeClient {
                         terminate_and_reap_blocking(&child);
                     }
                     crate::detach_worker(worker);
-                    return Err(anyhow::Error::new(AcpError::Transport(
+                    return Err(anyhow::Error::new(ChatError::Transport(
                         "the Claude worker exited before its handshake".into(),
                     )));
                 }
@@ -305,14 +305,14 @@ impl ClaudeClient {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 terminate_and_reap_blocking(&self.child);
                 let _ = worker.join();
-                Err(anyhow::Error::new(AcpError::Timeout {
+                Err(anyhow::Error::new(ChatError::Timeout {
                     operation: TimeoutOperation::Shutdown,
                     duration: SHUTDOWN_TIMEOUT,
                 }))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = worker.join();
-                Err(anyhow::Error::new(AcpError::Transport(
+                Err(anyhow::Error::new(ChatError::Transport(
                     "the Claude worker exited during shutdown".into(),
                 )))
             }

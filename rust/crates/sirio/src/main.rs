@@ -49838,7 +49838,7 @@ browser  profile  "
         );
 
         // The exact completion signal a real turn produces (chat.rs's
-        // `AcpEvent::TurnEnded` handler, after the transcript is
+        // `sirio_acp::ChatEvent::TurnEnded` handler, after the transcript is
         // persisted).
         chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::TurnEnded));
         cx.run_until_parked();

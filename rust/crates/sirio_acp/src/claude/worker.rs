@@ -26,7 +26,7 @@ use super::events::{Fold, ResultSummary};
 use super::permission;
 use super::trace::TraceFold;
 use crate::{
-    AcpError, AcpEvent, AgentMode, ChildHandle, ContextCost, ContextUsage, EffortChoice,
+    ChatError, ChatEvent, AgentMode, ChildHandle, ContextCost, ContextUsage, EffortChoice,
     EffortOption, ExitStatusSlot, ModeCatalog, ModelCatalog, ModelOption, StderrTail,
     TimeoutOperation, TraceEvent,
 };
@@ -107,7 +107,7 @@ struct PendingContextUsage {
     /// What the turn's `result` reported, the fallback when no answer comes.
     summary: ResultSummary,
     /// The `TurnEnded` event, held back until the meter is emitted.
-    held: Option<AcpEvent>,
+    held: Option<ChatEvent>,
     /// When the ask went out, for the grace.
     asked_at: std::time::Instant,
 }
@@ -126,7 +126,7 @@ pub(super) enum Startup {
     /// The handshake succeeded and the catalogues are readable.
     Ready,
     /// It did not.
-    Failed(AcpError),
+    Failed(ChatError),
 }
 
 /// State the client reads while the worker writes it.
@@ -283,7 +283,7 @@ pub(super) struct Config {
     pub launch: ClaudeLaunch,
     pub cwd: std::path::PathBuf,
     pub command_rx: async_channel::Receiver<Command>,
-    pub event_tx: async_channel::Sender<AcpEvent>,
+    pub event_tx: async_channel::Sender<ChatEvent>,
     pub startup_tx: mpsc::SyncSender<Startup>,
     pub shared: Arc<Shared>,
     pub prompt_timeout: Duration,
@@ -350,7 +350,7 @@ struct Attempt {
     launch: ClaudeLaunch,
     cwd: std::path::PathBuf,
     command_rx: async_channel::Receiver<Command>,
-    event_tx: async_channel::Sender<AcpEvent>,
+    event_tx: async_channel::Sender<ChatEvent>,
     startup_tx: mpsc::SyncSender<Startup>,
     shared: Arc<Shared>,
     prompt_timeout: Duration,
@@ -428,7 +428,7 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let _ = startup_tx.send(Startup::Failed(AcpError::Transport(format!(
+            let _ = startup_tx.send(Startup::Failed(ChatError::Transport(format!(
                 "could not launch `{}`: {error}",
                 launch.program.display()
             ))));
@@ -486,7 +486,7 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
             if retryable {
                 return AttemptOutcome::RetryWithoutResume;
             }
-            let _ = startup_tx.send(Startup::Failed(AcpError::Transport(error)));
+            let _ = startup_tx.send(Startup::Failed(ChatError::Transport(error)));
             AttemptOutcome::Finished
         }
         SessionOutcome::Died(detail) => {
@@ -497,7 +497,7 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
             block_on(crate::wait_for_stderr_drain(&stderr_drained));
             let report = crate::stderr_tail_report(&stderr_tail);
             let exit = block_on(crate::child_exit_report(&child, &exit_status));
-            let _ = event_tx.send_blocking(AcpEvent::TransportError(format!(
+            let _ = event_tx.send_blocking(ChatEvent::TransportError(format!(
                 "the Claude agent stopped{detail}{exit}{report}"
             )));
             AttemptOutcome::Finished
@@ -524,7 +524,7 @@ struct SessionContext {
     stdin: async_process::ChildStdin,
     stdout: async_process::ChildStdout,
     command_rx: async_channel::Receiver<Command>,
-    event_tx: async_channel::Sender<AcpEvent>,
+    event_tx: async_channel::Sender<ChatEvent>,
     startup_tx: mpsc::SyncSender<Startup>,
     shared: Arc<Shared>,
     child: ChildHandle,
@@ -564,7 +564,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let mut pending_effort: HashMap<String, String> = HashMap::new();
     let mut pending_rewinds: HashMap<String, mpsc::SyncSender<Result<RewindOutcome, String>>> =
         HashMap::new();
-    let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
+    let timeout_reason: Arc<Mutex<Option<ChatError>>> = Arc::new(Mutex::new(None));
     let permission_counter = AtomicU64::new(1);
     let mut pending_permissions: HashMap<u64, PendingPermission> = HashMap::new();
     let mut open_permissions: usize = 0;
@@ -626,7 +626,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
     if catalog.is_logged_out() {
         // The same error the ACP path raises, so the surface's existing
         // auth card and its CLI-login guidance apply unchanged (F-CHAT-02).
-        let _ = startup_tx.send(Startup::Failed(AcpError::AuthRequired {
+        let _ = startup_tx.send(Startup::Failed(ChatError::AuthRequired {
             methods: Vec::new(),
         }));
         return SessionOutcome::NeverStarted;
@@ -707,7 +707,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     }
                                 }
                                 let _ = event_tx
-                                    .send(AcpEvent::OtherSessionUpdate {
+                                    .send(ChatEvent::OtherSessionUpdate {
                                         kind: match (&envelope.error, &display) {
                                             (Some(_), _) => {
                                                 "ThinkingDisplayUpdate(unsupported)".to_string()
@@ -743,7 +743,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     }
                                 }
                                 let _ = event_tx
-                                    .send(AcpEvent::OtherSessionUpdate {
+                                    .send(ChatEvent::OtherSessionUpdate {
                                         kind: match (&envelope.error, enabled) {
                                             (Some(_), _) => "FastModeUpdate(blocked)".to_string(),
                                             (None, true) => "FastModeUpdate(on)".to_string(),
@@ -791,7 +791,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                             apply_selected_model(&shared, &model)
                                         {
                                             let _ = event_tx
-                                                .send(AcpEvent::ModelCatalog(catalogue))
+                                                .send(ChatEvent::ModelCatalog(catalogue))
                                                 .await;
                                         }
                                         // A model carries its own effort
@@ -811,7 +811,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     }
                                     Some(error) => {
                                         let _ = event_tx
-                                            .send(AcpEvent::TransportError(format!(
+                                            .send(ChatEvent::TransportError(format!(
                                                 "model selection failed: {error}"
                                             )))
                                             .await;
@@ -970,7 +970,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 permission::options_for(&request)
                             };
                             let _ = event_tx
-                                .send(AcpEvent::PermissionRequest {
+                                .send(ChatEvent::PermissionRequest {
                                     request_id,
                                     session_id: shared.session_id().unwrap_or_default(),
                                     title: sirio_claude::tools::describe(
@@ -1015,7 +1015,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         {
                             catalog.replace_commands(commands);
                             let _ = event_tx
-                                .send(AcpEvent::AvailableCommands(command_list(&catalog)))
+                                .send(ChatEvent::AvailableCommands(command_list(&catalog)))
                                 .await;
                         }
                         // Ahead of the line's transcript events, and not held with
@@ -1052,7 +1052,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             if let Some(pending) = pending_context_usage.take() {
                                 resolve_context_usage(&event_tx, pending, None).await;
                             }
-                            let held = matches!(events.last(), Some(AcpEvent::TurnEnded { .. }))
+                            let held = matches!(events.last(), Some(ChatEvent::TurnEnded { .. }))
                                 .then(|| events.pop())
                                 .flatten();
                             let request_id = next_request_id();
@@ -1352,7 +1352,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
             open_permissions = open_permissions.saturating_sub(1);
             crate::record_timeout(
                 &timeout_reason,
-                AcpError::Timeout {
+                ChatError::Timeout {
                     operation: TimeoutOperation::Permission,
                     duration: permission_timeout,
                 },
@@ -1383,13 +1383,13 @@ async fn session(context: SessionContext) -> SessionOutcome {
             // should, which is nothing.
             crate::record_timeout(
                 &timeout_reason,
-                AcpError::Timeout {
+                ChatError::Timeout {
                     operation: TimeoutOperation::Prompt,
                     duration: prompt_timeout,
                 },
             );
             let _ = event_tx
-                .send(AcpEvent::Timeout {
+                .send(ChatEvent::Timeout {
                     operation: TimeoutOperation::Prompt,
                     duration: prompt_timeout,
                 })
@@ -1413,9 +1413,9 @@ fn is_subagent_permission(fold: &Fold, request: &sirio_claude::CanUseTool) -> bo
 }
 
 /// Forwards the trace events one line, command or answer produced, in order.
-async fn send_trace(event_tx: &async_channel::Sender<AcpEvent>, events: Vec<TraceEvent>) {
+async fn send_trace(event_tx: &async_channel::Sender<ChatEvent>, events: Vec<TraceEvent>) {
     for event in events {
-        let _ = event_tx.send(AcpEvent::Trace(event)).await;
+        let _ = event_tx.send(ChatEvent::Trace(event)).await;
     }
 }
 
@@ -1425,7 +1425,7 @@ async fn send_trace(event_tx: &async_channel::Sender<AcpEvent>, events: Vec<Trac
 fn context_usage_event(
     report: Option<ContextUsageReport>,
     summary: &ResultSummary,
-) -> Option<AcpEvent> {
+) -> Option<ChatEvent> {
     let (used, size) = match report {
         Some(report) => (report.total_tokens, report.raw_max_tokens),
         None => {
@@ -1439,7 +1439,7 @@ fn context_usage_event(
             (used, size)
         }
     };
-    Some(AcpEvent::ContextUsage(ContextUsage {
+    Some(ChatEvent::ContextUsage(ContextUsage {
         used,
         size,
         cost: summary.total_cost_usd.map(|amount| ContextCost {
@@ -1462,8 +1462,8 @@ const MCP_SERVERS: &str = "McpServers";
 /// A re-read signal: the event vocabulary has no variant for the session
 /// panel's data, so the surface is told *that* something changed and reads it
 /// back through the client, the way it does for a mode change.
-fn other_update(kind: &str) -> AcpEvent {
-    AcpEvent::OtherSessionUpdate { kind: kind.into() }
+fn other_update(kind: &str) -> ChatEvent {
+    ChatEvent::OtherSessionUpdate { kind: kind.into() }
 }
 
 /// The meter's event for a breakdown asked for outside a turn. The last
@@ -1472,11 +1472,11 @@ fn other_update(kind: &str) -> AcpEvent {
 fn refreshed_usage_event(
     report: Option<&ContextUsageReport>,
     last_result: Option<&ResultSummary>,
-) -> Option<AcpEvent> {
+) -> Option<ChatEvent> {
     let report = report?;
     match last_result {
         Some(summary) => context_usage_event(Some(report.clone()), summary),
-        None => Some(AcpEvent::ContextUsage(ContextUsage {
+        None => Some(ChatEvent::ContextUsage(ContextUsage {
             used: report.total_tokens,
             size: report.raw_max_tokens,
             ..ContextUsage::default()
@@ -1487,7 +1487,7 @@ fn refreshed_usage_event(
 /// Ends a held turn: the meter first, then the turn's own end. A refusal or
 /// an unreadable answer is not an error — the result's numbers stand in.
 async fn resolve_context_usage(
-    event_tx: &async_channel::Sender<AcpEvent>,
+    event_tx: &async_channel::Sender<ChatEvent>,
     pending: PendingContextUsage,
     report: Option<ContextUsageReport>,
 ) {
@@ -1502,7 +1502,7 @@ async fn resolve_context_usage(
 /// The same, for a held turn the reader will never get an answer for — the
 /// CLI went away with the request still in its stdin.
 async fn end_held_turn(
-    event_tx: &async_channel::Sender<AcpEvent>,
+    event_tx: &async_channel::Sender<ChatEvent>,
     pending: &mut Option<PendingContextUsage>,
 ) {
     if let Some(pending) = pending.take() {
@@ -1566,11 +1566,11 @@ fn catalogue_events(
     catalog: &Catalog,
     model_id: &str,
     selected_effort: &mut String,
-) -> Vec<AcpEvent> {
+) -> Vec<ChatEvent> {
     let mut events = Vec::new();
     let commands = command_list(catalog);
     if !commands.is_empty() {
-        events.push(AcpEvent::AvailableCommands(commands));
+        events.push(ChatEvent::AvailableCommands(commands));
     }
     events.push(effort_event(catalog, model_id, selected_effort));
     events
@@ -1599,7 +1599,7 @@ fn command_list(catalog: &Catalog) -> Vec<crate::AvailableCommandInfo> {
 /// Empty choices are how a model with no effort at all says so — Haiku sends
 /// neither effort field — and the surface reads that as "no selector" rather
 /// than as an empty one.
-fn effort_event(catalog: &Catalog, model_id: &str, selected: &mut String) -> AcpEvent {
+fn effort_event(catalog: &Catalog, model_id: &str, selected: &mut String) -> ChatEvent {
     let effort = catalog.effort_for(model_id);
     let choices: Vec<EffortChoice> = effort
         .map(|effort| {
@@ -1616,7 +1616,7 @@ fn effort_event(catalog: &Catalog, model_id: &str, selected: &mut String) -> Acp
     if !choices.iter().any(|choice| choice.value == *selected) {
         *selected = EFFORT_DEFAULT.to_string();
     }
-    AcpEvent::Effort(EffortOption {
+    ChatEvent::Effort(EffortOption {
         option_id: "effort".into(),
         name: Some("Effort".into()),
         current_value: Some(selected.clone()),
@@ -1679,8 +1679,8 @@ mod tests {
         }
     }
 
-    fn context_usage(event: Option<AcpEvent>) -> ContextUsage {
-        let Some(AcpEvent::ContextUsage(usage)) = event else {
+    fn context_usage(event: Option<ChatEvent>) -> ContextUsage {
+        let Some(ChatEvent::ContextUsage(usage)) = event else {
             panic!("expected a context usage event, got {event:?}");
         };
         usage
@@ -1691,8 +1691,8 @@ mod tests {
         Catalog::from_initialize(&serde_json::json!({ "models": models }))
     }
 
-    fn selector(event: AcpEvent) -> EffortOption {
-        let AcpEvent::Effort(option) = event else {
+    fn selector(event: ChatEvent) -> EffortOption {
+        let ChatEvent::Effort(option) = event else {
             panic!("expected an effort event, got {event:?}");
         };
         option

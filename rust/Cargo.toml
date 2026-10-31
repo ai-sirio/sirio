@@ -16,6 +16,7 @@ members = [
     "crates/sirio_ui",
     "crates/sirio_term_session",
     "crates/sirio_terminal",
+    "crates/sirio_chat_vocab",
     "crates/sirio_acp",
     "crates/sirio_claude",
     "crates/sirio_lsp",

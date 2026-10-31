@@ -3,9 +3,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
 use futures::future::Either;
-use sirio_acp::{AcpClient, AcpEvent, AgentCommand, EventStream};
+use sirio_acp::{AcpClient, ChatEvent, AgentCommand, EventStream};
 
-fn next_event(events: &EventStream, timeout: Duration) -> Result<AcpEvent> {
+fn next_event(events: &EventStream, timeout: Duration) -> Result<ChatEvent> {
     let receive = events.recv();
     let timer = async_io::Timer::after(timeout);
     futures::executor::block_on(async move {
@@ -60,10 +60,10 @@ fn real_claude_streams_tool_permission_and_writes_nonce() -> Result<()> {
 
     loop {
         match next_event(&events, Duration::from_secs(180))? {
-            AcpEvent::AgentMessageChunk(text) => assistant_chunks.push(text),
-            AcpEvent::ToolCallStarted { .. } => tool_calls += 1,
-            AcpEvent::ToolCallCompleted { .. } => tool_completions += 1,
-            AcpEvent::PermissionRequest {
+            ChatEvent::AgentMessageChunk(text) => assistant_chunks.push(text),
+            ChatEvent::ToolCallStarted { .. } => tool_calls += 1,
+            ChatEvent::ToolCallCompleted { .. } => tool_completions += 1,
+            ChatEvent::PermissionRequest {
                 request_id,
                 options,
                 ..
@@ -77,14 +77,14 @@ fn real_claude_streams_tool_permission_and_writes_nonce() -> Result<()> {
                 client.respond_permission(request_id, option.id.clone())?;
                 permission_response = Some(option.id.clone());
             }
-            AcpEvent::TurnEnded { stop_reason } => {
+            ChatEvent::TurnEnded { stop_reason } => {
                 if stop_reason != "EndTurn" {
                     bail!("Claude turn ended with {stop_reason}");
                 }
                 break;
             }
-            AcpEvent::TransportError(error) => bail!("Claude ACP transport failed: {error}"),
-            AcpEvent::Timeout {
+            ChatEvent::TransportError(error) => bail!("Claude ACP transport failed: {error}"),
+            ChatEvent::Timeout {
                 operation,
                 duration,
             } => {

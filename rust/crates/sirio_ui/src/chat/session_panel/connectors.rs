@@ -842,7 +842,6 @@ mod tests {
 
     #[gpui::test]
     async fn a_new_init_asks_again_and_an_answers_own_signal_does_not(cx: &mut TestAppContext) {
-        use sirio_acp::AcpEvent;
         let dir = TempDir::new();
         let counts = dir.0.join("mcp-status-requests");
         let (chat, cx) = fixture_chat(cx, "session_panel", Some(&counts));
@@ -850,7 +849,7 @@ mod tests {
         let signal = |chat: &Entity<Chat>, cx: &mut VisualTestContext, kind: &str| {
             chat.update(cx, |chat, cx| {
                 chat.handle_event(
-                    AcpEvent::OtherSessionUpdate { kind: kind.to_string() },
+                    sirio_acp::ChatEvent::OtherSessionUpdate { kind: kind.to_string() },
                     cx,
                 )
             });

@@ -7308,6 +7308,7 @@ dependencies = [
  "futures",
  "libc",
  "serde_json",
+ "sirio_chat_vocab",
  "sirio_claude",
  "sirio_env",
  "sirio_persistence",
@@ -7336,6 +7337,14 @@ dependencies = [
  "sirio_release",
  "sirio_update",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "sirio_chat_vocab"
+version = "0.38.0"
+dependencies = [
+ "async-channel",
+ "serde_json",
 ]
 
 [[package]]
