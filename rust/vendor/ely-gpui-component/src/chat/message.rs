@@ -317,6 +317,7 @@ impl RenderOnce for MessageBubble {
 pub struct ChatContainer {
     messages: AnyElement,
     composer: Option<AnyElement>,
+    full_bleed: bool,
 }
 
 impl ChatContainer {
@@ -324,11 +325,20 @@ impl ChatContainer {
         Self {
             messages: messages.into_any_element(),
             composer: None,
+            full_bleed: false,
         }
     }
 
     pub fn composer(mut self, composer: impl IntoElement) -> Self {
         self.composer = Some(composer.into_any_element());
+        self
+    }
+
+    /// Hands the composer the whole width of the frame: no side or bottom
+    /// padding and no reading-column cap, for a composer that draws its own
+    /// edge to edge band.
+    pub fn composer_full_bleed(mut self) -> Self {
+        self.full_bleed = true;
         self
     }
 }
@@ -337,6 +347,7 @@ impl RenderOnce for ChatContainer {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let column = theme.container_width(ContainerSize::Md);
+        let full_bleed = self.full_bleed;
         div()
             .size_full()
             .flex()
@@ -344,6 +355,9 @@ impl RenderOnce for ChatContainer {
             .bg(theme.colors.bg)
             .child(div().flex_1().min_h_0().child(self.messages))
             .children(self.composer.map(|composer| {
+                if full_bleed {
+                    return div().flex_none().w_full().child(composer);
+                }
                 div()
                     .flex_none()
                     .w_full()

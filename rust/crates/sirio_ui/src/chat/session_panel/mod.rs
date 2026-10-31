@@ -15,6 +15,7 @@ mod context;
 mod environment;
 mod trace;
 
+use super::composer_row::probe_notifies;
 use super::*;
 use ely_gpui_component::{
     primitives::{Icon, IconName},
@@ -23,7 +24,7 @@ use ely_gpui_component::{
 use crate::text_selection::selectable_text;
 
 /// The column's width, fixed in this version.
-const COLUMN_WIDTH: f32 = 300.0;
+pub(super) const COLUMN_WIDTH: f32 = 300.0;
 /// Below this chat width the column is laid over the transcript instead of
 /// docked beside it, so the transcript and the composer keep a readable width.
 const MIN_CHAT_WIDTH: f32 = 640.0;
@@ -500,6 +501,12 @@ impl Chat {
         })
     }
 
+    /// The chat's width as the probe last measured it; `None` until it has
+    /// been laid out.
+    pub(super) fn chat_width(&self) -> Option<Pixels> {
+        self.session_panel.frame.width.get()
+    }
+
     /// Whether the column is on screen: open, and the chat laid out.
     pub(super) fn session_panel_drawn(&self) -> bool {
         self.session_panel_placement().is_some()
@@ -548,16 +555,30 @@ impl Chat {
     pub(super) fn render_session_panel_probe(&self, cx: &mut Context<Self>) -> AnyElement {
         let frame = self.session_panel.frame.clone();
         let entity = cx.entity();
+        let row = self.composer_row.clone();
         canvas(
             move |bounds, _, cx| {
                 frame.painted.set(true);
                 frame.trace_painted.set(true);
+                row.root.set(Some(bounds));
                 let width = bounds.size.width;
                 let before = frame.width.replace(Some(width));
                 let docked = |width: Option<Pixels>| width.map(|w| w >= px(MIN_CHAT_WIDTH));
                 // An overlay is as wide as the chat allows, so it follows it.
-                let moved = docked(before) != docked(Some(width))
+                let mut moved = docked(before) != docked(Some(width))
                     || (width < px(MIN_CHAT_WIDTH) && before != Some(width));
+                // The control row's layout gives way at a chat width; the row
+                // reads this width, and never its own, so the layout it picks
+                // cannot move the width it was picked from. The question is
+                // the render's own, so the two cannot split on a boundary.
+                moved |= probe_notifies(
+                    f32::from(width),
+                    row.docked.get(),
+                    row.needed.get(),
+                    row.compact_needed.get(),
+                    row.narrow_needed.get(),
+                    row.layout.get(),
+                );
                 if moved {
                     let entity = entity.clone();
                     cx.defer(move |cx| entity.update(cx, |_, cx| cx.notify()));
@@ -1013,8 +1034,11 @@ mod tests {
         let panel = cx.debug_bounds("session-panel").expect("still drawn");
         assert_eq!(panel.size.width, px(264.0), "the chat's width less 16");
 
-        // The toggle still closes it.
-        click(cx, "session-panel-toggle");
+        // At 280px the row is Compact, and the toggle is a row in ⋯: it still
+        // closes the column.
+        assert!(cx.debug_bounds("session-panel-toggle").is_none());
+        click(cx, "composer-overflow");
+        click(cx, "overflow-session-panel");
         assert!(cx.debug_bounds("session-panel").is_none());
 
         // Wide again, it docks and the transcript gives it room.

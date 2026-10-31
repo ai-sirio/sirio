@@ -2,7 +2,8 @@
 //! the transcript, and the composer's "more" menu. Rows are Ely's; whether a
 //! menu is open, where it hangs and what Escape does stay with `Chat`.
 
-use super::controls::{OverflowRow, PickerRow, popup_width};
+use super::composer_row::MenuRow;
+use super::controls::{OverflowRow, PickerRow, background_tasks_label, popup_width};
 use super::*;
 use ely_gpui_component::menus::{Hang, Menu, MenuItem, MenuPanel, layer};
 
@@ -95,32 +96,107 @@ impl Chat {
         )
     }
 
+    /// The rows of the "more" menu as Ely's menu model, so that what is
+    /// disabled is the model's to say: it steps over those rows and will not
+    /// run them.
+    pub(super) fn overflow_menu(&self, cx: &Context<Self>) -> Menu {
+        self.overflow_rows()
+            .into_iter()
+            .fold(Menu::new(), |menu, which| {
+                let row = PickerRow::Overflow(which);
+                let item = match which {
+                    OverflowRow::Fast => {
+                        let Some(fast) = self.fast_state() else {
+                            return menu;
+                        };
+                        let item = MenuItem::check("Fast mode", fast.enabled)
+                            .selectors("overflow-fast", None);
+                        match &fast.blocked_by {
+                            Some(reason) => item.disabled(true).tooltip(reason.clone()),
+                            None => item,
+                        }
+                    }
+                    OverflowRow::Model => MenuItem::new(format!(
+                        "Model: {}",
+                        self.selected_model_name()
+                    ))
+                    .selectors("overflow-model", None),
+                    // Information: a disabled row, which the menu steps over.
+                    OverflowRow::Agent => MenuItem::new(self.agent_badge_name())
+                        .disabled(true)
+                        .selectors("overflow-agent", None),
+                    OverflowRow::Attach => {
+                        MenuItem::new("Attach image").selectors("overflow-attach", None)
+                    }
+                    OverflowRow::Thinking => {
+                        let chosen = self.thinking_state().and_then(|state| state.chosen);
+                        let label = match chosen {
+                            Some(chosen) => {
+                                format!("Thinking: {}", thinking_display_name(&chosen))
+                            }
+                            None => "Thinking".to_string(),
+                        };
+                        MenuItem::new(label).selectors("overflow-thinking", None)
+                    }
+                    OverflowRow::SessionPanel => {
+                        let label = if self.session_panel_open() {
+                            "Hide session panel"
+                        } else {
+                            "Show session panel"
+                        };
+                        MenuItem::new(label).selectors("overflow-session-panel", None)
+                    }
+                    // Information: a disabled row, which the menu steps over.
+                    OverflowRow::BackgroundTasks => {
+                        MenuItem::new(background_tasks_label(self.background_tasks))
+                            .disabled(true)
+                            .selectors("overflow-background-tasks", None)
+                    }
+                    OverflowRow::Context => {
+                        MenuItem::new(self.context_row_label()).selectors("overflow-context", None)
+                    }
+                    OverflowRow::Follow if self.following_edited_files => {
+                        MenuItem::new("Stop Following").selectors("overflow-follow", None)
+                    }
+                    OverflowRow::Follow => {
+                        MenuItem::new("Follow Edited Files").selectors("overflow-follow", None)
+                    }
+                    OverflowRow::NewConversation => MenuItem::new("New Conversation")
+                        .selectors("overflow-new-conversation", None),
+                    OverflowRow::History => {
+                        MenuItem::new("Chat History").selectors("overflow-chat-history", None)
+                    }
+                };
+                menu.item(item.on_click(self.picker_click(row, cx)))
+            })
+    }
+
     /// The composer's "more" menu (F-CHAT-14): Follow Edited Files, New
-    /// Conversation and Chat History. Follow is a toggle and leaves the menu
-    /// open; the other two close it.
+    /// Conversation and Chat History, and, while the row is Compact, the
+    /// Fast, Thinking and session panel rows above them, in a Narrow one
+    /// the task count and the context ring's row too, and in a Minimal one the
+    /// model's and attach. Follow and Fast are toggles and leave the menu open;
+    /// the others close it.
     pub(super) fn render_chat_menu(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let rows = self.picker_rows(cx);
-        let menu = rows.iter().fold(Menu::new(), |menu, row| {
-            let PickerRow::Overflow(which) = row else {
-                return menu;
-            };
-            let (label, selector) = match which {
-                OverflowRow::Follow if self.following_edited_files => {
-                    ("Stop Following", "overflow-follow")
-                }
-                OverflowRow::Follow => ("Follow Edited Files", "overflow-follow"),
-                OverflowRow::NewConversation => ("New Conversation", "overflow-new-conversation"),
-                OverflowRow::History => ("Chat History", "overflow-chat-history"),
-            };
-            menu.item(
-                MenuItem::new(label)
-                    .selectors(selector, None)
-                    .on_click(self.picker_click(row.clone(), cx)),
-            )
-        });
+        let menu = self.overflow_menu(cx);
+        // The rows the control socket reports are the ones just built.
+        *self.composer_row.menu.borrow_mut() = Some(
+            menu.items()
+                .map(|item| {
+                    let selector = item.row_selector().map_or("", |name| name.as_ref());
+                    let id = selector.strip_prefix("overflow-").unwrap_or(selector);
+                    MenuRow {
+                        id: if id == "chat-history" { "history" } else { id }.to_string(),
+                        enabled: !item.is_disabled(),
+                        tooltip: item.tooltip_text().map(|text| text.to_string()),
+                    }
+                })
+                .collect(),
+        );
         layer(
             "composer-overflow-menu-menu",
-            Hang::AboveEnd,
+            Hang::Above,
             div()
                 .id("composer-overflow-menu")
                 .debug_selector(|| "composer-overflow-menu".into())

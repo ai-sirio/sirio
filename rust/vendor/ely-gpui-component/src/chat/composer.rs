@@ -1,8 +1,9 @@
 use std::{path::PathBuf, rc::Rc};
 
 use gpui::{
-    AnyElement, App, ElementId, Entity, ExternalPaths, InteractiveElement, IntoElement,
-    ParentElement, PathPromptOptions, RenderOnce, SharedString, Styled, Window, div, prelude::*,
+    AnyElement, App, Bounds, ElementId, Entity, ExternalPaths, InteractiveElement, IntoElement,
+    ParentElement, PathPromptOptions, Pixels, RenderOnce, SharedString, Styled, Window, canvas,
+    div, prelude::*, px,
 };
 use smallvec::SmallVec;
 
@@ -18,6 +19,7 @@ use crate::{
 };
 
 type OnPaths = Rc<dyn Fn(Vec<PathBuf>, &mut Window, &mut App)>;
+type OnBounds = Rc<dyn Fn(Bounds<Pixels>)>;
 
 /// Opens the system's file dialog to attach files; `on_pick` gets what was chosen.
 #[derive(IntoElement)]
@@ -320,6 +322,10 @@ pub struct PromptInput {
     commands: (Vec<Choice>, Option<OnValue>),
     context: (Vec<Choice>, Option<OnValue>),
     on_drop: Option<OnPaths>,
+    /// The band look of [`Self::band`]: the content column's widest.
+    band: Option<Pixels>,
+    /// Told where the band's send control was laid out (see [`Self::send_probe`]).
+    send_probe: Option<OnBounds>,
 }
 
 impl PromptInput {
@@ -343,6 +349,8 @@ impl PromptInput {
             commands: (Vec::new(), None),
             context: (Vec::new(), None),
             on_drop: None,
+            band: None,
+            send_probe: None,
         }
     }
 
@@ -350,7 +358,8 @@ impl PromptInput {
     /// sending is possible (`ready`); the shell draws the same border focused
     /// or not, takes no Enter action and offers no completion
     /// rows of its own, so the host's keyboard, IME and popups stay in charge.
-    /// The tool row wraps, so a narrow pane never clips the send control.
+    /// The tool row wraps, so a narrow pane never clips the send control,
+    /// unless [`Self::band`] is set: the band's row is one line.
     pub fn custom(
         id: impl Into<ElementId>,
         editor: impl IntoElement,
@@ -371,7 +380,31 @@ impl PromptInput {
             commands: (Vec::new(), None),
             context: (Vec::new(), None),
             on_drop: None,
+            band: None,
+            send_probe: None,
         }
+    }
+
+    /// Draws a host's editor (see [`Self::custom`]) as a band across the
+    /// bottom of its pane instead of a card: as wide as its parent, with a 1px
+    /// top rule in `border`, no radius, the theme's `surface` as its fill and
+    /// 12px of side padding, 10px above and 8px below. Its content sits in a
+    /// centred column at most `column` wide. The tool row never wraps: the
+    /// tools stay at the start in a group that does not shrink, and the
+    /// trailing tools and send stay at the end in a group that may shrink.
+    /// Without a host editor this does nothing.
+    pub fn band(mut self, column: Pixels) -> Self {
+        self.band = Some(column);
+        self
+    }
+
+    /// Calls `probe` with the send control's bounds at each paint of the
+    /// [`Self::band`] row, so a host can tell where it lies (a release build
+    /// has no debug selectors to read). Paints nothing; without the band this
+    /// does nothing.
+    pub fn send_probe(mut self, probe: impl Fn(Bounds<Pixels>) + 'static) -> Self {
+        self.send_probe = Some(Rc::new(probe));
+        self
     }
 
     /// A tool that travels with the send control at the end of the row.
@@ -492,57 +525,109 @@ impl RenderOnce for PromptInput {
             }
             (None, None) => unreachable!("a prompt input has a field or an editor"),
         };
-        let end = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_1()
-            .children(self.trailing)
-            .child(button);
-        let body = div()
+        let band = self.band.filter(|_| custom);
+        let end = div().flex().items_center().gap_1().children(self.trailing);
+        let end = if band.is_some() {
+            // The band's end group may shrink (its chips ellipsize or give way
+            // inside it) while send keeps its size and its place at the end.
+            let send = div().flex_none().relative().child(button);
+            let send = match self.send_probe {
+                Some(probe) => send.child(
+                    canvas(move |bounds, _, _| probe(bounds), |_, _, _, _| {})
+                        .absolute()
+                        .inset_0(),
+                ),
+                None => send,
+            };
+            end.min_w_0().justify_end().child(send)
+        } else {
+            end.flex_none().child(button)
+        };
+        let shell = div()
             .id(self.id.clone())
             .debug_selector(|| "ely-prompt-input".into())
             .relative()
             .flex()
             .flex_col()
-            .gap_2()
-            .p_3()
-            .rounded(radius)
-            .border_1()
-            .border_color(match (focused, custom) {
-                // A host's editor keeps the theme's quiet rule in both states:
-                // the caret already says where focus is, and a brighter outline
-                // read as a white frame around the card.
-                (_, true) => colors.border,
-                (true, false) => colors.focus,
-                (false, false) => colors.border_strong,
-            })
             // A host's editor paints no fill of its own (Sirio's is Ely's raw
             // `TextInput`); the shell's `surface` is the one surface both
             // read as, the same card fill as the rest of the theme.
             .bg(colors.surface)
             // Text below inherits this: attachment names and the like carry no
             // colour of their own, and gpui's default is black.
-            .text_color(colors.fg)
-            .children(self.above)
-            .child(editor)
-            .child(if custom {
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_1()
-                    .children(self.tools)
-                    .child(end.ml_auto())
-            } else {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .children(self.tools)
-                    .child(div().flex_1())
-                    .child(end)
-            });
+            .text_color(colors.fg);
+        let body = if let Some(column) = band {
+            // The band: the rule on top and nothing else around it, the
+            // content in a column no wider than `column`, and the row on one
+            // line at any width.
+            shell
+                .w_full()
+                .items_center()
+                .px(px(12.0))
+                .pt(px(10.0))
+                .pb(px(8.0))
+                .border_t_1()
+                .border_color(colors.border)
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(column)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children(self.above)
+                        .child(editor)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_none()
+                                        .items_center()
+                                        .gap_1()
+                                        .children(self.tools),
+                                )
+                                .child(div().flex_1().min_w_0())
+                                .child(end),
+                        ),
+                )
+        } else {
+            shell
+                .gap_2()
+                .p_3()
+                .rounded(radius)
+                .border_1()
+                .border_color(match (focused, custom) {
+                    // A host's editor keeps the theme's quiet rule in both
+                    // states: the caret already says where focus is, and a
+                    // brighter outline read as a white frame around the card.
+                    (_, true) => colors.border,
+                    (true, false) => colors.focus,
+                    (false, false) => colors.border_strong,
+                })
+                .children(self.above)
+                .child(editor)
+                .child(if custom {
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .children(self.tools)
+                        .child(end.ml_auto())
+                } else {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .children(self.tools)
+                        .child(div().flex_1())
+                        .child(end)
+                })
+        };
         body.when_some(self.on_drop, |body, take| {
             body.child(DragDropOverlay { on_drop: take })
         })

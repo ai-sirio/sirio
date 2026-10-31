@@ -141,7 +141,7 @@ impl Chat {
         };
         layer(
             "chat-history-menu-menu",
-            Hang::AboveEnd,
+            Hang::Above,
             div()
                 .id("chat-history-menu")
                 .debug_selector(|| "chat-history-menu".into())

@@ -1,0 +1,265 @@
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Composer band mockups</title>
+<style>
+:root{--text-secondary:#8a8d99;--bg-tertiary:#3d3d3f;--border:#424245}
+body{background:#161618;color:#e6e6e6;font:14px/1.5 system-ui,sans-serif;margin:0;padding:24px}
+.wrap{max-width:1100px;margin:0 auto}.subtitle{color:#999}h2{color:#eee}h3{color:#ddd}
+.card{background:#232326;border:1px solid var(--border);border-radius:12px}
+.card[data-choice="a"]{border:2px solid #0a84ff}
+</style></head><body><div class="wrap">
+<p class="subtitle">Mockups shown in the brainstorm of 2026-10-30 for docs/superpowers/specs/2026-10-30-composer-band-design.md. The user chose <strong>A</strong> ("A va bene come nel mockup") and declined the ⤢ expand control drawn in its field. Fast, Thinking, the background-task count and the context ring are not drawn here; the design (§3) says where they go. Texts are Italian as shown to the user; the shipped UI is English.</p>
+<style>
+  .s-row { display:grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 14px; align-items:start; }
+  .s-cap { font-size: 11px; color: var(--text-secondary); margin: 0 0 6px; }
+  .s-pane { background:#1b1c1f; border:1px solid #2c2e33; border-radius:8px; overflow:hidden;
+            height: 300px; display:flex; flex-direction:column; color:#d6d6d6;
+            font: 12px/1.4 -apple-system, "Inter", system-ui, sans-serif; position:relative; }
+  .s-tr { flex:1; padding: 12px 16px; min-height:0; overflow:hidden; }
+  .s-col { max-width: 420px; margin: 0 auto; }
+  .s-u { background:#26282d; border:1px solid #303238; border-radius:6px; padding:6px 9px; margin-bottom:10px; font-family: ui-monospace, monospace; }
+  .s-a { color:#c9c9c9; margin-bottom:8px; }
+  .s-l { height:6px; background:#2a2c31; border-radius:3px; margin:7px 0; }
+  .s-ph { color:#6b6e78; }
+  .s-ic { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px;
+          border-radius:5px; color:#a8abb4; font-size:13px; flex:none; }
+  .s-ic.on { background:#2c2f36; color:#e0e0e0; }
+  .s-send { width:24px; height:24px; border-radius:12px; background:#4a8cf0; color:#fff; display:inline-flex;
+            align-items:center; justify-content:center; font-size:13px; font-weight:700; flex:none; }
+  .s-send.off { background:#2c2f36; color:#6b6e78; }
+  .s-chip { display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 6px; border-radius:5px;
+            white-space:nowrap; color:#d6d6d6; flex:none; }
+  .s-chip .k { color:#7d808a; }
+  .s-chip .v { overflow:hidden; text-overflow:ellipsis; min-width:0; }
+  .s-chip.shrink { flex: 0 1 auto; min-width: 0; }
+  .s-dot { width:6px; height:6px; border-radius:3px; background:#53c653; flex:none; }
+  .s-chev { color:#7d808a; font-size:9px; }
+  .s-bars { display:inline-flex; align-items:flex-end; gap:2px; height:11px; }
+  .s-bars i { width:3px; background:#d6d6d6; border-radius:1px; display:block; }
+  .s-bars i.e { background:#454852; }
+  /* today: floating card */
+  .s-card { margin: 0 12px 10px; border:1px solid #34363c; border-radius:9px; background:#212226; padding:10px 12px 8px; }
+  .s-tools { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin-top:10px; }
+  .s-tools .sp { flex:1; }
+  /* band */
+  .s-band { border-top:1px solid #2f3136; background:#1f2023; padding: 10px 16px 9px; }
+  .s-band .inner { max-width: 420px; margin: 0 auto; display:flex; flex-direction:column; }
+  .s-field { position:relative; min-height: 46px; padding-right: 22px; }
+  .s-field .x { position:absolute; right:-4px; top:-3px; }
+  .s-bar { display:flex; align-items:center; gap:4px; min-width:0; }
+  .s-bar .sp { flex:1; min-width:6px; }
+  .s-strip { display:flex; align-items:center; gap:2px; min-width:0; color:#9a9da6; margin: -2px 0 6px -6px; }
+  .s-sep { color:#4a4d55; }
+  .s-pop { position:absolute; right:14px; bottom:44px; width: 190px; background:#25272c; border:1px solid #3a3d44;
+           border-radius:8px; padding:6px; box-shadow:0 10px 26px #0009; font-size:11px; }
+  .s-pop h6 { margin:4px 6px 3px; font-size:10px; color:#7d808a; font-weight:500; text-transform:uppercase; letter-spacing:.04em; }
+  .s-pop .r { display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:4px; }
+  .s-pop .r.sel { background:#2f3f5c; }
+  .s-pop hr { border:0; border-top:1px solid #34373e; margin:4px 2px; }
+  .s-opt { margin-bottom: 26px; padding: 14px; cursor:pointer; }
+  .s-opt h3 { margin: 0 0 2px; }
+  .s-opt p.d { color: var(--text-secondary); font-size: 0.85rem; margin: 0 0 10px; }
+  .s-tag { display:inline-block; font-size:10px; padding:1px 6px; border-radius:4px; background:var(--bg-tertiary); color:var(--text-secondary); margin-left:6px; vertical-align:middle; }
+</style>
+
+<h2>Composer a fascia: tre strade</h2>
+<p class="subtitle">A sinistra il pane della chat largo, a destra lo stesso pane stretto (quando gli altri pane si prendono lo spazio). </p>
+
+<!-- ============ TODAY ============ -->
+<div class="s-opt" style="cursor:default">
+  <h3>Oggi <span class="s-tag">riferimento</span></h3>
+  <p class="d">Card con bordo che galleggia sotto la chat, larga al massimo quanto il transcript. Nel pane stretto le chip vanno a capo e il composer cresce in altezza.</p>
+  <div class="s-row">
+    <div>
+      <p class="s-cap">Pane largo</p>
+      <div class="s-pane">
+        <div class="s-tr"><div class="s-col"><div class="s-u">ciao</div><div class="s-a">Ciao! Come posso aiutarti?</div><div class="s-l" style="width:70%"></div><div class="s-l" style="width:45%"></div></div></div>
+        <div class="s-col" style="width:100%"><div class="s-card">
+          <div class="s-ph">Message Claude…</div>
+          <div class="s-tools">
+            <span class="s-chip"><span class="s-dot"></span>Accept edits <span class="s-chev">▾</span></span>
+            <span class="s-chip"><span class="k">Model</span>Opus 5.5 <span class="s-chev">▾</span></span>
+            <span class="s-chip"><span class="k">Effort</span><span class="s-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span>High <span class="s-chev">▾</span></span>
+            <span class="sp"></span>
+            <span class="s-ic">📎</span><span class="s-ic">▥</span><span class="s-ic">⋯</span><span class="s-send off">↑</span>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <div>
+      <p class="s-cap">Pane stretto</p>
+      <div class="s-pane">
+        <div class="s-tr"><div class="s-u">ciao</div><div class="s-a">Ciao! Come posso aiutarti?</div><div class="s-l" style="width:70%"></div></div>
+        <div class="s-card" style="margin:0 8px 8px">
+          <div class="s-ph">Message Claude…</div>
+          <div class="s-tools">
+            <span class="s-chip"><span class="s-dot"></span>Accept edits <span class="s-chev">▾</span></span>
+            <span class="s-chip"><span class="k">Model</span>Opus 5.5 <span class="s-chev">▾</span></span>
+            <span class="s-chip"><span class="k">Effort</span><span class="s-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span>High <span class="s-chev">▾</span></span>
+            <span class="sp"></span>
+            <span class="s-ic">📎</span><span class="s-ic">▥</span><span class="s-ic">⋯</span><span class="s-send off">↑</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ A ============ -->
+<div class="card s-opt" data-choice="a">
+  <h3>A · Fascia Zed</h3>
+  <p class="d">Niente card: una fascia da bordo a bordo, separata dalla chat solo da una linea. Il testo in alto, tutti i controlli su una riga in basso, senza le etichette "Model"/"Effort". Quando il pane si stringe i controlli si accorciano (il modo diventa solo il pallino, l'effort solo le barre, il nome del modello va in ellissi) ma non vanno mai a capo. Nel pane largo il contenuto resta allineato alla colonna del transcript.</p>
+  <div class="s-row">
+    <div>
+      <p class="s-cap">Pane largo</p>
+      <div class="s-pane">
+        <div class="s-tr"><div class="s-col"><div class="s-u">ciao</div><div class="s-a">Ciao! Come posso aiutarti?</div><div class="s-l" style="width:70%"></div><div class="s-l" style="width:45%"></div></div></div>
+        <div class="s-band"><div class="inner">
+          <div class="s-field"><span class="s-ph">Message Claude — @ per il contesto, / per i comandi</span><span class="s-ic x">⤢</span></div>
+          <div class="s-bar">
+            <span class="s-ic">+</span><span class="s-ic">▥</span><span class="s-ic">⋯</span>
+            <span class="sp"></span>
+            <span class="s-chip"><span class="s-dot"></span>Accept edits <span class="s-chev">▾</span></span>
+            <span class="s-chip">Opus 5.5 <span class="s-chev">▾</span></span>
+            <span class="s-chip"><span class="s-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span>High <span class="s-chev">▾</span></span>
+            <span class="s-send off">↑</span>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <div>
+      <p class="s-cap">Pane stretto</p>
+      <div class="s-pane">
+        <div class="s-tr"><div class="s-u">ciao</div><div class="s-a">Ciao! Come posso aiutarti?</div><div class="s-l" style="width:70%"></div><div class="s-l" style="width:40%"></div></div>
+        <div class="s-band" style="padding:10px 10px 9px"><div class="inner">
+          <div class="s-field"><span class="s-ph">Message Claude…</span><span class="s-ic x">⤢</span></div>
+          <div class="s-bar">
+            <span class="s-ic">+</span><span class="s-ic">⋯</span>
+            <span class="sp"></span>
+            <span class="s-chip" style="padding:0 4px"><span class="s-dot"></span><span class="s-chev">▾</span></span>
+            <span class="s-chip shrink"><span class="v">Opus 5.5</span> <span class="s-chev">▾</span></span>
+            <span class="s-chip" style="padding:0 4px"><span class="s-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span><span class="s-chev">▾</span></span>
+            <span class="s-send off">↑</span>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ B ============ -->
+<div class="card s-opt" data-choice="b">
+  <h3>B · Fascia con riga di sessione</h3>
+  <p class="d">La stessa fascia, ma modo, modello ed effort salgono in una riga sottile in cima, scritti come una frase ("Accept edits · Opus 5.5 · High"), ognuno cliccabile. In basso restano solo allega e invio, come in una casella di messaggio. Nel pane stretto la riga in cima si tronca in ellissi invece di andare a capo.</p>
+  <div class="s-row">
+    <div>
+      <p class="s-cap">Pane largo</p>
+      <div class="s-pane">
+        <div class="s-tr"><div class="s-col"><div class="s-u">ciao</div><div class="s-a">Ciao! Come posso aiutarti?</div><div class="s-l" style="width:70%"></div><div class="s-l" style="width:45%"></div></div></div>
+        <div class="s-band"><div class="inner">
+          <div class="s-strip">
+            <span class="s-chip" style="color:#9a9da6"><span class="s-dot"></span>Accept edits</span><span class="s-sep">·</span>
+            <span class="s-chip" style="color:#9a9da6">Opus 5.5</span><span class="s-sep">·</span>
+            <span class="s-chip" style="color:#9a9da6"><span class="s-bars"><i style="height:4px;background:#9a9da6"></i><i style="height:7px;background:#9a9da6"></i><i style="height:10px;background:#9a9da6"></i><i class="e" style="height:11px"></i></span>High</span>
+            <span class="sp" style="flex:1"></span><span class="s-ic">▥</span><span class="s-ic">⋯</span>
+          </div>
+          <div class="s-field" style="min-height:40px"><span class="s-ph">Message Claude — @ per il contesto, / per i comandi</span><span class="s-ic x">⤢</span></div>
+          <div class="s-bar"><span class="s-ic">+</span><span class="sp"></span><span class="s-send off">↑</span></div>
+        </div></div>
+      </div>
+    </div>
+    <div>
+      <p class="s-cap">Pane stretto</p>
+      <div class="s-pane">
+        <div class="s-tr"><div class="s-u">ciao</div><div class="s-a">Ciao! Come posso aiutarti?</div><div class="s-l" style="width:70%"></div></div>
+        <div class="s-band" style="padding:10px 10px 9px"><div class="inner">
+          <div class="s-strip" style="overflow:hidden; white-space:nowrap">
+            <span style="display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; flex:1; padding-left:6px"><span class="s-dot" style="display:inline-block; margin-right:5px; vertical-align:middle"></span>Accept edits <span class="s-sep">·</span> Opus 5.5 <span class="s-sep">·</span> High</span>
+            <span class="s-ic">⋯</span>
+          </div>
+          <div class="s-field" style="min-height:40px"><span class="s-ph">Message Claude…</span><span class="s-ic x">⤢</span></div>
+          <div class="s-bar"><span class="s-ic">+</span><span class="sp"></span><span class="s-send off">↑</span></div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ C ============ -->
+<div class="card s-opt" data-choice="c">
+  <h3>C · Fascia con un solo selettore</h3>
+  <p class="d">La fascia di A, ma modo, modello ed effort diventano un'unica chip ("● Opus 5.5 · High") che apre un solo menu con le tre scelte raggruppate. La riga in basso è sempre corta, quindi il pane largo e quello stretto si somigliano. Costa un clic in più per cambiare il modo.</p>
+  <div class="s-row">
+    <div>
+      <p class="s-cap">Pane largo</p>
+      <div class="s-pane">
+        <div class="s-tr"><div class="s-col"><div class="s-u">ciao</div><div class="s-a">Ciao! Come posso aiutarti?</div><div class="s-l" style="width:70%"></div><div class="s-l" style="width:45%"></div></div></div>
+        <div class="s-band"><div class="inner">
+          <div class="s-field"><span class="s-ph">Message Claude — @ per il contesto, / per i comandi</span><span class="s-ic x">⤢</span></div>
+          <div class="s-bar">
+            <span class="s-ic">+</span><span class="s-ic">▥</span><span class="s-ic">⋯</span>
+            <span class="sp"></span>
+            <span class="s-chip"><span class="s-dot"></span>Accept edits <span class="s-sep">·</span> Opus 5.5 <span class="s-sep">·</span> High <span class="s-chev">▾</span></span>
+            <span class="s-send off">↑</span>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <div>
+      <p class="s-cap">Pane stretto, menu aperto</p>
+      <div class="s-pane">
+        <div class="s-tr"><div class="s-u">ciao</div><div class="s-a">Ciao! Come posso aiutarti?</div></div>
+        <div class="s-pop">
+          <h6>Modo</h6>
+          <div class="r sel"><span class="s-dot"></span>Accept edits</div>
+          <div class="r"><span class="s-dot" style="background:#8a8d99"></span>Plan</div>
+          <hr><h6>Modello</h6>
+          <div class="r sel">Opus 5.5</div><div class="r">Sonnet 5.5</div>
+          <hr><h6>Effort</h6>
+          <div class="r">Medium</div><div class="r sel">High</div>
+        </div>
+        <div class="s-band" style="padding:10px 10px 9px"><div class="inner">
+          <div class="s-field"><span class="s-ph">Message Claude…</span><span class="s-ic x">⤢</span></div>
+          <div class="s-bar">
+            <span class="s-ic">+</span><span class="s-ic">⋯</span>
+            <span class="sp"></span>
+            <span class="s-chip shrink" style="background:#2c2f36"><span class="s-dot"></span><span class="v">Opus 5.5 · High</span> <span class="s-chev">▾</span></span>
+            <span class="s-send off">↑</span>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<hr style="border:0;border-top:1px solid #333;margin:40px 0 24px"><p class="subtitle">Second screen: icons for the permission modes. The user chose family <strong>A</strong> ("vai di A").</p>
+
+<style>
+.p-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin:6px 0 14px}
+.p-cell{background:#1b1c1f;border:1px solid #2c2e33;border-radius:8px;padding:10px 6px;text-align:center;color:#d6d6d6;font:11px/1.3 system-ui,sans-serif}
+.p-cell .i{height:26px;display:flex;align-items:center;justify-content:center}
+.p-cell.danger{color:#ef5f5f;border-color:#5a2a2a}
+.p-bands{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:12px}
+.p-cap{font-size:11px;color:var(--text-secondary);margin:0 0 4px}
+.p-band{border-top:1px solid #2f3136;background:#1f2023;padding:8px 12px;border-radius:0 0 8px 8px;display:flex;align-items:center;gap:4px;color:#d6d6d6;font:12px/1.4 system-ui,sans-serif;min-width:0}
+.p-band .sp{flex:1;min-width:6px}
+.p-ic{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:5px;color:#a8abb4;flex:none}
+.p-chip{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 6px;border-radius:5px;white-space:nowrap;flex:none}
+.p-chip.danger{color:#ef5f5f;background:#3a1f22}
+.p-chip .chev{color:#7d808a;font-size:9px}
+.p-mi{position:relative;display:inline-flex}
+.p-mi .dot{position:absolute;right:-2px;bottom:-2px;width:6px;height:6px;border-radius:3px;border:1.5px solid #1f2023}
+.p-send{width:24px;height:24px;border-radius:12px;background:#2c2f36;color:#6b6e78;display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex:none}
+.p-bars{display:inline-flex;align-items:flex-end;gap:2px;height:11px}
+.p-bars i{width:3px;background:#d6d6d6;border-radius:1px;display:block}
+.p-bars i.e{background:#454852}
+.p-opt{padding:14px;margin-bottom:22px;cursor:pointer}
+.p-opt h3{margin:0 0 2px}.p-opt p.d{color:var(--text-secondary);font-size:.85rem;margin:0 0 8px}
+.p-note{font-size:12px;color:var(--text-secondary);margin:2px 0 18px}
+</style>
+
+<h2>Icone dei permessi</h2>
+<p class="subtitle">Icone Lucide (lo stesso set che Ely incorpora, v1.48.0, licenza ISC). L'icona prende il posto del pallino davanti al nome del modo; nella riga compatta resta solo l'icona. Il pallino dello stato di connessione diventa un puntino nell'angolo dell'icona (verde pronto, ambra al lavoro, grigio offline). Bypass è sempre in rosso.</p>
+<div class="card p-opt" data-choice="a"><h3>A · Per significato</h3><p class="d">Ogni icona dice cosa fa il modo: la mano chiede, la penna modifica, la lista pianifica, le scintille decidono da sole, lo scudo barrato non protegge.</p><div class="p-grid"><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2" /><path d="M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2" /><path d="M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8" /><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" /></svg></div>Ask<div style="color:#6b6e78;font-size:10px;margin-top:2px">hand</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v9.34" /><path d="M14 2v5a1 1 0 0 0 1 1h5" /><path d="M10.378 12.622a1 1 0 0 1 3 3.003L8.36 20.637a2 2 0 0 1-.854.506l-2.867.837a.5.5 0 0 1-.62-.62l.836-2.869a2 2 0 0 1 .506-.853z" /></svg></div>Accept edits<div style="color:#6b6e78;font-size:10px;margin-top:2px">file-pen</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="4" x="8" y="2" rx="1" ry="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><path d="M12 11h4" /><path d="M12 16h4" /><path d="M8 11h.01" /><path d="M8 16h.01" /></svg></div>Plan<div style="color:#6b6e78;font-size:10px;margin-top:2px">clipboard-list</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z" /><path d="M20 2v4" /><path d="M22 4h-4" /><circle cx="4" cy="20" r="2" /></svg></div>Auto<div style="color:#6b6e78;font-size:10px;margin-top:2px">sparkles</div></div><div class="p-cell danger"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ef5f5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20" /><path d="M5 5a1 1 0 0 0-1 1v7c0 5 3.5 7.5 7.67 8.94a1 1 0 0 0 .67.01c2.35-.82 4.48-1.97 5.9-3.71" /><path d="M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264" /></svg></div>Bypass permissions<div style="color:#6b6e78;font-size:10px;margin-top:2px">shield-off</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /></svg></div>Modo ACP sconosciuto<div style="color:#6b6e78;font-size:10px;margin-top:2px">shield</div></div></div><div class="p-bands"><div><p class="p-cap">Riga completa: Accept edits, al lavoro</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">▥</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v9.34" /><path d="M14 2v5a1 1 0 0 0 1 1h5" /><path d="M10.378 12.622a1 1 0 0 1 3 3.003L8.36 20.637a2 2 0 0 1-.854.506l-2.867.837a.5.5 0 0 1-.62-.62l.836-2.869a2 2 0 0 1 .506-.853z" /></svg><span class="dot" style="background:#f5a623"></span></span>Accept edits <span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span>High <span class="chev">▾</span></span><span class="p-send">↑</span></div></div><div><p class="p-cap">Compatta: Accept edits, pronto</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip" style="padding:0 4px"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v9.34" /><path d="M14 2v5a1 1 0 0 0 1 1h5" /><path d="M10.378 12.622a1 1 0 0 1 3 3.003L8.36 20.637a2 2 0 0 1-.854.506l-2.867.837a.5.5 0 0 1-.62-.62l.836-2.869a2 2 0 0 1 .506-.853z" /></svg><span class="dot" style="background:#53c653"></span></span><span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip" style="padding:0 4px"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span><span class="chev">▾</span></span><span class="p-send">↑</span></div></div></div><div class="p-bands" style="margin-top:8px"><div><p class="p-cap">Riga completa: Bypass permissions, pronto</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">▥</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip danger"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef5f5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20" /><path d="M5 5a1 1 0 0 0-1 1v7c0 5 3.5 7.5 7.67 8.94a1 1 0 0 0 .67.01c2.35-.82 4.48-1.97 5.9-3.71" /><path d="M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264" /></svg><span class="dot" style="background:#53c653"></span></span>Bypass permissions <span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span>High <span class="chev">▾</span></span><span class="p-send">↑</span></div></div><div><p class="p-cap">Compatta: Bypass, pronto</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip danger" style="padding:0 4px"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef5f5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20" /><path d="M5 5a1 1 0 0 0-1 1v7c0 5 3.5 7.5 7.67 8.94a1 1 0 0 0 .67.01c2.35-.82 4.48-1.97 5.9-3.71" /><path d="M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264" /></svg><span class="dot" style="background:#53c653"></span></span><span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip" style="padding:0 4px"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span><span class="chev">▾</span></span><span class="p-send">↑</span></div></div></div></div>
+<div class="card p-opt" data-choice="b"><h3>B · Famiglia scudo</h3><p class="d">Tutte scudi: si legge come un livello di protezione, più coerente ma meno descrittivo (bisogna imparare quale scudo è quale).</p><div class="p-grid"><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /><path d="M9.1 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3" /><path d="M12 17h.01" /></svg></div>Ask<div style="color:#6b6e78;font-size:10px;margin-top:2px">shield-question-mark</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /><path d="m9 12 2 2 4-4" /></svg></div>Accept edits<div style="color:#6b6e78;font-size:10px;margin-top:2px">shield-check</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /></svg></div>Plan<div style="color:#6b6e78;font-size:10px;margin-top:2px">shield-ellipsis</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /><path d="M12 22V2" /></svg></div>Auto<div style="color:#6b6e78;font-size:10px;margin-top:2px">shield-half</div></div><div class="p-cell danger"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ef5f5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20" /><path d="M5 5a1 1 0 0 0-1 1v7c0 5 3.5 7.5 7.67 8.94a1 1 0 0 0 .67.01c2.35-.82 4.48-1.97 5.9-3.71" /><path d="M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264" /></svg></div>Bypass permissions<div style="color:#6b6e78;font-size:10px;margin-top:2px">shield-off</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /></svg></div>Modo ACP sconosciuto<div style="color:#6b6e78;font-size:10px;margin-top:2px">shield</div></div></div><div class="p-bands"><div><p class="p-cap">Riga completa: Accept edits, al lavoro</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">▥</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /><path d="m9 12 2 2 4-4" /></svg><span class="dot" style="background:#f5a623"></span></span>Accept edits <span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span>High <span class="chev">▾</span></span><span class="p-send">↑</span></div></div><div><p class="p-cap">Compatta: Accept edits, pronto</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip" style="padding:0 4px"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /><path d="m9 12 2 2 4-4" /></svg><span class="dot" style="background:#53c653"></span></span><span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip" style="padding:0 4px"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span><span class="chev">▾</span></span><span class="p-send">↑</span></div></div></div><div class="p-bands" style="margin-top:8px"><div><p class="p-cap">Riga completa: Bypass permissions, pronto</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">▥</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip danger"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef5f5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20" /><path d="M5 5a1 1 0 0 0-1 1v7c0 5 3.5 7.5 7.67 8.94a1 1 0 0 0 .67.01c2.35-.82 4.48-1.97 5.9-3.71" /><path d="M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264" /></svg><span class="dot" style="background:#53c653"></span></span>Bypass permissions <span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span>High <span class="chev">▾</span></span><span class="p-send">↑</span></div></div><div><p class="p-cap">Compatta: Bypass, pronto</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip danger" style="padding:0 4px"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef5f5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m2 2 20 20" /><path d="M5 5a1 1 0 0 0-1 1v7c0 5 3.5 7.5 7.67 8.94a1 1 0 0 0 .67.01c2.35-.82 4.48-1.97 5.9-3.71" /><path d="M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264" /></svg><span class="dot" style="background:#53c653"></span></span><span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip" style="padding:0 4px"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span><span class="chev">▾</span></span><span class="p-send">↑</span></div></div></div></div>
+<div class="card p-opt" data-choice="c"><h3>C · Azioni</h3><p class="d">Come A, ma più leggera: matita, mappa, robot, e un fulmine per Bypass.</p><div class="p-grid"><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2" /><path d="M14 10V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v2" /><path d="M10 10.5V6a2 2 0 0 0-2-2a2 2 0 0 0-2 2v8" /><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" /></svg></div>Ask<div style="color:#6b6e78;font-size:10px;margin-top:2px">hand</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 21h8" /><path d="m15 5 4 4" /><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /></svg></div>Accept edits<div style="color:#6b6e78;font-size:10px;margin-top:2px">pencil-line</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z" /><path d="M15 5.764v15" /><path d="M9 3.236v15" /></svg></div>Plan<div style="color:#6b6e78;font-size:10px;margin-top:2px">map</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8" /><rect width="16" height="12" x="4" y="8" rx="2" /><path d="M2 14h2" /><path d="M20 14h2" /><path d="M15 13v2" /><path d="M9 13v2" /></svg></div>Auto<div style="color:#6b6e78;font-size:10px;margin-top:2px">bot</div></div><div class="p-cell danger"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ef5f5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z" /></svg></div>Bypass permissions<div style="color:#6b6e78;font-size:10px;margin-top:2px">zap</div></div><div class="p-cell"><div class="i"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /></svg></div>Modo ACP sconosciuto<div style="color:#6b6e78;font-size:10px;margin-top:2px">shield</div></div></div><div class="p-bands"><div><p class="p-cap">Riga completa: Accept edits, al lavoro</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">▥</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 21h8" /><path d="m15 5 4 4" /><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /></svg><span class="dot" style="background:#f5a623"></span></span>Accept edits <span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span>High <span class="chev">▾</span></span><span class="p-send">↑</span></div></div><div><p class="p-cap">Compatta: Accept edits, pronto</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip" style="padding:0 4px"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 21h8" /><path d="m15 5 4 4" /><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /></svg><span class="dot" style="background:#53c653"></span></span><span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip" style="padding:0 4px"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span><span class="chev">▾</span></span><span class="p-send">↑</span></div></div></div><div class="p-bands" style="margin-top:8px"><div><p class="p-cap">Riga completa: Bypass permissions, pronto</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">▥</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip danger"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef5f5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z" /></svg><span class="dot" style="background:#53c653"></span></span>Bypass permissions <span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span>High <span class="chev">▾</span></span><span class="p-send">↑</span></div></div><div><p class="p-cap">Compatta: Bypass, pronto</p><div class="p-band"><span class="p-ic">+</span><span class="p-ic">⋯</span><span class="sp"></span><span class="p-chip danger" style="padding:0 4px"><span class="p-mi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef5f5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z" /></svg><span class="dot" style="background:#53c653"></span></span><span class="chev">▾</span></span><span class="p-chip">Opus 5.5 <span class="chev">▾</span></span><span class="p-chip" style="padding:0 4px"><span class="p-bars"><i style="height:4px"></i><i style="height:7px"></i><i style="height:10px"></i><i class="e" style="height:11px"></i></span><span class="chev">▾</span></span><span class="p-send">↑</span></div></div></div></div>
+</div></body></html>

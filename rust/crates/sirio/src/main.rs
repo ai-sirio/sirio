@@ -20857,6 +20857,13 @@ impl SirioWorkspace {
                 serde_json::to_string(&snapshot.session_panel)
                     .expect("the session panel snapshot is serializable"),
             ),
+            // The composer band (layout, geometry, overflow, permission icon) as a JSON
+            // object. Its key is not `composer`: that is the draft's text.
+            (
+                "composerRow".to_string(),
+                serde_json::to_string(&snapshot.composer)
+                    .expect("the composer snapshot is serializable"),
+            ),
             // Where the transcript list's top sits, so a reveal can be told
             // from a list that did not move.
             (
