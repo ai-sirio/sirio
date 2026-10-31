@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use sirio_claude::message::{CliMessage, Delta, ResultPayload, SystemPayload};
 use sirio_claude::tools::{self, ToolContent, ToolInfo};
 
-use crate::{
+use sirio_chat_vocab::{
     ChatEvent, PlanEntryInfo, SessionNotice, ToolCallContentInfo, ToolCallDiff,
     ToolCallLocationInfo,
 };

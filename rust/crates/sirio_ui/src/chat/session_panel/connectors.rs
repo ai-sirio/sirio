@@ -10,7 +10,7 @@
 use super::{Row, Section, Tone};
 use crate::chat::Chat;
 use gpui::{AppContext as _, Context as GpuiContext, Task};
-use sirio_acp::{McpControl, McpOrigin, McpServer, McpState};
+use sirio_chat::{McpControl, McpOrigin, McpServer, McpState};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -596,14 +596,14 @@ mod tests {
     use crate::chat::tests::{TempDir, chat_view, pump_chat_until, refresh_frame};
     use crate::chat::{Chat, LaunchSpec};
     use gpui::{Entity, TestAppContext, VisualTestContext};
-    use sirio_acp::{ChatClient, ClaudeLaunch};
+    use sirio_chat::{ChatClient, ClaudeLaunch};
     use sirio_theme::Theme;
     use std::path::Path;
     use std::time::Duration;
 
     const CLAUDE_FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../sirio_acp/tests/fixtures/claude_fixture.py"
+        "/../sirio_chat/tests/fixtures/claude_fixture.py"
     );
 
     /// A chat on the native transport against the fixture CLI in its
@@ -849,7 +849,9 @@ mod tests {
         let signal = |chat: &Entity<Chat>, cx: &mut VisualTestContext, kind: &str| {
             chat.update(cx, |chat, cx| {
                 chat.handle_event(
-                    sirio_acp::ChatEvent::OtherSessionUpdate { kind: kind.to_string() },
+                    sirio_chat::ChatEvent::OtherSessionUpdate {
+                        kind: kind.to_string(),
+                    },
                     cx,
                 )
             });

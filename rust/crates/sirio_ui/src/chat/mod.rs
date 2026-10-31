@@ -13,7 +13,7 @@ use gpui::{
     StyledText, Task, Window, actions, canvas, div, list, point, prelude::*, px, quad, relative,
     transparent_black,
 };
-use sirio_acp::{
+use sirio_chat::{
     AgentCommand, AgentMode, AvailableCommandInfo, ChatClient, ContextUsage,
     EffortOption, FastMode, ImageAttachment, LaunchSpec, ModeCatalog, ModelCatalog, ModelOption,
     SessionNotice, THINKING_DISPLAYS, ThinkingDisplay, ToolCallContentInfo, ToolCallDiff,
@@ -1619,7 +1619,7 @@ const EFFORT_AUTO_REQUESTS: u8 = 2;
 
 /// A mid-session `TransportError` never carries the typed `ChatError` that
 /// caused it — the ACP layer folds it to a plain `String` before it crosses
-/// the crate boundary (`sirio_acp::ChatEvent::TransportError`'s own doc comment: "a
+/// the crate boundary (`sirio_chat::ChatEvent::TransportError`'s own doc comment: "a
 /// mid-session request rejected with ACP's `auth_required` error... arrives
 /// here rather than as its own variant... `ChatError::AuthRequired`'s
 /// `Display` renders the same auth-guidance text `AcpClient::launch` uses
@@ -1754,7 +1754,7 @@ pub enum ChatEvent {
     /// handler) and never reaches this event.
     OpenLink(String),
     /// F-CORE-DOM-07: a turn just finished settling into the transcript
-    /// (`sirio_acp::ChatEvent::TurnEnded` already handled -- footer pushed, streaming
+    /// (`sirio_chat::ChatEvent::TurnEnded` already handled -- footer pushed, streaming
     /// cleared, transcript persisted). This is the completion signal
     /// `request_auto_rename` needs and that no `ChatEvent` variant used to
     /// provide, so an ACP-hosted chat tab could never be auto-renamed: the
@@ -2976,7 +2976,7 @@ impl Chat {
         ]);
     }
 
-    fn handle_event(&mut self, event: sirio_acp::ChatEvent, cx: &mut Context<Self>) {
+    fn handle_event(&mut self, event: sirio_chat::ChatEvent, cx: &mut Context<Self>) {
         let _perf = sirio_perf::span("Chat.handle_event", cx.entity_id().as_u64());
         // The Claude worker records each sent turn's uuid when it processes
         // the prompt, so reading it at send time would usually still see
@@ -2984,9 +2984,8 @@ impl Chat {
         // the live cell instead. Only while connected — a failed send takes
         // the client, and stamping its entry with the previous turn's id
         // would name a checkpoint that is not this turn's.
-        if self.client.is_some()
-            && let Some(ChatClient::Claude(native)) = &self.client
-            && let Some(id) = native.last_user_message_id()
+        if let Some(client) = &self.client
+            && let Some(id) = client.last_user_message_id()
             && let Some(latest_user) = self
                 .entries
                 .iter()
@@ -2997,13 +2996,13 @@ impl Chat {
             *slot = Some(id);
         }
         let perf_notification = match &event {
-            sirio_acp::ChatEvent::AgentMessageChunk(_) => "notify.Chat.acp_message",
-            sirio_acp::ChatEvent::ThoughtChunk(_) => "notify.Chat.acp_thought",
-            sirio_acp::ChatEvent::Trace(_) => "notify.Chat.acp_trace",
+            sirio_chat::ChatEvent::AgentMessageChunk(_) => "notify.Chat.acp_message",
+            sirio_chat::ChatEvent::ThoughtChunk(_) => "notify.Chat.acp_thought",
+            sirio_chat::ChatEvent::Trace(_) => "notify.Chat.acp_trace",
             _ => "notify.Chat.acp_other",
         };
         match event {
-            sirio_acp::ChatEvent::AgentMessageChunk(text) => {
+            sirio_chat::ChatEvent::AgentMessageChunk(text) => {
                 let streamed = self.streamed_entry();
                 if let Some(index) = streamed
                     && let Some(Entry::Assistant {
@@ -3023,7 +3022,7 @@ impl Chat {
                     self.push_entry(Entry::Assistant { document, text });
                 }
             }
-            sirio_acp::ChatEvent::ThoughtChunk(text) => {
+            sirio_chat::ChatEvent::ThoughtChunk(text) => {
                 let streamed = self.streamed_entry();
                 if let Some(index) = streamed
                     && let Some(Entry::Thought { text: existing, .. }) = self.entries.get_mut(index)
@@ -3042,7 +3041,7 @@ impl Chat {
                     });
                 }
             }
-            sirio_acp::ChatEvent::ToolCallStarted {
+            sirio_chat::ChatEvent::ToolCallStarted {
                 id,
                 title,
                 status,
@@ -3100,7 +3099,7 @@ impl Chat {
                     });
                 }
             }
-            sirio_acp::ChatEvent::ToolCallUpdated {
+            sirio_chat::ChatEvent::ToolCallUpdated {
                 id,
                 title,
                 status,
@@ -3200,7 +3199,7 @@ impl Chat {
                     self.remeasure_entry(self.entries.len() - 1 - index);
                 }
             }
-            sirio_acp::ChatEvent::ToolCallCompleted {
+            sirio_chat::ChatEvent::ToolCallCompleted {
                 id,
                 status,
                 kind,
@@ -3278,7 +3277,7 @@ impl Chat {
                     self.remeasure_entry(self.entries.len() - 1 - index);
                 }
             }
-            sirio_acp::ChatEvent::ModelCatalog(ModelCatalog {
+            sirio_chat::ChatEvent::ModelCatalog(ModelCatalog {
                 config_id,
                 options,
                 selected_id,
@@ -3287,7 +3286,7 @@ impl Chat {
                 self.available_models = options;
                 self.selected_model = Some(selected_id);
             }
-            sirio_acp::ChatEvent::AvailableCommands(commands) => {
+            sirio_chat::ChatEvent::AvailableCommands(commands) => {
                 self.available_commands = commands;
                 self.slash_filter = Filter::new(
                     self.available_commands
@@ -3299,7 +3298,7 @@ impl Chat {
                     self.slash_filter.refilter(query);
                 }
             }
-            sirio_acp::ChatEvent::Effort(effort) => {
+            sirio_chat::ChatEvent::Effort(effort) => {
                 // An empty list of levels is how a session says this model
                 // has no effort to pick at all — Claude's Haiku advertises
                 // neither effort field, and the levels the others offer are
@@ -3320,7 +3319,7 @@ impl Chat {
                 self.effort = (!ladder.is_empty()).then_some(effort);
                 self.ask_for_the_effort_target(ladder, cx);
             }
-            sirio_acp::ChatEvent::ContextUsage(usage) => {
+            sirio_chat::ChatEvent::ContextUsage(usage) => {
                 self.context_usage = Some(usage);
             }
             // F-CHAT-18: the breakdown arrives on a separate wire event
@@ -3330,7 +3329,7 @@ impl Chat {
             // whatever context usage is already known rather than
             // replacing it -- an agent that reports one without the other
             // must not blank out the other's fields.
-            sirio_acp::ChatEvent::TokenUsageBreakdown {
+            sirio_chat::ChatEvent::TokenUsageBreakdown {
                 input_tokens,
                 output_tokens,
                 cached_read_tokens,
@@ -3340,7 +3339,7 @@ impl Chat {
                 usage.output_tokens = Some(output_tokens);
                 usage.cached_read_tokens = cached_read_tokens;
             }
-            sirio_acp::ChatEvent::PermissionRequest {
+            sirio_chat::ChatEvent::PermissionRequest {
                 request_id,
                 title,
                 options,
@@ -3417,7 +3416,7 @@ impl Chat {
                     });
                 }
             }
-            sirio_acp::ChatEvent::PlanUpdate { entries } => {
+            sirio_chat::ChatEvent::PlanUpdate { entries } => {
                 let entries = entries
                     .into_iter()
                     .map(|entry| PlanEntryRow {
@@ -3443,7 +3442,7 @@ impl Chat {
                     });
                 }
             }
-            sirio_acp::ChatEvent::TurnEnded { stop_reason } => {
+            sirio_chat::ChatEvent::TurnEnded { stop_reason } => {
                 self.settle_open_thought();
                 // The footer must state *why* the turn stopped. A cancelled
                 // or refused turn that ends in a plain timestamp looks like an
@@ -3478,7 +3477,7 @@ impl Chat {
                 // reply included.
                 cx.emit(ChatEvent::TurnEnded);
             }
-            sirio_acp::ChatEvent::TransportError(message) => {
+            sirio_chat::ChatEvent::TransportError(message) => {
                 self.client.take();
                 self.expire_unanswered();
                 let (message, kind) = classify_connection_error(message);
@@ -3490,7 +3489,7 @@ impl Chat {
                 });
                 self.streaming = false;
             }
-            sirio_acp::ChatEvent::Timeout {
+            sirio_chat::ChatEvent::Timeout {
                 operation,
                 duration,
             } => {
@@ -3511,13 +3510,15 @@ impl Chat {
                 });
                 self.streaming = false;
             }
-            sirio_acp::ChatEvent::OtherSessionUpdate { ref kind } if kind == "SessionIdentified" => {
+            sirio_chat::ChatEvent::OtherSessionUpdate { ref kind }
+                if kind == "SessionIdentified" =>
+            {
                 // The id arrives as a re-read signal rather than as its own
-                // event, so `sirio_acp::ChatEvent` stays the enum every consumer in the
+                // event, so `sirio_chat::ChatEvent` stays the enum every consumer in the
                 // workspace already matches exhaustively.
                 let identified = match &self.client {
-                    Some(ChatClient::Claude(native)) => {
-                        Some((native.resumed_session_refused(), native.session_id()))
+                    Some(client @ ChatClient::Claude(_)) => {
+                        Some((client.resumed_session_refused(), client.session_id()))
                     }
                     _ => None,
                 };
@@ -3537,7 +3538,7 @@ impl Chat {
                     _ => {}
                 }
             }
-            sirio_acp::ChatEvent::OtherSessionUpdate { ref kind } if kind == "SessionNotice" => {
+            sirio_chat::ChatEvent::OtherSessionUpdate { ref kind } if kind == "SessionNotice" => {
                 // Drained here rather than re-read as a snapshot: these are
                 // rows, and where they land in the transcript is the point.
                 let notices = self
@@ -3549,17 +3550,19 @@ impl Chat {
                     self.apply_notice(notice);
                 }
             }
-            sirio_acp::ChatEvent::OtherSessionUpdate { ref kind } if kind == "ContextBreakdown" => {
+            sirio_chat::ChatEvent::OtherSessionUpdate { ref kind }
+                if kind == "ContextBreakdown" =>
+            {
                 self.refresh_session_context(cx);
             }
-            sirio_acp::ChatEvent::OtherSessionUpdate { ref kind } if kind == "McpServers" => {
+            sirio_chat::ChatEvent::OtherSessionUpdate { ref kind } if kind == "McpServers" => {
                 self.refresh_session_connectors(cx);
             }
-            sirio_acp::ChatEvent::OtherSessionUpdate { ref kind } if kind == "McpServersInit" => {
+            sirio_chat::ChatEvent::OtherSessionUpdate { ref kind } if kind == "McpServersInit" => {
                 self.session_connectors_init(cx);
             }
-            sirio_acp::ChatEvent::OtherSessionUpdate { .. } => {}
-            sirio_acp::ChatEvent::Trace(trace) => {
+            sirio_chat::ChatEvent::OtherSessionUpdate { .. } => {}
+            sirio_chat::ChatEvent::Trace(trace) => {
                 let started = matches!(trace, TraceEvent::TurnStarted { .. });
                 let changed = self.trace.apply(trace);
                 if started {
@@ -7844,7 +7847,7 @@ pub(crate) mod testing {
 
     /// The agent reports `event`, as the transport does.
     pub(crate) fn feed(chat: &mut Chat, event: TraceEvent, cx: &mut Context<Chat>) {
-        chat.handle_event(sirio_acp::ChatEvent::Trace(event), cx);
+        chat.handle_event(sirio_chat::ChatEvent::Trace(event), cx);
     }
 
     /// The user sends `text`: a user message and a turn on its way.
@@ -7885,7 +7888,7 @@ pub(crate) mod testing {
 mod tests {
     use super::*;
     use gpui::{FileDropEvent, Modifiers, TestAppContext, VisualTestContext, size};
-    use sirio_acp::{EffortChoice, SpanKind, TimeoutOperation, TurnOutcome};
+    use sirio_chat::{EffortChoice, SpanKind, TimeoutOperation, TurnOutcome};
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -7962,17 +7965,20 @@ mod tests {
         let (chat, cx) = spinner_test_chat(cx);
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::AgentMessageChunk("private-fixture-content".into()),
+                sirio_chat::ChatEvent::AgentMessageChunk("private-fixture-content".into()),
                 cx,
             );
-            chat.handle_event(sirio_acp::ChatEvent::ThoughtChunk("private-fixture-content".into()), cx);
             chat.handle_event(
-                sirio_acp::ChatEvent::AgentMessageChunk("private-fixture-content".into()),
+                sirio_chat::ChatEvent::ThoughtChunk("private-fixture-content".into()),
+                cx,
+            );
+            chat.handle_event(
+                sirio_chat::ChatEvent::AgentMessageChunk("private-fixture-content".into()),
                 cx,
             );
             chat.streaming = true;
             chat.handle_event(
-                sirio_acp::ChatEvent::ThoughtChunk("private-fixture-content\n".repeat(100)),
+                sirio_chat::ChatEvent::ThoughtChunk("private-fixture-content\n".repeat(100)),
                 cx,
             );
         });
@@ -8029,7 +8035,7 @@ mod tests {
         let (chat, cx) = spinner_test_chat(cx);
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::Effort(EffortOption {
+                sirio_chat::ChatEvent::Effort(EffortOption {
                     option_id: "effort".into(),
                     name: Some("Effort".into()),
                     current_value: Some("xhigh".into()),
@@ -8042,7 +8048,7 @@ mod tests {
             );
             assert!(chat.effort.is_some(), "a model with a level has a picker");
             chat.handle_event(
-                sirio_acp::ChatEvent::Effort(EffortOption {
+                sirio_chat::ChatEvent::Effort(EffortOption {
                     option_id: "effort".into(),
                     name: Some("Effort".into()),
                     current_value: Some("default".into()),
@@ -8273,7 +8279,7 @@ mod tests {
     /// `confirm_rewind` make.
     fn native_chat_with_one_turn(cx: &mut TestAppContext) -> Entity<Chat> {
         let chat = chat_with_transport(
-            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            LaunchSpec::Claude(sirio_chat::ClaudeLaunch::new("claude")),
             cx,
         );
         chat.update(cx, |chat, _| {
@@ -8302,7 +8308,7 @@ mod tests {
     /// connection: the entry is there but no checkpoint id names it.
     fn native_chat_with_restored_transcript(cx: &mut TestAppContext) -> Entity<Chat> {
         let chat = chat_with_transport(
-            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            LaunchSpec::Claude(sirio_chat::ClaudeLaunch::new("claude")),
             cx,
         );
         chat.update(cx, |chat, _| {
@@ -8318,7 +8324,7 @@ mod tests {
     /// false`: checkpointing is off, so there is nothing to confirm.
     fn native_chat_that_refuses_rewind(cx: &mut TestAppContext) -> Entity<Chat> {
         let chat = chat_with_transport(
-            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            LaunchSpec::Claude(sirio_chat::ClaudeLaunch::new("claude")),
             cx,
         );
         chat.update(cx, |chat, _| {
@@ -8640,7 +8646,7 @@ two"
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::ToolCallStarted {
+                sirio_chat::ChatEvent::ToolCallStarted {
                     id: "t1".into(),
                     title: "cargo test".into(),
                     status: "in_progress".into(),
@@ -8663,7 +8669,7 @@ two"
                 "no duration while the call runs"
             );
             chat.handle_event(
-                sirio_acp::ChatEvent::ToolCallCompleted {
+                sirio_chat::ChatEvent::ToolCallCompleted {
                     id: "t1".into(),
                     status: "completed".into(),
                     kind: None,
@@ -8745,7 +8751,10 @@ two"
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         chat.update(cx, |chat, cx| {
             chat.streaming = true;
-            chat.handle_event(sirio_acp::ChatEvent::ThoughtChunk("weigh the options".into()), cx);
+            chat.handle_event(
+                sirio_chat::ChatEvent::ThoughtChunk("weigh the options".into()),
+                cx,
+            );
             assert!(
                 matches!(
                     chat.entries.last(),
@@ -8759,7 +8768,7 @@ two"
             );
             assert!(chat.thought_is_streaming(chat.entries.len() - 1));
             chat.handle_event(
-                sirio_acp::ChatEvent::AgentMessageChunk("Here is the answer.".into()),
+                sirio_chat::ChatEvent::AgentMessageChunk("Here is the answer.".into()),
                 cx,
             );
         });
@@ -8813,9 +8822,9 @@ two"
         let (chat, cx) = cx.add_window_view(|_, cx| Chat::new(None, std::env::temp_dir(), cx));
         chat.update(cx, |chat, cx| {
             chat.streaming = true;
-            chat.handle_event(sirio_acp::ChatEvent::ThoughtChunk("…".into()), cx);
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtChunk("…".into()), cx);
             chat.handle_event(
-                sirio_acp::ChatEvent::TurnEnded {
+                sirio_chat::ChatEvent::TurnEnded {
                     stop_reason: "end_turn".into(),
                 },
                 cx,
@@ -8864,7 +8873,7 @@ two"
         chat.update(cx, |chat, cx| {
             chat.streaming = true;
             chat.handle_event(
-                sirio_acp::ChatEvent::ThoughtChunk("first, look at the tests".into()),
+                sirio_chat::ChatEvent::ThoughtChunk("first, look at the tests".into()),
                 cx,
             );
         });
@@ -8879,7 +8888,7 @@ two"
         );
 
         chat.update(cx, |chat, cx| {
-            chat.handle_event(sirio_acp::ChatEvent::AgentMessageChunk("Done.".into()), cx);
+            chat.handle_event(sirio_chat::ChatEvent::AgentMessageChunk("Done.".into()), cx);
         });
         refresh_frame(cx);
         assert!(
@@ -8905,7 +8914,7 @@ two"
 
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::TurnEnded {
+                sirio_chat::ChatEvent::TurnEnded {
                     stop_reason: "end_turn".into(),
                 },
                 cx,
@@ -9626,7 +9635,7 @@ two"
     }
 
     /// F-CORE-DOM-07: before this pass `ChatEvent` had exactly two variants
-    /// (`OpenFile`, `OpenLink`) and `sirio_acp::ChatEvent::TurnEnded`'s handler -- which
+    /// (`OpenFile`, `OpenLink`) and `sirio_chat::ChatEvent::TurnEnded`'s handler -- which
     /// already flips `has_completed_turn`, pushes the footer, and persists
     /// the transcript -- never told an outside subscriber a turn had
     /// settled. That is the half of the wiring gap that lives in this
@@ -9635,7 +9644,7 @@ two"
     /// a chat pane because no event existed to call it *from*. This drives
     /// a real turn through the real `chat_fixture.py` ACP agent -- the same
     /// production path every other test in this file uses, not a
-    /// hand-constructed `sirio_acp::ChatEvent` -- and asserts an outside subscriber
+    /// hand-constructed `sirio_chat::ChatEvent` -- and asserts an outside subscriber
     /// (standing in for `SirioWorkspace::bind_chat`) observes
     /// `ChatEvent::TurnEnded` by the time `has_completed_turn` flips.
     #[gpui::test]
@@ -9662,7 +9671,7 @@ two"
 
         assert!(
             *turn_ended.borrow(),
-            "sirio_acp::ChatEvent::TurnEnded must also emit ChatEvent::TurnEnded -- on the \
+            "sirio_chat::ChatEvent::TurnEnded must also emit ChatEvent::TurnEnded -- on the \
              unfixed tree this assertion is the failure: has_completed_turn flips \
              true (the turn genuinely ended) but no ChatEvent ever reaches a \
              subscriber, which is exactly why request_auto_rename was structurally \
@@ -12036,9 +12045,9 @@ two"
             "the generating spinner is a sibling of the list"
         );
         chat.update(cx, |chat, cx| {
-            chat.handle_event(sirio_acp::ChatEvent::AgentMessageChunk("done".into()), cx);
+            chat.handle_event(sirio_chat::ChatEvent::AgentMessageChunk("done".into()), cx);
             chat.handle_event(
-                sirio_acp::ChatEvent::TurnEnded {
+                sirio_chat::ChatEvent::TurnEnded {
                     stop_reason: "end_turn".into(),
                 },
                 cx,
@@ -13347,8 +13356,8 @@ two"
 
     /// An effort report as an agent sends it: `current` on a ladder of
     /// `levels`.
-    fn effort_report(current: &str, levels: &[&str]) -> sirio_acp::ChatEvent {
-        sirio_acp::ChatEvent::Effort(EffortOption {
+    fn effort_report(current: &str, levels: &[&str]) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Effort(EffortOption {
             option_id: "effort".into(),
             name: Some("Effort".into()),
             current_value: Some(current.into()),
@@ -13774,7 +13783,7 @@ two"
     /// The fake `claude` the native transport's chats run against.
     const CLAUDE_FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../sirio_acp/tests/fixtures/claude_fixture.py"
+        "/../sirio_chat/tests/fixtures/claude_fixture.py"
     );
 
     /// A chat on the fake `claude` in `mode`, which appends every control
@@ -13792,7 +13801,7 @@ two"
         // The CLI's worker thread wakes the chat's event task, which the
         // test scheduler refuses unless it is told real threads are in play.
         cx.executor().allow_parking();
-        let launch = sirio_acp::ClaudeLaunch::fixture(
+        let launch = sirio_chat::ClaudeLaunch::fixture(
             "python3",
             vec![
                 CLAUDE_FIXTURE.to_string(),
@@ -13886,25 +13895,25 @@ two"
     #[gpui::test]
     async fn a_question_is_ingested_with_its_header_and_descriptions(cx: &mut TestAppContext) {
         let chat = chat_with_transport(
-            LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("claude")),
+            LaunchSpec::Claude(sirio_chat::ClaudeLaunch::new("claude")),
             cx,
         );
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::PermissionRequest {
+                sirio_chat::ChatEvent::PermissionRequest {
                     request_id: 7,
                     session_id: "session".into(),
                     title: "Question".into(),
-                    options: vec![sirio_acp::PermissionOption {
+                    options: vec![sirio_chat::PermissionOption {
                         id: "Docked".into(),
                         name: "Docked".into(),
                         kind: "AllowOnce".into(),
                         description: Some("Sits above the composer".into()),
                     }],
-                    question: Some(sirio_acp::PermissionQuestion {
+                    question: Some(sirio_chat::PermissionQuestion {
                         header: "Approach".into(),
                         prompt: "Which layout should the panel use?".into(),
-                        text_input: Some(sirio_acp::PermissionTextInput {
+                        text_input: Some(sirio_chat::PermissionTextInput {
                             placeholder: None,
                             prefill: None,
                         }),
@@ -13913,11 +13922,11 @@ two"
                 cx,
             );
             chat.handle_event(
-                sirio_acp::ChatEvent::PermissionRequest {
+                sirio_chat::ChatEvent::PermissionRequest {
                     request_id: 8,
                     session_id: "session".into(),
                     title: "/repo/src/main.rs".into(),
-                    options: vec![sirio_acp::PermissionOption {
+                    options: vec![sirio_chat::PermissionOption {
                         id: "allow_once".into(),
                         name: "Allow".into(),
                         kind: "AllowOnce".into(),
@@ -14745,7 +14754,7 @@ two"
 
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::TokenUsageBreakdown {
+                sirio_chat::ChatEvent::TokenUsageBreakdown {
                     input_tokens: 40,
                     output_tokens: 12,
                     cached_read_tokens: Some(8),
@@ -14795,7 +14804,7 @@ two"
         });
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::ToolCallUpdated {
+                sirio_chat::ChatEvent::ToolCallUpdated {
                     id: "tool-1".into(),
                     title: None,
                     status: Some("Completed".into()),
@@ -16027,7 +16036,7 @@ two"
         // Off by default: a reported location opens nothing.
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::ToolCallStarted {
+                sirio_chat::ChatEvent::ToolCallStarted {
                     id: "tool-1".into(),
                     title: "Edit file".into(),
                     status: "InProgress".into(),
@@ -16052,7 +16061,7 @@ two"
         chat.update(cx, |chat, _| chat.following_edited_files = true);
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::ToolCallUpdated {
+                sirio_chat::ChatEvent::ToolCallUpdated {
                     id: "tool-1".into(),
                     title: None,
                     status: None,
@@ -16077,7 +16086,7 @@ two"
         // Throttled: a second location right after does not refollow.
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::ToolCallUpdated {
+                sirio_chat::ChatEvent::ToolCallUpdated {
                     id: "tool-1".into(),
                     title: None,
                     status: None,
@@ -16229,11 +16238,11 @@ two"
         cx.run_until_parked();
         chat.update(cx, |chat, cx| {
             chat.streaming = true;
-            chat.handle_event(sirio_acp::ChatEvent::ThoughtChunk("first the ".into()), cx);
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtChunk("first the ".into()), cx);
             chat.apply_notice(SessionNotice::BackgroundTaskEnded {
                 summary: "The auth agent finished.".into(),
             });
-            chat.handle_event(sirio_acp::ChatEvent::ThoughtChunk("tests".into()), cx);
+            chat.handle_event(sirio_chat::ChatEvent::ThoughtChunk("tests".into()), cx);
             let thought = chat
                 .entries
                 .iter()
@@ -16242,13 +16251,16 @@ two"
                 thought.is_some_and(|index| chat.thought_is_streaming(index)),
                 "a notice does not settle the thought it lands under"
             );
-            chat.handle_event(sirio_acp::ChatEvent::AgentMessageChunk("The `src/auth.".into()), cx);
+            chat.handle_event(
+                sirio_chat::ChatEvent::AgentMessageChunk("The `src/auth.".into()),
+                cx,
+            );
             // A background agent ends while the reply is still streaming.
             chat.apply_notice(SessionNotice::BackgroundTaskEnded {
                 summary: "The server agent finished.".into(),
             });
             chat.handle_event(
-                sirio_acp::ChatEvent::AgentMessageChunk("ts` agent has finished.".into()),
+                sirio_chat::ChatEvent::AgentMessageChunk("ts` agent has finished.".into()),
                 cx,
             );
         });
@@ -16277,7 +16289,7 @@ two"
         // even with only a notice between the two.
         chat.update(cx, |chat, cx| {
             chat.handle_event(
-                sirio_acp::ChatEvent::TurnEnded {
+                sirio_chat::ChatEvent::TurnEnded {
                     stop_reason: "EndTurn".into(),
                 },
                 cx,
@@ -16286,7 +16298,10 @@ two"
                 summary: "The limiter agent finished.".into(),
             });
             chat.streaming = true;
-            chat.handle_event(sirio_acp::ChatEvent::AgentMessageChunk("All three are in.".into()), cx);
+            chat.handle_event(
+                sirio_chat::ChatEvent::AgentMessageChunk("All three are in.".into()),
+                cx,
+            );
         });
         let replies = chat.read_with(cx, |chat, _| {
             chat.entries
@@ -16465,7 +16480,7 @@ two"
                 cx,
             );
             chat.handle_event(
-                sirio_acp::ChatEvent::TokenUsageBreakdown {
+                sirio_chat::ChatEvent::TokenUsageBreakdown {
                     input_tokens: 40,
                     output_tokens: 12,
                     cached_read_tokens: Some(8),
@@ -17409,14 +17424,14 @@ two"
 
     use trace::TurnState;
 
-    fn trace_started() -> sirio_acp::ChatEvent {
-        sirio_acp::ChatEvent::Trace(TraceEvent::TurnStarted {
+    fn trace_started() -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Trace(TraceEvent::TurnStarted {
             at: std::time::Instant::now(),
         })
     }
 
-    fn trace_ended() -> sirio_acp::ChatEvent {
-        sirio_acp::ChatEvent::Trace(TraceEvent::TurnEnded {
+    fn trace_ended() -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Trace(TraceEvent::TurnEnded {
             at: std::time::Instant::now(),
             outcome: TurnOutcome::Done,
             measured_ms: None,
@@ -17425,8 +17440,8 @@ two"
         })
     }
 
-    fn trace_span(id: &str, parent: Option<&str>, kind: SpanKind) -> sirio_acp::ChatEvent {
-        sirio_acp::ChatEvent::Trace(TraceEvent::SpanStarted {
+    fn trace_span(id: &str, parent: Option<&str>, kind: SpanKind) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Trace(TraceEvent::SpanStarted {
             id: id.into(),
             parent: parent.map(str::to_string),
             kind,
@@ -17437,8 +17452,8 @@ two"
         })
     }
 
-    fn trace_wait(span: &str, request_id: u64) -> sirio_acp::ChatEvent {
-        sirio_acp::ChatEvent::Trace(TraceEvent::WaitStarted {
+    fn trace_wait(span: &str, request_id: u64) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Trace(TraceEvent::WaitStarted {
             span: Some(span.into()),
             request_id,
             at: std::time::Instant::now(),
@@ -17535,7 +17550,7 @@ two"
             chat.handle_event(trace_started(), cx);
             // The one message the transcript rewrites before it shows it.
             chat.handle_event(
-                sirio_acp::ChatEvent::TransportError("claude requires authentication".into()),
+                sirio_chat::ChatEvent::TransportError("claude requires authentication".into()),
                 cx,
             );
         });
@@ -17558,7 +17573,7 @@ two"
             chat.submit_turn("go".into(), Vec::new(), Vec::new(), cx);
             chat.handle_event(trace_started(), cx);
             chat.handle_event(
-                sirio_acp::ChatEvent::Timeout {
+                sirio_chat::ChatEvent::Timeout {
                     operation: TimeoutOperation::Startup,
                     duration: std::time::Duration::from_secs(30),
                 },
@@ -18102,11 +18117,17 @@ two"
         // The transport dies with the turn open: no `result` will end it, so
         // the chat does, and says so.
         chat.update(cx, |chat, cx| {
-            chat.handle_event(sirio_acp::ChatEvent::TransportError("the agent died".into()), cx)
+            chat.handle_event(
+                sirio_chat::ChatEvent::TransportError("the agent died".into()),
+                cx,
+            )
         });
         assert_eq!(said.get(), 3, "the turn ended failed");
         chat.update(cx, |chat, cx| {
-            chat.handle_event(sirio_acp::ChatEvent::TransportError("and again".into()), cx)
+            chat.handle_event(
+                sirio_chat::ChatEvent::TransportError("and again".into()),
+                cx,
+            )
         });
         assert_eq!(said.get(), 3, "with no turn open an error changes nothing in the trace");
     }

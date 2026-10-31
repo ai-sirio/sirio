@@ -3,7 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
 use futures::future::Either;
-use sirio_acp::{AcpClient, ChatEvent, AgentCommand, EventStream};
+use sirio_acp::{AcpClient, AgentCommand};
+use sirio_chat_vocab::{ChatEvent, EventStream};
 
 fn next_event(events: &EventStream, timeout: Duration) -> Result<ChatEvent> {
     let receive = events.recv();

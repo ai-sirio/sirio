@@ -22,6 +22,8 @@ use std::time::Duration;
 /// the turn. The clock restarts on every notification the agent sends.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// How long a client waits for its worker to acknowledge a shutdown.
+pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const CHILD_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub type ChildHandle = Arc<Mutex<Option<Child>>>;

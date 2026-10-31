@@ -8,7 +8,7 @@ use super::tests::{
 };
 use super::*;
 use gpui::{Bounds, TestAppContext, VisualTestContext, size};
-use sirio_acp::EffortChoice;
+use sirio_chat::EffortChoice;
 
 /// What the composer shows with a full complement of controls: Claude's five
 /// permission modes (current `acceptEdits`), Fast, Thinking, two background

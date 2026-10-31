@@ -1,6 +1,6 @@
 //! Non-drawing chat session state over one live ACP connection.
 //!
-//! [`AcpClient`] deliberately exposes protocol-shaped events. This module is
+//! [`AcpClient`](sirio_acp::AcpClient) deliberately exposes protocol-shaped events. This module is
 //! the seam a surface or a control socket uses instead: it owns one chat's
 //! lifecycle, folds streamed events into rendered transcript entries, and
 //! persists settled turns without involving GPUI or a window.
@@ -15,7 +15,8 @@ use sirio_persistence::{
     ChatToolLocation, ChatTranscript, ChatTurn,
 };
 
-use crate::{ChatEvent, ChatClient, EventStream, LaunchSpec, ToolCallLocationInfo};
+use crate::{ChatClient, LaunchSpec};
+use sirio_chat_vocab::{ChatEvent, EventStream, ToolCallLocationInfo};
 
 /// Observable state of a non-drawing chat session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -31,7 +31,7 @@ use super::ClaudeLaunch;
 use super::events::{Fold, ResultSummary};
 use super::permission;
 use super::trace::TraceFold;
-use crate::{
+use sirio_chat_vocab::{
     AgentMode, ChatError, ChatEvent, ContextCost, ContextUsage, EffortChoice, EffortOption,
     ModeCatalog, ModelCatalog, ModelOption, TimeoutOperation, TraceEvent,
 };
@@ -142,9 +142,9 @@ pub(super) struct Shared {
     model_catalog: Mutex<Option<ModelCatalog>>,
     mode_catalog: Mutex<Option<ModeCatalog>>,
     fast_mode: Mutex<Option<FastMode>>,
-    thinking_display: Mutex<crate::ThinkingDisplay>,
+    thinking_display: Mutex<sirio_chat_vocab::ThinkingDisplay>,
     mcp_warnings: Mutex<Vec<String>>,
-    notices: Mutex<Vec<crate::SessionNotice>>,
+    notices: Mutex<Vec<sirio_chat_vocab::SessionNotice>>,
     background_tasks: AtomicUsize,
     last_user_message_id: Mutex<Option<String>>,
     resumed_session_refused: AtomicBool,
@@ -180,7 +180,7 @@ impl Shared {
         self.fast_mode.lock().ok().and_then(|f| f.clone())
     }
 
-    pub(super) fn thinking_display(&self) -> crate::ThinkingDisplay {
+    pub(super) fn thinking_display(&self) -> sirio_chat_vocab::ThinkingDisplay {
         self.thinking_display
             .lock()
             .map(|d| d.clone())
@@ -196,7 +196,7 @@ impl Shared {
 
     /// The notices posted since the last read, draining them. The surface
     /// puts each one into the transcript once, in this order.
-    pub(super) fn take_notices(&self) -> Vec<crate::SessionNotice> {
+    pub(super) fn take_notices(&self) -> Vec<sirio_chat_vocab::SessionNotice> {
         self.notices
             .lock()
             .map(|mut held| std::mem::take(&mut *held))
@@ -208,7 +208,7 @@ impl Shared {
         self.background_tasks.load(Ordering::Acquire)
     }
 
-    fn push_notices(&self, notices: Vec<crate::SessionNotice>) {
+    fn push_notices(&self, notices: Vec<sirio_chat_vocab::SessionNotice>) {
         if notices.is_empty() {
             return;
         }
@@ -966,7 +966,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 let _ = event_tx.send(event).await;
                             }
                             let question = permission::is_question(&request)
-                                .then(|| crate::parse_permission_question(&request.input))
+                                .then(|| {
+                                    sirio_chat_vocab::parse_permission_question(&request.input)
+                                })
                                 .flatten()
                                 .map(permission::with_free_text);
                             let options = if permission::is_question(&request) {
@@ -1583,11 +1585,11 @@ fn catalogue_events(
 
 /// The command list as the surface takes it. Two callers: the handshake,
 /// and a `commands_changed` line later in the session.
-fn command_list(catalog: &Catalog) -> Vec<crate::AvailableCommandInfo> {
+fn command_list(catalog: &Catalog) -> Vec<sirio_chat_vocab::AvailableCommandInfo> {
     catalog
         .commands()
         .into_iter()
-        .map(|command| crate::AvailableCommandInfo {
+        .map(|command| sirio_chat_vocab::AvailableCommandInfo {
             name: command.name,
             description: command.description,
             argument_hint: command.argument_hint,

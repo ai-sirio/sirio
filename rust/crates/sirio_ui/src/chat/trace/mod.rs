@@ -3,7 +3,7 @@
 //!
 //! Pure, with no gpui: every instant comes in through an event or an
 //! argument, never from a clock, so what a turn looks like is a function of
-//! what it was told. `sirio_acp::TraceEvent` documents what the producer
+//! what it was told. `sirio_chat::TraceEvent` documents what the producer
 //! closes on its own; what it leaves to this store is:
 //! - a span still open when its turn ends becomes `Interrupted`, never `Done`,
 //!   whatever the turn's outcome;
@@ -25,7 +25,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
 
-use sirio_acp::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
+use sirio_chat::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
 
 mod view;
 

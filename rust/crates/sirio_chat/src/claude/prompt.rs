@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::ImageAttachment;
+use sirio_chat_vocab::ImageAttachment;
 
 /// Builds the `user` line for one turn. `uuid` is the client-generated id
 /// this turn is known by — the handle a later rewind names.
@@ -104,7 +104,7 @@ mod tests {
         let message = user_message(
             "   ",
             &[],
-            &[crate::ImageAttachment {
+            &[sirio_chat_vocab::ImageAttachment {
                 mime_type: "image/png".into(),
                 base64_data: "AAAA".into(),
             }],

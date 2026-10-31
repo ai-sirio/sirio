@@ -14,6 +14,4 @@ futures = "0.3"
 serde_json = "1"
 sirio_chat_child = { path = "../sirio_chat_child" }
 sirio_chat_vocab = { path = "../sirio_chat_vocab" }
-sirio_claude = { path = "../sirio_claude" }
 sirio_env = { path = "../sirio_env" }
-sirio_persistence = { path = "../sirio_persistence" }

@@ -7270,10 +7270,10 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sirio_acp",
  "sirio_activity",
  "sirio_agents",
  "sirio_apply",
+ "sirio_chat",
  "sirio_claude",
  "sirio_control",
  "sirio_env",
@@ -7309,9 +7309,7 @@ dependencies = [
  "serde_json",
  "sirio_chat_child",
  "sirio_chat_vocab",
- "sirio_claude",
  "sirio_env",
- "sirio_persistence",
 ]
 
 [[package]]
@@ -7337,6 +7335,24 @@ dependencies = [
  "sirio_release",
  "sirio_update",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "sirio_chat"
+version = "0.38.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "async-io",
+ "async-process",
+ "futures",
+ "serde_json",
+ "sirio_acp",
+ "sirio_chat_child",
+ "sirio_chat_vocab",
+ "sirio_claude",
+ "sirio_env",
+ "sirio_persistence",
 ]
 
 [[package]]
@@ -7375,7 +7391,7 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
- "sirio_acp",
+ "sirio_chat",
  "sirio_env",
  "sirio_host_client",
  "sirio_host_protocol",
@@ -7657,8 +7673,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sirio_acp",
  "sirio_agents",
+ "sirio_chat",
  "sirio_diagram",
  "sirio_env",
  "sirio_forge",

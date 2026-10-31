@@ -6,7 +6,7 @@
 use super::{BarSegment, Row, Section};
 use crate::chat::Chat;
 use gpui::Context as GpuiContext;
-use sirio_acp::{ContextBreakdown, ContextOrigins, ContextUsage, OriginNode, Standing};
+use sirio_chat::{ContextBreakdown, ContextOrigins, ContextUsage, OriginNode, Standing};
 use std::collections::HashSet;
 
 /// A level with more children than this shows the heaviest and folds the
@@ -241,7 +241,7 @@ mod tests {
     use crate::chat::{Chat, ChatEvent, SessionPanelAction};
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use serde_json::json;
-    use sirio_acp::{ContextBreakdown, ContextUsage};
+    use sirio_chat::{ContextBreakdown, ContextUsage};
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;

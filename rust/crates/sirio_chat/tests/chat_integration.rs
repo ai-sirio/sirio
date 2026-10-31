@@ -2,10 +2,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use sirio_acp::{ChatError, AgentCommand, ChatSession, ChatSessionConfig, ChatStatus, LaunchSpec};
+use sirio_chat::{AgentCommand, ChatError, ChatSession, ChatSessionConfig, ChatStatus, LaunchSpec};
 use sirio_persistence::{AppDatabase, ProjectRecord, TabRecord, WorktreeRecord};
 
-const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/acp_fixture.py");
+const FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../sirio_acp/tests/fixtures/acp_fixture.py"
+);
 
 struct TempDir(PathBuf);
 
@@ -50,9 +53,9 @@ fn seed_chat_tab(path: &Path, tab_id: &str, worktree_id: &str) {
     db.save_tabs(worktree_id, &tabs).expect("save chat tab");
 }
 
-fn wait_for<F>(session: &ChatSession, mut predicate: F) -> sirio_acp::ChatSnapshot
+fn wait_for<F>(session: &ChatSession, mut predicate: F) -> sirio_chat::ChatSnapshot
 where
-    F: FnMut(&sirio_acp::ChatSnapshot) -> bool,
+    F: FnMut(&sirio_chat::ChatSnapshot) -> bool,
 {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -486,7 +489,7 @@ fn a_native_chat_session_streams_and_persists_like_an_acp_one() {
     let session = ChatSession::launch(ChatSessionConfig::new(
         "tab-native",
         "worktree-native",
-        sirio_acp::LaunchSpec::Claude(sirio_acp::ClaudeLaunch::fixture(
+        sirio_chat::LaunchSpec::Claude(sirio_chat::ClaudeLaunch::fixture(
             std::path::PathBuf::from("python3"),
             vec![CLAUDE_FIXTURE.into(), "normal".into()],
         )),

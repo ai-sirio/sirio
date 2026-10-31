@@ -5,17 +5,18 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::future::Either;
-use sirio_acp::{AcpClient, ChatEvent, AgentCommand};
+use sirio_acp::{AcpClient, AgentCommand};
+use sirio_chat_vocab::ChatEvent;
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/acp_fixture.py");
 
-fn launch_fixture(mode: &str) -> (AcpClient, sirio_acp::EventStream) {
+fn launch_fixture(mode: &str) -> (AcpClient, sirio_chat_vocab::EventStream) {
     let cwd = std::env::temp_dir();
     let command = AgentCommand::new("python3").args([FIXTURE, mode]);
     AcpClient::launch(command, cwd).expect("fixture ACP agent should initialize")
 }
 
-fn launch_fixture_with_pid_file() -> (AcpClient, sirio_acp::EventStream, PathBuf) {
+fn launch_fixture_with_pid_file() -> (AcpClient, sirio_chat_vocab::EventStream, PathBuf) {
     let pid_path = std::env::temp_dir().join(format!(
         "sirio-acp-{}-{}.pid",
         std::process::id(),
@@ -55,7 +56,7 @@ fn process_exists(pid: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn next_event(events: &sirio_acp::EventStream) -> ChatEvent {
+fn next_event(events: &sirio_chat_vocab::EventStream) -> ChatEvent {
     let receive = events.recv();
     let timer = async_io::Timer::after(Duration::from_secs(2));
     futures::executor::block_on(async move {
@@ -346,12 +347,12 @@ fn advertises_commands_and_effort_and_echoes_prompt_blocks() {
     assert_eq!(
         commands.expect("commands arrived"),
         vec![
-            sirio_acp::AvailableCommandInfo {
+            sirio_chat_vocab::AvailableCommandInfo {
                 name: "cr".into(),
                 description: "Code review the diff".into(),
                 argument_hint: None,
             },
-            sirio_acp::AvailableCommandInfo {
+            sirio_chat_vocab::AvailableCommandInfo {
                 name: "research".into(),
                 description: "Research a topic".into(),
                 argument_hint: None,
@@ -371,7 +372,7 @@ fn advertises_commands_and_effort_and_echoes_prompt_blocks() {
         .prompt_content(
             "  hello world  ",
             vec!["sub/notes.md".into(), "/abs/file.png".into()],
-            vec![sirio_acp::ImageAttachment {
+            vec![sirio_chat_vocab::ImageAttachment {
                 mime_type: "image/png".into(),
                 base64_data: "AAAA".into(),
             }],
@@ -602,7 +603,7 @@ fn live_thread_count() -> usize {
 }
 
 #[cfg(not(windows))]
-fn drive_turn(client: &AcpClient, events: &sirio_acp::EventStream) {
+fn drive_turn(client: &AcpClient, events: &sirio_chat_vocab::EventStream) {
     client.prompt("count threads").expect("prompt accepted");
     loop {
         match next_event(events) {

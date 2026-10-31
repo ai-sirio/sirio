@@ -24,7 +24,7 @@ use super::{
     Entry, SubagentToolCall, TranscriptInteraction, diff_preview_lines, project_tool_content,
     tool_call_plain_text,
 };
-use sirio_acp::{ToolCallContentInfo, ToolCallLocationInfo};
+use sirio_chat::{ToolCallContentInfo, ToolCallLocationInfo};
 use sirio_theme::Theme;
 
 // The output well's metrics.

@@ -7,11 +7,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::future::Either;
-use sirio_acp::{
-    ChatEvent, AvailableCommandInfo, ClaudeClient, ClaudeLaunch, SessionNotice, SpanKind, TraceEvent,
+use sirio_chat::ThinkingDisplay;
+use sirio_chat::{
+    AvailableCommandInfo, ChatEvent, ClaudeClient, ClaudeLaunch, SessionNotice, SpanKind,
+    TraceEvent,
 };
 use sirio_claude::FastMode;
-use sirio_acp::ThinkingDisplay;
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -21,7 +22,7 @@ const FIXTURE: &str = concat!(
 /// The fixture is a python script, so the program is `python3` and the
 /// script is its first argument — `ClaudeLaunch` carries the extra
 /// arguments a test needs in front of the protocol flags.
-fn launch(mode: &str) -> (ClaudeClient, sirio_acp::EventStream) {
+fn launch(mode: &str) -> (ClaudeClient, sirio_chat::EventStream) {
     ClaudeClient::launch(fixture_launch(mode), std::env::temp_dir())
         .expect("fixture claude should complete its handshake")
 }
@@ -30,7 +31,7 @@ fn fixture_launch(mode: &str) -> ClaudeLaunch {
     ClaudeLaunch::fixture(PathBuf::from("python3"), vec![FIXTURE.into(), mode.into()])
 }
 
-fn next_event(events: &sirio_acp::EventStream) -> ChatEvent {
+fn next_event(events: &sirio_chat::EventStream) -> ChatEvent {
     let receive = events.recv();
     // A guard against a hang, not a budget: the only thing it must be is
     // longer than this suite's worst scheduling delay. Five seconds was not
@@ -50,7 +51,11 @@ fn next_event(events: &sirio_acp::EventStream) -> ChatEvent {
 /// The first re-read signal whose name starts with `prefix`, on a short
 /// budget. It reads the stream once, so a test can say *which* signal
 /// arrived rather than draining the stream asking after each in turn.
-fn first_signal(events: &sirio_acp::EventStream, prefix: &str, budget: Duration) -> Option<String> {
+fn first_signal(
+    events: &sirio_chat::EventStream,
+    prefix: &str,
+    budget: Duration,
+) -> Option<String> {
     let deadline = std::time::Instant::now() + budget;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -76,7 +81,7 @@ fn first_signal(events: &sirio_acp::EventStream, prefix: &str, budget: Duration)
     }
 }
 
-fn drain_until_turn_end(events: &sirio_acp::EventStream) -> Vec<ChatEvent> {
+fn drain_until_turn_end(events: &sirio_chat::EventStream) -> Vec<ChatEvent> {
     let mut seen = Vec::new();
     loop {
         let event = next_event(events);
@@ -489,7 +494,7 @@ fn a_turn_that_goes_silent_is_reaped_and_reported() {
         matches!(
             event,
             ChatEvent::Timeout {
-                operation: sirio_acp::TimeoutOperation::Prompt,
+                operation: sirio_chat::TimeoutOperation::Prompt,
                 ..
             }
         ),
@@ -1026,7 +1031,7 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
 /// Everything the stream carries up to and including the first re-read signal
 /// named `kind`, or `None` when none arrives inside `budget`.
 fn events_through_signal(
-    events: &sirio_acp::EventStream,
+    events: &sirio_chat::EventStream,
     kind: &str,
     budget: Duration,
 ) -> Option<Vec<ChatEvent>> {

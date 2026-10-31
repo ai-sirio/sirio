@@ -2,7 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sirio_acp::{AcpClient, ChatEvent, AgentCommand};
+use sirio_acp::{AcpClient, AgentCommand};
+use sirio_chat_vocab::ChatEvent;
 
 fn main() {
     if let Err(error) = run() {

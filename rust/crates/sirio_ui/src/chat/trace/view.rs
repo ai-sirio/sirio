@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use sirio_acp::{SpanKind, SpanOutcome, TokenCount, TurnOutcome};
+use sirio_chat::{SpanKind, SpanOutcome, TokenCount, TurnOutcome};
 
 use super::{ROOT, ROOT_NAME, Span, SpanEnd, Spend, Turn, TurnEnd};
 

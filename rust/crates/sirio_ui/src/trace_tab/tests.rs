@@ -6,7 +6,7 @@ use gpui::{
     AppContext as _, Modifiers, ParentElement, Styled, TestAppContext, VisualTestContext, px,
     size,
 };
-use sirio_acp::{SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
+use sirio_chat::{SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
 use std::cell::Cell;
 use std::rc::Rc;
 

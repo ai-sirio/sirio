@@ -30,7 +30,7 @@ portable-pty = "0.9"
 
 [dev-dependencies]
 anyhow = "1"
-sirio_acp = { path = "../sirio_acp" }
+sirio_chat = { path = "../sirio_chat" }
 sirio_persistence = { path = "../sirio_persistence" }
 
 [[bin]]

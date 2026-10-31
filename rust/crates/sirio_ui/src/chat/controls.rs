@@ -12,7 +12,7 @@ use ely_gpui_component::{
     primitives::{Icon, IconName},
     theme::IconSize,
 };
-use sirio_acp::EffortChoice;
+use sirio_chat::EffortChoice;
 
 /// A popup's width at the interface's text size: the 13px design size at
 /// rest, wider as the text grows, so a larger setting never cuts a label
