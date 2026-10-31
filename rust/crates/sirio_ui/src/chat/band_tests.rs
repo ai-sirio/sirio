@@ -1366,11 +1366,13 @@ async fn the_chips_never_cover_send(cx: &mut TestAppContext) {
     pump_chat_until(cx, &chat, |chat| chat.client.is_some());
     chat.update(cx, |chat, _| configure_full_row(chat));
 
-    for (width, layout) in [(280.0, RowLayout::Narrow), (160.0, RowLayout::Minimal)] {
+    for (width, layout) in [(280.0, RowLayout::Narrow), (130.0, RowLayout::Minimal)] {
         resize_to(cx, width, 700.0);
         // Both are under what the Compact row needs with the task count and
-        // the ring. 280px holds the Narrow row's three chips; 160px is under
-        // what it needs, so the row is Minimal.
+        // the ring. 280px holds the Narrow row's three chips whole. 130px is
+        // under the Minimal row's own minimum (143px with this fixture's three
+        // effort levels), the one width a pane cannot have where the chips
+        // overflow, so the clip is what keeps them off send.
         assert_eq!(row_layout_now(cx, &chat), layout, "at {width}px");
         let composer = drawn(cx, "composer");
         let send = drawn(cx, "send");
@@ -1813,6 +1815,26 @@ async fn compact_keeps_the_effort_label_only_where_there_are_no_bars(cx: &mut Te
         cx.debug_bounds("model-effort-label").is_some(),
         "so its name stays, and the chip is not a bare chevron"
     );
+
+    // Ultracode is no level either: Compact keeps its name too.
+    chat.update(cx, |chat, _| {
+        let effort = chat.effort.as_mut().unwrap();
+        effort.choices.push(EffortChoice {
+            value: "ultracode".into(),
+            name: "Ultracode".into(),
+        });
+        effort.current_value = Some("ultracode".into());
+    });
+    refresh_frame(cx);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    assert!(
+        cx.debug_bounds("effort-chip-bars").is_none(),
+        "Ultracode has no bars in Compact"
+    );
+    assert!(
+        cx.debug_bounds("model-effort-label").is_some(),
+        "so its name stays"
+    );
 }
 
 /// In Compact the ring keeps its popover: it hangs from the ring's chip and ends
@@ -2071,12 +2093,12 @@ async fn a_chip_that_does_not_fit_takes_no_press_in_the_band_padding(cx: &mut Te
     chat.update(cx, |chat, _| chat.effort_picker_open = false);
 
     chat.update(cx, |chat, _| configure_full_row(chat));
-    // The Narrow row's chips all fit from its minimum up, and the Minimal row's
-    // from its own, 171px. Under that the effort chip is cut, but its box reaches
-    // into the band's right padding only once the chat is under about 140px, which
-    // a split pane cannot be (160px is its floor). The clip is the same at any
-    // width, so the search walks down from the floor to the first width where the
-    // box does reach the padding.
+    // The Narrow row's chips all fit from its minimum up, and the Minimal row's from
+    // its own (143px with this fixture's three effort levels). Under that the effort
+    // chip is cut, but its box reaches into the band's right padding only once the
+    // chat is under about 112px, which a split pane cannot be (160px is its floor).
+    // The clip is the same at any width, so the search walks down from the floor to
+    // the first width where the box does reach the padding.
     let mut found = None;
     for width in (60..=160).rev() {
         resize_to(cx, width as f32, 700.0);
@@ -2268,21 +2290,57 @@ async fn minimal_moves_the_model_into_the_overflow_menu_and_drops_the_chevrons(
     drawn(cx, "attach-image");
 }
 
-/// Choosing the model row in a Minimal ⋯ closes the menu and opens the model
-/// picker with the search field focused, and the picker hangs from ⋯ (the chip is
-/// not drawn), inside the pane: the pane is narrower than the picker's usual width,
-/// so it is held to the room there is between ⋯ and the pane's edge. The chat fills
-/// the window here and the window snaps a popup back inside it, so containment
-/// alone could never prove where it hangs: the picker's left edge on ⋯'s does.
+/// A chat laid out in a column of fixed width, in a window wider than it: the shape of
+/// a split pane in the app, where the window keeps a popup on screen and the pane
+/// does not.
+struct PaneInWindow {
+    chat: gpui::Entity<Chat>,
+    width: f32,
+}
+
+impl Render for PaneInWindow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(self.width))
+            .h_full()
+            .child(self.chat.clone())
+    }
+}
+
+/// Choosing the model row in a Minimal ⋯ in a 160px pane (`MIN_SPLIT_PANE_SIZE`)
+/// closes the menu and opens the model picker with the search field focused, and the
+/// picker hangs from ⋯ (the chip is not drawn), as the thinking picker does, at its
+/// usual width, which is wider than the pane: the window keeps it on screen. The
+/// picker's left edge on ⋯'s is what proves where it hangs (hung from the right, it
+/// would be pushed to the window's margin).
 #[gpui::test]
-async fn the_overflow_model_row_opens_the_model_picker_inside_the_pane(cx: &mut TestAppContext) {
-    let (chat, cx) = chat_view(cx, &["plain"]);
+async fn the_overflow_model_row_opens_the_model_picker_hung_from_the_overflow_button(
+    cx: &mut TestAppContext,
+) {
+    cx.update(Theme::init);
+    cx.update(crate::ely::init);
+    cx.update(super::init);
+    let (host, cx) = cx.add_window_view(|_, cx| {
+        let command = AgentCommand::new("python3")
+            .arg(super::tests::CHAT_FIXTURE)
+            .arg("plain");
+        let chat = cx.new(|cx| {
+            Chat::from_test_command(LaunchSpec::Acp(command), std::env::temp_dir(), cx)
+        });
+        PaneInWindow { chat, width: 160.0 }
+    });
+    let chat = host.read_with(cx, |host, _| host.chat.clone());
     pump_chat_until(cx, &chat, |chat| chat.client.is_some());
     chat.update(cx, |chat, _| configure_full_row(chat));
-    let minimum = narrow_minimum(cx, &chat) as f32;
-    resize_to(cx, minimum - 1.0, 700.0);
+    cx.simulate_resize(size(px(900.0), px(700.0)));
+    refresh_frame(cx);
+    refresh_frame(cx);
+    refresh_frame(cx);
     assert_eq!(row_layout_now(cx, &chat), RowLayout::Minimal);
-    let root = drawn(cx, "chat-root");
+    assert!(
+        near(drawn(cx, "chat-root").size.width, px(160.0), 0.5),
+        "the pane is 160px in a wider window"
+    );
     let overflow = drawn(cx, "composer-overflow");
 
     open_overflow(cx, &chat);
@@ -2305,9 +2363,10 @@ async fn the_overflow_model_row_opens_the_model_picker_inside_the_pane(cx: &mut 
         Some("model")
     );
     let picker = drawn(cx, "model-picker");
+    let window = cx.update(|window, _| window.bounds());
     assert!(
-        picker.left() >= root.left() - px(0.5) && picker.right() <= root.right() + px(0.5),
-        "the model picker stays inside the chat: root={root:?} picker={picker:?}"
+        picker.left() >= px(0.0) && picker.right() <= window.size.width,
+        "the picker is inside the window: picker={picker:?} window={window:?}"
     );
     assert!(
         near(picker.left(), overflow.left(), 0.5),
@@ -2390,7 +2449,7 @@ async fn a_badge_only_agent_shows_its_name_as_an_informational_row(cx: &mut Test
 
 /// A five-level effort ladder, as the real Claude CLI offers (`low`, `medium`,
 /// `high`, `xhigh`, `max`), with the highest the current one: five bars, every one
-/// drawn, which is the widest the effort chip gets.
+/// drawn: the widest a barred effort chip gets.
 fn with_five_effort_levels(chat: &mut Chat) {
     chat.effort = Some(EffortOption {
         option_id: "effort".into(),
@@ -2626,4 +2685,164 @@ async fn the_overflow_attach_row_runs_the_attach_action(cx: &mut TestAppContext)
         "the attach action ran: the picked image is an attachment"
     );
     drawn(cx, "attachment-chip-0");
+}
+
+/// An effort ladder as the native catalogue offers it for a model with every level:
+/// the reset, the five levels, and Ultracode, which is offered where `xhigh` is.
+fn with_the_native_effort_catalogue(chat: &mut Chat, current: &str) {
+    let choice = |value: &str, name: &str| EffortChoice {
+        value: value.into(),
+        name: name.into(),
+    };
+    chat.effort = Some(EffortOption {
+        option_id: "effort".into(),
+        name: Some("Effort".into()),
+        current_value: Some(current.into()),
+        choices: vec![
+            choice("default", "Default"),
+            choice("low", "Low"),
+            choice("medium", "Medium"),
+            choice("high", "High"),
+            choice("xhigh", "Xhigh"),
+            choice("max", "Max"),
+            choice("ultracode", "Ultracode"),
+        ],
+    });
+}
+
+/// In Minimal an effort with no bars of its own, the reset ("Default") and
+/// Ultracode, draws the model's bars, not its word (the user's choice, 2026-10-31),
+/// so that the chip is as narrow as a barred level's and 160px holds it whole. The
+/// reset's bars are all unfilled and Ultracode's all filled; the level's name is
+/// the tooltip's. Compact and Full keep the word.
+#[gpui::test]
+async fn minimal_draws_bars_for_the_reset_and_ultracode_and_fits_the_pane_floor(
+    cx: &mut TestAppContext,
+) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    for (current, selector) in [
+        ("default", "effort-chip-bars-unfilled"),
+        ("ultracode", "effort-chip-bars-filled"),
+    ] {
+        chat.update(cx, |chat, _| {
+            configure_full_row(chat);
+            with_the_native_effort_catalogue(chat, current);
+            chat.overflow_open = false;
+        });
+        resize_to(cx, 1000.0, 700.0);
+        resize_to(cx, 480.0, 700.0);
+        assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact, "{current}");
+        drawn(cx, "model-effort-label");
+        assert!(
+            cx.debug_bounds("effort-chip-bars").is_none(),
+            "Compact draws the word of {current}, not bars"
+        );
+
+        resize_to(cx, 160.0, 700.0);
+        assert_eq!(row_layout_now(cx, &chat), RowLayout::Minimal, "{current}");
+        assert!(
+            cx.debug_bounds("model-effort-label").is_none(),
+            "Minimal draws no word for {current}"
+        );
+        let bars = drawn(cx, selector);
+        assert!(
+            near(bars.size.width, px(23.0), 0.5),
+            "all five of the model's bars are drawn for {current}: {bars:?}"
+        );
+        let chips = drawn(cx, "composer-chips");
+        let send = drawn(cx, "send");
+        for name in MINIMAL_CHIPS {
+            let chip = drawn(cx, name);
+            assert!(
+                chip.right() <= chips.right() + px(0.5),
+                "{name} is whole inside the chips' container for {current}: \
+                 {name}={chip:?} chips={chips:?}"
+            );
+        }
+        assert!(
+            chips.right() <= send.left() + px(0.5),
+            "the chips end before send for {current}: chips={chips:?} send={send:?}"
+        );
+        assert_one_line_inside_the_band(cx, &MINIMAL_CHIPS);
+    }
+}
+
+/// The mark leaves with its row when the layout leaves Minimal with ⋯ open: the model
+/// and attach rows are gone, so a mark on either moves to the nearest row that can be
+/// chosen, and Enter runs that row, never the one that is gone (no model picker
+/// opens, nothing is attached).
+#[gpui::test]
+async fn the_overflow_mark_leaves_with_the_model_and_attach_rows_when_the_chat_widens(
+    cx: &mut TestAppContext,
+) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    let dir = std::env::temp_dir().join(format!("sirio-mark-leaves-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let png = dir.join("photo.png");
+    std::fs::write(&png, b"a png by extension only").expect("write png");
+
+    // Where the mark lands matters only if the place it held is not a row that can be
+    // chosen: with Fast refused, a Narrow ⋯ opens on a disabled Fast row, where the
+    // model's row stood; with neither Fast nor Thinking, on the disabled task count,
+    // where attach's stood.
+    for (gone, expected) in [
+        (OverflowRow::Model, OverflowRow::Thinking),
+        (OverflowRow::Attach, OverflowRow::Context),
+    ] {
+        chat.update(cx, |chat, _| {
+            configure_full_row(chat);
+            chat.overflow_open = false;
+            chat.attach_test_paths = vec![png.clone()];
+            if gone == OverflowRow::Model {
+                chat.fast_mode = Some(FastMode {
+                    enabled: false,
+                    blocked_by: Some("not on this plan".into()),
+                });
+            } else {
+                chat.fast_mode = None;
+                chat.thinking_display = None;
+            }
+        });
+        resize_to(cx, 1000.0, 700.0);
+        resize_to(cx, 160.0, 700.0);
+        assert_eq!(row_layout_now(cx, &chat), RowLayout::Minimal);
+        open_overflow(cx, &chat);
+        mark_overflow_row(cx, &chat, gone);
+
+        resize_to(cx, 300.0, 700.0);
+        assert_eq!(row_layout_now(cx, &chat), RowLayout::Narrow);
+        assert!(
+            chat.read_with(cx, |chat, _| chat.overflow_open),
+            "the layout change leaves ⋯ open"
+        );
+        let rows = chat.read_with(cx, |chat, _| chat.overflow_rows());
+        assert!(
+            !rows.contains(&gone),
+            "{gone:?} is not a row of a Narrow ⋯"
+        );
+        assert_eq!(
+            marked_overflow_row(cx, &chat),
+            Some(expected),
+            "the mark moved to the nearest row that can be chosen ({gone:?} was marked)"
+        );
+
+        cx.update(|window, app| {
+            chat.update(app, |chat, cx| {
+                chat.picker_choose(&PickerChoose, window, cx)
+            })
+        });
+        refresh_frame(cx);
+        assert!(
+            !chat.read_with(cx, |chat, _| chat.model_picker_open),
+            "Enter did not run the model row that is gone ({gone:?} was marked)"
+        );
+        assert!(
+            chat.read_with(cx, |chat, _| chat.attachments.is_empty()),
+            "Enter did not run the attach row that is gone ({gone:?} was marked)"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

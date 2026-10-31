@@ -122,7 +122,9 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # right, until `layout` is `minimal`, about 209 px, since the window itself cannot go under 320 px), asserts
 # the same geometry and that `overflow` starts `model`, `attach`, then clicks the measured `overflowButton`,
 # reads `menu` (model first, attach second, both enabled), presses Enter (`picker` is `model`) and Escape;
-# frames per lane (minimal, minimal-overflow, minimal-model). Each then runs a narrow lane against the `ely-catalogue` fixture, which advertises
+# frames per lane (minimal, minimal-overflow, minimal-model). The composer_band scenarios run with a private HOME,
+# XDG tree and SHELL=/bin/sh, so the terminals the splits spawn read none of the user's rc files (their frames
+# show a plain sh prompt). Each then runs a narrow lane against the `ely-catalogue` fixture, which advertises
 # modes (current `ask`): `modeIcon` is what the render drew for the pill, the shield every id
 # without an icon gets, and `modeDanger` is false (the `composer` fixture, with no modes, draws none).
 # The record also carries `overflowButton`, `menu` (the rows ⋯ drew, while open) and `picker`.

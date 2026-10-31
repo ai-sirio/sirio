@@ -212,17 +212,6 @@ fn boxed(bounds: Option<Bounds<Pixels>>) -> Option<[f32; 4]> {
     })
 }
 
-/// The room a popup hung from ⋯ has in a Minimal row, between ⋯'s left edge and the
-/// right edge of a chat `chat_width` wide, less the margin the layer keeps from the
-/// window's edge. ⋯ is alone in the left group there, so its left edge is the band's
-/// padding.
-pub(crate) fn overflow_popup_room(chat_width: f32) -> f32 {
-    (chat_width - BAND_PAD_X - POPUP_MARGIN).max(0.0)
-}
-
-/// How far `layer` keeps a popup from the window's edge (`snap_to_window_with_margin`).
-const POPUP_MARGIN: f32 = 8.0;
-
 /// One of the tool group's 24px icon buttons.
 const TOOL_WIDTH: f32 = 24.0;
 /// The Full row's tool group: three icon buttons and their gaps.
@@ -389,8 +378,8 @@ impl Chat {
             .filter(|_| model_visible)
             .map_or(0.0, |level| {
                 let bars = self
-                    .effort_bar_position()
-                    .map_or(0.0, |(_, total)| CHIP_GAP + bars_width(total));
+                    .effort_chip_bars(false)
+                    .map_or(0.0, |bars| CHIP_GAP + bars_width(bars.total));
                 2.0 * CHIP_PAD_X + bars + measure(&level) + CHIP_GAP + chevron
             });
 
@@ -444,8 +433,8 @@ impl Chat {
         let effort = self
             .effort_level_name()
             .filter(|_| self.model_control_visible())
-            .map_or(0.0, |level| match self.effort_bar_position() {
-                Some((_, total)) => 2.0 * CHIP_PAD_X + bars_width(total) + CHIP_GAP + chevron,
+            .map_or(0.0, |level| match self.effort_chip_bars(false) {
+                Some(bars) => 2.0 * CHIP_PAD_X + bars_width(bars.total) + CHIP_GAP + chevron,
                 None => 2.0 * CHIP_PAD_X + measure(&level) + CHIP_GAP + chevron,
             });
 
@@ -487,8 +476,8 @@ impl Chat {
         let effort = self
             .effort_level_name()
             .filter(|_| self.effort_chip_drawn())
-            .map_or(0.0, |level| match self.effort_bar_position() {
-                Some((_, total)) => 2.0 * CHIP_PAD_X + bars_width(total) + CHIP_GAP + chevron,
+            .map_or(0.0, |level| match self.effort_chip_bars(false) {
+                Some(bars) => 2.0 * CHIP_PAD_X + bars_width(bars.total) + CHIP_GAP + chevron,
                 None => 2.0 * CHIP_PAD_X + measure(&level) + CHIP_GAP + chevron,
             });
 

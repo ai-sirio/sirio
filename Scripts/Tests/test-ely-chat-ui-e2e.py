@@ -1404,6 +1404,22 @@ def send_stays_clear(lane: str, row: dict) -> None:
         raise Failure(f"composer_band {lane}: the chips {chips} are not inside the band {band}")
 
 
+def isolate_shells(scenario: "Scenario") -> None:
+    """A private HOME, XDG tree and a plain `/bin/sh` for the scenario's instance, so the terminals
+    its `pane.split` spawns (`$SHELL -il` in the environment Sirio has) never read the user's
+    rc files. The same variables `test-chat-session-panel-e2e.sh` gives its instances."""
+    home = scenario.dir / "home"
+    directories = {
+        "XDG_CONFIG_HOME": home / ".config",
+        "XDG_DATA_HOME": home / ".local" / "share",
+        "XDG_STATE_HOME": home / ".local" / "state",
+        "XDG_CACHE_HOME": home / ".cache",
+    }
+    for directory in (home, *directories.values()):
+        directory.mkdir(parents=True, exist_ok=True)
+    scenario.env.update(HOME=str(home), SHELL="/bin/sh", **{name: str(path) for name, path in directories.items()})
+
+
 def composer_band_minimal_lane(run: Run, chat: Instance, window: str, name: str) -> dict:
     """Split the chat's pane beside itself until its `root` is in Minimal's range (the row is
     `minimal`), and return a read that still says so after the layout has settled. Each round
@@ -1418,18 +1434,32 @@ def composer_band_minimal_lane(run: Run, chat: Instance, window: str, name: str)
         split = chat.call("pane.split", direction="right")
         if not split.get("ok"):
             raise Failure(f"{name} minimal: pane.split failed: {split}")
-        try:
-            chat.until(
-                f"minimal: the chat is narrower than {before:.0f} px",
-                lambda s: s["composerRow"]["root"] is not None and s["composerRow"]["root"][2] < before - 5,
-                timeout=15,
+        # The chat is narrower, and its band has been measured at that width (the layout follows
+        # the width one frame after the band does).
+        def narrower(s: dict) -> bool:
+            row = s["composerRow"]
+            return (
+                row["root"] is not None
+                and row["band"] is not None
+                and row["root"][2] < before - 5
+                and near(row["band"][2], row["root"][2], 0.5)
             )
+
+        try:
+            chat.until(f"minimal: the chat is narrower than {before:.0f} px", narrower, timeout=15)
         except Failure:
             raise Failure(
                 f"{name} minimal: splitting stopped narrowing the chat: root {chat.read()['composerRow']['root']} "
                 f"layout {chat.read()['composerRow']['layout']}"
             ) from None
-        time.sleep(1.0)
+        # Wait for the layout to follow the width; a width still above Minimal's range never
+        # becomes minimal, so that wait is allowed to end, and the next split goes on.
+        try:
+            chat.until(
+                "minimal: the layout is minimal", lambda s: s["composerRow"]["layout"] == "minimal", timeout=4, quiet=True
+            )
+        except Failure:
+            pass
         narrowest = chat.read()["composerRow"]
         run.log(f"{name}: minimal lane: root {narrowest['root']} layout {narrowest['layout']}")
     if narrowest["layout"] != "minimal":
@@ -1441,14 +1471,17 @@ def composer_band_minimal_lane(run: Run, chat: Instance, window: str, name: str)
 
 
 def composer_band_steps(run: Run, name: str, appearance: str) -> None:
-    """The composer band in the real app against the ACP fixture, in four widths: wide (the full
+    """The composer band in the real app against the ACP fixture, in five widths: wide (the full
     row), narrow (the compact row: Fast, Thinking and the session panel moved into the overflow
     menu), floor (the narrowest a lone chat pane gets, about 320 px, where the chips may clip and send
-    must stay clear) and docked (a session panel beside the band, so the band ends at the panel).
+    must stay clear), docked (a session panel beside the band, so the band ends at the panel) and
+    minimal (the chat's own pane split down to about 209 px: the model and attach are rows of the
+    overflow menu).
     The record is `composerRow` of `surface.chat.read`; each lane asserts a width first, so a change
     to the shell's layout fails loudly instead of testing the wrong lane, and every lane asserts the
     row is one line (the band as tall as the default window's, the chips level with send)."""
     scenario = Scenario(run, name, "composer", appearance=appearance)
+    isolate_shells(scenario)
     chat = scenario.instance
     chat.start()
     chat.until("the chat has finished connecting", lambda s: s["status"] != "connecting", quiet=True)

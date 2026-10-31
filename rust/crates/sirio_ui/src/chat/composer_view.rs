@@ -547,9 +547,7 @@ impl Chat {
     }
 }
 
-use super::composer_row::{
-    BAND_COLUMN, BAND_TOP_PAD, RowLayout, overflow_popup_room, row_layout, row_width,
-};
+use super::composer_row::{BAND_COLUMN, BAND_TOP_PAD, RowLayout, row_layout, row_width};
 use super::*;
 use crate::popup::{hang_above_at, menu_card, menu_row};
 use ely_gpui_component::{
@@ -1095,15 +1093,10 @@ impl Chat {
             .then(|| self.render_context_popover(theme, Hang::Above, cx))
             .flatten();
         // A Minimal row has no model chip for the model picker to hang from, so it
-        // hangs from ⋯ too, held to the room a narrow pane leaves it.
+        // hangs from ⋯ too, as the thinking picker does.
         let minimal_model_picker = layout
             .is_minimal()
-            .then(|| {
-                let room = self.chat_width().map(|width| {
-                    px(overflow_popup_room(f32::from(width)))
-                });
-                self.render_model_picker(theme, Hang::Above, room, cx)
-            })
+            .then(|| self.render_model_picker(theme, Hang::Above, cx))
             .flatten();
 
         let composer_context_menu = self

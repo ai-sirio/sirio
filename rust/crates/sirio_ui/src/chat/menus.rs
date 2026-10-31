@@ -126,7 +126,7 @@ impl Chat {
                         .disabled(true)
                         .selectors("overflow-agent", None),
                     OverflowRow::Attach => {
-                        MenuItem::new("Attach file").selectors("overflow-attach", None)
+                        MenuItem::new("Attach image").selectors("overflow-attach", None)
                     }
                     OverflowRow::Thinking => {
                         let chosen = self.thinking_state().and_then(|state| state.chosen);

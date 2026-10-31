@@ -112,7 +112,7 @@ Fast, background tasks, Thinking, context ring.
 - With no agent configured the row holds only send (today's rule). Before models
   arrive the agent badge stands in for the model chip (today's rule, #206).
 
-**Full and compact.** The row has two layouts.
+**Full, Compact, Narrow and Minimal.** The row has four layouts.
 
 - **Full:** as above. The mode shows its icon, name and chevron. Effort shows
   bars, level and chevron.
@@ -140,23 +140,31 @@ Fast, background tasks, Thinking, context ring.
 - **Minimal** (the user's choice, 2026-10-31), whenever Narrow does not fit on
   one line (269 px on the test font, with three effort bars). The row is
   `[⋯] ······ [pill][effort][send]`:
-  - the permission pill draws its icon and dot and the effort chip its bars (or,
-    for a level with none, its label), both with no chevron, and both still open
-    their pickers; their padding is as in every layout;
+  - the permission pill draws its icon and dot and the effort chip its bars, both
+    with no chevron, and both still open their pickers; their padding is as in
+    every layout. An effort with no bars of its own draws the model's bars in
+    place of its word, in Minimal only: "Default" (the reset) all unfilled and
+    Ultracode all filled, in the accent colour, with the level's name in the
+    tooltip (the user's choice, 2026-10-31). Compact and Full keep the word. The
+    model's bars are its level count, which Ultracode shares (it is offered only
+    where `xhigh` is); a session with no levels at all has no scale to draw, and
+    its chip keeps the word;
   - the model chip, or the agent's badge, leaves the row. The model becomes the
     first row of ⋯ ("Model: <name>"); choosing it closes ⋯ and opens the model
     picker, with its search field focused, hung from ⋯ and held to the room the
     pane leaves it. With no models the row is the agent's name instead, a
     disabled row the keys skip;
-  - attach (`+`) leaves the row and becomes the second row of ⋯ ("Attach file"),
+  - attach (`+`) leaves the row and becomes the second row of ⋯ ("Attach image"),
     which runs the action the button runs; attach stays reachable through `@` in
     the field and through drag and drop (the user's choice, 2026-10-31). ⋯ is
     alone in the left group;
   - ⋯ then lists, in order, the model (or agent), attach, Fast, Thinking, the
     session panel, the task count and the context ring, ahead of Follow;
   - its measured minimum on the test font is 153 px with the five-level effort
-    the real Claude CLI offers (143 px with three levels), so 160 px, the least a
-    split pane can be (`MIN_SPLIT_PANE_SIZE`), holds every chip whole.
+    the real Claude CLI offers (143 px with three levels), whatever the current
+    effort is, so 160 px, the least a split pane can be (`MIN_SPLIT_PANE_SIZE`),
+    holds the pill and the effort chip whole. The one exception is a session
+    whose effort has no levels to draw, which keeps its word (above).
 - A slot with nothing to draw takes no room: the chips' row puts its gap between
   the chips it draws and none for an empty slot, in every layout, and the width
   estimates count the slots the render draws.
@@ -177,7 +185,7 @@ Fast, background tasks, Thinking, context ring.
   chat pane go down to 160 px (`MIN_SPLIT_PANE_SIZE`). Below the Compact fit the
   row is Narrow, which needs 269 px for its three chips (mode, model at its 56 px
   floor, effort) on the same font, so a 280 px chat holds them whole, and under
-  that the row is Minimal (below), which holds down to 160 px. The
+  that the row is Minimal (above), which holds down to 160 px. The
   thresholds are computed from the chips present, never constants: the Compact
   one is `compact_row_needed`, and Narrow gives way to Compact, as Compact to
   Full, a hysteresis step above it.

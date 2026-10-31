@@ -61,6 +61,17 @@ fn effort_steps(
         .into_any_element()
 }
 
+/// What the effort chip's bars are: how many of `total` are filled, and, for a
+/// level with no bars of its own that the Minimal row draws as bars (the reset,
+/// Ultracode), which it stands in for.
+pub(super) struct EffortBars {
+    pub filled: usize,
+    pub total: usize,
+    /// Whether these are bars the level does not have of its own: the reset's, all
+    /// unfilled, and Ultracode's, all filled.
+    pub standing_in: bool,
+}
+
 /// The Lucide icon the status pill draws for a permission mode: one per
 /// Claude mode, and a shield for any id Claude does not use, such as an ACP
 /// agent's own, so a known catalogue never leaves the pill without one.
@@ -105,6 +116,46 @@ impl Chat {
                 .map(|choice| choice.name.clone())
                 .unwrap_or_else(|| current.clone()),
         )
+    }
+
+    /// The bars the effort chip draws for the current level, or `None` for a chip
+    /// that is its word. A level on the model's scale has its own bars in every
+    /// layout. The reset and Ultracode have none, and keep their word, except in
+    /// the Minimal row (`minimal`), where a word would not fit 160px and the chip
+    /// draws the model's bars instead: the reset's all unfilled, Ultracode's all
+    /// filled (the user's choice, 2026-10-31). The render and the width estimates
+    /// ask this, so they agree on what the chip is.
+    pub(super) fn effort_chip_bars(&self, minimal: bool) -> Option<EffortBars> {
+        if let Some((filled, total)) = self.effort_bar_position() {
+            return Some(EffortBars {
+                filled,
+                total,
+                standing_in: false,
+            });
+        }
+        if !minimal {
+            return None;
+        }
+        let effort = self.effort.as_ref()?;
+        // Ultracode is offered only where `xhigh` is, so the ladder is there
+        // whenever either is; with no levels at all there is no scale to draw.
+        let total = effort_rows(&effort.choices).levels.len();
+        if total == 0 {
+            return None;
+        }
+        match effort.current_value.as_deref()? {
+            EFFORT_RESET => Some(EffortBars {
+                filled: 0,
+                total,
+                standing_in: true,
+            }),
+            EFFORT_ULTRACODE => Some(EffortBars {
+                filled: total,
+                total,
+                standing_in: true,
+            }),
+            _ => None,
+        }
     }
 
     /// Whether the effort chip is drawn: the agent reports a level and the model
@@ -202,13 +253,12 @@ impl Chat {
     /// The model picker while it is open, hung from the control the caller puts
     /// it in: the chip in a Full, Compact or Narrow row (`Hang::AboveEnd`, growing
     /// leftward from the right-aligned group) or ⋯ in a Minimal one (`Hang::Above`,
-    /// growing rightward from ⋯, which is in the left group). A `width` holds it to
-    /// the room a narrow pane leaves it; without one it is its usual width.
+    /// growing rightward from ⋯, which is in the left group). Like every popup from
+    /// ⋯ it is its usual width, and the window keeps it on screen.
     pub(super) fn render_model_picker(
         &self,
         theme: &Theme,
         hang: Hang,
-        width: Option<Pixels>,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
         if !self.model_picker_open {
@@ -283,7 +333,6 @@ impl Chat {
                         .child(Input::new(&self.model_search_field)),
                 )
             });
-        let usual = popup_width(theme, 245.0);
         Some(layer(
             "model-picker-menu",
             hang,
@@ -295,7 +344,7 @@ impl Chat {
                 .on_action(cx.listener(Self::picker_previous))
                 .on_action(cx.listener(Self::picker_next))
                 .on_action(cx.listener(Self::picker_choose))
-                .w(width.map_or(usual, |room| room.min(usual)))
+                .w(popup_width(theme, 245.0))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.model_picker_open = false;
                     cx.notify();
@@ -749,7 +798,7 @@ impl Chat {
         // leads nowhere. `flex_none` keeps it intact while the model chip
         // beside it absorbs the squeeze on a narrow pane. The row is one line
         // and goes Compact, then Narrow, instead of wrapping.
-        let effort_bars = self.effort_bar_position();
+        let effort_bars = self.effort_chip_bars(minimal);
         let effort_control = effort_label
             .filter(|_| self.effort_chip_drawn())
             .map(|label| {
@@ -770,15 +819,35 @@ impl Chat {
                     .on_click(move |_, window, cx| {
                         effort_entity.update(cx, |chat, cx| chat.toggle_effort_picker(window, cx));
                     })
-                    // Not a level (the reset, Ultracode): no bars.
-                    .children(effort_bars.map(|(filled, total)| {
-                        effort_steps(
+                    // Not a level (the reset, Ultracode): no bars of its own, so
+                    // none but in Minimal, which stands them in (below).
+                    .children(effort_bars.map(|bars| {
+                        // Ultracode's stood-in bars are the accent's, the reset's none.
+                        let accent = bars.standing_in && bars.filled > 0;
+                        let filled_step = if accent {
+                            theme.ely.accent
+                        } else {
+                            theme.ely.fg_muted
+                        };
+                        let kind = if bars.filled == 0 { "unfilled" } else { "filled" };
+                        let stood_in = bars.standing_in;
+                        let steps = effort_steps(
                             "effort-chip-bars".into(),
-                            filled,
-                            total,
-                            theme.ely.fg_muted,
+                            bars.filled,
+                            bars.total,
+                            filled_step,
                             theme.ely.fg_muted.opacity(0.3),
-                        )
+                        );
+                        if stood_in {
+                            div()
+                                .flex()
+                                .flex_none()
+                                .debug_selector(move || format!("effort-chip-bars-{kind}"))
+                                .child(steps)
+                                .into_any_element()
+                        } else {
+                            steps
+                        }
                     }))
                     // Compact drops the level's name where the bars say it;
                     // a level with no bars has only its name to show.
@@ -1014,7 +1083,7 @@ impl Chat {
 
         // Minimal has no chip to hang it from: `composer_view` hangs it from ⋯.
         let model_picker = (!minimal)
-            .then(|| self.render_model_picker(theme, Hang::AboveEnd, None, cx))
+            .then(|| self.render_model_picker(theme, Hang::AboveEnd, cx))
             .flatten();
 
         // F-CHAT-15: the session-mode picker, anchored above the status
@@ -1327,19 +1396,19 @@ pub(super) enum OverflowRow {
     /// The agent's name, as information. Only in the Minimal row, which has no
     /// badge for it, when there are no models to pick from.
     Agent,
-    /// Attach a file, which is what `+` does. Only in the Minimal row, which has no
+    /// Attach an image, which is what `+` does. Only in the Minimal row, which has no
     /// button for it.
     Attach,
-    /// Fast mode, a toggle. Only in the Compact and Narrow rows, which have no
-    /// chip for it.
+    /// Fast mode, a toggle. Only in the Compact, Narrow and Minimal rows, which have
+    /// no chip for it.
     Fast,
-    /// The thinking picker. Only in the Compact and Narrow rows.
+    /// The thinking picker. Only in the Compact, Narrow and Minimal rows.
     Thinking,
-    /// The session panel's toggle. Only in the Compact and Narrow rows.
+    /// The session panel's toggle. Only in the Compact, Narrow and Minimal rows.
     SessionPanel,
-    /// How many background tasks run. Only in the Narrow row.
+    /// How many background tasks run. Only in the Narrow and Minimal rows.
     BackgroundTasks,
-    /// The context ring's popover. Only in the Narrow row.
+    /// The context ring's popover. Only in the Narrow and Minimal rows.
     Context,
     Follow,
     NewConversation,
@@ -1442,9 +1511,10 @@ impl Chat {
             .map_or_else(|| "Context".to_string(), context_percent_label)
     }
 
-    /// Whether a row can be chosen. The two that cannot are Fast mode while the
-    /// CLI has refused it, and the task count, which only says how many tasks
-    /// run; the menu draws those rows disabled, and the keys step over them.
+    /// Whether a row can be chosen. The three that cannot are Fast mode while the
+    /// CLI has refused it, the task count, which only says how many tasks run, and
+    /// the agent's name; the menu draws those rows disabled, and the keys step over
+    /// them.
     pub(super) fn picker_row_enabled(&self, row: &PickerRow) -> bool {
         match row {
             PickerRow::Overflow(OverflowRow::BackgroundTasks | OverflowRow::Agent) => false,
