@@ -2,7 +2,7 @@
 //! content keeps to the transcript's reading column, so the field's first
 //! character sits on the transcript text's left edge.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use gpui::{Bounds, Pixels, Window};
 use sirio_theme::Theme;
@@ -118,6 +118,27 @@ pub(crate) struct RowFrame {
     /// The bounds of the clipping container the chips sit in, as its probe last
     /// measured them.
     pub chips: Cell<Option<Bounds<Pixels>>>,
+    /// The ⋯ trigger's bounds, as its probe last measured them.
+    pub overflow_button: Cell<Option<Bounds<Pixels>>>,
+    /// The Lucide name of the icon the last render drew in the permission pill;
+    /// `None` when it drew none.
+    pub mode_icon: Cell<Option<&'static str>>,
+    /// Whether the last render wrapped the pill in the bypass warning.
+    pub mode_danger: Cell<bool>,
+    /// The rows of ⋯ the last render built, while the menu is open.
+    pub menu: RefCell<Option<Vec<MenuRow>>>,
+}
+
+/// One row of ⋯ as the render built it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct MenuRow {
+    /// `fast`, `thinking`, `session-panel`, `background-tasks`, `context`,
+    /// `follow`, `new-conversation` or `history`.
+    pub id: String,
+    /// Whether a press on the row does anything.
+    pub enabled: bool,
+    /// The row's tooltip: on Fast, the reason the CLI refused it.
+    pub tooltip: Option<String>,
 }
 
 /// The composer band as the control socket reports it (`composerRow` of
@@ -141,11 +162,18 @@ pub struct ComposerSnapshot {
     /// `fast`, `thinking`, `session-panel`, `background-tasks` and `context`:
     /// what the layout moved into ⋯.
     pub overflow: Vec<&'static str>,
-    /// The Lucide name of the icon the permission pill draws; `None` without a
-    /// catalogue, where the pill is a dot.
+    /// The Lucide name of the icon the permission pill drew; `None` when it drew
+    /// none, which is without a catalogue, where the pill is a dot.
     pub mode_icon: Option<&'static str>,
-    /// Whether the pill is drawn as the bypass warning.
+    /// Whether the pill was drawn as the bypass warning.
     pub mode_danger: bool,
+    /// The ⋯ trigger.
+    pub overflow_button: Option<[f32; 4]>,
+    /// The rows ⋯ drew, in order; `None` while it is closed.
+    pub menu: Option<Vec<MenuRow>>,
+    /// The composer picker that is open: `mode`, `model`, `effort`, `thinking`,
+    /// `overflow`, `history` or `context`; `None` when none is.
+    pub picker: Option<&'static str>,
 }
 
 fn boxed(bounds: Option<Bounds<Pixels>>) -> Option<[f32; 4]> {
@@ -228,10 +256,6 @@ impl Chat {
     /// The composer band's state for the control socket.
     pub(super) fn composer_snapshot(&self) -> ComposerSnapshot {
         let frame = &self.composer_row;
-        let current_mode = self
-            .mode_catalog
-            .as_ref()
-            .map(|catalog| catalog.current_id.as_str());
         ComposerSnapshot {
             layout: match frame.layout.get() {
                 RowLayout::Full => "full",
@@ -257,9 +281,27 @@ impl Chat {
                     }
                 })
                 .collect(),
-            mode_icon: current_mode.map(|id| super::controls::mode_icon(id).name()),
-            mode_danger: current_mode == Some(super::BYPASS_PERMISSIONS_MODE),
+            mode_icon: frame.mode_icon.get(),
+            mode_danger: frame.mode_danger.get(),
+            overflow_button: boxed(frame.overflow_button.get()),
+            menu: frame.menu.borrow().clone(),
+            picker: self.open_picker_name(),
         }
+    }
+
+    /// Which composer picker is open, by the flags the render reads.
+    fn open_picker_name(&self) -> Option<&'static str> {
+        [
+            (self.mode_picker_open, "mode"),
+            (self.model_picker_open, "model"),
+            (self.effort_picker_open, "effort"),
+            (self.thinking_picker_open, "thinking"),
+            (self.overflow_open, "overflow"),
+            (self.history_open, "history"),
+            (self.context_popover_open, "context"),
+        ]
+        .into_iter()
+        .find_map(|(open, name)| open.then_some(name))
     }
 
     /// The width the Full row needs to hold every control it has, whole, on one

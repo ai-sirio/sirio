@@ -82,8 +82,12 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # chat's compact composer row at the default window (about 430 px) on the `composerRow` of
 # `surface.chat.read`: Fast, Thinking and the session panel in the overflow menu, the mode pill
 # the danger shield-off, the band spanning the chat, send inside it, the chips ending before send
-# and level with it (one line); it needs a painted chat (--display :N) and captures
-# frames/composer-compact.png.
+# and level with it (one line); then a real click on the overflow button (the measured
+# `overflowButton`) opens the menu, whose `menu` rows the render built list Fast disabled with the
+# CLI's reason as its tooltip (the stub's handshake says `preference`) and Thinking enabled, a real
+# Enter opens the thinking picker (`picker`) and Escape closes it. It needs a painted chat
+# (--display :N) and captures frames/composer-compact.png, composer-overflow.png and
+# composer-thinking.png.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the
@@ -114,7 +118,10 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # chat pane never goes under 320 px) are the compact row with send inside the band and the chips ending
 # before it, docked (the session panel open, a chat about 690 px wide) ends the band at the panel; every lane
 # also asserts the row is one line (the band as tall as the default window's, the chips level with send);
-# frames per lane.
+# frames per lane. Each then runs a narrow lane against the `ely-catalogue` fixture, which advertises
+# modes (current `ask`): `modeIcon` is what the render drew for the pill, the shield every id
+# without an icon gets, and `modeDanger` is false (the `composer` fixture, with no modes, draws none).
+# The record also carries `overflowButton`, `menu` (the rows ⋯ drew, while open) and `picker`.
 # The frame constants (FIELD_BAND, BAND_BESIDE_FIELD, COMPOSER_CLICK, POPUP_REGION) are for a 1470x833
 # window: an Xvfb screen of 1474x833 opens one.
 # --display :N (an Xvfb; export VK_DRIVER_FILES and VK_ICD_FILENAMES as lavapipe's lvp_icd.json)

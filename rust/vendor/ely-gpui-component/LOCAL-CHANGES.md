@@ -994,3 +994,14 @@ A sync with upstream must keep `scroll_x` in `x` and `grid`.
   assistant bodies already are. Upstream's flex row lets the body grow to its
   unbroken text, so a long system line ran off both sides of the centre
   instead of wrapping.
+
+### Reading a menu back (composer band)
+
+Sirio's control socket reports the rows its composer menu drew. `Menu` and `MenuItem`
+keep their fields private to the module, so a host could not read a menu it built.
+
+- `src/menus/model.rs`: `MenuItem::row_selector`, `MenuItem::is_disabled` and
+  `MenuItem::tooltip_text` return what `selectors`, `disabled` and `tooltip` set;
+  `Menu::items` walks the rows in order, without headings or separators.
+
+A sync with upstream must keep the four readers.

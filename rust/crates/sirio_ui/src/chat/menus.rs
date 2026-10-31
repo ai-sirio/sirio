@@ -2,6 +2,7 @@
 //! the transcript, and the composer's "more" menu. Rows are Ely's; whether a
 //! menu is open, where it hangs and what Escape does stay with `Chat`.
 
+use super::composer_row::MenuRow;
 use super::controls::{OverflowRow, PickerRow, background_tasks_label, popup_width};
 use super::*;
 use ely_gpui_component::menus::{Hang, Menu, MenuItem, MenuPanel, layer};
@@ -166,6 +167,20 @@ impl Chat {
     pub(super) fn render_chat_menu(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let rows = self.picker_rows(cx);
         let menu = self.overflow_menu(cx);
+        // The rows the control socket reports are the ones just built.
+        *self.composer_row.menu.borrow_mut() = Some(
+            menu.items()
+                .map(|item| {
+                    let selector = item.row_selector().map_or("", |name| name.as_ref());
+                    let id = selector.strip_prefix("overflow-").unwrap_or(selector);
+                    MenuRow {
+                        id: if id == "chat-history" { "history" } else { id }.to_string(),
+                        enabled: !item.is_disabled(),
+                        tooltip: item.tooltip_text().map(|text| text.to_string()),
+                    }
+                })
+                .collect(),
+        );
         layer(
             "composer-overflow-menu-menu",
             Hang::Above,

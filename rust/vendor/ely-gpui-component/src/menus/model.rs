@@ -123,6 +123,21 @@ impl MenuItem {
         self.note_selector = note;
         self
     }
+
+    /// The name `selectors` gave the row, kept in every build.
+    pub fn row_selector(&self) -> Option<&SharedString> {
+        self.selector.as_ref()
+    }
+
+    /// Whether the row is disabled: a press does nothing and the keys step over it.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    /// The tooltip `tooltip` gave the row.
+    pub fn tooltip_text(&self) -> Option<&SharedString> {
+        self.tooltip.as_ref()
+    }
 }
 
 #[derive(Clone)]
@@ -165,6 +180,14 @@ impl Menu {
         self.entries.push(Entry::Heading(title.into()));
         self.entries.extend(items.into_iter().map(Entry::Item));
         self
+    }
+
+    /// The rows, in order, headings and separators left out.
+    pub fn items(&self) -> impl Iterator<Item = &MenuItem> {
+        self.entries.iter().filter_map(|entry| match entry {
+            Entry::Item(item) => Some(item),
+            _ => None,
+        })
     }
 
     /// Runs row `at` as a press would, unless it is disabled or opens a submenu.

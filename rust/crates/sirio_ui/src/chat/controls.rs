@@ -446,9 +446,14 @@ impl Chat {
         } else {
             theme.ely.fg
         };
+        // What the render draws is what the control socket reports.
+        let frame = &self.composer_row;
+        frame.mode_icon.set(None);
+        frame.mode_danger.set(false);
         let mode_lead = match current_mode {
             Some(mode_id) => {
                 let icon = mode_icon(mode_id);
+                frame.mode_icon.set(Some(icon.name()));
                 let icon_selector = format!("mode-icon-{}", icon.name());
                 div()
                     .relative()
@@ -503,6 +508,7 @@ impl Chat {
         // The pill's selector is taken, so the danger fill is named on a
         // wrapper that is exactly as big as the pill.
         let status_pill = if danger {
+            frame.mode_danger.set(true);
             div()
                 .flex()
                 .flex_none()

@@ -1507,10 +1507,46 @@ def composer_band_steps(run: Run, name: str, appearance: str) -> None:
     scenario.finish()
 
 
+def composer_band_modes_steps(run: Run, name: str, appearance: str) -> None:
+    """The permission pill in a narrow chat, against the fixture that advertises modes. The
+    `composer` fixture has none, so its pill is a dot; `ely-catalogue` advertises `ask`, `plan` and
+    `auto` with `ask` current. `modeIcon` is what the render drew for the pill, so for `ask`, which
+    `mode_icon` has no entry for, it is the shield every unknown id gets, and the pill is not the
+    bypass warning. The narrow geometry holds as it does with no modes."""
+    scenario = Scenario(run, name, "ely-catalogue", appearance=appearance)
+    chat = scenario.instance
+    chat.start()
+    chat.until("the chat has finished connecting", lambda s: s["status"] != "connecting", quiet=True)
+    window = sirio_window(run, chat)
+    chat.until("the composer band is measured", lambda s: s["composerRow"]["band"] is not None)
+    chat.until(
+        "the pill draws the current mode's icon", lambda s: s["composerRow"]["modeIcon"] is not None, timeout=20
+    )
+    band_height = chat.read()["composerRow"]["band"][3]
+    narrow = composer_band_lane(run, chat, window, "narrow", 330, "narrow", lambda r: r["root"][2] <= 340)
+    row = narrow["composerRow"]
+    run.log(
+        f"{name}: narrow root {row['root']} layout {row['layout']} overflow {row['overflow']} "
+        f"modeIcon {row['modeIcon']} modeDanger {row['modeDanger']}"
+    )
+    chat.frame("narrow-modes")
+    if row["layout"] not in ("compact", "narrow"):
+        raise Failure(f"{name} narrow: expected a compact or narrow row: {row}")
+    if row["modeIcon"] != "shield":
+        raise Failure(f"{name} narrow: the pill for the mode `ask` drew {row['modeIcon']!r}, not the shield: {row}")
+    if row["modeDanger"]:
+        raise Failure(f"{name} narrow: the pill for the mode `ask` was drawn as the bypass warning: {row}")
+    band_spans_the_chat("narrow", row)
+    row_is_one_line("narrow", row, band_height)
+    send_stays_clear("narrow", row)
+    scenario.finish()
+
+
 def composer_band(run: Run) -> str | None:
     if needs_display(run, "composer_band"):
         return "skipped"
     composer_band_steps(run, "composer-band", "dark")
+    composer_band_modes_steps(run, "composer-band-modes", "dark")
     return None
 
 
@@ -1518,6 +1554,7 @@ def composer_band_light(run: Run) -> str | None:
     if needs_display(run, "composer_band_light"):
         return "skipped"
     composer_band_steps(run, "composer-band-light", "light")
+    composer_band_modes_steps(run, "composer-band-modes-light", "light")
     return None
 
 

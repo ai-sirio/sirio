@@ -97,7 +97,12 @@ set -euo pipefail
 #                      composer row (Fast, Thinking and the session panel in the overflow menu),
 #                      the mode pill the danger shield-off, the band spanning the chat, send inside
 #                      it, the chips ending before send and level with it; read on `composerRow`
-#                      of `surface.chat.read`, which exists only once a frame paints (--display :N)
+#                      of `surface.chat.read`, which exists only once a frame paints (--display :N).
+#                      Then a real click on the overflow button (its measured `overflowButton`)
+#                      opens the menu: `menu`, the rows the render built, lists Fast disabled with
+#                      the CLI's reason as its tooltip and Thinking enabled; a real Enter chooses
+#                      the first enabled row, Thinking, and `picker` is `thinking`; Escape closes it.
+#                      The stub's handshake names `preference` as the reason Fast is refused
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
@@ -611,6 +616,56 @@ elif command == "composer-compact":
     if not near(chips[1], send[1]) or not near(chips[3], send[3]):
         fail("the chips and send are not one line")
     print("OK: the chips and send share one line")
+elif command == "composer-overflow-xy":
+    # composer-overflow-xy SURFACE SECONDS: wait for the measured trigger of the overflow menu and
+    # print the window pixel at its centre as "x y".
+    surface, seconds = sys.argv[2], float(sys.argv[3])
+    deadline = time.time() + seconds
+    while True:
+        try:
+            box = state(surface)[1]["composerRow"].get("overflowButton")
+            if box:
+                print(f"{round(box[0] + box[2] / 2)} {round(box[1] + box[3] / 2)}")
+                break
+        except Exception as e:  # a read that fails is tried again until the time is up
+            print(f"  read failed: {e}", file=sys.stderr)
+        if time.time() > deadline:
+            print("FAIL: composer-overflow-xy: the overflow trigger was never measured", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+elif command == "composer-menu":
+    # composer-menu SURFACE SECONDS REASON: wait for the overflow menu the compact row opens
+    # (`picker` is `overflow` and `menu` the rows its render built), and assert them: Fast is
+    # there, disabled, with REASON as its tooltip; Thinking is there and enabled.
+    surface, seconds, reason = sys.argv[2], float(sys.argv[3]), sys.argv[4]
+    deadline = time.time() + seconds
+    row = None
+    while True:
+        try:
+            row = state(surface)[1]["composerRow"]
+            if row.get("picker") == "overflow" and row.get("menu"):
+                break
+        except Exception as e:  # a read that fails is tried again until the time is up
+            print(f"  read failed: {e}", file=sys.stderr)
+        if time.time() > deadline:
+            print(f"FAIL: composer-menu: the overflow menu was not drawn within {seconds:.0f} s: {json.dumps(row)}", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+    print("  composerRow: " + json.dumps(row, separators=(",", ":")), file=sys.stderr)
+    rows = {r["id"]: r for r in row["menu"]}
+
+    def fail(why):
+        print(f"FAIL: composer-menu: {why}: {json.dumps(row['menu'])}", file=sys.stderr)
+        sys.exit(1)
+
+    fast, thinking = rows.get("fast"), rows.get("thinking")
+    if fast is None or fast["enabled"] is not False or fast["tooltip"] != reason:
+        fail(f"Fast is not a disabled row whose tooltip is '{reason}'")
+    print(f"OK: the menu lists Fast, disabled, with its reason '{reason}'")
+    if thinking is None or thinking["enabled"] is not True:
+        fail("Thinking is not an enabled row")
+    print("OK: the menu lists Thinking, enabled")
+    print("OK: the rows are " + ", ".join(r["id"] for r in row["menu"]))
 elif command == "check":
     # check SURFACE DESC EXPR: one read, no waiting.
     surface, desc, expr = sys.argv[2], sys.argv[3], sys.argv[4]
@@ -1602,6 +1657,22 @@ press_key() { # key
   DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool key "$1" || fail "xdotool could not press $1"
   sleep 1
 }
+# The screen pixel of the app's window's top-left corner: the control socket reports window pixels.
+window_origin() { # prints "X Y"
+  local window
+  window=$(find_window)
+  [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID"
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xwininfo -id "$window" | awk '/Absolute upper-left X/ {x=$NF} /Absolute upper-left Y/ {y=$NF} END {print x, y}'
+}
+# A click at a window pixel ("X Y"), as the socket reports one.
+click_at_window() { # "x y"
+  local origin x y
+  origin=$(window_origin)
+  x=$(( ${1% *} + ${origin% *} ))
+  y=$(( ${1#* } + ${origin#* } ))
+  echo "  click: window pixel $1 is screen pixel $x $y" >&2
+  click_at "$x" "$y"
+}
 scenario_trace_keys() {
   trace_chat trace_keys 30
   send_prompt subagents
@@ -1976,6 +2047,20 @@ scenario_composer_compact() {
   wait_panel "the turn completed, so the model controls show" 'c["status"] == "completed"' 30
   E2E composer-compact "$SURFACE" 30 || fail "the compact composer row is not what the spec draws"
   capture composer-compact
+
+  echo "step: a real click on the overflow button opens the menu: Fast with its reason, Thinking"
+  click_at_window "$(E2E composer-overflow-xy "$SURFACE" 15)"
+  E2E composer-menu "$SURFACE" 15 preference || fail "the overflow menu is not what the spec draws"
+  capture composer-overflow
+
+  echo "step: a real Enter chooses the first enabled row, Thinking (Fast is blocked), and opens its picker"
+  press_key Return
+  wait_panel "Enter on the menu's marked row opened the thinking picker" 'c["composerRow"]["picker"] == "thinking"' 10
+  capture composer-thinking
+
+  echo "step: a real Escape closes the picker"
+  press_key Escape
+  wait_panel "Escape closed the thinking picker" 'c["composerRow"]["picker"] is None and c["composerRow"]["menu"] is None' 10
   stop_app
 }
 

@@ -23,7 +23,10 @@ REFUSE_RECONNECT = MODE == "session_panel_refuse"
 STARTS_AFTER = {"session_panel_starting": 2, "session_panel_pending": None}.get(MODE, 0)
 # `session_panel_bypass` is `session_panel` with the CLI started in
 # `bypassPermissions`: its init and its handshake both say so, which is what
-# draws the chat's mode pill as the danger shield.
+# draws the chat's mode pill as the danger shield. Its handshake also names a
+# reason fast mode cannot be used (`preference`, one of the CLI's own codes, where
+# every other mode says `sdk_opt_in_required`, which Sirio does not show as one),
+# so the composer menu's blocked Fast row has a reason to carry.
 START_BYPASS = MODE == "session_panel_bypass"
 if REFUSE_RECONNECT or MODE in ("session_panel_starting", "session_panel_pending", "session_panel_bypass"):
     MODE = "session_panel"
@@ -107,7 +110,7 @@ def initialize_payload():
         "available_output_styles": ["default"],
         "current_permission_mode": "bypassPermissions" if START_BYPASS else "default",
         "fast_mode_state": "off",
-        "fast_mode_disabled_reason": "sdk_opt_in_required",
+        "fast_mode_disabled_reason": "preference" if START_BYPASS else "sdk_opt_in_required",
         "account": account,
         "hooks_applied": True,
     }

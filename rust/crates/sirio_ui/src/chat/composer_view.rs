@@ -1009,9 +1009,20 @@ impl Chat {
                     }),
             );
 
+        let overflow_frame = self.composer_row.clone();
         let overflow_button = div()
+            .relative()
             .flex_none()
             .debug_selector(|| "composer-overflow".into())
+            // Measures the trigger; paints nothing.
+            .child(
+                canvas(
+                    move |bounds, _, _| overflow_frame.overflow_button.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
             .child(
                 IconButton::new("composer-overflow-button", IconName::Ellipsis)
                     .variant(ButtonVariant::Ghost)
@@ -1062,6 +1073,9 @@ impl Chat {
         // not carry inline. Built after the layout is known, because a Compact
         // row hands Fast, Thinking and the panel toggle to this menu.
         let overflow_menu = self.overflow_open.then(|| self.render_chat_menu(theme, cx));
+        if overflow_menu.is_none() {
+            *self.composer_row.menu.borrow_mut() = None;
+        }
         // The thinking picker hangs from ⋯ in a Compact row, which has no chip
         // for it (the Full row's chip hangs its own). ⋯ is in the left group, so
         // the picker grows rightward into the chat.
