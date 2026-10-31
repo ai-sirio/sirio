@@ -261,8 +261,10 @@ Fast and Thinking exist only on Claude's native transport (`AgentClient::fast_mo
 and `thinking_display` return `None` for ACP), and this script runs the ACP
 fixture. So their ⋯ rows are proven on the native-Claude stub that
 `Scripts/Tests/test-chat-session-panel-e2e.sh` already drives
-(`sirio_acp/tests/fixtures/claude_fixture.py`, which reports Fast as blocked,
-`sdk_opt_in_required`): in a narrow chat, ⋯ lists Fast with its blocked reason and
+(`sirio_acp/tests/fixtures/claude_fixture.py`; its default handshake says
+`sdk_opt_in_required`, which Sirio rightly reads as the opt-in state rather than a
+block, so the Bypass lane's handshake names a real reason, `preference`): in a
+narrow chat, ⋯ lists Fast with its blocked reason and
 Thinking opens its picker. The same narrow lane switches to Bypass permissions
 (the bypass confirmation answered) and asserts that the compact chip draws
 `shield-off` in the danger colour. Whether that is a scenario in that script or a
@@ -320,6 +322,13 @@ owed before release and listed in the PR.
 12. ACP agents' own modes all get the plain `shield`, even one as permissive as
    Bypass. Mapping other agents' mode ids to icons is a follow-up.
 13. Without a mode catalogue the pill keeps today's dot and state word.
+14. **Open, for the user (2026-10-31).** Below the Narrow fit (269 px on the test
+   font) and down to the 160 px a split pane allows, the clip cuts the effort
+   chip and then the model chip, and neither has a row in ⋯. That breaks §1's
+   first anti-goal, which this design does not waive. Either Narrow's pattern
+   extends one step (model and effort become ⋯ rows below the Narrow fit, their
+   pickers hanging from ⋯ as Thinking and Context already do), or the user names
+   a floor below which the row is allowed to cut them.
 
 **Left to the builder:** exact paddings, how the threshold is computed, the shape
 of the Ely API, the ⋯ rows' and mode icon's selectors, the icons for Fast and
