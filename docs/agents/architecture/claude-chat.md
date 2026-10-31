@@ -43,7 +43,9 @@ agents get a total-only Context. The debug-only `surface.chat.panel`
 (`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>`) drives
 it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
 JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` asserts on.
-`surface.chat.read` also reports `firstVisibleEntry` and `lastVisibleEntry`, the first and last
+`surface.chat.read` also carries `composerRow`, the composer band as a JSON string (`layout` `full` or
+`compact`, the `band`, `root`, `send` and `chips` boxes as `[x, y, w, h]`, `docked`, `overflow`, `modeIcon`,
+`modeDanger`; not `composer`, which is the draft's text), and reports `firstVisibleEntry` and `lastVisibleEntry`, the first and last
 transcript rows the list drew, so a reveal reads as the row being between them: a row that is
 the transcript's last cannot reach the top of a list that fills its pane, and unpainted nothing is
 drawn, so the two are equal.

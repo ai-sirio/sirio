@@ -175,7 +175,9 @@ impl Chat {
                     OverflowRow::Fast => Some("fast"),
                     OverflowRow::Thinking => Some("thinking"),
                     OverflowRow::SessionPanel => Some("session-panel"),
-                    _ => None,
+                    OverflowRow::Follow | OverflowRow::NewConversation | OverflowRow::History => {
+                        None
+                    }
                 })
                 .collect(),
             mode_icon: current_mode.map(|id| super::controls::mode_icon(id).name()),

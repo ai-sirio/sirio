@@ -85,12 +85,13 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # effort list opens and takes a pick through the debug-only `surface.chat.effort`; they capture it.
 # effort_full and effort_full_light run the fixture's effort-full mode (Default, five levels,
 # Ultracode), capture the whole list (the notes, the separator) and choose Default from it.
-# Three scenarios, and the two composer_band ones below, need a display and are skipped under --state-only (`SKIP <name>: needs a
+# Five scenarios need a display (composer_keys, reduced_motion and unfocused_spinner below, and the two
+# composer_band ones after them) and are skipped under --state-only (`SKIP <name>: needs a
 # display`, recorded as `skipped` in summary.json): composer_keys types through xdotool (Return,
 # Shift+Return, Up and Down moving the caret, the slash popup taken with Down and Tab, closed by
 # Escape, proved by a frame diff of its box against the frame before the `/`; and the composer's
 # field paints nothing of its own (`composer_field_has_no_fill`: in the empty draft's frame every
-# pixel of a band across the field is the card's colour, for the default 1470x833 window); its
+# pixel of a band across the field is the band's colour, for the default 1470x833 window); its
 # fixture is `composer`, because `plain` advertises no slash commands) and reduced_motion
 # (SIRIO_REDUCED_MOTION=1: the transcript is pixel-identical in three frames 250 ms apart) and
 # unfocused_spinner (a second window, `surfaces_probe --frame tooltip`, takes the X focus, and the
@@ -104,7 +105,9 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # real app on the `composer` fixture, from `composerRow` of `surface.chat.read` (layout, the band's, send's
 # and the chips' boxes, the chat root's, docked, overflow): wide is the full row, narrow and floor (a lone
 # chat pane never goes under 320 px) are the compact row with send inside the band and the chips ending
-# before it, docked (the session panel open, a 640-700 px chat) ends the band at the panel; frames per lane.
+# before it, docked (the session panel open, a chat about 690 px wide) ends the band at the panel; every lane
+# also asserts the row is one line (the band as tall as the default window's, the chips level with send);
+# frames per lane.
 # The frame constants (FIELD_BAND, BAND_BESIDE_FIELD, COMPOSER_CLICK, POPUP_REGION) are for a 1470x833
 # window: an Xvfb screen of 1474x833 opens one.
 # --display :N (an Xvfb; export VK_DRIVER_FILES and VK_ICD_FILENAMES as lavapipe's lvp_icd.json)
