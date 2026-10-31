@@ -24652,8 +24652,16 @@ impl SirioWorkspace {
         self.open_settings(None, cx);
     }
 
+    /// The pane-close banner, End All and the Set Title prompt hold the
+    /// keyboard until they are answered; nothing may open over them.
+    fn root_modal_open(&self) -> bool {
+        self.pending_pane_close.is_some()
+            || self.pending_end_all.is_some()
+            || self.pending_title_prompt.is_some()
+    }
+
     fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette_open {
+        if self.palette_open || self.root_modal_open() {
             return;
         }
         self.palette_previous_focus = window.focused(cx);
@@ -36208,6 +36216,104 @@ done
         assert!(
             palette.left() < center.left(),
             "the command palette must extend beyond the overflow-hidden center panel"
+        );
+    }
+
+    /// The pane-close banner and the Set Title prompt hold the keyboard until
+    /// answered, but ctrl-shift-p is intercepted before any focus handler, so
+    /// the palette used to open over them and run commands while a close was
+    /// still waiting. (End All needs a host connection and is not driven here.)
+    #[gpui::test]
+    async fn command_palette_does_not_open_over_a_root_modal(cx: &mut TestAppContext) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("palette-modal");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let palette_open = |workspace: &Entity<SirioWorkspace>, cx: &VisualTestContext| {
+            workspace.read_with(&cx.cx, |workspace, _| workspace.palette_open)
+        };
+
+        let focus = palette_test_terminal_focus(&workspace, &cx);
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+
+        // The pane-close banner.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.request_close_terminal_at(0, 0, None, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_some(),
+            "the close banner is up before the chord"
+        );
+        cx.simulate_keystrokes("ctrl-shift-p");
+        cx.run_until_parked();
+        assert!(
+            !palette_open(&workspace, &cx) && cx.debug_bounds("command-palette").is_none(),
+            "the palette must not open over a close that is waiting for an answer"
+        );
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_some(),
+            "the close banner is still waiting for its answer"
+        );
+        let cancel = cx
+            .debug_bounds("pane-close-confirm-cancel")
+            .expect("the held close offers a cancel");
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_none(),
+            "cancelling releases the held close"
+        );
+
+        // The Set Title prompt.
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.set_terminal_title(0, 0, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("set-title-prompt").is_some(),
+            "the Set Title prompt is up before the chord"
+        );
+        cx.simulate_keystrokes("ctrl-shift-p");
+        cx.run_until_parked();
+        assert!(
+            !palette_open(&workspace, &cx) && cx.debug_bounds("command-palette").is_none(),
+            "the palette must not open over the Set Title prompt"
+        );
+        assert!(
+            cx.debug_bounds("set-title-prompt").is_some(),
+            "the Set Title prompt is still waiting for its answer"
+        );
+        let cancel = cx
+            .debug_bounds("set-title-prompt-cancel")
+            .expect("the Set Title prompt offers a cancel");
+        cx.simulate_click(cancel.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("set-title-prompt").is_none(),
+            "cancelling dismisses the Set Title prompt"
+        );
+
+        // Control: with no modal up the same chord opens the palette, so the
+        // negative assertions above are not vacuous.
+        let focus = palette_test_terminal_focus(&workspace, &cx);
+        cx.update(|window, app| focus.focus(window, app));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-shift-p");
+        cx.run_until_parked();
+        assert!(
+            palette_open(&workspace, &cx) && cx.debug_bounds("command-palette").is_some(),
+            "with no modal up the chord reaches the interceptor and opens the palette"
         );
     }
 
