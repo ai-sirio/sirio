@@ -120,6 +120,9 @@ physical Wayland session and native macOS/Windows input are unverified.
   its content in a centred column at most `column` wide; the tool row never wraps: `tools` stay at
   the start in a group that does not shrink, a flexible gap follows, and `trailing` and send form a
   group at the end that may shrink (send keeps its size). Without `.band(..)` nothing above changes.
+  `.send_probe(f)` calls `f` with the send control's bounds at each paint of the band row (a
+  canvas over the control, painting nothing), because `debug_selector` is a no-op in a release
+  build and the control socket reads the composer's geometry there; unset, nothing changes.
   `.trailing` puts tools at the end of the row, next
   to the send control. `SendButton` carries `send`, `send-ready` and
   `stop-glyph` debug selectors, and `PromptInput`'s card `ely-prompt-input`

@@ -7,6 +7,7 @@ use std::cell::Cell;
 use gpui::{Bounds, Pixels, Window};
 use sirio_theme::Theme;
 
+use super::controls::OverflowRow;
 use super::session_panel::COLUMN_WIDTH;
 use super::{Chat, TRANSCRIPT_WIDTH};
 
@@ -84,6 +85,49 @@ pub(crate) struct RowFrame {
     pub root: Cell<Option<Bounds<Pixels>>>,
     /// The band's own bounds, as its probe last measured them.
     pub band: Cell<Option<Bounds<Pixels>>>,
+    /// The send control's bounds, as the band's send probe last measured them.
+    pub send: Cell<Option<Bounds<Pixels>>>,
+    /// The bounds of the clipping container the chips sit in, as its probe last
+    /// measured them.
+    pub chips: Cell<Option<Bounds<Pixels>>>,
+}
+
+/// The composer band as the control socket reports it (`composerRow` of
+/// `surface.chat.read`): which layout the row took, where the band and its
+/// parts were last laid out and what the layout moved into ⋯. Boxes are
+/// `[x, y, width, height]` in window pixels.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposerSnapshot {
+    /// `full` or `compact`.
+    pub layout: &'static str,
+    pub band: Option<[f32; 4]>,
+    /// The chat root, whose width the layout is decided from.
+    pub root: Option<[f32; 4]>,
+    /// The send control.
+    pub send: Option<[f32; 4]>,
+    /// The chips' clipping container.
+    pub chips: Option<[f32; 4]>,
+    /// Whether the session panel is docked beside the band.
+    pub docked: bool,
+    /// `fast`, `thinking` and `session-panel`: what the layout moved into ⋯.
+    pub overflow: Vec<&'static str>,
+    /// The Lucide name of the icon the permission pill draws; `None` without a
+    /// catalogue, where the pill is a dot.
+    pub mode_icon: Option<&'static str>,
+    /// Whether the pill is drawn as the bypass warning.
+    pub mode_danger: bool,
+}
+
+fn boxed(bounds: Option<Bounds<Pixels>>) -> Option<[f32; 4]> {
+    bounds.map(|b| {
+        [
+            b.origin.x.into(),
+            b.origin.y.into(),
+            b.size.width.into(),
+            b.size.height.into(),
+        ]
+    })
 }
 
 /// The control tool group's width: three 24px icon buttons and their 4px gaps.
@@ -107,6 +151,38 @@ const SEND_WIDTH: f32 = 24.0;
 const CHIP_SLOTS: f32 = 7.0;
 
 impl Chat {
+    /// The composer band's state for the control socket.
+    pub(super) fn composer_snapshot(&self) -> ComposerSnapshot {
+        let frame = &self.composer_row;
+        let current_mode = self
+            .mode_catalog
+            .as_ref()
+            .map(|catalog| catalog.current_id.as_str());
+        ComposerSnapshot {
+            layout: match frame.layout.get() {
+                RowLayout::Full => "full",
+                RowLayout::Compact => "compact",
+            },
+            band: boxed(frame.band.get()),
+            root: boxed(frame.root.get()),
+            send: boxed(frame.send.get()),
+            chips: boxed(frame.chips.get()),
+            docked: frame.docked.get(),
+            overflow: self
+                .overflowed_rows()
+                .into_iter()
+                .filter_map(|row| match row {
+                    OverflowRow::Fast => Some("fast"),
+                    OverflowRow::Thinking => Some("thinking"),
+                    OverflowRow::SessionPanel => Some("session-panel"),
+                    _ => None,
+                })
+                .collect(),
+            mode_icon: current_mode.map(|id| super::controls::mode_icon(id).name()),
+            mode_danger: current_mode == Some(super::BYPASS_PERMISSIONS_MODE),
+        }
+    }
+
     /// The width the Full row needs to hold every control it has, whole, on one
     /// line: the tools, the least gap between them and the chips, the chips
     /// (each text measured in the UI font at its own size, plus its padding,

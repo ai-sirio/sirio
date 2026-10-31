@@ -1125,13 +1125,24 @@ impl Chat {
         // The chips clip: on a pane too narrow for all of them the rightmost
         // are cut at this element's edge, and send, which the band keeps after
         // it, is never covered.
+        let chips_frame = self.composer_row.clone();
         div()
             .debug_selector(|| "composer-chips".into())
+            .relative()
             .flex()
             .items_center()
             .gap_1()
             .min_w_0()
             .overflow_hidden()
+            // Measures the container; paints nothing.
+            .child(
+                canvas(
+                    move |bounds, _, _| chips_frame.chips.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
             .child(
                 div()
                     .relative()

@@ -1,9 +1,9 @@
 use std::{path::PathBuf, rc::Rc};
 
 use gpui::{
-    AnyElement, App, ElementId, Entity, ExternalPaths, InteractiveElement, IntoElement,
-    ParentElement, PathPromptOptions, Pixels, RenderOnce, SharedString, Styled, Window, div,
-    prelude::*, px,
+    AnyElement, App, Bounds, ElementId, Entity, ExternalPaths, InteractiveElement, IntoElement,
+    ParentElement, PathPromptOptions, Pixels, RenderOnce, SharedString, Styled, Window, canvas,
+    div, prelude::*, px,
 };
 use smallvec::SmallVec;
 
@@ -19,6 +19,7 @@ use crate::{
 };
 
 type OnPaths = Rc<dyn Fn(Vec<PathBuf>, &mut Window, &mut App)>;
+type OnBounds = Rc<dyn Fn(Bounds<Pixels>)>;
 
 /// Opens the system's file dialog to attach files; `on_pick` gets what was chosen.
 #[derive(IntoElement)]
@@ -323,6 +324,8 @@ pub struct PromptInput {
     on_drop: Option<OnPaths>,
     /// The band look of [`Self::band`]: the content column's widest.
     band: Option<Pixels>,
+    /// Told where the band's send control was laid out (see [`Self::send_probe`]).
+    send_probe: Option<OnBounds>,
 }
 
 impl PromptInput {
@@ -347,6 +350,7 @@ impl PromptInput {
             context: (Vec::new(), None),
             on_drop: None,
             band: None,
+            send_probe: None,
         }
     }
 
@@ -377,6 +381,7 @@ impl PromptInput {
             context: (Vec::new(), None),
             on_drop: None,
             band: None,
+            send_probe: None,
         }
     }
 
@@ -390,6 +395,15 @@ impl PromptInput {
     /// Without a host editor this does nothing.
     pub fn band(mut self, column: Pixels) -> Self {
         self.band = Some(column);
+        self
+    }
+
+    /// Calls `probe` with the send control's bounds at each paint of the
+    /// [`Self::band`] row, so a host can tell where it lies (a release build
+    /// has no debug selectors to read). Paints nothing; without the band this
+    /// does nothing.
+    pub fn send_probe(mut self, probe: impl Fn(Bounds<Pixels>) + 'static) -> Self {
+        self.send_probe = Some(Rc::new(probe));
         self
     }
 
@@ -516,9 +530,16 @@ impl RenderOnce for PromptInput {
         let end = if band.is_some() {
             // The band's end group may shrink (its chips ellipsize or give way
             // inside it) while send keeps its size and its place at the end.
-            end.min_w_0()
-                .justify_end()
-                .child(div().flex_none().child(button))
+            let send = div().flex_none().relative().child(button);
+            let send = match self.send_probe {
+                Some(probe) => send.child(
+                    canvas(move |bounds, _, _| probe(bounds), |_, _, _, _| {})
+                        .absolute()
+                        .inset_0(),
+                ),
+                None => send,
+            };
+            end.min_w_0().justify_end().child(send)
         } else {
             end.flex_none().child(button)
         };

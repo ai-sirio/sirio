@@ -1154,11 +1154,13 @@ impl Chat {
             });
 
         let row_frame = self.composer_row.clone();
+        let send_frame = self.composer_row.clone();
         let streaming = self.streaming;
         let mut prompt = PromptInput::custom("composer-shell", editor, can_send, move |_, cx| {
             send_entity.update(cx, |chat, cx| chat.send(cx));
         })
-        .band(px(BAND_COLUMN));
+        .band(px(BAND_COLUMN))
+        .send_probe(move |bounds| send_frame.send.set(Some(bounds)));
         if streaming {
             // While a turn runs the send control is stop: the same path Escape
             // takes, and it leaves the draft alone.
@@ -1214,7 +1216,7 @@ impl Chat {
                             |_, _, _, _| {},
                         )
                         .absolute()
-                        .size_full(),
+                        .inset_0(),
                     ),
             )
             .into_any_element()

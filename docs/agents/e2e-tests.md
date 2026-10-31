@@ -85,7 +85,7 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # effort list opens and takes a pick through the debug-only `surface.chat.effort`; they capture it.
 # effort_full and effort_full_light run the fixture's effort-full mode (Default, five levels,
 # Ultracode), capture the whole list (the notes, the separator) and choose Default from it.
-# Three scenarios need a display and are skipped under --state-only (`SKIP <name>: needs a
+# Three scenarios, and the two composer_band ones below, need a display and are skipped under --state-only (`SKIP <name>: needs a
 # display`, recorded as `skipped` in summary.json): composer_keys types through xdotool (Return,
 # Shift+Return, Up and Down moving the caret, the slash popup taken with Down and Tab, closed by
 # Escape, proved by a frame diff of its box against the frame before the `/`; and the composer's
@@ -100,6 +100,13 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # surfaces_probe example, built with the others unless --no-build; the CPU base and the ceiling
 # formula `base × 1.25 + 1` are in docs/testing/bezel-off.md, "The unfocused spinner and its CPU
 # base").
+# composer_band and composer_band_light (dark and light, also display-only) prove the composer band in the
+# real app on the `composer` fixture, from `composerRow` of `surface.chat.read` (layout, the band's, send's
+# and the chips' boxes, the chat root's, docked, overflow): wide is the full row, narrow and floor (a lone
+# chat pane never goes under 320 px) are the compact row with send inside the band and the chips ending
+# before it, docked (the session panel open, a 640-700 px chat) ends the band at the panel; frames per lane.
+# The frame constants (FIELD_BAND, BAND_BESIDE_FIELD, COMPOSER_CLICK, POPUP_REGION) are for a 1470x833
+# window: an Xvfb screen of 1474x833 opens one.
 # --display :N (an Xvfb; export VK_DRIVER_FILES and VK_ICD_FILENAMES as lavapipe's lvp_icd.json)
 # takes the captures, --state-only omits them,
 # --only NAME[,NAME] runs some scenarios, --out-dir DIR keeps the artifact.

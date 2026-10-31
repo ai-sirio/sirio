@@ -61,6 +61,7 @@ pub mod trace;
 mod transcript;
 mod turn_rail;
 use ely_gpui_component::forms::{InputEvent, TextInput};
+pub use composer_row::ComposerSnapshot;
 pub use session_panel::{
     RowSnapshot, SectionSnapshot, SessionPanelAction, SessionPanelSnapshot,
 };
@@ -1065,6 +1066,9 @@ pub struct ChatControlSnapshot {
     /// The session panel's column: whether it is open, whether it is drawn
     /// at this width, and each section's rows.
     pub session_panel: SessionPanelSnapshot,
+    /// The composer band: its layout, where it and its parts were laid out,
+    /// what the layout moved into the overflow menu and the permission icon.
+    pub composer: ComposerSnapshot,
     /// The transcript row at the top of the list: where a reveal landed.
     pub first_visible_entry: usize,
     /// The last transcript row the list drew, from what it laid out. A row that is the
@@ -4014,6 +4018,7 @@ impl Chat {
             queued: self.queue.iter().cloned().collect(),
             transcript: self.entries.iter().map(control_entry_row).collect(),
             session_panel: self.session_panel_snapshot(),
+            composer: self.composer_snapshot(),
             first_visible_entry: self.list_state.logical_scroll_top().item_ix,
             last_visible_entry: self.last_visible_entry(),
             transcript_links: self.transcript_links.borrow().clone(),

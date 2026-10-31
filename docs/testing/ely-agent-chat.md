@@ -91,6 +91,8 @@ without guessing the request handle. The `plan` row now carries `id` and
 | `effort_light` | the same, in the light theme | the list, Low |
 | `effort_full` | on the fixture's `effort-full` mode the chat settles on High; the whole ladder (Default, Low, Medium, High, Extra high, Max, Ultracode) is drawn; choosing Default reaches the agent | the full list, Default in force |
 | `effort_full_light` | the same, in the light theme | the full list, Default |
+| `composer_band` | needs a display. On the `composer` fixture the composer is a band across the chat's width, read as `composerRow` of `surface.chat.read`: wide (chat 1000 px or more) is the full row with nothing in the overflow menu; narrow (340 px or less) and the floor (the narrowest a lone chat pane gets, about 320 px) are the compact row with the session panel's toggle moved into the menu; docked (a session panel open beside a 640-700 px chat) is a compact row ending 300 px short of the chat's right edge. Each lane asserts the band spans the chat (less the panel) and ends on its bottom; the narrow lanes assert send lies inside the band and the chips' clipping container ends before send and inside the band; a return to the default window brings the full row back | default, wide, narrow, floor, docked |
+| `composer_band_light` | the same, in the light theme | the same |
 
 Then the identity lane: the five agents (Claude Code, Codex, OpenCode, Pi,
 Oh-My-Pi) × dark/light, as the probe with `ELY_PROBE_AGENT`.
