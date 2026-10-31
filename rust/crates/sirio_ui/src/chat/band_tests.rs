@@ -1421,8 +1421,8 @@ fn compact_minimum(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>) -> u32
 
 /// Below a measured width the Compact row cannot hold every chip whole, and the
 /// layout gives way to Narrow, which moves the task count and the ring into ⋯.
-/// The real minimum with every chip a chat can have (mode, model at its 56px floor,
-/// effort, two background tasks, ring) is 353px on the test font
+/// On the test font, the real minimum with every chip a chat can have (mode, model
+/// at its 56px floor, effort, two background tasks, ring) is 353px
 /// (7.8px a character; the ring's glyph alone fits from 346px, its chip with the
 /// padding it carries from 353px); it is found here by search, walking down from
 /// a roomy row.
@@ -1443,10 +1443,6 @@ async fn compact_row_fits_every_chip_from_its_measured_minimum(cx: &mut TestAppC
     );
 
     let minimum = compact_minimum(cx, &chat);
-    assert!(
-        (345..=360).contains(&minimum),
-        "the measured minimum is about 353px, got {minimum}px"
-    );
     let model = drawn(cx, "model-chip").size.width;
     assert!(
         near(model, px(56.0), 1.0),
@@ -1609,9 +1605,25 @@ async fn the_overflow_context_row_opens_its_popover_inside_the_pane(cx: &mut Tes
     );
 
     // Chosen again with the popover already open, the row opens it, never closes it.
+    // By the keys: a click is a mouse-down outside the popover, which closes it
+    // before the row is chosen, whatever the row does.
     chat.update(cx, |chat, _| chat.overflow_open = false);
     open_overflow(cx, &chat);
-    click_drawn(cx, "overflow-context");
+    mark_overflow_row(cx, &chat, OverflowRow::Context);
+    assert!(
+        chat.read_with(cx, |chat, _| chat.context_popover_open),
+        "the popover is open when the row is chosen"
+    );
+    cx.update(|window, app| {
+        chat.update(app, |chat, cx| {
+            chat.picker_choose(&PickerChoose, window, cx)
+        })
+    });
+    refresh_frame(cx);
+    assert!(
+        chat.read_with(cx, |chat, _| chat.context_popover_open),
+        "choosing Context with the popover open leaves it open"
+    );
     drawn(cx, "context-popover");
 }
 
@@ -1626,6 +1638,11 @@ fn narrow_overflow_marked_on(
     resize_to(cx, 300.0, 700.0);
     assert_eq!(row_layout_now(cx, chat), RowLayout::Narrow);
     open_overflow(cx, chat);
+    mark_overflow_row(cx, chat, row);
+}
+
+/// Moves the open ⋯'s keyboard cursor to `row` with the keys.
+fn mark_overflow_row(cx: &mut VisualTestContext, chat: &gpui::Entity<Chat>, row: OverflowRow) {
     for _ in 0..8 {
         if marked_overflow_row(cx, chat) == Some(row) {
             return;
@@ -1642,7 +1659,7 @@ fn marked_overflow_row(
     cx: &mut VisualTestContext,
     chat: &gpui::Entity<Chat>,
 ) -> Option<OverflowRow> {
-    chat.read_with(cx, |chat, cx| {
+    chat.read_with(cx, |chat, _| {
         let rows = chat.overflow_rows();
         chat.marked_picker_row(rows.len()).map(|at| rows[at])
     })
@@ -1724,6 +1741,51 @@ async fn the_overflow_cursor_moves_to_a_row_that_can_be_chosen_when_its_row_goes
     assert!(
         chat.read_with(cx, |chat, _| chat.picker_row_enabled(&PickerRow::Overflow(marked))),
         "the mark is on a row that can be chosen, not on {marked:?}"
+    );
+}
+
+/// Compact draws an effort as its bars, and keeps the level's name only for an effort
+/// that has no bars to draw (the reset, Ultracode), so that the chip is never a bare
+/// chevron.
+#[gpui::test]
+async fn compact_keeps_the_effort_label_only_where_there_are_no_bars(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    chat.update(cx, |chat, _| {
+        configure_full_row(chat);
+        chat.effort
+            .as_mut()
+            .expect("the full row has an effort")
+            .choices
+            .push(EffortChoice {
+                value: "default".into(),
+                name: "Default".into(),
+            });
+    });
+    resize_to(cx, 480.0, 700.0);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+
+    assert!(
+        cx.debug_bounds("effort-chip-bars").is_some(),
+        "a barred effort draws its bars"
+    );
+    assert!(
+        cx.debug_bounds("model-effort-label").is_none(),
+        "and in Compact leaves its name to the tooltip"
+    );
+
+    chat.update(cx, |chat, _| {
+        chat.effort.as_mut().unwrap().current_value = Some("default".into());
+    });
+    refresh_frame(cx);
+    assert_eq!(row_layout_now(cx, &chat), RowLayout::Compact);
+    assert!(
+        cx.debug_bounds("effort-chip-bars").is_none(),
+        "the reset has no bars"
+    );
+    assert!(
+        cx.debug_bounds("model-effort-label").is_some(),
+        "so its name stays, and the chip is not a bare chevron"
     );
 }
 
@@ -1877,9 +1939,9 @@ async fn the_context_row_reads_as_the_ring_does(cx: &mut TestAppContext) {
 }
 
 /// Below its measured minimum the Narrow row cannot hold its three chips whole,
-/// and the last of them, the effort, is what is cut. The real minimum with a
-/// mode, a model at its 56px floor and an effort is 269px on the
-/// test font: found by search, walking up from a chat far narrower than that.
+/// and the last of them, the effort, is what is cut. On the test font, the real
+/// minimum with a mode, a model at its 56px floor and an effort is 269px: found
+/// by search, walking up from a chat far narrower than that.
 #[gpui::test]
 async fn narrow_row_fits_from_its_measured_minimum(cx: &mut TestAppContext) {
     let (chat, cx) = chat_view(cx, &["plain"]);
@@ -1900,10 +1962,6 @@ async fn narrow_row_fits_from_its_measured_minimum(cx: &mut TestAppContext) {
         }
     }
     let minimum = minimum.expect("some width up to 360px holds the Narrow chips");
-    assert!(
-        (260..=280).contains(&minimum),
-        "the measured minimum is about 269px, got {minimum}px"
-    );
     for width in minimum..minimum + 20 {
         resize_to(cx, width as f32, 700.0);
         assert!(

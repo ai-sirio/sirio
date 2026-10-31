@@ -125,6 +125,9 @@ Fast, background tasks, Thinking, context ring.
   - the model name ellipsizes down to its existing 56 px floor;
   - the background-task count and the context ring stay in Compact; in Narrow
     they move into ⋯ (below).
+  - An effort with no bars to draw (the reset, Ultracode) keeps its label in
+    Compact, so its chip is never a bare chevron (the builder's call,
+    2026-10-31, for the user to check).
 - **Narrow** (the user's option A, 2026-10-31), whenever Compact with every chip
   does not fit on one line. It draws what Compact does, less the background-task
   count and the context ring, which become the last two rows of ⋯ ahead of

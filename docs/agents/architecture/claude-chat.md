@@ -43,9 +43,14 @@ agents get a total-only Context. The debug-only `surface.chat.panel`
 (`sirioctl surface chat panel <surfaceId> open|close|toggle <key>|activate <key>`) drives
 it, and `surface.chat.read` carries the column's sections and rows as the `sessionPanel`
 JSON string, which is what `Scripts/Tests/test-chat-session-panel-e2e.sh` asserts on.
-`surface.chat.read` also carries `composerRow`, the composer band as a JSON string (`layout` `full` or
-`compact`, the `band`, `root`, `send` and `chips` boxes as `[x, y, w, h]`, `docked`, `overflow`, `modeIcon`,
-`modeDanger`; not `composer`, which is the draft's text), and reports `firstVisibleEntry` and `lastVisibleEntry`, the first and last
+`surface.chat.read` also carries `composerRow`, the composer band as a JSON string (`layout` `full`,
+`compact` or `narrow`, the `band`, `root`, `send`, `chips` and `overflowButton` boxes as `[x, y, w, h]`,
+`docked`, `overflow` (what the layout moved into ⋯: `fast`, `thinking`, `session-panel`,
+`background-tasks`, `context`), `modeIcon` and `modeDanger` (what the render drew for the permission
+pill, null and false when it drew no icon), `menu` (while ⋯ is open, the rows its render built, in order,
+as `{id, enabled, tooltip}`; Fast's tooltip is the CLI's reason it is blocked) and `picker` (the open
+composer picker: `mode`, `model`, `effort`, `thinking`, `overflow`, `history` or `context`; null when none
+is); geometry, enums and labels only; not `composer`, which is the draft's text), and reports `firstVisibleEntry` and `lastVisibleEntry`, the first and last
 transcript rows the list drew, so a reveal reads as the row being between them: a row that is
 the transcript's last cannot reach the top of a list that fills its pane, and unpainted nothing is
 drawn, so the two are equal.

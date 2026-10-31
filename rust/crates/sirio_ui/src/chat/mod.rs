@@ -6981,7 +6981,7 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                     .debug_selector(|| "chat-transcript".into())
                     .w_full()
                     .max_w(px(TRANSCRIPT_WIDTH))
-                    .px(px(24.0))
+                    .px(px(composer_row::TRANSCRIPT_PAD_X))
                     .py(px(28.0))
                     .flex_1()
                     .flex()
@@ -7204,10 +7204,10 @@ div().size_full().min_h_0().relative().flex().flex_col().items_center()
                         .debug_selector(|| "chat-generating-spinner".into())
                         .w_full()
                         .max_w(px(TRANSCRIPT_WIDTH))
-                        // Near the composer card's left edge rather than on
-                        // the transcript's text column, and lifted off the
-                        // card's top border: it reads as the run's status,
-                        // not as the start of the next transcript row.
+                        // Four pixels in from the transcript column's left edge,
+                        // short of the text, which is padded further in, and
+                        // lifted off the band's top rule: it reads as the run's
+                        // status, not as the start of the next transcript row.
                         .pl(px(4.0))
                         .pt(px(6.0))
                         .pb(px(8.0))

@@ -231,15 +231,7 @@ impl Chat {
                                     // Agents that never send a usage update (Pi's ACP
                                     // adapter among them) are exactly the ones a
                                     // fabricated zero would libel.
-                                    let percent = if usage.size == 0 {
-                                        None
-                                    } else {
-                                        Some(
-                                            ((usage.used as f64 / usage.size as f64) * 100.0)
-                                                .round()
-                                                as u64,
-                                        )
-                                    };
+                                    let percent = context_percent(&usage);
                                     let cost = usage.cost.map(|cost| {
                                         format!("Cost: {:.2} {}", cost.amount, cost.currency)
                                     });
@@ -552,8 +544,8 @@ impl Chat {
                 // row -- that is what keeps the name's ellipsis working --
                 // but a 56px floor stops it collapsing to nothing: the name
                 // ellipsizes down to the floor, never erasing the picker. The
-                // row is one line and compacts instead of wrapping (the
-                // compact layout is the band's Task 3).
+                // row is one line and goes Compact, then Narrow, instead of
+                // wrapping.
                 .min_w(px(MODEL_FLOOR))
                 .hover(|style| style.bg(bezel_theme.element_hover))
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -625,7 +617,7 @@ impl Chat {
         // the picker can actually open, so this is never a click target that
         // leads nowhere. `flex_none` keeps it intact while the model chip
         // beside it absorbs the squeeze on a narrow pane. The row is one line
-        // and compacts instead of wrapping (the band's Task 3).
+        // and goes Compact, then Narrow, instead of wrapping.
         let effort_bars = self.effort_bar_position();
         let effort_control = effort_label
             .filter(|_| self.model_control_visible())
@@ -1243,6 +1235,12 @@ pub(super) fn background_tasks_label(running: usize) -> String {
     }
 }
 
+/// How full the context is, in whole percent. `None` for a window of no size: that
+/// is no measurement, and never a zero.
+fn context_percent(usage: &ContextUsage) -> Option<u64> {
+    (usage.size > 0).then(|| ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
+}
+
 /// The context popover's headline, and the row in ⋯ that reads like it.
 fn context_percent_label(percent: u64) -> String {
     format!("{percent}% of context used")
@@ -1363,14 +1361,8 @@ impl Chat {
     pub(super) fn context_row_label(&self) -> String {
         self.context_usage
             .as_ref()
-            .filter(|usage| usage.size > 0)
-            .map_or_else(
-                || "Context".to_string(),
-                |usage| {
-                    let percent = ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64;
-                    context_percent_label(percent)
-                },
-            )
+            .and_then(context_percent)
+            .map_or_else(|| "Context".to_string(), context_percent_label)
     }
 
     /// Whether a row can be chosen. The two that cannot are Fast mode while the
