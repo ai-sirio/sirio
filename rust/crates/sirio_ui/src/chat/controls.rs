@@ -480,10 +480,18 @@ impl Chat {
             .tooltip(crate::controls::tooltip(mode_tooltip))
             .when(danger, |this| this.bg(theme.ely.danger_subtle))
             .when(mode_selectable, |this| {
-                this.hover(|style| style.bg(bezel_theme.element_hover))
-                    .on_click(cx.listener(|this, _, window, cx| {
+                // The warning keeps its red under the pointer: the neutral hover
+                // would read as the pill leaving the warning.
+                let hover = if danger {
+                    theme.ely.danger.opacity(0.22)
+                } else {
+                    bezel_theme.element_hover
+                };
+                this.hover(move |style| style.bg(hover)).on_click(cx.listener(
+                    |this, _, window, cx| {
                         this.toggle_mode_picker(window, cx);
-                    }))
+                    },
+                ))
             })
             .child(mode_lead)
             // Compact keeps the icon (or the dot) and the chevron: the name is
