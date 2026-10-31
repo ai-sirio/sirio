@@ -7306,7 +7306,6 @@ dependencies = [
  "async-io",
  "async-process",
  "futures",
- "libc",
  "serde_json",
  "sirio_chat_child",
  "sirio_chat_vocab",

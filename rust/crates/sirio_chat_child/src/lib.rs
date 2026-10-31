@@ -156,7 +156,7 @@ pub fn terminate_and_reap_blocking(child: &ChildHandle) -> Option<ExitStatus> {
 }
 
 /// What the OS said about the agent's exit, recorded by whoever reaped it.
-/// [`terminate_and_reap`] takes the child out of its handle, so a report
+/// `terminate_and_reap` takes the child out of its handle, so a report
 /// built afterwards has nothing left to ask.
 pub type ExitStatusSlot = Arc<Mutex<Option<ExitStatus>>>;
 
