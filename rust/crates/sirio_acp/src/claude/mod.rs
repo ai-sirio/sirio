@@ -19,11 +19,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use sirio_chat_child::{
+    ChildHandle, PERMISSION_TIMEOUT, PROMPT_TIMEOUT, detach_worker, terminate_and_reap_blocking,
+};
 use sirio_claude::{ContextBreakdown, McpAuthStart, McpServer, RewindOutcome};
 
 use crate::{
-    ChatError, ChildHandle, EventStream, ModeCatalog, ModelCatalog, SHUTDOWN_TIMEOUT,
-    TimeoutOperation, terminate_and_reap_blocking,
+    ChatError, EventStream, ModeCatalog, ModelCatalog, SHUTDOWN_TIMEOUT, TimeoutOperation,
 };
 
 /// ACP's startup budget is 120 s because `npx` may have to download a
@@ -100,8 +102,8 @@ impl ClaudeClient {
             launch,
             cwd,
             STARTUP_TIMEOUT,
-            crate::PROMPT_TIMEOUT,
-            crate::PERMISSION_TIMEOUT,
+            PROMPT_TIMEOUT,
+            PERMISSION_TIMEOUT,
         )
     }
 
@@ -148,14 +150,14 @@ impl ClaudeClient {
                     if let Some(child) = child.take() {
                         terminate_and_reap_blocking(&child);
                     }
-                    crate::detach_worker(worker);
+                    detach_worker(worker);
                     return Err(anyhow::Error::new(error));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if let Some(child) = child.take() {
                         terminate_and_reap_blocking(&child);
                     }
-                    crate::detach_worker(worker);
+                    detach_worker(worker);
                     return Err(anyhow::Error::new(ChatError::Timeout {
                         operation: TimeoutOperation::Startup,
                         duration: startup_timeout,
@@ -165,7 +167,7 @@ impl ClaudeClient {
                     if let Some(child) = child.take() {
                         terminate_and_reap_blocking(&child);
                     }
-                    crate::detach_worker(worker);
+                    detach_worker(worker);
                     return Err(anyhow::Error::new(ChatError::Transport(
                         "the Claude worker exited before its handshake".into(),
                     )));

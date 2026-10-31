@@ -2,9 +2,10 @@
 //!
 //! One thread, three jobs: write command lines to its stdin, fold its
 //! stdout into events, and make sure that when it dies the user is told
-//! why. The stderr drain, the exit probe and the tail report are the ACP
-//! client's own helpers, shared rather than re-derived — a death report
-//! that names one cause here and another there would be worse than none.
+//! why. The stderr drain, the exit probe and the tail report are the
+//! `sirio_chat_child` helpers the ACP client uses too, shared rather than
+//! re-derived — a death report that names one cause here and another there
+//! would be worse than none.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -15,6 +16,11 @@ use async_process::{Command as AsyncCommand, Stdio};
 use futures::StreamExt as _;
 use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use sirio_chat_child::{
+    ActivityClock, ChildHandle, ExitStatusSlot, MAX_MCP_WARNINGS, StderrTail, child_exit_report,
+    idle_for, push_stderr_tail, record_exit_status, record_timeout, stderr_tail_report,
+    terminate_and_reap_blocking, touch_activity, wait_for_stderr_drain,
+};
 use sirio_claude::{
     Catalog, ChatSession, CliMessage, ContextBreakdown, ContextUsageReport, ControlEnvelope,
     ControlRequest, EFFORT_DEFAULT, FastMode, LaunchLine, McpAuthStart, McpServer,
@@ -26,9 +32,8 @@ use super::events::{Fold, ResultSummary};
 use super::permission;
 use super::trace::TraceFold;
 use crate::{
-    ChatError, ChatEvent, AgentMode, ChildHandle, ContextCost, ContextUsage, EffortChoice,
-    EffortOption, ExitStatusSlot, ModeCatalog, ModelCatalog, ModelOption, StderrTail,
-    TimeoutOperation, TraceEvent,
+    AgentMode, ChatError, ChatEvent, ContextCost, ContextUsage, EffortChoice, EffortOption,
+    ModeCatalog, ModelCatalog, ModelOption, TimeoutOperation, TraceEvent,
 };
 
 /// What the client asks the worker to do.
@@ -269,7 +274,7 @@ impl Shared {
         }
         if let Ok(mut held) = self.mcp_warnings.lock() {
             for warning in warnings {
-                if held.len() >= crate::MAX_MCP_WARNINGS {
+                if held.len() >= MAX_MCP_WARNINGS {
                     held.remove(0);
                 }
                 held.push(warning);
@@ -443,14 +448,14 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
         .send(Startup::Process(Arc::clone(&child)))
         .is_err()
     {
-        crate::terminate_and_reap_blocking(&child);
+        terminate_and_reap_blocking(&child);
         return AttemptOutcome::Finished;
     }
 
     let stderr_tail: StderrTail = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let stderr_drained = Arc::new(AtomicBool::new(false));
     let exit_status: ExitStatusSlot = Arc::new(Mutex::new(None));
-    let activity: crate::ActivityClock = Arc::new(Mutex::new(std::time::Instant::now()));
+    let activity: ActivityClock = Arc::new(Mutex::new(std::time::Instant::now()));
     let drain_tail = Arc::clone(&stderr_tail);
     let drain_done = Arc::clone(&stderr_drained);
     let drain_shared = Arc::clone(&shared);
@@ -475,7 +480,7 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
         resumed: launch.resume.is_some(),
     }));
 
-    crate::record_exit_status(&exit_status, crate::terminate_and_reap_blocking(&child));
+    record_exit_status(&exit_status, terminate_and_reap_blocking(&child));
     match outcome {
         SessionOutcome::CleanShutdown(ack) => {
             let _ = ack.send(());
@@ -494,9 +499,9 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
             // it: the command channel is gone, so any later answer fails,
             // and this report tells the surface to close the cards — the
             // native equivalent of `cancel_permissions`.
-            block_on(crate::wait_for_stderr_drain(&stderr_drained));
-            let report = crate::stderr_tail_report(&stderr_tail);
-            let exit = block_on(crate::child_exit_report(&child, &exit_status));
+            block_on(wait_for_stderr_drain(&stderr_drained));
+            let report = stderr_tail_report(&stderr_tail);
+            let exit = block_on(child_exit_report(&child, &exit_status));
             let _ = event_tx.send_blocking(ChatEvent::TransportError(format!(
                 "the Claude agent stopped{detail}{exit}{report}"
             )));
@@ -528,7 +533,7 @@ struct SessionContext {
     startup_tx: mpsc::SyncSender<Startup>,
     shared: Arc<Shared>,
     child: ChildHandle,
-    activity: crate::ActivityClock,
+    activity: ActivityClock,
     prompt_timeout: Duration,
     permission_timeout: Duration,
     /// Whether this process was started with `--resume`: its cost counter
@@ -595,7 +600,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 "the Claude agent closed its output before answering the handshake".into(),
             );
         };
-        crate::touch_activity(&activity);
+        touch_activity(&activity);
         let at = std::time::Instant::now();
         let Some(message) = CliMessage::parse(&line) else {
             // Not JSON. A CLI that prints a banner or a warning before its
@@ -682,7 +687,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
             futures::future::Either::Left((futures::future::Either::Left((line, _)), _)) => {
                 match line {
                     Some(Ok(line)) => {
-                        crate::touch_activity(&activity);
+                        touch_activity(&activity);
                         // Stamped here, as the line leaves the pipe: the
                         // trace's every edge is this instant, and the GPUI
                         // thread can be behind by the time it hears of it.
@@ -1097,7 +1102,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         }
                         // The watchdog measures silence from here. A turn that
                         // reports is a turn that lives, however long it takes.
-                        crate::touch_activity(&activity);
+                        touch_activity(&activity);
                         turn_in_flight = true;
                         let at = std::time::Instant::now();
                         if write_line(&mut stdin, &line).await.is_err() {
@@ -1197,7 +1202,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         // The card closing is fresh evidence about the agent:
                         // the idle window starts from the answer, not the
                         // question.
-                        crate::touch_activity(&activity);
+                        touch_activity(&activity);
                         let answer = match choice {
                             PermissionChoice::Selected(option_id)
                                 if permission::is_question(&pending.request) =>
@@ -1350,7 +1355,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 continue;
             };
             open_permissions = open_permissions.saturating_sub(1);
-            crate::record_timeout(
+            record_timeout(
                 &timeout_reason,
                 ChatError::Timeout {
                     operation: TimeoutOperation::Permission,
@@ -1377,11 +1382,11 @@ async fn session(context: SessionContext) -> SessionOutcome {
         {
             resolve_context_usage(&event_tx, pending, None).await;
         }
-        if turn_in_flight && open_permissions == 0 && crate::idle_for(&activity) >= prompt_timeout {
+        if turn_in_flight && open_permissions == 0 && idle_for(&activity) >= prompt_timeout {
             // An unanswered permission card is the client's silence, not
             // the agent's: the agent asked and is doing exactly what it
             // should, which is nothing.
-            crate::record_timeout(
+            record_timeout(
                 &timeout_reason,
                 ChatError::Timeout {
                     operation: TimeoutOperation::Prompt,
@@ -1394,7 +1399,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                     duration: prompt_timeout,
                 })
                 .await;
-            crate::terminate_and_reap_blocking(&child);
+            terminate_and_reap_blocking(&child);
             end_held_turn(&event_tx, &mut pending_context_usage).await;
             return SessionOutcome::NeverStarted;
         }
@@ -1655,7 +1660,7 @@ async fn drain_stderr(stderr: async_process::ChildStderr, tail: StderrTail, _sha
                 // MCP stderr lines are intentionally not surfaced as warnings
                 // on the native path (see `Fold::apply_system`): a broken
                 // user server must not banner the chat.
-                crate::push_stderr_tail(&tail, trimmed.to_string());
+                push_stderr_tail(&tail, trimmed.to_string());
             }
         }
     }
