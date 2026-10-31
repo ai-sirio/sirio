@@ -2,7 +2,8 @@
 
 **Date:** 2026-10-31
 **Status:** programme designed, not implemented. Each agent gets its own spec
-after its live probe (§9).
+after its live probe (§9). Pi's is
+[2026-10-31-pi-native-chat-design.md](2026-10-31-pi-native-chat-design.md).
 **Decisions:** [ADR 0001](../../adr/0001-chat-transport-native-first.md) (native
 first, ACP as a first-class transport and the fallback) and
 [ADR 0002](../../adr/0002-one-opencode-server-per-app.md) (one OpenCode server
@@ -212,7 +213,7 @@ today are:
 
 | Agent | Binary | Native protocol | Floor candidate | Note |
 |---|---|---|---|---|
-| Pi | `pi` | `--mode rpc`, JSONL on stdio | 1.4.0 | [live] handshake |
+| Pi | `pi` | `--mode rpc`, JSONL on stdio | 1.4.0 | [live] full session (Pi spec) |
 | omp | `omp` | `--mode rpc-ui`, JSONL on stdio | 18.12.6 | [live] handshake in `--mode rpc` |
 | Codex | `codex` | `app-server`, JSON-RPC lines on stdio | 0.159.2 | [live] handshake |
 | OpenCode | `opencode` | `serve`, HTTP + SSE | 2.0.29 | [live] read-only GETs |
@@ -256,7 +257,7 @@ today ([code] the ACP arms of `ChatClient` and `AcpClient`, `lib.rs:225-516`):
 
 | Agent | Resume | Basis |
 |---|---|---|
-| Pi | `switch_session {sessionPath}`, or `--session` at launch | [docs] |
+| Pi | `--session-id <id>` at launch, the id minted by Sirio (Pi spec §5) | [live] |
 | omp | `switch_session` or `open_session`, or `--resume` | [schema] |
 | Codex | `thread/resume {threadId}` | [schema] |
 | OpenCode | the session persists in the server's store; Sirio reattaches by id | [schema] |
@@ -273,8 +274,8 @@ Expected cards. Each is confirmed or cut by that agent's probe.
 |---|---|---|---|---|
 | Environment | yes | yes | yes | yes |
 | Context total | `get_session_stats.contextUsage` [live] | `get_session_stats.contextUsage` [live] | `tokenUsage` with `modelContextWindow`, after the first turn [schema] | last step's tokens against `Model.limit` (`input` where given, else `context`) [schema] |
-| Context items, no weights | skills, prompts and extension commands from `get_commands` [live] | `systemPrompt` sections, `dumpTools`, commands by source [live] | `instructionSources`, `skills/list`, MCP tools [schema; skills live] | `/api/skill`, MCP, agents, instruction entries [live, except instruction entries] |
-| Connectors | no (Pi has no MCP of its own) | no (no MCP status over RPC) | `mcpServerStatus/list`, OAuth login [live list] | `/api/mcp`, connect/disconnect, integration OAuth [live list] |
+| Context items, no weights | the `system` message's prompt sections and tools, and skills, prompts and extension commands from `get_commands` [live] | `systemPrompt` sections, `dumpTools`, commands by source [live] | `instructionSources`, `skills/list`, MCP tools [schema; skills live] | `/api/skill`, MCP, agents, instruction entries [live, except instruction entries] |
+| Connectors | no (no MCP status over RPC; Pi's built-in MCP is [docs], see the Pi spec) | no (no MCP status over RPC) | `mcpServerStatus/list`, OAuth login [live list] | `/api/mcp`, connect/disconnect, integration OAuth [live list] |
 | Trace | main lane only | main lane + subagent lanes from `subagent_event` | main lane + subagent lanes from `subAgentActivity` and child threads | main lane + child sessions via `parentID` |
 | Change request | yes | yes | yes | yes |
 
@@ -373,7 +374,7 @@ What it settles:
 
 | Agent | What the probe settles |
 |---|---|
-| Pi | `message_update` delta-only on the wire; `tool_execution_end.durationMs`; resume via `--session` in RPC; the extension dialogs a fresh `HOME` still raises |
+| Pi | Answered in the Pi spec: `message_update` delta-only on the wire; `tool_execution_end.durationMs`; resume via `--session-id` in RPC; the extension dialogs a fresh `HOME` still raises |
 | omp | the `rpc-ui` approval wire; `set_event_filter {messageUpdates: "delta"}`; `prompt_result` and `session_settled` order; `subagent_event` volume; whether protocol v2 is needed |
 | Codex | the meaning of `tokenUsage.last` and `.total`; whether child-thread items stream to the parent's connection; `instructionSources` values; drift against the newer daemon (0.166 already adds fields) |
 | OpenCode | the payloads of `session.*` and `message.*` events; whether `session.log` resumes from its cursor; whether a preset `OPENCODE_PASSWORD` keeps the server from printing it; whether a second server on the same `opencode.db` is safe beside the user's `opencode service`; how a `task` call maps to its child |
