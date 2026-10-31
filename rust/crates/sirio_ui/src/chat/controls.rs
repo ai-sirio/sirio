@@ -1386,9 +1386,48 @@ impl Chat {
         }
     }
 
-    /// The row the keys have marked: the cursor, held to the rows there are.
+    /// The row the keys have marked: the cursor, held to the rows there are. In ⋯,
+    /// whose rows come and go (a task ends, Fast is refused), the mark follows its
+    /// row: if that row is still there the mark is on it wherever it moved to, and
+    /// if it is gone the mark moves to the nearest row that can be chosen.
     pub(super) fn marked_picker_row(&self, rows: usize) -> Option<usize> {
-        (rows > 0).then(|| self.picker_cursor.unwrap_or(0).min(rows - 1))
+        if rows == 0 {
+            return None;
+        }
+        let at = self.picker_cursor.unwrap_or(0);
+        let held = at.min(rows - 1);
+        let marked = self
+            .overflow_open
+            .then(|| self.picker_cursor_rows.get(at).copied())
+            .flatten();
+        let Some(marked) = marked else {
+            return Some(held);
+        };
+        let now = self.overflow_rows();
+        if let Some(moved) = now.iter().position(|row| *row == marked) {
+            return Some(moved);
+        }
+        // Gone: the nearest row that can be chosen, the later one when two are as near.
+        let held = held.min(now.len().saturating_sub(1));
+        (0..now.len())
+            .map(|distance| {
+                [held + distance, held.wrapping_sub(distance)]
+                    .into_iter()
+                    .filter(|at| *at < now.len())
+            })
+            .flatten()
+            .find(|at| self.picker_row_enabled(&PickerRow::Overflow(now[*at])))
+            .or(Some(held))
+    }
+
+    /// Notes the rows ⋯ has now, which the cursor's index is into, so that the mark
+    /// can follow its row if they change.
+    fn remember_picker_cursor_rows(&mut self) {
+        self.picker_cursor_rows = if self.overflow_open {
+            self.overflow_rows()
+        } else {
+            Vec::new()
+        };
     }
 
     /// A popup opens on the row in force: the model, mode or setting now chosen.
@@ -1416,6 +1455,7 @@ impl Chat {
         // A row that cannot be chosen is never where the cursor starts.
         let first_enabled = rows.iter().position(|row| self.picker_row_enabled(row));
         self.picker_cursor = current.or(first_enabled);
+        self.remember_picker_cursor_rows();
     }
 
     /// The press a row runs. It is the path the keys take, so a click and
@@ -1519,6 +1559,7 @@ impl Chat {
                 break;
             }
         }
+        self.remember_picker_cursor_rows();
         cx.notify();
     }
 

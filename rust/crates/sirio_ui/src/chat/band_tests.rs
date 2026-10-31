@@ -1615,6 +1615,118 @@ async fn the_overflow_context_row_opens_its_popover_inside_the_pane(cx: &mut Tes
     drawn(cx, "context-popover");
 }
 
+/// Opens a Narrow ⋯ with every chip present and moves the keyboard cursor to
+/// `row` with the keys.
+fn narrow_overflow_marked_on(
+    cx: &mut VisualTestContext,
+    chat: &gpui::Entity<Chat>,
+    row: OverflowRow,
+) {
+    chat.update(cx, |chat, _| configure_full_row(chat));
+    resize_to(cx, 300.0, 700.0);
+    assert_eq!(row_layout_now(cx, chat), RowLayout::Narrow);
+    open_overflow(cx, chat);
+    for _ in 0..8 {
+        if marked_overflow_row(cx, chat) == Some(row) {
+            return;
+        }
+        cx.update(|window, app| {
+            chat.update(app, |chat, cx| chat.picker_next(&PickerNext, window, cx))
+        });
+    }
+    panic!("the keys never reached {row:?}");
+}
+
+/// The row of ⋯ the keyboard cursor marks, as it is drawn and as Enter takes it.
+fn marked_overflow_row(
+    cx: &mut VisualTestContext,
+    chat: &gpui::Entity<Chat>,
+) -> Option<OverflowRow> {
+    chat.read_with(cx, |chat, cx| {
+        let rows = chat.overflow_rows();
+        chat.marked_picker_row(rows.len()).map(|at| rows[at])
+    })
+}
+
+/// The marked row follows its row, not its place. A background task ends while ⋯ is
+/// open, so the task count's row is gone and every row under it moves up one:
+/// Enter on the row marked Context still opens the context popover, and does not
+/// land on Follow, which has taken its place in the list.
+#[gpui::test]
+async fn the_overflow_cursor_stays_on_its_row_when_a_task_ends(cx: &mut TestAppContext) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    narrow_overflow_marked_on(cx, &chat, OverflowRow::Context);
+    assert!(!chat.read_with(cx, |chat, _| chat.following_edited_files));
+
+    // The app's own way: the transport's count, read again after an event.
+    chat.update(cx, |chat, cx| {
+        chat.background_tasks = 0;
+        cx.notify();
+    });
+    refresh_frame(cx);
+    assert!(
+        !chat
+            .read_with(cx, |chat, _| chat.overflow_rows())
+            .contains(&OverflowRow::BackgroundTasks),
+        "the task count's row is gone"
+    );
+    assert_eq!(
+        marked_overflow_row(cx, &chat),
+        Some(OverflowRow::Context),
+        "the mark stays on Context"
+    );
+
+    cx.update(|window, app| {
+        chat.update(app, |chat, cx| {
+            chat.picker_choose(&PickerChoose, window, cx)
+        })
+    });
+    refresh_frame(cx);
+    assert!(
+        chat.read_with(cx, |chat, _| chat.context_popover_open),
+        "Enter opened the context popover"
+    );
+    assert!(
+        cx.debug_bounds("composer-overflow-menu").is_none(),
+        "choosing Context closes ⋯"
+    );
+    assert!(
+        !chat.read_with(cx, |chat, _| chat.following_edited_files),
+        "Follow was not toggled"
+    );
+}
+
+/// When the marked row itself goes, the mark moves to the nearest row that can be
+/// chosen, never onto one that cannot: Thinking and Fast go with ⋯ open, and
+/// the place Thinking had now holds the task count's row, which only says how many
+/// tasks run.
+#[gpui::test]
+async fn the_overflow_cursor_moves_to_a_row_that_can_be_chosen_when_its_row_goes(
+    cx: &mut TestAppContext,
+) {
+    let (chat, cx) = chat_view(cx, &["plain"]);
+    pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+    narrow_overflow_marked_on(cx, &chat, OverflowRow::Thinking);
+
+    chat.update(cx, |chat, cx| {
+        chat.fast_mode = None;
+        chat.thinking_display = None;
+        cx.notify();
+    });
+    refresh_frame(cx);
+    let rows = chat.read_with(cx, |chat, _| chat.overflow_rows());
+    assert!(
+        !rows.contains(&OverflowRow::Thinking) && !rows.contains(&OverflowRow::Fast),
+        "Fast and Thinking are gone: {rows:?}"
+    );
+    let marked = marked_overflow_row(cx, &chat).expect("a row is marked");
+    assert!(
+        chat.read_with(cx, |chat, _| chat.picker_row_enabled(&PickerRow::Overflow(marked))),
+        "the mark is on a row that can be chosen, not on {marked:?}"
+    );
+}
+
 /// In Compact the ring keeps its popover: it hangs from the ring's chip and ends
 /// on that chip's right edge, growing leftward. (⋯'s placement is for Narrow.)
 /// The chat fills the window and the window snaps a popup back inside it, so it is

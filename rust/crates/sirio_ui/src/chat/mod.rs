@@ -2215,6 +2215,9 @@ pub struct Chat {
     model_picker_scroll: ScrollHandle,
     /// The row the keys have marked in the open catalogue popup.
     picker_cursor: Option<usize>,
+    /// ⋯'s rows as they were when the cursor last moved, so the mark can follow its
+    /// row when the rows change under it. Empty for every other popup.
+    picker_cursor_rows: Vec<controls::OverflowRow>,
     /// The model search the cursor was last placed for, so a changed query
     /// restarts it on the first match and a moved caret does not.
     picker_query: String,
@@ -2626,6 +2629,7 @@ impl Chat {
             model_picker_open: false,
             model_picker_scroll: ScrollHandle::new(),
             picker_cursor: None,
+            picker_cursor_rows: Vec::new(),
             picker_query: String::new(),
             mode_catalog: None,
             mode_picker_open: false,
