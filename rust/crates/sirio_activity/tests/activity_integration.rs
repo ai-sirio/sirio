@@ -20,15 +20,22 @@ fn now() -> Instant {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_process_inspection_reads_agent_names_from_proc_children() {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::thread;
 
     let root = std::env::temp_dir().join(format!("sirio-activity-proc-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).expect("create process fixture directory");
+    // A script, not an alias of `sleep`: comm is the name of the file exec'd,
+    // and a multicall coreutils (uutils, Ubuntu 26.04's) run as `codex` looks
+    // for a utility of that name and exits at once. The trailing `true` keeps
+    // the script's own process, the one named `codex`, alive.
     let agent = root.join("codex");
-    symlink("/bin/sleep", &agent).expect("create codex test alias");
+    std::fs::write(&agent, "#!/bin/sh\n/bin/sleep \"$1\"\ntrue\n")
+        .expect("write codex test script");
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755))
+        .expect("make codex test script executable");
     // The trailing `true` keeps the shell alive as the parent: `sh -c` with
     // a single command exec-replaces itself (bash and dash both do), and the
     // walk reads comm for descendants only, never for the shell.
