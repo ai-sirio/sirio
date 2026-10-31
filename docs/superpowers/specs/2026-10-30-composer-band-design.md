@@ -163,8 +163,9 @@ Fast, background tasks, Thinking, context ring.
   - its measured minimum on the test font is 153 px with the five-level effort
     the real Claude CLI offers (143 px with three levels), whatever the current
     effort is, so 160 px, the least a split pane can be (`MIN_SPLIT_PANE_SIZE`),
-    holds the pill and the effort chip whole. The one exception is a session
-    whose effort has no levels to draw, which keeps its word (above).
+    holds the pill and the effort chip whole. The exceptions keep their word
+    (above): a session whose effort has no levels to draw, and a current value
+    the agent names that is neither a level, the reset nor Ultracode.
 - A slot with nothing to draw takes no room: the chips' row puts its gap between
   the chips it draws and none for an empty slot, in every layout, and the width
   estimates count the slots the render draws.

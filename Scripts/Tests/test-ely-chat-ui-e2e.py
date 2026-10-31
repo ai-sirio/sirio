@@ -1407,7 +1407,8 @@ def send_stays_clear(lane: str, row: dict) -> None:
 def isolate_shells(scenario: "Scenario") -> None:
     """A private HOME, XDG tree and a plain `/bin/sh` for the scenario's instance, so the terminals
     its `pane.split` spawns (`$SHELL -il` in the environment Sirio has) never read the user's
-    rc files. The same variables `test-chat-session-panel-e2e.sh` gives its instances."""
+    rc files. The same variables `test-chat-session-panel-e2e.sh` gives its instances, less the
+    `ENV` and `BASH_ENV` an interactive `sh` would otherwise source."""
     home = scenario.dir / "home"
     directories = {
         "XDG_CONFIG_HOME": home / ".config",
@@ -1417,7 +1418,7 @@ def isolate_shells(scenario: "Scenario") -> None:
     }
     for directory in (home, *directories.values()):
         directory.mkdir(parents=True, exist_ok=True)
-    scenario.env.update(HOME=str(home), SHELL="/bin/sh", **{name: str(path) for name, path in directories.items()})
+    scenario.env.update(HOME=str(home), SHELL="/bin/sh", ENV=None, BASH_ENV=None, **{name: str(path) for name, path in directories.items()})
 
 
 def composer_band_minimal_lane(run: Run, chat: Instance, window: str, name: str) -> dict:
