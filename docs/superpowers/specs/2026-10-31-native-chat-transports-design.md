@@ -9,7 +9,7 @@ first, ACP as a first-class transport and the fallback) and
 per app). The terms *session panel* and *transport* are defined in `CONTEXT.md`.
 **Touches:** `sirio_acp`, `sirio_agents`, `sirio_ui` (chat, session panel,
 settings), `sirio` (resolution, picker, restore), a new `sirio_chat`, a new
-leaf crate for the chat vocabulary (§2.2, name open), and one leaf protocol
+leaf crate for the chat vocabulary, `sirio_chat_vocab` (§2.2), and one leaf protocol
 crate per agent family: `sirio_pi`, `sirio_codex`, `sirio_opencode`.
 
 This is the programme spec. It holds what every delivery shares: the shape of
@@ -124,7 +124,7 @@ sirio                      resolution per adapter, picker, restore
             ├─ sirio_claude, sirio_pi, sirio_codex, sirio_opencode
             │              leaf protocol crates: types and pure functions, no process,
             │              no channels (the sirio_claude precedent)
-            └─ <vocabulary> leaf: AcpEvent, TraceEvent, ContextUsage, SessionNotice, …
+            └─ sirio_chat_vocab  leaf: ChatEvent (was AcpEvent), TraceEvent, ContextUsage, …
 ```
 
 - `ChatClient` keeps an exhaustive `match` in every method ([code]
@@ -144,7 +144,7 @@ sirio                      resolution per adapter, picker, restore
 - The refactor delivery updates `docs/agents/architecture/crates.md` and
   `claude-chat.md` to match.
 
-### §2.2 Open decision: where the shared vocabulary lives
+### §2.2 Where the shared vocabulary lives
 
 `sirio_acp` cannot keep the events every transport emits. ADR 0001 makes it
 "the ACP client and nothing else", and `sirio_chat` sits above it, so the
@@ -155,12 +155,12 @@ crate below both:
 - `ContextUsage`, `SessionNotice`;
 - the context and MCP view types re-exported today.
 
-**Recommendation:** a new leaf crate named **`sirio_chat_vocab`**, with
-`AcpEvent` renamed `ChatEvent` in the same mechanical commit. Today the crates
-that depend on `sirio_acp` are `sirio`, `sirio_ui`, and `sirio_control` (only
-its integration test). Each takes the types from the new crate instead, and
-takes `sirio_acp` only where it really drives ACP. The name is the
-maintainer's call, and this is the one decision of the programme not yet taken.
+**Decided:** they go to a new leaf crate, **`sirio_chat_vocab`**. `AcpEvent`
+becomes `ChatEvent` in the same mechanical commit, which is part of the
+refactor delivery. Today the crates that depend on `sirio_acp` are `sirio`,
+`sirio_ui`, and `sirio_control` (only its integration test). Each takes the
+types from `sirio_chat_vocab` instead, and keeps `sirio_acp` only where it
+really drives ACP.
 
 ### §2.3 Protocol crates
 
