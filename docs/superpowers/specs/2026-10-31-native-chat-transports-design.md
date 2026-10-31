@@ -8,9 +8,10 @@ first, ACP as a first-class transport and the fallback) and
 [ADR 0002](../../adr/0002-one-opencode-server-per-app.md) (one OpenCode server
 per app). The terms *session panel* and *transport* are defined in `CONTEXT.md`.
 **Touches:** `sirio_acp`, `sirio_agents`, `sirio_ui` (chat, session panel,
-settings), `sirio` (resolution, picker, restore), a new `sirio_chat`, a new
-leaf crate for the chat vocabulary, `sirio_chat_vocab` (§2.2), and one leaf protocol
-crate per agent family: `sirio_pi`, `sirio_codex`, `sirio_opencode`.
+settings), `sirio` (resolution, picker, restore), a new `sirio_chat`, two new
+leaf crates shared by every transport, `sirio_chat_vocab` and `sirio_chat_child`
+(§2.2), and one leaf protocol crate per agent family: `sirio_pi`, `sirio_codex`,
+`sirio_opencode`.
 
 This is the programme spec. It holds what every delivery shares: the shape of
 the code, the resolution rule, the parity contract, the panel map and the test
@@ -124,7 +125,9 @@ sirio                      resolution per adapter, picker, restore
             ├─ sirio_claude, sirio_pi, sirio_codex, sirio_opencode
             │              leaf protocol crates: types and pure functions, no process,
             │              no channels (the sirio_claude precedent)
-            └─ sirio_chat_vocab  leaf: ChatEvent (was AcpEvent), TraceEvent, ContextUsage, …
+            ├─ sirio_chat_child  leaf: supervising an agent's child process
+            └─ sirio_chat_vocab  leaf: ChatEvent (was AcpEvent), ChatError (was AcpError),
+                                 TraceEvent, ContextUsage, …
 ```
 
 - `ChatClient` keeps an exhaustive `match` in every method ([code]
@@ -144,7 +147,7 @@ sirio                      resolution per adapter, picker, restore
 - The refactor delivery updates `docs/agents/architecture/crates.md` and
   `claude-chat.md` to match.
 
-### §2.2 Where the shared vocabulary lives
+### §2.2 What every transport shares
 
 `sirio_acp` cannot keep the events every transport emits. ADR 0001 makes it
 "the ACP client and nothing else", and `sirio_chat` sits above it, so the
@@ -153,14 +156,32 @@ crate below both:
 - `AcpEvent` (17 variants, [code] `lib.rs:751`);
 - `TraceEvent` ([code] `trace_event.rs`);
 - `ContextUsage`, `SessionNotice`;
-- the context and MCP view types re-exported today.
+- `AcpError`, which the Claude worker raises too ([code] `claude/worker.rs:431`).
 
 **Decided:** they go to a new leaf crate, **`sirio_chat_vocab`**. `AcpEvent`
-becomes `ChatEvent` in the same mechanical commit, which is part of the
-refactor delivery. Today the crates that depend on `sirio_acp` are `sirio`,
-`sirio_ui`, and `sirio_control` (only its integration test). Each takes the
-types from `sirio_chat_vocab` instead, and keeps `sirio_acp` only where it
-really drives ACP.
+becomes `ChatEvent` and `AcpError` becomes `ChatError`, in the same mechanical
+commit, which is part of the refactor delivery. The context and MCP view types
+that `sirio_acp` re-exports from `sirio_claude` today are re-exported by
+`sirio_chat` instead, so the vocabulary depends on no protocol crate.
+
+The Claude worker also shares the helpers that supervise an agent's child
+process with the ACP client ([code] `sirio_acp/src/lib.rs` from `:2253`):
+- the activity clock, the stderr tail and the MCP warnings read from it;
+- reaping the process group, recording the exit status, and describing the
+  exit and the timeout;
+- detaching the worker thread.
+
+Every native transport with a child process needs them as they are, and so
+does the OpenCode server.
+
+**Decided:** they go to a second leaf crate, **`sirio_chat_child`**, which
+depends on `sirio_chat_vocab` for `ChatError` and contains nothing but that
+supervision. `parse_permission_question` is a pure parser of a tool input, so
+it goes to `sirio_chat_vocab`.
+
+Today the crates that depend on `sirio_acp` are `sirio`, `sirio_ui`, and
+`sirio_control` (only its integration test). Each takes the types from these
+crates instead, and keeps `sirio_acp` only where it really drives ACP.
 
 ### §2.3 Protocol crates
 

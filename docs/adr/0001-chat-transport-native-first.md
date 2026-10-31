@@ -41,7 +41,8 @@ change the conformance test exists to catch.
   The native transports live beside it, under `sirio_chat`, together with the
   choice between transports. Claude's native transport moves there too. The
   events every transport emits (`ChatEvent`, formerly `AcpEvent`) live in a
-  leaf crate below both, `sirio_chat_vocab`. That
+  leaf crate below both, `sirio_chat_vocab`. The supervision of an agent's
+  child process lives in another, `sirio_chat_child`. That
   way the ACP client can grow, with new agents and new protocol versions,
   without touching the native transports.
 - Each agent keeps two chat transports. Both must emit the same events, so a
