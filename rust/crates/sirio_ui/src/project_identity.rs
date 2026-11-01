@@ -2,8 +2,9 @@
 //! (F-PRJ-13/14/15/16, which make F-PER-07 persistable).
 //!
 //! This is a standalone, mountable component, not a screen: the project
-//! settings sheet that must host it — `sidebar.rs`'s `render_project_settings`
-//! — belongs to `codex12`, so this file never reaches into it. See
+//! settings sheet that hosts it, `sidebar/project_settings.rs`, and the
+//! dialog shown when a project is added, `project_identity_dialog.rs`, own
+//! their own layout, so this file never reaches into either. See
 //! `../../../docs/linux-rewrite/SEAMS.md` for the mount seam and the avatar
 //! network-fetch seam this file deliberately does not build.
 
@@ -334,6 +335,9 @@ pub struct ProjectIconPicker {
     favicon_caret_visible: bool,
     on_change: Option<Rc<dyn Fn(ProjectIcon)>>,
     on_change_with_context: Option<Rc<dyn Fn(ProjectIcon, &mut Context<Self>)>>,
+    /// Drawn without its own card, for a host that already is one (the
+    /// Project added dialog); the source rows then wrap to fit.
+    bare: bool,
     /// Test-only substitute for the OS file picker `choose_local_png`
     /// normally opens — mirrors `chat.rs`'s `attach_test_paths` seam, since
     /// nothing can drive a real native file dialog from a `gpui::test`.
@@ -371,6 +375,7 @@ impl ProjectIconPicker {
             favicon_caret_visible: false,
             on_change: None,
             on_change_with_context: None,
+            bare: false,
             #[cfg(test)]
             png_test_paths: Vec::new(),
         }
@@ -410,9 +415,46 @@ impl ProjectIconPicker {
         self
     }
 
+    /// Draws the picker without its own card, so a host that is already a
+    /// card has one surface, and lets the source rows wrap so they fit a
+    /// narrow host.
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
+        self
+    }
+
     /// The current value, for the host and for tests.
     pub fn value(&self) -> &ProjectIcon {
         &self.value
+    }
+
+    /// The dialog's `act mode <icon|emoji|avatar>`; any other value is
+    /// ignored, and the dialog rejects it before it gets here.
+    pub(crate) fn control_set_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        let index = match mode {
+            "icon" => PickerMode::Icon.index(),
+            "emoji" => PickerMode::Emoji.index(),
+            "avatar" => PickerMode::Avatar.index(),
+            _ => return,
+        };
+        self.set_mode(index, cx);
+    }
+
+    /// The dialog's `act open-emoji-grid`.
+    pub(crate) fn control_open_emoji_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_emoji_grid(window, cx);
+    }
+
+    /// The dialog's `act pick-glyph <id>`: commits through the path a click
+    /// on that glyph takes. An id that names no glyph is an error.
+    pub(crate) fn control_pick_glyph(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let glyph = ProjectGlyph::parse(id).ok_or_else(|| format!("unknown glyph {id:?}"))?;
+        self.select_glyph(glyph, cx);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -527,6 +569,9 @@ impl ProjectIconPicker {
         let key = event.keystroke.key.as_str();
         if key == "escape" {
             self.close_emoji_grid(cx);
+            // The grid takes this Esc; a dialog around the picker would
+            // otherwise close on it as well.
+            cx.stop_propagation();
             return;
         }
         if key == "backspace" || key == "delete" {
@@ -801,6 +846,7 @@ impl ProjectIconPicker {
                     .flex()
                     .items_center()
                     .gap(px(BezelTheme::SPACE_MD))
+                    .when(self.bare, |row| row.flex_wrap())
                     .child(field)
                     .child(controls::button(
                         "project-icon-emoji-set",
@@ -1066,14 +1112,28 @@ impl ProjectIconPicker {
                 Self::commit_favicon,
                 "Use Favicon",
                 theme,
-            ));
+            ))
+            .child(
+                div()
+                    .id("project-icon-avatar-caption")
+                    .debug_selector(|| "project-icon-avatar-caption".into())
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.ely.fg_muted)
+                    .child(
+                        selectable_text(
+                            "GitHub and favicon avatars show as a globe until Sirio can \
+                             download images",
+                        )
+                        .id("project-icon-avatar-caption-text"),
+                    ),
+            );
 
         if let Some(label) = current_avatar_label {
             // A locally chosen PNG is real file content already on disk, so
             // the preview can show the actual image rather than only a text
             // caption. GitHub/Favicon sources still fall back to text-only
-            // here: rendering those needs a network fetch this app has no
-            // HTTP client for yet (F-PRJ-14).
+            // here: they need an avatar download, which Sirio does not do
+            // yet (F-PRJ-14).
             if let ProjectIconValue::Avatar(AvatarSource::LocalPng(path)) = &self.value.value {
                 column = column.child(
                     gpui::img(path.clone())
@@ -1179,6 +1239,7 @@ impl ProjectIconPicker {
             .flex()
             .items_center()
             .gap(px(BezelTheme::SPACE_MD))
+            .when(self.bare, |row| row.flex_wrap())
             .child(field)
             .child(controls::button(
                 button_label,
@@ -1247,7 +1308,8 @@ impl Render for ProjectIconPicker {
             PickerMode::Avatar => self.render_avatar_mode(theme, entity.clone()),
         };
 
-        controls::card(theme)
+        let surface = if self.bare { div() } else { controls::card(theme) };
+        surface
             .child(controls::row("Project icon", None, mode_switch, theme))
             .child(controls::separator(theme))
             .child(div().p(px(BezelTheme::SPACE_LG)).child(body))

@@ -615,7 +615,7 @@ impl Render for CreateForm {
                     .text_color(theme.ely.fg_muted)
                     .child("Make a new folder for a project in the selected location."),
             )
-            .child(form_label("Project name", &theme))
+            .child(form_label("Folder name", &theme))
             .child(
                 div()
                     .id("create-name-field")
@@ -712,6 +712,15 @@ fn destination_for(parent: &Path, url: &str) -> Option<PathBuf> {
     Some(parent.join(name))
 }
 
+/// The notice for a clone whose progress output was cut short: the clone
+/// itself completed, so it is worded as a notice, not a failure.
+pub fn clone_truncation_notice(destination: &Path) -> String {
+    format!(
+        "Cloned to {} — progress output was truncated (repository is large)",
+        destination.display()
+    )
+}
+
 fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Hsla) {
     match state.status() {
         CloneStatus::Ready => ("Ready to clone".to_owned(), theme.ely.fg_muted),
@@ -724,10 +733,7 @@ fn clone_status_line(state: &CloneFormState, theme: &Theme) -> (String, gpui::Hs
             destination,
             truncated: true,
         } => (
-            format!(
-                "Cloned to {} — progress output was truncated (repository is large)",
-                destination.display()
-            ),
+            clone_truncation_notice(destination),
             theme.ely.warning,
         ),
         CloneStatus::Complete {
