@@ -7508,6 +7508,7 @@ impl SirioWorkspace {
                             // survives a restart.
                             TabContent::Chat(chat) => {
                                 state.chat_draft = chat.read(cx).draft_text();
+                                state.chat_prompt_history = chat.read(cx).prompt_history();
                                 state.chat_session_panel_open = chat.read(cx).session_panel_open();
                             }
                             // #125 (spec R6.5): read live at save time, the
@@ -26329,6 +26330,7 @@ fn restore_tabs_with_terminal_cache(
                     if !tab_state.chat_draft.is_empty() {
                         chat.control_compose(&tab_state.chat_draft, cx);
                     }
+                    chat.restore_prompt_history(tab_state.chat_prompt_history.clone());
                     if tab_state.chat_session_panel_open {
                         chat.restore_session_panel_open(true, cx);
                     }
@@ -26924,6 +26926,7 @@ fn restore_tabs_in_workspace(
                     if !tab_state.chat_draft.is_empty() {
                         chat.control_compose(&tab_state.chat_draft, cx);
                     }
+                    chat.restore_prompt_history(tab_state.chat_prompt_history.clone());
                     if tab_state.chat_session_panel_open {
                         chat.restore_session_panel_open(true, cx);
                     }
