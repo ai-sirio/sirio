@@ -325,6 +325,11 @@ pub struct ProjectIconPicker {
     emoji_grid_open: bool,
     emoji_grid_query: String,
     emoji_grid_focus: FocusHandle,
+    /// Set by `open_emoji_grid`, consumed by the first `render` that draws
+    /// the grid. The workspace keeps focus inside the "Project added" dialog
+    /// by reading the last drawn frame, where a query field not drawn yet is
+    /// outside the dialog, so focusing it on open would be taken back.
+    focus_grid_when_drawn: bool,
     /// One blink shared by every field in the picker: only one of them can
     /// hold focus at a time, so one timer is all the surface ever needs —
     /// the same arrangement `sidebar.rs` and `settings.rs` use.
@@ -368,6 +373,7 @@ impl ProjectIconPicker {
             emoji_grid_open: false,
             emoji_grid_query: String::new(),
             emoji_grid_focus: cx.focus_handle(),
+            focus_grid_when_drawn: false,
             field_blink: caret::Blink::new(),
             emoji_caret_visible: false,
             emoji_grid_caret_visible: false,
@@ -548,10 +554,10 @@ impl ProjectIconPicker {
     /// F-PRJ-16: opens the searchable emoji grid. Self-contained -- see
     /// `emoji_grid_open`'s doc comment for why this doesn't delegate to a
     /// host callback the way `choose_local_png`'s file picker does.
-    fn open_emoji_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_emoji_grid(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.emoji_grid_open = true;
         self.emoji_grid_query.clear();
-        self.emoji_grid_focus.focus(window, cx);
+        self.focus_grid_when_drawn = true;
         cx.notify();
     }
 
@@ -1288,6 +1294,16 @@ impl Render for ProjectIconPicker {
         self.emoji_grid_caret_visible = emoji_grid_focused && lit;
         self.github_caret_visible = github_focused && lit;
         self.favicon_caret_visible = favicon_focused && lit;
+        // The grid is drawn in this frame, so after it the query field is
+        // inside the dialog's drawn tree and the focus stays where it is put.
+        if self.focus_grid_when_drawn
+            && self.emoji_grid_open
+            && matches!(self.mode, PickerMode::Emoji)
+        {
+            self.focus_grid_when_drawn = false;
+            let focus = self.emoji_grid_focus.clone();
+            window.on_next_frame(move |window, cx| focus.focus(window, cx));
+        }
 
         let mode_switch = controls::segmented(
             "project-icon-mode",

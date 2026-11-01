@@ -462,6 +462,8 @@ fn measured(cell: &Rc<Cell<Option<Bounds<Pixels>>>>, child: impl IntoElement) ->
     div().relative().child(child).child(
         canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
             .absolute()
+            .top_0()
+            .left_0()
             .size_full(),
     )
 }
