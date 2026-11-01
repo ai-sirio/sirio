@@ -9,11 +9,13 @@
 //! worktree switch drops it — settings tabs are ephemeral) never loses
 //! anything.
 
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::{
-    Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
-    PathPromptOptions, PromptLevel, Render, Window, div, prelude::*, px,
+    Bounds, Context, Entity, EventEmitter, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
+    PathPromptOptions, Pixels, PromptLevel, Render, Window, canvas, div, prelude::*, px,
 };
 use sirio_project::display_path;
 use sirio_theme::Theme;
@@ -61,6 +63,9 @@ pub struct ProjectSettingsView {
     base_name: String,
     display_name: String,
     display_name_focus: FocusHandle,
+    /// The label field's window bounds, recorded at prepaint for the debug
+    /// read verb, which a script uses to click the field.
+    label_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     path: PathBuf,
     is_git: bool,
     icon: ProjectIcon,
@@ -99,6 +104,7 @@ impl ProjectSettingsView {
             base_name: seed.base_name,
             display_name: seed.display_name,
             display_name_focus: cx.focus_handle(),
+            label_bounds: Rc::new(Cell::new(None)),
             path: seed.path,
             is_git: seed.is_git,
             icon: seed.icon,
@@ -115,6 +121,21 @@ impl ProjectSettingsView {
 
     pub fn project_id(&self) -> &str {
         &self.id
+    }
+
+    /// The label field's bounds as `x,y,w,h` in window pixels, or empty before
+    /// the field has been drawn. The debug read verb reports it.
+    pub fn label_bounds(&self) -> String {
+        match self.label_bounds.get() {
+            Some(bounds) => format!(
+                "{:.0},{:.0},{:.0},{:.0}",
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height)
+            ),
+            None => String::new(),
+        }
     }
 
     /// The tab title's name half for a seed, before any view exists.
@@ -596,6 +617,7 @@ impl Render for ProjectSettingsView {
         );
         let caret_visible = field_focused && self.field_blink.visible();
         let display_name_focus = self.display_name_focus.clone();
+        let label_bounds = self.label_bounds.clone();
         let is_git = self.is_git;
         let target = SidebarContextTarget::Project {
             id: self.id.clone(),
@@ -641,6 +663,7 @@ impl Render for ProjectSettingsView {
                     .id("project-display-name-field")
                     .debug_selector(|| "project-display-name-field".to_owned())
                     .track_focus(&display_name_focus)
+                    .relative()
                     .w_full()
                     .h(px(32.0))
                     .px(px(9.0))
@@ -685,6 +708,13 @@ impl Render for ProjectSettingsView {
                     .when(name_focused && !name_is_empty, |this| {
                         this.child(caret::bar(px(14.0), theme.ely.fg, caret_visible))
                     })
+                    .child(
+                        canvas(move |bounds, _, _| label_bounds.set(Some(bounds)), |_, _, _, _| {})
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                    )
             })
             .when(!is_git, |this| {
                 this.child(

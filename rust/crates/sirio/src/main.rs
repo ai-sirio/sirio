@@ -1451,6 +1451,29 @@ enum ControlAction {
         action: String,
         reply: ControlReply,
     },
+    /// Debug-only `surface.project_add {kind, value, submit?, answer?}`: starts
+    /// an add the way the sidebar does, without the folder chooser. The name
+    /// differs from `AddProject`, which is `project.add`'s: that one never
+    /// opens the "Project added" dialog, this one does.
+    ProjectAddDebug {
+        kind: String,
+        value: String,
+        submit: bool,
+        answer: Option<u8>,
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.project_identity.read`: the "Project added"
+    /// dialog's state and the workspace facts around it.
+    ProjectIdentityRead {
+        reply: ControlReply,
+    },
+    /// Debug-only `surface.project_identity.act {action, value?}`: runs the
+    /// open dialog's button handler or drives its picker.
+    ProjectIdentityAct {
+        action: String,
+        value: Option<String>,
+        reply: ControlReply,
+    },
 }
 
 enum ChatControlAction {
@@ -3555,6 +3578,63 @@ impl ControlHandler for AppControlHandler {
                 };
                 self.queue_action(request, move |reply| ControlAction::Chat {
                     action: ChatControlAction::Effort { surface_id, action },
+                    reply,
+                })
+            }
+            "surface.project_add" if cfg!(debug_assertions) => {
+                let Some(kind) = request.params.get("kind").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.project_add requires kind");
+                };
+                if !matches!(kind.as_str(), "path" | "clone" | "create") {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.project_add requires kind path, clone or create",
+                    );
+                }
+                let Some(value) = request.params.get("value").cloned() else {
+                    return ControlResponse::failure(&request.id, "surface.project_add requires value");
+                };
+                let submit = request.params.get("submit").is_some_and(|submit| submit == "true");
+                let answer = match request.params.get("answer").map(String::as_str) {
+                    None => None,
+                    Some("0") => Some(0),
+                    Some("1") => Some(1),
+                    Some("2") => Some(2),
+                    Some(_) => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.project_add answer must be 0, 1 or 2",
+                        );
+                    }
+                };
+                if answer.is_some() && kind != "path" {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.project_add answer is valid only with kind path",
+                    );
+                }
+                self.queue_action(request, move |reply| ControlAction::ProjectAddDebug {
+                    kind,
+                    value,
+                    submit,
+                    answer,
+                    reply,
+                })
+            }
+            "surface.project_identity.read" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::ProjectIdentityRead { reply })
+            }
+            "surface.project_identity.act" if cfg!(debug_assertions) => {
+                let Some(action) = request.params.get("action").cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.project_identity.act requires action",
+                    );
+                };
+                let value = request.params.get("value").cloned();
+                self.queue_action(request, move |reply| ControlAction::ProjectIdentityAct {
+                    action,
+                    value,
                     reply,
                 })
             }
@@ -5838,10 +5918,20 @@ struct OpenIdentityDialog {
     entity: Entity<ProjectIdentityDialog>,
     /// Held so the `Closed` subscription lives exactly as long as the dialog.
     _subscription: gpui::Subscription,
-    /// How the project was added. Nothing reads it yet: Ely's `give_back`, not
-    /// the workspace, decides where focus goes after the close.
-    #[allow(dead_code)]
+    /// How the project was added. The debug read verb reports it; Ely's
+    /// `give_back`, not the workspace, decides where focus goes after the close.
     origin: AddOrigin,
+}
+
+/// The word the debug read verb reports for how a project was added.
+fn add_origin_label(origin: AddOrigin) -> &'static str {
+    match origin {
+        AddOrigin::OpenedFolder => "opened-folder",
+        AddOrigin::AddedWithoutGit => "added-without-git",
+        AddOrigin::InitializedGit => "initialized-git",
+        AddOrigin::Cloned { .. } => "cloned",
+        AddOrigin::Created => "created",
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -6330,6 +6420,23 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::SettingsAct { action, reply } => {
                                     workspace.control_settings_act(&action, reply, cx);
+                                }
+                                ControlAction::ProjectAddDebug { kind, value, submit, answer, reply } => {
+                                    let result =
+                                        workspace.control_project_add(&kind, value, submit, answer, window, cx);
+                                    let _ = reply.send(result);
+                                }
+                                ControlAction::ProjectIdentityRead { reply } => {
+                                    let _ = reply.send(Ok(workspace.control_project_identity_read(window, cx)));
+                                }
+                                ControlAction::ProjectIdentityAct { action, value, reply } => {
+                                    let result = workspace.control_project_identity_act(
+                                        &action,
+                                        value.as_deref(),
+                                        window,
+                                        cx,
+                                    );
+                                    let _ = reply.send(result);
                                 }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
@@ -19884,6 +19991,124 @@ impl SirioWorkspace {
                 let _ = reply.send(Err(format!("surface.settings.act has no action {other}")));
             }
         }
+    }
+
+    /// Debug-only `surface.project_add`: `path` runs the Open folder flow on
+    /// `value` and the other kinds open the Clone or Create form, both through
+    /// the sidebar's own entry points, so the "Project added" dialog opens
+    /// afterwards exactly as it does for a click.
+    fn control_project_add(
+        &mut self,
+        kind: &str,
+        value: String,
+        submit: bool,
+        answer: Option<u8>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        self.sidebar.update(cx, |sidebar, cx| match kind {
+            "path" => {
+                sidebar.control_add_path(PathBuf::from(value), answer, window, cx);
+                Ok(())
+            }
+            other => sidebar.control_project_form(other, &value, submit, window, cx),
+        })?;
+        Ok(Vec::new())
+    }
+
+    /// Debug-only `surface.project_identity.read`. `open` is true only once
+    /// the dialog has rendered, because its focus rule waits for that frame.
+    /// The dialog's `report` names `field` or `dialog` as the focus; when it
+    /// names neither (or no dialog is open) the workspace names where focus is.
+    fn control_project_identity_read(&self, window: &Window, cx: &App) -> Vec<(String, String)> {
+        let open = self
+            .identity_dialog
+            .as_ref()
+            .is_some_and(|open| open.entity.read(cx).rendered_once());
+        let mut pairs = vec![
+            ("open".to_string(), open.to_string()),
+            ("queue".to_string(), self.identity_queue.len().to_string()),
+            (
+                "lastOutcome".to_string(),
+                self.identity_last_outcome.unwrap_or("").to_string(),
+            ),
+        ];
+        let mut focus = String::new();
+        if let Some(open) = self.identity_dialog.as_ref() {
+            for (key, value) in open.entity.read(cx).report(window, cx) {
+                if key == "focus" {
+                    focus = value;
+                } else {
+                    pairs.push((key, value));
+                }
+            }
+            pairs.push(("origin".to_string(), add_origin_label(open.origin).to_string()));
+        }
+        if focus.is_empty() {
+            focus = if self.focused_terminal(window, cx) {
+                "terminal"
+            } else if self.root_focus.is_focused(window) {
+                "root"
+            } else if window.focused(cx).is_none() {
+                "none"
+            } else {
+                "other"
+            }
+            .to_string();
+        }
+        // The Project Settings tab that is drawn: one per pane, the secondary
+        // one only while its pane is open, and none under the Settings screen.
+        let mut drawn = Vec::new();
+        if !self.show_settings {
+            drawn.extend(self.center_split.active(sirio_project::PaneRole::Primary));
+            if self.secondary_pane_visible() {
+                drawn.extend(self.center_split.active(sirio_project::PaneRole::Secondary));
+            }
+        }
+        let mut label_bounds = String::new();
+        for tab in self.tabs.iter().filter(|tab| drawn.contains(&tab.id)) {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::ProjectSettings(view) = content {
+                    label_bounds = view.read(cx).label_bounds();
+                }
+            });
+        }
+        pairs.extend([
+            ("focus".to_string(), focus),
+            (
+                "projectForm".to_string(),
+                self.sidebar.read(cx).project_form_kind().to_string(),
+            ),
+            ("sidebarVisible".to_string(), self.sidebar_visible.to_string()),
+            ("paletteOpen".to_string(), self.palette_open.to_string()),
+            (
+                "pendingPaneClose".to_string(),
+                self.pending_pane_close.is_some().to_string(),
+            ),
+            (
+                "toast".to_string(),
+                self.toast.as_ref().map(|toast| toast.message.clone()).unwrap_or_default(),
+            ),
+            ("projectSettingsLabelBounds".to_string(), label_bounds),
+        ]);
+        pairs
+    }
+
+    /// Debug-only `surface.project_identity.act`: the open dialog's own
+    /// `control_act`, or an error when none is open.
+    fn control_project_identity_act(
+        &mut self,
+        action: &str,
+        value: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let Some(open) = self.identity_dialog.as_ref() else {
+            return Err("no project identity dialog is open".to_string());
+        };
+        let dialog = open.entity.clone();
+        dialog.update(cx, |dialog, cx| dialog.control_act(action, value, window, cx))?;
+        Ok(Vec::new())
     }
 
     /// Every tab as `<kind>|<snapshot yes|no>|<title>`, and which is active.
@@ -45070,6 +45295,9 @@ done
             | ControlAction::TerminalRestart { reply, .. }
             | ControlAction::TerminalState { reply, .. }
             | ControlAction::SettingsAct { reply, .. }
+            | ControlAction::ProjectAddDebug { reply, .. }
+            | ControlAction::ProjectIdentityRead { reply }
+            | ControlAction::ProjectIdentityAct { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -45256,6 +45484,11 @@ done
             "surface.chat.read" => request_with_params(method, &[]),
             "surface.chat.panel" => request::chat_panel("chat-1", "open", None),
             "surface.chat.effort" => request::chat_effort("chat-1", "open", None),
+            "surface.project_add" => {
+                request::surface_project_add("path", VERBATIM_PATH, false, None)
+            }
+            "surface.project_identity.read" => request::project_identity_read(),
+            "surface.project_identity.act" => request::project_identity_act("skip", None),
             "browser.open" | "browser.navigate" | "browser.act" | "browser.get"
             | "browser.wait" | "browser.eval" | "browser.console" | "browser.snapshot"
             | "browser.permission" => request_with_params(method, &[]),

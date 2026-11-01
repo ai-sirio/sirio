@@ -1131,6 +1131,47 @@ pub mod request {
         request("surface.chat.effort", params)
     }
 
+    /// Debug-only `surface.project_add {kind, value, submit?, answer?}`: starts
+    /// an add without the folder chooser. `kind` is `path` (the Open folder
+    /// flow on the folder `value`), `clone` or `create` (the form, its field
+    /// filled from `value`). `answer` (`0` Initialize Git, `1` Add without
+    /// Git, `2` Cancel) answers the not-a-git-repository prompt, `path` only.
+    pub fn surface_project_add(
+        kind: &str,
+        value: &str,
+        submit: bool,
+        answer: Option<u8>,
+    ) -> ControlRequest {
+        let mut params = BTreeMap::from([
+            ("kind".to_string(), kind.to_string()),
+            ("value".to_string(), value.to_string()),
+        ]);
+        if submit {
+            params.insert("submit".to_string(), "true".to_string());
+        }
+        if let Some(answer) = answer {
+            params.insert("answer".to_string(), answer.to_string());
+        }
+        request("surface.project_add", params)
+    }
+
+    /// Debug-only `surface.project_identity.read`: the "Project added" dialog's
+    /// state, and the workspace facts around it.
+    pub fn project_identity_read() -> ControlRequest {
+        request("surface.project_identity.read", BTreeMap::new())
+    }
+
+    /// Debug-only `surface.project_identity.act {action, value?}`: runs a
+    /// dialog button's handler (`save`, `skip`) or drives its picker (`mode`,
+    /// `open-emoji-grid`, `pick-glyph`).
+    pub fn project_identity_act(action: &str, value: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::from([("action".to_string(), action.to_string())]);
+        if let Some(value) = value {
+            params.insert("value".to_string(), value.to_string());
+        }
+        request("surface.project_identity.act", params)
+    }
+
     pub fn system_ping() -> ControlRequest {
         request("system.ping", BTreeMap::new())
     }

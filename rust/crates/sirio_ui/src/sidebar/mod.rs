@@ -652,6 +652,11 @@ pub struct Sidebar {
     /// sees only prompts gpui draws inside the window, and on macOS and
     /// Windows this one is native, so the sidebar tracks it itself.
     prompt_open: bool,
+    /// Debug builds' stand-in for the not-a-git-repository prompt's reply,
+    /// set by `control_add_path` and consumed by the next
+    /// `confirm_add_project`: `0` Initialize Git, `1` Add without Git, `2`
+    /// Cancel. `None` leaves the real prompt in place.
+    debug_prompt_answer: Option<u8>,
     pending_reorder: Option<(RowDrag, usize, bool)>,
     /// The panel's current width, pushed in by the host each render — the
     /// same arrangement `RightPanel::set_panel_width` uses, and for the same
@@ -977,6 +982,7 @@ impl Sidebar {
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             prompt_open: false,
+            debug_prompt_answer: None,
             pending_reorder: None,
             panel_width: DEFAULT_SIDEBAR_WIDTH,
             row_views: std::collections::HashMap::new(),
@@ -1074,6 +1080,7 @@ impl Sidebar {
             chat_launch_sources: std::collections::BTreeMap::new(),
             project_form: None,
             prompt_open: false,
+            debug_prompt_answer: None,
             pending_reorder: None,
             panel_width: DEFAULT_SIDEBAR_WIDTH,
             row_views: std::collections::HashMap::new(),
@@ -1777,6 +1784,74 @@ impl Sidebar {
         self.prompt_open
     }
 
+    /// Which project-entry form is open: `none`, `clone` or `create`. The
+    /// debug read verb reports it.
+    pub fn project_form_kind(&self) -> &'static str {
+        match self.project_form {
+            None => "none",
+            Some(ProjectFormSurface::Clone(_)) => "clone",
+            Some(ProjectFormSurface::Create(_)) => "create",
+        }
+    }
+
+    /// Debug entry point of `surface.project_add kind=path`: the Open folder
+    /// flow on `path`, without the folder chooser. `answer` replaces the
+    /// not-a-git-repository prompt's reply (`0` Initialize Git, `1` Add
+    /// without Git, `2` Cancel), because that prompt takes clicks only and a
+    /// script could not answer it. Present in every build; the verb's arm in
+    /// `main.rs` serves it in debug builds only.
+    pub fn control_add_path(
+        &mut self,
+        path: PathBuf,
+        answer: Option<u8>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.debug_prompt_answer = answer;
+        self.confirm_add_project(path, window, cx);
+    }
+
+    /// Debug entry point of `surface.project_add kind=clone|create`: opens the
+    /// form, fills its field from `value` (a URL or a folder name), focuses
+    /// the field and, with `submit`, submits it. Present in every build; the
+    /// verb's arm in `main.rs` serves it in debug builds only.
+    pub fn control_project_form(
+        &mut self,
+        kind: &str,
+        value: &str,
+        submit: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        match kind {
+            "clone" => {
+                self.start_clone_project(cx);
+                let Some(ProjectFormSurface::Clone(form)) = self.project_form.clone() else {
+                    return Err("the Clone form did not open".to_string());
+                };
+                form.update(cx, |form, cx| form.set_url(value, cx));
+                window.focus(&form.focus_handle(cx), cx);
+                if submit {
+                    form.update(cx, |form, cx| form.submit(cx));
+                }
+                Ok(())
+            }
+            "create" => {
+                self.start_create_project(cx);
+                let Some(ProjectFormSurface::Create(form)) = self.project_form.clone() else {
+                    return Err("the Create form did not open".to_string());
+                };
+                form.update(cx, |form, cx| form.set_name(value, cx));
+                window.focus(&form.focus_handle(cx), cx);
+                if submit {
+                    form.update(cx, |form, cx| form.submit(cx));
+                }
+                Ok(())
+            }
+            other => Err(format!("unknown project form kind {other:?}")),
+        }
+    }
+
     /// Opens the folder chooser that starts Add Project. Public so the
     /// centre's no-project state reuses this flow — chooser, the
     /// not-a-git-repository prompt (F-PRJ-03), `SidebarEvent::AddProject` —
@@ -1824,6 +1899,9 @@ impl Sidebar {
     /// project. A folder that is already a git checkout (the common case)
     /// is added immediately with no extra click.
     fn confirm_add_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        // Taken before anything else, so a git folder, which never prompts,
+        // cannot leave an answer behind for the next add.
+        let answer = self.debug_prompt_answer.take();
         if path.join(".git").exists() {
             cx.emit(SidebarEvent::AddProject {
                 path,
@@ -1831,25 +1909,37 @@ impl Sidebar {
             });
             return;
         }
-        self.prompt_open = true;
-        let receiver = window.prompt(
-            PromptLevel::Info,
-            "This folder is not a git repository",
-            Some(
-                "Sirio's worktrees, branches, and git-driven sidebar features need a git \
-                 repository. You can initialize one here, or add the folder as-is.",
-            ),
-            &["Initialize Git", "Add without Git", "Cancel"],
-            cx,
-        );
+        // With a debug answer there is no prompt, so the flag is never set.
+        let receiver = if answer.is_none() {
+            self.prompt_open = true;
+            Some(window.prompt(
+                PromptLevel::Info,
+                "This folder is not a git repository",
+                Some(
+                    "Sirio's worktrees, branches, and git-driven sidebar features need a git \
+                     repository. You can initialize one here, or add the folder as-is.",
+                ),
+                &["Initialize Git", "Add without Git", "Cancel"],
+                cx,
+            ))
+        } else {
+            None
+        };
         cx.spawn_in(window, async move |sidebar, cx| {
-            let choice = receiver.await.unwrap_or(2);
-            // Clear the flag before any branch emits or returns, so none
-            // leaves it set: a flag left set would stall the host's queue.
-            let _ = sidebar.update(cx, |sidebar, cx| {
-                sidebar.prompt_open = false;
-                cx.emit(SidebarEvent::PromptClosed);
-            });
+            let choice = match receiver {
+                Some(receiver) => {
+                    let choice = receiver.await.unwrap_or(2);
+                    // Clear the flag before any branch emits or returns, so
+                    // none leaves it set: a flag left set would stall the
+                    // host's queue.
+                    let _ = sidebar.update(cx, |sidebar, cx| {
+                        sidebar.prompt_open = false;
+                        cx.emit(SidebarEvent::PromptClosed);
+                    });
+                    choice
+                }
+                None => answer.map_or(2, usize::from),
+            };
             if choice == 1 {
                 let _ = sidebar.update(cx, |_, cx| {
                     cx.emit(SidebarEvent::AddProject {
