@@ -231,7 +231,8 @@ impl AppDatabase {
     pub fn worktrees(&self) -> Result<Vec<WorktreeRecord>, PersistenceError> {
         let mut statement = self.conn.prepare(
             "SELECT id, project_id, branch, path, is_primary, order_idx,
-                    comment, created_at, updated_at, secondary_pane_hidden
+                    comment, created_at, updated_at, secondary_pane_hidden,
+                    primary_pane_collapsed
              FROM worktree
              ORDER BY project_id, order_idx, id",
         )?;
@@ -246,7 +247,8 @@ impl AppDatabase {
     ) -> Result<Vec<WorktreeRecord>, PersistenceError> {
         let mut statement = self.conn.prepare(
             "SELECT id, project_id, branch, path, is_primary, order_idx,
-                    comment, created_at, updated_at, secondary_pane_hidden
+                    comment, created_at, updated_at, secondary_pane_hidden,
+                    primary_pane_collapsed
              FROM worktree
              WHERE project_id = ?1
              ORDER BY order_idx, id",
@@ -262,8 +264,9 @@ impl AppDatabase {
         transaction.execute(
             "INSERT INTO worktree
                 (id, project_id, branch, path, is_primary, order_idx,
-                 comment, created_at, updated_at, secondary_pane_hidden)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 comment, created_at, updated_at, secondary_pane_hidden,
+                 primary_pane_collapsed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                  project_id = excluded.project_id,
                  branch = excluded.branch,
@@ -273,7 +276,8 @@ impl AppDatabase {
                  comment = excluded.comment,
                  created_at = excluded.created_at,
                  updated_at = excluded.updated_at,
-                 secondary_pane_hidden = excluded.secondary_pane_hidden",
+                 secondary_pane_hidden = excluded.secondary_pane_hidden,
+                 primary_pane_collapsed = excluded.primary_pane_collapsed",
             params![
                 worktree.id,
                 worktree.project_id,
@@ -285,6 +289,7 @@ impl AppDatabase {
                 worktree.created_at,
                 worktree.updated_at,
                 worktree.secondary_pane_hidden,
+                worktree.primary_pane_collapsed,
             ],
         )?;
         transaction.commit()?;
@@ -320,7 +325,8 @@ impl AppDatabase {
         self.conn
             .query_row(
                 "SELECT id, project_id, branch, path, is_primary, order_idx,
-                        comment, created_at, updated_at, secondary_pane_hidden
+                        comment, created_at, updated_at, secondary_pane_hidden,
+                        primary_pane_collapsed
                  FROM worktree
                  WHERE path = ?1
                  ORDER BY project_id, order_idx, id
@@ -1876,6 +1882,7 @@ fn map_worktree(row: &rusqlite::Row) -> rusqlite::Result<WorktreeRecord> {
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
         secondary_pane_hidden: row.get(9)?,
+        primary_pane_collapsed: row.get(10)?,
     })
 }
 
@@ -2027,8 +2034,9 @@ fn insert_worktree(tx: &rusqlite::Transaction, worktree: &WorktreeRecord) -> rus
     tx.execute(
         "INSERT INTO worktree
             (id, project_id, branch, path, is_primary, order_idx,
-             comment, created_at, updated_at, secondary_pane_hidden)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             comment, created_at, updated_at, secondary_pane_hidden,
+             primary_pane_collapsed)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             worktree.id,
             worktree.project_id,
@@ -2040,6 +2048,7 @@ fn insert_worktree(tx: &rusqlite::Transaction, worktree: &WorktreeRecord) -> rus
             worktree.created_at,
             worktree.updated_at,
             worktree.secondary_pane_hidden,
+            worktree.primary_pane_collapsed,
         ],
     )?;
     Ok(())
