@@ -81,7 +81,7 @@ mod tests {
         notify: true,
     };
 
-    fn all_firsts() -> [FirstStatus; 5] {
+    fn all_firsts() -> [FirstStatus; 7] {
         [
             FirstStatus::Unrecorded,
             FirstStatus::Recorded { was_running: false },
@@ -92,6 +92,14 @@ mod tests {
             },
             FirstStatus::Restored {
                 was_running: false,
+                chat: true,
+            },
+            FirstStatus::Restored {
+                was_running: false,
+                chat: false,
+            },
+            FirstStatus::Restored {
+                was_running: true,
                 chat: true,
             },
         ]

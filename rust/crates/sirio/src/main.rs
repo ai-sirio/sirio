@@ -5791,10 +5791,10 @@ struct SirioWorkspace {
     /// (backed uniformly by every platform's own window, no linux-specific
     /// code needed here). Polled once per frame in `render` (the same
     /// "Layer E is polled, not pushed" pattern that function already uses
-    /// for streaming/exit state), because `StopPolicy::decide`
-    /// is decided from `post_activity_notification`, which fires from
-    /// Layer B/C/D activity-transition callbacks that carry no `Window` of
-    /// their own -- only `render` and the control-socket dispatch loop do.
+    /// for streaming/exit state), because `post_activity_notification`
+    /// gates on `StopPolicy::decide` from Layer B/C/D activity-transition
+    /// callbacks that carry no `Window` of their own -- only `render` and
+    /// the control-socket dispatch loop do.
     /// Starts `true` (matching this argument's previous hardcoded value)
     /// so the very first transition, before any frame has painted, keeps
     /// today's behaviour rather than guessing unfocused.

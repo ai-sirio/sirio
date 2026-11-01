@@ -81,9 +81,11 @@ impl AgentActivityModel {
         Self::default()
     }
 
-    /// Records the timestamp only when the pane's resolved status changes.
-    /// Signals can reassert the same status frequently, but those are not
-    /// meaningful transitions for an age displayed to users.
+    /// Acts only when the pane's resolved status changes: records the
+    /// timestamp and queues the resolved transition for
+    /// [`Self::take_resolved_transitions`]. Signals can reassert the same
+    /// status frequently, but those are not meaningful transitions for an age
+    /// displayed to users or for a stop.
     fn track_status_change(&mut self, pane_id: &str, old: Option<AgentStatus>, now: Instant) {
         let new = self.resolved(pane_id);
         if old == new {
@@ -237,12 +239,16 @@ impl AgentActivityModel {
         // --- Unregistered pane: try to identify the agent from title text ---
         let Some(agent_id) = self.pane_agents.get(pane_id).cloned() else {
             let identified = identify_agent_from_title(title)?;
+            // Read before ownership changes what `resolved` consults: a
+            // standing Layer E claim is the old status of this change.
+            let old = self.resolved(pane_id);
             self.pane_agents
                 .insert(pane_id.to_string(), identified.to_string());
             self.title_owned_panes.insert(pane_id.to_string());
             let status =
                 detect_status_from_title(title, identified).unwrap_or(AgentStatus::Running);
-            self.set_agent_status(pane_id, status, now);
+            self.agent_status.insert(pane_id.to_string(), status);
+            self.track_status_change(pane_id, old, now);
             return Some(Transition {
                 pane_id: pane_id.to_string(),
                 old: None,
@@ -329,10 +335,15 @@ impl AgentActivityModel {
         if self.pane_agents.contains_key(pane_id) {
             return None;
         }
+        // Read before ownership changes what `resolved` consults: a
+        // standing Layer E claim is the old status of this change.
+        let old = self.resolved(pane_id);
         self.pane_agents
             .insert(pane_id.to_string(), agent_id.to_string());
         self.process_owned_panes.insert(pane_id.to_string());
-        self.set_agent_status(pane_id, AgentStatus::Running, Instant::now());
+        self.agent_status
+            .insert(pane_id.to_string(), AgentStatus::Running);
+        self.track_status_change(pane_id, old, Instant::now());
         Some(Transition {
             pane_id: pane_id.to_string(),
             old: None,
@@ -978,5 +989,29 @@ mod tests {
         model.set_entity_status("pane-1", Some(AgentStatus::Done));
         assert_eq!(model.take_resolved_transitions().len(), 1);
         assert_eq!(model.take_resolved_transitions(), vec![]);
+    }
+
+    #[test]
+    fn identifying_a_pane_by_title_queues_the_surface_claim_as_old() {
+        let mut model = AgentActivityModel::new();
+        model.set_entity_status("pane-1", Some(AgentStatus::Done));
+        model.take_resolved_transitions();
+        model.handle_title_change("pane-1", "\u{2733} idle", Instant::now());
+        assert_eq!(
+            statuses(&model.take_resolved_transitions()),
+            vec![(Some(AgentStatus::Done), AgentStatus::NeedsInput)]
+        );
+    }
+
+    #[test]
+    fn identifying_a_pane_by_process_queues_the_surface_claim_as_old() {
+        let mut model = AgentActivityModel::new();
+        model.set_entity_status("pane-1", Some(AgentStatus::Done));
+        model.take_resolved_transitions();
+        model.process_identified("pane-1", "claude");
+        assert_eq!(
+            statuses(&model.take_resolved_transitions()),
+            vec![(Some(AgentStatus::Done), AgentStatus::Running)]
+        );
     }
 }
