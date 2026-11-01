@@ -2,37 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use sirio_activity::{
     ActivityStatus, AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
-    AttentionSort, BootstrapRestoreOrder, NotificationPolicy, TerminalContentId,
-    WorktreeMountPolicy,
+    AttentionSort, BootstrapRestoreOrder, TerminalContentId, WorktreeMountPolicy,
 };
-
-#[test]
-fn f_core_act_20_notification_policy_suppresses_noise_and_visible_transitions() {
-    assert!(!NotificationPolicy::should_notify(
-        None,
-        AgentStatus::Running,
-        false,
-        false
-    ));
-    assert!(!NotificationPolicy::should_notify(
-        Some(AgentStatus::Done),
-        AgentStatus::Done,
-        false,
-        false
-    ));
-    assert!(!NotificationPolicy::should_notify(
-        Some(AgentStatus::Running),
-        AgentStatus::NeedsInput,
-        true,
-        true
-    ));
-    assert!(NotificationPolicy::should_notify(
-        Some(AgentStatus::Running),
-        AgentStatus::NeedsInput,
-        true,
-        false
-    ));
-}
 
 #[test]
 fn f_core_act_22_attention_sort_is_stable_and_urgent_first_preserves_manual_nonurgent_order() {

@@ -13,8 +13,8 @@ use notify::{
 };
 use sirio_activity::{
     AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
-    BootstrapRestoreOrder, NotificationPayload, NotificationPolicy, TerminalContentId, Transition,
-    WorktreeMountPolicy,
+    BootstrapRestoreOrder, FirstStatus, NotificationPayload, StopPolicy, TerminalContentId,
+    Transition, WorktreeMountPolicy,
 };
 use sirio_agents::{ALL as AGENT_CATALOG, AgentAdapter};
 use sirio_chat::{AgentCommand, ClaudeLaunch, LaunchSpec};
@@ -5791,7 +5791,7 @@ struct SirioWorkspace {
     /// (backed uniformly by every platform's own window, no linux-specific
     /// code needed here). Polled once per frame in `render` (the same
     /// "Layer E is polled, not pushed" pattern that function already uses
-    /// for streaming/exit state), because `NotificationPolicy::should_notify`
+    /// for streaming/exit state), because `StopPolicy::decide`
     /// is decided from `post_activity_notification`, which fires from
     /// Layer B/C/D activity-transition callbacks that carry no `Window` of
     /// their own -- only `render` and the control-socket dispatch loop do.
@@ -13665,12 +13665,14 @@ impl SirioWorkspace {
         // F-CORE-ACT-20: real window-focus, not a hardcoded `true` -- see
         // `window_active`'s own doc comment for why this reads a
         // once-per-frame cache instead of a live `Window` query.
-        if !NotificationPolicy::should_notify(
+        if !StopPolicy::decide(
             transition.old,
             transition.new,
-            self.window_active,
-            visible,
-        ) {
+            FirstStatus::Unrecorded,
+            self.window_active && visible,
+        )
+        .notify
+        {
             return;
         }
         let agent_display_name = AGENT_CATALOG
@@ -13707,7 +13709,7 @@ impl SirioWorkspace {
         };
         // F-CORE-ACT-19: the title is `<agent> — <human worktree label>`,
         // not `<agent> — <status>` — the pane's transition status already
-        // drives which notification fires at all (`NotificationPolicy`
+        // drives which notification fires at all (`StopPolicy`
         // above); it does not belong in the title text a second time.
         // `AgentActivityModel::build_payload` (sirio_activity, not owned by
         // this file) still emits the status-suffixed title, so it is
@@ -40897,7 +40899,7 @@ done
     /// `Window::is_window_active`, not stay pinned to its own `true`
     /// starting value -- that pinned value is exactly what the production
     /// call site hardcoded before this fix (`main.rs`, the
-    /// `NotificationPolicy::should_notify` call
+    /// `StopPolicy::decide` call
     /// `post_activity_notification` makes), silently making the
     /// desktop-focus half of that clause unable to vary. `gpui`'s own test
     /// platform makes this a real, non-tautological assertion: a freshly
