@@ -9633,9 +9633,8 @@ impl SirioWorkspace {
                     }
                 }
                 ChatEvent::TurnEnded => {
-                    // A chat of a worktree that is not selected ends its turns
-                    // too: it is found among the retained ones.
-                    if let Some(pane_id) = workspace.chat_pane_id(chat_entity.entity_id()) {
+                    let chat_id = chat_entity.entity_id();
+                    if let Some(pane_id) = Self::pane_of_chat_in(workspace.tabs.iter(), chat_id) {
                         let transition = Transition {
                             pane_id: format!("pane-{pane_id}"),
                             old: Some(AgentStatus::Running),
@@ -9656,15 +9655,14 @@ impl SirioWorkspace {
         .detach();
     }
 
-    /// The pane `chat` lives in, among the mounted tabs and then the chats
-    /// retained across a worktree switch. A chat is never in two panes.
-    fn chat_pane_id(&self, chat_id: gpui::EntityId) -> Option<usize> {
+    /// The pane the chat `chat_id` lives in, among `tabs`. A chat is never in
+    /// two panes.
+    fn pane_of_chat_in<'a>(
+        tabs: impl Iterator<Item = &'a OpenTab>,
+        chat_id: gpui::EntityId,
+    ) -> Option<usize> {
         let mut pane_id = None;
-        for tab in self
-            .tabs
-            .iter()
-            .chain(self.retained_worktree_chats.values().flat_map(BTreeMap::values))
-        {
+        for tab in tabs {
             if pane_id.is_some() {
                 break;
             }
@@ -9678,6 +9676,17 @@ impl SirioWorkspace {
             });
         }
         pane_id
+    }
+
+    /// The pane a chat lives in, among the mounted tabs and then the chats
+    /// retained across a worktree switch.
+    fn chat_pane_id(&self, chat_id: gpui::EntityId) -> Option<usize> {
+        Self::pane_of_chat_in(self.tabs.iter(), chat_id).or_else(|| {
+            Self::pane_of_chat_in(
+                self.retained_worktree_chats.values().flat_map(BTreeMap::values),
+                chat_id,
+            )
+        })
     }
 
     /// Pushes a chat's status claim into the activity model the moment the chat
@@ -9696,8 +9705,16 @@ impl SirioWorkspace {
             return;
         };
         self.chat_evidence.insert(chat_id, status);
-        self.activity
-            .set_entity_status(&format!("pane-{pane_id}"), status);
+        // The observer runs before render, so render's own sync no longer sees this
+        // change: a clear (no Transition) must still arm the reconcile, and a parked
+        // chat's notify repaints nothing, so the sidebar is asked to.
+        if self
+            .activity
+            .set_entity_status(&format!("pane-{pane_id}"), status)
+        {
+            self.mark_activity_dirty();
+            cx.notify();
+        }
         self.drain_activity_transitions(cx);
     }
 
@@ -10535,6 +10552,10 @@ impl SirioWorkspace {
             });
         }
         let mounted = found.len();
+        // A pane moved to a fresh id keeps its cache entry under the old one: the
+        // same terminal must not be polled twice, once under an id nothing holds.
+        let mounted_views: HashSet<gpui::EntityId> =
+            found.iter().map(|(_, _, view)| view.entity_id()).collect();
         for cached in self.terminal_pane_cache.iter() {
             // `track_terminal_panes_in_cache` addresses a pane as `terminal-{id}`.
             let Some(pane_id) = cached
@@ -10544,7 +10565,9 @@ impl SirioWorkspace {
             else {
                 continue;
             };
-            if !found[..mounted].iter().any(|(_, mounted_id, _)| *mounted_id == pane_id) {
+            if !found[..mounted].iter().any(|(_, mounted_id, _)| *mounted_id == pane_id)
+                && !mounted_views.contains(&cached.controller.entity_id())
+            {
                 found.push((None, pane_id, cached.controller.clone()));
             }
         }
@@ -12682,12 +12705,16 @@ impl SirioWorkspace {
     /// before the worktree's strip is dropped for good (evicted, or closed with
     /// its project or on its own): the model is keyed by pane id, and an id
     /// still holding a status would be inherited by the next pane to take it.
-    /// A pane that is a leaf of a mounted tab is left alone: its tab's close
-    /// forgets it, and a selection change never does.
+    /// A pane that is a leaf of a mounted tab of another worktree is left alone,
+    /// and a selection change never forgets one. A tab of this worktree does not
+    /// protect its panes: when the outgoing worktree is itself evicted,
+    /// `self.tabs` still holds its tabs, since the switch replaces them later.
     fn forget_parked_panes(&mut self, worktree_id: &str) {
+        let forgotten = Path::new(worktree_id);
         let mounted: HashSet<usize> = self
             .tabs
             .iter()
+            .filter(|tab| !paths_name_the_same_document(&self.tab_worktree_path(tab.id), forgotten))
             .flat_map(|tab| tab.panes.leaf_ids())
             .collect();
         if let Some(parked) = self.parked_worktree_tabs.get(worktree_id) {
@@ -12949,7 +12976,25 @@ impl SirioWorkspace {
             // `new_tabs`; a running chat whose tab the database no longer
             // names is dropped rather than resurrected, so the DB stays the
             // source of *which* tabs exist.
-            self.retained_worktree_chats.remove(&selected_worktree_id);
+            if let Some(dropped) = self.retained_worktree_chats.remove(&selected_worktree_id) {
+                let mut kept = HashSet::new();
+                for tab in &new_tabs {
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::Chat(chat) = content {
+                            kept.insert(chat.entity_id());
+                        }
+                    });
+                }
+                for tab in dropped.values() {
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::Chat(chat) = content
+                            && !kept.contains(&chat.entity_id())
+                        {
+                            self.chat_evidence.remove(&chat.entity_id());
+                        }
+                    });
+                }
+            }
             let keep_content_ids: HashSet<String> = reused_terminal_panes
                 .iter()
                 .map(|pane_id| format!("terminal-{pane_id}"))

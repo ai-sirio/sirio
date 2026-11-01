@@ -2262,15 +2262,16 @@ look_at_shown() {
 }
 # One field of the chat session `surface attention read` lists for $LINKED: strings as they
 # are, everything else as JSON.
-attention_chat() { # field
+attention_chat() { attention_session chat "$1"; }
+attention_session() { # kind field: the first session of that kind (chat|terminal) held for $LINKED
   reply surface attention read | python3 -c 'import json, os, sys
 reply = json.load(sys.stdin)
 reply = reply[0] if isinstance(reply, list) else reply
 for row in json.loads(reply["sessions"]):
-    if row["kind"] == "chat" and row["worktree"] and os.path.realpath(row["worktree"]) == os.path.realpath(sys.argv[2]):
-        value = row[sys.argv[1]]
+    if row["kind"] == sys.argv[1] and row["worktree"] and os.path.realpath(row["worktree"]) == os.path.realpath(sys.argv[3]):
+        value = row[sys.argv[2]]
         print(value if isinstance(value, str) else json.dumps(value))
-        break' "$1" "$LINKED"
+        break' "$1" "$2" "$LINKED"
 }
 # Polls until the chat session's FIELD reads WANT.
 wait_attention() { # desc field want seconds
@@ -2322,6 +2323,9 @@ scenario_unread_parked_chat() {
   capture unread_parked_chat-before
   send_prompt request
   ctl select-workspace --workspace "$PRIMARY" >/dev/null
+  # The turn is still going and nothing shows the chat: the stop below is off screen.
+  [ "$(attention_chat status)" = running ] || fail "the chat does not read running right after the select (status '$(attention_chat status)'), so the stop would not be off screen"
+  [ "$(attention_chat onScreen)" = false ] || fail "the chat reads onScreen after the select"
   echo "step: the worktree was left mid-turn; the turn ends with the chat parked"
   wait_attention "the parked chat's turn ended" status done 30
   wait_attention "the parked chat's stop marked it" unread true 5
@@ -2352,6 +2356,9 @@ scenario_unread_question() {
   capture unread_question-before
   send_prompt subperm
   ctl select-workspace --workspace "$PRIMARY" >/dev/null
+  # The turn runs and has not asked yet: the question below comes with the worktree left.
+  [ "$(attention_chat status)" = running ] || fail "the chat does not read running right after the select (status '$(attention_chat status)'), so the question would not come off screen"
+  [ "$(attention_chat onScreen)" = false ] || fail "the chat reads onScreen after the select"
   echo "step: the worktree was left; the turn asks a permission and nobody answers"
   wait_attention "the parked chat waits for the user" status needs-input 30
   wait_attention "the question marked the parked chat" unread true 5
@@ -2381,7 +2388,16 @@ scenario_unread_secondary_seen() {
     sleep 0.2
   done
   [ "$tabs" = "true chat" ] || fail "the chat is not alone in a visible Secondary half (secondaryVisible secondaryKinds: '$tabs')"
-  echo "OK: the chat is in the visible Secondary half, a terminal in the Primary"
+  echo "OK: the chat is alone in the visible Secondary half"
+  local primary_tabs
+  primary_tabs=$(reply surface layout read | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["primaryTabs"])')
+  [ "$primary_tabs" = 1 ] || fail "the Primary half holds $primary_tabs tabs, not the one terminal"
+  for _ in $(seq 1 50); do
+    [ "$(attention_session terminal onScreen)" = true ] && break
+    sleep 0.2
+  done
+  [ "$(attention_session terminal onScreen)" = true ] || fail "the terminal in the Primary half does not read onScreen: both halves are not shown"
+  echo "OK: the Primary half's one tab is the terminal, and it is on screen"
   wait_attention "the chat is on screen in the Secondary half" onScreen true 10
   local base
   base=$(posted_count)
