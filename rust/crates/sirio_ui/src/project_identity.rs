@@ -225,6 +225,20 @@ impl PickerMode {
     }
 }
 
+/// The longest display name a project keeps, counted in characters.
+const MAX_DISPLAY_NAME_CHARS: usize = 120;
+
+/// The one rule every writer of a project's display name applies: trim,
+/// remove control characters, keep the first 120 characters, trim again.
+/// `None` means no label: the result is empty or equals `base_name` (the
+/// root name) exactly, so typing the root name itself stores nothing.
+pub fn normalize_display_name(input: &str, base_name: &str) -> Option<String> {
+    let without_controls: String = input.trim().chars().filter(|c| !c.is_control()).collect();
+    let kept: String = without_controls.chars().take(MAX_DISPLAY_NAME_CHARS).collect();
+    let value = kept.trim();
+    (!value.is_empty() && value != base_name).then(|| value.to_string())
+}
+
 /// A PNG over this size is rejected before it is read into memory. The
 /// reference app states its own limit in Swift source this port has no
 /// access to (copying from a reference checkout is out of bounds here); this
@@ -1246,6 +1260,101 @@ mod tests {
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    fn some(value: &str) -> Option<String> {
+        Some(value.to_string())
+    }
+
+    #[test]
+    fn a_label_loses_its_surrounding_spaces() {
+        assert_eq!(normalize_display_name("  api  ", "root"), some("api"));
+        assert_eq!(normalize_display_name("\u{a0}api\u{3000}", "root"), some("api"));
+    }
+
+    #[test]
+    fn a_label_of_only_spaces_is_no_label() {
+        assert_eq!(normalize_display_name("", "root"), None);
+        assert_eq!(normalize_display_name("   ", "root"), None);
+    }
+
+    #[test]
+    fn control_characters_are_removed_and_the_rest_is_kept() {
+        assert_eq!(normalize_display_name("a\tb\nc\u{7}d", "root"), some("abcd"));
+        assert_eq!(normalize_display_name("my \u{7}app", "root"), some("my app"));
+        // Controls at the edges are removed before the second trim, never
+        // shielding the spaces beside them.
+        assert_eq!(normalize_display_name("\u{7} api \n", "root"), some("api"));
+    }
+
+    #[test]
+    fn a_label_of_only_control_characters_is_no_label() {
+        assert_eq!(normalize_display_name("\u{7}", "root"), None);
+        assert_eq!(normalize_display_name(" \t\n\u{7} ", "root"), None);
+    }
+
+    #[test]
+    fn a_label_of_exactly_120_characters_is_kept_whole() {
+        let label = "a".repeat(120);
+        assert_eq!(normalize_display_name(&label, "root"), Some(label.clone()));
+    }
+
+    #[test]
+    fn a_label_of_121_characters_is_cut_to_120() {
+        let label = "a".repeat(121);
+        assert_eq!(normalize_display_name(&label, "root"), Some("a".repeat(120)));
+    }
+
+    #[test]
+    fn the_cut_counts_characters_not_bytes() {
+        // 'e acute' is two bytes, the rocket four: a byte cut would panic or
+        // keep fewer characters.
+        let accents = "\u{e9}".repeat(150);
+        assert_eq!(normalize_display_name(&accents, "root"), Some("\u{e9}".repeat(120)));
+        let rockets = "\u{1F680}".repeat(121);
+        assert_eq!(normalize_display_name(&rockets, "root"), Some("\u{1F680}".repeat(120)));
+        let mixed = format!("{}{}", "\u{e9}".repeat(119), "\u{1F680}\u{1F680}");
+        assert_eq!(
+            normalize_display_name(&mixed, "root"),
+            Some(format!("{}\u{1F680}", "\u{e9}".repeat(119)))
+        );
+    }
+
+    #[test]
+    fn the_cut_is_taken_after_the_controls_are_removed() {
+        // 130 characters of which 20 are controls: all 110 others survive.
+        let label = format!("{}{}", "\u{7}".repeat(20), "b".repeat(110));
+        assert_eq!(normalize_display_name(&label, "root"), Some("b".repeat(110)));
+    }
+
+    #[test]
+    fn a_cut_that_leaves_a_trailing_space_is_trimmed_again() {
+        let label = format!("{} {}", "a".repeat(119), "b".repeat(10));
+        assert_eq!(normalize_display_name(&label, "root"), Some("a".repeat(119)));
+    }
+
+    #[test]
+    fn a_label_equal_to_the_root_name_is_no_label() {
+        assert_eq!(normalize_display_name("sirio", "sirio"), None);
+    }
+
+    #[test]
+    fn a_label_equal_to_the_root_name_after_trimming_is_no_label() {
+        assert_eq!(normalize_display_name("  sirio\t", "sirio"), None);
+        assert_eq!(normalize_display_name("si\u{7}rio", "sirio"), None);
+    }
+
+    #[test]
+    fn a_label_that_differs_from_the_root_name_only_by_case_is_kept() {
+        assert_eq!(normalize_display_name("Sirio", "sirio"), some("Sirio"));
+        assert_eq!(normalize_display_name("SIRIO", "sirio"), some("SIRIO"));
+    }
+
+    #[test]
+    fn an_empty_root_name_still_gives_no_label_for_an_empty_input() {
+        assert_eq!(normalize_display_name("", ""), None);
+        assert_eq!(normalize_display_name("   ", ""), None);
+        assert_eq!(normalize_display_name("api", ""), some("api"));
+    }
 
     /// A scratch file that removes itself when the test finishes, mirroring
     /// `chat.rs`'s own `TempDir` — the same reasoning applies: nothing can

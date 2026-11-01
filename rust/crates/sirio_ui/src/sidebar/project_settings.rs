@@ -19,7 +19,7 @@ use sirio_project::display_path;
 use sirio_theme::Theme;
 
 use crate::caret;
-use crate::project_identity::{ProjectIcon, ProjectIconPicker};
+use crate::project_identity::{ProjectIcon, ProjectIconPicker, normalize_display_name};
 
 use super::ProjectSettingsUpdate;
 use super::SidebarContextAction;
@@ -154,10 +154,7 @@ impl ProjectSettingsView {
     fn to_update(&self) -> ProjectSettingsUpdate {
         ProjectSettingsUpdate {
             id: self.id.clone(),
-            display_name: {
-                let value = self.display_name.trim().to_string();
-                (!value.is_empty()).then_some(value)
-            },
+            display_name: normalize_display_name(&self.display_name, &self.base_name),
             is_git: self.is_git,
             icon: self.icon.clone(),
             default_worktree_base: {
