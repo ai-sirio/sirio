@@ -75,7 +75,7 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # a fresh Sirio; --state-only skips the
 # captures; --display :N is a private Xvfb (at least --window-size, default 2200x1000)
 # with Mesa's lavapipe, and trace_tab and trace_idle need one (--state-only with it paints
-# but takes no captures), trace_keys, file_links and clipboard_keys a framed run at --window-size 2200x1000;
+# but takes no captures), trace_keys, file_links, clipboard_keys and composer_keys a framed run at --window-size 2200x1000;
 # --appearance light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL". The
 # composer_compact scenario uses Scripts/Tests/stubs/session-panel-bypass/claude, the fixture's
 # session_panel_bypass mode (the CLI starts in bypassPermissions), and proves the native Claude
@@ -87,7 +87,19 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # CLI's reason as its tooltip (the stub's handshake says `preference`) and Thinking enabled, a real
 # Enter opens the thinking picker (`picker`) and Escape closes it. It needs a painted chat
 # (--display :N) and captures frames/composer-compact.png, composer-overflow.png and
-# composer-thinking.png.
+# composer-thinking.png. The composer_keys scenario (not the one of that name in
+# test-ely-chat-ui-e2e.py) presses real X keys in a native Claude chat's composer, on the default
+# stub, whose fixture logs every prompt it hears (SIRIO_FIXTURE_USER_LOG) and every control request
+# (SIRIO_FIXTURE_CONTROL_LOG): after two prompts, the second with a file picked from the @ popup
+# with Tab, Up recalls the second with its @path text, a second Up the first, Down twice goes back
+# to the empty draft; the recalled prompt sent again reaches the CLI with the file as a mention
+# link and no literal @path; an edited recall is an ordinary draft (Up moves the caret); after a
+# relaunch Up still recalls that prompt, mention included, and sending it mentions the file again.
+# Then six Shift+Tab walk the permission modes in the menu's order with Bypass left out (the
+# fixture's set_permission_mode requests read acceptEdits plan auto default acceptEdits plan), no
+# mode is drawn as the danger shield, and typing still reaches the composer, so no dialog holds the
+# keyboard. It needs --display :N --window-size 2200x1000 and captures
+# frames/composer-keys-*.png.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the
