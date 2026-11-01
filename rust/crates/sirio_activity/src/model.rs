@@ -33,7 +33,6 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::{Duration, Instant};
 
-use crate::notification::NotificationPayload;
 use crate::status::{AgentStatus, Transition};
 use crate::title::{
     TITLE_DEBOUNCE, detect_status_from_title, identify_agent_from_title, should_apply_title_signal,
@@ -630,43 +629,6 @@ impl AgentActivityModel {
             .into_iter()
             .filter(|pane_id| self.resolved(pane_id) == Some(AgentStatus::Running))
             .count()
-    }
-
-    /// Builds the platform-neutral notification payload for a tracked pane.
-    /// The caller supplies display context because project/worktree ownership
-    /// belongs above this crate.
-    #[allow(clippy::too_many_arguments)]
-    pub fn build_payload(
-        &self,
-        pane_id: &str,
-        status: AgentStatus,
-        agent_display_name: &str,
-        worktree_id: &str,
-        worktree_branch: &str,
-        project_name: Option<&str>,
-        worktree_comment: Option<&str>,
-    ) -> Option<NotificationPayload> {
-        if !self.pane_agents.contains_key(pane_id) {
-            return None;
-        }
-        let mut body = worktree_branch.to_string();
-        if let Some(project_name) = project_name {
-            body.push_str(" · ");
-            body.push_str(project_name);
-        }
-        if let Some(comment) = worktree_comment
-            .map(str::trim)
-            .filter(|comment| !comment.is_empty())
-        {
-            body.push_str("  ·  ");
-            body.push_str(comment);
-        }
-        Some(NotificationPayload {
-            pane_id: pane_id.to_string(),
-            worktree_id: worktree_id.to_string(),
-            title: format!("{agent_display_name} — {}", status.human_label()),
-            body,
-        })
     }
 }
 

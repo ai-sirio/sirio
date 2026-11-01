@@ -560,7 +560,8 @@ pub mod request {
     }
 
     /// Debug-only `surface.attention.act {focus}`: forces the window's focus to
-    /// `active` or `inactive`, or back to the OS's with `os`.
+    /// `active` or `inactive`, or back to the OS's with `os`. With `{click}`
+    /// instead, a click on the notification with that tag.
     pub fn attention_act(params: BTreeMap<String, String>) -> ControlRequest {
         request("surface.attention.act", params)
     }

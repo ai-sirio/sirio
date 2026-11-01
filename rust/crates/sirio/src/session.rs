@@ -2249,6 +2249,25 @@ impl SessionStore {
         }
     }
 
+    /// The worktree of the open tab whose persistence id is `id`, as the
+    /// database holds it. `None` for an unknown or archived tab, a fallback
+    /// database or a read error.
+    pub fn worktree_path_of_tab(&self, id: &str) -> Option<PathBuf> {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let db = db.as_ref()?;
+        match db.worktree_path_of_tab(id) {
+            Ok(path) => path.map(PathBuf::from),
+            Err(error) => {
+                eprintln!("[session] failed to read the worktree of tab {id}: {error}");
+                None
+            }
+        }
+    }
+
     /// Records that this worktree's Secondary pane is hidden or shown. A
     /// no-op for a worktree with no persisted row -- the row is written by
     /// the catalog upsert, and a pane state with no worktree to hang off is

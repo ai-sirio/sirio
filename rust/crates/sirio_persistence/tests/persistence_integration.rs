@@ -2443,3 +2443,43 @@ fn a_projects_handoff_choice_survives_a_relaunch_and_is_replaced_whole() {
     assert_eq!(db.handoff_choice("p1").expect("read"), Some(choice("p1", "", "terminal")));
     assert_eq!(db.handoff_choice("p2").expect("read"), None);
 }
+
+#[test]
+fn the_worktree_of_a_tab_is_found_by_its_id() {
+    let (_dir, db) = archive_fixture("tab-worktree");
+    db.save_worktree(&sample_worktree("other", "project", "feature"))
+        .expect("second worktree");
+    db.save_tab(&sample_tab("term", "worktree", "Terminal", "terminal"))
+        .expect("terminal");
+    db.save_tab(&sample_tab("chat", "other", "Chat", "chat"))
+        .expect("chat");
+
+    assert_eq!(
+        db.worktree_path_of_tab("term").expect("lookup"),
+        Some("/Users/me/main".to_string())
+    );
+    assert_eq!(
+        db.worktree_path_of_tab("chat").expect("lookup"),
+        Some("/Users/me/feature".to_string()),
+        "a tab answers with its own worktree, not the first one"
+    );
+}
+
+#[test]
+fn an_unknown_tab_has_no_worktree() {
+    let (_dir, db) = archive_fixture("tab-worktree-unknown");
+    db.save_tab(&sample_tab("term", "worktree", "Terminal", "terminal"))
+        .expect("terminal");
+
+    assert_eq!(db.worktree_path_of_tab("nope").expect("lookup"), None);
+}
+
+#[test]
+fn an_archived_tab_has_no_worktree() {
+    let (_dir, db) = archive_fixture("tab-worktree-archived");
+    db.save_tab(&sample_tab("chat", "worktree", "Chat", "chat"))
+        .expect("chat");
+    assert!(db.archive_tab("chat", 1_000).expect("archive"));
+
+    assert_eq!(db.worktree_path_of_tab("chat").expect("lookup"), None);
+}

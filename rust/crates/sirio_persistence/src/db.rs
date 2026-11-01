@@ -342,6 +342,20 @@ impl AppDatabase {
     // Tabs
     // ------------------------------------------------------------------
 
+    /// The path of the worktree an open tab belongs to. `None` for an id no
+    /// tab has, and for an archived tab: it is not part of any strip.
+    pub fn worktree_path_of_tab(&self, id: &str) -> Result<Option<String>, PersistenceError> {
+        self.conn
+            .query_row(
+                "SELECT w.path FROM tab t JOIN worktree w ON w.id = t.worktree_id
+                 WHERE t.id = ?1 AND t.closed_at IS NULL",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(PersistenceError::from)
+    }
+
     /// All tabs, ordered by worktree then position.
     pub fn tabs(&self) -> Result<Vec<TabRecord>, PersistenceError> {
         read_tabs(

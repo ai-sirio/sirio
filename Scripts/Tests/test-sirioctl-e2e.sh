@@ -1482,6 +1482,50 @@ for key, value in reply.items():
 panel_ids() { ctl_json panel list | python3 -I -c 'import json, sys
 for row in json.load(sys.stdin):
     print(row["id"])'; }
+# The notifications the app decided to post, one JSON object per line, oldest
+# first: `surface attention read`'s `posted`, which only a debug build keeps. Fails
+# with its own message when the key is missing.
+posted_rows() {
+  ctl_json surface attention read | python3 -I -c 'import json, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+if "posted" not in reply:
+    sys.exit("the attention read has no posted key")
+for row in json.loads(reply["posted"]):
+    print(json.dumps(row))'
+}
+# How many notifications the app has posted so far. Every assertion about a step
+# compares against this, taken just before the step, never against the total.
+posted_count() { posted_rows | wc -l | tr -d ' '; }
+# The notifications posted after the first $1 of them, one JSON object per line.
+posted_since() { posted_rows | tail -n +"$(( $1 + 1 ))"; }
+# One field of the first notification among those posted after the first $1.
+posted_field() { # baseline field
+  posted_since "$1" | head -n 1 | python3 -I -c 'import json, sys
+print(json.loads(sys.stdin.readline())[sys.argv[1]])' "$2"
+}
+# The notification posted after the first $1 whose tag is $2: its field $3.
+posted_field_of() { # baseline tag field
+  posted_since "$1" | python3 -I -c 'import json, sys
+for line in sys.stdin:
+    row = json.loads(line)
+    if row["tag"] == sys.argv[1]:
+        print(row[sys.argv[2]])
+        break' "$2" "$3"
+}
+# Waits until the app has posted $2 more notifications than at baseline $1.
+posted_wait() { # baseline want seconds
+  local got=""
+  for _ in $(seq 1 $(( $3 * 5 ))); do
+    got="$(( $(posted_count) - $1 ))"
+    [ "$got" -ge "$2" ] && return 0
+    sleep 0.2
+  done
+  fail "the app posted $got notification(s) since the baseline, wanted $2; posted: $(posted_rows | tr '\n' ' ')"
+}
+# The selected worktree's path and the active tab's 1-based position.
+current_path() { ctl_json current-workspace | field path; }
+active_tab() { ctl_json surface tabs read | field active; }
 
 case_15() {
   needs_window || return 0
@@ -1507,6 +1551,8 @@ SH
   W_SHELL="$W/sleeper/shell"
   local wt_b="$W/repo-b"
   git -C "$W_REPO" worktree add -q -b unread-b "$wt_b"
+  local wt_c="$W/repo-c"
+  git -C "$W_REPO" worktree add -q -b unread-c "$wt_c"
   app_start "$RUN/app-a/sirio"
   echo "step 14.1: the window reads active, before anything is opened"
   ctl surface attention act --focus active >/dev/null || fail "surface attention act --focus active was refused"
@@ -1514,10 +1560,11 @@ SH
 
   echo "step 14.2: worktrees A and B; a claude agent tab in A reaches SessionStart's needs-input"
   ctl project add "$W_REPO" >/dev/null 2>&1 || true
-  local id_a id_b
+  local id_a id_b id_c
   id_a="$(worktree_id_of "$W_REPO")"
   id_b="$(worktree_id_of "$wt_b")"
-  [ -n "$id_a" ] && [ -n "$id_b" ] && [ "$id_a" != "$id_b" ] || fail "the project does not list both worktrees"
+  id_c="$(worktree_id_of "$wt_c")"
+  [ -n "$id_a" ] && [ -n "$id_b" ] && [ -n "$id_c" ] && [ "$id_a" != "$id_b" ] && [ "$id_a" != "$id_c" ] && [ "$id_b" != "$id_c" ] || fail "the project does not list worktrees A, B and C"
   select_wt "$id_a"
   local known pane_a sess
   known="$(attention_ids | tr '\n' ' ')"
@@ -1537,6 +1584,8 @@ SH
   hook_go claude
   wait_until 30 hook_settled claude "claude UserPromptSubmit" || fail "the UserPromptSubmit step never ran"
   attention_wait "$sess" status running 20
+  local posted_base
+  posted_base="$(posted_count)"
   hook_go claude
   wait_until 30 hook_settled claude "claude Stop" || fail "the Stop step never ran"
   attention_wait "$sess" status needs-input 20
@@ -1545,6 +1594,40 @@ SH
   attention_wait "$sess" unread true 10
   [ "$(attention_get "$sess" onScreen)" = false ] || fail "the session in the parked worktree reads onScreen"
   echo "OK: the claude session stopped off screen: unread, needs-input, not on screen"
+
+  echo "step 14.4a: the one stop posted one notification, built from A's own worktree"
+  posted_wait "$posted_base" 1 10
+  sleep 1
+  [ "$(( $(posted_count) - posted_base ))" = 1 ] || fail "the stop posted $(( $(posted_count) - posted_base )) notifications, not one: $(posted_since "$posted_base" | tr '\n' ' ')"
+  [ "$(posted_field "$posted_base" tag)" = "sirio-tab-$sess" ] || fail "the notification's tag is not sirio-tab-$sess: $(posted_since "$posted_base" | tr '\n' ' ')"
+  local body_a
+  body_a="$(posted_field "$posted_base" body)"
+  case "$body_a" in "main "*"repo"*) ;; *) fail "the notification's body does not name A's branch and the project: '$body_a'" ;; esac
+  case "$body_a" in *unread-b*) fail "the notification's body names B's branch: '$body_a'" ;; esac
+  echo "OK: one notification, tag sirio-tab-$sess, body '$body_a'"
+
+  echo "step 14.4b: two worktrees stop back to back: two notifications, each naming its own branch"
+  select_wt "$id_c"
+  local known_c pane_c sess_c
+  known_c="$(attention_ids | tr '\n' ' ')"
+  pane_c="$(ctl_json surface terminal open --cmd "sleep 600" | pane_of)"
+  wait_until 30 attention_new_session "$wt_c" "$known_c" || fail "no session appeared in worktree C"
+  sess_c="$ATT_NEW"
+  select_wt "$id_b"
+  posted_base="$(posted_count)"
+  ctl notify --session "$pane_a" --status running >/dev/null || fail "notify running for $pane_a was refused"
+  ctl notify --session "$pane_c" --status running >/dev/null || fail "notify running for $pane_c was refused"
+  ctl notify --session "$pane_a" --status needs-input >/dev/null || fail "notify needs-input for $pane_a was refused"
+  ctl notify --session "$pane_c" --status needs-input >/dev/null || fail "notify needs-input for $pane_c was refused"
+  posted_wait "$posted_base" 2 10
+  sleep 1
+  [ "$(( $(posted_count) - posted_base ))" = 2 ] || fail "two stops posted $(( $(posted_count) - posted_base )) notifications: $(posted_since "$posted_base" | tr '\n' ' ')"
+  local body_a2 body_c
+  body_a2="$(posted_field_of "$posted_base" "sirio-tab-$sess" body)"
+  body_c="$(posted_field_of "$posted_base" "sirio-tab-$sess_c" body)"
+  case "$body_a2" in "main "*) ;; *) fail "A's notification does not name its branch: '$body_a2'" ;; esac
+  case "$body_c" in "unread-c "*) ;; *) fail "C's notification does not name its branch: '$body_c' (A's: '$body_a2')" ;; esac
+  echo "OK: A's notification reads '$body_a2', C's reads '$body_c'"
 
   echo "step 14.5: a stop in a split pane marks the tab and leaves the first pane's running beside it"
   select_wt "$id_a"
@@ -1637,7 +1720,43 @@ for line in sys.stdin.read().split():
   ctl surface attention act --focus active >/dev/null || fail "--focus active was refused"
   [ "$(attention_get "$sess_plain" unread)" = false ] || fail "the plain session is unread once the window is active"
 
-  echo "step 14.8: the artifact"
+  echo "step 14.8: a click on a notification opens its session, and an unknown one is ignored"
+  select_wt "$id_b"
+  ctl notify --session "$pane_a" --status running >/dev/null || fail "notify running for $pane_a was refused"
+  ctl notify --session "$pane_a" --status needs-input >/dev/null || fail "notify needs-input for $pane_a was refused"
+  attention_wait "$sess" unread true 10
+  local path_before tab_before
+  path_before="$(current_path)"
+  tab_before="$(active_tab)"
+  [ "$(realpath_of "$path_before")" = "$(realpath_of "$wt_b")" ] || fail "B is not the selected worktree before the click: $path_before"
+  ctl surface attention act --click "sirio-tab-nope" >/dev/null || fail "--click sirio-tab-nope was refused"
+  sleep 2
+  [ "$(current_path)" = "$path_before" ] || fail "click_unknown_session_is_ignored: the click on an unknown session changed the workspace to $(current_path)"
+  [ "$(active_tab)" = "$tab_before" ] || fail "click_unknown_session_is_ignored: the click on an unknown session changed the active tab"
+  echo "OK: a click on sirio-tab-nope left $path_before and tab $tab_before alone"
+  ctl surface attention act --click "sirio-tab-$sess" >/dev/null || fail "--click sirio-tab-$sess was refused"
+  attention_wait "$sess" unread false 10
+  [ "$(realpath_of "$(current_path)")" = "$(realpath_of "$W_REPO")" ] || fail "the click did not select A: $(current_path)"
+  [ "$(active_tab)" = "$(tab_position_of "$agent_title")" ] || fail "the click did not select the agent tab: active $(active_tab), the agent tab is $(tab_position_of "$agent_title")"
+  [ "$(attention_get "$sess" onScreen)" = true ] || fail "the clicked session is not on screen"
+  echo "OK: the click selected A and the agent tab, and the session is no longer unread"
+
+  echo "step 14.9: the agent's exit after its stop posts nothing more"
+  # A has to stay mounted, since a pane in a parked worktree is not told that its
+  # process exited. An inactive window puts the shown tab off screen all the same,
+  # which is where a stop would post.
+  ctl surface attention act --focus inactive >/dev/null || fail "--focus inactive was refused"
+  [ "$(attention_get "$sess" onScreen)" = false ] || fail "the agent session reads onScreen in an inactive window, so the check proves nothing"
+  posted_base="$(posted_count)"
+  hook_go claude
+  wait_status "$pane_a" done 20
+  sleep 2
+  [ "$(( $(posted_count) - posted_base ))" = 0 ] || fail "the agent's exit posted a notification: $(posted_since "$posted_base" | tr '\n' ' ')"
+  echo "OK: the claude stub exited (its pane reads done) and no notification followed"
+  ctl surface attention act --focus active >/dev/null || fail "--focus active was refused"
+  ! grep -q "panicked" "$W/app.log" || fail "the app panicked: $(grep -m1 panicked "$W/app.log")"
+
+  echo "step 14.10: the artifact"
   ctl_json surface attention read | python3 -I -c 'import json, sys
 reply = json.load(sys.stdin)
 reply = reply[0] if isinstance(reply, list) else reply

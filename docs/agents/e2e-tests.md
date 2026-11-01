@@ -41,14 +41,18 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
 # socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
 # mount kept out of a pane, quit and relaunch, every stub agent's hooks, the skill,
-# SIRIO_WORKTREE_ID and the flags sirioctl offers, `project add --display-name` (case 14: the
-# label, no dialog, a duplicate). Case 15 (unread sessions) drives a claude stub through
-# `surface attention read` and `act --focus`: a stop off screen marks the session until it
-# is shown, a stop in a split pane marks the tab beside the other pane's running, and an
-# inactive window keeps the mark. Linux runs it with --xvfb or --display :N; --state-only
-# skips cases 4, 4c, 5, 6, 10 and 15 and is what macOS runs. --out-dir DIR keeps the
-# transcript, logs and env dumps (and case 15's case15-attention.json); --only N[,N...]
-# prints "SIRIOCTL E2E PARTIAL"; --mutate claude-prompt-hook is case 6's mutation check.
+# SIRIO_WORKTREE_ID and the flags sirioctl offers, `project add --display-name` (case 14:
+# the label, no dialog, a duplicate). Case 15 (unread sessions) drives a claude stub
+# through `surface attention read` and `act --focus`: a stop off screen marks the session
+# until it is shown, a stop in a split pane marks the tab beside the other pane's running,
+# and an inactive window keeps the mark. The same case counts the notifications the app
+# decided to post (`posted`): one per stop, built from the session's own worktree, none for
+# the agent's exit afterwards, and `act --click <tag>` opens the session the way a click on
+# the notification does (the app's D-Bus is dead, so the E2E never reaches a desktop).
+# Linux runs it with --xvfb or --display :N; --state-only skips cases 4, 4c, 5, 6, 10 and
+# 15 and is what macOS runs. --out-dir DIR keeps the transcript, logs and env dumps (and
+# case 15's case15-attention.json); --only N[,N...] prints "SIRIOCTL E2E PARTIAL"; --mutate
+# claude-prompt-hook is case 6's mutation check.
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 
 # The "Project added" dialog after every add from the UI, in a real debug Sirio per scenario (a

@@ -288,8 +288,8 @@ mod login_path;
 mod host_sessions;
 mod lsp;
 mod lsp_install;
-// Compiled everywhere so every platform checks it; only macOS routes to it.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// Compiled everywhere so every platform checks it; macOS and Linux route to it.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 mod native_notification;
 #[cfg(feature = "perf-native")]
 mod native_perf;
@@ -1652,6 +1652,9 @@ enum AttentionAct {
     /// Force the window's focus: `Some(true)` active, `Some(false)` inactive,
     /// `None` the OS's own answer again.
     Focus(Option<bool>),
+    /// A click on the notification of the session with this persistence id:
+    /// the path a real click takes, for a platform where CI cannot click.
+    Click(String),
 }
 
 /// A Trace tab kept while its worktree is parked. It holds no state of its
@@ -1742,6 +1745,9 @@ enum WorkspaceAction {
     OpenSurface(sirio_ui::right_panel::OpenSurface),
     /// The Primary strip's collapse button (spec 2026-11-01-primary-rail §3).
     CollapsePrimary,
+    /// A click on a desktop notification, carrying the persistence id its tag
+    /// names. Queued because the click's callback has an `App` and no window.
+    OpenNotifiedSession(String),
     /// A hand-off's agent, started in `path` (the worktree it was checked out
     /// to). `asked` is the tab that asked, which reports the outcome.
     StartHandoffAgent {
@@ -2596,7 +2602,7 @@ impl AppControlHandler {
         });
         drop(notifications);
         (self.notification_poster)(&NotificationPayload {
-            pane_id: String::new(),
+            session_id: String::new(),
             worktree_id: String::new(),
             title: title.to_string(),
             body: body.to_string(),
@@ -3394,6 +3400,19 @@ impl ControlHandler for AppControlHandler {
                 }
             }),
             "surface.attention.act" if cfg!(debug_assertions) => {
+                if let Some(tag) = request.params.get("click") {
+                    let Some(id) = native_notification::session_id_of_tag(tag) else {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.attention.act --click requires a sirio-tab-<id> tag",
+                        );
+                    };
+                    let id = id.to_string();
+                    return self.queue_action(request, move |reply| ControlAction::Attention {
+                        act: AttentionAct::Click(id),
+                        reply,
+                    });
+                }
                 let focus = match request.params.get("focus").map(String::as_str) {
                     Some("active") => Some(true),
                     Some("inactive") => Some(false),
@@ -3401,7 +3420,7 @@ impl ControlHandler for AppControlHandler {
                     _ => {
                         return ControlResponse::failure(
                             &request.id,
-                            "surface.attention.act requires focus active, inactive or os",
+                            "surface.attention.act requires focus active, inactive or os, or click <tag>",
                         );
                     }
                 };
@@ -4361,11 +4380,18 @@ fn post_desktop_notification(payload: &NotificationPayload) {
     };
 
     #[cfg(target_os = "linux")]
-    let result = sirio_env::command("notify-send")
-        .arg("--app-name=Sirio")
-        .arg(&payload.title)
-        .arg(&payload.body)
-        .spawn();
+    let result = {
+        // gpui's own route first: it is the one a click on the notification
+        // comes back through. `notify-send` only when none was installed.
+        if native_notification::post(payload) {
+            return;
+        }
+        sirio_env::command("notify-send")
+            .arg("--app-name=Sirio")
+            .arg(&payload.title)
+            .arg(&payload.body)
+            .spawn()
+    };
 
     #[cfg(target_os = "windows")]
     let result = {
@@ -5875,6 +5901,11 @@ struct SirioWorkspace {
     /// on macOS `--state-only`, nobody controls what the OS reports.
     #[cfg(debug_assertions)]
     debug_window_active: Option<bool>,
+    /// Debug-only: every notification `on_pane_transition` decided to post, the
+    /// newest last, whether or not the desktop took it. `surface.attention.read`
+    /// reports it as `posted`; the last 50 are kept.
+    #[cfg(debug_assertions)]
+    posted_notifications: std::collections::VecDeque<NotificationPayload>,
     browser_origins: BTreeSet<String>,
     /// F-TERM-08: an interactive pane close (Cmd-W, right-click "Close
     /// Terminal…") that would kill a pane whose `ActivityStatus` reports
@@ -6328,6 +6359,13 @@ impl SirioWorkspace {
                                     if workspace.primary_rail_drawn() {
                                         workspace.focus_after_peek(window, cx);
                                     }
+                                }
+                                WorkspaceAction::OpenNotifiedSession(id) => {
+                                    // A session that is gone leaves the
+                                    // selection alone; the window still comes
+                                    // forward, because the click was Sirio's.
+                                    workspace.open_session(&id, window, cx);
+                                    window.activate_window();
                                 }
                                 WorkspaceAction::StartHandoffAgent {
                                     path,
@@ -7137,6 +7175,8 @@ impl SirioWorkspace {
             session_attention: HashMap::new(),
             #[cfg(debug_assertions)]
             debug_window_active: None,
+            #[cfg(debug_assertions)]
+            posted_notifications: std::collections::VecDeque::new(),
             browser_origins,
             show_settings: false,
             restore_focus_pending: false,
@@ -13737,21 +13777,38 @@ impl SirioWorkspace {
         });
     }
 
-    /// Posts the desktop notification for one stop. The caller has decided that
-    /// it is one (`on_pane_transition`), so nothing here gates on focus.
-    fn post_activity_notification(&self, transition: &Transition) {
-        let Some(agent_id) = self.activity.agent_id(&transition.pane_id) else {
-            return;
-        };
-        let agent_display_name = AGENT_CATALOG
-            .iter()
-            .find(|adapter| adapter.id() == agent_id)
-            .map_or(agent_id, |adapter| adapter.display_name());
-        let context = worktree_context(&self.project_catalog, &self.working_directory);
+    /// Builds and posts the desktop notification for one stop of `session`; the
+    /// caller has decided that it is one (`on_pane_transition`), so nothing here
+    /// gates on focus. Everything it names is the session's own: its worktree,
+    /// never the one the user happens to have selected. Returns what it posted.
+    ///
+    /// The title is `<agent> — <project>/<branch>` and the body
+    /// `<branch> · <project>`. The agent is the catalog's display name for the
+    /// pane's identified agent, then the chat's own, then the tab's title: a
+    /// pane that only an agent's hook has identified has no agent id.
+    fn post_session_notification(
+        &self,
+        session: &SessionRef,
+        pane_key: &str,
+        cx: &App,
+    ) -> NotificationPayload {
+        let agent_name = if session.chat {
+            self.chat_agent_display_name(&session.persistence_id, cx)
+        } else {
+            self.activity.agent_id(pane_key).map(|agent_id| {
+                AGENT_CATALOG
+                    .iter()
+                    .find(|adapter| adapter.id() == agent_id)
+                    .map_or(agent_id, |adapter| adapter.display_name())
+                    .to_string()
+            })
+        }
+        .unwrap_or_else(|| session.title.clone());
+        let context = worktree_context(&self.project_catalog, &session.worktree);
         let worktree_id = self
-            .sidebar_worktree_id(&self.working_directory)
+            .sidebar_worktree_id(&session.worktree)
             .map_or_else(
-                || self.working_directory.to_string_lossy().into_owned(),
+                || session.worktree.to_string_lossy().into_owned(),
                 |id| id.to_string(),
             );
         let project_name = self
@@ -13760,32 +13817,44 @@ impl SirioWorkspace {
             .iter()
             .find(|project| {
                 project.worktrees.iter().any(|worktree| {
-                    paths_name_the_same_document(&worktree.path, &self.working_directory)
+                    paths_name_the_same_document(&worktree.path, &session.worktree)
                 })
             })
             .map(|project| project.name.as_str());
-        let Some(mut payload) = self.activity.build_payload(
-            &transition.pane_id,
-            transition.new,
-            agent_display_name,
-            &worktree_id,
-            &context.branch,
-            project_name,
-            None,
-        ) else {
-            return;
+        let mut body = context.branch.clone();
+        if let Some(project_name) = project_name {
+            body.push_str(" · ");
+            body.push_str(project_name);
+        }
+        let payload = NotificationPayload {
+            session_id: session.persistence_id.clone(),
+            worktree_id,
+            title: format!("{agent_name} — {}", context.activity_label),
+            body,
         };
-        // F-CORE-ACT-19: the title is `<agent> — <human worktree label>`,
-        // not `<agent> — <status>` — the pane's transition status already
-        // drives which notification fires at all (`StopPolicy`, through
-        // `on_pane_transition`); it does not belong in the title text a
-        // second time.
-        // `AgentActivityModel::build_payload` (sirio_activity, not owned by
-        // this file) still emits the status-suffixed title, so it is
-        // corrected here rather than left for the desktop notifier to show
-        // verbatim.
-        payload.title = format!("{agent_display_name} — {}", context.activity_label);
         post_desktop_notification(&payload);
+        payload
+    }
+
+    /// The display name the chat tab `persistence_id` shows for its agent, in
+    /// the tabs mounted or retained across a worktree switch. `None` for a
+    /// parked strip, which holds no chat, and for a chat whose agent is not
+    /// known.
+    fn chat_agent_display_name(&self, persistence_id: &str, cx: &App) -> Option<String> {
+        let tab = self
+            .tabs
+            .iter()
+            .chain(self.retained_worktree_chats.values().flat_map(BTreeMap::values))
+            .find(|tab| tab.persistence_id == persistence_id)?;
+        let mut name = None;
+        tab.panes.for_each(&mut |_, content| {
+            if name.is_none()
+                && let TabContent::Chat(chat) = content
+            {
+                name = chat.read(cx).agent_display_name().map(str::to_string);
+            }
+        });
+        name
     }
 
     /// The window's focus as the funnel reads it: the debug override when one is
@@ -13960,7 +14029,7 @@ impl SirioWorkspace {
 
     /// The one place a status change becomes a stop: the unread mark, the running
     /// flag and the desktop notification.
-    fn on_pane_transition(&mut self, transition: &Transition, _cx: &mut Context<Self>) {
+    fn on_pane_transition(&mut self, transition: &Transition, cx: &mut Context<Self>) {
         let Some(session) = self.session_for_pane(&transition.pane_id) else {
             return;
         };
@@ -13982,7 +14051,16 @@ impl SirioWorkspace {
         record.unread |= decision.unread;
         self.mark_activity_dirty();
         if decision.notify {
-            self.post_activity_notification(transition);
+            let payload = self.post_session_notification(&session, &transition.pane_id, cx);
+            #[cfg(debug_assertions)]
+            {
+                self.posted_notifications.push_back(payload);
+                while self.posted_notifications.len() > 50 {
+                    self.posted_notifications.pop_front();
+                }
+            }
+            #[cfg(not(debug_assertions))]
+            let _ = payload;
         }
     }
 
@@ -14005,6 +14083,9 @@ impl SirioWorkspace {
             {
                 record.unread = false;
                 cleared = true;
+                // A seen session's notification has nothing left to say.
+                #[cfg(target_os = "macos")]
+                native_notification::dismiss(&id);
             }
         }
         if cleared {
@@ -14029,6 +14110,10 @@ impl SirioWorkspace {
                 let _ = focus;
                 self.mark_shown_sessions_seen(cx);
                 cx.notify();
+                Ok(Vec::new())
+            }
+            AttentionAct::Click(id) => {
+                self.queue_workspace_action(WorkspaceAction::OpenNotifiedSession(id));
                 Ok(Vec::new())
             }
         }
@@ -14078,6 +14163,26 @@ impl SirioWorkspace {
                 "onScreen": false,
             }));
         }
+        #[cfg(debug_assertions)]
+        let posted: Vec<serde_json::Value> = self
+            .posted_notifications
+            .iter()
+            .map(|payload| {
+                serde_json::json!({
+                    "tag": if payload.session_id.is_empty() {
+                        String::new()
+                    } else {
+                        native_notification::tab_tag(&payload.session_id)
+                    },
+                    "sessionId": payload.session_id,
+                    "worktreeId": payload.worktree_id,
+                    "title": payload.title,
+                    "body": payload.body,
+                })
+            })
+            .collect();
+        #[cfg(not(debug_assertions))]
+        let posted: Vec<serde_json::Value> = Vec::new();
         vec![
             (
                 "windowActive".to_string(),
@@ -14087,7 +14192,55 @@ impl SirioWorkspace {
                 "sessions".to_string(),
                 serde_json::Value::Array(rows).to_string(),
             ),
+            (
+                "posted".to_string(),
+                serde_json::Value::Array(posted).to_string(),
+            ),
         ]
+    }
+
+    /// Opens the session with this persistence id: selects its worktree and
+    /// its tab. Being seen then follows from `mark_shown_sessions_seen`. Returns
+    /// `false`, and selects nothing, when no such tab exists any more.
+    ///
+    /// The worktree is looked up in the tabs mounted, the chats retained across
+    /// a worktree switch and the parked strips (`held_sessions`), then in the
+    /// database, whose open tabs also name worktrees not yet mounted.
+    fn open_session(
+        &mut self,
+        persistence_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let worktree = self
+            .held_sessions()
+            .into_iter()
+            .find(|session| session.persistence_id == persistence_id)
+            .map(|session| session.worktree)
+            .or_else(|| self.session.worktree_path_of_tab(persistence_id));
+        let Some(worktree) = worktree else {
+            return false;
+        };
+        if !paths_name_the_same_document(&worktree, &self.working_directory)
+            && self
+                .select_worktree(worktree.clone(), Some(window), cx)
+                .is_err()
+        {
+            return false;
+        }
+        let Some(tab_id) = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.persistence_id == persistence_id
+                    && paths_name_the_same_document(&self.tab_worktree_path(tab.id), &worktree)
+            })
+            .map(|tab| tab.id)
+        else {
+            return false;
+        };
+        self.select_tab(tab_id, Some(window), cx);
+        true
     }
 
     /// F-CORE-DOM-07: on a running→done/needs-input transition, throttled
@@ -30605,12 +30758,28 @@ fn main() {
         // read once now, off the UI thread. A read never shows a prompt.
         #[cfg(target_os = "macos")]
         {
-            native_notification::install(cx);
             cx.background_executor()
                 .spawn(async {
                     sirio_privacy::probe::status(sirio_privacy::PermissionKind::Notifications);
                 })
                 .detach();
+        }
+        // The name and id a Linux notification daemon shows the app under.
+        #[cfg(target_os = "linux")]
+        cx.set_app_identity("app.sirioai.sirio", "Sirio");
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            native_notification::install(cx);
+            // A click on a notification only queues the session to open: this
+            // callback has an `App` and neither a window nor the workspace.
+            let pending = pending_actions.clone();
+            cx.on_system_notification_response(move |response, _cx| {
+                if let Some(id) = native_notification::session_id_of_tag(&response.tag)
+                    && let Ok(mut actions) = pending.lock()
+                {
+                    actions.push(WorkspaceAction::OpenNotifiedSession(id.to_string()));
+                }
+            });
         }
 
         let panes_for_host_link = panes.clone();

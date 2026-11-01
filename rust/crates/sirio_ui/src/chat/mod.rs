@@ -2462,6 +2462,13 @@ impl Chat {
         self.agent_name = display_name;
     }
 
+    /// The agent's display name, `None` when the chat's agent is unknowable (a
+    /// restored chat whose banner says so). A notification names the agent
+    /// with this and falls back to the tab's title.
+    pub fn agent_display_name(&self) -> Option<&str> {
+        self.agent_name.as_deref()
+    }
+
     /// What the composer's agent badge shows (#206).
     ///
     /// It names the *agent*, so it reads `agent_name` -- not
