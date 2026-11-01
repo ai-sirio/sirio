@@ -23,7 +23,8 @@ and one method of its own, on the same object:
 - InvokeDefault(u): emits ActionInvoked(id, "default") and then NotificationClosed(id, 2),
   "dismissed by the user", which is what a desktop sends when its user clicks a notification
   that offers a `default` action. An id the server does not hold, or one that offered no
-  `default` action, is an error: a desktop has nothing to click there.
+  `default` action, is an error: a desktop has nothing to click there. The notification stays
+  held (only CloseNotification drops it), so the caller can repeat a click that was lost.
 
 `serve` prints `ready` on stdout once it owns the name and runs until SIGTERM or SIGINT.
 `click` calls InvokeDefault over the same bus and exits 0, or 1 with the error on stderr.
@@ -154,7 +155,7 @@ class Server:
                 return self.error(invocation, f"notification {notification_id} offered no default action")
             invocation.return_value(None)
             self.emit("ActionInvoked", "(us)", (notification_id, "default"))
-            del self.held[notification_id]
+            # Still held: a repeat of a click the client missed must be served, not refused.
             self.emit("NotificationClosed", "(uu)", (notification_id, REASON_DISMISSED))
         else:
             invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)
