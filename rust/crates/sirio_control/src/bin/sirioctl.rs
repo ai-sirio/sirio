@@ -127,7 +127,9 @@ fn usage() {
          \x20 quit                              gracefully quit Sirio\n\
          \x20 capabilities [--json]             list available socket methods\n\
          \x20 project list [--json]              list discovered projects and worktrees\n\
-         \x20 project add <path> [--json]        add a project and report the new catalog\n\
+         \x20 project add <path> [--display-name <label>] [--json]\n\
+         \x20                                    add a project, optionally with a sidebar label\n\
+         \x20                                    (--display-name=--x for a label starting with --)\n\
          \x20 identify [--json]                 show the current workspace/surface context\n\
          \x20 list-workspaces [--json]          list all worktrees\n\
          \x20 new-workspace --project <p> [--branch <b>]\n\
@@ -540,12 +542,42 @@ fn cmd_project(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 .or_else(|| parsed.positional.get(1).map(String::as_str))
                 .filter(|path| !path.is_empty())
                 .ok_or_else(|| "Missing project path".to_string())?;
-            let response = require_ok(socket, &sirio_control::protocol::request::project_add(path));
-            print_result(
-                &response,
-                &["added", "projectId", "worktreeCount"],
-                parsed.flag("json"),
+            // The flag given with no value lands among the booleans, and
+            // `--display-name=` as an empty value: both fail before a socket
+            // is touched.
+            if parsed.flag("display-name") || parsed.value("display-name") == Some("") {
+                return Err("--display-name needs a value".to_string());
+            }
+            let display_name = parsed.value("display-name");
+            let response = require_ok(
+                socket,
+                &sirio_control::protocol::request::project_add(path, display_name),
             );
+            let mut columns = vec!["added", "projectId", "worktreeCount"];
+            if display_name.is_some() {
+                let result = response.result.clone().unwrap_or_default();
+                let added = result.get("added").map(String::as_str) == Some("true");
+                match result.get("displayNameApplied").map(String::as_str) {
+                    None => {
+                        return Err(if added {
+                            "this Sirio predates --display-name; the project was added without \
+                             a label"
+                                .to_string()
+                        } else {
+                            "this Sirio predates --display-name; the project was not added \
+                             (already tracked, inside a tracked project, or containing one)"
+                                .to_string()
+                        });
+                    }
+                    Some("false") => eprintln!(
+                        "not added: already tracked, inside a tracked project, or containing \
+                         one; label ignored"
+                    ),
+                    Some(_) => {}
+                }
+                columns.push("displayName");
+            }
+            print_result(&response, &columns, parsed.flag("json"));
             Ok(())
         }
         other => Err(format!("unknown project action '{other}'")),

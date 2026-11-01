@@ -1162,11 +1162,12 @@ pub mod request {
         request("project.list", BTreeMap::new())
     }
 
-    pub fn project_add(path: &str) -> ControlRequest {
-        request(
-            "project.add",
-            BTreeMap::from([(String::from("path"), path.to_string())]),
-        )
+    pub fn project_add(path: &str, display_name: Option<&str>) -> ControlRequest {
+        let mut params = BTreeMap::from([(String::from("path"), path.to_string())]);
+        if let Some(display_name) = display_name {
+            params.insert("displayName".to_string(), display_name.to_string());
+        }
+        request("project.add", params)
     }
 
     pub fn workspace_create(project: &str, branch: Option<&str>) -> ControlRequest {

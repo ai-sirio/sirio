@@ -1084,6 +1084,7 @@ enum ControlAction {
     },
     AddProject {
         path: PathBuf,
+        display_name: Option<String>,
         reply: ControlReply,
     },
     CreateWorkspace {
@@ -2735,8 +2736,21 @@ impl ControlHandler for AppControlHandler {
                     return ControlResponse::failure(&request.id, "project.add requires path");
                 };
                 let path = PathBuf::from(path);
+                let display_name = request.params.get("displayName").cloned();
+                // Nothing left after cleaning is no label to apply. A label
+                // equal to the root name passes: the workspace stores none.
+                if let Some(display_name) = &display_name
+                    && sirio_ui::project_identity::normalize_display_name(display_name, "")
+                        .is_none()
+                {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "project.add displayName must not be empty",
+                    );
+                }
                 self.queue_action(request, move |reply| ControlAction::AddProject {
                     path,
+                    display_name,
                     reply,
                 })
             }
@@ -6113,8 +6127,13 @@ impl SirioWorkspace {
                                     );
                                     let _ = reply.send(result);
                                 }
-                                ControlAction::AddProject { path, reply } => {
-                                    let result = workspace.control_add_project(&path, cx);
+                                ControlAction::AddProject {
+                                    path,
+                                    display_name,
+                                    reply,
+                                } => {
+                                    let result =
+                                        workspace.control_add_project(&path, display_name, cx);
                                     let _ = reply.send(result);
                                 }
                                 ControlAction::CreateWorkspace {
@@ -10234,22 +10253,65 @@ impl SirioWorkspace {
     /// Adds the project at `path` to the catalog and, when it is new, writes
     /// the catalog and refreshes the socket's snapshot and the sidebar.
     /// Returns its id, or `None` when the path is already tracked or nested.
+    /// A `display_name` labels the new project in the same write; it is
+    /// ignored for a path that is not added.
     fn insert_project(
         &mut self,
         path: &Path,
+        display_name: Option<&str>,
         cx: &mut Context<Self>,
     ) -> Result<Option<String>, String> {
-        let id = self.project_catalog.insert(path)?;
-        if id.is_some() {
-            self.session.schedule_catalog(&self.project_catalog);
-            self.sync_control_state(cx);
-            self.refresh_sidebar(cx);
-        }
-        Ok(id)
+        let Some(id) = self.project_catalog.insert(path)? else {
+            return Ok(None);
+        };
+        // The project is in the catalog either way, so it is written and shown
+        // before a failure to label it is reported.
+        let labelled = match display_name {
+            Some(display_name) => self.label_new_project(&id, display_name),
+            None => Ok(()),
+        };
+        self.session.schedule_catalog(&self.project_catalog);
+        self.sync_control_state(cx);
+        self.refresh_sidebar(cx);
+        labelled.map(|()| Some(id))
+    }
+
+    /// Stores `display_name` as the label of the project `id`, keeping the rest
+    /// of its settings. A label that normalizes to none (empty, or the root
+    /// name itself) stores nothing. The catalog is only changed in memory.
+    fn label_new_project(&mut self, id: &str, display_name: &str) -> Result<(), String> {
+        let Some(project) = self
+            .project_catalog
+            .projects()
+            .iter()
+            .find(|project| project.id == id)
+        else {
+            return Err(format!("unknown project: {id}"));
+        };
+        let Some(display_name) =
+            sirio_ui::project_identity::normalize_display_name(display_name, &project.name)
+        else {
+            return Ok(());
+        };
+        let is_git = project.is_git;
+        let settings = self.project_catalog.project_settings(id);
+        let icon = sirio_ui::project_identity::ProjectIcon::from_persisted_parts(
+            &settings.icon_kind,
+            settings.icon_value.as_deref(),
+            settings.color_hex.as_deref(),
+        );
+        self.apply_project_settings(&ProjectSettingsUpdate {
+            id: id.to_string(),
+            display_name: Some(display_name),
+            is_git,
+            icon,
+            default_worktree_base: settings.default_worktree_base,
+            worktree_location_override: settings.worktree_location_override,
+        })
     }
 
     fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        match self.insert_project(&path, cx) {
+        match self.insert_project(&path, None, cx) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 let message = format!("already tracked or nested: {}", path.display());
@@ -10852,9 +10914,12 @@ impl SirioWorkspace {
     fn control_add_project(
         &mut self,
         path: &Path,
+        display_name: Option<String>,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
-        let added = self.insert_project(path, cx)?.is_some();
+        let added = self
+            .insert_project(path, display_name.as_deref(), cx)?
+            .is_some();
         let state = self
             .control_state
             .lock()
@@ -10876,6 +10941,19 @@ impl SirioWorkspace {
                     "worktreeCount".to_string(),
                     project.worktrees.len().to_string(),
                 ),
+            ]);
+        }
+        // A label that was sent is answered whether or not it was stored: it
+        // was applied for a project this call added, even when it normalized
+        // to no label, and ignored for a path that was not added.
+        if display_name.is_some() {
+            let stored = project
+                .and_then(|project| state.project_settings.get(&project.id))
+                .and_then(|settings| settings.display_name.clone())
+                .unwrap_or_default();
+            result.extend([
+                ("displayName".to_string(), stored),
+                ("displayNameApplied".to_string(), added.to_string()),
             ]);
         }
         Ok(result)
@@ -44671,7 +44749,7 @@ done
             "system.identify" => request::system_identify(None, None),
             "system.quit" => request::system_quit(),
             "project.list" => request::project_list(),
-            "project.add" => request::project_add(VERBATIM_PATH),
+            "project.add" => request::project_add(VERBATIM_PATH, None),
             "workspace.list" => request::workspace_list(),
             "workspace.create" => request::workspace_create("project", Some("branch")),
             "workspace.select" => request::workspace_select("workspace-1"),
@@ -47067,7 +47145,7 @@ done
             workspace.read_with(&cx.cx, |workspace, _| workspace.working_directory.clone());
         workspace.update(&mut cx, |workspace, cx| {
             workspace
-                .control_add_project(&working_directory, cx)
+                .control_add_project(&working_directory, None, cx)
                 .expect("add the project rooted at the fallback working_directory")
         });
         cx.run_until_parked();
@@ -47086,6 +47164,215 @@ done
             cx.debug_bounds("right-panel-no-worktree").is_none(),
             "the no-worktree placeholder must not still be drawn once a \
              worktree is current"
+        );
+    }
+
+    /// A fresh plain folder to add as a project, in a scratch directory of its
+    /// own, named `name` so the project's root name is known.
+    fn project_folder_for_label_tests(name: &str) -> PathBuf {
+        let unique = TEST_WORKSPACE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let folder = std::env::temp_dir()
+            .canonicalize()
+            .expect("canonicalize temp dir")
+            .join(format!("sirio-add-label-{}-{unique}", std::process::id()))
+            .join(name);
+        std::fs::create_dir_all(&folder).expect("create the project folder");
+        folder
+    }
+
+    fn reply_value<'a>(reply: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        reply
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// What `project.list` reports for `project_id`, read from the socket's
+    /// own snapshot.
+    fn listed_project_field(workspace: &SirioWorkspace, project_id: &str, field: &str) -> String {
+        workspace
+            .control_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .project_rows()
+            .iter()
+            .find(|row| row.get("id").map(String::as_str) == Some(project_id))
+            .and_then(|row| row.get(field).cloned())
+            .expect("the project is listed")
+    }
+
+    fn empty_catalog_workspace(
+        cx: &mut TestAppContext,
+    ) -> (Entity<SirioWorkspace>, VisualTestContext) {
+        cx.set_global(Theme::light());
+        let window = cx.add_window(|_window, cx| empty_catalog_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        (workspace, cx)
+    }
+
+    /// The socket's `displayName` on `project.add` is what the sidebar shows
+    /// at once: the cleaned label is stored, `project.list` reports it, and the
+    /// reply says it was applied.
+    #[gpui::test]
+    async fn drawn_control_add_project_stores_the_cleaned_label_and_lists_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (workspace, mut cx) = empty_catalog_workspace(cx);
+        let folder = project_folder_for_label_tests("label-store");
+
+        let reply = workspace
+            .update(&mut cx, |workspace, cx| {
+                workspace.control_add_project(&folder, Some("  Client\u{7} App  ".into()), cx)
+            })
+            .expect("add the labelled project");
+        cx.run_until_parked();
+
+        assert_eq!(reply_value(&reply, "added"), Some("true"));
+        assert_eq!(reply_value(&reply, "displayName"), Some("Client App"));
+        assert_eq!(reply_value(&reply, "displayNameApplied"), Some("true"));
+        let id = reply_value(&reply, "projectId").expect("project id");
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(listed_project_field(workspace, id, "displayName"), "Client App");
+        });
+    }
+
+    /// A label equal to the root name is not an error and not a label: the
+    /// add succeeds, no settings are written and the reply still says the
+    /// label was applied.
+    #[gpui::test]
+    async fn drawn_control_add_project_stores_no_label_for_the_root_name(
+        cx: &mut TestAppContext,
+    ) {
+        let (workspace, mut cx) = empty_catalog_workspace(cx);
+        let folder = project_folder_for_label_tests("label-root-name");
+
+        let reply = workspace
+            .update(&mut cx, |workspace, cx| {
+                workspace.control_add_project(&folder, Some("label-root-name".into()), cx)
+            })
+            .expect("add the project");
+        cx.run_until_parked();
+
+        assert_eq!(reply_value(&reply, "added"), Some("true"));
+        assert_eq!(reply_value(&reply, "displayName"), Some(""));
+        assert_eq!(reply_value(&reply, "displayNameApplied"), Some("true"));
+        let id = reply_value(&reply, "projectId").expect("project id");
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(listed_project_field(workspace, id, "displayName"), "");
+            assert_eq!(
+                listed_project_field(workspace, id, "color"),
+                "",
+                "a label that is no label must write no settings at all"
+            );
+        });
+    }
+
+    /// A path that is already tracked is not added again, and the label sent
+    /// with it is ignored: the first label stays.
+    #[gpui::test]
+    async fn drawn_control_add_project_ignores_the_label_of_a_tracked_path(
+        cx: &mut TestAppContext,
+    ) {
+        let (workspace, mut cx) = empty_catalog_workspace(cx);
+        let folder = project_folder_for_label_tests("label-tracked");
+        let first = workspace
+            .update(&mut cx, |workspace, cx| {
+                workspace.control_add_project(&folder, Some("First".into()), cx)
+            })
+            .expect("add the project");
+        let id = reply_value(&first, "projectId")
+            .expect("project id")
+            .to_string();
+
+        let again = workspace
+            .update(&mut cx, |workspace, cx| {
+                workspace.control_add_project(&folder, Some("Second".into()), cx)
+            })
+            .expect("add the tracked project again");
+        cx.run_until_parked();
+
+        assert_eq!(reply_value(&again, "added"), Some("false"));
+        assert_eq!(reply_value(&again, "displayNameApplied"), Some("false"));
+        assert_eq!(reply_value(&again, "projectId"), Some(id.as_str()));
+        workspace.read_with(&cx.cx, |workspace, _| {
+            assert_eq!(listed_project_field(workspace, &id, "displayName"), "First");
+        });
+    }
+
+    /// A call that carries no label answers exactly as before the parameter
+    /// existed, so a caller that never sends one sees nothing new.
+    #[gpui::test]
+    async fn drawn_control_add_project_without_a_label_answers_as_before(
+        cx: &mut TestAppContext,
+    ) {
+        let (workspace, mut cx) = empty_catalog_workspace(cx);
+        let folder = project_folder_for_label_tests("label-none");
+
+        let reply = workspace
+            .update(&mut cx, |workspace, cx| {
+                workspace.control_add_project(&folder, None, cx)
+            })
+            .expect("add the project");
+
+        let keys: Vec<&str> = reply.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(keys, ["added", "projectId", "worktreeCount"]);
+    }
+
+    fn project_add_handler(
+        control_actions: Arc<Mutex<Vec<ControlAction>>>,
+    ) -> Arc<AppControlHandler> {
+        Arc::new(AppControlHandler::new(
+            Arc::new(Mutex::new(ControlState {
+                projects: Vec::new(),
+                project_settings: BTreeMap::new(),
+                workspaces: Vec::new(),
+                current: None,
+            })),
+            control_actions,
+            Arc::new(PaneRegistry::new()),
+            Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            None,
+            ControlSocketInfo::new(PathBuf::from("/tmp/sirio-test-control.sock")),
+        ))
+    }
+
+    fn project_add_request(label: &str) -> ControlRequest {
+        ControlRequest {
+            id: "add-with-label".into(),
+            method: "project.add".into(),
+            params: BTreeMap::from([
+                ("path".into(), "/tmp/sirio-label-fixture".into()),
+                ("displayName".into(), label.into()),
+            ]),
+        }
+    }
+
+    /// A label with nothing left after cleaning is refused before anything is
+    /// queued, so nothing is added.
+    #[test]
+    fn project_add_rejects_a_label_with_nothing_left_after_cleaning() {
+        let control_actions = Arc::new(Mutex::new(Vec::new()));
+        let handler = project_add_handler(control_actions.clone());
+
+        for label in ["", "   ", "\u{7} "] {
+            let response = handler.handle(&project_add_request(label));
+            assert!(!response.ok, "label {label:?} must be refused");
+            assert_eq!(
+                response.error.as_deref(),
+                Some("project.add displayName must not be empty")
+            );
+        }
+        assert!(
+            control_actions.lock().expect("queue").is_empty(),
+            "a refused label must not queue an add"
         );
     }
 

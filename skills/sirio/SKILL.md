@@ -161,6 +161,14 @@ These capabilities return `not_supported`, never a silent success:
 | `errors` | The protocol name is reserved, but error-log retrieval is not implemented. |
 | `screenshot` | Page capture is not available on this WebKit surface in V1. |
 
+## Add a project
+
+```bash
+sirioctl project add "$REPO" --display-name 'client app'
+```
+
+The label is what the sidebar shows; the folder keeps its name, and no other command accepts the label to select the project. A path that is not added (already tracked, inside a tracked project, or containing one) ignores the label, so check `displayNameApplied` in the `--json` reply: an older `sirioctl` accepts `--display-name` and drops it.
+
 ## Report durable and user-visible status
 
 Attach durable progress to the current worktree and use notifications for user-visible completion:
