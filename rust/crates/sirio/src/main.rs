@@ -5832,6 +5832,11 @@ struct SirioWorkspace {
     /// pane id because pane ids are reused when another worktree is mounted.
     /// Content repaint notifications must never invalidate this workspace.
     terminal_shell_evidence: BTreeMap<u64, TerminalShellEvidence>,
+    /// What each chat last claimed about itself, keyed by the chat entity, as
+    /// `push_chat_evidence` pushed it into `activity`. A chat notifies on every
+    /// streamed token; this is what lets the observer return at one hash lookup
+    /// when the claim has not changed. Forgotten with the chat's pane.
+    chat_evidence: HashMap<gpui::EntityId, Option<AgentStatus>>,
     /// Set when a change can affect what the activity reconciliation reads.
     /// Render consumes it at most once per frame.
     activity_dirty: bool,
@@ -7164,6 +7169,7 @@ impl SirioWorkspace {
             },
             activity,
             terminal_shell_evidence,
+            chat_evidence: HashMap::new(),
             activity_dirty: true,
             last_seen_has_worktree: None,
             reconciles: 0,
@@ -9627,22 +9633,9 @@ impl SirioWorkspace {
                     }
                 }
                 ChatEvent::TurnEnded => {
-                    let chat_id = chat_entity.entity_id();
-                    let mut pane_id = None;
-                    for tab in &workspace.tabs {
-                        if pane_id.is_some() {
-                            break;
-                        }
-                        tab.panes.for_each(&mut |leaf_id, content| {
-                            if pane_id.is_none()
-                                && let TabContent::Chat(candidate) = content
-                                && candidate.entity_id() == chat_id
-                            {
-                                pane_id = Some(leaf_id);
-                            }
-                        });
-                    }
-                    if let Some(pane_id) = pane_id {
+                    // A chat of a worktree that is not selected ends its turns
+                    // too: it is found among the retained ones.
+                    if let Some(pane_id) = workspace.chat_pane_id(chat_entity.entity_id()) {
                         let transition = Transition {
                             pane_id: format!("pane-{pane_id}"),
                             old: Some(AgentStatus::Running),
@@ -9654,6 +9647,58 @@ impl SirioWorkspace {
             },
         )
         .detach();
+        // The chat's own state is evidence, and only a mounted chat is walked each
+        // frame: this is what reaches one that is retained or parked. A detached
+        // observer lives exactly as long as the chat, like the subscription above.
+        cx.observe(chat, |workspace, chat, cx| {
+            workspace.push_chat_evidence(&chat, cx)
+        })
+        .detach();
+    }
+
+    /// The pane `chat` lives in, among the mounted tabs and then the chats
+    /// retained across a worktree switch. A chat is never in two panes.
+    fn chat_pane_id(&self, chat_id: gpui::EntityId) -> Option<usize> {
+        let mut pane_id = None;
+        for tab in self
+            .tabs
+            .iter()
+            .chain(self.retained_worktree_chats.values().flat_map(BTreeMap::values))
+        {
+            if pane_id.is_some() {
+                break;
+            }
+            tab.panes.for_each(&mut |leaf_id, content| {
+                if pane_id.is_none()
+                    && let TabContent::Chat(candidate) = content
+                    && candidate.entity_id() == chat_id
+                {
+                    pane_id = Some(leaf_id);
+                }
+            });
+        }
+        pane_id
+    }
+
+    /// Pushes a chat's status claim into the activity model the moment the chat
+    /// notifies, wherever the chat is held, so that a stop in a worktree that is
+    /// not selected reaches `on_pane_transition` like any other. A claim that
+    /// has not changed returns at the lookup, before any pane search.
+    fn push_chat_evidence(&mut self, chat: &Entity<Chat>, cx: &mut Context<Self>) {
+        let status = Self::chat_status_evidence(chat.read(cx));
+        let chat_id = chat.entity_id();
+        if self.chat_evidence.get(&chat_id) == Some(&status) {
+            return;
+        }
+        // A chat bound before its tab is inserted has no pane yet: nothing is
+        // recorded, so its next notification asks again.
+        let Some(pane_id) = self.chat_pane_id(chat_id) else {
+            return;
+        };
+        self.chat_evidence.insert(chat_id, status);
+        self.activity
+            .set_entity_status(&format!("pane-{pane_id}"), status);
+        self.drain_activity_transitions(cx);
     }
 
     /// Gives a terminal the identity of `pane_id` and routes its events to the
@@ -10210,25 +10255,33 @@ impl SirioWorkspace {
                 );
                 match event {
                     TerminalActivityEvent::ChildExited { status } => {
-                        workspace.terminal_shell_evidence.insert(
-                            terminal.entity_id().as_u64(),
-                            TerminalShellEvidence {
-                                failed: false,
-                                exit_status: Some(*status),
-                            },
-                        );
+                        let evidence = TerminalShellEvidence {
+                            failed: false,
+                            exit_status: Some(*status),
+                        };
+                        workspace
+                            .terminal_shell_evidence
+                            .insert(terminal.entity_id().as_u64(), evidence);
+                        // `sync_entity_evidence` walks only the mounted tabs, so a
+                        // terminal in a worktree that is not selected is told here.
+                        workspace
+                            .activity
+                            .set_entity_status(&activity_pane_id, evidence.status());
                     }
                     TerminalActivityEvent::LifecycleChanged {
                         failed,
                         exit_status,
                     } => {
-                        workspace.terminal_shell_evidence.insert(
-                            terminal.entity_id().as_u64(),
-                            TerminalShellEvidence {
-                                failed: *failed,
-                                exit_status: *exit_status,
-                            },
-                        );
+                        let evidence = TerminalShellEvidence {
+                            failed: *failed,
+                            exit_status: *exit_status,
+                        };
+                        workspace
+                            .terminal_shell_evidence
+                            .insert(terminal.entity_id().as_u64(), evidence);
+                        workspace
+                            .activity
+                            .set_entity_status(&activity_pane_id, evidence.status());
                     }
                     TerminalActivityEvent::OscTitle(_)
                     | TerminalActivityEvent::OutputSettled { .. } => {}
@@ -10467,15 +10520,33 @@ impl SirioWorkspace {
     ///
     /// Chat, Changes, Browser and Editor panes are deliberately absent: only a
     /// terminal has a shell pid to walk.
-    fn terminals_to_poll(&self) -> Vec<(usize, usize, Entity<TerminalView>)> {
+    ///
+    /// A terminal of a worktree that is not selected is in no tab: the pane
+    /// cache holds it, so it is walked too, with no tab id. Its shell keeps
+    /// running, and so does the agent in it.
+    fn terminals_to_poll(&self) -> Vec<(Option<usize>, usize, Entity<TerminalView>)> {
         let mut found = Vec::new();
         for tab in &self.tabs {
             let tab_id = tab.id;
             tab.panes.for_each(&mut |pane_id, content| {
                 if let Some(view) = content.terminal() {
-                    found.push((tab_id, pane_id, view));
+                    found.push((Some(tab_id), pane_id, view));
                 }
             });
+        }
+        let mounted = found.len();
+        for cached in self.terminal_pane_cache.iter() {
+            // `track_terminal_panes_in_cache` addresses a pane as `terminal-{id}`.
+            let Some(pane_id) = cached
+                .content_id
+                .strip_prefix("terminal-")
+                .and_then(|id| id.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            if !found[..mounted].iter().any(|(_, mounted_id, _)| *mounted_id == pane_id) {
+                found.push((None, pane_id, cached.controller.clone()));
+            }
         }
         found
     }
@@ -11169,6 +11240,7 @@ impl SirioWorkspace {
                     controller.update(cx, |terminal, _| terminal.end_session());
                 }
                 self.terminal_pane_cache.remove_worktree(&worktree_id);
+                self.forget_parked_panes(&worktree_id);
                 self.parked_worktree_tabs.remove(&worktree_id);
                 self.retained_worktree_chats.remove(&worktree_id);
                 self.parked_trace_tabs.remove(&worktree_id);
@@ -11848,6 +11920,24 @@ impl SirioWorkspace {
         }
     }
 
+    /// What a chat claims about itself: waiting on the user while its turn
+    /// streams and holds an open question, running while the turn streams, done
+    /// once a turn has completed, and nothing before that. Both the per-frame
+    /// sync and the chat's own observer read it, so the two cannot disagree.
+    fn chat_status_evidence(chat: &Chat) -> Option<AgentStatus> {
+        if chat.is_streaming() {
+            Some(if chat.awaits_user() {
+                AgentStatus::NeedsInput
+            } else {
+                AgentStatus::Running
+            })
+        } else if chat.has_completed_turn() {
+            Some(AgentStatus::Done)
+        } else {
+            None
+        }
+    }
+
     /// What a live surface claims about itself — the evidence
     /// `AgentActivityModel`'s four layers cannot see. Chat evidence is still
     /// read from its entity; terminal lifecycle evidence is pushed into the
@@ -11862,16 +11952,7 @@ impl SirioWorkspace {
         cx: &App,
     ) -> Option<AgentStatus> {
         match content {
-            TabContent::Chat(chat) => {
-                let chat = chat.read(cx);
-                if chat.is_streaming() {
-                    Some(AgentStatus::Running)
-                } else if chat.has_completed_turn() {
-                    Some(AgentStatus::Done)
-                } else {
-                    None
-                }
-            }
+            TabContent::Chat(chat) => Self::chat_status_evidence(chat.read(cx)),
             TabContent::Terminal { view } => terminal_shell_evidence
                 .get(&view.entity_id().as_u64())
                 .and_then(TerminalShellEvidence::status),
@@ -12596,6 +12677,41 @@ impl SirioWorkspace {
             })
     }
 
+    /// Forgets what the panes of a worktree's parked strip left in the activity
+    /// model, and what its retained chats left in `chat_evidence`. It runs just
+    /// before the worktree's strip is dropped for good (evicted, or closed with
+    /// its project or on its own): the model is keyed by pane id, and an id
+    /// still holding a status would be inherited by the next pane to take it.
+    /// A pane that is a leaf of a mounted tab is left alone: its tab's close
+    /// forgets it, and a selection change never does.
+    fn forget_parked_panes(&mut self, worktree_id: &str) {
+        let mounted: HashSet<usize> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.leaf_ids())
+            .collect();
+        if let Some(parked) = self.parked_worktree_tabs.get(worktree_id) {
+            for pane_id in parked
+                .terminal_panes_by_tab
+                .iter()
+                .chain(&parked.chat_panes_by_tab)
+                .flatten()
+                .filter(|pane_id| !mounted.contains(pane_id))
+            {
+                self.activity.pane_closed(&format!("pane-{pane_id}"));
+            }
+        }
+        if let Some(chats) = self.retained_worktree_chats.get(worktree_id) {
+            for tab in chats.values() {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Chat(chat) = content {
+                        self.chat_evidence.remove(&chat.entity_id());
+                    }
+                });
+            }
+        }
+    }
+
     /// F-CORE-ACT-26: caps how many worktrees stay mounted once the newly
     /// selected one joins them. `WorktreeMountPolicy::ids_to_evict` never
     /// touches the selected worktree, and skips any worktree with a running
@@ -12651,6 +12767,7 @@ impl SirioWorkspace {
             // session instead of leaving a shell behind in the cache (a host
             // session lives on; a local one ends with its link).
             self.terminal_pane_cache.remove_worktree(&id);
+            self.forget_parked_panes(&id);
             self.parked_worktree_tabs.remove(&id);
             self.retained_worktree_chats.remove(&id);
             self.parked_trace_tabs.remove(&id);
@@ -13230,6 +13347,7 @@ impl SirioWorkspace {
             controller.update(cx, |terminal, _| terminal.end_session());
         }
         self.terminal_pane_cache.remove_worktree(&worktree_id);
+        self.forget_parked_panes(&worktree_id);
         self.parked_worktree_tabs.remove(&worktree_id);
         self.retained_worktree_chats.remove(&worktree_id);
         self.parked_trace_tabs.remove(&worktree_id);
@@ -15067,6 +15185,9 @@ impl SirioWorkspace {
         let mut closed_panes = Vec::new();
         self.tabs[index].panes.for_each(&mut |pane_id, content| {
             closed_panes.push(pane_id);
+            if let TabContent::Chat(chat) = content {
+                self.chat_evidence.remove(&chat.entity_id());
+            }
             if let Some(terminal) = content.terminal() {
                 terminals.push(terminal);
                 terminal_pane_ids.push(pane_id);
@@ -22908,6 +23029,9 @@ impl SirioWorkspace {
                 // alive, so nothing else ever gets to it — see the same call
                 // in `close_tab` for why `Drop` does not suffice.
                 surface.update(cx, |surface, _| surface.close_native());
+            }
+            if let TabContent::Chat(chat) = &removed {
+                self.chat_evidence.remove(&chat.entity_id());
             }
             let replacement = tab.panes.first_id().unwrap_or(focused_pane);
             tab.focused_pane = replacement;

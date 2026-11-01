@@ -72,6 +72,12 @@ set -euo pipefail
 #                      or a third tab selected in its place, with the worktree parked or after the turn
 #   trace_keys         real X input on the Trace tab: a click on a row and Enter on the selected row
 #                      reveal its Agent row, a click on the Follow checkbox toggles it
+#   unread_parked_chat a turn that ends while its worktree is not selected marks the chat unread and posts
+#                      one notification naming its branch; showing the worktree clears the mark
+#   unread_question    a permission the turn asks while the worktree is not selected reads needs-input and
+#                      unread, and is still open when the worktree is shown
+#   unread_secondary_seen  a chat in the shown Secondary half, beside a terminal in the Primary, stops
+#                      with no mark and no notification
 # The file_links scenario (spec 2026-10-24-chat-file-links-design.md §6) uses a third stub,
 # Scripts/Tests/stubs/file-links/claude, the fixture in its file_links mode: every prompt is
 # answered with one text holding paths that exist in the worktree, ones that do not, a
@@ -154,7 +160,8 @@ CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
-  trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys)
+  trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys
+  unread_parked_chat unread_question unread_secondary_seen)
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
@@ -912,6 +919,8 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_FIXTURE_REPO=$LINKED" "SIRIO_STUB_LOG=$RUN_DIR/stub-calls.log"
     "SIRIO_CSP_E2E_RUN=$RUN_DIR" "TRACE_STEP_MS=${TRACE_STEP_MS:-400}"
     "SIRIO_FIXTURE_USER_LOG=$RUN_DIR/fixture-user.log" "SIRIO_FIXTURE_CONTROL_LOG=$RUN_DIR/fixture-control.log"
+    # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=$RUN_DIR/no-bus"
   )
   # A performance trace names a file that does not exist yet, one per launch.
   [ -z "${PERF_TRACE:-}" ] || pairs+=("SIRIO_PERF_TRACE=$PERF_TRACE")
@@ -937,6 +946,9 @@ launch() { # name (a relaunch under the same name keeps its database and host)
   [ "$(probe_count)" -gt "$before" ] \
     || fail "$name: the app's claude --version probe never reached the shim"
   echo "OK: $name: pid $APP_PID answers; its claude --version probe reached the shim"
+  # A window focused for sure, so that a session on screen reads on screen whatever the
+  # display (or a --state-only run, which has none) says about focus.
+  ctl surface attention act --focus active >/dev/null || fail "$name: surface attention act --focus active was refused"
   if [ -n "$DISPLAY_TARGET" ] && [ -n "$WINDOW_SIZE" ]; then
     local window="" _
     for _ in $(seq 1 100); do
@@ -2229,6 +2241,161 @@ scenario_composer_keys() {
   press_key BackSpace
   composer_is "the composer is empty" ""
   echo "OK: composer_keys: Up and Down recall prompts and their mentions across a relaunch, Shift+Tab cycles the modes short of Bypass"
+  stop_app
+}
+
+# ---- the unread scenarios ---------------------------------------------------------
+# A fresh Sirio on the fixture with the trace stub and a Claude chat in $LINKED, no column.
+# STEP-MS paces the fixture's scripted lines.
+unread_chat() { # name [step-ms]
+  use_stub trace
+  TRACE_STEP_MS=${2:-400}
+  launch "$1"
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+}
+# A shown session is marked seen by the frame that draws it, and a --state-only run draws
+# none: the focus act runs the same marking (`mark_shown_sessions_seen`) without one. The
+# sirioctl E2E's case 14 proves the frame's own marking on a window.
+look_at_shown() {
+  ctl surface attention act --focus active >/dev/null || fail "surface attention act --focus active was refused"
+}
+# One field of the chat session `surface attention read` lists for $LINKED: strings as they
+# are, everything else as JSON.
+attention_chat() { # field
+  reply surface attention read | python3 -c 'import json, os, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+for row in json.loads(reply["sessions"]):
+    if row["kind"] == "chat" and row["worktree"] and os.path.realpath(row["worktree"]) == os.path.realpath(sys.argv[2]):
+        value = row[sys.argv[1]]
+        print(value if isinstance(value, str) else json.dumps(value))
+        break' "$1" "$LINKED"
+}
+# Polls until the chat session's FIELD reads WANT.
+wait_attention() { # desc field want seconds
+  local desc=$1 field=$2 want=$3 seconds=$4 got="" _
+  for _ in $(seq 1 $((seconds * 5))); do
+    got=$(attention_chat "$field")
+    [ "$got" = "$want" ] && { echo "OK: $desc ($field = $want)"; return 0; }
+    sleep 0.2
+  done
+  fail "$desc: the chat session's $field is '$got', not '$want' after $seconds s; read: $(reply surface attention read | tr '\n' ' ')"
+}
+# The notifications the app decided to post, as JSON objects one per line, oldest first. A
+# read with no `posted` key is an error, never an empty list.
+posted_rows() {
+  reply surface attention read | python3 -c 'import json, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+if "posted" not in reply:
+    sys.exit("the attention read has no posted key")
+for row in json.loads(reply["posted"]):
+    print(json.dumps(row))'
+}
+posted_count() { local rows; rows=$(posted_rows) || fail "the posted notifications could not be read"; [ -z "$rows" ] && echo 0 || printf '%s\n' "$rows" | wc -l | tr -d ' '; }
+# The bodies of the notifications posted after the first $1 of them, one per line.
+posted_bodies_since() { # baseline
+  posted_rows | tail -n +"$(( $1 + 1 ))" | python3 -c 'import json, sys
+for line in sys.stdin:
+    print(json.loads(line)["body"])'
+}
+# The last attention read as the scenario's artifact: attention-NAME.json under the out dir.
+save_attention() { # name
+  reply surface attention read | python3 -c 'import json, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+reply["sessions"] = json.loads(reply["sessions"])
+reply["posted"] = json.loads(reply.get("posted", "[]"))
+json.dump(reply, open(sys.argv[1], "w"), indent=2)' "$OUT_DIR/attention-$1.json"
+  [ -s "$OUT_DIR/attention-$1.json" ] || fail "no attention-$1.json was written"
+  echo "OK: $OUT_DIR/attention-$1.json holds the last read"
+}
+
+scenario_unread_parked_chat() {
+  # A turn of about four seconds: long enough to leave the worktree while it runs.
+  unread_chat unread_parked_chat 1000
+  wait_panel "the chat is ready for a prompt" 'c["status"] in ("idle", "completed")' 30
+  [ "$(attention_chat unread)" = false ] || fail "the chat reads unread before any turn"
+  local base
+  base=$(posted_count)
+  capture unread_parked_chat-before
+  send_prompt request
+  ctl select-workspace --workspace "$PRIMARY" >/dev/null
+  echo "step: the worktree was left mid-turn; the turn ends with the chat parked"
+  wait_attention "the parked chat's turn ended" status done 30
+  wait_attention "the parked chat's stop marked it" unread true 5
+  local got="" _
+  for _ in $(seq 1 50); do
+    got=$(( $(posted_count) - base ))
+    [ "$got" -ge 1 ] && break
+    sleep 0.2
+  done
+  [ "$got" = 1 ] || fail "the parked chat's stop posted $got notification(s), not one; posted: $(posted_rows | tr '\n' ' ')"
+  sleep 1
+  [ "$(( $(posted_count) - base ))" = 1 ] || fail "the stop posted more than one notification: $(posted_rows | tr '\n' ' ')"
+  case "$(posted_bodies_since "$base")" in *feat/login*) ;; *) fail "the notification's body does not name feat/login: $(posted_bodies_since "$base")" ;; esac
+  echo "OK: one notification, '$(posted_bodies_since "$base")'"
+  echo "step: showing the worktree clears the mark"
+  ctl select-workspace --workspace "$LINKED" >/dev/null
+  look_at_shown
+  wait_attention "showing the chat's worktree cleared the mark" unread false 10
+  capture unread_parked_chat-after
+  save_attention unread_parked_chat
+  stop_app
+}
+
+scenario_unread_question() {
+  # The question comes about three seconds after the prompt, with the worktree already left.
+  unread_chat unread_question 1000
+  wait_panel "the chat is ready for a prompt" 'c["status"] in ("idle", "completed")' 30
+  capture unread_question-before
+  send_prompt subperm
+  ctl select-workspace --workspace "$PRIMARY" >/dev/null
+  echo "step: the worktree was left; the turn asks a permission and nobody answers"
+  wait_attention "the parked chat waits for the user" status needs-input 30
+  wait_attention "the question marked the parked chat" unread true 5
+  sleep 2
+  [ "$(attention_chat status)" = needs-input ] || fail "the parked chat left needs-input with no answer given: $(attention_chat status)"
+  echo "step: the question is still open"
+  ctl select-workspace --workspace "$LINKED" >/dev/null
+  look_at_shown
+  wait_panel "the permission card is still pending" 'len(pending()) == 1' 10
+  wait_attention "showing the chat's worktree cleared the mark" unread false 10
+  [ "$(attention_chat status)" = needs-input ] || fail "the shown chat is not waiting any more: $(attention_chat status)"
+  capture unread_question-after
+  save_attention unread_question
+  answer_permission reject_once
+  stop_app
+}
+
+scenario_unread_secondary_seen() {
+  unread_chat unread_secondary_seen
+  # `open_chat` opens the chat in the Secondary half: a terminal in the Primary half puts
+  # two shown tabs in front of the user.
+  local tabs
+  ctl surface terminal open --cmd "sleep 600" >/dev/null || fail "no terminal opened"
+  for _ in $(seq 1 50); do
+    tabs=$(reply surface layout read | python3 -c 'import json, sys; r = json.load(sys.stdin)[0]; print(r["secondaryVisible"], r["secondaryKinds"])' 2>/dev/null || true)
+    [ "$tabs" = "true chat" ] && break
+    sleep 0.2
+  done
+  [ "$tabs" = "true chat" ] || fail "the chat is not alone in a visible Secondary half (secondaryVisible secondaryKinds: '$tabs')"
+  echo "OK: the chat is in the visible Secondary half, a terminal in the Primary"
+  wait_attention "the chat is on screen in the Secondary half" onScreen true 10
+  local base
+  base=$(posted_count)
+  capture unread_secondary_seen-before
+  send_prompt second
+  wait_panel "the turn ended" 'c["status"] == "completed"' 30
+  wait_attention "the chat's stop was decided" status done 10
+  sleep 2
+  [ "$(attention_chat unread)" = false ] || fail "a stop in the shown Secondary half marked the chat unread"
+  [ "$(attention_chat onScreen)" = true ] || fail "the chat is no longer on screen"
+  [ "$(( $(posted_count) - base ))" = 0 ] || fail "a stop on screen posted a notification: $(posted_rows | tr '\n' ' ')"
+  capture unread_secondary_seen-after
+  save_attention unread_secondary_seen
+  echo "OK: the stop in the Secondary half left no mark and posted nothing"
   stop_app
 }
 

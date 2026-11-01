@@ -6909,6 +6909,13 @@ impl Chat {
     pub fn has_completed_turn(&self) -> bool {
         self.has_completed_turn
     }
+
+    /// Whether the transcript holds a question nobody has answered: the one the
+    /// dock draws. A turn that asks stays streaming until the answer comes, so
+    /// this is what tells a chat waiting on the user from one that is working.
+    pub fn awaits_user(&self) -> bool {
+        self.entries.iter().any(question_dock::is_open)
+    }
 }
 
 impl Focusable for Chat {

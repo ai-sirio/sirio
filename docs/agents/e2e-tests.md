@@ -48,11 +48,13 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # and an inactive window keeps the mark. The same case counts the notifications the app
 # decided to post (`posted`): one per stop, built from the session's own worktree, none for
 # the agent's exit afterwards, and `act --click <tag>` opens the session the way a click on
-# the notification does (the app's D-Bus is dead, so the E2E never reaches a desktop).
-# Linux runs it with --xvfb or --display :N; --state-only skips cases 4, 4c, 5, 6, 10 and
-# 15 and is what macOS runs. --out-dir DIR keeps the transcript, logs and env dumps (and
-# case 15's case15-attention.json); --only N[,N...] prints "SIRIOCTL E2E PARTIAL"; --mutate
-# claude-prompt-hook is case 6's mutation check.
+# the notification does (the app's D-Bus is dead, so the E2E never reaches a desktop). Its
+# step 14.7c (`parked_terminal_exit_reaches_status`) is the parked twin of a plain shell's
+# exit: the shell exits 3 while its worktree is not selected, and its session reads error
+# and is not unread. Linux runs it with --xvfb or --display :N; --state-only skips cases 4,
+# 4c, 5, 6, 10 and 15 and is what macOS runs. --out-dir DIR keeps the transcript, logs and
+# env dumps (and case 15's case15-attention.json); --only N[,N...] prints "SIRIOCTL E2E
+# PARTIAL"; --mutate claude-prompt-hook is case 6's mutation check.
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 
 # The "Project added" dialog after every add from the UI, in a real debug Sirio per scenario (a
@@ -144,6 +146,13 @@ Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "
 # mode is drawn as the danger shield, and typing still reaches the composer, so no dialog holds the
 # keyboard. It needs --display :N --window-size 2200x1000 and captures
 # frames/composer-keys-*.png.
+# The three unread scenarios run in the default set and need no display: `unread_parked_chat` (a
+# turn that ends while its worktree is not selected marks the chat unread, posts one notification
+# naming its branch, and showing the worktree clears the mark), `unread_question` (a permission
+# the turn asks while the worktree is not selected reads needs-input and unread, still open when
+# the worktree is shown), and `unread_secondary_seen` (a chat in the shown Secondary half, beside a
+# terminal in the Primary, stops with no mark and no notification). Each leaves
+# attention-<scenario>.json, the last `surface attention read`, in the out dir.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the

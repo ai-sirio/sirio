@@ -55,7 +55,8 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #  15  unread sessions: a claude agent tab in worktree A stops while worktree B is
 #      on screen and reads unread until A is shown; a stop in a split pane marks the
 #      tab and leaves the other pane's running beside it; an inactive window keeps
-#      the mark until the window is active (needs a pane's shell, like 6)
+#      the mark until the window is active; a plain shell that exits 3 reads error and
+#      is not unread, shown or in a parked worktree (needs a pane's shell, like 6)
 #
 # --out-dir DIR keeps transcript.log, app-<world>.log, host-<world>-log/ (the
 # host's logs), env/<case>.env (each pane's `env -0` dump, never printed),
@@ -1698,10 +1699,9 @@ for line in sys.stdin.read().split():
   echo "OK: the window turned active: unread cleared"
 
   echo "step 14.7b: plain_shell_exit_is_not_a_stop: only an agent's pane stops, so a plain shell that exits 3 with the window inactive marks nothing"
-  # The plain tab stays mounted and shown: a tab in a parked worktree is not told
-  # that its shell exited, so a stop could not be read from there. An inactive
-  # window puts the shown tab off screen all the same, which is where an agent's
-  # stop would mark it.
+  # The plain tab stays mounted and shown, and an inactive window puts it off
+  # screen, which is where an agent's stop would mark it. Step 14.7c is the same
+  # exit in a parked worktree.
   local known_plain pane_plain sess_plain
   known_plain="$(attention_ids | tr '\n' ' ')"
   rm -f "$W/plain-gate" "$W/plain-exit.marker"
@@ -1719,6 +1719,23 @@ for line in sys.stdin.read().split():
   echo "OK: the plain shell exited 3 (its pane reads error), off screen, and its session is not unread"
   ctl surface attention act --focus active >/dev/null || fail "--focus active was refused"
   [ "$(attention_get "$sess_plain" unread)" = false ] || fail "the plain session is unread once the window is active"
+
+  echo "step 14.7c: parked_terminal_exit_reaches_status: a plain shell in a parked worktree that exits 3 reads error, and is not unread"
+  # The parked twin of 14.7b: worktree A is not mounted when the shell exits.
+  local known_parked pane_parked sess_parked
+  known_parked="$(attention_ids | tr '\n' ' ')"
+  rm -f "$W/parked-gate" "$W/parked-exit.marker"
+  pane_parked="$(ctl_json surface terminal open --cmd "while [ ! -f $W/parked-gate ]; do sleep 0.2; done; echo exiting > $W/parked-exit.marker; exit 3" | pane_of)"
+  wait_until 30 attention_new_session "$W_REPO" "$known_parked" || fail "no session appeared in worktree A for the parked terminal tab"
+  sess_parked="$ATT_NEW"
+  [ "$(attention_get "$sess_parked" status)" = null ] || fail "the parked terminal's session reads a status before it exits"
+  select_wt "$id_b"
+  [ "$(attention_get "$sess_parked" onScreen)" = false ] || fail "the terminal reads onScreen with its worktree parked, so the check proves nothing"
+  : > "$W/parked-gate"
+  wait_until 30 test -s "$W/parked-exit.marker" || fail "the parked shell never reached its exit"
+  attention_wait "$sess_parked" status error 10
+  [ "$(attention_get "$sess_parked" unread)" = false ] || fail "a plain shell's exit in a parked worktree marked its session unread"
+  echo "OK: the plain shell exited 3 while parked: its session reads error and is not unread"
 
   echo "step 14.8: a click on a notification opens its session, and an unknown one is ignored"
   select_wt "$id_b"
@@ -1742,8 +1759,7 @@ for line in sys.stdin.read().split():
   echo "OK: the click selected A and the agent tab, and the session is no longer unread"
 
   echo "step 14.9: the agent's exit after its stop posts nothing more"
-  # A has to stay mounted, since a pane in a parked worktree is not told that its
-  # process exited. An inactive window puts the shown tab off screen all the same,
+  # A stays mounted and shown: an inactive window puts the shown tab off screen,
   # which is where a stop would post.
   ctl surface attention act --focus inactive >/dev/null || fail "--focus inactive was refused"
   [ "$(attention_get "$sess" onScreen)" = false ] || fail "the agent session reads onScreen in an inactive window, so the check proves nothing"
