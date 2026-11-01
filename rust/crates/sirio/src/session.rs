@@ -2701,6 +2701,30 @@ impl SessionStore {
         .collect()
     }
 
+    /// Every open tab's attention record. An error answers "none", which reads
+    /// as every session seen and idle.
+    pub fn tab_attention(&self) -> HashMap<String, sirio_persistence::TabAttention> {
+        self.read_with(Vec::new(), "read session attention", |db| {
+            db.tab_attention()
+        })
+        .into_iter()
+        .collect()
+    }
+
+    /// Returns the ids that matched no row; an error answers "none", so a
+    /// failing database is not retried on every frame.
+    pub fn set_tab_attention(
+        &self,
+        writes: &[(String, sirio_persistence::TabAttention)],
+    ) -> Vec<String> {
+        if writes.is_empty() {
+            return Vec::new();
+        }
+        self.write_with(Vec::new(), "record session attention", |db| {
+            db.set_tab_attention(writes)
+        })
+    }
+
     /// Deletes a tab row outright (an archived chat's Delete).
     pub fn delete_tab(&self, id: &str) -> bool {
         self.write_with(false, "delete a closed chat", |db| {

@@ -569,6 +569,21 @@ fn migrate_v25(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v26 — whether a tab's session has stopped unseen, and whether it was
+/// running when the app last wrote.
+///
+/// `unread` is the mark the sidebar shows until the user looks at the session;
+/// `last_running` lets a restart tell that an agent stopped while the app was
+/// closed. Both are nullable and never backfilled (a NULL reads as false), and
+/// both are written only by `AppDatabase::set_tab_attention`: `save_tab` and
+/// `save_tabs` do not list them, so a layout save keeps them.
+fn migrate_v26(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "ALTER TABLE tab ADD COLUMN unread INTEGER;
+         ALTER TABLE tab ADD COLUMN last_running INTEGER;",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -597,6 +612,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v23,
     migrate_v24,
     migrate_v25,
+    migrate_v26,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
@@ -997,6 +1013,35 @@ mod tests {
             )
             .expect("tab row survives v20");
         assert_eq!((last_event_at, closed_at), (None, None));
+    }
+
+    #[test]
+    fn a_tab_saved_before_v26_reads_as_seen_and_idle() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        migrate_up_to(&mut conn, 25).expect("migrate to v25");
+        conn.execute_batch(
+            "INSERT INTO project (id, name, root_path) VALUES ('proj', 'Proj', '/repo');
+             INSERT INTO worktree (id, project_id, branch, path, order_idx)
+                 VALUES ('wt', 'proj', 'main', '/repo', 0);
+             INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
+                 VALUES ('tab-old', 'wt', 'Chat', 'chat', 0, 1);",
+        )
+        .expect("plant a v25 tab");
+
+        migrate_up_to(&mut conn, MIGRATIONS.len()).expect("migrate forward");
+
+        let (unread, last_running): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT unread, last_running FROM tab WHERE id = 'tab-old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("tab row survives v26");
+        assert_eq!(
+            (unread, last_running),
+            (None, None),
+            "the columns are nullable and never backfilled"
+        );
     }
 
     /// v19: the pane flag is inverted. Whatever v16 stored — open or closed —

@@ -37,6 +37,12 @@ Scripts/Tests/test-term-e2e.sh      # -> prints "TERM E2E OK (<n> cases, <s>s)"
 # probe. --out-dir DIR keeps logs, state and PID-matched captures; --state-only takes
 # no captures (macOS runs that way); --xvfb or --display :N picks the display (Linux);
 # --only N[,N...] runs some cases and prints "HOST SESSIONS E2E PARTIAL" instead.
+# Case 33 (unread across a restart) has a codex stub that leaves, exit 0, when a file
+# appears: the agent stops while the app is closed, and the relaunched app marks it unread
+# and posts nothing. The mark survives a second restart and goes with the closed tab. A
+# restored terminal opens its session when first drawn, so the agent tab is the active one
+# and the window is forced inactive (`act --focus inactive`). It leaves case33-restored.json,
+# case33-saved.json and case33-closed.json, the `surface attention read` of each start.
 Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> cases, <s>s)"
 # The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
 # socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
@@ -153,6 +159,9 @@ Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "
 # the worktree is shown), and `unread_secondary_seen` (a chat in the shown Secondary half, beside a
 # terminal in the Primary, stops with no mark and no notification). Each leaves
 # attention-<scenario>.json, the last `surface attention read`, in the out dir.
+# `unread_restored_chat_quiet` is the chat side of a restart: two chats that ran a turn on screen
+# come back with no mark and no notification, and a chat whose turn ended off screen before the
+# quit comes back unread, again with no notification.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the

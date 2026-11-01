@@ -28,7 +28,7 @@ use sirio_git::{
 };
 use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, ClosedChatSummary,
-    stable_worktree_id,
+    TabAttention, stable_worktree_id,
 };
 use sirio_project::{
     OnceGate, PaneRole, TabKind, display_absolute_path, display_path, is_git_repository,
@@ -1633,16 +1633,6 @@ struct SessionRef {
     title: String,
     /// The `pane-N` activity keys of the tab's panes.
     pane_keys: Vec<String>,
-}
-
-/// What the app remembers about one session's attention, in memory.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-struct TabAttention {
-    /// An agent stopped while the session was not on screen, and nobody has
-    /// looked at it since.
-    unread: bool,
-    /// At least one pane of the tab was running at its last status change.
-    running: bool,
 }
 
 /// What a debug `surface.attention.act` does.
@@ -5898,9 +5888,17 @@ struct SirioWorkspace {
     /// would never see it once the callback had already set `true`.
     last_polled_window_active: bool,
     /// Per session, by persistence id: the unread mark and the running flag.
-    /// In memory only; a record stays for the rest of the run, whether or not
-    /// its session is still open.
+    /// Seeded at boot from the database, and kept there by
+    /// `pending_attention_writes`; a record stays until its tab is closed.
     session_attention: HashMap<String, TabAttention>,
+    /// The sessions whose record an earlier run left: each leaves the set at its
+    /// first status decision, which reads the record as a restore
+    /// (`first_status_for`).
+    attention_from_previous_run: HashSet<String>,
+    /// Attention records not yet written: every change goes in, and
+    /// `flush_attention_writes` writes them, keeping those whose tab has no row
+    /// yet while the tab is still held.
+    pending_attention_writes: BTreeMap<String, TabAttention>,
     /// Debug-only override of the window's focus, driven by
     /// `surface.attention.act --focus`: under Xvfb with no window manager, and
     /// on macOS `--state-only`, nobody controls what the OS reports.
@@ -7082,6 +7080,8 @@ impl SirioWorkspace {
             },
         )
         .detach();
+        // Read before the literal moves `session`: the records an earlier run left.
+        let previous_attention = session.tab_attention();
         let mut workspace = Self {
             titlebar,
             sidebar,
@@ -7178,7 +7178,9 @@ impl SirioWorkspace {
             restored_scrollback_scheduled: OnceGate::default(),
             window_active: true,
             last_polled_window_active: true,
-            session_attention: HashMap::new(),
+            attention_from_previous_run: previous_attention.keys().cloned().collect(),
+            session_attention: previous_attention,
+            pending_attention_writes: BTreeMap::new(),
             #[cfg(debug_assertions)]
             debug_window_active: None,
             #[cfg(debug_assertions)]
@@ -11263,6 +11265,7 @@ impl SirioWorkspace {
                     controller.update(cx, |terminal, _| terminal.end_session());
                 }
                 self.terminal_pane_cache.remove_worktree(&worktree_id);
+                self.forget_worktree_attention(path);
                 self.forget_parked_panes(&worktree_id);
                 self.parked_worktree_tabs.remove(&worktree_id);
                 self.retained_worktree_chats.remove(&worktree_id);
@@ -13392,6 +13395,7 @@ impl SirioWorkspace {
             controller.update(cx, |terminal, _| terminal.end_session());
         }
         self.terminal_pane_cache.remove_worktree(&worktree_id);
+        self.forget_worktree_attention(&path);
         self.forget_parked_panes(&worktree_id);
         self.parked_worktree_tabs.remove(&worktree_id);
         self.retained_worktree_chats.remove(&worktree_id);
@@ -14159,20 +14163,37 @@ impl SirioWorkspace {
     }
 
     /// What is known of a session's status record when a pane's status goes from
-    /// nothing to something. Until the record outlives the run, that is only
-    /// this run's own `session_attention`.
+    /// nothing to something: the record an earlier run saved
+    /// (`attention_from_previous_run`), else this run's own `session_attention`.
+    ///
+    /// Two limits, both because an earlier run's record says what the app last
+    /// saw, not what happened while it was closed:
+    ///
+    /// - A CLI agent whose turn ended while Sirio was closed, and which is still
+    ///   open, cannot be detected: `sirioctl` drops the hook when the app's
+    ///   socket is not there to answer, so nothing reaches the app, and the
+    ///   agent is still running as far as any layer can tell.
+    /// - A chat's mark after a restart is only the one saved before quitting:
+    ///   a restored chat never gains a mark, because its first settled status is
+    ///   a transcript (`has_completed_turn`), not a stop.
     ///
     /// A chat with no record reads as recorded and idle: in this run a chat
-    /// reaches a stop through Running to settled, so a first settled status
-    /// is a restored transcript (`has_completed_turn`), not news. Task 5
-    /// replaces this with the persisted `Restored { chat: true }`.
+    /// reaches a stop through Running to settled, so the line only guards a
+    /// first settled status from a transcript the seed did not cover.
     fn first_status_for(&self, persistence_id: &str, chat: bool) -> FirstStatus {
-        match self.session_attention.get(persistence_id) {
-            None if chat => FirstStatus::Recorded { was_running: false },
-            None => FirstStatus::Unrecorded,
+        let record = self.session_attention.get(persistence_id);
+        if self.attention_from_previous_run.contains(persistence_id) {
+            return FirstStatus::Restored {
+                was_running: record.is_some_and(|record| record.running),
+                chat,
+            };
+        }
+        match record {
             Some(record) => FirstStatus::Recorded {
                 was_running: record.running,
             },
+            None if chat => FirstStatus::Recorded { was_running: false },
+            None => FirstStatus::Unrecorded,
         }
     }
 
@@ -14188,6 +14209,7 @@ impl SirioWorkspace {
         for transition in self.activity.take_resolved_transitions() {
             self.on_pane_transition(&transition, cx);
         }
+        self.flush_attention_writes();
     }
 
     /// The one place a status change becomes a stop: the unread mark, the running
@@ -14206,12 +14228,21 @@ impl SirioWorkspace {
             .pane_keys
             .iter()
             .any(|key| self.activity.status(key) == Some(AgentStatus::Running));
+        // The first decision of a restored session has been made.
+        self.attention_from_previous_run
+            .remove(&session.persistence_id);
         let record = self
             .session_attention
             .entry(session.persistence_id.clone())
             .or_default();
+        let before = *record;
         record.running = running;
         record.unread |= decision.unread;
+        let after = *record;
+        if after != before {
+            self.pending_attention_writes
+                .insert(session.persistence_id.clone(), after);
+        }
         self.mark_activity_dirty();
         if decision.notify {
             let payload = self.post_session_notification(&session, &transition.pane_id, cx);
@@ -14231,6 +14262,7 @@ impl SirioWorkspace {
     /// Does nothing while nothing is unread.
     fn mark_shown_sessions_seen(&mut self, _cx: &mut Context<Self>) {
         if !self.session_attention.values().any(|record| record.unread) {
+            self.flush_attention_writes();
             return;
         }
         let shown: Vec<String> = self
@@ -14245,6 +14277,7 @@ impl SirioWorkspace {
                 && record.unread
             {
                 record.unread = false;
+                self.pending_attention_writes.insert(id.clone(), *record);
                 cleared = true;
                 // A seen session's notification has nothing left to say.
                 #[cfg(target_os = "macos")]
@@ -14253,6 +14286,69 @@ impl SirioWorkspace {
         }
         if cleared {
             self.mark_activity_dirty();
+        }
+        self.flush_attention_writes();
+    }
+
+    /// Writes the pending attention records. A record whose tab has no row yet (a
+    /// tab younger than one save debounce) stays pending while the tab is still
+    /// held; every other record is dropped once written. Does nothing while
+    /// nothing is pending, so the per-frame call is a field read.
+    fn flush_attention_writes(&mut self) {
+        if self.pending_attention_writes.is_empty() {
+            return;
+        }
+        let writes: Vec<(String, TabAttention)> = self
+            .pending_attention_writes
+            .iter()
+            .map(|(id, record)| (id.clone(), *record))
+            .collect();
+        let unmatched: HashSet<String> =
+            self.session.set_tab_attention(&writes).into_iter().collect();
+        if unmatched.is_empty() {
+            self.pending_attention_writes.clear();
+            return;
+        }
+        let held: HashSet<String> = self
+            .held_sessions()
+            .into_iter()
+            .map(|session| session.persistence_id)
+            .collect();
+        self.pending_attention_writes
+            .retain(|id, _| unmatched.contains(id) && held.contains(id));
+    }
+
+    /// A closed or archived tab has no session left: its record is written seen
+    /// and idle (a row an archive keeps must not come back unread) and leaves
+    /// memory. A worktree switch or an eviction never calls this: those sessions
+    /// live on.
+    fn forget_session_attention(&mut self, persistence_id: &str) {
+        self.attention_from_previous_run.remove(persistence_id);
+        if self.session_attention.remove(persistence_id).is_some() {
+            self.pending_attention_writes
+                .insert(persistence_id.to_owned(), TabAttention::default());
+            self.mark_activity_dirty();
+        }
+    }
+
+    /// `forget_session_attention` for every session of a worktree that is closing:
+    /// the ones Sirio holds, and the ones only the database knows (a worktree this
+    /// run never mounted). Read before the worktree's parked strip is dropped.
+    fn forget_worktree_attention(&mut self, worktree: &Path) {
+        let mut ids: Vec<String> = self
+            .held_sessions()
+            .into_iter()
+            .filter(|session| paths_name_the_same_document(&session.worktree, worktree))
+            .map(|session| session.persistence_id)
+            .collect();
+        ids.extend(
+            self.session
+                .persisted_tabs_for(worktree)
+                .into_iter()
+                .map(|tab| tab.id),
+        );
+        for id in ids {
+            self.forget_session_attention(&id);
         }
     }
 
@@ -15219,6 +15315,8 @@ impl SirioWorkspace {
         let archived = (self.tabs[index].kind == TabKind::AgentChat)
             .then(|| self.tabs[index].persistence_id.clone())
             .filter(|id| self.session.archive_tab(id, unix_now_ms()));
+        // Archived or deleted, the tab's session is over: its record leaves with it.
+        let closing_persistence_id = self.tabs[index].persistence_id.clone();
         // Read while the tab is still here: only a tab that held a change
         // request's refs can be the last one holding them (spec §6.4).
         let held_revision_refs = tab_holds_revision_refs(&self.tabs[index], cx);
@@ -15297,6 +15395,7 @@ impl SirioWorkspace {
         }
         self.tabs.remove(index);
         self.tab_worktree_paths.remove(&tab_id);
+        self.forget_session_attention(&closing_persistence_id);
         let worktree_id = worktree_path.to_string_lossy().into_owned();
         for pane_id in terminal_pane_ids {
             self.terminal_pane_cache

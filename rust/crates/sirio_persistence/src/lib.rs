@@ -65,7 +65,7 @@ pub use model::{
     ChatPermissionOutcome, ChatPlanEntry, ChatSessionSummary, ChatToolLocation, ChatTranscript,
     ChatTurn, ClosedChatSummary, EditorCursorShape, EditorLineNumbers, MAX_CHAT_TRANSCRIPT_BYTES,
     ProjectRecord, QuarantinedRecord,
-    SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
+    SidebarState, SidebarView, TabAttention, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
     settings_ranges,
     stable_worktree_id,
 };

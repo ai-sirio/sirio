@@ -78,6 +78,8 @@ set -euo pipefail
 #                      unread, and is still open when the worktree is shown
 #   unread_secondary_seen  a chat in the shown Secondary half, beside a terminal in the Primary, stops
 #                      with no mark and no notification
+#   unread_restored_chat_quiet  a relaunch gives a seen chat no mark and no notification, and keeps the
+#                      mark of a chat whose turn ended unseen before the quit
 # The file_links scenario (spec 2026-10-24-chat-file-links-design.md §6) uses a third stub,
 # Scripts/Tests/stubs/file-links/claude, the fixture in its file_links mode: every prompt is
 # answered with one text holding paths that exist in the worktree, ones that do not, a
@@ -161,7 +163,7 @@ ALL_SCENARIOS=(environment default_folds context connectors change_request rate_
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
   trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys
-  unread_parked_chat unread_question unread_secondary_seen)
+  unread_parked_chat unread_question unread_secondary_seen unread_restored_chat_quiet)
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
@@ -2283,6 +2285,38 @@ wait_attention() { # desc field want seconds
   done
   fail "$desc: the chat session's $field is '$got', not '$want' after $seconds s; read: $(reply surface attention read | tr '\n' ' ')"
 }
+# One field of the session `surface attention read` lists with id $1 (any worktree, or none
+# when the tab is not held): strings as they are, everything else as JSON. Prints nothing when
+# the read does not list it.
+attention_row() { # id field
+  reply surface attention read | python3 -c 'import json, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+for row in json.loads(reply["sessions"]):
+    if row["id"] == sys.argv[1]:
+        value = row[sys.argv[2]]
+        print(value if isinstance(value, str) else json.dumps(value))
+        break' "$1" "$2"
+}
+# The ids of the chat sessions held for $LINKED, one per line, in the order the read lists them.
+attention_chat_ids() {
+  reply surface attention read | python3 -c 'import json, os, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+for row in json.loads(reply["sessions"]):
+    if row["kind"] == "chat" and row["worktree"] and os.path.realpath(row["worktree"]) == os.path.realpath(sys.argv[1]):
+        print(row["id"])' "$LINKED"
+}
+# Polls until session $2's FIELD $3 reads WANT.
+wait_row() { # desc id field want seconds
+  local desc=$1 id=$2 field=$3 want=$4 seconds=$5 got="" _
+  for _ in $(seq 1 $((seconds * 5))); do
+    got=$(attention_row "$id" "$field")
+    [ "$got" = "$want" ] && { echo "OK: $desc ($field = $want)"; return 0; }
+    sleep 0.2
+  done
+  fail "$desc: session $id's $field is '$got', not '$want' after $seconds s; read: $(reply surface attention read | tr '\n' ' ')"
+}
 # The notifications the app decided to post, as JSON objects one per line, oldest first. A
 # read with no `posted` key is an error, never an empty list.
 posted_rows() {
@@ -2412,6 +2446,85 @@ scenario_unread_secondary_seen() {
   capture unread_secondary_seen-after
   save_attention unread_secondary_seen
   echo "OK: the stop in the Secondary half left no mark and posted nothing"
+  stop_app
+}
+
+scenario_unread_restored_chat_quiet() {
+  # Turns of a few seconds, so the second half can leave the worktree while one runs.
+  unread_chat unread_restored_chat_quiet 1000
+  local first=$SURFACE second="" id _
+  echo "step: a turn in each of two chats of one worktree, each shown while it runs"
+  wait_row "the first chat is on screen" "$first" onScreen true 10
+  send_prompt second
+  wait_panel "the first chat's turn ended" 'c["status"] == "completed"' 30
+  ctl surface open-list open --entry agent:claude >/dev/null || fail "the second chat did not open"
+  for _ in $(seq 1 50); do
+    for id in $(attention_chat_ids); do [ "$id" != "$first" ] && second=$id; done
+    [ -n "$second" ] && break
+    sleep 0.2
+  done
+  [ -n "$second" ] || fail "the worktree holds no second chat: $(attention_chat_ids | tr '\n' ' ')"
+  SURFACE=$second
+  wait_row "the second chat is on screen" "$second" onScreen true 10
+  send_prompt second
+  wait_panel "the second chat's turn ended" 'c["status"] == "completed"' 30
+  look_at_shown
+  [ "$(attention_row "$first" unread)" = false ] || fail "the first chat reads unread: its turn ended while it was shown"
+  [ "$(attention_row "$second" unread)" = false ] || fail "the second chat reads unread: its turn ended while it was shown"
+  echo "OK: both chats ran a turn on screen and neither is unread"
+
+  echo "step: Sirio starts again; a restored chat is not news"
+  stop_app
+  launch unread_restored_chat_quiet
+  for _ in $(seq 1 100); do
+    [ "$(attention_chat_ids | wc -l | tr -d ' ')" = 2 ] && break
+    sleep 0.3
+  done
+  [ "$(attention_chat_ids | wc -l | tr -d ' ')" = 2 ] || fail "the relaunch did not restore both chats: $(attention_chat_ids | tr '\n' ' ')"
+  local hidden=""
+  for id in $first $second; do
+    [ "$(attention_row "$id" onScreen)" = false ] && hidden=$id
+  done
+  [ -n "$hidden" ] || fail "no restored chat is off screen: $(reply surface attention read | tr '\n' ' ')"
+  echo "OK: both chats came back; $hidden is the one not shown"
+  sleep 3
+  [ "$(attention_row "$hidden" unread)" = false ] || fail "the restored chat that is not shown reads unread"
+  [ "$(posted_count)" = 0 ] || fail "the relaunch posted a notification for a seen chat: $(posted_rows | tr '\n' ' ')"
+  echo "step: each chat is shown in turn"
+  local position
+  for position in $(tab_positions chat); do
+    ctl surface tabs select "$position" >/dev/null || fail "selecting tab $position was refused"
+    look_at_shown
+    sleep 1
+    [ "$(attention_row "$first" unread)" = false ] && [ "$(attention_row "$second" unread)" = false ] \
+      || fail "showing tab $position marked a chat unread: $(reply surface attention read | tr '\n' ' ')"
+  done
+  [ "$(posted_count)" = 0 ] || fail "showing the restored chats posted a notification: $(posted_rows | tr '\n' ' ')"
+  echo "OK: a seen chat stays quiet over a restart"
+
+  echo "step: a turn ends unseen, with another worktree selected, and Sirio quits"
+  local shown=""
+  for id in $first $second; do
+    [ "$(attention_row "$id" onScreen)" = true ] && shown=$id
+  done
+  [ -n "$shown" ] || fail "no chat is shown to run the last turn in"
+  SURFACE=$shown
+  send_prompt request
+  ctl select-workspace --workspace "$PRIMARY" >/dev/null
+  [ "$(attention_row "$shown" status)" = running ] || fail "the chat does not read running right after the select (status '$(attention_row "$shown" status)'), so the stop would not be off screen"
+  wait_row "the parked chat's turn ended" "$shown" status done 30
+  wait_row "the parked chat's stop marked it" "$shown" unread true 5
+  # The write reaches the database in the same drain; a moment for the disk, then quit.
+  sleep 1
+  stop_app
+  launch unread_restored_chat_quiet
+  wait_row "the chat that ended unseen is still unread after the relaunch" "$shown" unread true 30
+  [ "$(posted_count)" = 0 ] || fail "a saved mark posted a notification after the relaunch: $(posted_rows | tr '\n' ' ')"
+  local other=$first
+  [ "$shown" = "$first" ] && other=$second
+  [ "$(attention_row "$other" unread)" = false ] || fail "the other chat reads unread after the relaunch"
+  save_attention unread_restored_chat_quiet
+  echo "OK: the saved mark survived the restart and nothing was posted"
   stop_app
 }
 
