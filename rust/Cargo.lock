@@ -7270,10 +7270,10 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sirio_acp",
  "sirio_activity",
  "sirio_agents",
  "sirio_apply",
+ "sirio_chat",
  "sirio_claude",
  "sirio_control",
  "sirio_env",
@@ -7306,11 +7306,10 @@ dependencies = [
  "async-io",
  "async-process",
  "futures",
- "libc",
  "serde_json",
- "sirio_claude",
+ "sirio_chat_child",
+ "sirio_chat_vocab",
  "sirio_env",
- "sirio_persistence",
 ]
 
 [[package]]
@@ -7339,6 +7338,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "sirio_chat"
+version = "0.38.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "async-io",
+ "async-process",
+ "futures",
+ "serde_json",
+ "sirio_acp",
+ "sirio_chat_child",
+ "sirio_chat_vocab",
+ "sirio_claude",
+ "sirio_env",
+ "sirio_persistence",
+]
+
+[[package]]
+name = "sirio_chat_child"
+version = "0.38.0"
+dependencies = [
+ "async-io",
+ "async-process",
+ "futures",
+ "libc",
+ "sirio_chat_vocab",
+]
+
+[[package]]
+name = "sirio_chat_vocab"
+version = "0.38.0"
+dependencies = [
+ "async-channel",
+ "serde_json",
+]
+
+[[package]]
 name = "sirio_claude"
 version = "0.38.1"
 dependencies = [
@@ -7355,7 +7391,7 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
- "sirio_acp",
+ "sirio_chat",
  "sirio_env",
  "sirio_host_client",
  "sirio_host_protocol",
@@ -7637,8 +7673,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sirio_acp",
  "sirio_agents",
+ "sirio_chat",
  "sirio_diagram",
  "sirio_env",
  "sirio_forge",

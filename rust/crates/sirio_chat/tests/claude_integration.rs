@@ -7,11 +7,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use futures::future::Either;
-use sirio_acp::{
-    AcpEvent, AvailableCommandInfo, ClaudeClient, ClaudeLaunch, SessionNotice, SpanKind, TraceEvent,
+use sirio_chat::ThinkingDisplay;
+use sirio_chat::{
+    AvailableCommandInfo, ChatEvent, ClaudeClient, ClaudeLaunch, SessionNotice, SpanKind,
+    TraceEvent,
 };
 use sirio_claude::FastMode;
-use sirio_acp::ThinkingDisplay;
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -21,7 +22,7 @@ const FIXTURE: &str = concat!(
 /// The fixture is a python script, so the program is `python3` and the
 /// script is its first argument — `ClaudeLaunch` carries the extra
 /// arguments a test needs in front of the protocol flags.
-fn launch(mode: &str) -> (ClaudeClient, sirio_acp::EventStream) {
+fn launch(mode: &str) -> (ClaudeClient, sirio_chat::EventStream) {
     ClaudeClient::launch(fixture_launch(mode), std::env::temp_dir())
         .expect("fixture claude should complete its handshake")
 }
@@ -30,7 +31,7 @@ fn fixture_launch(mode: &str) -> ClaudeLaunch {
     ClaudeLaunch::fixture(PathBuf::from("python3"), vec![FIXTURE.into(), mode.into()])
 }
 
-fn next_event(events: &sirio_acp::EventStream) -> AcpEvent {
+fn next_event(events: &sirio_chat::EventStream) -> ChatEvent {
     let receive = events.recv();
     // A guard against a hang, not a budget: the only thing it must be is
     // longer than this suite's worst scheduling delay. Five seconds was not
@@ -50,7 +51,11 @@ fn next_event(events: &sirio_acp::EventStream) -> AcpEvent {
 /// The first re-read signal whose name starts with `prefix`, on a short
 /// budget. It reads the stream once, so a test can say *which* signal
 /// arrived rather than draining the stream asking after each in turn.
-fn first_signal(events: &sirio_acp::EventStream, prefix: &str, budget: Duration) -> Option<String> {
+fn first_signal(
+    events: &sirio_chat::EventStream,
+    prefix: &str,
+    budget: Duration,
+) -> Option<String> {
     let deadline = std::time::Instant::now() + budget;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -67,7 +72,7 @@ fn first_signal(events: &sirio_acp::EventStream, prefix: &str, budget: Duration)
             }
         });
         match got {
-            Some(AcpEvent::OtherSessionUpdate { kind }) if kind.starts_with(prefix) => {
+            Some(ChatEvent::OtherSessionUpdate { kind }) if kind.starts_with(prefix) => {
                 return Some(kind);
             }
             Some(_) => continue,
@@ -76,11 +81,11 @@ fn first_signal(events: &sirio_acp::EventStream, prefix: &str, budget: Duration)
     }
 }
 
-fn drain_until_turn_end(events: &sirio_acp::EventStream) -> Vec<AcpEvent> {
+fn drain_until_turn_end(events: &sirio_chat::EventStream) -> Vec<ChatEvent> {
     let mut seen = Vec::new();
     loop {
         let event = next_event(events);
-        let ended = matches!(event, AcpEvent::TurnEnded { .. });
+        let ended = matches!(event, ChatEvent::TurnEnded { .. });
         seen.push(event);
         if ended {
             return seen;
@@ -123,13 +128,13 @@ fn a_command_list_that_changes_mid_session_reaches_the_picker() {
     let mut lists: Vec<Vec<AvailableCommandInfo>> = Vec::new();
     let changed = loop {
         match next_event(&events) {
-            AcpEvent::AvailableCommands(commands) => {
+            ChatEvent::AvailableCommands(commands) => {
                 lists.push(commands);
                 if lists.len() == 2 {
                     break lists.pop().expect("the second list");
                 }
             }
-            AcpEvent::OtherSessionUpdate { kind } if kind == "system/commands_changed" => {
+            ChatEvent::OtherSessionUpdate { kind } if kind == "system/commands_changed" => {
                 panic!("the change was named but the new list was never published");
             }
             _ => {}
@@ -155,14 +160,14 @@ fn a_turn_streams_its_text_and_ends_with_usage() {
     let text: String = seen
         .iter()
         .filter_map(|event| match event {
-            AcpEvent::AgentMessageChunk(chunk) => Some(chunk.as_str()),
+            ChatEvent::AgentMessageChunk(chunk) => Some(chunk.as_str()),
             _ => None,
         })
         .collect();
     assert_eq!(text, "Hello there");
     assert!(seen.iter().any(|event| matches!(
         event,
-        AcpEvent::TokenUsageBreakdown {
+        ChatEvent::TokenUsageBreakdown {
             input_tokens: 100,
             output_tokens: 20,
             ..
@@ -170,7 +175,7 @@ fn a_turn_streams_its_text_and_ends_with_usage() {
     )));
     assert_eq!(
         seen.last(),
-        Some(&AcpEvent::TurnEnded {
+        Some(&ChatEvent::TurnEnded {
             stop_reason: "EndTurn".into()
         })
     );
@@ -189,7 +194,7 @@ fn the_session_id_is_named_at_launch_and_the_clis_own_replaces_it() {
     assert_eq!(
         seen.iter()
             .filter(|event| **event
-                == AcpEvent::OtherSessionUpdate {
+                == ChatEvent::OtherSessionUpdate {
                     kind: "SessionIdentified".into()
                 })
             .count(),
@@ -223,7 +228,7 @@ fn a_malformed_line_is_skipped_without_hanging_the_session() {
     let seen = drain_until_turn_end(&events);
     assert!(
         seen.iter()
-            .any(|event| matches!(event, AcpEvent::AgentMessageChunk(_)))
+            .any(|event| matches!(event, ChatEvent::AgentMessageChunk(_)))
     );
     client.shutdown().expect("fixture should shut down cleanly");
 }
@@ -234,8 +239,8 @@ fn a_dead_agent_names_its_exit_and_its_last_words() {
     _client.prompt("hello").expect("prompt is accepted");
     let message = loop {
         match next_event(&events) {
-            AcpEvent::TransportError(message) => break message,
-            AcpEvent::TurnEnded { .. } => panic!("a dead agent must not report a normal turn end"),
+            ChatEvent::TransportError(message) => break message,
+            ChatEvent::TurnEnded { .. } => panic!("a dead agent must not report a normal turn end"),
             _ => continue,
         }
     };
@@ -434,7 +439,7 @@ fn a_mode_change_is_confirmed_by_the_agents_own_status_line() {
     let mut seen_update = false;
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while !seen_update && std::time::Instant::now() < deadline {
-        if let AcpEvent::OtherSessionUpdate { kind } = next_event(&events) {
+        if let ChatEvent::OtherSessionUpdate { kind } = next_event(&events) {
             seen_update = kind == "CurrentModeUpdate(plan)";
         }
     }
@@ -449,7 +454,7 @@ fn cancelling_a_turn_produces_a_terminal_outcome() {
     client.prompt("hello").expect("prompt is accepted");
     // Wait until the turn is demonstrably running before interrupting it.
     loop {
-        if matches!(next_event(&events), AcpEvent::AgentMessageChunk(_)) {
+        if matches!(next_event(&events), ChatEvent::AgentMessageChunk(_)) {
             break;
         }
     }
@@ -457,7 +462,7 @@ fn cancelling_a_turn_produces_a_terminal_outcome() {
     let seen = drain_until_turn_end(&events);
     assert_eq!(
         seen.last(),
-        Some(&AcpEvent::TurnEnded {
+        Some(&ChatEvent::TurnEnded {
             stop_reason: "Cancelled".into()
         }),
         "a cancelled turn must say so, or the footer reads as an ordinary end"
@@ -481,15 +486,15 @@ fn a_turn_that_goes_silent_is_reaped_and_reported() {
     _client.prompt("hello").expect("prompt is accepted");
     let event = loop {
         match next_event(&events) {
-            event @ (AcpEvent::Timeout { .. } | AcpEvent::TransportError(_)) => break event,
+            event @ (ChatEvent::Timeout { .. } | ChatEvent::TransportError(_)) => break event,
             _ => continue,
         }
     };
     assert!(
         matches!(
             event,
-            AcpEvent::Timeout {
-                operation: sirio_acp::TimeoutOperation::Prompt,
+            ChatEvent::Timeout {
+                operation: sirio_chat::TimeoutOperation::Prompt,
                 ..
             }
         ),
@@ -524,7 +529,7 @@ fn a_turn_that_keeps_reporting_is_never_reaped_for_taking_long() {
     assert!(
         !seen
             .iter()
-            .any(|event| matches!(event, AcpEvent::Timeout { .. })),
+            .any(|event| matches!(event, ChatEvent::Timeout { .. })),
         "a reporting agent must not be reaped: {seen:?}"
     );
     // No shutdown assertion here: `chatty_slow_turn` ends its own process
@@ -540,7 +545,7 @@ fn a_tool_that_needs_permission_pauses_its_row_and_resumes_on_allow() {
     client.prompt("delete it").expect("prompt is accepted");
     let (request_id, options) = loop {
         match next_event(&events) {
-            AcpEvent::PermissionRequest {
+            ChatEvent::PermissionRequest {
                 request_id,
                 options,
                 title,
@@ -560,7 +565,7 @@ fn a_tool_that_needs_permission_pauses_its_row_and_resumes_on_allow() {
     assert!(
         seen.iter().any(|event| matches!(
             event,
-            AcpEvent::ToolCallCompleted { status, .. } if status == "Completed"
+            ChatEvent::ToolCallCompleted { status, .. } if status == "Completed"
         )),
         "an allowed tool must complete: {seen:?}"
     );
@@ -578,8 +583,8 @@ fn an_open_permission_does_not_freeze_the_stream() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !saw_text_after && std::time::Instant::now() < deadline {
         match next_event(&events) {
-            AcpEvent::PermissionRequest { .. } => saw_request = true,
-            AcpEvent::AgentMessageChunk(_) if saw_request => saw_text_after = true,
+            ChatEvent::PermissionRequest { .. } => saw_request = true,
+            ChatEvent::AgentMessageChunk(_) if saw_request => saw_text_after = true,
             _ => {}
         }
     }
@@ -595,7 +600,7 @@ fn a_withdrawn_permission_is_answered_as_a_refusal() {
     let (mut client, events) = launch("permission");
     client.prompt("delete it").expect("prompt is accepted");
     let request_id = loop {
-        if let AcpEvent::PermissionRequest { request_id, .. } = next_event(&events) {
+        if let ChatEvent::PermissionRequest { request_id, .. } = next_event(&events) {
             break request_id;
         }
     };
@@ -606,7 +611,7 @@ fn a_withdrawn_permission_is_answered_as_a_refusal() {
     assert!(
         seen.iter().any(|event| matches!(
             event,
-            AcpEvent::ToolCallCompleted { status, .. } if status == "Failed"
+            ChatEvent::ToolCallCompleted { status, .. } if status == "Failed"
         )),
         "a refused tool must not read as completed: {seen:?}"
     );
@@ -625,7 +630,7 @@ fn a_permission_left_open_expires_into_a_refusal() {
     .expect("handshake succeeds");
     client.prompt("delete it").expect("prompt is accepted");
     loop {
-        if matches!(next_event(&events), AcpEvent::PermissionRequest { .. }) {
+        if matches!(next_event(&events), ChatEvent::PermissionRequest { .. }) {
             break;
         }
     }
@@ -634,7 +639,7 @@ fn a_permission_left_open_expires_into_a_refusal() {
     let seen = drain_until_turn_end(&events);
     assert!(seen.iter().any(|event| matches!(
         event,
-        AcpEvent::ToolCallCompleted { status, .. } if status == "Failed"
+        ChatEvent::ToolCallCompleted { status, .. } if status == "Failed"
     )));
     client.shutdown().expect("clean shutdown");
 }
@@ -647,7 +652,7 @@ fn a_turn_and_its_permission_reach_the_trace_ahead_of_the_transcript() {
     let request_id = loop {
         let event = next_event(&events);
         let asked = match &event {
-            AcpEvent::PermissionRequest { request_id, .. } => Some(*request_id),
+            ChatEvent::PermissionRequest { request_id, .. } => Some(*request_id),
             _ => None,
         };
         seen.push(event);
@@ -663,7 +668,7 @@ fn a_turn_and_its_permission_reach_the_trace_ahead_of_the_transcript() {
     let trace: Vec<&TraceEvent> = seen
         .iter()
         .filter_map(|event| match event {
-            AcpEvent::Trace(trace) => Some(trace),
+            ChatEvent::Trace(trace) => Some(trace),
             _ => None,
         })
         .collect();
@@ -690,11 +695,11 @@ fn a_turn_and_its_permission_reach_the_trace_ahead_of_the_transcript() {
     // transcript's own end, which the context meter holds back.
     let trace_end = seen
         .iter()
-        .position(|event| matches!(event, AcpEvent::Trace(TraceEvent::TurnEnded { .. })))
+        .position(|event| matches!(event, ChatEvent::Trace(TraceEvent::TurnEnded { .. })))
         .expect("the result ends the trace's turn");
     let transcript_end = seen
         .iter()
-        .position(|event| matches!(event, AcpEvent::TurnEnded { .. }))
+        .position(|event| matches!(event, ChatEvent::TurnEnded { .. }))
         .expect("the transcript's turn ends");
     assert!(trace_end < transcript_end, "{seen:?}");
     client.shutdown().expect("clean shutdown");
@@ -712,7 +717,7 @@ fn a_subagents_permission_asks_without_opening_a_tool_row() {
     let request_id = loop {
         let event = next_event(&events);
         let asked = match &event {
-            AcpEvent::PermissionRequest { request_id, .. } => Some(*request_id),
+            ChatEvent::PermissionRequest { request_id, .. } => Some(*request_id),
             _ => None,
         };
         seen.push(event);
@@ -728,21 +733,21 @@ fn a_subagents_permission_asks_without_opening_a_tool_row() {
     assert!(
         !seen.iter().any(|event| matches!(
             event,
-            AcpEvent::ToolCallStarted { .. }
-                | AcpEvent::ToolCallUpdated { .. }
-                | AcpEvent::ToolCallCompleted { .. }
+            ChatEvent::ToolCallStarted { .. }
+                | ChatEvent::ToolCallUpdated { .. }
+                | ChatEvent::ToolCallCompleted { .. }
         )),
         "a subagent's call is not a row of the transcript: {seen:?}"
     );
     // The card is still asked, and the wait is still in the trace.
     assert!(seen.iter().any(|event| matches!(
         event,
-        AcpEvent::Trace(TraceEvent::WaitStarted { request_id: waited, .. })
+        ChatEvent::Trace(TraceEvent::WaitStarted { request_id: waited, .. })
             if *waited == request_id
     )));
     assert!(seen.iter().any(|event| matches!(
         event,
-        AcpEvent::Trace(TraceEvent::WaitEnded { request_id: ended, .. })
+        ChatEvent::Trace(TraceEvent::WaitEnded { request_id: ended, .. })
             if *ended == request_id
     )));
     client.shutdown().expect("clean shutdown");
@@ -753,7 +758,7 @@ fn a_structured_question_carries_its_prompt_and_its_options() {
     let (mut client, events) = launch("question");
     client.prompt("ask me").expect("prompt is accepted");
     let (request_id, options, question) = loop {
-        if let AcpEvent::PermissionRequest {
+        if let ChatEvent::PermissionRequest {
             request_id,
             options,
             question,
@@ -785,7 +790,7 @@ fn a_structured_question_carries_its_prompt_and_its_options() {
     let seen = drain_until_turn_end(&events);
     assert!(
         seen.iter()
-            .any(|event| matches!(event, AcpEvent::TurnEnded { .. }))
+            .any(|event| matches!(event, ChatEvent::TurnEnded { .. }))
     );
     client.shutdown().expect("clean shutdown");
 }
@@ -795,7 +800,7 @@ fn approving_a_plan_moves_the_session_out_of_plan_mode() {
     let (mut client, events) = launch("exit_plan_mode");
     client.prompt("plan it").expect("prompt is accepted");
     let request_id = loop {
-        if let AcpEvent::PermissionRequest {
+        if let ChatEvent::PermissionRequest {
             request_id,
             options,
             ..
@@ -857,7 +862,7 @@ fn a_cli_that_does_not_know_the_verb_degrades_that_feature_only() {
     let seen = drain_until_turn_end(&events);
     assert!(
         seen.iter()
-            .any(|event| matches!(event, AcpEvent::AgentMessageChunk(_)))
+            .any(|event| matches!(event, ChatEvent::AgentMessageChunk(_)))
     );
     client.shutdown().expect("clean shutdown");
 }
@@ -871,7 +876,7 @@ fn the_meter_prefers_the_agents_own_count_and_falls_back_to_the_turns_usage() {
         .iter()
         .rev()
         .find_map(|event| match event {
-            AcpEvent::ContextUsage(usage) => Some(usage.clone()),
+            ChatEvent::ContextUsage(usage) => Some(usage.clone()),
             _ => None,
         })
         .expect("a context usage event");
@@ -889,7 +894,7 @@ fn the_meter_prefers_the_agents_own_count_and_falls_back_to_the_turns_usage() {
         .iter()
         .rev()
         .find_map(|event| match event {
-            AcpEvent::ContextUsage(usage) => Some(usage.clone()),
+            ChatEvent::ContextUsage(usage) => Some(usage.clone()),
             _ => None,
         })
         .expect("a fallback context usage event");
@@ -978,15 +983,15 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
     let mut task_updates = Vec::new();
     loop {
         match next_event(&events) {
-            AcpEvent::OtherSessionUpdate { kind } if kind == "SessionNotice" => {
+            ChatEvent::OtherSessionUpdate { kind } if kind == "SessionNotice" => {
                 notices.extend(client.take_notices());
             }
-            AcpEvent::OtherSessionUpdate { kind }
+            ChatEvent::OtherSessionUpdate { kind }
                 if kind.starts_with("BackgroundTasksUpdate") =>
             {
                 task_updates.push(kind);
             }
-            AcpEvent::TurnEnded { .. } => break,
+            ChatEvent::TurnEnded { .. } => break,
             _ => {}
         }
     }
@@ -1026,10 +1031,10 @@ fn the_notices_a_turn_produces_reach_the_client_in_order() {
 /// Everything the stream carries up to and including the first re-read signal
 /// named `kind`, or `None` when none arrives inside `budget`.
 fn events_through_signal(
-    events: &sirio_acp::EventStream,
+    events: &sirio_chat::EventStream,
     kind: &str,
     budget: Duration,
-) -> Option<Vec<AcpEvent>> {
+) -> Option<Vec<ChatEvent>> {
     let deadline = std::time::Instant::now() + budget;
     let mut seen = Vec::new();
     loop {
@@ -1046,7 +1051,7 @@ fn events_through_signal(
                 Either::Right((_, _)) => None,
             }
         })?;
-        let hit = matches!(&event, AcpEvent::OtherSessionUpdate { kind: got } if got == kind);
+        let hit = matches!(&event, ChatEvent::OtherSessionUpdate { kind: got } if got == kind);
         seen.push(event);
         if hit {
             return Some(seen);
@@ -1071,12 +1076,12 @@ fn a_turn_leaves_its_context_breakdown_behind() {
     let signal = seen
         .iter()
         .position(|event| {
-            matches!(event, AcpEvent::OtherSessionUpdate { kind } if kind == "ContextBreakdown")
+            matches!(event, ChatEvent::OtherSessionUpdate { kind } if kind == "ContextBreakdown")
         })
         .expect("a ContextBreakdown signal");
     let ended = seen
         .iter()
-        .position(|event| matches!(event, AcpEvent::TurnEnded { .. }))
+        .position(|event| matches!(event, ChatEvent::TurnEnded { .. }))
         .expect("the turn ended");
     assert!(signal < ended, "signal at {signal}, turn ended at {ended}");
     client.shutdown().expect("clean shutdown");
@@ -1092,14 +1097,14 @@ fn the_breakdown_can_be_asked_for_before_any_turn() {
     assert!(
         !seen
             .iter()
-            .any(|event| matches!(event, AcpEvent::TurnEnded { .. })),
+            .any(|event| matches!(event, ChatEvent::TurnEnded { .. })),
         "asking is not a turn"
     );
     // The meter moves too: the window is named by the same answer.
     let usage = seen
         .iter()
         .find_map(|event| match event {
-            AcpEvent::ContextUsage(usage) => Some(usage.clone()),
+            ChatEvent::ContextUsage(usage) => Some(usage.clone()),
             _ => None,
         })
         .expect("the answer's window reaches the meter");
@@ -1153,7 +1158,7 @@ fn every_init_announces_itself_apart_from_a_status_answer() {
     let names: Vec<&str> = seen
         .iter()
         .filter_map(|event| match event {
-            AcpEvent::OtherSessionUpdate { kind } if kind.starts_with("McpServers") => {
+            ChatEvent::OtherSessionUpdate { kind } if kind.starts_with("McpServers") => {
                 Some(kind.as_str())
             }
             _ => None,

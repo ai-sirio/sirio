@@ -11,13 +11,13 @@ use gpui_platform::application;
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use sirio_acp::{AgentCommand, ClaudeLaunch, LaunchSpec};
 use sirio_activity::{
     AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
     BootstrapRestoreOrder, NotificationPayload, NotificationPolicy, TerminalContentId, Transition,
     WorktreeMountPolicy,
 };
 use sirio_agents::{ALL as AGENT_CATALOG, AgentAdapter};
+use sirio_chat::{AgentCommand, ClaudeLaunch, LaunchSpec};
 use sirio_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,
     PaneInfo, PaneRegistry, PaneStateSnapshot, ScrollbackSource, base64_encode,
@@ -41830,7 +41830,7 @@ done
             }),
         );
         let spec = agent_launch_for(&launch, "claude").expect("the wrapper launches");
-        assert!(matches!(spec, sirio_acp::LaunchSpec::Acp(_)));
+        assert!(matches!(spec, sirio_chat::LaunchSpec::Acp(_)));
     }
 
     #[test]
@@ -41845,8 +41845,8 @@ done
             .0;
         assert_eq!(
             spec,
-            sirio_acp::LaunchSpec::Claude(
-                sirio_acp::ClaudeLaunch::new("/usr/local/bin/claude").resuming("sess-1")
+            sirio_chat::LaunchSpec::Claude(
+                sirio_chat::ClaudeLaunch::new("/usr/local/bin/claude").resuming("sess-1")
             )
         );
     }
@@ -41865,7 +41865,7 @@ done
             .0;
         assert_eq!(
             spec,
-            sirio_acp::LaunchSpec::Claude(sirio_acp::ClaudeLaunch::new("/usr/local/bin/claude")),
+            sirio_chat::LaunchSpec::Claude(sirio_chat::ClaudeLaunch::new("/usr/local/bin/claude")),
             "a fresh session, not a resumed one"
         );
     }
@@ -49944,7 +49944,7 @@ browser  profile  "
         );
 
         // The exact completion signal a real turn produces (chat.rs's
-        // `AcpEvent::TurnEnded` handler, after the transcript is
+        // `sirio_chat::ChatEvent::TurnEnded` handler, after the transcript is
         // persisted).
         chat.update(&mut cx, |_, cx| cx.emit(ChatEvent::TurnEnded));
         cx.run_until_parked();

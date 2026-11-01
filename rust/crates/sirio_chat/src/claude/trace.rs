@@ -42,7 +42,7 @@ use sirio_claude::message::{
 };
 use sirio_claude::tools;
 
-use crate::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
+use sirio_chat_vocab::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
 
 /// A model call's name: the model is its own field, the span says nothing
 /// more.

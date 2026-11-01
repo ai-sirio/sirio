@@ -3,7 +3,7 @@
 //! This crate is what `claude -p --output-format stream-json
 //! --input-format stream-json` speaks, with no process attached: parsing,
 //! building, and the small tables that turn wire values into things a
-//! surface can draw. `sirio_acp::claude` owns the subprocess and the
+//! surface can draw. `sirio_chat::claude` owns the subprocess and the
 //! channels; `sirio_usage` uses the same types for a one-shot usage query.
 //!
 //! The protocol is the Claude Agent SDK's internal contract, not a

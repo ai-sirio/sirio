@@ -34,7 +34,7 @@ use gpui::{
     Styled, Subscription, UniformListScrollHandle, WeakEntity, Window,
     actions, canvas, div, prelude::FluentBuilder as _, px, relative, uniform_list,
 };
-use sirio_acp::SpanKind;
+use sirio_chat::SpanKind;
 use sirio_theme::Theme;
 
 use crate::chat::trace::{Axis, TraceStore, TreeRow, Turn, TurnState, axis, format_duration};

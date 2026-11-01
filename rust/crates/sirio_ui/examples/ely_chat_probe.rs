@@ -231,13 +231,13 @@ fn main() {
                             );
                             let mode = std::env::var("ELY_PROBE_FIXTURE_MODE")
                                 .unwrap_or_else(|_| "plain".into());
-                            let mut command = sirio_acp::AgentCommand::new("python3")
+                            let mut command = sirio_chat::AgentCommand::new("python3")
                                 .arg(fixture)
                                 .arg(mode);
                             if let Ok(extra) = std::env::var("ELY_PROBE_FIXTURE_DIR") {
                                 command = command.arg(extra);
                             }
-                            let launch = sirio_acp::LaunchSpec::Acp(command);
+                            let launch = sirio_chat::LaunchSpec::Acp(command);
                             let mut chat = match std::env::var_os("ELY_PROBE_HISTORY_DB") {
                                 Some(path) => {
                                     let path = std::path::PathBuf::from(path);

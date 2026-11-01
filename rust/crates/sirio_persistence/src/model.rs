@@ -401,9 +401,9 @@ pub enum ChatEntry {
 
 /// One file a persisted tool call touched.
 ///
-/// A storage-side twin of `sirio_acp::ToolCallLocationInfo`, spelled with a
+/// A storage-side twin of `sirio_chat::ToolCallLocationInfo`, spelled with a
 /// `String` path because this crate is a dependency-free leaf and must not
-/// reach for the ACP types — the same reason its sibling display helpers are
+/// reach for the chat types — the same reason its sibling display helpers are
 /// duplicated rather than shared.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChatToolLocation {

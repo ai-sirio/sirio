@@ -5,17 +5,18 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::future::Either;
-use sirio_acp::{AcpClient, AcpEvent, AgentCommand};
+use sirio_acp::{AcpClient, AgentCommand};
+use sirio_chat_vocab::ChatEvent;
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/acp_fixture.py");
 
-fn launch_fixture(mode: &str) -> (AcpClient, sirio_acp::EventStream) {
+fn launch_fixture(mode: &str) -> (AcpClient, sirio_chat_vocab::EventStream) {
     let cwd = std::env::temp_dir();
     let command = AgentCommand::new("python3").args([FIXTURE, mode]);
     AcpClient::launch(command, cwd).expect("fixture ACP agent should initialize")
 }
 
-fn launch_fixture_with_pid_file() -> (AcpClient, sirio_acp::EventStream, PathBuf) {
+fn launch_fixture_with_pid_file() -> (AcpClient, sirio_chat_vocab::EventStream, PathBuf) {
     let pid_path = std::env::temp_dir().join(format!(
         "sirio-acp-{}-{}.pid",
         std::process::id(),
@@ -55,7 +56,7 @@ fn process_exists(pid: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn next_event(events: &sirio_acp::EventStream) -> AcpEvent {
+fn next_event(events: &sirio_chat_vocab::EventStream) -> ChatEvent {
     let receive = events.recv();
     let timer = async_io::Timer::after(Duration::from_secs(2));
     futures::executor::block_on(async move {
@@ -111,17 +112,17 @@ fn streams_chunks_tool_and_permission_denial() {
 
     while !turn_ended {
         match next_event(&events) {
-            AcpEvent::AgentMessageChunk(text) => chunks.push(text),
-            AcpEvent::ToolCallStarted { id, .. } => {
+            ChatEvent::AgentMessageChunk(text) => chunks.push(text),
+            ChatEvent::ToolCallStarted { id, .. } => {
                 assert_eq!(id, "tool-1");
                 saw_tool_start = true;
             }
-            AcpEvent::ToolCallCompleted { id, status, .. } => {
+            ChatEvent::ToolCallCompleted { id, status, .. } => {
                 assert_eq!(id, "tool-1");
                 assert_eq!(status, "Completed");
                 saw_tool_completion = true;
             }
-            AcpEvent::PermissionRequest {
+            ChatEvent::PermissionRequest {
                 request_id,
                 options,
                 ..
@@ -133,11 +134,11 @@ fn streams_chunks_tool_and_permission_denial() {
                     .expect("permission denial should be sent");
                 permission = Some(request_id);
             }
-            AcpEvent::TurnEnded { stop_reason } => {
+            ChatEvent::TurnEnded { stop_reason } => {
                 assert_eq!(stop_reason, "EndTurn");
                 turn_ended = true;
             }
-            AcpEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
+            ChatEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
             other => panic!("unexpected event: {other:?}"),
         }
     }
@@ -158,15 +159,15 @@ fn malformed_frame_is_rejected_without_hanging_the_session() {
     let mut recovered = false;
     loop {
         match next_event(&events) {
-            AcpEvent::AgentMessageChunk(text) => {
+            ChatEvent::AgentMessageChunk(text) => {
                 assert_eq!(text, "after malformed");
                 recovered = true;
             }
-            AcpEvent::TurnEnded { stop_reason } => {
+            ChatEvent::TurnEnded { stop_reason } => {
                 assert_eq!(stop_reason, "EndTurn");
                 break;
             }
-            AcpEvent::TransportError(error) => {
+            ChatEvent::TransportError(error) => {
                 panic!("malformed frame failed the session: {error}")
             }
             other => panic!("unexpected malformed-frame event: {other:?}"),
@@ -190,12 +191,12 @@ fn agent_death_is_transport_error() {
     let mut saw_partial_chunk = false;
     let message = loop {
         match next_event(&events) {
-            AcpEvent::AgentMessageChunk(text) => {
+            ChatEvent::AgentMessageChunk(text) => {
                 assert_eq!(text, "partial");
                 saw_partial_chunk = true;
             }
-            AcpEvent::TransportError(message) => break message,
-            AcpEvent::Timeout {
+            ChatEvent::TransportError(message) => break message,
+            ChatEvent::Timeout {
                 operation,
                 duration,
             } => {
@@ -235,8 +236,8 @@ fn death_report_waits_for_the_agents_last_stderr_line() {
         .expect("prompt accepted");
     let message = loop {
         match next_event(&events) {
-            AcpEvent::TransportError(message) => break message,
-            AcpEvent::Timeout {
+            ChatEvent::TransportError(message) => break message,
+            ChatEvent::Timeout {
                 operation,
                 duration,
             } => panic!("unexpected {operation:?} timeout after {duration:?}"),
@@ -269,15 +270,15 @@ fn an_open_permission_does_not_freeze_the_session() {
 
     let request_id = loop {
         match next_event(&events) {
-            AcpEvent::PermissionRequest { request_id, .. } => break request_id,
-            AcpEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
+            ChatEvent::PermissionRequest { request_id, .. } => break request_id,
+            ChatEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
             _ => {}
         }
     };
 
     let streamed_while_open = matches!(
         next_event(&events),
-        AcpEvent::AgentMessageChunk(ref text) if text.starts_with("tick")
+        ChatEvent::AgentMessageChunk(ref text) if text.starts_with("tick")
     );
     assert!(
         streamed_while_open,
@@ -290,8 +291,8 @@ fn an_open_permission_does_not_freeze_the_session() {
     let mut turn_ended = false;
     while !turn_ended {
         match next_event(&events) {
-            AcpEvent::TurnEnded { .. } => turn_ended = true,
-            AcpEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
+            ChatEvent::TurnEnded { .. } => turn_ended = true,
+            ChatEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
             _ => {}
         }
     }
@@ -308,15 +309,15 @@ fn cancel_while_permission_is_pending_produces_a_terminal_outcome() {
     let mut saw_permission = false;
     loop {
         match next_event(&events) {
-            AcpEvent::PermissionRequest { .. } => {
+            ChatEvent::PermissionRequest { .. } => {
                 saw_permission = true;
                 client.cancel().expect("cancel accepted");
             }
-            AcpEvent::TurnEnded { stop_reason } => {
+            ChatEvent::TurnEnded { stop_reason } => {
                 assert_eq!(stop_reason, "Cancelled");
                 break;
             }
-            AcpEvent::TransportError(error) => panic!("permission cancel failed: {error}"),
+            ChatEvent::TransportError(error) => panic!("permission cancel failed: {error}"),
             _ => {}
         }
     }
@@ -337,21 +338,21 @@ fn advertises_commands_and_effort_and_echoes_prompt_blocks() {
     let mut effort = None;
     while commands.is_none() || effort.is_none() {
         match next_event(&events) {
-            AcpEvent::AvailableCommands(list) => commands = Some(list),
-            AcpEvent::Effort(option) => effort = Some(option),
-            AcpEvent::ModelCatalog(_) => {}
+            ChatEvent::AvailableCommands(list) => commands = Some(list),
+            ChatEvent::Effort(option) => effort = Some(option),
+            ChatEvent::ModelCatalog(_) => {}
             other => panic!("unexpected startup event: {other:?}"),
         }
     }
     assert_eq!(
         commands.expect("commands arrived"),
         vec![
-            sirio_acp::AvailableCommandInfo {
+            sirio_chat_vocab::AvailableCommandInfo {
                 name: "cr".into(),
                 description: "Code review the diff".into(),
                 argument_hint: None,
             },
-            sirio_acp::AvailableCommandInfo {
+            sirio_chat_vocab::AvailableCommandInfo {
                 name: "research".into(),
                 description: "Research a topic".into(),
                 argument_hint: None,
@@ -371,7 +372,7 @@ fn advertises_commands_and_effort_and_echoes_prompt_blocks() {
         .prompt_content(
             "  hello world  ",
             vec!["sub/notes.md".into(), "/abs/file.png".into()],
-            vec![sirio_acp::ImageAttachment {
+            vec![sirio_chat_vocab::ImageAttachment {
                 mime_type: "image/png".into(),
                 base64_data: "AAAA".into(),
             }],
@@ -382,9 +383,9 @@ fn advertises_commands_and_effort_and_echoes_prompt_blocks() {
     let mut echo = None;
     while echo.is_none() {
         match next_event(&events) {
-            AcpEvent::AgentMessageChunk(text) => echo = Some(text),
-            AcpEvent::TurnEnded { .. } => break,
-            AcpEvent::TransportError(error) => panic!("content prompt failed: {error}"),
+            ChatEvent::AgentMessageChunk(text) => echo = Some(text),
+            ChatEvent::TurnEnded { .. } => break,
+            ChatEvent::TransportError(error) => panic!("content prompt failed: {error}"),
             other => panic!("unexpected prompt event: {other:?}"),
         }
     }
@@ -445,7 +446,7 @@ fn plan_updates_and_approval_flow_as_events() {
 
     while !ended {
         match next_event(&events) {
-            AcpEvent::PlanUpdate { entries } => {
+            ChatEvent::PlanUpdate { entries } => {
                 let statuses = entries
                     .iter()
                     .map(|entry| entry.status.as_str())
@@ -458,7 +459,7 @@ fn plan_updates_and_approval_flow_as_events() {
                     saw_advanced_plan = true;
                 }
             }
-            AcpEvent::PermissionRequest {
+            ChatEvent::PermissionRequest {
                 request_id,
                 title,
                 options,
@@ -473,9 +474,9 @@ fn plan_updates_and_approval_flow_as_events() {
                     .expect("approval should be sent");
                 saw_approval = true;
             }
-            AcpEvent::AgentMessageChunk(text) => assert!(text.contains("approved")),
-            AcpEvent::TurnEnded { .. } => ended = true,
-            AcpEvent::TransportError(error) => panic!("plan fixture failed: {error}"),
+            ChatEvent::AgentMessageChunk(text) => assert!(text.contains("approved")),
+            ChatEvent::TurnEnded { .. } => ended = true,
+            ChatEvent::TransportError(error) => panic!("plan fixture failed: {error}"),
             other => panic!("unexpected plan event: {other:?}"),
         }
     }
@@ -502,7 +503,7 @@ fn a_pre_rename_agent_still_gets_its_text_input_affordance() {
     let mut ended = false;
     while !ended {
         match next_event(&events) {
-            AcpEvent::PermissionRequest {
+            ChatEvent::PermissionRequest {
                 request_id,
                 question,
                 ..
@@ -521,9 +522,9 @@ fn a_pre_rename_agent_still_gets_its_text_input_affordance() {
                     .respond_permission(request_id, "Blue")
                     .expect("the typed answer should be sent");
             }
-            AcpEvent::AgentMessageChunk(_) => {}
-            AcpEvent::TurnEnded { .. } => ended = true,
-            AcpEvent::TransportError(error) => panic!("legacy question fixture failed: {error}"),
+            ChatEvent::AgentMessageChunk(_) => {}
+            ChatEvent::TurnEnded { .. } => ended = true,
+            ChatEvent::TransportError(error) => panic!("legacy question fixture failed: {error}"),
             other => panic!("unexpected question event: {other:?}"),
         }
     }
@@ -544,7 +545,7 @@ fn structured_question_carries_title_and_text_input() {
     let mut ended = false;
     while !ended {
         match next_event(&events) {
-            AcpEvent::PermissionRequest {
+            ChatEvent::PermissionRequest {
                 request_id,
                 title,
                 options,
@@ -568,11 +569,11 @@ fn structured_question_carries_title_and_text_input() {
                     .expect("the typed answer should be sent");
                 answered = true;
             }
-            AcpEvent::AgentMessageChunk(text) => {
+            ChatEvent::AgentMessageChunk(text) => {
                 assert!(text.contains("You chose: Blue"));
             }
-            AcpEvent::TurnEnded { .. } => ended = true,
-            AcpEvent::TransportError(error) => panic!("question fixture failed: {error}"),
+            ChatEvent::TurnEnded { .. } => ended = true,
+            ChatEvent::TransportError(error) => panic!("question fixture failed: {error}"),
             other => panic!("unexpected question event: {other:?}"),
         }
     }
@@ -602,15 +603,15 @@ fn live_thread_count() -> usize {
 }
 
 #[cfg(not(windows))]
-fn drive_turn(client: &AcpClient, events: &sirio_acp::EventStream) {
+fn drive_turn(client: &AcpClient, events: &sirio_chat_vocab::EventStream) {
     client.prompt("count threads").expect("prompt accepted");
     loop {
         match next_event(events) {
-            AcpEvent::PermissionRequest { request_id, .. } => client
+            ChatEvent::PermissionRequest { request_id, .. } => client
                 .respond_permission(request_id, "deny")
                 .expect("permission denial should be sent"),
-            AcpEvent::TurnEnded { .. } => break,
-            AcpEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
+            ChatEvent::TurnEnded { .. } => break,
+            ChatEvent::TransportError(error) => panic!("unexpected transport error: {error}"),
             _ => {}
         }
     }

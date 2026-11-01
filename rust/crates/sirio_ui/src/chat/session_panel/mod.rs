@@ -1060,7 +1060,7 @@ mod tests {
 
     const CLAUDE_FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../sirio_acp/tests/fixtures/claude_fixture.py"
+        "/../sirio_chat/tests/fixtures/claude_fixture.py"
     );
 
     /// Every card that needs the agent or the forge is drawn, and all of them
@@ -1079,7 +1079,7 @@ mod tests {
         let source = FakeSource::ready(testing::github_client(forge), Some("feat/y"));
         cx.update(|cx| crate::forge_source::set_source(source, cx));
         let (chat, cx) = cx.add_window_view(|_, cx| {
-            let launch = sirio_acp::ClaudeLaunch::fixture(
+            let launch = sirio_chat::ClaudeLaunch::fixture(
                 "python3",
                 vec![CLAUDE_FIXTURE.to_string(), "session_panel".to_string()],
             );

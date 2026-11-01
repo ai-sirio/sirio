@@ -26,7 +26,7 @@ sirio_ui.workspace = true
 sirio_terminal.workspace = true
 sirio_agents.workspace = true
 sirio_registry = { workspace = true }
-sirio_acp.workspace = true
+sirio_chat.workspace = true
 # The version floor the Claude transport resolution reads
 # (`sirio_claude::MIN_CLAUDE_VERSION`); a leaf crate of serde types.
 sirio_claude = { path = "../sirio_claude" }
@@ -49,7 +49,7 @@ serde.workspace = true
 serde_json.workspace = true
 # The channel that carries a notification from whichever thread posts it to
 # the main thread, where gpui's notification center lives. Already in the
-# graph through gpui, sirio_ui and sirio_acp.
+# graph through gpui, sirio_ui and sirio_chat.
 futures = "0.3"
 getrandom = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

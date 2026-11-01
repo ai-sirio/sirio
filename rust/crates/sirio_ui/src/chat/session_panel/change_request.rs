@@ -866,7 +866,7 @@ mod tests {
         // A restored chat, or one in a background tab: open, in no window.
         let chat = cx.new(|cx| {
             Chat::new(
-                Some(crate::chat::LaunchSpec::Acp(sirio_acp::AgentCommand::new(
+                Some(crate::chat::LaunchSpec::Acp(sirio_chat::AgentCommand::new(
                     "/definitely/missing/sirio-acp-agent",
                 ))),
                 std::env::temp_dir(),
@@ -985,7 +985,7 @@ mod tests {
         cx.update(crate::chat::init);
         let (chat, cx) = cx.add_window_view(|_, cx| {
             Chat::new(
-                Some(crate::chat::LaunchSpec::Acp(sirio_acp::AgentCommand::new(
+                Some(crate::chat::LaunchSpec::Acp(sirio_chat::AgentCommand::new(
                     "/definitely/missing/sirio-acp-agent",
                 ))),
                 repo.clone(),

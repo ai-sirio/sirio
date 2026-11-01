@@ -1,0 +1,9 @@
+[package]
+name = "sirio_chat_vocab"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-channel = "2"
+serde_json = "1"

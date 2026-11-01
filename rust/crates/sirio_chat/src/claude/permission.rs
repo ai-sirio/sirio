@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 use sirio_claude::{CanUseTool, PermissionResult};
 
-use crate::{PermissionOption, PermissionQuestion, PermissionTextInput};
+use sirio_chat_vocab::{PermissionOption, PermissionQuestion, PermissionTextInput};
 
 /// An answer, plus the mode change that has to follow it.
 #[derive(Clone, Debug, PartialEq)]

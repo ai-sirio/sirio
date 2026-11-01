@@ -48,8 +48,8 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 
 # The chat's session panel column in a real, isolated Sirio: a stub `claude`
-# (Scripts/Tests/stubs/session-panel/claude over claude_fixture.py's session_panel
-# mode) and the fake forge, asserted on `surface.chat.read`'s `sessionPanel`:
+# (Scripts/Tests/stubs/session-panel/claude over sirio_chat's claude_fixture.py in
+# session_panel mode) and the fake forge, asserted on `surface.chat.read`'s `sessionPanel`:
 # Environment, the Context fold (asked on open, a plugin node, the CLAUDE.md row
 # opening a file tab), Connectors (reconnect, sign in), the Change request card, the
 # shared rate-limit pause and the open state across a relaunch. The trace scenarios
