@@ -45,6 +45,14 @@ terminal/webview/editor dependencies and Gallery runtime are excluded.
   `text_color(colors.fg)`, because a dialog is raised above its owner and
   otherwise inherited the owner's text colour (in Sirio gpui's default black,
   unreadable on a dark card).
+- `overlays/dialog.rs`, `overlays/dialogs.rs`: `held`, `focus_first` and
+  `on_enter` are public. `on_enter(field, build)` names its own field and no
+  longer needs `focus_first`. A release of Enter confirms only after a press
+  the dialog saw (its capture of the `Enter` action while the field had focus,
+  kept in the dialog's keyed state), and every Enter release clears that
+  record. Without it, the release of an Enter pressed before the dialog opened
+  confirmed it. It does not stop a press that repeats, such as a held key with
+  auto-repeat. `PromptDialog` passes its field to `focus_first` and `on_enter`.
 - `layout/scroll.rs`, `overlays/hover.rs`, `primitives/tooltip.rs`: the pinned
   Bezel GPUI has `on_hover` but no newer `HoverListenerMode` policy setter.
   These components use the fork's existing hover dispatch, like Bezel's
