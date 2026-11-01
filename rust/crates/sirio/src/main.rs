@@ -58,7 +58,7 @@ use sirio_ui::{
     row_reorder::{ReorderScope, RowDrag},
     settings::{InstallState, Settings, SettingsCategory, SettingsReport, SettingsSnapshot},
     sidebar::{
-        AgentMark, ClosedSession, ProjectSettingsUpdate, RowStatusGlyph, Sidebar,
+        AddOrigin, AgentMark, ClosedSession, ProjectSettingsUpdate, RowStatusGlyph, Sidebar,
         SidebarContextAction, SidebarContextTarget, SidebarEvent, SidebarProject, SidebarTab,
         SidebarTabRef, SidebarWorktree, TAB_ROW_ID_OFFSET,
         icons::{Icon, IconElement, IconSize, file_glyph},
@@ -71,6 +71,10 @@ use sirio_ui::{
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
 use sirio_ui::pane_launcher::{LauncherItem, pane_launcher};
+use sirio_ui::project_identity_dialog::{
+    FocusMode, IdentityOutcome, OtherProject, ProjectIdentityDialog, ProjectIdentityDialogInput,
+    ProjectIdentityEvent,
+};
 use sirio_ui::change_request_tab::{
     ChangeRequestTab, ChangeRequestTabEvent, CheckoutState, HandoffAgent, HandoffOptions, HandoffRequest,
     HandoffState, InnerTab, Surface,
@@ -80,7 +84,7 @@ use sirio_ui::trace_tab::{TraceTab, TraceTabEvent};
 use sirio_ui::status::ActivityStatus;
 use sirio_ui::worktree_picker::{WorktreeChoice, WorktreePicker, WorktreePickerEvent};
 use sirio_ui::update_card::{UpdateCard, UpdateCardAction, UpdateCardInput, UpdateCardView, update_card_view};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -5649,6 +5653,24 @@ struct SirioWorkspace {
     /// already replaced) can't clear a toast it doesn't own.
     toast: Option<Toast>,
     next_toast_id: u64,
+    /// Projects the UI added whose "Project added" dialog is still to open,
+    /// in the order of the adds. `render` drains it, one dialog at a time,
+    /// when nothing else holds the screen; no close site pumps it.
+    identity_queue: VecDeque<IdentityRequest>,
+    /// The open "Project added" dialog, if any.
+    identity_dialog: Option<OpenIdentityDialog>,
+    /// Set when `render` defers `open_next_identity_dialog` and cleared by it,
+    /// so two renders before the deferred call runs cannot pop two entries.
+    identity_open_scheduled: bool,
+    /// The id of the toast that reports a failed identity save. The drain
+    /// waits until it is gone, so the next dialog does not cover it.
+    identity_error_toast: Option<u64>,
+    /// How the last dialog ended: `saved`, `unchanged`, `skipped` or `error`.
+    /// The debug read verb reports it (commit 7).
+    identity_last_outcome: Option<&'static str>,
+    /// Counter behind each dialog's element id, so Ely's keyed focus state is
+    /// never shared between two dialogs.
+    identity_seq: u64,
     /// Shows whose host listing is in flight, by session id, with every
     /// request waiting on it: a second show joins the first, never opens a tab.
     pending_shows: HashMap<String, Vec<Option<ControlReply>>>,
@@ -5803,6 +5825,23 @@ struct SirioWorkspace {
 struct Toast {
     id: u64,
     message: String,
+}
+
+/// A project the UI added and whose "Project added" dialog has not opened yet.
+struct IdentityRequest {
+    id: String,
+    origin: AddOrigin,
+}
+
+/// The open "Project added" dialog, with the subscription that hears it close.
+struct OpenIdentityDialog {
+    entity: Entity<ProjectIdentityDialog>,
+    /// Held so the `Closed` subscription lives exactly as long as the dialog.
+    _subscription: gpui::Subscription,
+    /// How the project was added. Nothing reads it yet: Ely's `give_back`, not
+    /// the workspace, decides where focus goes after the close.
+    #[allow(dead_code)]
+    origin: AddOrigin,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -6803,6 +6842,12 @@ impl SirioWorkspace {
             published_pane_directories: BTreeSet::new(),
             toast: None,
             next_toast_id: 0,
+            identity_queue: VecDeque::new(),
+            identity_dialog: None,
+            identity_open_scheduled: false,
+            identity_error_toast: None,
+            identity_last_outcome: None,
+            identity_seq: 0,
             pending_shows: HashMap::new(),
             live_update_state: UiUpdateState::default(),
             updater: None,
@@ -10134,7 +10179,10 @@ impl SirioWorkspace {
 
     fn handle_sidebar_event(&mut self, event: &SidebarEvent, cx: &mut Context<Self>) {
         match event {
-            SidebarEvent::AddProject(path) => self.add_project(path.clone(), cx),
+            SidebarEvent::AddProject { path, origin } => {
+                self.add_project(path.clone(), *origin, cx)
+            }
+            SidebarEvent::PromptClosed => cx.notify(),
             SidebarEvent::RemoveProject(id) => {
                 self.remove_project(id, cx);
                 self.refresh_closed_sessions(cx);
@@ -10310,9 +10358,14 @@ impl SirioWorkspace {
         })
     }
 
-    fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    fn add_project(&mut self, path: PathBuf, origin: AddOrigin, cx: &mut Context<Self>) {
         match self.insert_project(&path, None, cx) {
-            Ok(Some(_)) => {}
+            // The dialog opens from `render`'s drain, once nothing else holds
+            // the screen, so it is only queued here.
+            Ok(Some(id)) => {
+                self.identity_queue.push_back(IdentityRequest { id, origin });
+                cx.notify();
+            }
             Ok(None) => {
                 let message = format!("already tracked or nested: {}", path.display());
                 self.sidebar
@@ -10371,6 +10424,140 @@ impl SirioWorkspace {
                 Err(error)
             }
         }
+    }
+
+    /// Writes what the "Project added" dialog saved, keeping the project's
+    /// other settings as they are at this moment. A failed write is shown as
+    /// a toast, because the sidebar may be hidden, and its id is remembered so
+    /// the queue waits for it. The in-memory catalog is not rolled back.
+    fn save_project_identity(
+        &mut self,
+        id: &str,
+        display_name: Option<String>,
+        icon: sirio_ui::project_identity::ProjectIcon,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let (root_name, is_git) = self
+            .project_catalog
+            .projects()
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| (project.name.clone(), project.is_git))
+            .unwrap_or_default();
+        let shown_name = display_name.clone().unwrap_or(root_name);
+        let settings = self.project_catalog.project_settings(id);
+        let result = self.update_project_settings(
+            &ProjectSettingsUpdate {
+                id: id.to_string(),
+                display_name,
+                is_git,
+                icon,
+                default_worktree_base: settings.default_worktree_base,
+                worktree_location_override: settings.worktree_location_override,
+            },
+            cx,
+        );
+        if let Err(error) = &result {
+            self.show_toast(
+                format!(
+                    "Couldn't save the name of {shown_name} to disk: {error}. \
+                     Sirio keeps it and retries with its next save."
+                ),
+                cx,
+            );
+            self.identity_error_toast = self.toast.as_ref().map(|toast| toast.id);
+        }
+        result
+    }
+
+    /// Opens the dialog for the oldest queued project that still exists.
+    /// Called only from `render`'s drain, through `cx.defer_in`, so the
+    /// synchronous `git config` the dialog's picker runs stays out of `render`.
+    fn open_next_identity_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.identity_open_scheduled = false;
+        if self.identity_dialog.is_some() {
+            return;
+        }
+        let (request, seed) = loop {
+            let Some(request) = self.identity_queue.pop_front() else {
+                return;
+            };
+            if let Some(seed) = self.sidebar.read(cx).project_settings_seed(&request.id) {
+                break (request, seed);
+            }
+        };
+        let others: Vec<OtherProject> = self
+            .project_catalog
+            .projects()
+            .iter()
+            .filter(|project| project.id != request.id)
+            .filter_map(|project| self.sidebar.read(cx).project_settings_seed(&project.id))
+            .map(|other| OtherProject {
+                shown_name: if other.display_name.is_empty() {
+                    other.base_name
+                } else {
+                    other.display_name
+                },
+                path: other.path,
+            })
+            .collect();
+        let focus_mode = match request.origin {
+            AddOrigin::OpenedFolder | AddOrigin::AddedWithoutGit | AddOrigin::Created => {
+                FocusMode::Field
+            }
+            AddOrigin::InitializedGit | AddOrigin::Cloned { .. } => FocusMode::Dialog,
+        };
+        // The sidebar has already closed the clone form, so the notice has no
+        // other place to be read.
+        let notice = match request.origin {
+            AddOrigin::Cloned { truncated: true } => {
+                Some(sirio_ui::project_forms::clone_truncation_notice(&seed.path))
+            }
+            _ => None,
+        };
+        self.identity_seq += 1;
+        let input = ProjectIdentityDialogInput {
+            seq: self.identity_seq,
+            project_id: request.id,
+            root_name: seed.base_name,
+            root_path: seed.path,
+            initial_icon: seed.icon,
+            focus_mode,
+            notice,
+            others,
+        };
+        let entity = cx.new(|cx| ProjectIdentityDialog::new(input, cx));
+        let subscription = cx.subscribe(&entity, |workspace, _, event: &ProjectIdentityEvent, cx| {
+            workspace.on_identity_dialog_closed(event, cx)
+        });
+        self.identity_dialog = Some(OpenIdentityDialog {
+            entity,
+            _subscription: subscription,
+            origin: request.origin,
+        });
+        sirio_perf::event("project_add.dialog_opened", 0);
+        cx.notify();
+    }
+
+    /// Takes the dialog, acts on how it ended and records it. It moves no
+    /// focus and opens nothing: Ely's `give_back` restores the focus held
+    /// before the dialog, F-SID-19 catches a handle that has gone, and the
+    /// next frame's drain finds the queue.
+    fn on_identity_dialog_closed(&mut self, event: &ProjectIdentityEvent, cx: &mut Context<Self>) {
+        self.identity_dialog = None;
+        let ProjectIdentityEvent::Closed { project_id, outcome } = event;
+        let label = match outcome {
+            IdentityOutcome::Saved { display_name, icon } => {
+                let saved =
+                    self.save_project_identity(project_id, display_name.clone(), icon.clone(), cx);
+                if saved.is_ok() { "saved" } else { "error" }
+            }
+            IdentityOutcome::Unchanged => "unchanged",
+            IdentityOutcome::Skipped => "skipped",
+        };
+        self.identity_last_outcome = Some(label);
+        eprintln!("project identity: {label}");
+        cx.notify();
     }
 
     fn remove_project(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -24632,6 +24819,22 @@ impl SirioWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // While the "Project added" dialog is open it owns the keyboard, so no
+        // other branch below runs: not the palette, not the banner, and not
+        // the Esc that closes a clone or create form hidden behind its scrim.
+        // Esc from `root_focus` (where selecting the path parks focus) is out
+        // of the dialog's own handler's path, so it skips the dialog here.
+        // Any other key goes on to the dialog untouched.
+        if let Some(open) = self.identity_dialog.as_ref() {
+            if event.keystroke.key == "escape" && self.root_focus.is_focused(window) {
+                let dialog = open.entity.clone();
+                let _ = dialog.update(cx, |dialog, cx| {
+                    dialog.control_act("skip", None, window, cx)
+                });
+                cx.stop_propagation();
+            }
+            return;
+        }
         if self.palette_open {
             self.handle_palette_key(event, window, cx);
             cx.stop_propagation();
@@ -24758,7 +24961,9 @@ impl SirioWorkspace {
     }
 
     fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette_open || self.root_modal_open() {
+        // The identity dialog is not in `root_modal_open`: the drain asks that
+        // predicate before it opens one. The chord is still eaten by its caller.
+        if self.palette_open || self.root_modal_open() || self.identity_dialog.is_some() {
             return;
         }
         self.palette_previous_focus = window.focused(cx);
@@ -25242,12 +25447,21 @@ impl SirioWorkspace {
             self.render_pane_close_confirm(theme, entity.clone()),
             self.render_title_prompt(theme, entity.clone()),
             self.render_update_card(entity.clone()),
+            // Just before the toast, so a toast raised while the dialog is
+            // open stays visible above its scrim.
+            self.render_identity_dialog(),
             self.render_toast(theme, entity.clone()),
             self.render_end_all_confirm(theme, entity),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// The "Project added" dialog, drawn in both shell branches.
+    fn render_identity_dialog(&self) -> Option<AnyElement> {
+        let open = self.identity_dialog.as_ref()?;
+        Some(open.entity.clone().into_any_element())
     }
 
     /// The update card (spec 2026-10-14). Main shell only: Settings has its
@@ -25301,6 +25515,75 @@ fn replay_persisted_terminal_scrollback(tabs: &mut [OpenTab], cx: &mut App) {
                 view.update(cx, |terminal, _| terminal.replay_scrollback(bytes));
             }
         });
+    }
+}
+
+impl SirioWorkspace {
+    /// The main shell's action listeners. They are registered only while no
+    /// "Project added" dialog is open: gpui hands a key that matches a binding
+    /// to its action before any key listener runs, so a check in
+    /// `handle_root_key_down` alone would miss the shortcuts. With the
+    /// listeners absent the key falls through to the key listeners.
+    fn shell_actions(
+        &self,
+        frame: gpui::Stateful<gpui::Div>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        frame
+            .on_action(cx.listener(Self::handle_new_terminal_tab))
+            .on_action(cx.listener(Self::handle_open_file))
+            .on_action(cx.listener(Self::handle_restore_launch_snapshot))
+            .on_action(cx.listener(Self::handle_save_file))
+            .on_action(cx.listener(Self::handle_new_browser))
+            .on_action(cx.listener(Self::handle_focus_address_bar))
+            .on_action(cx.listener(Self::handle_open_settings_shortcut))
+            // F-TAB-24: this action/binding pair previously existed only in
+            // the `show_settings` render branch above (there was nothing
+            // else for it to do outside settings). A tab drag can only be
+            // in progress while *this*, the main, branch renders, so Escape
+            // needs this listener here too -- see the long comment on
+            // `handle_close_settings_surface` for why it is safe to add
+            // (short version: it always `cx.propagate()`s when it finds
+            // nothing to do, so this cannot swallow an unrelated Escape).
+            .on_action(cx.listener(Self::handle_close_settings_surface))
+            .on_action(cx.listener(|workspace, _: &ToggleSidebar, _, cx| {
+                workspace.toggle_sidebar(cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &ToggleRightPanel, _, cx| {
+                workspace.toggle_right_panel(cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &ToggleSecondaryPane, _, cx| {
+                // Consumed even when nothing toggles: `ctrl-shift-` chords are
+                // Sirio's inside a terminal too (spec 2026-10-15 §1).
+                workspace.toggle_secondary_pane(cx);
+            }))
+            .on_action(cx.listener(Self::handle_move_tab_to_other_pane))
+            .on_action(cx.listener(Self::handle_focus_pane_left))
+            .on_action(cx.listener(Self::handle_focus_pane_right))
+            .on_action(cx.listener(Self::handle_focus_pane_above))
+            .on_action(cx.listener(Self::handle_focus_pane_below))
+            .on_action(cx.listener(Self::handle_split_pane_right))
+            .on_action(cx.listener(Self::handle_split_pane_down))
+            .on_action(cx.listener(Self::handle_close_pane))
+            .on_action(cx.listener(Self::handle_cycle_tab_forward))
+            .on_action(cx.listener(Self::handle_cycle_tab_backward))
+            .on_action(cx.listener(Self::handle_jump_to_tab_1))
+            .on_action(cx.listener(Self::handle_jump_to_tab_2))
+            .on_action(cx.listener(Self::handle_jump_to_tab_3))
+            .on_action(cx.listener(Self::handle_jump_to_tab_4))
+            .on_action(cx.listener(Self::handle_jump_to_tab_5))
+            .on_action(cx.listener(Self::handle_jump_to_tab_6))
+            .on_action(cx.listener(Self::handle_jump_to_tab_7))
+            .on_action(cx.listener(Self::handle_jump_to_tab_8))
+            .on_action(cx.listener(Self::handle_jump_to_tab_9))
+            .on_action(cx.listener(Self::handle_open_all_tabs))
+            .on_action(cx.listener(Self::handle_open_tab_menu))
+            .on_action(cx.listener(Self::handle_close_tab))
+            .on_action(cx.listener(Self::handle_close_other_tabs))
+            .on_action(cx.listener(Self::handle_close_tabs_to_right))
+            .on_action(cx.listener(Self::handle_move_tab_earlier))
+            .on_action(cx.listener(Self::handle_move_tab_later))
+            .on_action(cx.listener(Self::handle_resume_chat))
     }
 }
 
@@ -25360,7 +25643,12 @@ impl Render for SirioWorkspace {
         // `PendingTitlePrompt::needs_focus`'s own doc comment), so this is
         // that same "poll once, from wherever `Window` is reachable" shape
         // `window_active` above already uses, applied to focus instead.
-        if let Some(prompt) = self.pending_title_prompt.as_mut()
+        //
+        // The three blocks below take focus only while no "Project added"
+        // dialog is open: a modal raised behind it is drawn under its scrim and
+        // keeps `needs_focus` set, so it claims focus once the dialog is gone.
+        if self.identity_dialog.is_none()
+            && let Some(prompt) = self.pending_title_prompt.as_mut()
             && prompt.needs_focus
         {
             prompt.needs_focus = false;
@@ -25375,14 +25663,16 @@ impl Render for SirioWorkspace {
         // `ctrl-alt-w`) left the terminal as the actual keyboard-dispatch
         // target and everything typed while the banner was up reached its
         // PTY instead.
-        if let Some(pending) = self.pending_pane_close.as_mut()
+        if self.identity_dialog.is_none()
+            && let Some(pending) = self.pending_pane_close.as_mut()
             && pending.needs_focus
         {
             pending.needs_focus = false;
             let focus = pending.focus.clone();
             focus.focus(window, cx);
         }
-        if let Some(pending) = self.pending_end_all.as_mut()
+        if self.identity_dialog.is_none()
+            && let Some(pending) = self.pending_end_all.as_mut()
             && pending.needs_focus
         {
             pending.needs_focus = false;
@@ -25407,6 +25697,39 @@ impl Render for SirioWorkspace {
         // this element's own handle and needs no such deferral.
         if window.focused(cx).is_none() {
             window.focus(&self.root_focus, cx);
+        }
+        // The "Project added" dialog's focus rule and drain. Both sit before
+        // the Settings early return, so the dialog also opens over Settings.
+        // The rule waits a frame after the dialog's first render, so Ely has
+        // recorded the focus to give back, and yields to any prompt: the
+        // non-git prompt is native on macOS and Windows, which gpui cannot
+        // see, so the sidebar tracks it too.
+        let prompt_up = window.has_active_prompt() || self.sidebar.read(cx).prompt_open();
+        if let Some(open) = self.identity_dialog.as_ref() {
+            let dialog = open.entity.clone();
+            if !prompt_up
+                && dialog.read(cx).rendered_once()
+                && !dialog.read(cx).contains_focus(window, cx)
+                && !self.root_focus.is_focused(window)
+            {
+                dialog.update(cx, |dialog, cx| dialog.reclaim_focus(window, cx));
+            }
+        }
+        let error_toast_showing = self
+            .identity_error_toast
+            .is_some_and(|id| self.toast.as_ref().is_some_and(|toast| toast.id == id));
+        if self.identity_dialog.is_none()
+            && !self.identity_queue.is_empty()
+            && !self.identity_open_scheduled
+            && !self.root_modal_open()
+            && !self.palette_open
+            && !prompt_up
+            && !error_toast_showing
+        {
+            self.identity_open_scheduled = true;
+            cx.defer_in(window, |workspace, window, cx| {
+                workspace.open_next_identity_dialog(window, cx);
+            });
         }
         // The Set Title modal's caret shares the workspace's render pass:
         // schedule its blink while the prompt owns focus and stash this
@@ -25493,7 +25816,9 @@ impl Render for SirioWorkspace {
                     #[cfg(target_os = "windows")]
                     sirio_ui::browser::steal_win32_focus_from_webview_child(_window);
                 })
-                .on_action(cx.listener(Self::handle_close_settings_surface))
+                .when(self.identity_dialog.is_none(), |frame| {
+                    frame.on_action(cx.listener(Self::handle_close_settings_surface))
+                })
                 .child(
                     div()
                         .h(theme.browser_chrome.bar_height)
@@ -25573,60 +25898,7 @@ impl Render for SirioWorkspace {
                 #[cfg(target_os = "windows")]
                 sirio_ui::browser::steal_win32_focus_from_webview_child(_window);
             })
-            .on_action(cx.listener(Self::handle_new_terminal_tab))
-            .on_action(cx.listener(Self::handle_open_file))
-            .on_action(cx.listener(Self::handle_restore_launch_snapshot))
-            .on_action(cx.listener(Self::handle_save_file))
-            .on_action(cx.listener(Self::handle_new_browser))
-            .on_action(cx.listener(Self::handle_focus_address_bar))
-            .on_action(cx.listener(Self::handle_open_settings_shortcut))
-            // F-TAB-24: this action/binding pair previously existed only in
-            // the `show_settings` render branch above (there was nothing
-            // else for it to do outside settings). A tab drag can only be
-            // in progress while *this*, the main, branch renders, so Escape
-            // needs this listener here too -- see the long comment on
-            // `handle_close_settings_surface` for why it is safe to add
-            // (short version: it always `cx.propagate()`s when it finds
-            // nothing to do, so this cannot swallow an unrelated Escape).
-            .on_action(cx.listener(Self::handle_close_settings_surface))
-            .on_action(cx.listener(|workspace, _: &ToggleSidebar, _, cx| {
-                workspace.toggle_sidebar(cx);
-            }))
-            .on_action(cx.listener(|workspace, _: &ToggleRightPanel, _, cx| {
-                workspace.toggle_right_panel(cx);
-            }))
-            .on_action(cx.listener(|workspace, _: &ToggleSecondaryPane, _, cx| {
-                // Consumed even when nothing toggles: `ctrl-shift-` chords are
-                // Sirio's inside a terminal too (spec 2026-10-15 §1).
-                workspace.toggle_secondary_pane(cx);
-            }))
-            .on_action(cx.listener(Self::handle_move_tab_to_other_pane))
-            .on_action(cx.listener(Self::handle_focus_pane_left))
-            .on_action(cx.listener(Self::handle_focus_pane_right))
-            .on_action(cx.listener(Self::handle_focus_pane_above))
-            .on_action(cx.listener(Self::handle_focus_pane_below))
-            .on_action(cx.listener(Self::handle_split_pane_right))
-            .on_action(cx.listener(Self::handle_split_pane_down))
-            .on_action(cx.listener(Self::handle_close_pane))
-            .on_action(cx.listener(Self::handle_cycle_tab_forward))
-            .on_action(cx.listener(Self::handle_cycle_tab_backward))
-            .on_action(cx.listener(Self::handle_jump_to_tab_1))
-            .on_action(cx.listener(Self::handle_jump_to_tab_2))
-            .on_action(cx.listener(Self::handle_jump_to_tab_3))
-            .on_action(cx.listener(Self::handle_jump_to_tab_4))
-            .on_action(cx.listener(Self::handle_jump_to_tab_5))
-            .on_action(cx.listener(Self::handle_jump_to_tab_6))
-            .on_action(cx.listener(Self::handle_jump_to_tab_7))
-            .on_action(cx.listener(Self::handle_jump_to_tab_8))
-            .on_action(cx.listener(Self::handle_jump_to_tab_9))
-            .on_action(cx.listener(Self::handle_open_all_tabs))
-            .on_action(cx.listener(Self::handle_open_tab_menu))
-            .on_action(cx.listener(Self::handle_close_tab))
-            .on_action(cx.listener(Self::handle_close_other_tabs))
-            .on_action(cx.listener(Self::handle_close_tabs_to_right))
-            .on_action(cx.listener(Self::handle_move_tab_earlier))
-            .on_action(cx.listener(Self::handle_move_tab_later))
-            .on_action(cx.listener(Self::handle_resume_chat))
+            .when(self.identity_dialog.is_none(), |frame| self.shell_actions(frame, cx))
             .child(
                 div()
                     .h(theme.browser_chrome.bar_height)
@@ -35257,6 +35529,110 @@ done
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// No socket verb raises a root modal, so only a test can prove that the
+    /// pane-close banner, raised while the "Project added" dialog is open,
+    /// waits behind it: it must not take focus while the dialog is up, and it
+    /// must take it once the dialog is gone.
+    #[gpui::test]
+    async fn pane_close_banner_takes_focus_only_after_the_project_added_dialog_closes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::light());
+        let (root, _worktrees) = urgency_test_root("identity-gate");
+        let root_for_window = root.clone();
+        let window =
+            cx.add_window(|_window, cx| worktree_urgency_test_workspace(cx, &root_for_window));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+
+        // The drain defers the open by a frame, and the focus rule starts on
+        // the one after the dialog's first render.
+        let folder = project_folder_for_label_tests("identity-gate");
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.add_project(folder.clone(), AddOrigin::OpenedFolder, cx);
+        });
+        for _ in 0..4 {
+            cx.run_until_parked();
+        }
+        let dialog = workspace
+            .read_with(&cx.cx, |workspace, _| {
+                workspace
+                    .identity_dialog
+                    .as_ref()
+                    .map(|open| open.entity.clone())
+            })
+            .expect("adding a folder opens the Project added dialog");
+        cx.update(|window, cx| {
+            assert!(
+                dialog.read(cx).contains_focus(window, cx),
+                "the dialog holds focus once it is open"
+            );
+        });
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.request_close_terminal_at(0, 0, None, cx);
+        });
+        for _ in 0..4 {
+            cx.run_until_parked();
+        }
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_some(),
+            "the banner is drawn, under the dialog's scrim"
+        );
+        let banner_focus = workspace.read_with(&cx.cx, |workspace, _| {
+            workspace
+                .pending_pane_close
+                .as_ref()
+                .map(|pending| pending.focus.clone())
+                .expect("the close is held for confirmation")
+        });
+        cx.update(|window, cx| {
+            assert!(
+                dialog.read(cx).contains_focus(window, cx),
+                "a banner raised behind the dialog must not take its focus"
+            );
+            assert!(
+                !banner_focus.is_focused(window),
+                "the banner must not claim focus while the dialog is open"
+            );
+        });
+
+        cx.update(|window, cx| {
+            dialog
+                .update(cx, |dialog, cx| dialog.control_act("skip", None, window, cx))
+                .expect("the drawn dialog can be skipped");
+        });
+        for _ in 0..4 {
+            cx.run_until_parked();
+        }
+        assert!(
+            workspace.read_with(&cx.cx, |workspace, _| workspace.identity_dialog.is_none()),
+            "skipping closes the dialog"
+        );
+        assert!(
+            cx.debug_bounds("pane-close-confirm").is_some(),
+            "the banner is still drawn once the dialog is gone"
+        );
+        cx.update(|window, _| {
+            assert!(
+                banner_focus.is_focused(window),
+                "the banner claims focus once the dialog has closed"
+            );
+        });
+
+        shutdown_workspace_terminals(&workspace, &mut cx);
+        let _ = std::fs::remove_dir_all(&root);
+        if let Some(scratch) = folder.parent() {
+            let _ = std::fs::remove_dir_all(scratch);
+        }
+    }
+
     /// A close in the selected worktree stays silent for idle sessions, unlike
     /// `request_close_parked_tab`, which switches worktrees and asks first.
     #[gpui::test]
@@ -39790,7 +40166,7 @@ done
         });
 
         workspace.update(&mut cx, |workspace, cx| {
-            workspace.add_project(path.clone(), cx);
+            workspace.add_project(path.clone(), AddOrigin::OpenedFolder, cx);
         });
         cx.run_until_parked();
         let notice = workspace.read_with(&cx.cx, |workspace, cx| {

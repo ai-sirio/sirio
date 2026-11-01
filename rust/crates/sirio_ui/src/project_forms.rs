@@ -30,7 +30,8 @@ pub enum CloneStatus {
     /// clone's streamed diagnostic capture hit its byte cap (see
     /// `GitCommandResult::truncated`); the clone itself still completed, so
     /// this is a notice, not a failure — see `clone_status_line` for how it
-    /// is worded and colored.
+    /// is worded and colored. The identity dialog shows the same notice,
+    /// with the text `clone_truncation_notice` builds.
     Complete {
         destination: PathBuf,
         truncated: bool,
@@ -117,10 +118,9 @@ impl CloneFormState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloneFormEvent {
     /// `truncated` mirrors [`CloneStatus::Complete`]'s field: the clone
-    /// succeeded either way. A subscriber that auto-dismisses the form on
-    /// this event (as `Sidebar` does) should keep it open when `truncated`
-    /// is set, so the status line's notice is actually seen rather than
-    /// closed the same frame it appears — see `Sidebar::start_clone_project`.
+    /// succeeded either way. The subscriber closes the form on this event,
+    /// and `Sidebar` does so, a truncated clone included: that clone's
+    /// notice is shown in the identity dialog.
     Cloned {
         destination: PathBuf,
         truncated: bool,
