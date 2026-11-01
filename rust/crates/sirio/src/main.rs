@@ -10231,14 +10231,27 @@ impl SirioWorkspace {
         });
     }
 
+    /// Adds the project at `path` to the catalog and, when it is new, writes
+    /// the catalog and refreshes the socket's snapshot and the sidebar.
+    /// Returns its id, or `None` when the path is already tracked or nested.
+    fn insert_project(
+        &mut self,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<String>, String> {
+        let id = self.project_catalog.insert(path)?;
+        if id.is_some() {
+            self.session.schedule_catalog(&self.project_catalog);
+            self.sync_control_state(cx);
+            self.refresh_sidebar(cx);
+        }
+        Ok(id)
+    }
+
     fn add_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        match self.project_catalog.add(&path) {
-            Ok(true) => {
-                self.session.schedule_catalog(&self.project_catalog);
-                self.sync_control_state(cx);
-                self.refresh_sidebar(cx);
-            }
-            Ok(false) => {
+        match self.insert_project(&path, cx) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
                 let message = format!("already tracked or nested: {}", path.display());
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.set_notice(message.clone(), cx));
@@ -10252,7 +10265,7 @@ impl SirioWorkspace {
         }
     }
 
-    fn update_project_settings(&mut self, update: &ProjectSettingsUpdate, cx: &mut Context<Self>) {
+    fn apply_project_settings(&mut self, update: &ProjectSettingsUpdate) -> Result<(), String> {
         let (icon_kind, icon_value) = update.icon.persisted_parts();
         // F-PRJ-17/F-PRJ-18: `update.default_worktree_base`/
         // `worktree_location_override` are always the sheet's *current*
@@ -10273,18 +10286,28 @@ impl SirioWorkspace {
             default_worktree_base: update.default_worktree_base.clone(),
             worktree_location_override: update.worktree_location_override.clone(),
         };
+        self.project_catalog.update_project_settings(&update.id, settings)
+    }
+
+    fn update_project_settings(
+        &mut self,
+        update: &ProjectSettingsUpdate,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         match self
-            .project_catalog
-            .update_project_settings(&update.id, settings)
+            .apply_project_settings(update)
+            .and_then(|()| self.session.try_schedule_catalog(&self.project_catalog))
         {
             Ok(()) => {
-                self.session.schedule_catalog(&self.project_catalog);
-                publish_worktree_lookup(&self.project_catalog, cx);
+                self.sync_control_state(cx);
                 self.refresh_sidebar(cx);
+                Ok(())
             }
-            Err(error) => self
-                .sidebar
-                .update(cx, |sidebar, cx| sidebar.set_notice(error, cx)),
+            Err(error) => {
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.set_notice(error.clone(), cx));
+                Err(error)
+            }
         }
     }
 
@@ -10831,12 +10854,7 @@ impl SirioWorkspace {
         path: &Path,
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
-        let added = self.project_catalog.add(path)?;
-        if added {
-            self.session.schedule_catalog(&self.project_catalog);
-            self.sync_control_state(cx);
-            self.refresh_sidebar(cx);
-        }
+        let added = self.insert_project(path, cx)?.is_some();
         let state = self
             .control_state
             .lock()
@@ -16525,7 +16543,8 @@ impl SirioWorkspace {
             tab,
             |workspace, emitter, event: &ProjectSettingsEvent, cx| match event {
                 ProjectSettingsEvent::Changed(update) => {
-                    workspace.update_project_settings(update, cx);
+                    // A failure already set the sidebar notice.
+                    let _ = workspace.update_project_settings(update, cx);
                     let title = format!("Project Settings · {}", emitter.read(cx).heading_name());
                     let hosted: Vec<usize> = workspace
                         .tabs

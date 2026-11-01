@@ -827,7 +827,9 @@ impl ProjectCatalog {
             .is_some_and(|project| reorder_item(&mut project.worktrees, from, target, before))
     }
 
-    pub fn add(&mut self, path: &Path) -> Result<bool, String> {
+    /// Adds the project at `path` and returns its id, or `None` when the path
+    /// is already tracked or nested in a tracked project.
+    pub fn insert(&mut self, path: &Path) -> Result<Option<String>, String> {
         let input_path = path
             .canonicalize()
             .map_err(|error| format!("cannot add {}: {error}", path.display()))?;
@@ -841,14 +843,20 @@ impl ProjectCatalog {
                 || root_path.starts_with(&project.root_path)
                 || project.root_path.starts_with(&root_path)
         }) {
-            return Ok(false);
+            return Ok(None);
         }
 
         let project = catalog_project(&root_path, discovered);
         self.settings
             .insert(project.id.clone(), CatalogProjectSettings::default());
+        let id = project.id.clone();
         self.projects.push(project);
-        Ok(true)
+        Ok(Some(id))
+    }
+
+    #[cfg(test)]
+    pub fn add(&mut self, path: &Path) -> Result<bool, String> {
+        self.insert(path).map(|id| id.is_some())
     }
 
     pub fn remove(&mut self, id: &str) -> bool {
@@ -2407,22 +2415,32 @@ impl SessionStore {
     /// worktrees that are still present. Project discovery happens before this
     /// method is called, so the database write remains small and deterministic.
     pub fn schedule_catalog(&self, catalog: &ProjectCatalog) {
+        if let Err(error) = self.try_schedule_catalog(catalog) {
+            eprintln!("[session] failed to persist project catalog: {error}");
+        }
+    }
+
+    /// [`SessionStore::schedule_catalog`] for a caller that reports a failed
+    /// write. With no database (the in-memory mode tests run in) there is
+    /// nothing to write and it succeeds.
+    pub fn try_schedule_catalog(&self, catalog: &ProjectCatalog) -> Result<(), String> {
+        // Debug-only: lets an E2E make the write fail on demand. A read-only
+        // `SIRIO_DB` would not, because the open connection keeps writing.
+        #[cfg(debug_assertions)]
+        if std::env::var("SIRIO_DEBUG_FAIL_CATALOG_WRITES").as_deref() == Ok("1") {
+            return Err("the catalog write failed on purpose for a debug test".to_string());
+        }
         let mut db = self
             .inner
             .db
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(db) = db.as_mut() else {
-            return;
+            return Ok(());
         };
-        match write_catalog(db, catalog) {
-            Ok(()) => {
-                self.inner.writes.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(error) => {
-                eprintln!("[session] failed to persist project catalog: {error}");
-            }
-        }
+        write_catalog(db, catalog).map_err(|error| error.to_string())?;
+        self.inner.writes.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Loads the durable application settings, or their defaults when the
