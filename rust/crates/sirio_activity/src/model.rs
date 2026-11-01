@@ -181,6 +181,11 @@ impl AgentActivityModel {
         self.last_hook_push_at.insert(pane_id.to_string(), now);
     }
 
+    /// A Layer A push reached this pane: only an agent's hooks or `sirioctl notify` send one.
+    pub fn has_hook_evidence(&self, pane_id: &str) -> bool {
+        self.last_hook_push_at.contains_key(pane_id)
+    }
+
     /// The agent id registered for a pane, or `None` for plain shells.
     pub fn agent_id(&self, pane_id: &str) -> Option<&str> {
         self.pane_agents.get(pane_id).map(String::as_str)

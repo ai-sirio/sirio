@@ -1483,6 +1483,12 @@ enum ControlAction {
         value: Option<String>,
         reply: ControlReply,
     },
+    /// Debug-only `surface.attention.read` and `surface.attention.act`: every
+    /// session's unread mark, and the window-focus override the E2E drives.
+    Attention {
+        act: AttentionAct,
+        reply: ControlReply,
+    },
 }
 
 enum ChatControlAction {
@@ -1613,6 +1619,39 @@ struct ParkedWorktreeTabs {
     /// Their sessions are another worktree's or a shown tab's, so closing the
     /// worktree must not end them (SP2 spec §4.2).
     attached_panes: HashSet<usize>,
+}
+
+/// A chat or terminal tab as the attention funnel sees it, wherever it is
+/// held: mounted, retained across a worktree switch, or parked.
+struct SessionRef {
+    /// The tab's stable database identity, which every record is keyed by.
+    persistence_id: String,
+    worktree: PathBuf,
+    chat: bool,
+    /// In front of the user right now: see `SirioWorkspace::session_on_screen`.
+    on_screen: bool,
+    title: String,
+    /// The `pane-N` activity keys of the tab's panes.
+    pane_keys: Vec<String>,
+}
+
+/// What the app remembers about one session's attention, in memory.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct TabAttention {
+    /// An agent stopped while the session was not on screen, and nobody has
+    /// looked at it since.
+    unread: bool,
+    /// At least one pane of the tab was running at its last status change.
+    running: bool,
+}
+
+/// What a debug `surface.attention.act` does.
+enum AttentionAct {
+    /// `surface.attention.read`: report, change nothing.
+    Read,
+    /// Force the window's focus: `Some(true)` active, `Some(false)` inactive,
+    /// `None` the OS's own answer again.
+    Focus(Option<bool>),
 }
 
 /// A Trace tab kept while its worktree is parked. It holds no state of its
@@ -3347,6 +3386,29 @@ impl ControlHandler for AppControlHandler {
             "surface.terminal.state" if cfg!(debug_assertions) => {
                 let pane = request.params.get("pane").cloned().unwrap_or_default();
                 self.queue_action(request, move |reply| ControlAction::TerminalState { pane, reply })
+            }
+            "surface.attention.read" if cfg!(debug_assertions) => self.queue_action(request, |reply| {
+                ControlAction::Attention {
+                    act: AttentionAct::Read,
+                    reply,
+                }
+            }),
+            "surface.attention.act" if cfg!(debug_assertions) => {
+                let focus = match request.params.get("focus").map(String::as_str) {
+                    Some("active") => Some(true),
+                    Some("inactive") => Some(false),
+                    Some("os") => None,
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.attention.act requires focus active, inactive or os",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::Attention {
+                    act: AttentionAct::Focus(focus),
+                    reply,
+                })
             }
             "surface.settings.act" if cfg!(debug_assertions) => {
                 let action = request.params.get("action").cloned().unwrap_or_default();
@@ -5791,14 +5853,27 @@ struct SirioWorkspace {
     /// (backed uniformly by every platform's own window, no linux-specific
     /// code needed here). Polled once per frame in `render` (the same
     /// "Layer E is polled, not pushed" pattern that function already uses
-    /// for streaming/exit state), because `post_activity_notification`
-    /// gates on `StopPolicy::decide` from Layer B/C/D activity-transition
-    /// callbacks that carry no `Window` of their own -- only `render` and
-    /// the control-socket dispatch loop do.
+    /// for streaming/exit state), because `on_pane_transition` decides each
+    /// stop with `StopPolicy::decide` from Layer B/C/D activity-transition
+    /// callbacks that carry no `Window` of their own -- only `render`, the
+    /// control-socket dispatch loop and the activation callback do.
     /// Starts `true` (matching this argument's previous hardcoded value)
     /// so the very first transition, before any frame has painted, keeps
     /// today's behaviour rather than guessing unfocused.
     window_active: bool,
+    /// The value `render` last polled, kept apart from `window_active` because
+    /// the activation callback writes that one between frames: the branch
+    /// refresh (#114) fires on the false→true edge of what a frame polled, and
+    /// would never see it once the callback had already set `true`.
+    last_polled_window_active: bool,
+    /// Per session, by persistence id: the unread mark and the running flag.
+    /// In memory only; a record outlives its session's panes until the tab closes.
+    session_attention: HashMap<String, TabAttention>,
+    /// Debug-only override of the window's focus, driven by
+    /// `surface.attention.act --focus`: under Xvfb with no window manager, and
+    /// on macOS `--state-only`, nobody controls what the OS reports.
+    #[cfg(debug_assertions)]
+    debug_window_active: Option<bool>,
     browser_origins: BTreeSet<String>,
     /// F-TERM-08: an interactive pane close (Cmd-W, right-click "Close
     /// Terminal…") that would kill a pane whose `ActivityStatus` reports
@@ -6331,7 +6406,7 @@ impl SirioWorkspace {
                                 ControlAction::Notify { pane_id, status } => {
                                     let transition =
                                         workspace.activity.notify(&pane_id, status, Instant::now());
-                                    workspace.post_activity_notification(&transition);
+                                    workspace.drain_activity_transitions(cx);
                                     workspace.request_auto_rename(&transition, cx);
                                     workspace.mark_activity_dirty();
                                     cx.notify();
@@ -6536,6 +6611,9 @@ impl SirioWorkspace {
                                         cx,
                                     );
                                     let _ = reply.send(result);
+                                }
+                                ControlAction::Attention { act, reply } => {
+                                    let _ = reply.send(workspace.control_attention(act, cx));
                                 }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
@@ -7054,6 +7132,10 @@ impl SirioWorkspace {
             cache_child_views: !cfg!(test),
             restored_scrollback_scheduled: OnceGate::default(),
             window_active: true,
+            last_polled_window_active: true,
+            session_attention: HashMap::new(),
+            #[cfg(debug_assertions)]
+            debug_window_active: None,
             browser_origins,
             show_settings: false,
             restore_focus_pending: false,
@@ -10120,8 +10202,8 @@ impl SirioWorkspace {
                         cx.notify();
                     }
                 }
+                workspace.drain_activity_transitions(cx);
                 if let Some(transition) = transition.as_ref() {
-                    workspace.post_activity_notification(transition);
                     workspace.request_auto_rename(transition, cx);
                 }
                 // Lifecycle changes must repaint even without a model
@@ -10186,8 +10268,8 @@ impl SirioWorkspace {
                     workspace
                         .activity
                         .apply_content_signal(&activity_pane_id, status, now);
+                workspace.drain_activity_transitions(cx);
                 if let Some(transition) = transition.as_ref() {
-                    workspace.post_activity_notification(transition);
                     workspace.request_auto_rename(transition, cx);
                     workspace.mark_activity_dirty();
                     cx.notify();
@@ -10297,7 +10379,7 @@ impl SirioWorkspace {
                             {
                                 Ok(Some(transition)) => {
                                     any_transition = true;
-                                    workspace.post_activity_notification(&transition);
+                                    workspace.drain_activity_transitions(cx);
                                     workspace.request_auto_rename(&transition, cx);
                                 }
                                 Ok(None) => {
@@ -12164,6 +12246,7 @@ impl SirioWorkspace {
         // same ids (the reconcile the selection armed has not run yet — this
         // is the "reads immediately afterwards" exception to the gate).
         self.sync_entity_evidence(cx);
+        self.drain_activity_transitions(cx);
         let Some(id) = self.worst_status_tab_id(cx) else {
             return Ok(None);
         };
@@ -13650,31 +13733,12 @@ impl SirioWorkspace {
         });
     }
 
+    /// Posts the desktop notification for one stop. The caller has decided that
+    /// it is one (`on_pane_transition`), so nothing here gates on focus.
     fn post_activity_notification(&self, transition: &Transition) {
         let Some(agent_id) = self.activity.agent_id(&transition.pane_id) else {
             return;
         };
-        let visible = self.tabs.get(self.active_tab).is_some_and(|tab| {
-            let pane_id = transition.pane_id.strip_prefix("pane-");
-            pane_id.is_some_and(|pane_id| {
-                pane_id
-                    .parse::<usize>()
-                    .is_ok_and(|pane_id| tab.panes.contains(pane_id))
-            })
-        });
-        // F-CORE-ACT-20: real window-focus, not a hardcoded `true` -- see
-        // `window_active`'s own doc comment for why this reads a
-        // once-per-frame cache instead of a live `Window` query.
-        if !StopPolicy::decide(
-            transition.old,
-            transition.new,
-            FirstStatus::Unrecorded,
-            self.window_active && visible,
-        )
-        .notify
-        {
-            return;
-        }
         let agent_display_name = AGENT_CATALOG
             .iter()
             .find(|adapter| adapter.id() == agent_id)
@@ -13709,14 +13773,311 @@ impl SirioWorkspace {
         };
         // F-CORE-ACT-19: the title is `<agent> — <human worktree label>`,
         // not `<agent> — <status>` — the pane's transition status already
-        // drives which notification fires at all (`StopPolicy`
-        // above); it does not belong in the title text a second time.
+        // drives which notification fires at all (`StopPolicy`, through
+        // `on_pane_transition`); it does not belong in the title text a
+        // second time.
         // `AgentActivityModel::build_payload` (sirio_activity, not owned by
         // this file) still emits the status-suffixed title, so it is
         // corrected here rather than left for the desktop notifier to show
         // verbatim.
         payload.title = format!("{agent_display_name} — {}", context.activity_label);
         post_desktop_notification(&payload);
+    }
+
+    /// The window's focus as the funnel reads it: the debug override when one is
+    /// set, else what the last frame polled.
+    fn effective_window_active(&self) -> bool {
+        #[cfg(debug_assertions)]
+        if let Some(forced) = self.debug_window_active {
+            return forced;
+        }
+        self.window_active
+    }
+
+    /// Every chat and terminal tab Sirio holds, once each, in the order
+    /// `session_for_pane` looks: the mounted tabs, then the chats retained across
+    /// a worktree switch, then the strips of parked worktrees.
+    ///
+    /// A `pane-N` key names one surface across all three: new panes take
+    /// `next_pane_id`, which only grows above the database floor, and
+    /// `select_worktree` renames a restored id another parked strip holds
+    /// (`reassign_taken_restored_pane_ids`, against `parked_pane_ids_outside`).
+    /// `park_current_worktree_tabs` inserts its strip unconditionally, so a
+    /// worktree with only chat tabs is covered too. If that insert ever becomes
+    /// conditional, this lookup loses those chats.
+    fn held_sessions(&self) -> Vec<SessionRef> {
+        // The pair names a session: the default tabs of a fresh worktree all
+        // carry the same ids (`default-chat`, `default-terminal`).
+        fn push(sessions: &mut Vec<SessionRef>, session: SessionRef) {
+            if !sessions.iter().any(|held| {
+                held.persistence_id == session.persistence_id
+                    && paths_name_the_same_document(&held.worktree, &session.worktree)
+            }) {
+                sessions.push(session);
+            }
+        }
+        let pane_keys = |tab: &OpenTab| -> Vec<String> {
+            tab.panes
+                .leaf_ids()
+                .into_iter()
+                .map(|id| format!("pane-{id}"))
+                .collect()
+        };
+        let mut sessions = Vec::new();
+        for tab in &self.tabs {
+            if !matches!(tab.kind, TabKind::Terminal | TabKind::AgentChat) {
+                continue;
+            }
+            push(
+                &mut sessions,
+                SessionRef {
+                    persistence_id: tab.persistence_id.clone(),
+                    worktree: self.tab_worktree_path(tab.id),
+                    chat: tab.kind == TabKind::AgentChat,
+                    on_screen: self.session_on_screen(tab),
+                    title: tab.title.clone(),
+                    pane_keys: pane_keys(tab),
+                },
+            );
+        }
+        for (worktree, chats) in &self.retained_worktree_chats {
+            for tab in chats.values() {
+                push(
+                    &mut sessions,
+                    SessionRef {
+                        persistence_id: tab.persistence_id.clone(),
+                        worktree: PathBuf::from(worktree),
+                        chat: true,
+                        on_screen: false,
+                        title: tab.title.clone(),
+                        pane_keys: pane_keys(tab),
+                    },
+                );
+            }
+        }
+        for (worktree, parked) in &self.parked_worktree_tabs {
+            for (index, tab) in parked.layout.tabs.iter().enumerate() {
+                let chat = tab.kind == "chat";
+                if !chat && tab.kind != "terminal" {
+                    continue;
+                }
+                let panes = |by_tab: &Vec<HashSet<usize>>| -> Vec<usize> {
+                    by_tab
+                        .get(index)
+                        .map(|panes| panes.iter().copied().collect())
+                        .unwrap_or_default()
+                };
+                let mut ids = panes(&parked.terminal_panes_by_tab);
+                ids.extend(panes(&parked.chat_panes_by_tab));
+                ids.sort_unstable();
+                ids.dedup();
+                push(
+                    &mut sessions,
+                    SessionRef {
+                        persistence_id: tab.id.clone(),
+                        worktree: PathBuf::from(worktree),
+                        chat,
+                        on_screen: false,
+                        title: tab.title.clone(),
+                        pane_keys: ids.into_iter().map(|id| format!("pane-{id}")).collect(),
+                    },
+                );
+            }
+        }
+        sessions
+    }
+
+    /// The session that owns a pane's activity key, or `None` when no tab Sirio
+    /// holds names it.
+    fn session_for_pane(&self, pane_key: &str) -> Option<SessionRef> {
+        self.held_sessions()
+            .into_iter()
+            .find(|session| session.pane_keys.iter().any(|key| key == pane_key))
+    }
+
+    /// Whether the user is looking at this tab right now: the window is active,
+    /// a worktree is selected, and the tab is the one shown in the Primary half
+    /// or in the Secondary half while that half is drawn. A retained or parked
+    /// session is never on screen.
+    fn session_on_screen(&self, tab: &OpenTab) -> bool {
+        self.effective_window_active()
+            && self.has_current_worktree()
+            && self.tabs.iter().any(|held| held.id == tab.id)
+            && paths_name_the_same_document(&self.tab_worktree_path(tab.id), &self.working_directory)
+            && (self.center_split.active(PaneRole::Primary) == Some(tab.id)
+                || (self.secondary_pane_visible()
+                    && self.center_split.active(PaneRole::Secondary) == Some(tab.id)))
+    }
+
+    /// Only an agent's stop is news: a chat, a terminal pane whose agent is
+    /// identified, or one an agent's hooks have already pushed to. A hook can
+    /// arrive before the title or the process sweep names the agent, which is
+    /// why a push counts.
+    fn pane_is_agent(&self, pane_key: &str, session: &SessionRef) -> bool {
+        session.chat
+            || self.activity.agent_id(pane_key).is_some()
+            || self.activity.has_hook_evidence(pane_key)
+    }
+
+    /// What is known of a session's status record when a pane's status goes from
+    /// nothing to something. Until the record outlives the run, that is only
+    /// this run's own `session_attention`.
+    fn first_status_for(&self, persistence_id: &str, _chat: bool) -> FirstStatus {
+        match self.session_attention.get(persistence_id) {
+            None => FirstStatus::Unrecorded,
+            Some(record) => FirstStatus::Recorded {
+                was_running: record.running,
+            },
+        }
+    }
+
+    fn is_unread(&self, persistence_id: &str) -> bool {
+        self.session_attention
+            .get(persistence_id)
+            .is_some_and(|record| record.unread)
+    }
+
+    /// Hands every resolved status change since the last drain to
+    /// `on_pane_transition`. Every path that can change a status reaches one.
+    fn drain_activity_transitions(&mut self, cx: &mut Context<Self>) {
+        for transition in self.activity.take_resolved_transitions() {
+            self.on_pane_transition(&transition, cx);
+        }
+    }
+
+    /// The one place a status change becomes a stop: the unread mark, the running
+    /// flag and the desktop notification.
+    fn on_pane_transition(&mut self, transition: &Transition, _cx: &mut Context<Self>) {
+        let Some(session) = self.session_for_pane(&transition.pane_id) else {
+            return;
+        };
+        if !self.pane_is_agent(&transition.pane_id, &session) {
+            return;
+        }
+        let first = self.first_status_for(&session.persistence_id, session.chat);
+        let decision =
+            StopPolicy::decide(transition.old, transition.new, first, session.on_screen);
+        let running = session
+            .pane_keys
+            .iter()
+            .any(|key| self.activity.status(key) == Some(AgentStatus::Running));
+        let record = self
+            .session_attention
+            .entry(session.persistence_id.clone())
+            .or_default();
+        record.running = running;
+        record.unread |= decision.unread;
+        self.mark_activity_dirty();
+        if decision.notify {
+            self.post_activity_notification(transition);
+        }
+    }
+
+    /// Clears the mark of every session on screen: at most one tab per half.
+    /// Does nothing while nothing is unread.
+    fn mark_shown_sessions_seen(&mut self, _cx: &mut Context<Self>) {
+        if !self.session_attention.values().any(|record| record.unread) {
+            return;
+        }
+        let shown: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|tab| self.session_on_screen(tab))
+            .map(|tab| tab.persistence_id.clone())
+            .collect();
+        let mut cleared = false;
+        for id in shown {
+            if let Some(record) = self.session_attention.get_mut(&id)
+                && record.unread
+            {
+                record.unread = false;
+                cleared = true;
+            }
+        }
+        if cleared {
+            self.mark_activity_dirty();
+        }
+    }
+
+    /// Debug-only `surface.attention.read` and `surface.attention.act`.
+    fn control_attention(
+        &mut self,
+        act: AttentionAct,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        match act {
+            AttentionAct::Read => Ok(self.control_attention_read()),
+            AttentionAct::Focus(focus) => {
+                #[cfg(debug_assertions)]
+                {
+                    self.debug_window_active = focus;
+                }
+                #[cfg(not(debug_assertions))]
+                let _ = focus;
+                self.mark_shown_sessions_seen(cx);
+                cx.notify();
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// `windowActive` and `sessions`: a JSON array with one object per session
+    /// Sirio can reach, plus one per record whose session it no longer holds.
+    fn control_attention_read(&self) -> Vec<(String, String)> {
+        let status_word = |status: Option<AgentStatus>| match status {
+            Some(AgentStatus::Running) => serde_json::json!("running"),
+            Some(AgentStatus::NeedsInput) => serde_json::json!("needs-input"),
+            Some(AgentStatus::Done) => serde_json::json!("done"),
+            Some(AgentStatus::Error) => serde_json::json!("error"),
+            None => serde_json::Value::Null,
+        };
+        let held = self.held_sessions();
+        let mut rows: Vec<serde_json::Value> = held
+            .iter()
+            .map(|session| {
+                let record = self
+                    .session_attention
+                    .get(&session.persistence_id)
+                    .copied()
+                    .unwrap_or_default();
+                let keys: Vec<&str> = session.pane_keys.iter().map(String::as_str).collect();
+                serde_json::json!({
+                    "id": session.persistence_id,
+                    "worktree": session.worktree.to_string_lossy(),
+                    "title": session.title,
+                    "kind": if session.chat { "chat" } else { "terminal" },
+                    "unread": record.unread,
+                    "running": record.running,
+                    "status": status_word(self.activity.status_for_panes(&keys)),
+                    "onScreen": session.on_screen,
+                })
+            })
+            .collect();
+        for (id, record) in &self.session_attention {
+            if held.iter().any(|session| &session.persistence_id == id) {
+                continue;
+            }
+            rows.push(serde_json::json!({
+                "id": id,
+                "worktree": serde_json::Value::Null,
+                "title": serde_json::Value::Null,
+                "kind": serde_json::Value::Null,
+                "unread": record.unread,
+                "running": record.running,
+                "status": serde_json::Value::Null,
+                "onScreen": false,
+            }));
+        }
+        vec![
+            (
+                "windowActive".to_string(),
+                self.effective_window_active().to_string(),
+            ),
+            (
+                "sessions".to_string(),
+                serde_json::Value::Array(rows).to_string(),
+            ),
+        ]
     }
 
     /// F-CORE-DOM-07: on a running→done/needs-input transition, throttled
@@ -26576,6 +26937,7 @@ impl Render for SirioWorkspace {
         if self.sync_entity_evidence(cx) {
             self.mark_activity_dirty();
         }
+        self.drain_activity_transitions(cx);
         // F-CHG-02: worktree currency can change passively (the catalog
         // re-matching `working_directory` with no `select_worktree` call),
         // so no mutation site arms the gate for it. One bool compare per
@@ -26599,8 +26961,10 @@ impl Render for SirioWorkspace {
         // retells each branch label truthfully. Every other frame this is
         // a field comparison; a call here at any wider cadence would both
         // burn reads the Pi can't spare and notify-loop forever.
-        let was_window_active = self.window_active;
+        let was_window_active = self.last_polled_window_active;
         self.window_active = window.is_window_active();
+        self.last_polled_window_active = self.window_active;
+        self.mark_shown_sessions_seen(cx);
         self.keep_active_tab_visible(window, *Theme::get(cx));
         if !was_window_active && self.window_active {
             let working_directory = self.working_directory.clone();
@@ -30511,6 +30875,11 @@ fn main() {
                     // back is the only moment Sirio can notice: an open
                     // Permissions page re-reads macOS then.
                     cx.observe_window_activation(window, |workspace, window, cx| {
+                        // A stop never reads a focus older than the last
+                        // activation change, and a session already on screen
+                        // is seen the moment the window is active.
+                        workspace.window_active = window.is_window_active();
+                        workspace.mark_shown_sessions_seen(cx);
                         if window.is_window_active() {
                             workspace.refresh_permissions_on_screen(cx);
                         }
@@ -46094,6 +46463,7 @@ done
             | ControlAction::ProjectIdentityRead { reply }
             | ControlAction::PromptsRead { reply }
             | ControlAction::ProjectIdentityAct { reply, .. }
+            | ControlAction::Attention { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -46224,6 +46594,8 @@ done
             "surface.host.end_all" => request_with_params(method, &[]),
             "surface.terminal.open" => request_with_params(method, &[]),
             "surface.settings.act" => request_with_params(method, &[("action", "install-hooks")]),
+            "surface.attention.read" => request::attention_read(),
+            "surface.attention.act" => request_with_params(method, &[("focus", "active")]),
             "surface.terminal.restart" | "surface.terminal.state" => {
                 request_with_params(method, &[("pane", "pane-1")])
             }
