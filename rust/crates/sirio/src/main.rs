@@ -1635,6 +1635,20 @@ struct SessionRef {
     pane_keys: Vec<String>,
 }
 
+/// The window focus a debug build starts with, from `SIRIO_DEBUG_WINDOW_ACTIVE`
+/// (`active` or `inactive`): the same override `surface.attention.act --focus`
+/// sets, but in force from the first frame, which an E2E that restarts the app
+/// needs, because the first decision about a restored session can come before
+/// any control call. Anything else, and every release build, leaves the OS in charge.
+#[cfg(debug_assertions)]
+fn debug_window_active_from_env() -> Option<bool> {
+    match std::env::var("SIRIO_DEBUG_WINDOW_ACTIVE").as_deref() {
+        Ok("active") => Some(true),
+        Ok("inactive") => Some(false),
+        _ => None,
+    }
+}
+
 /// What a debug `surface.attention.act` does.
 enum AttentionAct {
     /// `surface.attention.read`: report, change nothing.
@@ -7182,7 +7196,7 @@ impl SirioWorkspace {
             session_attention: previous_attention,
             pending_attention_writes: BTreeMap::new(),
             #[cfg(debug_assertions)]
-            debug_window_active: None,
+            debug_window_active: debug_window_active_from_env(),
             #[cfg(debug_assertions)]
             posted_notifications: std::collections::VecDeque::new(),
             browser_origins,
@@ -14262,7 +14276,6 @@ impl SirioWorkspace {
     /// Does nothing while nothing is unread.
     fn mark_shown_sessions_seen(&mut self, _cx: &mut Context<Self>) {
         if !self.session_attention.values().any(|record| record.unread) {
-            self.flush_attention_writes();
             return;
         }
         let shown: Vec<String> = self
@@ -24703,7 +24716,10 @@ impl SirioWorkspace {
         let moved_terminal = moved.terminal();
         if source_will_be_empty {
             self.tab_worktree_paths.remove(&source_tab_id);
+            // The tab is gone, its pane lives on in another one: the mark does not follow.
+            let dropped_persistence_id = self.tabs[source_index].persistence_id.clone();
             self.tabs.remove(source_index);
+            self.forget_session_attention(&dropped_persistence_id);
         } else {
             self.tabs[source_index]
                 .session_state

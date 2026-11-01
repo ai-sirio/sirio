@@ -41,8 +41,12 @@ Scripts/Tests/test-term-e2e.sh      # -> prints "TERM E2E OK (<n> cases, <s>s)"
 # appears: the agent stops while the app is closed, and the relaunched app marks it unread
 # and posts nothing. The mark survives a second restart and goes with the closed tab. A
 # restored terminal opens its session when first drawn, so the agent tab is the active one
-# and the window is forced inactive (`act --focus inactive`). It leaves case33-restored.json,
-# case33-saved.json and case33-closed.json, the `surface attention read` of each start.
+# and the window is forced inactive from the first frame (the debug-only launch knob
+# SIRIO_DEBUG_WINDOW_ACTIVE=inactive). It needs a display on Linux (--xvfb or --display :N) and
+# SKIPs under --state-only; macOS runs it, since its state-only run still draws a window. It
+# leaves case33-restored.json, case33-saved.json and case33-closed.json (the
+# `surface attention read` of each start) and case33-db.json (the saved `unread, last_running`
+# row, read from the world's database between the quits).
 Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> cases, <s>s)"
 # The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
 # socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
@@ -152,16 +156,17 @@ Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "
 # mode is drawn as the danger shield, and typing still reaches the composer, so no dialog holds the
 # keyboard. It needs --display :N --window-size 2200x1000 and captures
 # frames/composer-keys-*.png.
-# The three unread scenarios run in the default set and need no display: `unread_parked_chat` (a
+# The four unread scenarios run in the default set and need no display: `unread_parked_chat` (a
 # turn that ends while its worktree is not selected marks the chat unread, posts one notification
 # naming its branch, and showing the worktree clears the mark), `unread_question` (a permission
 # the turn asks while the worktree is not selected reads needs-input and unread, still open when
 # the worktree is shown), and `unread_secondary_seen` (a chat in the shown Secondary half, beside a
-# terminal in the Primary, stops with no mark and no notification). Each leaves
-# attention-<scenario>.json, the last `surface attention read`, in the out dir.
-# `unread_restored_chat_quiet` is the chat side of a restart: two chats that ran a turn on screen
-# come back with no mark and no notification, and a chat whose turn ended off screen before the
-# quit comes back unread, again with no notification.
+# terminal in the Primary, stops with no mark and no notification), and `unread_restored_chat_quiet`
+# (the chat side of a restart: two chats that ran a turn on screen come back with no mark and no
+# notification, a chat whose turn ended off screen before the quit comes back unread, again with no
+# notification, and looking at it clears the mark for good). Each leaves
+# attention-<scenario>.json (so attention-unread_restored_chat_quiet.json), the last
+# `surface attention read`, in the out dir.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the

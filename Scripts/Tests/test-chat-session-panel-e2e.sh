@@ -2491,14 +2491,16 @@ scenario_unread_restored_chat_quiet() {
   [ "$(attention_row "$hidden" unread)" = false ] || fail "the restored chat that is not shown reads unread"
   [ "$(posted_count)" = 0 ] || fail "the relaunch posted a notification for a seen chat: $(posted_rows | tr '\n' ' ')"
   echo "step: each chat is shown in turn"
-  local position
+  local position shown_in_turn=0
   for position in $(tab_positions chat); do
     ctl surface tabs select "$position" >/dev/null || fail "selecting tab $position was refused"
     look_at_shown
     sleep 1
     [ "$(attention_row "$first" unread)" = false ] && [ "$(attention_row "$second" unread)" = false ] \
       || fail "showing tab $position marked a chat unread: $(reply surface attention read | tr '\n' ' ')"
+    shown_in_turn=$((shown_in_turn + 1))
   done
+  [ "$shown_in_turn" = 2 ] || fail "$shown_in_turn chat tab(s) were shown in turn, not both"
   [ "$(posted_count)" = 0 ] || fail "showing the restored chats posted a notification: $(posted_rows | tr '\n' ' ')"
   echo "OK: a seen chat stays quiet over a restart"
 
@@ -2525,6 +2527,18 @@ scenario_unread_restored_chat_quiet() {
   [ "$(attention_row "$other" unread)" = false ] || fail "the other chat reads unread after the relaunch"
   save_attention unread_restored_chat_quiet
   echo "OK: the saved mark survived the restart and nothing was posted"
+  echo "step: looking at the chat clears the mark for good"
+  ctl select-workspace --workspace "$LINKED" >/dev/null
+  look_at_shown
+  wait_row "showing the chat's worktree cleared the saved mark" "$shown" unread false 10
+  sleep 1
+  stop_app
+  launch unread_restored_chat_quiet
+  wait_row "the seen chat is still seen after another relaunch" "$shown" unread false 30
+  sleep 2
+  [ "$(attention_row "$shown" unread)" = false ] || fail "the cleared mark came back after a relaunch"
+  [ "$(posted_count)" = 0 ] || fail "the relaunch posted a notification for a seen chat: $(posted_rows | tr '\n' ' ')"
+  echo "OK: a mark cleared by looking stays cleared over a restart"
   stop_app
 }
 

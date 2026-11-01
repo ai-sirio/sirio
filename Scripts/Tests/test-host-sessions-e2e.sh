@@ -1700,15 +1700,32 @@ for key, value in tabs.items():
 # moment, so only the pane's own exit reaches the relaunched app (Layer E's Done).
 #
 # A restored terminal opens its session when it is first drawn, so the agent tab is the
-# active one at every start here, and the window is forced inactive: the tab is drawn and
-# the stop it reads is off screen. (A session that was not drawn yet reads no exit at all.)
+# active one at every start here, and the window is forced inactive from the first frame
+# (SIRIO_DEBUG_WINDOW_ACTIVE, a debug-only launch knob; no OS focus is relied on): the tab
+# is drawn and the stop it reads is off screen. A session that was not drawn yet reads no
+# exit at all, so a run that draws nothing skips the case on Linux. macOS draws a window
+# even in its state-only run.
+# The saved row is read from the world's own database between the quits.
+saved_attention() { # id: "unread last_running" of the tab's row, read-only; empty when no row
+  python3 -I - "$W/s.sqlite" "$1" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+row = conn.execute("SELECT unread, last_running FROM tab WHERE id = ?", (sys.argv[2],)).fetchone()
+print("%s %s" % row if row else "")
+PY
+}
+saved_attention_is() { [ "$(saved_attention "$1")" = "$2" ]; }
 case_unread_across_restart() {
+  if [ "$OS" = linux ] && { [ "$STATE_ONLY" -eq 1 ] || [ -z "$DISPLAY_TARGET" ]; }; then
+    SKIPPED=1
+    NOTE="SKIP: a restored terminal opens its session only when it is drawn; pass --xvfb or --display :N"
+    return 0
+  fi
   new_world c33
   install_codex_stub
   local exit_file="$W/stub/exit"
-  local -a agent_env=("PATH=$W/bin:$PATH" "SHELL=$W/bin/guard-shell" "E2E_STUB_DIR=$W/stub" "E2E_STUB_EXIT_ON=$exit_file")
+  local -a agent_env=("PATH=$W/bin:$PATH" "SHELL=$W/bin/guard-shell" "E2E_STUB_DIR=$W/stub" "E2E_STUB_EXIT_ON=$exit_file" "SIRIO_DEBUG_WINDOW_ACTIVE=inactive")
   app_start "${agent_env[@]}"
-  ctl surface attention act --focus inactive >/dev/null || fail "surface attention act --focus inactive was refused"
   select_repo "$W/repo"
   local before agent_id pane_a stub_pid
   before=$(attention_ids)
@@ -1737,17 +1754,22 @@ case_unread_across_restart() {
   wait_until 10 pid_dead "$stub_pid" || fail "the agent's pid $stub_pid did not leave after the exit file appeared"
   echo "step: the agent stopped while the app was closed; Sirio starts again"
   app_start "${agent_env[@]}"
-  ctl surface attention act --focus inactive >/dev/null || fail "surface attention act --focus inactive was refused"
   wait_until 30 attention_field_is "$agent_id" unread true \
     || fail "the agent that stopped while Sirio was closed is not unread (unread '$(attention_field "$agent_id" unread)'; read: $(attention_json | tr '\n' ' '))"
   [ "$(posted_total)" = 0 ] || fail "a restore stop posted a notification: $(attention_json | tr '\n' ' ')"
   save_attention_read restored
   echo "OK: the agent that stopped while closed is unread, and the new process posted nothing"
+  # The mark is on disk before the next quit: a lost write would still pass the second start,
+  # which finds the stop again by itself.
+  wait_until 10 saved_attention_is "$agent_id" "1 0" \
+    || fail "the database holds '$(saved_attention "$agent_id")' (unread last_running) for the agent tab, not '1 0'"
+  python3 -I -c 'import json, sys; u, r = sys.argv[1:3]; json.dump({"id": sys.argv[3], "unread": int(u), "last_running": int(r)}, open(sys.argv[4], "w"), indent=2)' \
+    $(saved_attention "$agent_id") "$agent_id" "$OUT_DIR/case33-db.json"
+  [ -s "$OUT_DIR/case33-db.json" ] || fail "no case33-db.json was written"
 
   echo "step: the saved mark survives another restart"
   app_quit
   app_start "${agent_env[@]}"
-  ctl surface attention act --focus inactive >/dev/null || fail "surface attention act --focus inactive was refused"
   wait_until 30 attention_field_is "$agent_id" unread true \
     || fail "the saved unread mark did not survive a second restart (unread '$(attention_field "$agent_id" unread)'; read: $(attention_json | tr '\n' ' '))"
   sleep 2
@@ -1767,7 +1789,6 @@ case_unread_across_restart() {
   sleep 1
   app_quit
   app_start "${agent_env[@]}"
-  ctl surface attention act --focus inactive >/dev/null || fail "surface attention act --focus inactive was refused"
   attention_ids | grep -qx "$agent_id" && fail "the closed agent tab $agent_id is still listed after a restart"
   save_attention_read closed
   NOTE="the agent $agent_id came back unread without a notification, kept its mark over a second restart, and left with its tab"
