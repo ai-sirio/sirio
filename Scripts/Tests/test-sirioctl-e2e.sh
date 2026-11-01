@@ -51,6 +51,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #      stale marked copy stale
 #  12  panel wait exits with the waited child's code
 #  13  --dry-run prints one request and creates no pane
+#  14  project add --display-name: the label, no dialog on a socket add, a duplicate, an empty value
 #
 # --out-dir DIR keeps transcript.log, app-<world>.log, host-<world>-log/ (the
 # host's logs), env/<case>.env (each pane's `env -0` dump, never printed),
@@ -58,7 +59,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #
 # --state-only takes no window captures, and skips 4, 4c, 5, 6 and 10: each needs
 # a pane's own shell to run a command, which a state-only run does not render for
-# the case's purpose. 9, 12 and 13 run there: a session starts without a window.
+# the case's purpose. 9, 12, 13 and 14 run there: a session starts without a window.
 # --xvfb starts a private Xvfb on a free display; --display :N uses one that is
 # already there. --mutate claude-prompt-hook is the mutation check of case 6: it drops the
 # UserPromptSubmit hook from the Claude worktree before that hook can fire, and
@@ -1312,6 +1313,107 @@ assert request["params"]["cmd"] == "x", request' || fail "--dry-run did not prin
   app_quit
 }
 
+# ---- case 14: project add --display-name
+
+# The `display_name` column of the project whose root is $2 in database $1:
+# `NULL` for no label, `row-missing` for no such project, else the stored text.
+# Matched by real path: the app stores the canonical root, and on macOS the run
+# directory under /var/folders is reached through the /var symlink.
+stored_label() { # db root
+  python3 -I -c 'import os, sqlite3, sys
+connection = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+target = os.path.realpath(sys.argv[2])
+for root, label in connection.execute("SELECT root_path, display_name FROM project"):
+    if os.path.realpath(root) == target:
+        print("NULL" if label is None else label)
+        raise SystemExit
+print("row-missing")' "$1" "$2"
+}
+# The `displayName` the project list gives the project rooted at $1; `row-missing` for none.
+listed_label() { # root
+  ctl_json project list | python3 -I -c 'import json, os, sys
+target = os.path.realpath(sys.argv[1])
+for project in json.load(sys.stdin):
+    if os.path.realpath(project["path"]) == target:
+        print(project.get("displayName", "no-field"))
+        raise SystemExit
+print("row-missing")' "$1"
+}
+# Succeeds when the project rooted at $1 is listed with label $2.
+listed_label_is() { [ "$(listed_label "$1")" = "$2" ]; }
+# Succeeds when the stored label of the project rooted at $2 in database $1 is $3.
+stored_label_is() { [ "$(stored_label "$1" "$2")" = "$3" ]; }
+
+case_14() {
+  world_open w8
+  W_PATH="$RUN/bin:/usr/bin:/bin"
+  echo "step 14: project add --display-name: the label, no dialog, a duplicate"
+  app_start "$RUN/app-a/sirio"
+  local repo2="$W/repo2" reply rc seen n
+  repo_init "$repo2"
+
+  echo "step 14.1: a labelled add replies added, applied and the label"
+  reply="$(ctl_json project add "$W_REPO" --display-name 'client app')" || fail "project add --display-name failed: $reply"
+  echo "reply: $reply"
+  [ "$(printf '%s' "$reply" | field added)" = true ] || fail "added is not true: $reply"
+  [ "$(printf '%s' "$reply" | field displayNameApplied)" = true ] || fail "displayNameApplied is not true: $reply"
+  [ "$(printf '%s' "$reply" | field displayName)" = "client app" ] || fail "displayName is not 'client app': $reply"
+  echo "OK: added=true, displayNameApplied=true, displayName=client app"
+
+  echo "step 14.2: the project list shows the label at once"
+  [ "$(listed_label "$W_REPO")" = "client app" ] || fail "project list shows '$(listed_label "$W_REPO")', not 'client app'"
+  echo "OK: project list --json shows displayName=client app"
+
+  echo "step 14.3: a socket add opens no dialog (polled for 20 s: the dialog's open turns true only after a render)"
+  n=100
+  seen=0
+  while [ "$n" -gt 0 ]; do
+    reply="$("$CTL" surface project-identity read)" || fail "surface project-identity read failed: $reply"
+    case "$reply" in *"open=false"*) ;; *) fail "the identity dialog is open after a socket add: $reply" ;; esac
+    case "$reply" in *"queue=0"*) ;; *) fail "the identity queue is not empty after a socket add: $reply" ;; esac
+    seen=$((seen + 1))
+    sleep 0.2
+    n=$((n - 1))
+  done
+  echo "OK: $seen reads over 20 s all showed open=false and queue=0"
+
+  echo "step 14.4: the same add again changes nothing"
+  reply="$(ctl_json project add "$W_REPO" --display-name 'other label' 2>/dev/null)" || fail "the duplicate add failed: $reply"
+  echo "reply: $reply"
+  [ "$(printf '%s' "$reply" | field added)" = false ] || fail "the duplicate add replied added!=false: $reply"
+  [ "$(printf '%s' "$reply" | field displayNameApplied)" = false ] || fail "the duplicate add replied displayNameApplied!=false: $reply"
+  [ "$(listed_label "$W_REPO")" = "client app" ] || fail "the duplicate add changed the label to '$(listed_label "$W_REPO")'"
+  [ "$(stored_label "$W/s.sqlite" "$W_REPO")" = "client app" ] || fail "the stored label is '$(stored_label "$W/s.sqlite" "$W_REPO")', not 'client app'"
+  echo "OK: added=false, displayNameApplied=false, the label is still client app"
+
+  echo "step 14.5: --display-name with no value, and with an empty value, exit 1"
+  rc=0
+  "$CTL" project add "$repo2" --display-name >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "--display-name with no value exited $rc, not 1"
+  rc=0
+  "$CTL" project add "$repo2" --display-name= >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "--display-name= exited $rc, not 1"
+  [ "$(listed_label "$repo2")" = row-missing ] || fail "a rejected add still tracked $repo2"
+  echo "OK: both exit 1, and nothing was added"
+
+  echo "step 14.6: a label equal to the folder name is no label"
+  reply="$(ctl_json project add "$repo2" --display-name "$(basename "$repo2")")" || fail "the folder-name add failed: $reply"
+  echo "reply: $reply"
+  [ "$(printf '%s' "$reply" | field added)" = true ] || fail "added is not true: $reply"
+  [ "$(printf '%s' "$reply" | field displayNameApplied)" = true ] || fail "displayNameApplied is not true: $reply"
+  [ "$(printf '%s' "$reply" | field displayName)" = "" ] || fail "displayName is not empty: $reply"
+  wait_until 20 listed_label_is "$repo2" "" || fail "project list shows '$(listed_label "$repo2")' for the folder-named label"
+  wait_until 20 stored_label_is "$W/s.sqlite" "$repo2" NULL || fail "the stored display_name is '$(stored_label "$W/s.sqlite" "$repo2")', not NULL"
+  echo "OK: added=true, displayNameApplied=true, displayName empty, display_name IS NULL"
+  { printf 'root_path\tdisplay_name\n'
+    python3 -I -c 'import sqlite3, sys
+connection = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+for root, label in connection.execute("SELECT root_path, display_name FROM project ORDER BY order_idx"):
+    print(root + "\t" + ("NULL" if label is None else label))' "$W/s.sqlite"
+  } > "$OUT_DIR/case-14-projects.tsv"
+  app_quit
+}
+
 # ---------------------------------------------------------------- run
 
 echo "run started"
@@ -1329,6 +1431,7 @@ run_case 10 "the skill's git exclude is written once, by the shared-skill adapte
 run_case 11 "startup refresh of the user copies" case_11
 run_case 12 "panel wait exits with the child's code" case_12
 run_case 13 "--dry-run prints one request and creates no pane" case_13
+run_case 14 "project add --display-name: the label, no dialog, a duplicate" case_14
 
 # Teardown: nothing of this run may outlive it. Every host is shut down, every
 # app quit, every holder and every pane session of this run ended.

@@ -19,9 +19,9 @@ use crate::{
 pub type Close = Rc<dyn Fn(&mut Window, &mut App)>;
 
 type Action = Box<dyn FnOnce(Close) -> AnyElement>;
-type OnEnter = Box<dyn FnOnce(Close) -> Run>;
+type OnEnter = Box<dyn FnOnce(Close) -> Close>;
 
-/// A card over a scrim: a title, a line of detail, the owner's content and a row of actions. Escape closes it, Tab stays inside, and focus returns on every close.
+/// A card over a scrim: a title, a line of detail, the owner's content and a row of actions. Escape closes it, Tab stays inside, and focus returns on every close. An `on_enter` confirms on the release of an Enter only after a press the dialog saw, so the release of one pressed before it opened does nothing.
 #[derive(IntoElement)]
 pub struct Dialog {
     id: ElementId,
@@ -33,6 +33,7 @@ pub struct Dialog {
     scrim_closes: bool,
     fullscreen: bool,
     first: Option<FocusHandle>,
+    enter_field: Option<FocusHandle>,
     on_close: Run,
 }
 
@@ -53,6 +54,7 @@ impl Dialog {
             scrim_closes: true,
             fullscreen: false,
             first: None,
+            enter_field: None,
             on_close: Rc::new(on_close),
         }
     }
@@ -69,8 +71,13 @@ impl Dialog {
         self
     }
 
-    /// Runs on an unmodified Enter release while the `focus_first` field holds focus; `build` gets the dialog's close.
-    pub(crate) fn on_enter(mut self, build: impl FnOnce(Close) -> Run + 'static) -> Self {
+    /// Runs on an unmodified Enter release while `field` holds focus, if the dialog saw that Enter pressed there; `build` gets the dialog's close.
+    pub fn on_enter(
+        mut self,
+        field: FocusHandle,
+        build: impl FnOnce(Close) -> Close + 'static,
+    ) -> Self {
+        self.enter_field = Some(field);
         self.enter = Some(Box::new(build));
         self
     }
@@ -82,13 +89,13 @@ impl Dialog {
     }
 
     /// Only its actions and Escape close it; a press on the scrim does not.
-    pub(crate) fn held(mut self) -> Self {
+    pub fn held(mut self) -> Self {
         self.scrim_closes = false;
         self
     }
 
     /// Where focus goes when it opens.
-    pub(crate) fn focus_first(mut self, handle: FocusHandle) -> Self {
+    pub fn focus_first(mut self, handle: FocusHandle) -> Self {
         self.first = Some(handle);
         self
     }
@@ -109,6 +116,8 @@ impl RenderOnce for Dialog {
         {
             window.focus(first, cx);
         }
+        // Whether the dialog saw an Enter pressed in its field, so a release with no press stays quiet.
+        let armed = window.use_keyed_state((self.id.clone(), "enter-armed"), cx, |_, _| false);
         let close: Run = {
             let (id, on_close) = (self.id.clone(), self.on_close);
             Rc::new(move |window, cx| {
@@ -152,13 +161,10 @@ impl RenderOnce for Dialog {
                 .gap_2()
                 .children(buttons)
         });
-        let enter = self.enter.map(|build| {
-            let field = self
-                .first
-                .clone()
-                .expect("a dialog that takes Enter names its field with focus_first");
-            (field, build(close.clone()))
-        });
+        let enter = self
+            .enter
+            .zip(self.enter_field)
+            .map(|(build, field)| (field, build(close.clone())));
         let (escape, dismiss, button) = (close.clone(), close.clone(), close);
         let fullscreen = self.fullscreen;
         let card = if fullscreen {
@@ -257,14 +263,22 @@ impl RenderOnce for Dialog {
                 }
             })
             .when_some(enter, |layer, (field, enter)| {
+                let (pressed, released) = (armed.clone(), armed);
+                let down = field.clone();
                 layer
-                    .capture_action(|_: &Enter, _, cx| cx.stop_propagation())
+                    .capture_action(move |_: &Enter, window, cx| {
+                        if down.is_focused(window) {
+                            pressed.update(cx, |armed, _| *armed = true);
+                        }
+                        cx.stop_propagation();
+                    })
                     .on_key_up(move |event, window, cx| {
                         let stroke = &event.keystroke;
-                        if stroke.key == "enter"
-                            && !stroke.modifiers.modified()
-                            && field.is_focused(window)
-                        {
+                        if stroke.key != "enter" {
+                            return;
+                        }
+                        let was_armed = released.update(cx, |armed, _| std::mem::take(armed));
+                        if was_armed && !stroke.modifiers.modified() && field.is_focused(window) {
                             cx.stop_propagation();
                             enter(window, cx);
                         }
@@ -301,5 +315,93 @@ impl RenderOnce for Dialog {
             })
             .child(layer)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{
+        AppContext, Context, Entity, IntoElement, KeyUpEvent, Keystroke, Render, TestAppContext,
+        VisualTestContext, Window,
+    };
+
+    use crate::{forms::TextInput, overlays::PromptDialog};
+
+    struct Host {
+        field: Entity<TextInput>,
+        sent: Rc<Cell<u32>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let sent = self.sent.clone();
+            PromptDialog::new("prompt", "Name", &self.field, |_, _| {})
+                .on_submit(move |_, _, _| sent.set(sent.get() + 1))
+        }
+    }
+
+    /// A prompt open with focus in its field, and how many times it has sent.
+    fn open(cx: &mut TestAppContext) -> (Entity<TextInput>, Rc<Cell<u32>>, &mut VisualTestContext) {
+        cx.update(crate::init_chat);
+        let sent = Rc::new(Cell::new(0));
+        let (host, cx) = cx.add_window_view({
+            let sent = sent.clone();
+            move |window, cx| Host {
+                field: cx.new(|cx| TextInput::new(window, cx)),
+                sent,
+            }
+        });
+        cx.run_until_parked();
+        let field = host.read_with(cx, |host, _| host.field.clone());
+        let focus = field.read_with(cx, |field, _| field.focus().clone());
+        assert!(
+            cx.update(|window, _| focus.is_focused(window)),
+            "the prompt opens with focus in its field"
+        );
+        (field, sent, cx)
+    }
+
+    fn release_enter(cx: &mut VisualTestContext) {
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke::parse("enter").expect("a key"),
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_release_with_no_press_does_not_confirm(cx: &mut TestAppContext) {
+        let (_field, sent, cx) = open(cx);
+        // The Enter that opened the dialog went down before it existed.
+        release_enter(cx);
+        assert_eq!(sent.get(), 0, "an Enter the dialog never saw pressed confirmed it");
+    }
+
+    #[gpui::test]
+    fn a_press_and_its_release_confirm_once(cx: &mut TestAppContext) {
+        let (_field, sent, cx) = open(cx);
+        cx.simulate_keystrokes("enter");
+        release_enter(cx);
+        assert_eq!(sent.get(), 1, "a press the dialog saw, then its release, confirms");
+        release_enter(cx);
+        assert_eq!(sent.get(), 1, "a second release with no press does not confirm again");
+    }
+
+    #[gpui::test]
+    fn a_press_while_the_field_is_out_of_focus_arms_nothing(cx: &mut TestAppContext) {
+        let (field, sent, cx) = open(cx);
+        // Tab leaves the field for the next control in the dialog.
+        cx.update(|window, cx| window.focus_next(cx));
+        let focus = field.read_with(cx, |field, _| field.focus().clone());
+        assert!(
+            !cx.update(|window, _| focus.is_focused(window)),
+            "focus left the field"
+        );
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| window.focus(&focus, cx));
+        cx.run_until_parked();
+        release_enter(cx);
+        assert_eq!(sent.get(), 0, "the field was not focused when Enter went down");
     }
 }

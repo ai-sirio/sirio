@@ -171,7 +171,8 @@ jobs:
       # The display tools are the ones the window captures and the echo
       # measurement use (Xvfb with Mesa's lavapipe, xdotool, X11 utils,
       # ImageMagick's import and identify). It runs under its own Xvfb; Windows
-      # does not run it (the app builds there only in the release job).
+      # does not run it (the app builds there only in the release job). xset
+      # (x11-xserver-utils) and python3-gi's GTK serve the project identity E2E.
       - name: Install the display tools for the host sessions E2E
         run: |
           sudo apt-get install -y -q --no-install-recommends \
@@ -179,7 +180,10 @@ jobs:
             x11-utils \
             imagemagick \
             xdotool \
-            mesa-vulkan-drivers
+            mesa-vulkan-drivers \
+            x11-xserver-utils \
+            python3-gi \
+            gir1.2-gtk-3.0
 
       - name: Host sessions E2E
         if: success() || failure()
@@ -206,4 +210,20 @@ jobs:
         with:
           name: sirioctl-e2e-linux
           path: sirioctl-e2e
+          if-no-files-found: warn
+
+      # The project identity E2E: the "Project added" dialog after every add from
+      # the UI (focus, Enter and Esc, skip against save, the queue, the clone and
+      # non-git paths, the Settings tab, the trace's privacy, a refresh and a
+      # relaunch), on its own private Xvfb.
+      - name: Project identity E2E
+        if: success() || failure()
+        run: Scripts/Tests/test-project-identity-e2e.sh --xvfb --out-dir project-identity-e2e
+
+      - name: Upload project identity E2E evidence
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: project-identity-e2e-linux
+          path: project-identity-e2e
           if-no-files-found: warn

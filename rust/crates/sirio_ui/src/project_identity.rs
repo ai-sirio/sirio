@@ -2,8 +2,9 @@
 //! (F-PRJ-13/14/15/16, which make F-PER-07 persistable).
 //!
 //! This is a standalone, mountable component, not a screen: the project
-//! settings sheet that must host it — `sidebar.rs`'s `render_project_settings`
-//! — belongs to `codex12`, so this file never reaches into it. See
+//! settings sheet that hosts it, `sidebar/project_settings.rs`, and the
+//! dialog shown when a project is added, `project_identity_dialog.rs`, own
+//! their own layout, so this file never reaches into either. See
 //! `../../../docs/linux-rewrite/SEAMS.md` for the mount seam and the avatar
 //! network-fetch seam this file deliberately does not build.
 
@@ -225,6 +226,20 @@ impl PickerMode {
     }
 }
 
+/// The longest display name a project keeps, counted in characters.
+const MAX_DISPLAY_NAME_CHARS: usize = 120;
+
+/// The one rule every writer of a project's display name applies: trim,
+/// remove control characters, keep the first 120 characters, trim again.
+/// `None` means no label: the result is empty or equals `base_name` (the
+/// root name) exactly, so typing the root name itself stores nothing.
+pub fn normalize_display_name(input: &str, base_name: &str) -> Option<String> {
+    let without_controls: String = input.trim().chars().filter(|c| !c.is_control()).collect();
+    let kept: String = without_controls.chars().take(MAX_DISPLAY_NAME_CHARS).collect();
+    let value = kept.trim();
+    (!value.is_empty() && value != base_name).then(|| value.to_string())
+}
+
 /// A PNG over this size is rejected before it is read into memory. The
 /// reference app states its own limit in Swift source this port has no
 /// access to (copying from a reference checkout is out of bounds here); this
@@ -310,6 +325,11 @@ pub struct ProjectIconPicker {
     emoji_grid_open: bool,
     emoji_grid_query: String,
     emoji_grid_focus: FocusHandle,
+    /// Set by `open_emoji_grid`, consumed by the first `render` that draws
+    /// the grid. The workspace keeps focus inside the "Project added" dialog
+    /// by reading the last drawn frame, where a query field not drawn yet is
+    /// outside the dialog, so focusing it on open would be taken back.
+    focus_grid_when_drawn: bool,
     /// One blink shared by every field in the picker: only one of them can
     /// hold focus at a time, so one timer is all the surface ever needs —
     /// the same arrangement `sidebar.rs` and `settings.rs` use.
@@ -320,6 +340,9 @@ pub struct ProjectIconPicker {
     favicon_caret_visible: bool,
     on_change: Option<Rc<dyn Fn(ProjectIcon)>>,
     on_change_with_context: Option<Rc<dyn Fn(ProjectIcon, &mut Context<Self>)>>,
+    /// Drawn without its own card, for a host that already is one (the
+    /// Project added dialog); the source rows then wrap to fit.
+    bare: bool,
     /// Test-only substitute for the OS file picker `choose_local_png`
     /// normally opens — mirrors `chat.rs`'s `attach_test_paths` seam, since
     /// nothing can drive a real native file dialog from a `gpui::test`.
@@ -350,6 +373,7 @@ impl ProjectIconPicker {
             emoji_grid_open: false,
             emoji_grid_query: String::new(),
             emoji_grid_focus: cx.focus_handle(),
+            focus_grid_when_drawn: false,
             field_blink: caret::Blink::new(),
             emoji_caret_visible: false,
             emoji_grid_caret_visible: false,
@@ -357,6 +381,7 @@ impl ProjectIconPicker {
             favicon_caret_visible: false,
             on_change: None,
             on_change_with_context: None,
+            bare: false,
             #[cfg(test)]
             png_test_paths: Vec::new(),
         }
@@ -396,9 +421,46 @@ impl ProjectIconPicker {
         self
     }
 
+    /// Draws the picker without its own card, so a host that is already a
+    /// card has one surface, and lets the source rows wrap so they fit a
+    /// narrow host.
+    pub fn bare(mut self) -> Self {
+        self.bare = true;
+        self
+    }
+
     /// The current value, for the host and for tests.
     pub fn value(&self) -> &ProjectIcon {
         &self.value
+    }
+
+    /// The dialog's `act mode <icon|emoji|avatar>`; any other value is
+    /// ignored, and the dialog rejects it before it gets here.
+    pub(crate) fn control_set_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        let index = match mode {
+            "icon" => PickerMode::Icon.index(),
+            "emoji" => PickerMode::Emoji.index(),
+            "avatar" => PickerMode::Avatar.index(),
+            _ => return,
+        };
+        self.set_mode(index, cx);
+    }
+
+    /// The dialog's `act open-emoji-grid`.
+    pub(crate) fn control_open_emoji_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_emoji_grid(window, cx);
+    }
+
+    /// The dialog's `act pick-glyph <id>`: commits through the path a click
+    /// on that glyph takes. An id that names no glyph is an error.
+    pub(crate) fn control_pick_glyph(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let glyph = ProjectGlyph::parse(id).ok_or_else(|| format!("unknown glyph {id:?}"))?;
+        self.select_glyph(glyph, cx);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -492,10 +554,10 @@ impl ProjectIconPicker {
     /// F-PRJ-16: opens the searchable emoji grid. Self-contained -- see
     /// `emoji_grid_open`'s doc comment for why this doesn't delegate to a
     /// host callback the way `choose_local_png`'s file picker does.
-    fn open_emoji_grid(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_emoji_grid(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.emoji_grid_open = true;
         self.emoji_grid_query.clear();
-        self.emoji_grid_focus.focus(window, cx);
+        self.focus_grid_when_drawn = true;
         cx.notify();
     }
 
@@ -513,6 +575,9 @@ impl ProjectIconPicker {
         let key = event.keystroke.key.as_str();
         if key == "escape" {
             self.close_emoji_grid(cx);
+            // The grid takes this Esc; a dialog around the picker would
+            // otherwise close on it as well.
+            cx.stop_propagation();
             return;
         }
         if key == "backspace" || key == "delete" {
@@ -787,6 +852,7 @@ impl ProjectIconPicker {
                     .flex()
                     .items_center()
                     .gap(px(BezelTheme::SPACE_MD))
+                    .when(self.bare, |row| row.flex_wrap())
                     .child(field)
                     .child(controls::button(
                         "project-icon-emoji-set",
@@ -1052,14 +1118,28 @@ impl ProjectIconPicker {
                 Self::commit_favicon,
                 "Use Favicon",
                 theme,
-            ));
+            ))
+            .child(
+                div()
+                    .id("project-icon-avatar-caption")
+                    .debug_selector(|| "project-icon-avatar-caption".into())
+                    .text_size(theme.typography.footnote)
+                    .text_color(theme.ely.fg_muted)
+                    .child(
+                        selectable_text(
+                            "GitHub and favicon avatars show as a globe until Sirio can \
+                             download images",
+                        )
+                        .id("project-icon-avatar-caption-text"),
+                    ),
+            );
 
         if let Some(label) = current_avatar_label {
             // A locally chosen PNG is real file content already on disk, so
             // the preview can show the actual image rather than only a text
             // caption. GitHub/Favicon sources still fall back to text-only
-            // here: rendering those needs a network fetch this app has no
-            // HTTP client for yet (F-PRJ-14).
+            // here: they need an avatar download, which Sirio does not do
+            // yet (F-PRJ-14).
             if let ProjectIconValue::Avatar(AvatarSource::LocalPng(path)) = &self.value.value {
                 column = column.child(
                     gpui::img(path.clone())
@@ -1165,6 +1245,7 @@ impl ProjectIconPicker {
             .flex()
             .items_center()
             .gap(px(BezelTheme::SPACE_MD))
+            .when(self.bare, |row| row.flex_wrap())
             .child(field)
             .child(controls::button(
                 button_label,
@@ -1213,6 +1294,16 @@ impl Render for ProjectIconPicker {
         self.emoji_grid_caret_visible = emoji_grid_focused && lit;
         self.github_caret_visible = github_focused && lit;
         self.favicon_caret_visible = favicon_focused && lit;
+        // The grid is drawn in this frame, so after it the query field is
+        // inside the dialog's drawn tree and the focus stays where it is put.
+        if self.focus_grid_when_drawn
+            && self.emoji_grid_open
+            && matches!(self.mode, PickerMode::Emoji)
+        {
+            self.focus_grid_when_drawn = false;
+            let focus = self.emoji_grid_focus.clone();
+            window.on_next_frame(move |window, cx| focus.focus(window, cx));
+        }
 
         let mode_switch = controls::segmented(
             "project-icon-mode",
@@ -1233,7 +1324,8 @@ impl Render for ProjectIconPicker {
             PickerMode::Avatar => self.render_avatar_mode(theme, entity.clone()),
         };
 
-        controls::card(theme)
+        let surface = if self.bare { div() } else { controls::card(theme) };
+        surface
             .child(controls::row("Project icon", None, mode_switch, theme))
             .child(controls::separator(theme))
             .child(div().p(px(BezelTheme::SPACE_LG)).child(body))
@@ -1246,6 +1338,101 @@ mod tests {
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    fn some(value: &str) -> Option<String> {
+        Some(value.to_string())
+    }
+
+    #[test]
+    fn a_label_loses_its_surrounding_spaces() {
+        assert_eq!(normalize_display_name("  api  ", "root"), some("api"));
+        assert_eq!(normalize_display_name("\u{a0}api\u{3000}", "root"), some("api"));
+    }
+
+    #[test]
+    fn a_label_of_only_spaces_is_no_label() {
+        assert_eq!(normalize_display_name("", "root"), None);
+        assert_eq!(normalize_display_name("   ", "root"), None);
+    }
+
+    #[test]
+    fn control_characters_are_removed_and_the_rest_is_kept() {
+        assert_eq!(normalize_display_name("a\tb\nc\u{7}d", "root"), some("abcd"));
+        assert_eq!(normalize_display_name("my \u{7}app", "root"), some("my app"));
+        // Controls at the edges are removed before the second trim, never
+        // shielding the spaces beside them.
+        assert_eq!(normalize_display_name("\u{7} api \n", "root"), some("api"));
+    }
+
+    #[test]
+    fn a_label_of_only_control_characters_is_no_label() {
+        assert_eq!(normalize_display_name("\u{7}", "root"), None);
+        assert_eq!(normalize_display_name(" \t\n\u{7} ", "root"), None);
+    }
+
+    #[test]
+    fn a_label_of_exactly_120_characters_is_kept_whole() {
+        let label = "a".repeat(120);
+        assert_eq!(normalize_display_name(&label, "root"), Some(label.clone()));
+    }
+
+    #[test]
+    fn a_label_of_121_characters_is_cut_to_120() {
+        let label = "a".repeat(121);
+        assert_eq!(normalize_display_name(&label, "root"), Some("a".repeat(120)));
+    }
+
+    #[test]
+    fn the_cut_counts_characters_not_bytes() {
+        // 'e acute' is two bytes, the rocket four: a byte cut would panic or
+        // keep fewer characters.
+        let accents = "\u{e9}".repeat(150);
+        assert_eq!(normalize_display_name(&accents, "root"), Some("\u{e9}".repeat(120)));
+        let rockets = "\u{1F680}".repeat(121);
+        assert_eq!(normalize_display_name(&rockets, "root"), Some("\u{1F680}".repeat(120)));
+        let mixed = format!("{}{}", "\u{e9}".repeat(119), "\u{1F680}\u{1F680}");
+        assert_eq!(
+            normalize_display_name(&mixed, "root"),
+            Some(format!("{}\u{1F680}", "\u{e9}".repeat(119)))
+        );
+    }
+
+    #[test]
+    fn the_cut_is_taken_after_the_controls_are_removed() {
+        // 130 characters of which 20 are controls: all 110 others survive.
+        let label = format!("{}{}", "\u{7}".repeat(20), "b".repeat(110));
+        assert_eq!(normalize_display_name(&label, "root"), Some("b".repeat(110)));
+    }
+
+    #[test]
+    fn a_cut_that_leaves_a_trailing_space_is_trimmed_again() {
+        let label = format!("{} {}", "a".repeat(119), "b".repeat(10));
+        assert_eq!(normalize_display_name(&label, "root"), Some("a".repeat(119)));
+    }
+
+    #[test]
+    fn a_label_equal_to_the_root_name_is_no_label() {
+        assert_eq!(normalize_display_name("sirio", "sirio"), None);
+    }
+
+    #[test]
+    fn a_label_equal_to_the_root_name_after_trimming_is_no_label() {
+        assert_eq!(normalize_display_name("  sirio\t", "sirio"), None);
+        assert_eq!(normalize_display_name("si\u{7}rio", "sirio"), None);
+    }
+
+    #[test]
+    fn a_label_that_differs_from_the_root_name_only_by_case_is_kept() {
+        assert_eq!(normalize_display_name("Sirio", "sirio"), some("Sirio"));
+        assert_eq!(normalize_display_name("SIRIO", "sirio"), some("SIRIO"));
+    }
+
+    #[test]
+    fn an_empty_root_name_still_gives_no_label_for_an_empty_input() {
+        assert_eq!(normalize_display_name("", ""), None);
+        assert_eq!(normalize_display_name("   ", ""), None);
+        assert_eq!(normalize_display_name("api", ""), some("api"));
+    }
 
     /// A scratch file that removes itself when the test finishes, mirroring
     /// `chat.rs`'s own `TempDir` — the same reasoning applies: nothing can
