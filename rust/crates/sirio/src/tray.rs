@@ -41,14 +41,20 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use sirio_activity::AgentStatus;
 
 /// One roster row: a worktree with at least one pane reporting a live
-/// [`AgentStatus`]. Mirrors Swift's `activeAgentWorktrees` filter
-/// (`App/AppModel.swift:157`).
+/// [`AgentStatus`], or with a session that ended a turn out of sight and has not
+/// been looked at since. Mirrors Swift's `activeAgentWorktrees` filter
+/// (`App/AppModel.swift:157`), plus the unread worktrees that filter never had.
 #[derive(Clone, PartialEq)]
 pub struct TrayRosterEntry {
     pub path: PathBuf,
     pub branch: String,
     pub project_name: String,
-    pub status: AgentStatus,
+    /// `None` for a worktree listed only because it is unread: its agents are
+    /// not running, so there is no live status to name.
+    pub status: Option<AgentStatus>,
+    /// Some session of the worktree ended a turn unseen. The label leads with a
+    /// dot, and the row is part of the change key the poll loop compares.
+    pub unread: bool,
     /// *When* this entry's status last changed -- never how long ago
     /// (#187). The poll loop in `main.rs` keeps the previous tick's
     /// snapshot and only nudges the tray when the two differ, so every
@@ -89,7 +95,7 @@ enum TrayIconKind {
 fn tray_icon_kind(roster: &[TrayRosterEntry]) -> TrayIconKind {
     if roster
         .iter()
-        .any(|entry| entry.status == AgentStatus::NeedsInput)
+        .any(|entry| entry.status == Some(AgentStatus::NeedsInput))
     {
         TrayIconKind::Attention
     } else {
@@ -126,7 +132,11 @@ fn format_status_age(age: Duration) -> String {
 /// deterministic in tests. Production callers pass `Instant::now()` at the
 /// moment the menu is actually drawn (#187).
 fn roster_menu_label(entry: &TrayRosterEntry, now: Instant) -> String {
-    let status = entry.status.human_label();
+    let mark = if entry.unread { "● " } else { "" };
+    let Some(status) = entry.status else {
+        return format!("{mark}{} — {}", entry.branch, entry.project_name);
+    };
+    let status = status.human_label();
     let status = entry
         .status_changed_at
         .and_then(|changed_at| now.checked_duration_since(changed_at))
@@ -134,7 +144,7 @@ fn roster_menu_label(entry: &TrayRosterEntry, now: Instant) -> String {
             || status.to_string(),
             |age| format!("{status} · {}", format_status_age(age)),
         );
-    format!("{} — {} ({status})", entry.branch, entry.project_name)
+    format!("{mark}{} — {} ({status})", entry.branch, entry.project_name)
 }
 
 /// Opaque handle kept alive for the process's lifetime. `ksni` serves
@@ -1114,7 +1124,8 @@ mod tests {
             path: PathBuf::from("/worktrees/feature"),
             branch: "feature/login".into(),
             project_name: "Sirio".into(),
-            status: AgentStatus::NeedsInput,
+            status: Some(AgentStatus::NeedsInput),
+            unread: false,
             status_changed_at: now.checked_sub(std::time::Duration::from_secs(4 * 60)),
         };
 
@@ -1130,14 +1141,16 @@ mod tests {
             path: PathBuf::from("/worktrees/normal"),
             branch: "normal".into(),
             project_name: "Sirio".into(),
-            status: AgentStatus::Running,
+            status: Some(AgentStatus::Running),
+            unread: false,
             status_changed_at: None,
         };
         let waiting = TrayRosterEntry {
             path: PathBuf::from("/worktrees/waiting"),
             branch: "waiting".into(),
             project_name: "Sirio".into(),
-            status: AgentStatus::NeedsInput,
+            status: Some(AgentStatus::NeedsInput),
+            unread: false,
             status_changed_at: None,
         };
 
@@ -1155,14 +1168,16 @@ mod tests {
                 path: PathBuf::from("/worktrees/running"),
                 branch: "running".into(),
                 project_name: "Sirio".into(),
-                status: AgentStatus::Running,
+                status: Some(AgentStatus::Running),
+                unread: false,
                 status_changed_at: None,
             },
             TrayRosterEntry {
                 path: PathBuf::from("/worktrees/done"),
                 branch: "done".into(),
                 project_name: "Sirio".into(),
-                status: AgentStatus::Done,
+                status: Some(AgentStatus::Done),
+                unread: false,
                 status_changed_at: None,
             },
         ];

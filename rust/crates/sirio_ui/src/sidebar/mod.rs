@@ -175,6 +175,9 @@ pub struct SidebarTab {
     pub status: Option<ActivityStatus>,
     /// Unix milliseconds of the tab's last agent event, when known.
     pub last_event_at: Option<i64>,
+    /// Whether the session ended a turn out of sight and has not been looked at
+    /// since. Host-computed, like `status`: this crate only draws it.
+    pub unread: bool,
 }
 
 /// Width the sidebar draws itself at until the host says otherwise, and the
@@ -282,6 +285,12 @@ pub struct SidebarRow {
     /// is a pill with a running status, and drawing it twice was the only
     /// thing the badge added.
     pub pills: Vec<SidebarPill>,
+    /// How many of the project's worktrees' tabs are unread, for a project row
+    /// whose section is folded: its worktree rows are not drawn, so the count
+    /// is the only place the mark can show. Filled by `visible_rows`, never by
+    /// the host, and `0` for every other row. Part of the row a view diffs, so
+    /// a change repaints the header.
+    pub unread_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -905,6 +914,7 @@ impl Sidebar {
                 agent_brand: None,
                 comment: None,
                 pills: Vec::new(),
+                unread_count: 0,
             }
         }
 
@@ -946,6 +956,7 @@ impl Sidebar {
             kind: TabKind::AgentChat,
             persistence_id: "test-tab-1".into(),
             last_event_at: None,
+            unread: false,
         }];
         rows[6].pills = vec![SidebarPill {
             tab_id: Some(2),
@@ -958,6 +969,7 @@ impl Sidebar {
             kind: TabKind::Terminal,
             persistence_id: "test-tab-2".into(),
             last_event_at: None,
+            unread: false,
         }];
 
         Self {
@@ -1033,6 +1045,7 @@ impl Sidebar {
                 agent_brand: None,
                 comment: None,
                 pills: Vec::new(),
+                unread_count: 0,
             });
             for (worktree_index, worktree) in project.worktrees.into_iter().enumerate() {
                 rows.push(SidebarRow {
@@ -1055,6 +1068,7 @@ impl Sidebar {
                     agent_brand: None,
                     comment: worktree.comment,
                     pills: Vec::new(),
+                    unread_count: 0,
                 });
             }
         }
@@ -2420,6 +2434,7 @@ impl Sidebar {
                     kind,
                     persistence_id: tab.persistence_id,
                     last_event_at: tab.last_event_at,
+                    unread: tab.unread,
                 }
             })
             .collect();
@@ -2697,6 +2712,7 @@ impl Sidebar {
                 agent_brand: None,
                 comment: None,
                 pills: Vec::new(),
+                unread_count: 0,
             },
         );
         self.select_row(id, cx);
@@ -3064,6 +3080,7 @@ impl Sidebar {
                 let mut project_row = project.clone();
                 if !project.expanded {
                     project_row.agent_status = Self::collapsed_project_status(section);
+                    project_row.unread_count = Self::unread_pills(section);
                 }
                 filtered.push(project_row);
                 // A collapsed project opens itself when the filter reaches
@@ -3092,6 +3109,30 @@ impl Sidebar {
             project_index = next_project;
         }
         filtered
+    }
+
+    /// How many unread pills a project's worktree rows hold between them.
+    fn unread_pills(children: &[SidebarRow]) -> usize {
+        children
+            .iter()
+            .filter(|row| row.kind == RowKind::Worktree)
+            .flat_map(|row| row.pills.iter())
+            .filter(|pill| pill.unread)
+            .count()
+    }
+
+    /// Each worktree row's checkout path with the number of its pills that are
+    /// unread, in tree order. What the control socket's attention read reports
+    /// as `rows`: the sidebar's own answer, not the host's.
+    pub fn unread_marks(&self) -> Vec<(PathBuf, usize)> {
+        self.rows
+            .iter()
+            .filter(|row| row.kind == RowKind::Worktree)
+            .filter_map(|row| {
+                let path = row.path.clone()?;
+                Some((path, row.pills.iter().filter(|pill| pill.unread).count()))
+            })
+            .collect()
     }
 
     /// F-SID-06: a collapsed project hides its worktree rows, so the status
@@ -4668,7 +4709,8 @@ pub(super) mod tests_support {
                     persistence_id: "test-tab-1".into(),
                     status: None,
                     last_event_at: None,
-                },
+                                    unread: false,
+},
                 SidebarTab {
                     tab: SidebarTabRef::Open(2),
                     title: "Terminal".to_string(),
@@ -4678,7 +4720,8 @@ pub(super) mod tests_support {
                     persistence_id: "test-tab-2".into(),
                     status: None,
                     last_event_at: None,
-                },
+                                    unread: false,
+},
             ],
             cx,
         );
@@ -5236,7 +5279,8 @@ mod tests {
                     persistence_id: "test-tab-7".into(),
                     status: None,
                     last_event_at: None,
-                }],
+                                    unread: false,
+}],
                 cx,
             );
             sidebar.filter = "main".to_string();
@@ -5317,7 +5361,8 @@ mod tests {
                         persistence_id: "test-tab-parked-0".into(),
                         status: None,
                         last_event_at: None,
-                    },
+                                            unread: false,
+},
                     SidebarTab {
                         tab: SidebarTabRef::Parked(1),
                         title: "Old Chat".into(),
@@ -5327,7 +5372,8 @@ mod tests {
                         persistence_id: "test-tab-parked-1".into(),
                         status: None,
                         last_event_at: None,
-                    },
+                                            unread: false,
+},
                 ],
                 cx,
             );
@@ -7178,7 +7224,8 @@ mod tests {
             persistence_id: "test-tab-7".into(),
             status: None,
             last_event_at: None,
-        };
+                    unread: false,
+};
         entity.update(&mut cx, |sidebar, cx| {
             sidebar.set_worktree_tabs(1, vec![plain_terminal()], cx);
         });
@@ -7339,7 +7386,8 @@ mod tests {
                     persistence_id: "test-tab-7".into(),
                     status: None,
                     last_event_at: None,
-                }],
+                                    unread: false,
+}],
                 cx,
             );
         });
@@ -8115,7 +8163,8 @@ mod tests {
                     persistence_id: "tab-1".into(),
                     status: Some(ActivityStatus::Done),
                     last_event_at: Some(1_000),
-                },
+                                    unread: false,
+},
                 SidebarTab {
                     tab: SidebarTabRef::Open(2),
                     title: "Newer chat".into(),
@@ -8125,7 +8174,8 @@ mod tests {
                     persistence_id: "tab-2".into(),
                     status: Some(ActivityStatus::Running),
                     last_event_at: Some(5_000),
-                },
+                                    unread: false,
+},
             ],
             cx,
         );
@@ -8202,7 +8252,8 @@ mod tests {
             persistence_id: "tab-3".into(),
             status: Some(status),
             last_event_at: Some(1),
-        };
+                    unread: false,
+};
         window
             .update(&mut cx, |sidebar, _window, cx| {
                 sidebar.set_worktree_tabs(2, vec![asking(ActivityStatus::NeedsInput)], cx)

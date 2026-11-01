@@ -74,6 +74,8 @@ set -euo pipefail
 #                      reveal its Agent row, a click on the Follow checkbox toggles it
 #   unread_parked_chat a turn that ends while its worktree is not selected marks the chat unread and posts
 #                      one notification naming its branch; showing the worktree clears the mark
+#                      (with --display, also the sidebar's own count in the read's `rows`, and captures of the
+#                      row, the Sessions card and a folded project's badge)
 #   unread_question    a permission the turn asks while the worktree is not selected reads needs-input and
 #                      unread, and is still open when the worktree is shown
 #   unread_secondary_seen  a chat in the shown Secondary half, beside a terminal in the Primary, stops
@@ -2335,6 +2337,33 @@ posted_bodies_since() { # baseline
 for line in sys.stdin:
     print(json.loads(line)["body"])'
 }
+# The count of unread session pills the sidebar holds for the worktree at $1, from the `rows`
+# key of `surface attention read` (what `Sidebar::unread_marks` reports): a number, or nothing
+# when the read has no `rows` key or lists no such worktree.
+attention_marks() { # worktree
+  reply surface attention read | python3 -c 'import json, os, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+if "rows" not in reply:
+    sys.exit(0)
+for row in json.loads(reply["rows"]):
+    if os.path.realpath(row["worktree"]) == os.path.realpath(sys.argv[1]):
+        print(row["unread"])
+        break' "$1"
+}
+# The sidebar's pills are refreshed by the reconcile, which a frame drives: a --state-only run
+# with no display paints nothing, so its `rows` read has nothing to say and is not asserted.
+rows_painted() { [ -n "$DISPLAY_TARGET" ]; }
+# Polls until the sidebar's unread count for worktree $2 reads WANT.
+wait_marks() { # desc worktree want seconds
+  local desc=$1 worktree=$2 want=$3 seconds=$4 got="" _
+  for _ in $(seq 1 $((seconds * 5))); do
+    got=$(attention_marks "$worktree")
+    [ "$got" = "$want" ] && { echo "OK: $desc (rows count = $want)"; return 0; }
+    sleep 0.2
+  done
+  fail "$desc: the sidebar's unread count for $worktree is '$got', not '$want' after $seconds s; read: $(reply surface attention read | tr '\n' ' ')"
+}
 # The last attention read as the scenario's artifact: attention-NAME.json under the out dir.
 save_attention() { # name
   reply surface attention read | python3 -c 'import json, sys
@@ -2354,6 +2383,11 @@ scenario_unread_parked_chat() {
   [ "$(attention_chat unread)" = false ] || fail "the chat reads unread before any turn"
   local base
   base=$(posted_count)
+  if rows_painted; then
+    wait_marks "the sidebar holds no unread pill before any turn" "$LINKED" 0 10
+  else
+    echo "SKIP: no display, so no frame refreshes the sidebar: the rows assertions are not run"
+  fi
   capture unread_parked_chat-before
   send_prompt request
   ctl select-workspace --workspace "$PRIMARY" >/dev/null
@@ -2374,10 +2408,28 @@ scenario_unread_parked_chat() {
   [ "$(( $(posted_count) - base ))" = 1 ] || fail "the stop posted more than one notification: $(posted_rows | tr '\n' ' ')"
   case "$(posted_bodies_since "$base")" in *feat/login*) ;; *) fail "the notification's body does not name feat/login: $(posted_bodies_since "$base")" ;; esac
   echo "OK: one notification, '$(posted_bodies_since "$base")'"
+  if rows_painted; then
+    echo "step: the sidebar draws the unread mark on the worktree's row"
+    wait_marks "the sidebar counts the unread chat under the worktree" "$LINKED" 1 10
+    capture unread_parked_chat-unread
+    echo "step: the Sessions view draws the same mark on the session's card"
+    # The two segments under the sidebar's top edge, at fixed window pixels like the chevron.
+    click_at_window "207 65"
+    capture unread-sessions-view
+    click_at_window "90 65"
+    echo "step: a collapsed project keeps the mark as a badge on its header"
+    # The project header's disclosure chevron: the sidebar is a fixed-width column, so it is
+    # at the same window pixel in every window size.
+    click_at_window "263 171"
+    wait_marks "the collapsed project still counts the unread chat" "$LINKED" 1 10
+    capture unread-collapsed-project
+    click_at_window "263 171"
+  fi
   echo "step: showing the worktree clears the mark"
   ctl select-workspace --workspace "$LINKED" >/dev/null
   look_at_shown
   wait_attention "showing the chat's worktree cleared the mark" unread false 10
+  rows_painted && wait_marks "showing the worktree cleared the sidebar's count" "$LINKED" 0 10
   capture unread_parked_chat-after
   save_attention unread_parked_chat
   stop_app

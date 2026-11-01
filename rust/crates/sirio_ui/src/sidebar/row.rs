@@ -23,6 +23,10 @@ pub struct SidebarPill {
     pub kind: TabKind,
     pub persistence_id: String,
     pub last_event_at: Option<i64>,
+    /// The tab's session ended a turn out of sight and has not been looked at
+    /// since. Drawn on the pill (ring and dot) and, aggregated, on its worktree
+    /// row and a folded project header.
+    pub unread: bool,
 }
 
 /// What a worktree (or collapsed project) row draws in place of a status
@@ -365,6 +369,10 @@ impl Sidebar {
                     .when(pill.selected || pill_cursor == Some(index), |this| {
                         this.border_1().border_color(theme.sirio.quantity)
                     })
+                    // Unread outranks the selection ring: the colour is the news.
+                    .when(pill.unread, |this| {
+                        this.border_1().border_color(theme.ely.info)
+                    })
                     .when(parked.is_some(), |this| this.opacity(0.6))
                     .hover(|style| style.bg(theme.ely.hover))
                     .child(
@@ -390,7 +398,11 @@ impl Sidebar {
                                     .w(px(6.0))
                                     .h(px(6.0))
                                     .rounded_full()
-                                    .bg(crate::status::status_color(status, theme)),
+                                    .bg(if pill.unread {
+                                        theme.ely.info
+                                    } else {
+                                        crate::status::status_color(status, theme)
+                                    }),
                             )
                         })
                     })
@@ -640,6 +652,9 @@ impl Sidebar {
             ),
             RowStatusGlyph::None => None,
         };
+        // Any unread pill makes the whole worktree row read as news: a dot at its
+        // leading edge and a heavier title. A project row is already semibold.
+        let row_unread = is_worktree && row.pills.iter().any(|pill| pill.unread);
         let title_element = div()
             .min_w_0()
             .flex_1()
@@ -656,7 +671,7 @@ impl Sidebar {
             // the same defect, and the same fix, on the colour.
             .text_size(theme.typography.scaled(ROW_TITLE_FONT_SIZE))
             .line_height(Self::title_line_height(&theme.typography))
-            .font_weight(if is_project {
+            .font_weight(if is_project || row_unread {
                 FontWeight::SEMIBOLD
             } else {
                 FontWeight::NORMAL
@@ -826,7 +841,27 @@ impl Sidebar {
             .child(title_line)
             .when(has_sub_line, |this| this.child(sub_line));
 
-        row_view.child(content)
+        row_view
+            .when(row_unread, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        // Level with the title line, the card's top padding down.
+                        .top(px(7.0))
+                        .h(Self::title_line_height(&theme.typography))
+                        .left(px(3.0))
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .debug_selector(move || format!("sidebar-unread-dot-{row_id}"))
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(theme.ely.info),
+                        ),
+                )
+            })
+            .child(content)
     }
 }
 
@@ -856,6 +891,7 @@ mod tests {
             agent_brand: None,
             comment: None,
             pills: Vec::new(),
+            unread_count: 0,
         }
     }
 
@@ -871,6 +907,7 @@ mod tests {
             kind: TabKind::AgentChat,
             persistence_id: format!("test-tab-{tab_id}"),
             last_event_at: None,
+            unread: false,
         }
     }
 

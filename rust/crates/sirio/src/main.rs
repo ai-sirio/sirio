@@ -5905,6 +5905,10 @@ struct SirioWorkspace {
     /// Seeded at boot from the database, and kept there by
     /// `pending_attention_writes`; a record stays until its tab is closed.
     session_attention: HashMap<String, TabAttention>,
+    /// The worktrees with at least one unread tab, as the last
+    /// `sync_sidebar_tabs` found them: live, parked and unmounted alike. The tray
+    /// roster lists such a worktree even when it has no status to show.
+    worktree_unread: HashSet<PathBuf>,
     /// The sessions whose record an earlier run left: each leaves the set at its
     /// first status decision, which reads the record as a restore
     /// (`first_status_for`).
@@ -7194,6 +7198,7 @@ impl SirioWorkspace {
             last_polled_window_active: true,
             attention_from_previous_run: previous_attention.keys().cloned().collect(),
             session_attention: previous_attention,
+            worktree_unread: HashSet::new(),
             pending_attention_writes: BTreeMap::new(),
             #[cfg(debug_assertions)]
             debug_window_active: debug_window_active_from_env(),
@@ -12332,23 +12337,46 @@ impl SirioWorkspace {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut entries = Vec::new();
         for workspace in &state.workspaces {
-            let Ok(panes) = self.panes.list_for(Path::new(&workspace.path)) else {
-                continue;
-            };
-            let pane_ids: Vec<String> = panes.into_iter().map(|pane| pane.id).collect();
+            let path = Path::new(&workspace.path);
+            let mut pane_ids: Vec<String> = self
+                .panes
+                .list_for(path)
+                .map(|panes| panes.into_iter().map(|pane| pane.id).collect())
+                .unwrap_or_default();
+            // A worktree the control snapshot holds no panes for is one parked behind
+            // another selection: its panes live on, and its strip names them.
+            if pane_ids.is_empty()
+                && let Some(parked) = self.parked_strip_of(path)
+            {
+                pane_ids = parked
+                    .terminal_panes_by_tab
+                    .iter()
+                    .chain(&parked.chat_panes_by_tab)
+                    .flatten()
+                    .map(|pane_id| format!("pane-{pane_id}"))
+                    .collect();
+            }
             let refs: Vec<&str> = pane_ids.iter().map(String::as_str).collect();
-            let Some(status) = self.activity.status_for_panes(&refs) else {
+            let status = self.activity.status_for_panes(&refs);
+            let unread = self
+                .worktree_unread
+                .iter()
+                .any(|unread| paths_name_the_same_document(unread, path));
+            // A worktree with nothing to say, neither a live status nor an unread
+            // session, is not listed.
+            if status.is_none() && !unread {
                 continue;
-            };
+            }
             entries.push(tray::TrayRosterEntry {
                 path: PathBuf::from(&workspace.path),
                 branch: workspace.branch.clone(),
                 project_name: workspace.project.clone(),
                 status,
+                unread,
                 status_changed_at: self.activity.status_changed_at_for_panes(&refs),
             });
         }
-        sirio_activity::AttentionSort::sorted(&entries, |entry| Some(entry.status))
+        sirio_activity::AttentionSort::sorted(&entries, |entry| entry.status)
     }
 
     /// F-USE-05: the tab a tray roster click jumps to once its worktree is
@@ -12489,6 +12517,7 @@ impl SirioWorkspace {
                 agent: self.tab_agent_mark(tab),
                 status: None,
                 last_event_at: None,
+                unread: false,
             })
             .collect()
     }
@@ -12549,6 +12578,7 @@ impl SirioWorkspace {
                     .and_then(AgentMark::for_agent_id),
                 status: None,
                 last_event_at: None,
+                unread: false,
             })
             .collect();
         self.parked_sidebar_tabs
@@ -13711,6 +13741,7 @@ impl SirioWorkspace {
             .collect();
         let mut sidebar_updates: Vec<(usize, Vec<SidebarTab>)> =
             Vec::with_capacity(worktree_rows.len());
+        let mut worktree_unread: HashSet<PathBuf> = HashSet::new();
         for (worktree_id, path) in worktree_rows {
             let mut tabs = self.sidebar_tabs_for_worktree(&path);
             // A worktree with no live tabs keeps listing its persisted strip
@@ -13747,9 +13778,16 @@ impl SirioWorkspace {
                     self.note_session_status(&tab.persistence_id, status, now_ms);
                 }
                 tab.last_event_at = self.session_event_at.get(&tab.persistence_id).copied();
+                // The record is seeded at boot for every open tab, so this is right for
+                // a live, a parked and a database-only row alike.
+                tab.unread = self.is_unread(&tab.persistence_id);
+            }
+            if tabs.iter().any(|tab| tab.unread) {
+                worktree_unread.insert(path.clone());
             }
             sidebar_updates.push((worktree_id, tabs));
         }
+        self.worktree_unread = worktree_unread;
         self.flush_session_event_writes();
         self.sidebar.update(cx, |sidebar, cx| {
             for (worktree_id, tabs) in sidebar_updates {
@@ -13783,6 +13821,19 @@ impl SirioWorkspace {
         }
     }
 
+    /// The strip parked for `worktree_path`: the exact key first, then by path
+    /// identity, which survives a catalog refresh spelling the checkout another way.
+    fn parked_strip_of(&self, worktree_path: &Path) -> Option<&ParkedWorktreeTabs> {
+        self.parked_worktree_tabs
+            .get(worktree_path.to_string_lossy().as_ref())
+            .or_else(|| {
+                self.parked_worktree_tabs
+                    .iter()
+                    .find(|(path, _)| paths_name_the_same_document(Path::new(path), worktree_path))
+                    .map(|(_, parked)| parked)
+            })
+    }
+
     /// A tab of a mounted, parked strip: the most urgent status among its
     /// panes, found by persistence id (the sidebar's parked index counts
     /// only sidebar tabs, the layout counts all). `None` when the worktree is
@@ -13792,17 +13843,7 @@ impl SirioWorkspace {
         worktree_path: &Path,
         persistence_id: &str,
     ) -> Option<ActivityStatus> {
-        let parked = self
-            .parked_worktree_tabs
-            .get(worktree_path.to_string_lossy().as_ref())
-            .or_else(|| {
-                self.parked_worktree_tabs
-                    .iter()
-                    .find(|(path, _)| {
-                        paths_name_the_same_document(Path::new(path), worktree_path)
-                    })
-                    .map(|(_, parked)| parked)
-            })?;
+        let parked = self.parked_strip_of(worktree_path)?;
         let index = parked
             .layout
             .tabs
@@ -14372,7 +14413,7 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         match act {
-            AttentionAct::Read => Ok(self.control_attention_read()),
+            AttentionAct::Read => Ok(self.control_attention_read(cx)),
             AttentionAct::Focus(focus) => {
                 #[cfg(debug_assertions)]
                 {
@@ -14392,8 +14433,10 @@ impl SirioWorkspace {
     }
 
     /// `windowActive` and `sessions`: a JSON array with one object per session
-    /// Sirio can reach, plus one per record whose session it no longer holds.
-    fn control_attention_read(&self) -> Vec<(String, String)> {
+    /// Sirio can reach, plus one per record whose session it no longer holds. `rows`
+    /// is a second JSON array: each worktree row of the sidebar with its count of
+    /// unread pills, as the sidebar holds them (see `Sidebar::unread_marks`).
+    fn control_attention_read(&self, cx: &App) -> Vec<(String, String)> {
         let status_word = |status: Option<AgentStatus>| match status {
             Some(_) => serde_json::json!(agent_status_word(status)),
             None => serde_json::Value::Null,
@@ -14435,6 +14478,20 @@ impl SirioWorkspace {
                 "onScreen": false,
             }));
         }
+        // What the sidebar holds, not what the host would compute: it is refreshed by the
+        // reconcile a frame drives, so this read never runs one.
+        let sidebar_rows: Vec<serde_json::Value> = self
+            .sidebar
+            .read(cx)
+            .unread_marks()
+            .into_iter()
+            .map(|(worktree, unread)| {
+                serde_json::json!({
+                    "worktree": worktree.to_string_lossy(),
+                    "unread": unread,
+                })
+            })
+            .collect();
         #[cfg(debug_assertions)]
         let posted: Vec<serde_json::Value> = self
             .posted_notifications
@@ -14467,6 +14524,10 @@ impl SirioWorkspace {
             (
                 "posted".to_string(),
                 serde_json::Value::Array(posted).to_string(),
+            ),
+            (
+                "rows".to_string(),
+                serde_json::Value::Array(sidebar_rows).to_string(),
             ),
         ]
     }
@@ -51540,7 +51601,12 @@ browser  profile  "
             let roster = workspace.tray_roster_snapshot();
             let summary: Vec<(String, AgentStatus)> = roster
                 .iter()
-                .map(|entry| (entry.branch.clone(), entry.status))
+                .map(|entry| {
+                    (
+                        entry.branch.clone(),
+                        entry.status.expect("every listed entry has a status here"),
+                    )
+                })
                 .collect();
             assert_eq!(
                 summary,

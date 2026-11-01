@@ -39,6 +39,9 @@ pub struct SessionRow {
     /// Last agent event (open) or archive time (closed), Unix ms.
     pub at: Option<i64>,
     pub selected: bool,
+    /// The session ended a turn out of sight and has not been looked at since.
+    /// An archived chat is never unread.
+    pub unread: bool,
 }
 
 /// An archived chat as the host pushes it (`Sidebar::set_closed_sessions`).
@@ -120,6 +123,7 @@ pub fn session_list(rows: &[SidebarRow], closed: &[ClosedSession], filter: &str)
                         status: pill.status,
                         at: pill.last_event_at,
                         selected: pill.selected,
+                        unread: pill.unread,
                     });
                 }
             }
@@ -153,6 +157,7 @@ pub fn session_list(rows: &[SidebarRow], closed: &[ClosedSession], filter: &str)
                 status: None,
                 at: Some(session.closed_at),
                 selected: false,
+                unread: false,
             })
         })
         .collect::<Vec<_>>();
@@ -239,6 +244,7 @@ mod tests {
             agent_brand: None,
             comment: None,
             pills: Vec::new(),
+            unread_count: 0,
         }
     }
 
@@ -266,6 +272,7 @@ mod tests {
             kind,
             persistence_id: key.into(),
             last_event_at: at,
+            unread: false,
         }
     }
 
@@ -435,7 +442,8 @@ mod tests {
             status,
             at: None,
             selected: false,
-        };
+                    unread: false,
+};
         assert_eq!(attention(&[row(Some(ActivityStatus::Running))]), None);
         assert_eq!(
             attention(&[row(Some(ActivityStatus::NeedsInput))]),
@@ -605,6 +613,25 @@ impl Sidebar {
             .when(row.selected, |this| this.bg(theme.ely.active))
             .when(!row.selected, |this| this.hover(|style| style.bg(theme.ely.hover)))
             .when(cursor, |this| this.border_1().border_color(theme.sirio.quantity))
+            .when(row.unread, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        // Level with the title line, the card's top padding down.
+                        .top(px(7.0))
+                        .h(Self::title_line_height(&theme.typography))
+                        .left(px(3.0))
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .debug_selector(move || format!("{prefix}-unread-dot-{index}"))
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(theme.ely.info),
+                        ),
+                )
+            })
             .on_click(move |_, window, cx| {
                 let event = match &select_target {
                     SessionTarget::Open(id) => SidebarEvent::SelectTab(*id),
@@ -649,6 +676,7 @@ impl Sidebar {
                             .text_ellipsis()
                             .text_size(theme.typography.scaled(ROW_TITLE_FONT_SIZE))
                             .text_color(theme.ely.fg)
+                            .when(row.unread, |this| this.font_weight(FontWeight::SEMIBOLD))
                             .child(row.title.clone()),
                     )
                     .when_some(status, |this, status| this.child(status))
