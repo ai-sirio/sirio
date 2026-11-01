@@ -83,6 +83,15 @@ set -euo pipefail
 #                      with no mark and no notification
 #   unread_restored_chat_quiet  a relaunch gives a seen chat no mark and no notification, and keeps the
 #                      mark of a chat whose turn ended unseen before the quit
+# The notification_click scenario is opt-in (never in the default set; name it with --only) and
+# needs `dbus-daemon` and python3-gi (Gio 2.0): it starts a private session bus and, on it,
+# Scripts/Tests/fake_notifications.py, a recording org.freedesktop.Notifications server, and the
+# only launch of the whole script that is handed a bus address:
+#   notification_click a turn that ends in a parked worktree posts one Notify over D-Bus (app name
+#                      Sirio, a body that names feat/login, a `default` action); the recorder's
+#                      ActionInvoked for it, the signal a desktop sends when the notification is
+#                      clicked, selects that worktree. notifications.jsonl under the out dir is the
+#                      recorder's log
 # The file_links scenario (spec 2026-10-24-chat-file-links-design.md §6) uses a third stub,
 # Scripts/Tests/stubs/file-links/claude, the fixture in its file_links mode: every prompt is
 # answered with one text holding paths that exist in the worktree, ones that do not, a
@@ -167,6 +176,8 @@ ALL_SCENARIOS=(environment default_folds context connectors change_request rate_
   trace_background trace_background_prompt trace_reveal
   trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys
   unread_parked_chat unread_question unread_secondary_seen unread_restored_chat_quiet)
+# Scenarios that need more of the machine than the default set does, so only --only runs them.
+OPT_IN_SCENARIOS=(notification_click)
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
@@ -213,7 +224,7 @@ done
 if [ -n "$ONLY" ]; then
   IFS=',' read -r -a SCENARIOS <<<"$ONLY"
   for name in "${SCENARIOS[@]}"; do
-    case " ${ALL_SCENARIOS[*]} " in *" $name "*) ;; *) refuse "unknown scenario $name (${ALL_SCENARIOS[*]})" ;; esac
+    case " ${ALL_SCENARIOS[*]} ${OPT_IN_SCENARIOS[*]} " in *" $name "*) ;; *) refuse "unknown scenario $name (${ALL_SCENARIOS[*]} ${OPT_IN_SCENARIOS[*]})" ;; esac
     [ -n "$DISPLAY_TARGET" ] || [[ "$PAINTED_SCENARIOS" != *" $name "* ]] || refuse "scenario $name needs a painted column: pass --display :N"
     [[ "$FRAMED_SCENARIOS" != *" $name "* ]] || framed_run || refuse "scenario $name sends real clicks at the 2200x1000 layout: pass --display :N --window-size 2200x1000 and no --state-only"
   done
@@ -252,6 +263,13 @@ if [[ " ${SCENARIOS[*]} " == *" clipboard_keys "* ]]; then
   python3 -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("Gdk", "3.0"); from gi.repository import Gtk' 2>/dev/null \
     || refuse "clipboard_keys needs python3-gi with GTK 3 (python-gobject and gtk3) to read and own the clipboard; drop it with --only"
 fi
+# notification_click starts a private session bus and a D-Bus server written with Gio.
+if [[ " ${SCENARIOS[*]} " == *" notification_click "* ]]; then
+  command -v dbus-daemon >/dev/null \
+    || refuse "notification_click needs dbus-daemon for its private session bus; drop it with --only"
+  python3 -c 'import gi; gi.require_version("Gio", "2.0"); from gi.repository import Gio, GLib' 2>/dev/null \
+    || refuse "notification_click needs python3-gi (python-gobject) with Gio 2.0 for the recording notification server; drop it with --only"
+fi
 
 [ -n "$OUT_DIR" ] || OUT_DIR="$ROOT/artifacts/chat-session-panel-e2e-$(date +%Y%m%d-%H%M%S)-$$"
 if [ -d "$OUT_DIR" ] && [ -n "$(ls -A "$OUT_DIR")" ]; then
@@ -283,6 +301,8 @@ echo "mise config: ${MISE_BEFORE:-absent}"
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/sirio-csp-XXXXXX")
 APP_PID=""
 FORGE_PID=""
+# notification_click's private session bus (empty everywhere else: see launch()).
+APP_SESSION_BUS=""
 stop_hosts() {
   local state pid tries
   for state in "$RUN_DIR"/*-host/host-v*.json; do
@@ -342,6 +362,7 @@ cleanup() {
   stop_run_processes
   cp "$RUN_DIR"/*.log "$OUT_DIR/" 2>/dev/null || true
   cp "$RUN_DIR"/*.tsv "$OUT_DIR/" 2>/dev/null || true
+  cp "$RUN_DIR"/*.jsonl "$OUT_DIR/" 2>/dev/null || true
   rm -rf --one-file-system "$RUN_DIR"
 }
 trap cleanup EXIT
@@ -901,6 +922,8 @@ capture() { # name
 #   SIRIO_FIXTURE_USER_LOG, SIRIO_FIXTURE_CONTROL_LOG  the files the fixture appends every prompt and
 #                  every control request to (composer_keys reads them)
 #   SIRIO_PERF_TRACE  trace_idle's performance trace (a file that does not exist yet)
+#   DBUS_SESSION_BUS_ADDRESS  a socket path that does not exist, so a notification goes nowhere;
+#                  notification_click alone passes its private bus's address
 # How many `claude --version` probes the shim has recorded.
 probe_count() { local n; n=$(grep -c '^claude --version$' "$RUN_DIR/stub-calls.log" 2>/dev/null || true); echo "${n:-0}"; }
 launch() { # name (a relaunch under the same name keeps its database and host)
@@ -925,7 +948,8 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "SIRIO_CSP_E2E_RUN=$RUN_DIR" "TRACE_STEP_MS=${TRACE_STEP_MS:-400}"
     "SIRIO_FIXTURE_USER_LOG=$RUN_DIR/fixture-user.log" "SIRIO_FIXTURE_CONTROL_LOG=$RUN_DIR/fixture-control.log"
     # Sirio posts its notifications over D-Bus: the app never reaches the user's own session bus.
-    "DBUS_SESSION_BUS_ADDRESS=unix:path=$RUN_DIR/no-bus"
+    # Only notification_click names a bus of its own (APP_SESSION_BUS, the run's private one).
+    "DBUS_SESSION_BUS_ADDRESS=${APP_SESSION_BUS:-unix:path=$RUN_DIR/no-bus}"
   )
   # A performance trace names a file that does not exist yet, one per launch.
   [ -z "${PERF_TRACE:-}" ] || pairs+=("SIRIO_PERF_TRACE=$PERF_TRACE")
@@ -2663,6 +2687,125 @@ scenario_unread_restored_chat_quiet() {
   [ "$(attention_row "$shown" unread)" = false ] || fail "the cleared mark came back after a relaunch"
   [ "$(posted_count)" = 0 ] || fail "the relaunch posted a notification for a seen chat: $(posted_rows | tr '\n' ' ')"
   echo "OK: a mark cleared by looking stays cleared over a restart"
+  stop_app
+}
+
+# ---- notification_click: a private session bus with a recording notification server ----
+# A dbus-daemon of the run's own: a private runtime dir, and an XDG_DATA_DIRS that names an empty
+# directory, so no service file exists and nothing can be activated on the bus (the user's own
+# notification daemon, if any, is not reachable from here). It carries the run marker, so
+# stop_run_processes stops it with everything else.
+start_private_bus() {
+  local bus_runtime="$RUN_DIR/bus-runtime" bus_data="$RUN_DIR/bus-data" bus_home="$RUN_DIR/bus-home"
+  mkdir -p "$bus_data/empty-services" "$bus_home"
+  mkdir -m 700 "$bus_runtime"
+  [ "${#bus_runtime}" -lt 90 ] || fail "the private bus socket path is too long: $bus_runtime/bus"
+  local address="unix:path=$bus_runtime/bus"
+  env -i PATH=/usr/local/bin:/usr/bin:/bin "HOME=$bus_home" "XDG_RUNTIME_DIR=$bus_runtime" \
+    "XDG_DATA_HOME=$bus_data" "XDG_DATA_DIRS=$bus_data/empty-services" "XDG_CONFIG_HOME=$bus_home" \
+    "SIRIO_CSP_E2E_RUN=$RUN_DIR" \
+    dbus-daemon --session --fork --address="$address" >>"$RUN_DIR/bus.log" 2>&1 \
+    || fail "could not start a private session bus"
+  [ -S "$bus_runtime/bus" ] || fail "the private session bus has no socket at $bus_runtime/bus"
+  APP_SESSION_BUS=$address
+  echo "OK: a private session bus at $address (no service files: nothing is activated on it)"
+}
+
+# The recording notification server, owning org.freedesktop.Notifications on that bus. It prints
+# `ready` once it owns the name.
+start_notification_recorder() {
+  : >"$RUN_DIR/notifications.jsonl"
+  env -i PATH=/usr/local/bin:/usr/bin:/bin "HOME=$RUN_DIR/bus-home" "DBUS_SESSION_BUS_ADDRESS=$APP_SESSION_BUS" \
+    "SIRIO_CSP_E2E_RUN=$RUN_DIR" \
+    python3 -I "$ROOT/Scripts/Tests/fake_notifications.py" serve --log "$RUN_DIR/notifications.jsonl" \
+    >>"$RUN_DIR/notifications-server.log" 2>&1 &
+  local _
+  for _ in $(seq 1 50); do
+    grep -q '^ready$' "$RUN_DIR/notifications-server.log" 2>/dev/null && break
+    sleep 0.2
+  done
+  grep -q '^ready$' "$RUN_DIR/notifications-server.log" 2>/dev/null \
+    || fail "the recording notification server never owned org.freedesktop.Notifications: $(cat "$RUN_DIR/notifications-server.log" 2>/dev/null | tr '\n' ' ')"
+  echo "OK: the recording notification server owns org.freedesktop.Notifications on the private bus"
+}
+
+# The id of the first recorded Notify that is Sirio's, names $1 in its body and offers the default
+# action; nothing when there is none yet.
+recorded_notification_id() { # branch
+  python3 -I -c 'import json, sys
+for line in open(sys.argv[1]):
+    row = json.loads(line)
+    if row["app_name"] == "Sirio" and sys.argv[2] in row["body"] and "default" in row["actions"]:
+        print(row["id"])
+        break' "$RUN_DIR/notifications.jsonl" "$1"
+}
+recorded_count() { grep -c . "$RUN_DIR/notifications.jsonl" 2>/dev/null || true; }
+
+# The path `current-workspace` reports, compared as a real path.
+current_workspace_is() { # path
+  python3 -I -c 'import json, os, sys
+reply = json.loads(sys.argv[1])
+reply = reply[0] if isinstance(reply, list) else reply
+sys.exit(0 if os.path.realpath(reply.get("path", "")) == os.path.realpath(sys.argv[2]) else 1)' "$(reply current-workspace)" "$1"
+}
+
+scenario_notification_click() {
+  start_private_bus
+  start_notification_recorder
+  # The one launch that gets the bus: launch() reads APP_SESSION_BUS.
+  unread_chat notification_click 1000
+  wait_panel "the chat is ready for a prompt" 'c["status"] in ("idle", "completed")' 30
+  send_prompt request
+  ctl select-workspace --workspace "$PRIMARY" >/dev/null
+  [ "$(attention_chat status)" = running ] || fail "the chat does not read running right after the select (status '$(attention_chat status)'), so the stop would not be off screen"
+  echo "step: the worktree was left mid-turn; the turn ends with the chat parked"
+  wait_attention "the parked chat's turn ended" status done 30
+  wait_attention "the parked chat's stop marked it" unread true 5
+  local id="" _
+  for _ in $(seq 1 100); do
+    id=$(recorded_notification_id feat/login)
+    [ -n "$id" ] && break
+    sleep 0.2
+  done
+  [ -n "$id" ] || fail "the recording server holds no Notify from Sirio naming feat/login with a default action: $(cat "$RUN_DIR/notifications.jsonl" | tr '\n' ' '); app log tail: $(tail -n 5 "$RUN_DIR/notification_click-app.log" | tr '\n' ' ')"
+  sleep 1
+  [ "$(recorded_count)" = 1 ] || fail "the recording server holds $(recorded_count) Notify call(s), not one: $(cat "$RUN_DIR/notifications.jsonl" | tr '\n' ' ')"
+  echo "OK: the server was sent one Notify (id $id): $(cat "$RUN_DIR/notifications.jsonl")"
+  # The click must be what moves the app: another worktree is selected and the chat is unread.
+  current_workspace_is "$PRIMARY" || fail "the selected worktree is not $PRIMARY before the click: $(reply current-workspace)"
+  [ "$(attention_chat onScreen)" = false ] || fail "the chat reads onScreen before the click"
+  [ "$(attention_chat unread)" = true ] || fail "the chat does not read unread before the click"
+  echo "step: the server sends ActionInvoked(id, \"default\"), as a desktop does for a click"
+  # The app's thread adds its ActionInvoked match rule right after the Notify reply, so a signal
+  # sent in that gap reaches nobody: send it again until the selection moves. A repeat after the
+  # app has taken the first one is ignored (its thread stops listening at the first).
+  local clicked=0 try
+  for try in 1 2 3 4 5 6; do
+    env -i PATH=/usr/local/bin:/usr/bin:/bin "HOME=$RUN_DIR/bus-home" "DBUS_SESSION_BUS_ADDRESS=$APP_SESSION_BUS" \
+      python3 -I "$ROOT/Scripts/Tests/fake_notifications.py" click --id "$id" >>"$RUN_DIR/notifications-click.log" 2>&1 \
+      || fail "the recording server refused the click: $(tail -n 3 "$RUN_DIR/notifications-click.log" | tr '\n' ' ')"
+    for _ in $(seq 1 15); do
+      current_workspace_is "$LINKED" && { clicked=1; break; }
+      sleep 0.2
+    done
+    [ "$clicked" = 1 ] && break
+  done
+  [ "$clicked" = 1 ] || fail "$try click(s) on the notification never selected $LINKED: $(reply current-workspace); app log tail: $(tail -n 5 "$RUN_DIR/notification_click-app.log" | tr '\n' ' ')"
+  echo "OK: the click selected $LINKED (after $try signal(s))"
+  wait_attention "the clicked session is the one shown" onScreen true 10
+  [ "$(tabs_state | cut -d' ' -f2)" = "$(tab_positions chat | tr ' ' '\n' | head -n 1)" ] \
+    || fail "the active tab is not the chat's: $(tabs_state); chat tabs at $(tab_positions chat)"
+  echo "OK: the active tab is the chat"
+  # A --state-only run paints no frame, and a shown session is marked seen by the frame that draws
+  # it: this runs the same marking without one.
+  look_at_shown
+  wait_attention "seeing the clicked chat cleared its mark" unread false 10
+  [ "$(recorded_count)" = 1 ] || fail "the click or the clearing posted another notification: $(cat "$RUN_DIR/notifications.jsonl" | tr '\n' ' ')"
+  cp "$RUN_DIR/notifications.jsonl" "$OUT_DIR/notifications.jsonl"
+  [ -s "$OUT_DIR/notifications.jsonl" ] || fail "no notifications.jsonl was written"
+  save_attention notification_click
+  echo "OK: notification_click: one Notify reached the D-Bus server, and its click opened the parked chat ($OUT_DIR/notifications.jsonl)"
+  APP_SESSION_BUS=""
   stop_app
 }
 

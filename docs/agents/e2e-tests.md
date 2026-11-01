@@ -184,8 +184,25 @@ Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "
 # project header) and unread_parked_chat-after.png. The pills' mark and the tray's unread flag are
 # refreshed by the reconcile a frame drives, so a --state-only run with no display prints a SKIP
 # line for these assertions and keeps the rest.
+# The opt-in scenario `notification_click` (never in the default set; name it with --only, with
+# --state-only) proves the Linux notification route against a real D-Bus server. It needs
+# `dbus-daemon` and python3-gi with Gio 2.0, and the script refuses it without them. It starts a
+# private session bus (an empty XDG_DATA_DIRS, so nothing can be activated on it) and, on it,
+# Scripts/Tests/fake_notifications.py, a recording org.freedesktop.Notifications server (Notify,
+# GetCapabilities, GetServerInformation and CloseNotification as the Desktop Notifications
+# Specification 1.2 defines them, plus an InvokeDefault of its own that emits
+# ActionInvoked(id, "default") as a desktop does for a body click). It is the only launch that
+# gets a bus address: every other launch gets one that does not exist. A turn ends in a parked
+# worktree; the scenario waits for one Notify whose app name is `Sirio`, whose body names
+# feat/login and whose actions hold `default`, sends the click, and asserts that the selected
+# worktree becomes the chat's, the chat is the shown tab and, after the focus act that stands in
+# for the frame a --state-only run does not paint, the chat is no longer unread and no second
+# notification was posted. It leaves notifications.jsonl (the recorder's log: id, app_name,
+# summary, body, actions of every Notify) and attention-notification_click.json in the out dir.
+# Whether a real daemon (mako) invokes `default` on a body click is a hand check.
 # The script seeds only light or dark: the Onice base colour is a hand check.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
+Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the
 # control socket (docs/testing/ely-agent-chat.md). The effort and effort_light scenarios (dark and
