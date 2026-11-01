@@ -442,8 +442,8 @@ mod tests {
             status,
             at: None,
             selected: false,
-                    unread: false,
-};
+            unread: false,
+        };
         assert_eq!(attention(&[row(Some(ActivityStatus::Running))]), None);
         assert_eq!(
             attention(&[row(Some(ActivityStatus::NeedsInput))]),
@@ -614,23 +614,7 @@ impl Sidebar {
             .when(!row.selected, |this| this.hover(|style| style.bg(theme.ely.hover)))
             .when(cursor, |this| this.border_1().border_color(theme.sirio.quantity))
             .when(row.unread, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        // Level with the title line, the card's top padding down.
-                        .top(px(7.0))
-                        .h(Self::title_line_height(&theme.typography))
-                        .left(px(3.0))
-                        .flex()
-                        .items_center()
-                        .child(
-                            div()
-                                .debug_selector(move || format!("{prefix}-unread-dot-{index}"))
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(theme.ely.info),
-                        ),
-                )
+                this.child(Self::unread_dot(format!("{prefix}-unread-dot-{index}"), &theme))
             })
             .on_click(move |_, window, cx| {
                 let event = match &select_target {

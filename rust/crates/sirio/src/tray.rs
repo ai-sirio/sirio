@@ -131,7 +131,7 @@ fn format_status_age(age: Duration) -> String {
 /// `AgentActivityModel::status_age_for_panes` does: it keeps this
 /// deterministic in tests. Production callers pass `Instant::now()` at the
 /// moment the menu is actually drawn (#187).
-fn roster_menu_label(entry: &TrayRosterEntry, now: Instant) -> String {
+pub(crate) fn roster_menu_label(entry: &TrayRosterEntry, now: Instant) -> String {
     let mark = if entry.unread { "● " } else { "" };
     let Some(status) = entry.status else {
         return format!("{mark}{} — {}", entry.branch, entry.project_name);

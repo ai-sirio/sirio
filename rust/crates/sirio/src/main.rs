@@ -5909,6 +5909,12 @@ struct SirioWorkspace {
     /// `sync_sidebar_tabs` found them: live, parked and unmounted alike. The tray
     /// roster lists such a worktree even when it has no status to show.
     worktree_unread: HashSet<PathBuf>,
+    /// The `pane-N` keys each parked worktree's strip names, as the last
+    /// `sync_sidebar_tabs` found them; worktrees with none are absent. Both this
+    /// and `worktree_unread` are keyed by the catalog's spelling of the checkout,
+    /// which is `ControlWorkspace::path`'s, so the tray's 40 ms tick does exact
+    /// gets and no path scan.
+    worktree_parked_panes: HashMap<PathBuf, Vec<String>>,
     /// The sessions whose record an earlier run left: each leaves the set at its
     /// first status decision, which reads the record as a restore
     /// (`first_status_for`).
@@ -7199,6 +7205,7 @@ impl SirioWorkspace {
             attention_from_previous_run: previous_attention.keys().cloned().collect(),
             session_attention: previous_attention,
             worktree_unread: HashSet::new(),
+            worktree_parked_panes: HashMap::new(),
             pending_attention_writes: BTreeMap::new(),
             #[cfg(debug_assertions)]
             debug_window_active: debug_window_active_from_env(),
@@ -12346,22 +12353,13 @@ impl SirioWorkspace {
             // A worktree the control snapshot holds no panes for is one parked behind
             // another selection: its panes live on, and its strip names them.
             if pane_ids.is_empty()
-                && let Some(parked) = self.parked_strip_of(path)
+                && let Some(parked) = self.worktree_parked_panes.get(path)
             {
-                pane_ids = parked
-                    .terminal_panes_by_tab
-                    .iter()
-                    .chain(&parked.chat_panes_by_tab)
-                    .flatten()
-                    .map(|pane_id| format!("pane-{pane_id}"))
-                    .collect();
+                pane_ids.clone_from(parked);
             }
             let refs: Vec<&str> = pane_ids.iter().map(String::as_str).collect();
             let status = self.activity.status_for_panes(&refs);
-            let unread = self
-                .worktree_unread
-                .iter()
-                .any(|unread| paths_name_the_same_document(unread, path));
+            let unread = self.worktree_unread.contains(path);
             // A worktree with nothing to say, neither a live status nor an unread
             // session, is not listed.
             if status.is_none() && !unread {
@@ -13742,6 +13740,7 @@ impl SirioWorkspace {
         let mut sidebar_updates: Vec<(usize, Vec<SidebarTab>)> =
             Vec::with_capacity(worktree_rows.len());
         let mut worktree_unread: HashSet<PathBuf> = HashSet::new();
+        let mut worktree_parked_panes: HashMap<PathBuf, Vec<String>> = HashMap::new();
         for (worktree_id, path) in worktree_rows {
             let mut tabs = self.sidebar_tabs_for_worktree(&path);
             // A worktree with no live tabs keeps listing its persisted strip
@@ -13785,9 +13784,22 @@ impl SirioWorkspace {
             if tabs.iter().any(|tab| tab.unread) {
                 worktree_unread.insert(path.clone());
             }
+            if let Some(parked) = self.parked_strip_of(&path) {
+                let keys: Vec<String> = parked
+                    .terminal_panes_by_tab
+                    .iter()
+                    .chain(&parked.chat_panes_by_tab)
+                    .flatten()
+                    .map(|pane_id| format!("pane-{pane_id}"))
+                    .collect();
+                if !keys.is_empty() {
+                    worktree_parked_panes.insert(path.clone(), keys);
+                }
+            }
             sidebar_updates.push((worktree_id, tabs));
         }
         self.worktree_unread = worktree_unread;
+        self.worktree_parked_panes = worktree_parked_panes;
         self.flush_session_event_writes();
         self.sidebar.update(cx, |sidebar, cx| {
             for (worktree_id, tabs) in sidebar_updates {
@@ -14436,6 +14448,9 @@ impl SirioWorkspace {
     /// Sirio can reach, plus one per record whose session it no longer holds. `rows`
     /// is a second JSON array: each worktree row of the sidebar with its count of
     /// unread pills, as the sidebar holds them (see `Sidebar::unread_marks`).
+    /// `projects` is one object per project header as the tree draws it (name,
+    /// `expanded`, and the `unreadCount` its folded badge is drawn from), and `tray`
+    /// one per roster entry with the label the tray menu would show.
     fn control_attention_read(&self, cx: &App) -> Vec<(String, String)> {
         let status_word = |status: Option<AgentStatus>| match status {
             Some(_) => serde_json::json!(agent_status_word(status)),
@@ -14492,6 +14507,32 @@ impl SirioWorkspace {
                 })
             })
             .collect();
+        let projects: Vec<serde_json::Value> = self
+            .sidebar
+            .read(cx)
+            .project_marks()
+            .into_iter()
+            .map(|(name, expanded, unread_count)| {
+                serde_json::json!({
+                    "name": name,
+                    "expanded": expanded,
+                    "unreadCount": unread_count,
+                })
+            })
+            .collect();
+        let now = Instant::now();
+        let tray: Vec<serde_json::Value> = self
+            .tray_roster_snapshot()
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "worktree": entry.path.to_string_lossy(),
+                    "status": status_word(entry.status),
+                    "unread": entry.unread,
+                    "label": tray::roster_menu_label(entry, now),
+                })
+            })
+            .collect();
         #[cfg(debug_assertions)]
         let posted: Vec<serde_json::Value> = self
             .posted_notifications
@@ -14528,6 +14569,14 @@ impl SirioWorkspace {
             (
                 "rows".to_string(),
                 serde_json::Value::Array(sidebar_rows).to_string(),
+            ),
+            (
+                "projects".to_string(),
+                serde_json::Value::Array(projects).to_string(),
+            ),
+            (
+                "tray".to_string(),
+                serde_json::Value::Array(tray).to_string(),
             ),
         ]
     }

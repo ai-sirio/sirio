@@ -74,8 +74,9 @@ set -euo pipefail
 #                      reveal its Agent row, a click on the Follow checkbox toggles it
 #   unread_parked_chat a turn that ends while its worktree is not selected marks the chat unread and posts
 #                      one notification naming its branch; showing the worktree clears the mark
-#                      (with --display, also the sidebar's own count in the read's `rows`, and captures of the
-#                      row, the Sessions card and a folded project's badge)
+#                      (with --display, also what the sidebar and the tray hold in the read's `rows`, `projects`
+#                      and `tray`, a click that folds the project, and captures of the row, the Sessions
+#                      card and the folded project's badge)
 #   unread_question    a permission the turn asks while the worktree is not selected reads needs-input and
 #                      unread, and is still open when the worktree is shown
 #   unread_secondary_seen  a chat in the shown Secondary half, beside a terminal in the Primary, stops
@@ -2352,8 +2353,63 @@ for row in json.loads(reply["rows"]):
         break' "$1"
 }
 # The sidebar's pills are refreshed by the reconcile, which a frame drives: a --state-only run
-# with no display paints nothing, so its `rows` read has nothing to say and is not asserted.
+# with no display paints nothing, so its `rows`, `projects` and `tray` reads have nothing to say
+# and are not asserted (the tray's unread flag is computed by the same reconcile).
 rows_painted() { [ -n "$DISPLAY_TARGET" ]; }
+# The fold and view clicks are real X input at window pixels: only a run that opened the window
+# (no --state-only), which the display preflight checked, makes them.
+window_clicks() { [ "$STATE_ONLY" -eq 0 ]; }
+# One field of the first project header in the read's `projects` key (what the tree draws:
+# `expanded`, and the `unreadCount` of the folded badge), as JSON; nothing when the key is absent.
+attention_project() { # field
+  reply surface attention read | python3 -c 'import json, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+if "projects" not in reply:
+    sys.exit(0)
+projects = json.loads(reply["projects"])
+if projects:
+    print(json.dumps(projects[0][sys.argv[1]]))' "$1"
+}
+# Polls until the first project header's FIELD reads WANT (JSON: true, false, 1).
+wait_project() { # desc field want seconds
+  local desc=$1 field=$2 want=$3 seconds=$4 got="" _
+  for _ in $(seq 1 $((seconds * 5))); do
+    got=$(attention_project "$field")
+    [ "$got" = "$want" ] && { echo "OK: $desc (project $field = $want)"; return 0; }
+    sleep 0.2
+  done
+  fail "$desc: the project header's $field is '$got', not '$want' after $seconds s; read: $(reply surface attention read | tr '\n' ' ')"
+}
+# One field of the tray roster entry for worktree $1, as the read's `tray` key lists it: strings
+# as they are, everything else as JSON; nothing when the roster does not list it.
+attention_tray() { # worktree field
+  reply surface attention read | python3 -c 'import json, os, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+if "tray" not in reply:
+    sys.exit(0)
+for row in json.loads(reply["tray"]):
+    if os.path.realpath(row["worktree"]) == os.path.realpath(sys.argv[1]):
+        value = row[sys.argv[2]]
+        print(value if isinstance(value, str) else json.dumps(value))
+        break' "$1" "$2"
+}
+# Polls until the tray entry for worktree $2 reads WANT in FIELD, or, with field `label`, starts
+# with WANT.
+wait_tray() { # desc worktree field want seconds
+  local desc=$1 worktree=$2 field=$3 want=$4 seconds=$5 got="" _
+  for _ in $(seq 1 $((seconds * 5))); do
+    got=$(attention_tray "$worktree" "$field")
+    if [ "$field" = label ]; then
+      case "$got" in "$want"*) echo "OK: $desc (tray label '$got')"; return 0 ;; esac
+    else
+      [ "$got" = "$want" ] && { echo "OK: $desc (tray $field = $want)"; return 0; }
+    fi
+    sleep 0.2
+  done
+  fail "$desc: the tray's $field for $worktree is '$got', not '$want' after $seconds s; read: $(reply surface attention read | tr '\n' ' ')"
+}
 # Polls until the sidebar's unread count for worktree $2 reads WANT.
 wait_marks() { # desc worktree want seconds
   local desc=$1 worktree=$2 want=$3 seconds=$4 got="" _
@@ -2386,7 +2442,7 @@ scenario_unread_parked_chat() {
   if rows_painted; then
     wait_marks "the sidebar holds no unread pill before any turn" "$LINKED" 0 10
   else
-    echo "SKIP: no display, so no frame refreshes the sidebar: the rows assertions are not run"
+    echo "SKIP: no display, so no frame refreshes the sidebar: the rows, projects and tray assertions are not run"
   fi
   capture unread_parked_chat-before
   send_prompt request
@@ -2411,25 +2467,41 @@ scenario_unread_parked_chat() {
   if rows_painted; then
     echo "step: the sidebar draws the unread mark on the worktree's row"
     wait_marks "the sidebar counts the unread chat under the worktree" "$LINKED" 1 10
+    wait_project "the project header is open and draws no badge" expanded true 10
+    wait_project "an open project header counts nothing" unreadCount 0 10
+    echo "step: the tray lists the unread worktree, marked"
+    wait_tray "the tray lists the parked worktree as unread" "$LINKED" unread true 10
+    wait_tray "its menu label leads with the unread dot" "$LINKED" label "● " 10
     capture unread_parked_chat-unread
-    echo "step: the Sessions view draws the same mark on the session's card"
-    # The two segments under the sidebar's top edge, at fixed window pixels like the chevron.
-    click_at_window "207 65"
-    capture unread-sessions-view
-    click_at_window "90 65"
-    echo "step: a collapsed project keeps the mark as a badge on its header"
-    # The project header's disclosure chevron: the sidebar is a fixed-width column, so it is
-    # at the same window pixel in every window size.
-    click_at_window "263 171"
-    wait_marks "the collapsed project still counts the unread chat" "$LINKED" 1 10
-    capture unread-collapsed-project
-    click_at_window "263 171"
+    if window_clicks; then
+      echo "step: the Sessions view draws the same mark on the session's card"
+      # The two segments under the sidebar's top edge, at fixed window pixels like the chevron.
+      click_at_window "207 65"
+      capture unread-sessions-view
+      click_at_window "90 65"
+      echo "step: a folded project keeps the mark as a badge on its header"
+      # The project header's disclosure chevron: the socket reports no position for it (the
+      # sidebar is a fixed-width column, so it is at the same window pixel in every window
+      # size). A click that misses it leaves the header open, which the read below fails on.
+      click_at_window "263 171"
+      wait_project "the click folded the project" expanded false 10
+      wait_project "the folded header's badge counts the unread chat" unreadCount 1 10
+      capture unread-collapsed-project
+      click_at_window "263 171"
+      wait_project "the second click opened the project again" expanded true 10
+      wait_project "the open header counts nothing again" unreadCount 0 10
+    fi
   fi
   echo "step: showing the worktree clears the mark"
   ctl select-workspace --workspace "$LINKED" >/dev/null
   look_at_shown
   wait_attention "showing the chat's worktree cleared the mark" unread false 10
-  rows_painted && wait_marks "showing the worktree cleared the sidebar's count" "$LINKED" 0 10
+  if rows_painted; then
+    wait_marks "showing the worktree cleared the sidebar's count" "$LINKED" 0 10
+    wait_tray "showing the worktree cleared the tray's unread flag" "$LINKED" unread false 10
+    case "$(attention_tray "$LINKED" label)" in "● "*) fail "the tray label still leads with the unread dot: $(attention_tray "$LINKED" label)" ;; esac
+    echo "OK: the tray label no longer leads with the unread dot"
+  fi
   capture unread_parked_chat-after
   save_attention unread_parked_chat
   stop_app

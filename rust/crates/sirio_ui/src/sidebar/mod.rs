@@ -3121,6 +3121,18 @@ impl Sidebar {
             .count()
     }
 
+    /// Each project header as the tree draws it: its name, whether its section is
+    /// open, and the unread count its folded header's badge is drawn from
+    /// (`visible_rows` fills it for a folded section only). What the control
+    /// socket's attention read reports as `projects`.
+    pub fn project_marks(&self) -> Vec<(String, bool, usize)> {
+        self.visible_rows()
+            .into_iter()
+            .filter(|row| row.kind == RowKind::Project)
+            .map(|row| (row.title, row.expanded, row.unread_count))
+            .collect()
+    }
+
     /// Each worktree row's checkout path with the number of its pills that are
     /// unread, in tree order. What the control socket's attention read reports
     /// as `rows`: the sidebar's own answer, not the host's.
@@ -4709,8 +4721,8 @@ pub(super) mod tests_support {
                     persistence_id: "test-tab-1".into(),
                     status: None,
                     last_event_at: None,
-                                    unread: false,
-},
+                    unread: false,
+                },
                 SidebarTab {
                     tab: SidebarTabRef::Open(2),
                     title: "Terminal".to_string(),
@@ -4720,8 +4732,8 @@ pub(super) mod tests_support {
                     persistence_id: "test-tab-2".into(),
                     status: None,
                     last_event_at: None,
-                                    unread: false,
-},
+                    unread: false,
+                },
             ],
             cx,
         );
@@ -5279,8 +5291,8 @@ mod tests {
                     persistence_id: "test-tab-7".into(),
                     status: None,
                     last_event_at: None,
-                                    unread: false,
-}],
+                    unread: false,
+                }],
                 cx,
             );
             sidebar.filter = "main".to_string();
@@ -5361,8 +5373,8 @@ mod tests {
                         persistence_id: "test-tab-parked-0".into(),
                         status: None,
                         last_event_at: None,
-                                            unread: false,
-},
+                        unread: false,
+                    },
                     SidebarTab {
                         tab: SidebarTabRef::Parked(1),
                         title: "Old Chat".into(),
@@ -5372,8 +5384,8 @@ mod tests {
                         persistence_id: "test-tab-parked-1".into(),
                         status: None,
                         last_event_at: None,
-                                            unread: false,
-},
+                        unread: false,
+                    },
                 ],
                 cx,
             );
@@ -7224,8 +7236,8 @@ mod tests {
             persistence_id: "test-tab-7".into(),
             status: None,
             last_event_at: None,
-                    unread: false,
-};
+            unread: false,
+        };
         entity.update(&mut cx, |sidebar, cx| {
             sidebar.set_worktree_tabs(1, vec![plain_terminal()], cx);
         });
@@ -7386,8 +7398,8 @@ mod tests {
                     persistence_id: "test-tab-7".into(),
                     status: None,
                     last_event_at: None,
-                                    unread: false,
-}],
+                    unread: false,
+                }],
                 cx,
             );
         });
@@ -8163,8 +8175,8 @@ mod tests {
                     persistence_id: "tab-1".into(),
                     status: Some(ActivityStatus::Done),
                     last_event_at: Some(1_000),
-                                    unread: false,
-},
+                    unread: false,
+                },
                 SidebarTab {
                     tab: SidebarTabRef::Open(2),
                     title: "Newer chat".into(),
@@ -8174,8 +8186,8 @@ mod tests {
                     persistence_id: "tab-2".into(),
                     status: Some(ActivityStatus::Running),
                     last_event_at: Some(5_000),
-                                    unread: false,
-},
+                    unread: false,
+                },
             ],
             cx,
         );
@@ -8252,8 +8264,8 @@ mod tests {
             persistence_id: "tab-3".into(),
             status: Some(status),
             last_event_at: Some(1),
-                    unread: false,
-};
+            unread: false,
+        };
         window
             .update(&mut cx, |sidebar, _window, cx| {
                 sidebar.set_worktree_tabs(2, vec![asking(ActivityStatus::NeedsInput)], cx)

@@ -266,8 +266,8 @@ mod tests {
                     persistence_id: "test-tab-0".into(),
                     status: None,
                     last_event_at: None,
-                                    unread: false,
-},
+                    unread: false,
+                },
                 SidebarTab {
                     tab: SidebarTabRef::Open(1),
                     title: "Terminal".to_string(),
@@ -277,8 +277,8 @@ mod tests {
                     persistence_id: "test-tab-1".into(),
                     status: None,
                     last_event_at: None,
-                                    unread: false,
-},
+                    unread: false,
+                },
             ],
             cx,
         );

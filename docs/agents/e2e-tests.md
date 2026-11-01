@@ -167,14 +167,23 @@ Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "
 # notification, and looking at it clears the mark for good). Each leaves
 # attention-<scenario>.json (so attention-unread_restored_chat_quiet.json), the last
 # `surface attention read`, in the out dir.
-# With --display :N, `unread_parked_chat` also asserts the sidebar's own count: the read's `rows`
-# key (each worktree row's number of unread pills, from `Sidebar::unread_marks`) names the chat's
-# worktree with 1 while it is unread, still with 1 once its project is folded, and with 0 after the
-# worktree is shown; and it captures frames/unread_parked_chat-unread.png (dot, bold title, ring),
-# unread-sessions-view.png (the same dot and weight on the Sessions card),
-# unread-collapsed-project.png (the count badge on the folded project header) and
-# unread_parked_chat-after.png. A pill's mark is refreshed by the reconcile a frame drives, so a
-# --state-only run with no display prints a SKIP line for the `rows` assertions and keeps the rest.
+# With --display :N (a window that paints, or --state-only --display :N), `unread_parked_chat` also
+# asserts what the sidebar and the tray hold, through three keys of the debug-only
+# `surface attention read`: `rows` (each worktree row's number of unread pills, from
+# `Sidebar::unread_marks`) names the chat's worktree with 1 while it is unread and with 0 once it is
+# shown; `projects` (one object per project header as the tree draws it: `expanded` and the
+# `unreadCount` the folded badge is drawn from) reads open with 0 before the fold; and `tray` (one
+# object per tray roster entry, with the label the menu would show) lists the worktree with
+# `unread: true` and a label led by "● " while it is unread, and `unread: false` with no "● " after
+# it is shown. In a window that paints it also clicks the Sessions segment, the project's chevron
+# and the chevron again, and asserts `projects` reads `expanded: false` with `unreadCount: 1`, then
+# `expanded: true` with 0, so a click that misses fails. The socket reports no position for the
+# chevron, so that click is at a fixed window pixel. It captures
+# frames/unread_parked_chat-unread.png (dot, bold title, ring), unread-sessions-view.png (the same
+# dot and weight on the Sessions card), unread-collapsed-project.png (the count badge on the folded
+# project header) and unread_parked_chat-after.png. The pills' mark and the tray's unread flag are
+# refreshed by the reconcile a frame drives, so a --state-only run with no display prints a SKIP
+# line for these assertions and keeps the rest.
 # The script seeds only light or dark: the Onice base colour is a hand check.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 

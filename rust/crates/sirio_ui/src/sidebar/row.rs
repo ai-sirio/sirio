@@ -336,6 +336,27 @@ impl Sidebar {
 
     const PILL_SIZE: f32 = 20.0;
 
+    /// The 6px info dot at a card's leading edge, level with its title line (the
+    /// card's top padding down). Drawn by a worktree row and a Sessions card alike.
+    pub(super) fn unread_dot(selector: String, theme: &Theme) -> impl IntoElement + use<> {
+        let line = Self::title_line_height(&theme.typography);
+        let colour = theme.ely.info;
+        div()
+            .absolute()
+            .top(px(7.0))
+            .h(line)
+            .left(px(3.0))
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .debug_selector(move || selector.clone())
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(colour),
+            )
+    }
+
     fn render_pills(
         row: &SidebarRow,
         pill_cursor: Option<usize>,
@@ -369,8 +390,9 @@ impl Sidebar {
                     .when(pill.selected || pill_cursor == Some(index), |this| {
                         this.border_1().border_color(theme.sirio.quantity)
                     })
-                    // Unread outranks the selection ring: the colour is the news.
-                    .when(pill.unread, |this| {
+                    // Unread outranks the selection ring (the colour is the news), but
+                    // never the keyboard cursor's: that one must stay findable.
+                    .when(pill.unread && pill_cursor != Some(index), |this| {
                         this.border_1().border_color(theme.ely.info)
                     })
                     .when(parked.is_some(), |this| this.opacity(0.6))
@@ -843,23 +865,7 @@ impl Sidebar {
 
         row_view
             .when(row_unread, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        // Level with the title line, the card's top padding down.
-                        .top(px(7.0))
-                        .h(Self::title_line_height(&theme.typography))
-                        .left(px(3.0))
-                        .flex()
-                        .items_center()
-                        .child(
-                            div()
-                                .debug_selector(move || format!("sidebar-unread-dot-{row_id}"))
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(theme.ely.info),
-                        ),
-                )
+                this.child(Self::unread_dot(format!("sidebar-unread-dot-{row_id}"), &theme))
             })
             .child(content)
     }
