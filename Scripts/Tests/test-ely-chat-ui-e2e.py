@@ -295,6 +295,14 @@ class Run:
         self.frames.append(str(destination.relative_to(self.out)))
 
 
+def composer_row_record(result: dict) -> dict:
+    """The `composerRow` of a `surface.chat.read` result: a JSON object in a string, as
+    `sessionPanel` is."""
+    if "composerRow" not in result:
+        raise Failure(f"surface.chat.read has no composerRow record (keys: {sorted(result)})")
+    return json.loads(result["composerRow"])
+
+
 class Instance:
     """One isolated Sirio, launched against a seeded scratch database."""
 
@@ -389,6 +397,9 @@ class Instance:
             "transcript": json.loads(result["transcript"]),
             # The level the chat is on, empty when the session offers no effort.
             "effort": result.get("effort"),
+            # The composer band's record (layout, geometry, overflow, mode icon); it is its own key
+            # because "composer" above is the draft's text.
+            "composerRow": composer_row_record(result),
         }
 
     def until(self, what: str, predicate, timeout: float = 40, quiet: bool = False) -> dict:
@@ -1021,19 +1032,27 @@ TRANSCRIPT_REGION = (0.228, 0.12, 0.52, 0.635)
 # with the window's size): the 14 px glyph centred at (265, 199), with a margin. `unfocused_spinner`
 # judges this and not the transcript, see there.
 SIDEBAR_BLOOM = "32x30+250+184"
-# The slash popup's box: the three command rows hung above the composer card, which starts below.
-POPUP_REGION = (0.231, 0.606, 0.204, 0.148)
-# Where a click lands in the composer card, in window pixels from the bottom edge and as a
-# fraction of the width: the card's text area, in the chat column.
-COMPOSER_CLICK = (0.487, 150)
+# The slash popup's box: the three command rows hung above the composer band, which starts below.
+# Measured on the 1470x833 frames `composer_keys` writes (`before-slash.png`, `slash-popup.png`): the
+# popup is the box x 360-640, y 571-664 (the pixels that differ between the two frames above the band,
+# which starts at y 673), and the region is that box with 4 px around it, as fractions of the frame.
+POPUP_REGION = (0.2422, 0.6807, 0.196, 0.1213)
+# Where a click lands in the composer band, in window pixels from the bottom edge and as a fraction
+# of the width: the field's second row, in the chat column. Measured on the 1470x833 frame
+# (`composer-band/frames/default.png`): the band is y 673-788, the field y 683-747 (the rule, 10 px
+# of padding, 5 px of field padding, three 18 px rows), so y 715 is its middle, 118 px from the
+# bottom; x 716 is the chat column's middle (the chat pane is x 289-1141).
+COMPOSER_CLICK = (0.487, 118)
 # Where the composer's field must paint nothing, in pixels of the default 1470x833 window as an
 # ImageMagick `WxH+X+Y`: a band on the field's second and third rows (the first holds the placeholder
-# and the caret) across its whole width and a few pixels of the card's padding to each side, so that
-# a frame drawn on the field's edge lies inside it; and the card's own padding just left of the
-# field on the same rows. `composer_field_has_no_fill` compares the two.
+# and the caret) across its whole width and 8 pixels of the band's padding to each side, so that a
+# frame drawn on the field's edge lies inside it; and the band's own padding just left of the field
+# on the same rows. `composer_field_has_no_fill` compares the two. Measured on the same frame: the
+# content column is 712 px wide (BAND_COLUMN), centred in the 852 px chat pane, so the field is
+# x 359-1071; its rows are y 688-706, 706-724 and 724-742, and the crops sit in 710-738.
 DEFAULT_WINDOW = "1470x833"
-FIELD_BAND = "745x28+343+672"
-CARD_BESIDE_FIELD = "8x28+340+672"
+FIELD_BAND = "728x28+351+710"
+BAND_BESIDE_FIELD = "8x28+349+710"
 
 
 def crop_difference(run: Run, before: Path, after: Path, crop: str, tolerance: int = 0) -> int:
@@ -1159,9 +1178,9 @@ def colour_counts(frame: Path, crop: str) -> dict[str, int]:
 
 def composer_field_has_no_fill(run: Run, frame: Path) -> None:
     """Goal 5: the composer's field paints nothing of its own, no fill and no frame, so the shell is
-    the one surface the field and the card read as. In the frame of an empty draft, every pixel of
-    a band across `composer-input` (on rows below the placeholder and the caret, with a few pixels
-    of the card's padding to each side) is the colour of the card just outside the field, exactly
+    the one surface the field and the band read as. In the frame of an empty draft, every pixel of
+    a crop across `composer-input` (on rows below the placeholder and the caret, with a few pixels
+    of the band's padding to each side) is the colour of the band just outside the field, exactly
     (`-fuzz 0`).
 
     Every pixel, and not only the band's most frequent colour: Ely's framed field fills with the
@@ -1174,19 +1193,19 @@ def composer_field_has_no_fill(run: Run, frame: Path) -> None:
         raise Failure(
             f"composer_field_has_no_fill: the frame is {size}, and its band is placed for {DEFAULT_WINDOW}"
         )
-    beside = colour_counts(frame, CARD_BESIDE_FIELD)
+    beside = colour_counts(frame, BAND_BESIDE_FIELD)
     if len(beside) != 1:
-        raise Failure(f"composer_field_has_no_fill: the card beside the field is not one colour: {beside}")
-    (card, _), = beside.items()
+        raise Failure(f"composer_field_has_no_fill: the band beside the field is not one colour: {beside}")
+    (fill, _), = beside.items()
     band = colour_counts(frame, FIELD_BAND)
-    stray = sum(count for colour, count in band.items() if colour != card)
+    stray = sum(count for colour, count in band.items() if colour != fill)
     run.log(
-        f"composer_field_has_no_fill: the card is {card}; {stray} of {sum(band.values())} pixels of "
+        f"composer_field_has_no_fill: the band is {fill}; {stray} of {sum(band.values())} pixels of "
         f"the field's band differ from it ({dict(sorted(band.items(), key=lambda item: -item[1])[:3])})"
     )
     if stray:
         raise Failure(
-            f"composer_field_has_no_fill: the field paints {stray} pixels of its own over the card's {card}: {band}"
+            f"composer_field_has_no_fill: the field paints {stray} pixels of its own over the band's {fill}: {band}"
         )
 
 
@@ -1284,6 +1303,364 @@ def composer_keys(run: Run) -> str | None:
     if texts(state, "user") != ["first"] or state["status"] != "completed":
         raise Failure(f"composer_keys: Escape sent or stopped something: {texts(state, 'user')} / {state['status']}")
     scenario.finish()
+    return None
+
+
+# --- the composer band, across widths -------------------------------------------------------------
+
+
+# The band's height with the control row on one line, in pixels, measured on the default window's
+# frame (`composer-band/frames/default.png`): the 1 px rule, 10 px of padding, the field (5 px of
+# padding, three 18 px rows, 5 px of padding), the 8 px gap, the 24 px row and 8 px of padding.
+# The default lane's own height cannot be the only reference: a row that wraps in the default
+# window is as tall in every lane, so every lane would still agree with it.
+BAND_ONE_LINE = 115.0
+
+
+def window_width(run: Run, window: str) -> int:
+    geometry = subprocess.run(
+        ["xwininfo", "-display", run.display, "-id", window], capture_output=True, text=True
+    ).stdout
+    return int(re.search(r"Width:\s*(\d+)", geometry).group(1))
+
+
+def near(a: float, b: float, tolerance: float = 1.0) -> bool:
+    return abs(a - b) <= tolerance
+
+
+def inside(inner: list[float], outer: list[float], tolerance: float = 1.0) -> bool:
+    """Whether the box `inner` (x, y, w, h) lies inside `outer`."""
+    return (
+        inner[0] >= outer[0] - tolerance
+        and inner[1] >= outer[1] - tolerance
+        and inner[0] + inner[2] <= outer[0] + outer[2] + tolerance
+        and inner[1] + inner[3] <= outer[1] + outer[3] + tolerance
+    )
+
+
+def composer_band_lane(run: Run, chat: Instance, window: str, lane: str, chat_width: int, accept: str, wanted) -> dict:
+    """Resize so the chat is about `chat_width` wide, wait until `wanted(row)` holds of the
+    composerRow record (a width, and for the docked lane the docking), and return a read that
+    `wanted` still holds of after the layout has settled."""
+    first = chat.read()
+    root = first["composerRow"]["root"]
+    chrome = window_width(run, window) - root[2]
+    x_run(run, "windowsize", window, str(chat_width + int(chrome)), str(DEFAULT_WINDOW.split("x")[1]))
+
+    def settled(s: dict) -> bool:
+        row = s["composerRow"]
+        return row["root"] is not None and wanted(row)
+
+    try:
+        chat.until(f"{lane}: the chat is {accept} (asked for {chat_width} px)", settled, timeout=20)
+    except Failure as failure:
+        raise Failure(
+            f"{failure}; the chat is {chat.read()['composerRow']['root']} in a {window_width(run, window)} px window"
+        ) from None
+    # One more settle: the layout follows the width one frame later. What is asserted on is
+    # the read after it, so it must still be the lane it was waited for.
+    time.sleep(1.0)
+    state = chat.read()
+    if not settled(state):
+        raise Failure(f"composer_band {lane}: the chat left the {accept} lane while settling: {state['composerRow']}")
+    return state
+
+
+def row_is_one_line(lane: str, row: dict, band_height: float) -> None:
+    """Spec section 7's first assertion: the control row is one line at every width. A wrapped
+    row makes the band taller than the default lane's, and puts the chips (and send) on lines of
+    their own, so the chips and send no longer share a top and a height."""
+    band, send, chips = row["band"], row["send"], row["chips"]
+    if band is None or send is None or chips is None:
+        raise Failure(f"composer_band {lane}: the band, send or the chips were not measured: {row}")
+    if not near(band[3], band_height):
+        raise Failure(f"composer_band {lane}: the band is {band[3]} px tall, not the one-line {band_height}: the row wrapped: {row}")
+    if not near(chips[1], send[1]) or not near(chips[3], send[3]):
+        raise Failure(f"composer_band {lane}: the chips {chips} and send {send} are not on one line")
+
+
+def band_spans_the_chat(lane: str, row: dict, beside: float = 0.0) -> None:
+    """The band runs the chat's whole width (less a docked panel's column) and ends on its bottom."""
+    root, band = row["root"], row["band"]
+    if band is None:
+        raise Failure(f"composer_band {lane}: the band was not measured: {row}")
+    if not near(band[0], root[0]) or not near(band[0] + band[2], root[0] + root[2] - beside):
+        raise Failure(f"composer_band {lane}: the band {band} does not span the chat {root} less {beside}")
+    if not near(band[1] + band[3], root[1] + root[3]):
+        raise Failure(f"composer_band {lane}: the band {band} does not end at the chat's bottom {root}")
+
+
+def send_stays_clear(lane: str, row: dict) -> None:
+    """Send lies inside the band; the chips' clipping container ends at or before send's left edge
+    and lies inside the band: a narrow pane never lets a chip cover send."""
+    band, send, chips = row["band"], row["send"], row["chips"]
+    if send is None or chips is None:
+        raise Failure(f"composer_band {lane}: send or the chips were not measured: {row}")
+    if not inside(send, band):
+        raise Failure(f"composer_band {lane}: send {send} is not inside the band {band}")
+    if chips[0] + chips[2] > send[0] + 1.0:
+        raise Failure(f"composer_band {lane}: the chips {chips} reach past send's left edge {send[0]}")
+    if not inside(chips, band):
+        raise Failure(f"composer_band {lane}: the chips {chips} are not inside the band {band}")
+
+
+def isolate_shells(scenario: "Scenario") -> None:
+    """A private HOME, XDG tree and a plain `/bin/sh` for the scenario's instance, so the terminals
+    its `pane.split` spawns (`$SHELL -il` in the environment Sirio has) never read the user's
+    rc files. The same variables `test-chat-session-panel-e2e.sh` gives its instances, less the
+    `ENV` and `BASH_ENV` an interactive `sh` would otherwise source."""
+    home = scenario.dir / "home"
+    directories = {
+        "XDG_CONFIG_HOME": home / ".config",
+        "XDG_DATA_HOME": home / ".local" / "share",
+        "XDG_STATE_HOME": home / ".local" / "state",
+        "XDG_CACHE_HOME": home / ".cache",
+    }
+    for directory in (home, *directories.values()):
+        directory.mkdir(parents=True, exist_ok=True)
+    scenario.env.update(HOME=str(home), SHELL="/bin/sh", ENV=None, BASH_ENV=None, **{name: str(path) for name, path in directories.items()})
+
+
+def composer_band_minimal_lane(run: Run, chat: Instance, window: str, name: str) -> dict:
+    """Split the chat's pane beside itself until its `root` is in Minimal's range (the row is
+    `minimal`), and return a read that still says so after the layout has settled. Each round
+    focuses the chat's pane, splits it to the right and waits for the chat to get narrower; a split
+    that no longer narrows it means the 160 px pane floor, which is reported with the root there."""
+    narrowest = chat.read()["composerRow"]
+    for _ in range(6):
+        if narrowest["layout"] == "minimal":
+            break
+        before = narrowest["root"][2]
+        chat.call("pane.focus", direction="left")
+        split = chat.call("pane.split", direction="right")
+        if not split.get("ok"):
+            raise Failure(f"{name} minimal: pane.split failed: {split}")
+        # The chat is narrower, and its band has been measured at that width (the layout follows
+        # the width one frame after the band does).
+        def narrower(s: dict) -> bool:
+            row = s["composerRow"]
+            return (
+                row["root"] is not None
+                and row["band"] is not None
+                and row["root"][2] < before - 5
+                and near(row["band"][2], row["root"][2], 0.5)
+            )
+
+        try:
+            chat.until(f"minimal: the chat is narrower than {before:.0f} px", narrower, timeout=15)
+        except Failure:
+            raise Failure(
+                f"{name} minimal: splitting stopped narrowing the chat: root {chat.read()['composerRow']['root']} "
+                f"layout {chat.read()['composerRow']['layout']}"
+            ) from None
+        # Wait for the layout to follow the width; a width still above Minimal's range never
+        # becomes minimal, so that wait is allowed to end, and the next split goes on.
+        try:
+            chat.until(
+                "minimal: the layout is minimal", lambda s: s["composerRow"]["layout"] == "minimal", timeout=4, quiet=True
+            )
+        except Failure:
+            pass
+        narrowest = chat.read()["composerRow"]
+        run.log(f"{name}: minimal lane: root {narrowest['root']} layout {narrowest['layout']}")
+    if narrowest["layout"] != "minimal":
+        raise Failure(f"{name} minimal: splits reached root {narrowest['root']} and layout {narrowest['layout']}, not minimal")
+    state = chat.read()
+    if state["composerRow"]["layout"] != "minimal":
+        raise Failure(f"{name} minimal: the chat left the minimal layout while settling: {state['composerRow']}")
+    return state
+
+
+def composer_band_steps(run: Run, name: str, appearance: str) -> None:
+    """The composer band in the real app against the ACP fixture, in five widths: wide (the full
+    row), narrow (the compact row: Fast, Thinking and the session panel moved into the overflow
+    menu), floor (the narrowest a lone chat pane gets, about 320 px, where the chips may clip and send
+    must stay clear), docked (a session panel beside the band, so the band ends at the panel) and
+    minimal (the chat's own pane split down to about 209 px: the model and attach are rows of the
+    overflow menu).
+    The record is `composerRow` of `surface.chat.read`; each lane asserts a width first, so a change
+    to the shell's layout fails loudly instead of testing the wrong lane, and every lane asserts the
+    row is one line (the band as tall as the default window's, the chips level with send)."""
+    scenario = Scenario(run, name, "composer", appearance=appearance)
+    isolate_shells(scenario)
+    chat = scenario.instance
+    chat.start()
+    chat.until("the chat has finished connecting", lambda s: s["status"] != "connecting", quiet=True)
+    window = sirio_window(run, chat)
+    chat.until("the composer band is measured", lambda s: s["composerRow"]["band"] is not None)
+    default_width = window_width(run, window)
+    opened_row = chat.read()["composerRow"]
+    band_height = opened_row["band"][3]
+    if not near(band_height, BAND_ONE_LINE):
+        raise Failure(f"{name} default: the band is {band_height} px tall, not the one-line {BAND_ONE_LINE}: {opened_row}")
+    row_is_one_line("default", opened_row, band_height)
+    # The window as it opens, 1470x833: the frame the composer_keys constants are measured on.
+    chat.frame("default")
+
+    # 1. Wide: the default window.
+    wide = composer_band_lane(run, chat, window, "wide", 1100, "wide", lambda r: r["root"][2] >= 1000)
+    row = wide["composerRow"]
+    run.log(f"{name}: wide root {row['root']} band {row['band']} layout {row['layout']}")
+    chat.frame("wide")
+    if row["layout"] != "full" or row["overflow"] != []:
+        raise Failure(f"{name} wide: expected the full row with nothing overflowed: {row}")
+    band_spans_the_chat("wide", row)
+    row_is_one_line("wide", row, band_height)
+    # The composer fixture advertises no permission modes, so its pill is the connection's dot and
+    # `modeIcon` is null; `ely-catalogue` is the fixture that has them.
+    if row["modeIcon"] is not None or row["modeDanger"]:
+        raise Failure(f"{name} wide: a fixture without modes drew a mode icon: {row}")
+
+    # 2. Narrow: a chat 340 px or less wide.
+    narrow = composer_band_lane(run, chat, window, "narrow", 330, "narrow", lambda r: r["root"][2] <= 340)
+    row = narrow["composerRow"]
+    run.log(f"{name}: narrow root {row['root']} band {row['band']} layout {row['layout']} overflow {row['overflow']}")
+    chat.frame("narrow")
+    if row["layout"] != "compact":
+        raise Failure(f"{name} narrow: expected the compact row: {row}")
+    if "session-panel" not in row["overflow"]:
+        raise Failure(f"{name} narrow: the session panel's toggle did not move into the menu: {row}")
+    band_spans_the_chat("narrow", row)
+    row_is_one_line("narrow", row, band_height)
+    send_stays_clear("narrow", row)
+
+    # 3. Floor: the narrowest a lone chat pane gets. A centre pane never goes under
+    # MIN_CENTER_PANE_WIDTH (320 px, `panel_layout.rs`): the side panels yield before it does, so
+    # asking for 290 px lands on that floor. A chat below it needs the Secondary pane squeezed, and
+    # nothing on the control socket opens a chat there; the gpui band tests cover that width.
+    narrow_width = row["root"][2]
+    floor = composer_band_lane(
+        run, chat, window, "floor", 290, "floor", lambda r: r["root"][2] < narrow_width and r["root"][2] <= 330
+    )
+    row = floor["composerRow"]
+    run.log(f"{name}: floor root {row['root']} band {row['band']} layout {row['layout']} overflow {row['overflow']}")
+    chat.frame("floor")
+    if row["layout"] != "compact":
+        raise Failure(f"{name} floor: expected the compact row: {row}")
+    band_spans_the_chat("floor", row)
+    row_is_one_line("floor", row, band_height)
+    send_stays_clear("floor", row)
+
+    # 4. Docked: a session panel open beside a chat about 690 px wide.
+    opened = chat.call("surface.chat.panel", surfaceId=chat.surface, action="open")
+    if not opened.get("ok"):
+        raise Failure(f"{name} docked: surface.chat.panel open failed: {opened}")
+    # About 690, clear of the 640 px docking threshold (`MIN_CHAT_WIDTH`).
+    docked = composer_band_lane(
+        run, chat, window, "docked", 690, "docked", lambda r: r["docked"] and 650 <= r["root"][2] <= 700
+    )
+    row = docked["composerRow"]
+    run.log(f"{name}: docked root {row['root']} band {row['band']} layout {row['layout']} docked {row['docked']}")
+    chat.frame("docked")
+    if not row["docked"]:
+        raise Failure(f"{name} docked: the session panel is not docked beside the band: {row}")
+    band_spans_the_chat("docked", row, beside=300.0)
+    row_is_one_line("docked", row, band_height)
+    if row["layout"] != "compact":
+        # The brief: stop and report, never loosen.
+        raise Failure(f"{name} docked: the ACP row's Full fits the docked band ({row['band']}): {row}")
+    send_stays_clear("docked", row)
+    chat.call("surface.chat.panel", surfaceId=chat.surface, action="close")
+
+    # 5. Back to the default window: the full row returns.
+    x_run(run, "windowsize", window, str(default_width), DEFAULT_WINDOW.split("x")[1])
+    try:
+        back = chat.until(
+            "the default window brings the full row back",
+            lambda s: s["composerRow"]["layout"] == "full" and s["composerRow"]["root"][2] >= 700,
+            timeout=20,
+        )
+    except Failure as failure:
+        raise Failure(f"{failure}; now {chat.read()['composerRow']} in a {window_width(run, window)} px window") from None
+    band_spans_the_chat("back", back["composerRow"])
+    row_is_one_line("back", back["composerRow"], band_height)
+
+    # 6. Minimal: the window cannot make the chat narrower than the 320 px floor, but a split
+    # pane can be 160 px (`MIN_SPLIT_PANE_SIZE`). `pane.split` (served in release builds too) puts a
+    # terminal beside the focused pane; each split of the chat's own pane halves it. The row is
+    # Minimal there: attach and the model are the first rows of the overflow menu, the pill and the
+    # effort have no chevrons, and the chat's chips still end before send.
+    minimal = composer_band_minimal_lane(run, chat, window, name)
+    row = minimal["composerRow"]
+    run.log(
+        f"{name}: minimal root {row['root']} band {row['band']} layout {row['layout']} overflow {row['overflow']}"
+    )
+    chat.frame("minimal")
+    band_spans_the_chat("minimal", row)
+    row_is_one_line("minimal", row, band_height)
+    send_stays_clear("minimal", row)
+    if row["overflow"][:2] != ["model", "attach"]:
+        raise Failure(f"{name} minimal: the model and attach are not the first rows moved into the menu: {row}")
+    if row["overflowButton"] is None:
+        raise Failure(f"{name} minimal: the overflow button was not measured: {row}")
+    # A real click on the measured overflow button opens the menu: the model first, attach second.
+    x_focus(run, window)
+    x, y, width, height = row["overflowButton"]
+    x_run(run, "mousemove", "--window", window, str(round(x + width / 2)), str(round(y + height / 2)), "click", "1")
+    opened = chat.until(
+        "the overflow menu is open", lambda s: s["composerRow"]["picker"] == "overflow" and s["composerRow"]["menu"]
+    )["composerRow"]
+    ids = [item["id"] for item in opened["menu"]]
+    if ids[:2] != ["model", "attach"] or not all(item["enabled"] for item in opened["menu"][:2]):
+        raise Failure(f"{name} minimal: the menu does not list the model, then attach, both enabled: {opened['menu']}")
+    chat.frame("minimal-overflow")
+    # Enter chooses the marked row, the model: its picker opens.
+    x_key(run, "Return")
+    chat.until("Enter on the model row opens the model picker", lambda s: s["composerRow"]["picker"] == "model")
+    chat.frame("minimal-model")
+    x_key(run, "Escape")
+    chat.until("Escape closes the model picker", lambda s: s["composerRow"]["picker"] is None)
+    scenario.finish()
+
+
+def composer_band_modes_steps(run: Run, name: str, appearance: str) -> None:
+    """The permission pill in a narrow chat, against the fixture that advertises modes. The
+    `composer` fixture has none, so its pill is a dot; `ely-catalogue` advertises `ask`, `plan` and
+    `auto` with `ask` current. `modeIcon` is what the render drew for the pill, so for `ask`, which
+    `mode_icon` has no entry for, it is the shield every unknown id gets, and the pill is not the
+    bypass warning. The narrow geometry holds as it does with no modes."""
+    scenario = Scenario(run, name, "ely-catalogue", appearance=appearance)
+    chat = scenario.instance
+    chat.start()
+    chat.until("the chat has finished connecting", lambda s: s["status"] != "connecting", quiet=True)
+    window = sirio_window(run, chat)
+    chat.until("the composer band is measured", lambda s: s["composerRow"]["band"] is not None)
+    chat.until(
+        "the pill draws the current mode's icon", lambda s: s["composerRow"]["modeIcon"] is not None, timeout=20
+    )
+    band_height = chat.read()["composerRow"]["band"][3]
+    narrow = composer_band_lane(run, chat, window, "narrow", 330, "narrow", lambda r: r["root"][2] <= 340)
+    row = narrow["composerRow"]
+    run.log(
+        f"{name}: narrow root {row['root']} layout {row['layout']} overflow {row['overflow']} "
+        f"modeIcon {row['modeIcon']} modeDanger {row['modeDanger']}"
+    )
+    chat.frame("narrow-modes")
+    if row["layout"] not in ("compact", "narrow"):
+        raise Failure(f"{name} narrow: expected a compact or narrow row: {row}")
+    if row["modeIcon"] != "shield":
+        raise Failure(f"{name} narrow: the pill for the mode `ask` drew {row['modeIcon']!r}, not the shield: {row}")
+    if row["modeDanger"]:
+        raise Failure(f"{name} narrow: the pill for the mode `ask` was drawn as the bypass warning: {row}")
+    band_spans_the_chat("narrow", row)
+    row_is_one_line("narrow", row, band_height)
+    send_stays_clear("narrow", row)
+    scenario.finish()
+
+
+def composer_band(run: Run) -> str | None:
+    if needs_display(run, "composer_band"):
+        return "skipped"
+    composer_band_steps(run, "composer-band", "dark")
+    composer_band_modes_steps(run, "composer-band-modes", "dark")
+    return None
+
+
+def composer_band_light(run: Run) -> str | None:
+    if needs_display(run, "composer_band_light"):
+        return "skipped"
+    composer_band_steps(run, "composer-band-light", "light")
+    composer_band_modes_steps(run, "composer-band-modes-light", "light")
     return None
 
 
@@ -1490,6 +1867,8 @@ SCENARIOS = [
     effort_full,
     effort_full_light,
     composer_keys,
+    composer_band,
+    composer_band_light,
     reduced_motion,
     unfocused_spinner,
 ]

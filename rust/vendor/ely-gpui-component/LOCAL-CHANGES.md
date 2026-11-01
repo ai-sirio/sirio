@@ -31,7 +31,9 @@ terminal/webview/editor dependencies and Gallery runtime are excluded.
   native probe, allowing Sirio's existing asset-free GPUI test contexts.
 - `src/assets.rs` and `src/primitives/icon.rs`: offline icons use the `ely/`
   namespace in both lookup/list and references. Icon geometry is unchanged;
-  upstream Inter/JetBrains Mono font files are excluded.
+  upstream Inter/JetBrains Mono font files are excluded. `ClipboardList`,
+  `FilePen` and `ShieldOff` (and their SVGs, kept verbatim) were added from
+  lucide-static 1.48.0 for the composer's permission-mode icons.
 - `src/compat.rs`: retains the image-source helper from
   `documents/blocks/media.rs` and code-color helper from `editor/syntax.rs`.
   Message/avatar and code components import these helpers without pulling in
@@ -61,6 +63,9 @@ as they are implemented. Native rendering/input evidence is collected by
 
 - `chat/message.rs`: `MessageAvatar::content` accepts the host's white agent
   mark and dark plate, before Ely's default role avatar.
+- `chat/message.rs`: `ChatContainer::composer_full_bleed()` gives the composer slot the
+  whole width of the frame (no `px_4`, `pb_4` or reading-column cap) for a composer that
+  draws its own band; without it the slot is as upstream.
 - `theme/{mod,tokens}.rs`: optional `ThemeMetrics` supplies Sirio's eight text
   sizes and four radii in pixels; a single px-to-rem conversion preserves the
   existing API and avoids applying font scale twice.
@@ -109,7 +114,18 @@ physical Wayland session and native macOS/Windows input are unverified.
   (Sirio's composer hands it Ely's raw `TextInput`, which draws text, selection
   and caret but no frame or fill), so the two
   read as one card in the theme's card colour; its border is `border` in both
-  states, never the ring colour or a brighter step, and the tool row wraps. `.trailing` puts tools at the end of the row, next
+  states, never the ring colour or a brighter step, and the tool row wraps unless `.band(column)` is set. `.band(column)` draws the
+  custom shell as a band across the bottom of its pane instead of a card: as wide as its parent, a 1px
+  top rule in `border`, no radius, `surface` as its fill, 12px side padding, 10px above and 8px below,
+  its content in a centred column at most `column` wide; the tool row never wraps: `tools` stay at
+  the start in a group that does not shrink, a flexible gap follows, and `trailing` and send form a
+  group at the end that may shrink (send keeps its size). Without `.band(..)` nothing above changes.
+  `.send_probe(f)` calls `f` with the send control's bounds at each paint of the band row (a
+  canvas over the control, painting nothing), because the running app cannot read a debug
+  selector's bounds in any build (`debug_selector` is live only under `cfg(any(test, feature =
+  "test-support"))`, and only a `VisualTestContext` reads it), and the control socket reports the
+  composer's geometry; unset, nothing changes.
+  `.trailing` puts tools at the end of the row, next
   to the send control. `SendButton` carries `send`, `send-ready` and
   `stop-glyph` debug selectors, and `PromptInput`'s card `ely-prompt-input`
   (no-ops in release builds); the card sets a text colour so content without
@@ -978,3 +994,14 @@ A sync with upstream must keep `scroll_x` in `x` and `grid`.
   assistant bodies already are. Upstream's flex row lets the body grow to its
   unbroken text, so a long system line ran off both sides of the centre
   instead of wrapping.
+
+### Reading a menu back (composer band)
+
+Sirio's control socket reports the rows its composer menu drew. `Menu` and `MenuItem`
+keep their fields private to the module, so a host could not read a menu it built.
+
+- `src/menus/model.rs`: `MenuItem::row_selector`, `MenuItem::is_disabled` and
+  `MenuItem::tooltip_text` return what `selectors`, `disabled` and `tooltip` set;
+  `Menu::items` walks the rows in order, without headings or separators.
+
+A sync with upstream must keep the four readers.

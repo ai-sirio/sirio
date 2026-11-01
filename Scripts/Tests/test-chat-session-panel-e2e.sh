@@ -90,6 +90,19 @@ set -euo pipefail
 #                      Ctrl+A then Ctrl+X cuts, Ctrl+V pastes another application's text;
 #                      a drag across the response then Ctrl+C copies what it selected,
 #                      and a plain click on the response leaves typing in the composer
+# The composer_compact scenario (spec 2026-10-30-composer-band) uses a fourth stub,
+# Scripts/Tests/stubs/session-panel-bypass/claude, the fixture in its session_panel_bypass mode
+# (the CLI starts in bypassPermissions):
+#   composer_compact   the native Claude chat at the default window (about 430 px): the compact
+#                      composer row (Fast, Thinking and the session panel in the overflow menu),
+#                      the mode pill the danger shield-off, the band spanning the chat, send inside
+#                      it, the chips ending before send and level with it; read on `composerRow`
+#                      of `surface.chat.read`, which exists only once a frame paints (--display :N).
+#                      Then a real click on the overflow button (its measured `overflowButton`)
+#                      opens the menu: `menu`, the rows the render built, lists Fast disabled with
+#                      the CLI's reason as its tooltip and Thinking enabled; a real Enter chooses
+#                      the first enabled row, Thinking, and `picker` is `thinking`; Escape closes it.
+#                      The stub's handshake names `preference` as the reason Fast is refused
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
@@ -130,7 +143,7 @@ CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
-  trace_tab trace_idle trace_keys file_links clipboard_keys)
+  trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact)
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
@@ -153,11 +166,12 @@ refuse() { echo "refused: $*" >&2; exit 2; }
 case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark, not $APPEARANCE" ;; esac
 [ -z "$WINDOW_SIZE" ] || [[ "$WINDOW_SIZE" =~ ^[0-9]+x[0-9]+$ ]] || refuse "--window-size is WxH, not $WINDOW_SIZE"
 # The scenarios that read the forge through the change request card, which reads only
-# while a frame paints the column, and the two that need a frame for what they assert:
+# while a frame paints the column, composer_compact (the composer's layout and the measured
+# band exist only once a frame paints the chat), and the two that need a frame for what they assert:
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact "
 # trace_keys, file_links and clipboard_keys send real X clicks, keys and drags at pixels, so they need a
 # framed run (no --state-only) at the 2200x1000 window size.
 FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys "
@@ -386,17 +400,18 @@ STUB_EOF
   chmod +x "$CLI_STUBS/$name"
 done
 # Which claude shim the next launch puts first on the app's PATH: session-panel (the
-# column's own scenarios), trace (the trace scenarios) or file-links (file_links). A scenario picks its stub by
+# column's own scenarios), session-panel-bypass (the same, the CLI in bypassPermissions), trace (the trace
+# scenarios) or file-links (file_links). A scenario picks its stub by
 # naming it in SIRIO_E2E_CLAUDE_STUB through use_stub, and the run loop puts the default
 # back before the next scenario.
-use_stub() { # session-panel|trace|file-links
+use_stub() { # session-panel|session-panel-bypass|trace|file-links
   SIRIO_E2E_CLAUDE_STUB=$1
   local stubs="$ROOT/Scripts/Tests/stubs/$SIRIO_E2E_CLAUDE_STUB" resolved
   APP_PATH="$stubs:$RUN_DIR/bin:/usr/local/bin:/usr/bin:/bin"
   resolved=$(PATH="$APP_PATH" command -v claude || true)
   [ "$resolved" = "$stubs/claude" ] || fail "claude resolves to '$resolved' under the app's PATH, not the $SIRIO_E2E_CLAUDE_STUB shim"
 }
-for stub in session-panel trace file-links; do
+for stub in session-panel session-panel-bypass trace file-links; do
   use_stub "$stub"
   echo "OK: claude resolves to the $stub shim"
 done
@@ -447,6 +462,8 @@ def state(surface):
     panel = json.loads(result["sessionPanel"])
     chat = {k: v for k, v in result.items() if k != "sessionPanel"}
     chat["transcript"] = json.loads(chat.get("transcript") or "[]")
+    # The composer band's record (layout, geometry, overflow, mode icon) is JSON in a string.
+    chat["composerRow"] = json.loads(chat.get("composerRow") or "{}")
     chat["first"] = int(chat.get("firstVisibleEntry") or 0)
     chat["last"] = int(chat.get("lastVisibleEntry") or 0)
     return panel, chat
@@ -549,6 +566,106 @@ elif command in ("wait", "find"):
             print(f"FAIL: {desc}: not true within {seconds:.0f} s: {expr}" + (f" ({error})" if error else ""), file=sys.stderr)
             sys.exit(1)
         time.sleep(0.3)
+elif command == "composer-compact":
+    # composer-compact SURFACE SECONDS: wait for the compact row the Claude chat draws at the
+    # default window (its measured band, send and chips), assert it and print what was read.
+    surface, seconds = sys.argv[2], float(sys.argv[3])
+    deadline = time.time() + seconds
+    row = None
+    while True:
+        try:
+            row = state(surface)[1]["composerRow"]
+            if row.get("band") and row.get("send") and row.get("chips") and row.get("layout") == "compact":
+                break
+        except Exception as e:  # a read that fails is tried again until the time is up
+            print(f"  read failed: {e}", file=sys.stderr)
+        if time.time() > deadline:
+            print(f"FAIL: composer-compact: no measured compact row within {seconds:.0f} s: {json.dumps(row)}", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+    print("  composerRow: " + json.dumps(row, separators=(",", ":")), file=sys.stderr)
+
+    def near(a, b):
+        return abs(a - b) <= 1.0
+
+    def fail(why):
+        print(f"FAIL: composer-compact: {why}: {json.dumps(row)}", file=sys.stderr)
+        sys.exit(1)
+
+    # The spec's own text, as Enzo's native-Claude chat shows it: Fast, Thinking and the
+    # session panel in the overflow menu, and Bypass as a struck-through shield, in danger.
+    if row["overflow"] != ["fast", "thinking", "session-panel"]:
+        fail("the overflow menu is not fast, thinking, session-panel")
+    print("OK: the overflow menu holds fast, thinking and session-panel")
+    if row["modeIcon"] != "shield-off" or row["modeDanger"] is not True:
+        fail("the mode pill is not the danger shield-off")
+    print("OK: bypass permissions is the shield-off icon, drawn as danger")
+    root, band, send, chips = row["root"], row["band"], row["send"], row["chips"]
+    if root is None:
+        fail("the chat's root was not measured")
+    if not (near(band[0], root[0]) and near(band[0] + band[2], root[0] + root[2]) and near(band[1] + band[3], root[1] + root[3])):
+        fail("the band does not span the chat and end on its bottom")
+    print("OK: the band spans the chat and ends on its bottom")
+    if not (send[0] >= band[0] - 1 and send[1] >= band[1] - 1 and send[0] + send[2] <= band[0] + band[2] + 1 and send[1] + send[3] <= band[1] + band[3] + 1):
+        fail("send is outside the band")
+    if chips[0] + chips[2] > send[0] + 1:
+        fail("the chips reach past send's left edge")
+    if not (chips[0] >= band[0] - 1 and chips[1] >= band[1] - 1 and chips[0] + chips[2] <= band[0] + band[2] + 1 and chips[1] + chips[3] <= band[1] + band[3] + 1):
+        fail("the chips are outside the band")
+    print("OK: send is inside the band and the chips end before it")
+    if not near(chips[1], send[1]) or not near(chips[3], send[3]):
+        fail("the chips and send are not one line")
+    print("OK: the chips and send share one line")
+elif command == "composer-overflow-xy":
+    # composer-overflow-xy SURFACE SECONDS: wait for the measured trigger of the overflow menu and
+    # print the window pixel at its centre as "x y".
+    surface, seconds = sys.argv[2], float(sys.argv[3])
+    deadline = time.time() + seconds
+    while True:
+        try:
+            box = state(surface)[1]["composerRow"].get("overflowButton")
+            if box:
+                print(f"{round(box[0] + box[2] / 2)} {round(box[1] + box[3] / 2)}")
+                break
+        except Exception as e:  # a read that fails is tried again until the time is up
+            print(f"  read failed: {e}", file=sys.stderr)
+        if time.time() > deadline:
+            print("FAIL: composer-overflow-xy: the overflow trigger was never measured", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+elif command == "composer-menu":
+    # composer-menu SURFACE SECONDS REASON: wait for the overflow menu the compact row opens
+    # (`picker` is `overflow` and `menu` the rows its render built), and assert them: Fast is
+    # there, disabled, with REASON as its tooltip; Thinking is there and enabled.
+    surface, seconds, reason = sys.argv[2], float(sys.argv[3]), sys.argv[4]
+    deadline = time.time() + seconds
+    row = None
+    while True:
+        try:
+            row = state(surface)[1]["composerRow"]
+            if row.get("picker") == "overflow" and row.get("menu"):
+                break
+        except Exception as e:  # a read that fails is tried again until the time is up
+            print(f"  read failed: {e}", file=sys.stderr)
+        if time.time() > deadline:
+            print(f"FAIL: composer-menu: the overflow menu was not drawn within {seconds:.0f} s: {json.dumps(row)}", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.3)
+    print("  composerRow: " + json.dumps(row, separators=(",", ":")), file=sys.stderr)
+    rows = {r["id"]: r for r in row["menu"]}
+
+    def fail(why):
+        print(f"FAIL: composer-menu: {why}: {json.dumps(row['menu'])}", file=sys.stderr)
+        sys.exit(1)
+
+    fast, thinking = rows.get("fast"), rows.get("thinking")
+    if fast is None or fast["enabled"] is not False or fast["tooltip"] != reason:
+        fail(f"Fast is not a disabled row whose tooltip is '{reason}'")
+    print(f"OK: the menu lists Fast, disabled, with its reason '{reason}'")
+    if thinking is None or thinking["enabled"] is not True:
+        fail("Thinking is not an enabled row")
+    print("OK: the menu lists Thinking, enabled")
+    print("OK: the rows are " + ", ".join(r["id"] for r in row["menu"]))
 elif command == "check":
     # check SURFACE DESC EXPR: one read, no waiting.
     surface, desc, expr = sys.argv[2], sys.argv[3], sys.argv[4]
@@ -1540,6 +1657,22 @@ press_key() { # key
   DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool key "$1" || fail "xdotool could not press $1"
   sleep 1
 }
+# The screen pixel of the app's window's top-left corner: the control socket reports window pixels.
+window_origin() { # prints "X Y"
+  local window
+  window=$(find_window)
+  [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID"
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xwininfo -id "$window" | awk '/Absolute upper-left X/ {x=$NF} /Absolute upper-left Y/ {y=$NF} END {print x, y}'
+}
+# A click at a window pixel ("X Y"), as the socket reports one.
+click_at_window() { # "x y"
+  local origin x y
+  origin=$(window_origin)
+  x=$(( ${1% *} + ${origin% *} ))
+  y=$(( ${1#* } + ${origin#* } ))
+  echo "  click: window pixel $1 is screen pixel $x $y" >&2
+  click_at "$x" "$y"
+}
 scenario_trace_keys() {
   trace_chat trace_keys 30
   send_prompt subagents
@@ -1898,6 +2031,37 @@ scenario_clipboard_keys() {
   echo "OK: clipboard_keys: copy, cut and paste work in the composer, and Ctrl+C copies a transcript selection"
   stop_app
   printf 'fn main() {}\n' >"$main_rs"
+}
+
+# The compact composer row on a native Claude chat (spec 2026-10-30-composer-band): the
+# session-panel-bypass stub has the CLI start in bypassPermissions, and the chat at the default
+# window (about 430 px wide) draws the compact row -- Fast, Thinking and the session panel in
+# the overflow menu, the mode pill the danger shield-off -- on one line, with the chips clear
+# of send. Asserted on the `composerRow` of `surface.chat.read`.
+scenario_composer_compact() {
+  use_stub session-panel-bypass
+  launch composer_compact
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  send_prompt hello
+  wait_panel "the turn completed, so the model controls show" 'c["status"] == "completed"' 30
+  E2E composer-compact "$SURFACE" 30 || fail "the compact composer row is not what the spec draws"
+  capture composer-compact
+
+  echo "step: a real click on the overflow button opens the menu: Fast with its reason, Thinking"
+  click_at_window "$(E2E composer-overflow-xy "$SURFACE" 15)"
+  E2E composer-menu "$SURFACE" 15 preference || fail "the overflow menu is not what the spec draws"
+  capture composer-overflow
+
+  echo "step: a real Enter chooses the first enabled row, Thinking (Fast is blocked), and opens its picker"
+  press_key Return
+  wait_panel "Enter on the menu's marked row opened the thinking picker" 'c["composerRow"]["picker"] == "thinking"' 10
+  capture composer-thinking
+
+  echo "step: a real Escape closes the picker"
+  press_key Escape
+  wait_panel "Escape closed the thinking picker" 'c["composerRow"]["picker"] is None and c["composerRow"]["menu"] is None' 10
+  stop_app
 }
 
 ran=0

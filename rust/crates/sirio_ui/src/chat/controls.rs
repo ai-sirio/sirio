@@ -3,11 +3,14 @@
 //! the popup each one opens. Every control draws only what the agent reported,
 //! so a catalogue it never sent leaves no chevron and no chip behind.
 
+use super::composer_row::{CHIP_GAP, CHIP_PAD_X, MODEL_FLOOR, RowLayout};
 use super::composer_view::{EFFORT_RESET, EFFORT_ULTRACODE, effort_rows};
 use super::*;
 use ely_gpui_component::{
     forms::Input,
     menus::{Hang, Menu, MenuItem, MenuPanel, layer, panel_surface},
+    primitives::{Icon, IconName},
+    theme::IconSize,
 };
 use sirio_acp::EffortChoice;
 
@@ -58,73 +61,36 @@ fn effort_steps(
         .into_any_element()
 }
 
+/// What the effort chip's bars are: how many of `total` are filled, and, for a
+/// level with no bars of its own that the Minimal row draws as bars (the reset,
+/// Ultracode), which it stands in for.
+pub(super) struct EffortBars {
+    pub filled: usize,
+    pub total: usize,
+    /// Whether these are bars the level does not have of its own: the reset's, all
+    /// unfilled, and Ultracode's, all filled.
+    pub standing_in: bool,
+}
+
+/// The Lucide icon the status pill draws for a permission mode: one per
+/// Claude mode, and a shield for any id Claude does not use, such as an ACP
+/// agent's own, so a known catalogue never leaves the pill without one.
+pub(crate) fn mode_icon(mode_id: &str) -> IconName {
+    match mode_id {
+        "default" => IconName::Hand,
+        "acceptEdits" => IconName::FilePen,
+        "plan" => IconName::ClipboardList,
+        "auto" => IconName::Sparkles,
+        BYPASS_PERMISSIONS_MODE => IconName::ShieldOff,
+        _ => IconName::Shield,
+    }
+}
+
 impl Chat {
-    /// The control row's chips, each with the popup it hangs. One element so
-    /// the composer takes it as a single tool slot; its own wrapping keeps
-    /// the chips inside a narrow pane.
-    pub(super) fn render_agent_controls(
-        &self,
-        theme: &Theme,
-        _window: &mut Window,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let typography = theme.typography;
-        let bezel_theme = bezel_theme::Theme::of(cx).clone();
-        let entity = cx.entity();
-
-        // Swift's `modePill` (ComposerControlBar.swift) pairs a status dot
-        // with the permission mode's name: the dot carries the connection
-        // state, the label the mode, and a raw state word ("idle"/"working")
-        // only stands in while no mode is known. The port used to let
-        // "working" and "connecting" take the label over from the mode, so
-        // the permission the user picked was unreadable exactly while a
-        // turn ran (`status_pill_content`, `composer_view.rs`).
-        let connecting = self.connecting;
-        // F-CHAT-15 / #136: a known mode names itself from the first frame,
-        // never waiting on `has_completed_turn`.
-        let (dot, label) = composer_view::status_pill_content(
-            connecting,
-            self.streaming,
-            self.client.is_some(),
-            self.mode_catalog.as_ref(),
-        );
-        let dot = dot.color();
-        let mode_selectable = self.mode_selectable();
-        let status_pill = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(24.0))
-            .px(px(7.0))
-            .rounded(theme.radii.control)
-            .text_size(typography.ui_size);
-        let status_pill = if connecting {
-            status_pill
-                .id("chat-connecting")
-                .debug_selector(|| "chat-connecting".into())
-        } else {
-            status_pill
-                .id("chat-status")
-                .debug_selector(|| "chat-status".into())
-        };
-        // The agent's own words for the mode, whole, for a label a narrow
-        // pane has to cut.
-        let mode_tooltip = SharedString::from(label.to_string());
-        let status_pill = status_pill
-            .tooltip(crate::controls::tooltip(mode_tooltip))
-            .when(mode_selectable, |this| {
-                this.hover(|style| style.bg(bezel_theme.element_hover))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_mode_picker(window, cx);
-                    }))
-            })
-            .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
-            .child(div().text_color(theme.ely.fg).child(label))
-            .when(mode_selectable, |this| this.child(picker_chevron(theme)));
-
-        let selected_model_name = self
-            .selected_model
+    /// The name the model chip shows: the selected model's, whatever else the
+    /// agent knows it by.
+    pub(super) fn selected_model_name(&self) -> String {
+        self.selected_model
             .as_deref()
             .and_then(|selected| {
                 self.available_models
@@ -133,661 +99,278 @@ impl Chat {
                     .map(|option| option.name.clone())
             })
             .or_else(|| self.selected_model.clone())
-            .unwrap_or_else(|| "Claude Code".into());
-        let effort_label = self.effort.as_ref().and_then(|effort| {
-            effort.current_value.as_ref().map(|current| {
-                let name = effort
-                    .choices
-                    .iter()
-                    .find(|choice| choice.value == *current)
-                    .map(|choice| choice.name.clone())
-                    .unwrap_or_else(|| current.clone());
-                // Not uppercased any more: it used to be a bare caption that
-                // needed to read as chrome, and now it sits beside its own
-                // "Effort" label exactly the way the model value sits beside
-                // "Model".
-                name
-            })
-        });
-        // The picker chip — "Model" in muted chrome text, the value in
-        // title text, the effort level when one is selected — opens only
-        // once a turn has completed and the agent reported models. Without
-        // models the pill degrades to a plain agent badge (F-CHAT-36): no
-        // label, no chevron, no picker.
-        let model_control = if self.model_control_visible() {
-            let model_selection_id = self
-                .selected_model
-                .as_deref()
-                .map(|id| format!("model-selection-{id}"))
-                .unwrap_or_else(|| "model-selection-none".into());
-            let model_tooltip = SharedString::from(format!("Model: {selected_model_name}"));
-            div()
-                .id("model-chip")
-                .debug_selector(|| "model-chip".into())
-                .tooltip(crate::controls::tooltip(model_tooltip))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(24.0))
-                .px(px(7.0))
-                .rounded(theme.radii.control)
-                .text_size(typography.ui_size)
-                // Sized to its content, not to the row. It used to carry
-                // `flex_1`, which stretched the pill the whole width of the
-                // control row and stranded its own chevron ~200px from the
-                // model name, next to the overflow button -- so the chevron
-                // read as belonging to nothing and the model value read as a
-                // caption rather than a picker. It still shrinks on a tight
-                // row -- that is what keeps the name's ellipsis working --
-                // but a 56px floor stops it collapsing to nothing: the name
-                // ellipsizes while the row wraps around it, never erasing
-                // the picker.
-                .min_w(px(56.0))
-                .hover(|style| style.bg(bezel_theme.element_hover))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.toggle_model_picker(window, cx);
-                }))
-                .child(div().text_color(theme.ely.fg_subtle).child("Model"))
-                .child(
-                    div()
-                        .id(model_selection_id.clone())
-                        .debug_selector(move || model_selection_id)
-                        // No `flex_1`. Inert on its own now that the pill
-                        // hugs its content -- there is no slack left inside
-                        // to absorb, and removing it alone does not move the
-                        // chevron, which the test below confirms. It goes
-                        // because the two together are what stranded the
-                        // chevron: restore `flex_1` on the pill and this
-                        // would push it to the far edge again.
-                        // `min_w_0` + `text_ellipsis` do the real work,
-                        // truncating a long name when the row is tight.
-                        .min_w_0()
-                        .text_ellipsis()
-                        .text_color(theme.ely.fg)
-                        .child(selected_model_name.clone()),
-                )
-                .child(
-                    div()
-                        .id("model-chip-chevron")
-                        .debug_selector(|| "model-chip-chevron".into())
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .justify_center()
-                        .child(picker_chevron(theme)),
-                )
-        } else {
-            // #206: this badge names the *agent*, so it reads the agent.
-            // It used to render `selected_model_name`, a model variable
-            // whose fallback is the literal "Claude Code" -- so it named
-            // the wrong agent for every other one until models arrived,
-            // and named an agent at all for a chat whose banner two
-            // inches above says the agent is unknowable. `agent_name` is
-            // `None` in exactly that case, which is the case the banner
-            // is about.
-            let agent_badge_name = self.agent_badge_name();
-            div()
-                .id("agent-badge")
-                .debug_selector(|| "agent-badge".into())
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(24.0))
-                .px(px(7.0))
-                .rounded(theme.radii.control)
-                .text_size(typography.ui_size)
-                // Same rule as the chip above: hug the content.
-                .min_w_0()
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_ellipsis()
-                        .text_color(theme.ely.fg)
-                        .child(agent_badge_name),
-                )
-        };
+            .unwrap_or_else(|| "Claude Code".into())
+    }
 
-        // The effort level is a peer of the model, not a caption inside it:
-        // it is changed about as often, so it belongs at the same depth and
-        // carries its own label. Drawn only when the agent reports a value
-        // AND the picker can actually open, so this is never a click target
-        // that leads nowhere. `flex_none` keeps it intact while the model
-        // chip beside it absorbs the squeeze on a narrow pane — past that
-        // the chip wraps whole to the next line, never over the send disc.
-        let effort_control = effort_label
-            .filter(|_| self.model_control_visible())
-            .map(|label| {
-                let effort_entity = entity.clone();
-                div()
-                    .id("effort-chip")
-                    .debug_selector(|| "effort-chip".into())
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(24.0))
-                    .px(px(7.0))
-                    .rounded(theme.radii.control)
-                    .text_size(typography.ui_size)
-                    .hover(|style| style.bg(bezel_theme.element_hover))
-                    .on_click(move |_, window, cx| {
-                        effort_entity.update(cx, |chat, cx| chat.toggle_effort_picker(window, cx));
-                    })
-                    .child(div().text_color(theme.ely.fg_subtle).child("Effort"))
-                    .child(
-                        div()
-                            .id("model-effort-label")
-                            .debug_selector(|| "model-effort-label".into())
-                            .text_color(theme.ely.fg)
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_center()
-                            .child(picker_chevron(theme)),
-                    )
+    /// The effort level's own name, as the agent reported it. Not uppercased
+    /// any more: it used to be a bare caption that needed to read as chrome,
+    /// and now it stands on its own, as the model's name does.
+    pub(super) fn effort_level_name(&self) -> Option<String> {
+        let effort = self.effort.as_ref()?;
+        let current = effort.current_value.as_ref()?;
+        Some(
+            effort
+                .choices
+                .iter()
+                .find(|choice| choice.value == *current)
+                .map(|choice| choice.name.clone())
+                .unwrap_or_else(|| current.clone()),
+        )
+    }
+
+    /// The bars the effort chip draws for the current level, or `None` for a chip
+    /// that is its word. A level on the model's scale has its own bars in every
+    /// layout. The reset and Ultracode have none, and keep their word, except in
+    /// the Minimal row (`minimal`), where a word would not fit 160px and the chip
+    /// draws the model's bars instead: the reset's all unfilled, Ultracode's all
+    /// filled (the user's choice, 2026-10-31). The render and the width estimates
+    /// ask this, so they agree on what the chip is.
+    pub(super) fn effort_chip_bars(&self, minimal: bool) -> Option<EffortBars> {
+        if let Some((filled, total)) = self.effort_bar_position() {
+            return Some(EffortBars {
+                filled,
+                total,
+                standing_in: false,
             });
+        }
+        if !minimal {
+            return None;
+        }
+        let effort = self.effort.as_ref()?;
+        // Ultracode is offered only where `xhigh` is, so the ladder is there
+        // whenever either is; with no levels at all there is no scale to draw.
+        let total = effort_rows(&effort.choices).levels.len();
+        if total == 0 {
+            return None;
+        }
+        match effort.current_value.as_deref()? {
+            EFFORT_RESET => Some(EffortBars {
+                filled: 0,
+                total,
+                standing_in: true,
+            }),
+            EFFORT_ULTRACODE => Some(EffortBars {
+                filled: total,
+                total,
+                standing_in: true,
+            }),
+            _ => None,
+        }
+    }
 
-        // Fast mode: a toggle, not a picker, so it is a chip that shows its
-        // own state rather than one that opens a list. Drawn only when the
-        // session reported the feature at all — an older CLI says nothing
-        // and gets no chip, rather than a dead one. When the CLI has
-        // refused it, the chip stays and carries the CLI's own sentence,
-        // the way a missing language server names the program.
-        let fast_control = self
-            .fast_mode
-            .clone()
+    /// Whether the effort chip is drawn: the agent reports a level and the model
+    /// controls are shown. The render and the row's width estimates ask this, so
+    /// they agree on whether its slot is in the row.
+    pub(super) fn effort_chip_drawn(&self) -> bool {
+        self.model_control_visible() && self.effort_level_name().is_some()
+    }
+
+    /// How many steps the effort bars fill, and of how many, for a level that
+    /// stands on the model's own scale; `None` for one that does not (the reset,
+    /// Ultracode).
+    pub(super) fn effort_bar_position(&self) -> Option<(usize, usize)> {
+        let effort = self.effort.as_ref()?;
+        let levels = effort_rows(&effort.choices).levels;
+        let current = effort.current_value.as_deref()?;
+        let filled = levels.iter().position(|level| level.value == current)? + 1;
+        Some((filled, levels.len()))
+    }
+
+    /// Fast mode, while there is a control to draw for it: the session reported
+    /// the feature and the model controls are shown. The chip in the Full row,
+    /// the row in ⋯ in the Compact one and the width the Full row needs all ask
+    /// this, so they agree.
+    pub(super) fn fast_state(&self) -> Option<&FastMode> {
+        self.fast_mode
+            .as_ref()
             .filter(|_| self.model_control_visible())
-            .map(|fast| {
-                let blocked = fast.blocked_by.clone();
-                let fast_entity = entity.clone();
-                let selector = if blocked.is_some() {
-                    "fast-mode-chip-blocked"
-                } else {
-                    "fast-mode-chip"
-                };
-                let label_colour: gpui::Hsla = match (&blocked, fast.enabled) {
-                    (Some(_), _) => theme.ely.fg_subtle,
-                    // On, the chip is filled with the theme's own accent
-                    // pair rather than a colour of Sirio's: the palette is
-                    // bezel's, all of it.
-                    (None, true) => bezel_theme.on_solid,
-                    (None, false) => theme.ely.fg,
-                };
-                div()
-                    .id("fast-mode-chip")
-                    .debug_selector(move || selector.into())
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(24.0))
-                    .px(px(7.0))
-                    .rounded(theme.radii.control)
-                    .text_size(typography.ui_size)
-                    .when(fast.enabled && blocked.is_none(), |chip| {
-                        chip.bg(bezel_theme.solid)
-                    })
-                    .when(blocked.is_none(), |chip| {
-                        chip.hover(|style| style.bg(bezel_theme.element_hover))
-                            .on_click(move |_, _, cx| {
-                                fast_entity.update(cx, |chat, cx| chat.toggle_fast_mode(cx));
-                            })
-                    })
-                    .when_some(blocked, |chip, reason| {
-                        let reason = SharedString::from(reason);
-                        chip.tooltip(crate::controls::tooltip(reason))
-                    })
-                    .child(div().text_color(label_colour).child("Fast"))
-            });
+    }
 
-        // Background tasks: a count, not a list. The CLI sends the whole
-        // running set on every change and drains it as each task ends, so
-        // this is only ever "how many are still going" — what *finished*
-        // arrives separately, as a notice in the transcript, because the
-        // list is already empty by the time that is known.
-        let background_tasks = (self.background_tasks > 0).then(|| {
-            let running = self.background_tasks;
-            div()
-                .id("background-tasks-chip")
-                .debug_selector(|| "background-tasks-chip".into())
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(24.0))
-                .px(px(7.0))
-                .rounded(theme.radii.control)
-                .text_size(typography.ui_size)
-                .text_color(theme.ely.fg_subtle)
-                .tooltip(crate::controls::tooltip(if running == 1 {
-                    "1 background task running".to_string()
-                } else {
-                    format!("{running} background tasks running")
-                }))
-                .child(format!("⌁ {running}"))
-        });
-
-        // The thinking display. Drawn only while the transport has it and
-        // the CLI has not refused the verb; unset shows no value at all,
-        // because nothing reports the session's own and a word here would
-        // be one nobody read (F-CHAT-18's rule, as the effort chip already
-        // applies it).
-        let thinking = self
-            .thinking_display
+    /// The thinking display, while there is one to draw: the transport has it
+    /// and the CLI has not refused the verb. The chip in the Full row and the
+    /// row in ⋯ in the Compact one both ask this, so they appear together.
+    pub(super) fn thinking_state(&self) -> Option<ThinkingDisplay> {
+        self.thinking_display
             .clone()
             .filter(|state| !state.unsupported)
-            .filter(|_| self.model_control_visible());
-        let thinking_control = thinking.clone().map(|state| {
-            let thinking_entity = entity.clone();
-            let chosen = state.chosen.clone();
-            div()
-                .id("thinking-chip")
-                .debug_selector(|| "thinking-chip".into())
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(6.0))
-                .h(px(24.0))
-                .px(px(7.0))
-                .rounded(theme.radii.control)
-                .text_size(typography.ui_size)
-                .hover(|style| style.bg(bezel_theme.element_hover))
-                .on_click(move |_, window, cx| {
-                    thinking_entity.update(cx, |chat, cx| chat.toggle_thinking_picker(window, cx));
-                })
-                .child(div().text_color(theme.ely.fg_subtle).child("Thinking"))
-                .when_some(chosen, |chip, chosen| {
-                    chip.child(
-                        div()
-                            .debug_selector(|| "thinking-chip-value".into())
-                            .text_color(theme.ely.fg)
-                            .child(thinking_display_name(&chosen).to_string()),
-                    )
-                })
-        });
+            .filter(|_| self.model_control_visible())
+    }
 
-        let thinking_picker = self.thinking_picker_open.then(|| {
-            let chosen = thinking.and_then(|state| state.chosen);
-            let rows = self.picker_rows(cx);
-            // The agent's own answer is a row, not the absence of one:
-            // choosing it is how a user undoes a choice they made.
-            let menu = rows.iter().fold(Menu::new(), |menu, row| {
-                let PickerRow::Thinking(value) = row else {
-                    return menu;
-                };
-                let id = value.unwrap_or("default");
-                let label = value.map_or("Agent's own", thinking_display_name);
-                menu.item(
-                    MenuItem::radio(label, chosen.as_deref() == *value)
-                        .selectors(format!("thinking-option-{id}"), None)
-                        .on_click(self.picker_click(row.clone(), cx)),
-                )
-            });
-            layer(
-                "thinking-picker-menu",
-                Hang::Above,
-                div()
-                    .id("thinking-picker")
-                    .debug_selector(|| "thinking-picker".into())
-                    .key_context("ChatThinkingPicker")
-                    .track_focus(&self.thinking_picker_focus)
-                    .on_action(cx.listener(Self::cancel))
-                    .on_action(cx.listener(Self::picker_previous))
-                    .on_action(cx.listener(Self::picker_next))
-                    .on_action(cx.listener(Self::picker_choose))
-                    .w(popup_width(theme, 200.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.thinking_picker_open = false;
-                        cx.notify();
-                    }))
-                    .child(
-                        MenuPanel::new("thinking-picker-rows", menu)
-                            .current(self.marked_picker_row(rows.len())),
-                    ),
-                cx,
-            )
-        });
-
-        // The effort list, anchored to the chip above. The levels are the
-        // session's own — `supportedEffortLevels` differs per model — so the
-        // list grows and shrinks with the model instead of naming rungs the
-        // model does not have. Each level shows its step on that scale;
-        // Ultracode is no further step, and the reset is the model's own pick,
-        // set apart below them.
-        let effort_picker = self
-            .effort_picker_open
-            .then(|| self.effort.clone())
-            .flatten()
-            .map(|effort| {
-                let split = effort_rows(&effort.choices);
-                let current = effort.current_value.as_deref().unwrap_or(EFFORT_RESET);
-                let (filled_step, empty_step) =
-                    (theme.ely.fg_muted, theme.ely.fg_muted.opacity(0.3));
-                let row = |choice: &EffortChoice| {
-                    let value = choice.value.clone();
-                    let note_selector =
-                        (value == EFFORT_ULTRACODE).then(|| "effort-note-ultracode".into());
-                    MenuItem::check(choice.name.clone(), current == value)
-                        .selectors(format!("effort-option-{value}"), note_selector)
-                        .on_click(self.picker_click(PickerRow::Effort(value), cx))
-                };
-
-                // The menu's entries in the order drawn, `None` being a separator.
-                // This is the one place the order is written down.
-                let total = split.levels.len();
-                let mut entries: Vec<Option<MenuItem>> = Vec::new();
-                for (index, level) in split.levels.iter().enumerate() {
-                    let filled = index + 1;
-                    let selector = format!("effort-steps-{}-{filled}-{total}", level.value);
-                    entries.push(Some(row(level).trailing(move |_| {
-                        effort_steps(selector.clone(), filled, total, filled_step, empty_step)
-                    })));
-                }
-                if let Some(ultracode) = &split.ultracode {
-                    entries.push(Some(row(ultracode).note("+ workflow")));
-                }
-                if let Some(reset) = &split.reset {
-                    if !entries.is_empty() {
-                        entries.push(None);
-                    }
-                    entries.push(Some(row(reset).muted(true).note("model's own")));
-                }
-                // The keys mark a row, and `MenuPanel` marks an entry: a
-                // separator is an entry no key lands on.
-                let mut entry_of_row = Vec::new();
-                let mut menu = Menu::new();
-                for (entry, item) in entries.into_iter().enumerate() {
-                    match item {
-                        Some(item) => {
-                            entry_of_row.push(entry);
-                            menu = menu.item(item);
-                        }
-                        None => menu = menu.separator(),
-                    }
-                }
-                let marked = self
-                    .marked_picker_row(entry_of_row.len())
-                    .map(|at| entry_of_row[at]);
-
-                layer(
-                    "effort-picker-menu",
-                    Hang::Above,
-                    div()
-                        .id("effort-picker")
-                        .debug_selector(|| "effort-picker".into())
-                        .key_context("ChatEffortPicker")
-                        .track_focus(&self.effort_picker_focus)
-                        .on_action(cx.listener(Self::cancel))
-                        .on_action(cx.listener(Self::picker_previous))
-                        .on_action(cx.listener(Self::picker_next))
-                        .on_action(cx.listener(Self::picker_choose))
-                        .w(popup_width(theme, 220.0))
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.effort_picker_open = false;
-                            cx.notify();
-                        }))
-                        .child(MenuPanel::new("effort-picker-rows", menu).current(marked)),
-                    cx,
-                )
-            });
-
-        let model_picker = self.model_picker_open.then(|| {
-            // F-CHAT-16: "Recommended" is not a protocol flag — `ModelOption`
-            // has none, and the ACP layer never carries one — it is purely
-            // the driver's own first-listed choice, matching Swift's
-            // `recommendedId = models.first?.modelId` exactly. The search
-            // filter runs over the full, unfiltered list order (`filter`,
-            // not `sort`) so a query never reorders results.
-            let recommended_id = self
-                .available_models
-                .first()
-                .map(|option| option.id.clone());
-            let selected_id = self.selected_model.clone();
-            let rows = self.picker_rows(cx);
-            let menu = rows.iter().fold(Menu::new(), |menu, row| {
-                let PickerRow::Model(option) = row else {
-                    return menu;
-                };
-                let is_recommended = recommended_id.as_deref() == Some(option.id.as_str());
-                let item = MenuItem::radio(
-                    option.name.clone(),
-                    selected_id.as_deref() == Some(option.id.as_str()),
-                )
-                .tooltip(option.name.clone())
-                .selectors(
-                    format!("model-option-{}", option.id),
-                    is_recommended.then(|| "model-option-recommended".into()),
-                )
-                .on_click(self.picker_click(row.clone(), cx));
-                menu.item(if is_recommended {
-                    item.note("Recommended")
-                } else {
-                    item
-                })
-            });
-            let no_models = self.available_models.is_empty();
-            let empty = if no_models {
-                div()
-                    .px_2()
-                    .py_1p5()
-                    .text_size(typography.footnote)
-                    .text_color(theme.ely.fg_subtle)
-                    .child("The connected agent did not report any models.")
-                    .into_any_element()
-            } else {
-                div()
-                    .id("model-picker-no-match")
-                    .debug_selector(|| "model-picker-no-match".into())
-                    .px_2()
-                    .py_1p5()
-                    .text_size(typography.footnote)
-                    .text_color(theme.ely.fg_subtle)
-                    .child("No models match")
-                    .into_any_element()
+    /// The thinking picker while it is open, hung from the control the caller
+    /// puts it in: the chip in the Full row (`Hang::AboveEnd`, growing leftward
+    /// from the right-aligned group) or ⋯ in the Compact one (`Hang::Above`,
+    /// growing rightward from ⋯, which is in the left group).
+    pub(super) fn render_thinking_picker(
+        &self,
+        theme: &Theme,
+        hang: Hang,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.thinking_picker_open {
+            return None;
+        }
+        let chosen = self.thinking_state().and_then(|state| state.chosen);
+        let rows = self.picker_rows(cx);
+        // The agent's own answer is a row, not the absence of one:
+        // choosing it is how a user undoes a choice they made.
+        let menu = rows.iter().fold(Menu::new(), |menu, row| {
+            let PickerRow::Thinking(value) = row else {
+                return menu;
             };
-            let panel = MenuPanel::new("model-picker-rows", menu)
-                .current(self.marked_picker_row(rows.len()))
-                .scroll(&self.model_picker_scroll, px(MODEL_PICKER_LIST_MAX_H))
-                .selector("model-picker-list")
-                .empty(empty)
-                .when(!no_models, |panel| {
-                    panel.head(
-                        div()
-                            .id("model-search-input")
-                            .debug_selector(|| "model-search-input".into())
-                            .w_full()
-                            .mb(px(6.0))
-                            .child(Input::new(&self.model_search_field)),
-                    )
-                });
-            layer(
-                "model-picker-menu",
-                Hang::Above,
-                div()
-                    .id("model-picker")
-                    .debug_selector(|| "model-picker".into())
-                    .key_context("ChatModelPicker")
-                    .on_action(cx.listener(Self::cancel))
-                    .on_action(cx.listener(Self::picker_previous))
-                    .on_action(cx.listener(Self::picker_next))
-                    .on_action(cx.listener(Self::picker_choose))
-                    .w(popup_width(theme, 245.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.model_picker_open = false;
-                        cx.notify();
-                    }))
-                    .child(panel),
-                cx,
+            let id = value.unwrap_or("default");
+            let label = value.map_or("Agent's own", thinking_display_name);
+            menu.item(
+                MenuItem::radio(label, chosen.as_deref() == *value)
+                    .selectors(format!("thinking-option-{id}"), None)
+                    .on_click(self.picker_click(row.clone(), cx)),
             )
         });
+        Some(layer(
+            "thinking-picker-menu",
+            hang,
+            div()
+                .id("thinking-picker")
+                .debug_selector(|| "thinking-picker".into())
+                .key_context("ChatThinkingPicker")
+                .track_focus(&self.thinking_picker_focus)
+                .on_action(cx.listener(Self::cancel))
+                .on_action(cx.listener(Self::picker_previous))
+                .on_action(cx.listener(Self::picker_next))
+                .on_action(cx.listener(Self::picker_choose))
+                .w(popup_width(theme, 200.0))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.thinking_picker_open = false;
+                    cx.notify();
+                }))
+                .child(
+                    MenuPanel::new("thinking-picker-rows", menu)
+                        .current(self.marked_picker_row(rows.len())),
+                ),
+            cx,
+        ))
+    }
 
-        // F-CHAT-15: the session-mode picker, anchored above the status
-        // pill the same way `model_picker` anchors above the model chip.
-        // No search field — mode lists are small and entirely agent-defined
-        // (ask/plan/auto today), so a flat list of rows is enough.
-        let mode_picker = self.mode_picker_open.then(|| {
-            let current_id = self
-                .mode_catalog
-                .as_ref()
-                .map(|catalog| catalog.current_id.clone())
-                .unwrap_or_default();
-            let rows = self.picker_rows(cx);
-            let menu = rows.iter().fold(Menu::new(), |menu, row| {
-                let PickerRow::Mode(mode) = row else {
-                    return menu;
-                };
-                menu.item(
-                    MenuItem::radio(mode.name.clone(), mode.id == current_id)
-                        .tooltip(mode.name.clone())
-                        .selectors(format!("mode-option-{}", mode.id), None)
-                        .on_click(self.picker_click(row.clone(), cx)),
+    /// The model picker while it is open, hung from the control the caller puts
+    /// it in: the chip in a Full, Compact or Narrow row (`Hang::AboveEnd`, growing
+    /// leftward from the right-aligned group) or ⋯ in a Minimal one (`Hang::Above`,
+    /// growing rightward from ⋯, which is in the left group). Like every popup from
+    /// ⋯ it is its usual width, and the window keeps it on screen.
+    pub(super) fn render_model_picker(
+        &self,
+        theme: &Theme,
+        hang: Hang,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.model_picker_open {
+            return None;
+        }
+        let typography = theme.typography;
+        // F-CHAT-16: "Recommended" is not a protocol flag — `ModelOption`
+        // has none, and the ACP layer never carries one — it is purely
+        // the driver's own first-listed choice, matching Swift's
+        // `recommendedId = models.first?.modelId` exactly. The search
+        // filter runs over the full, unfiltered list order (`filter`,
+        // not `sort`) so a query never reorders results.
+        let recommended_id = self
+            .available_models
+            .first()
+            .map(|option| option.id.clone());
+        let selected_id = self.selected_model.clone();
+        let rows = self.picker_rows(cx);
+        let menu = rows.iter().fold(Menu::new(), |menu, row| {
+            let PickerRow::Model(option) = row else {
+                return menu;
+            };
+            let is_recommended = recommended_id.as_deref() == Some(option.id.as_str());
+            let item = MenuItem::radio(
+                option.name.clone(),
+                selected_id.as_deref() == Some(option.id.as_str()),
+            )
+            .tooltip(option.name.clone())
+            .selectors(
+                format!("model-option-{}", option.id),
+                is_recommended.then(|| "model-option-recommended".into()),
+            )
+            .on_click(self.picker_click(row.clone(), cx));
+            menu.item(if is_recommended {
+                item.note("Recommended")
+            } else {
+                item
+            })
+        });
+        let no_models = self.available_models.is_empty();
+        let empty = if no_models {
+            div()
+                .px_2()
+                .py_1p5()
+                .text_size(typography.footnote)
+                .text_color(theme.ely.fg_subtle)
+                .child("The connected agent did not report any models.")
+                .into_any_element()
+        } else {
+            div()
+                .id("model-picker-no-match")
+                .debug_selector(|| "model-picker-no-match".into())
+                .px_2()
+                .py_1p5()
+                .text_size(typography.footnote)
+                .text_color(theme.ely.fg_subtle)
+                .child("No models match")
+                .into_any_element()
+        };
+        let panel = MenuPanel::new("model-picker-rows", menu)
+            .current(self.marked_picker_row(rows.len()))
+            .scroll(&self.model_picker_scroll, px(MODEL_PICKER_LIST_MAX_H))
+            .selector("model-picker-list")
+            .empty(empty)
+            .when(!no_models, |panel| {
+                panel.head(
+                    div()
+                        .id("model-search-input")
+                        .debug_selector(|| "model-search-input".into())
+                        .w_full()
+                        .mb(px(6.0))
+                        .child(Input::new(&self.model_search_field)),
                 )
             });
-            layer(
-                "mode-picker-menu",
-                Hang::Above,
-                div()
-                    .id("mode-picker")
-                    .debug_selector(|| "mode-picker".into())
-                    .key_context("ChatModelPicker")
-                    .track_focus(&self.mode_picker_focus)
-                    .on_action(cx.listener(Self::cancel))
-                    .on_action(cx.listener(Self::picker_previous))
-                    .on_action(cx.listener(Self::picker_next))
-                    .on_action(cx.listener(Self::picker_choose))
-                    .w(popup_width(theme, 200.0))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.mode_picker_open = false;
-                        cx.notify();
-                    }))
-                    .child(
-                        MenuPanel::new("mode-picker-rows", menu)
-                            .current(self.marked_picker_row(rows.len()))
-                            .empty(
-                                div()
-                                    .px_2()
-                                    .py_1p5()
-                                    .text_size(typography.footnote)
-                                    .text_color(theme.ely.fg_subtle)
-                                    .child("No modes offered"),
-                            ),
-                    ),
-                cx,
-            )
-        });
+        Some(layer(
+            "model-picker-menu",
+            hang,
+            div()
+                .id("model-picker")
+                .debug_selector(|| "model-picker".into())
+                .key_context("ChatModelPicker")
+                .on_action(cx.listener(Self::cancel))
+                .on_action(cx.listener(Self::picker_previous))
+                .on_action(cx.listener(Self::picker_next))
+                .on_action(cx.listener(Self::picker_choose))
+                .w(popup_width(theme, 245.0))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.model_picker_open = false;
+                    cx.notify();
+                }))
+                .child(panel),
+            cx,
+        ))
+    }
 
+    /// The context popover while it is open, hung from the control the caller
+    /// puts it in: the ring in a Full or Compact row (`Hang::AboveEnd`, growing
+    /// leftward from the right-aligned group) or ⋯ in a Narrow one
+    /// (`Hang::Above`, growing rightward from ⋯, which is in the left group).
+    pub(super) fn render_context_popover(
+        &self,
+        theme: &Theme,
+        hang: Hang,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let typography = theme.typography;
         let context_usage = self.context_usage.clone();
-        let context_amount = context_usage
-            .as_ref()
-            .filter(|usage| usage.size > 0)
-            .map(|usage| (usage.used as f32 / usage.size as f32).clamp(0.0, 1.0))
-            .unwrap_or(0.0);
-        let context_ring_entity = entity.clone();
-        // Above the 80% warning threshold the arc switches from the gauge
-        // blue to the shared danger token, the same rule as the reference
-        // `contextRingColor`. The warning wrapper element exists only in
-        // that state, so drawn tests can see the colour decision without
-        // reading pixels.
-        let context_warning = context_amount > 0.8;
-        let warning_element = div()
-            .id("context-ring-warning")
-            .debug_selector(|| "context-ring-warning".into());
-        let context_ring = div()
-            .id("context-ring")
-            .debug_selector(|| "context-ring".into())
-            .relative()
-            .w(px(16.0))
-            .h(px(16.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.ely.border)
-            .hover(|style| style.bg(theme.sirio.overlay))
-            .on_click(move |_, window, cx| {
-                context_ring_entity.update(cx, |chat, cx| chat.toggle_context_popover(window, cx));
-            })
-            .when(context_warning, |this| this.child(warning_element))
-            .child(
-                div()
-                    .id("context-ring-progress")
-                    .debug_selector(|| "context-ring-progress".into())
-                    .absolute()
-                    .inset_0()
-                    .child({
-                        // The paint closure is `'static`, so it cannot borrow
-                        // `theme`; copy out the two colours it draws with.
-                        let ring_danger = theme.ely.danger;
-                        let ring_accent = theme.sirio.quantity;
-                        canvas(
-                            move |_, _, _| {},
-                            move |bounds, _, window, _| {
-                                if context_amount <= 0.0 {
-                                    return;
-                                }
-                                let origin_x: f32 = bounds.origin.x.into();
-                                let origin_y: f32 = bounds.origin.y.into();
-                                let width: f32 = bounds.size.width.into();
-                                let center =
-                                    point(px(origin_x + width / 2.0), px(origin_y + width / 2.0));
-                                let radius = width / 2.0 - 2.0;
-                                let start = point(center.x, px(origin_y + 1.0));
-                                let angle = -std::f32::consts::FRAC_PI_2
-                                    + context_amount * std::f32::consts::TAU;
-                                let end = point(
-                                    px(origin_x + width / 2.0 + radius * angle.cos()),
-                                    px(origin_y + width / 2.0 + radius * angle.sin()),
-                                );
-                                let mut path = PathBuilder::stroke(px(2.0));
-                                path.move_to(start);
-                                if context_amount >= 1.0 {
-                                    path.arc_to(
-                                        point(px(radius), px(radius)),
-                                        px(0.0),
-                                        false,
-                                        true,
-                                        point(center.x, px(origin_y + width - 1.0)),
-                                    );
-                                    path.arc_to(
-                                        point(px(radius), px(radius)),
-                                        px(0.0),
-                                        false,
-                                        true,
-                                        start,
-                                    );
-                                } else if context_amount > 0.0 {
-                                    path.arc_to(
-                                        point(px(radius), px(radius)),
-                                        px(0.0),
-                                        context_amount > 0.5,
-                                        true,
-                                        end,
-                                    );
-                                }
-                                if let Ok(path) = path.build() {
-                                    window.paint_path(
-                                        path,
-                                        if context_warning {
-                                            ring_danger
-                                        } else {
-                                            ring_accent
-                                        },
-                                    );
-                                }
-                            },
-                        )
-                        .absolute()
-                        .size_full()
-                    }),
-            );
-
-        let context_popover = if self.context_popover_open {
+        if self.context_popover_open {
             let usage = context_usage.clone();
             Some(layer(
                 "context-popover-menu",
-                Hang::AboveEnd,
+                hang,
                 div()
                     .id("context-popover")
                     .debug_selector(|| "context-popover".into())
@@ -810,15 +393,7 @@ impl Chat {
                                     // Agents that never send a usage update (Pi's ACP
                                     // adapter among them) are exactly the ones a
                                     // fabricated zero would libel.
-                                    let percent = if usage.size == 0 {
-                                        None
-                                    } else {
-                                        Some(
-                                            ((usage.used as f64 / usage.size as f64) * 100.0)
-                                                .round()
-                                                as u64,
-                                        )
-                                    };
+                                    let percent = context_percent(&usage);
                                     let cost = usage.cost.map(|cost| {
                                         format!("Cost: {:.2} {}", cost.amount, cost.currency)
                                     });
@@ -838,7 +413,7 @@ impl Chat {
                                         })
                                         .text_size(typography.footnote)
                                         .text_color(theme.ely.fg)
-                                        .child(format!("{percent}% of context used")),
+                                        .child(context_percent_label(percent)),
                                 )
                                 .child(
                                     div()
@@ -952,14 +527,754 @@ impl Chat {
             ))
         } else {
             None
+        }
+    }
+
+    /// The control row's chips, each with the popup it hangs. One element so
+    /// the composer takes it as a single trailing slot; it is one line, and
+    /// the model chip, which may shrink, is what gives on a narrow one.
+    pub(super) fn render_agent_controls(
+        &self,
+        theme: &Theme,
+        layout: RowLayout,
+        _window: &mut Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        // Narrow draws what Compact does, less the task count and the ring;
+        // Minimal, less the model chip too, and the chevrons of the chips it keeps.
+        let compact = layout != RowLayout::Full;
+        let narrow = layout.is_narrow();
+        let minimal = layout.is_minimal();
+        let typography = theme.typography;
+        let bezel_theme = bezel_theme::Theme::of(cx).clone();
+        let entity = cx.entity();
+
+        // Swift's `modePill` (ComposerControlBar.swift) pairs a status dot
+        // with the permission mode's name: the dot carries the connection
+        // state, the label the mode, and a raw state word ("idle"/"working")
+        // only stands in while no mode is known. The port used to let
+        // "working" and "connecting" take the label over from the mode, so
+        // the permission the user picked was unreadable exactly while a
+        // turn ran (`status_pill_content`, `composer_view.rs`).
+        let connecting = self.connecting;
+        // F-CHAT-15 / #136: a known mode names itself from the first frame,
+        // never waiting on `has_completed_turn`.
+        let (dot, label) = composer_view::status_pill_content(
+            connecting,
+            self.streaming,
+            self.client.is_some(),
+            self.mode_catalog.as_ref(),
+        );
+        let dot = dot.color();
+        let mode_selectable = self.mode_selectable();
+        let status_pill = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(CHIP_GAP))
+            .h(px(24.0))
+            .px(px(CHIP_PAD_X))
+            .rounded(theme.radii.control)
+            .text_size(typography.ui_size);
+        let status_pill = if connecting {
+            status_pill
+                .id("chat-connecting")
+                .debug_selector(|| "chat-connecting".into())
+        } else {
+            status_pill
+                .id("chat-status")
+                .debug_selector(|| "chat-status".into())
+        };
+        // The agent's own words for the mode, whole, for a label a narrow
+        // pane has to cut.
+        let mode_tooltip = SharedString::from(label.to_string());
+        // Once the agent has advertised its modes the pill shows the current
+        // one as an icon, with the connection state a small dot on its
+        // corner; before that it keeps the plain dot and the state word.
+        // Bypass permissions is the one mode drawn as a warning.
+        let current_mode = self
+            .mode_catalog
+            .as_ref()
+            .map(|catalog| catalog.current_id.as_str());
+        let danger = current_mode == Some(BYPASS_PERMISSIONS_MODE);
+        let label_color = if danger {
+            theme.ely.danger
+        } else {
+            theme.ely.fg
+        };
+        // What the render draws is what the control socket reports.
+        let frame = &self.composer_row;
+        frame.mode_icon.set(None);
+        frame.mode_danger.set(false);
+        let mode_lead = match current_mode {
+            Some(mode_id) => {
+                let icon = mode_icon(mode_id);
+                frame.mode_icon.set(Some(icon.name()));
+                let icon_selector = format!("mode-icon-{}", icon.name());
+                div()
+                    .relative()
+                    .flex_none()
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .debug_selector(move || icon_selector)
+                    .child(Icon::new(icon).size(IconSize::Sm).color(label_color))
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(-3.5))
+                            .bottom(px(-3.5))
+                            .w(px(9.0))
+                            .h(px(9.0))
+                            .rounded(px(4.5))
+                            .p(px(1.5))
+                            .bg(theme.ely.surface)
+                            .debug_selector(|| "mode-connection-dot".into())
+                            .child(div().size_full().rounded(px(3.0)).bg(dot)),
+                    )
+                    .into_any_element()
+            }
+            None => div()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(3.0))
+                .bg(dot)
+                .into_any_element(),
+        };
+        let status_pill = status_pill
+            .tooltip(crate::controls::tooltip(mode_tooltip))
+            .when(danger, |this| this.bg(theme.ely.danger_subtle))
+            .when(mode_selectable, |this| {
+                // The warning keeps its red under the pointer: the neutral hover
+                // would read as the pill leaving the warning.
+                let hover = if danger {
+                    theme.ely.danger.opacity(0.22)
+                } else {
+                    bezel_theme.element_hover
+                };
+                this.hover(move |style| style.bg(hover)).on_click(cx.listener(
+                    |this, _, window, cx| {
+                        this.toggle_mode_picker(window, cx);
+                    },
+                ))
+            })
+            .child(mode_lead)
+            // Compact keeps the icon (or the dot) and the chevron: the name is
+            // the tooltip's.
+            .when(!compact, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "mode-label".into())
+                        .text_color(label_color)
+                        .child(label),
+                )
+            })
+            // Minimal leaves the chevron out: the pill is the icon, and still opens
+            // its picker.
+            .when(mode_selectable && !minimal, |this| {
+                this.child(
+                    div()
+                        .debug_selector(|| "mode-chip-chevron".into())
+                        .child(picker_chevron(theme)),
+                )
+            });
+        // The pill's selector is taken, so the danger fill is named on a
+        // wrapper that is exactly as big as the pill.
+        let status_pill = if danger {
+            frame.mode_danger.set(true);
+            div()
+                .flex()
+                .flex_none()
+                .debug_selector(|| "mode-chip-danger".into())
+                .child(status_pill)
+                .into_any_element()
+        } else {
+            status_pill.into_any_element()
         };
 
+        let selected_model_name = self.selected_model_name();
+        let effort_label = self.effort_level_name();
+        // The picker chip — the value in title text and a chevron, with no key
+        // label: the name speaks for itself — opens only once a turn has
+        // completed and the agent reported models. Without models the pill
+        // degrades to a plain agent badge (F-CHAT-36): no chevron, no picker.
+        let model_control = if self.model_control_visible() {
+            let model_selection_id = self
+                .selected_model
+                .as_deref()
+                .map(|id| format!("model-selection-{id}"))
+                .unwrap_or_else(|| "model-selection-none".into());
+            let model_tooltip = SharedString::from(format!("Model: {selected_model_name}"));
+            div()
+                .id("model-chip")
+                .debug_selector(|| "model-chip".into())
+                .tooltip(crate::controls::tooltip(model_tooltip))
+                .flex()
+                .items_center()
+                .gap(px(CHIP_GAP))
+                .h(px(24.0))
+                .px(px(CHIP_PAD_X))
+                .rounded(theme.radii.control)
+                .text_size(typography.ui_size)
+                // Sized to its content, not to the row. It used to carry
+                // `flex_1`, which stretched the pill the whole width of the
+                // control row and stranded its own chevron ~200px from the
+                // model name, next to the overflow button -- so the chevron
+                // read as belonging to nothing and the model value read as a
+                // caption rather than a picker. It still shrinks on a tight
+                // row -- that is what keeps the name's ellipsis working --
+                // but a 56px floor stops it collapsing to nothing: the name
+                // ellipsizes down to the floor, never erasing the picker. The
+                // row is one line and goes Compact, then Narrow, instead of
+                // wrapping.
+                .min_w(px(MODEL_FLOOR))
+                .hover(|style| style.bg(bezel_theme.element_hover))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_model_picker(window, cx);
+                }))
+                .child(
+                    div()
+                        .id(model_selection_id.clone())
+                        .debug_selector(move || model_selection_id)
+                        // No `flex_1`. Inert on its own now that the pill
+                        // hugs its content -- there is no slack left inside
+                        // to absorb, and removing it alone does not move the
+                        // chevron, which the test below confirms. It goes
+                        // because the two together are what stranded the
+                        // chevron: restore `flex_1` on the pill and this
+                        // would push it to the far edge again.
+                        // `min_w_0` + `text_ellipsis` do the real work,
+                        // truncating a long name when the row is tight.
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_color(theme.ely.fg)
+                        .child(selected_model_name.clone()),
+                )
+                .child(
+                    div()
+                        .id("model-chip-chevron")
+                        .debug_selector(|| "model-chip-chevron".into())
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .child(picker_chevron(theme)),
+                )
+        } else {
+            // #206: this badge names the *agent*, so it reads the agent.
+            // It used to render `selected_model_name`, a model variable
+            // whose fallback is the literal "Claude Code" -- so it named
+            // the wrong agent for every other one until models arrived,
+            // and named an agent at all for a chat whose banner two
+            // inches above says the agent is unknowable. `agent_name` is
+            // `None` in exactly that case, which is the case the banner
+            // is about.
+            let agent_badge_name = self.agent_badge_name();
+            div()
+                .id("agent-badge")
+                .debug_selector(|| "agent-badge".into())
+                .flex()
+                .items_center()
+                .gap(px(CHIP_GAP))
+                .h(px(24.0))
+                .px(px(CHIP_PAD_X))
+                .rounded(theme.radii.control)
+                .text_size(typography.ui_size)
+                // Same rule as the chip above: hug the content.
+                .min_w_0()
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_color(theme.ely.fg)
+                        .child(agent_badge_name),
+                )
+        };
+
+        // The effort level is a peer of the model, not a caption inside it:
+        // it is changed about as often, so it belongs at the same depth. It
+        // reads as its bars (how high the level stands on the model's own
+        // scale) and its name. Drawn only when the agent reports a value AND
+        // the picker can actually open, so this is never a click target that
+        // leads nowhere. `flex_none` keeps it intact while the model chip
+        // beside it absorbs the squeeze on a narrow pane. The row is one line
+        // and goes Compact, then Narrow, instead of wrapping.
+        let effort_bars = self.effort_chip_bars(minimal);
+        let effort_control = effort_label
+            .filter(|_| self.effort_chip_drawn())
+            .map(|label| {
+                let bars_stand_in = compact && effort_bars.is_some();
+                let effort_entity = entity.clone();
+                div()
+                    .id("effort-chip")
+                    .debug_selector(|| "effort-chip".into())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(CHIP_GAP))
+                    .h(px(24.0))
+                    .px(px(CHIP_PAD_X))
+                    .rounded(theme.radii.control)
+                    .text_size(typography.ui_size)
+                    .hover(|style| style.bg(bezel_theme.element_hover))
+                    .on_click(move |_, window, cx| {
+                        effort_entity.update(cx, |chat, cx| chat.toggle_effort_picker(window, cx));
+                    })
+                    // Not a level (the reset, Ultracode): no bars of its own, so
+                    // none but in Minimal, which stands them in (below).
+                    .children(effort_bars.map(|bars| {
+                        // Ultracode's stood-in bars are the accent's, the reset's none.
+                        let accent = bars.standing_in && bars.filled > 0;
+                        let filled_step = if accent {
+                            theme.ely.accent
+                        } else {
+                            theme.ely.fg_muted
+                        };
+                        let kind = if bars.filled == 0 { "unfilled" } else { "filled" };
+                        let stood_in = bars.standing_in;
+                        let steps = effort_steps(
+                            "effort-chip-bars".into(),
+                            bars.filled,
+                            bars.total,
+                            filled_step,
+                            theme.ely.fg_muted.opacity(0.3),
+                        );
+                        if stood_in {
+                            div()
+                                .flex()
+                                .flex_none()
+                                .debug_selector(move || format!("effort-chip-bars-{kind}"))
+                                .child(steps)
+                                .into_any_element()
+                        } else {
+                            steps
+                        }
+                    }))
+                    // Compact drops the level's name where the bars say it;
+                    // a level with no bars has only its name to show.
+                    .when(bars_stand_in, |chip| {
+                        chip.tooltip(crate::controls::tooltip(SharedString::from(
+                            label.clone(),
+                        )))
+                    })
+                    .when(!bars_stand_in, |chip| {
+                        chip.child(
+                            div()
+                                .id("model-effort-label")
+                                .debug_selector(|| "model-effort-label".into())
+                                .text_color(theme.ely.fg)
+                                .child(
+                                    div()
+                                        .debug_selector(|| "effort-chip-level".into())
+                                        .child(label.clone()),
+                                ),
+                        )
+                    })
+                    // Minimal leaves the chevron out, as it does the pill's.
+                    .when(!minimal, |chip| {
+                        chip.child(
+                            div()
+                                .debug_selector(|| "effort-chip-chevron".into())
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .child(picker_chevron(theme)),
+                        )
+                    })
+            });
+
+        // Fast mode: a toggle, not a picker, so it is a chip that shows its
+        // own state rather than one that opens a list. Drawn only when the
+        // session reported the feature at all — an older CLI says nothing
+        // and gets no chip, rather than a dead one. When the CLI has
+        // refused it, the chip stays and carries the CLI's own sentence,
+        // the way a missing language server names the program.
+        let fast_control = self
+            .fast_state()
+            .cloned()
+            .filter(|_| !compact)
+            .map(|fast| {
+                let blocked = fast.blocked_by.clone();
+                let fast_entity = entity.clone();
+                let selector = if blocked.is_some() {
+                    "fast-mode-chip-blocked"
+                } else {
+                    "fast-mode-chip"
+                };
+                let label_colour: gpui::Hsla = match (&blocked, fast.enabled) {
+                    (Some(_), _) => theme.ely.fg_subtle,
+                    // On, the chip is filled with the theme's own accent
+                    // pair rather than a colour of Sirio's: the palette is
+                    // bezel's, all of it.
+                    (None, true) => bezel_theme.on_solid,
+                    (None, false) => theme.ely.fg,
+                };
+                div()
+                    .id("fast-mode-chip")
+                    .debug_selector(move || selector.into())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(CHIP_GAP))
+                    .h(px(24.0))
+                    .px(px(CHIP_PAD_X))
+                    .rounded(theme.radii.control)
+                    .text_size(typography.ui_size)
+                    .when(fast.enabled && blocked.is_none(), |chip| {
+                        chip.bg(bezel_theme.solid)
+                    })
+                    .when(blocked.is_none(), |chip| {
+                        chip.hover(|style| style.bg(bezel_theme.element_hover))
+                            .on_click(move |_, _, cx| {
+                                fast_entity.update(cx, |chat, cx| chat.toggle_fast_mode(cx));
+                            })
+                    })
+                    .when_some(blocked, |chip, reason| {
+                        let reason = SharedString::from(reason);
+                        chip.tooltip(crate::controls::tooltip(reason))
+                    })
+                    .child(div().text_color(label_colour).child("Fast"))
+            });
+
+        // Background tasks: a count, not a list. The CLI sends the whole
+        // running set on every change and drains it as each task ends, so
+        // this is only ever "how many are still going" — what *finished*
+        // arrives separately, as a notice in the transcript, because the
+        // list is already empty by the time that is known.
+        let background_tasks = (self.background_tasks > 0).then(|| {
+            let running = self.background_tasks;
+            div()
+                .id("background-tasks-chip")
+                .debug_selector(|| "background-tasks-chip".into())
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(CHIP_GAP))
+                .h(px(24.0))
+                .px(px(CHIP_PAD_X))
+                .rounded(theme.radii.control)
+                .text_size(typography.ui_size)
+                .text_color(theme.ely.fg_subtle)
+                .tooltip(crate::controls::tooltip(background_tasks_label(running)))
+                .child(format!("⌁ {running}"))
+        });
+
+        // The thinking display. Drawn only while the transport has it and
+        // the CLI has not refused the verb; unset shows no value at all,
+        // because nothing reports the session's own and a word here would
+        // be one nobody read (F-CHAT-18's rule, as the effort chip already
+        // applies it).
+        // Compact leaves Fast and Thinking out of the row: they are rows in ⋯.
+        let thinking_control = self.thinking_state().filter(|_| !compact).map(|state| {
+            let thinking_entity = entity.clone();
+            let chosen = state.chosen.clone();
+            div()
+                .id("thinking-chip")
+                .debug_selector(|| "thinking-chip".into())
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(CHIP_GAP))
+                .h(px(24.0))
+                .px(px(CHIP_PAD_X))
+                .rounded(theme.radii.control)
+                .text_size(typography.ui_size)
+                .hover(|style| style.bg(bezel_theme.element_hover))
+                .on_click(move |_, window, cx| {
+                    thinking_entity.update(cx, |chat, cx| chat.toggle_thinking_picker(window, cx));
+                })
+                .child(div().text_color(theme.ely.fg_subtle).child("Thinking"))
+                .when_some(chosen, |chip, chosen| {
+                    chip.child(
+                        div()
+                            .debug_selector(|| "thinking-chip-value".into())
+                            .text_color(theme.ely.fg)
+                            .child(thinking_display_name(&chosen).to_string()),
+                    )
+                })
+        });
+
+        let thinking_picker = (!compact)
+            .then(|| self.render_thinking_picker(theme, Hang::AboveEnd, cx))
+            .flatten();
+
+        // The effort list, anchored to the chip above. The levels are the
+        // session's own — `supportedEffortLevels` differs per model — so the
+        // list grows and shrinks with the model instead of naming rungs the
+        // model does not have. Each level shows its step on that scale;
+        // Ultracode is no further step, and the reset is the model's own pick,
+        // set apart below them.
+        let effort_picker = self
+            .effort_picker_open
+            .then(|| self.effort.clone())
+            .flatten()
+            .map(|effort| {
+                let split = effort_rows(&effort.choices);
+                let current = effort.current_value.as_deref().unwrap_or(EFFORT_RESET);
+                let (filled_step, empty_step) =
+                    (theme.ely.fg_muted, theme.ely.fg_muted.opacity(0.3));
+                let row = |choice: &EffortChoice| {
+                    let value = choice.value.clone();
+                    let note_selector =
+                        (value == EFFORT_ULTRACODE).then(|| "effort-note-ultracode".into());
+                    MenuItem::check(choice.name.clone(), current == value)
+                        .selectors(format!("effort-option-{value}"), note_selector)
+                        .on_click(self.picker_click(PickerRow::Effort(value), cx))
+                };
+
+                // The menu's entries in the order drawn, `None` being a separator.
+                // This is the one place the order is written down.
+                let total = split.levels.len();
+                let mut entries: Vec<Option<MenuItem>> = Vec::new();
+                for (index, level) in split.levels.iter().enumerate() {
+                    let filled = index + 1;
+                    let selector = format!("effort-steps-{}-{filled}-{total}", level.value);
+                    entries.push(Some(row(level).trailing(move |_| {
+                        effort_steps(selector.clone(), filled, total, filled_step, empty_step)
+                    })));
+                }
+                if let Some(ultracode) = &split.ultracode {
+                    entries.push(Some(row(ultracode).note("+ workflow")));
+                }
+                if let Some(reset) = &split.reset {
+                    if !entries.is_empty() {
+                        entries.push(None);
+                    }
+                    entries.push(Some(row(reset).muted(true).note("model's own")));
+                }
+                // The keys mark a row, and `MenuPanel` marks an entry: a
+                // separator is an entry no key lands on.
+                let mut entry_of_row = Vec::new();
+                let mut menu = Menu::new();
+                for (entry, item) in entries.into_iter().enumerate() {
+                    match item {
+                        Some(item) => {
+                            entry_of_row.push(entry);
+                            menu = menu.item(item);
+                        }
+                        None => menu = menu.separator(),
+                    }
+                }
+                let marked = self
+                    .marked_picker_row(entry_of_row.len())
+                    .map(|at| entry_of_row[at]);
+
+                layer(
+                    "effort-picker-menu",
+                    Hang::AboveEnd,
+                    div()
+                        .id("effort-picker")
+                        .debug_selector(|| "effort-picker".into())
+                        .key_context("ChatEffortPicker")
+                        .track_focus(&self.effort_picker_focus)
+                        .on_action(cx.listener(Self::cancel))
+                        .on_action(cx.listener(Self::picker_previous))
+                        .on_action(cx.listener(Self::picker_next))
+                        .on_action(cx.listener(Self::picker_choose))
+                        .w(popup_width(theme, 220.0))
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.effort_picker_open = false;
+                            cx.notify();
+                        }))
+                        .child(MenuPanel::new("effort-picker-rows", menu).current(marked)),
+                    cx,
+                )
+            });
+
+        // Minimal has no chip to hang it from: `composer_view` hangs it from ⋯.
+        let model_picker = (!minimal)
+            .then(|| self.render_model_picker(theme, Hang::AboveEnd, cx))
+            .flatten();
+
+        // F-CHAT-15: the session-mode picker, anchored above the status
+        // pill the same way `model_picker` anchors above the model chip.
+        // No search field — mode lists are small and entirely agent-defined
+        // (ask/plan/auto today), so a flat list of rows is enough.
+        let mode_picker = self.mode_picker_open.then(|| {
+            let current_id = self
+                .mode_catalog
+                .as_ref()
+                .map(|catalog| catalog.current_id.clone())
+                .unwrap_or_default();
+            let rows = self.picker_rows(cx);
+            let menu = rows.iter().fold(Menu::new(), |menu, row| {
+                let PickerRow::Mode(mode) = row else {
+                    return menu;
+                };
+                menu.item(
+                    MenuItem::radio(mode.name.clone(), mode.id == current_id)
+                        .tooltip(mode.name.clone())
+                        .selectors(format!("mode-option-{}", mode.id), None)
+                        .on_click(self.picker_click(row.clone(), cx)),
+                )
+            });
+            layer(
+                "mode-picker-menu",
+                // The pill is the first chip of the right-aligned group: from
+                // its right edge the picker would cross the chat's left edge in
+                // a narrow chat, so it grows rightward from its left.
+                Hang::Above,
+                div()
+                    .id("mode-picker")
+                    .debug_selector(|| "mode-picker".into())
+                    .key_context("ChatModelPicker")
+                    .track_focus(&self.mode_picker_focus)
+                    .on_action(cx.listener(Self::cancel))
+                    .on_action(cx.listener(Self::picker_previous))
+                    .on_action(cx.listener(Self::picker_next))
+                    .on_action(cx.listener(Self::picker_choose))
+                    .w(popup_width(theme, 200.0))
+                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                        this.mode_picker_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        MenuPanel::new("mode-picker-rows", menu)
+                            .current(self.marked_picker_row(rows.len()))
+                            .empty(
+                                div()
+                                    .px_2()
+                                    .py_1p5()
+                                    .text_size(typography.footnote)
+                                    .text_color(theme.ely.fg_subtle)
+                                    .child("No modes offered"),
+                            ),
+                    ),
+                cx,
+            )
+        });
+
+        let context_usage = self.context_usage.clone();
+        let context_amount = context_usage
+            .as_ref()
+            .filter(|usage| usage.size > 0)
+            .map(|usage| (usage.used as f32 / usage.size as f32).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        let context_ring_entity = entity.clone();
+        // Above the 80% warning threshold the arc switches from the gauge
+        // blue to the shared danger token, the same rule as the reference
+        // `contextRingColor`. The warning wrapper element exists only in
+        // that state, so drawn tests can see the colour decision without
+        // reading pixels.
+        let context_warning = context_amount > 0.8;
+        let warning_element = div()
+            .id("context-ring-warning")
+            .debug_selector(|| "context-ring-warning".into());
+        let context_ring = div()
+            .id("context-ring")
+            .debug_selector(|| "context-ring".into())
+            .relative()
+            .w(px(16.0))
+            .h(px(16.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme.ely.border)
+            .when(compact, |this| {
+                this.tooltip(crate::controls::tooltip("Context"))
+            })
+            .hover(|style| style.bg(theme.sirio.overlay))
+            .on_click(move |_, window, cx| {
+                context_ring_entity.update(cx, |chat, cx| chat.toggle_context_popover(window, cx));
+            })
+            .when(context_warning, |this| this.child(warning_element))
+            .child(
+                div()
+                    .id("context-ring-progress")
+                    .debug_selector(|| "context-ring-progress".into())
+                    .absolute()
+                    .inset_0()
+                    .child({
+                        // The paint closure is `'static`, so it cannot borrow
+                        // `theme`; copy out the two colours it draws with.
+                        let ring_danger = theme.ely.danger;
+                        let ring_accent = theme.sirio.quantity;
+                        canvas(
+                            move |_, _, _| {},
+                            move |bounds, _, window, _| {
+                                if context_amount <= 0.0 {
+                                    return;
+                                }
+                                let origin_x: f32 = bounds.origin.x.into();
+                                let origin_y: f32 = bounds.origin.y.into();
+                                let width: f32 = bounds.size.width.into();
+                                let center =
+                                    point(px(origin_x + width / 2.0), px(origin_y + width / 2.0));
+                                let radius = width / 2.0 - 2.0;
+                                let start = point(center.x, px(origin_y + 1.0));
+                                let angle = -std::f32::consts::FRAC_PI_2
+                                    + context_amount * std::f32::consts::TAU;
+                                let end = point(
+                                    px(origin_x + width / 2.0 + radius * angle.cos()),
+                                    px(origin_y + width / 2.0 + radius * angle.sin()),
+                                );
+                                let mut path = PathBuilder::stroke(px(2.0));
+                                path.move_to(start);
+                                if context_amount >= 1.0 {
+                                    path.arc_to(
+                                        point(px(radius), px(radius)),
+                                        px(0.0),
+                                        false,
+                                        true,
+                                        point(center.x, px(origin_y + width - 1.0)),
+                                    );
+                                    path.arc_to(
+                                        point(px(radius), px(radius)),
+                                        px(0.0),
+                                        false,
+                                        true,
+                                        start,
+                                    );
+                                } else if context_amount > 0.0 {
+                                    path.arc_to(
+                                        point(px(radius), px(radius)),
+                                        px(0.0),
+                                        context_amount > 0.5,
+                                        true,
+                                        end,
+                                    );
+                                }
+                                if let Ok(path) = path.build() {
+                                    window.paint_path(
+                                        path,
+                                        if context_warning {
+                                            ring_danger
+                                        } else {
+                                            ring_accent
+                                        },
+                                    );
+                                }
+                            },
+                        )
+                        .absolute()
+                        .size_full()
+                    }),
+            );
+
+        // Hung from the ring, in the row that draws it.
+        let context_popover = (!narrow)
+            .then(|| self.render_context_popover(theme, Hang::AboveEnd, cx))
+            .flatten();
+        // The chips clip: on a pane too narrow for all of them the rightmost
+        // are cut at this element's edge, and send, which the band keeps after
+        // it, is never covered.
+        let chips_frame = self.composer_row.clone();
         div()
+            .debug_selector(|| "composer-chips".into())
+            .relative()
             .flex()
-            .flex_wrap()
             .items_center()
             .gap_1()
             .min_w_0()
+            .overflow_hidden()
+            // Measures the container; paints nothing.
+            .child(
+                canvas(
+                    move |bounds, _, _| chips_frame.chips.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
             .child(
                 div()
                     .relative()
@@ -968,47 +1283,97 @@ impl Chat {
                     .children(mode_picker),
             )
             // The one shrinkable chip: on a tight line it ellipsizes its name
-            // down to its 56px floor, never to nothing.
-            .child(div().relative().child(model_control).children(model_picker))
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .children(effort_control)
-                    .children(effort_picker),
-            )
-            .child(div().relative().flex_none().children(fast_control))
-            .child(div().relative().flex_none().children(background_tasks))
-            .child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .children(thinking_control)
-                    .children(thinking_picker),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(24.0))
-                    .px(px(7.0))
-                    .rounded(theme.radii.control)
-                    .text_size(typography.ui_size)
-                    .child(context_ring)
-                    .child(
-                        div()
-                            .id("context-label")
-                            .debug_selector(|| "context-label".into())
-                            .text_color(theme.ely.fg_subtle)
-                            .child("Context"),
-                    )
-                    .children(context_popover),
-            )
+            // down to its 56px floor, never to nothing. The floor is the
+            // wrapper's too: a wrapper sized to its content would hold the
+            // name whole and leave the row nothing to shrink. Minimal has no
+            // slot for it: the model is a row of ⋯ there.
+            .when(!minimal, |row| {
+                row.child(
+                    div()
+                        .relative()
+                        .min_w(px(MODEL_FLOOR))
+                        .child(model_control)
+                        .children(model_picker),
+                )
+            })
+            // A slot is in the row only when it draws something: a wrapper left
+            // empty would still take its gap. `composer_row`'s estimates count the
+            // slots by the same tests.
+            .when(effort_control.is_some(), |row| {
+                row.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .children(effort_control)
+                        .children(effort_picker),
+                )
+            })
+            .when(fast_control.is_some(), |row| {
+                row.child(div().relative().flex_none().children(fast_control))
+            })
+            // Narrow has neither the task count nor the ring: they are rows in ⋯.
+            .when(background_tasks.is_some() && !narrow, |row| {
+                row.child(div().relative().flex_none().children(background_tasks))
+            })
+            .when(thinking_control.is_some(), |row| {
+                row.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .children(thinking_control)
+                        .children(thinking_picker),
+                )
+            })
+            .when(!narrow, |row| {
+                row.child(
+                    div()
+                        .debug_selector(|| "context-chip".into())
+                        .relative()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(CHIP_GAP))
+                        .h(px(24.0))
+                        .px(px(CHIP_PAD_X))
+                        .rounded(theme.radii.control)
+                        .text_size(typography.ui_size)
+                        .child(context_ring)
+                        // Compact keeps the ring, which is the control, and leaves
+                        // its caption out.
+                        .when(!compact, |this| {
+                            this.child(
+                                div()
+                                    .id("context-label")
+                                    .debug_selector(|| "context-label".into())
+                                    .text_color(theme.ely.fg_subtle)
+                                    .child("Context"),
+                            )
+                        })
+                        .children(context_popover),
+                )
+            })
             .into_any_element()
     }
+}
+
+/// The background-task count in words: the chip's tooltip, and the row in ⋯.
+pub(super) fn background_tasks_label(running: usize) -> String {
+    if running == 1 {
+        "1 background task running".to_string()
+    } else {
+        format!("{running} background tasks running")
+    }
+}
+
+/// How full the context is, in whole percent. `None` for a window of no size: that
+/// is no measurement, and never a zero.
+fn context_percent(usage: &ContextUsage) -> Option<u64> {
+    (usage.size > 0).then(|| ((usage.used as f64 / usage.size as f64) * 100.0).round() as u64)
+}
+
+/// The context popover's headline, and the row in ⋯ that reads like it.
+fn context_percent_label(percent: u64) -> String {
+    format!("{percent}% of context used")
 }
 
 /// One row of the open catalogue popup, as a press and the keys both see it.
@@ -1025,6 +1390,26 @@ pub(super) enum PickerRow {
 /// The rows of the composer's "more" menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OverflowRow {
+    /// The model picker. Only in the Minimal row, which has no chip for it, when
+    /// there are models to pick from.
+    Model,
+    /// The agent's name, as information. Only in the Minimal row, which has no
+    /// badge for it, when there are no models to pick from.
+    Agent,
+    /// Attach an image, which is what `+` does. Only in the Minimal row, which has no
+    /// button for it.
+    Attach,
+    /// Fast mode, a toggle. Only in the Compact, Narrow and Minimal rows, which have
+    /// no chip for it.
+    Fast,
+    /// The thinking picker. Only in the Compact, Narrow and Minimal rows.
+    Thinking,
+    /// The session panel's toggle. Only in the Compact, Narrow and Minimal rows.
+    SessionPanel,
+    /// How many background tasks run. Only in the Narrow and Minimal rows.
+    BackgroundTasks,
+    /// The context ring's popover. Only in the Narrow and Minimal rows.
+    Context,
     Follow,
     NewConversation,
     History,
@@ -1066,22 +1451,122 @@ impl Chat {
                 })
                 .unwrap_or_default()
         } else if self.overflow_open {
-            [
-                OverflowRow::Follow,
-                OverflowRow::NewConversation,
-                OverflowRow::History,
-            ]
-            .into_iter()
-            .map(PickerRow::Overflow)
-            .collect()
+            self.overflow_rows()
+                .into_iter()
+                .map(PickerRow::Overflow)
+                .collect()
         } else {
             Vec::new()
         }
     }
 
-    /// The row the keys have marked: the cursor, held to the rows there are.
+    /// What the current layout moves out of the row and into ⋯, whether or not
+    /// ⋯ is open: in the Full row, nothing; in the Compact row Fast, Thinking and
+    /// the session panel; in the Narrow row those and the task count and the
+    /// context ring; in the Minimal row the model (or, with no models, the agent's
+    /// name) and attach ahead of all of them. In order, these are the rows ahead of the menu's
+    /// own.
+    pub(super) fn overflowed_rows(&self) -> Vec<OverflowRow> {
+        let layout = self.composer_row.layout.get();
+        if layout == RowLayout::Full {
+            return Vec::new();
+        }
+        let narrow = layout.is_narrow();
+        let minimal = layout.is_minimal();
+        let models = self.model_control_visible();
+        [
+            (minimal && models).then_some(OverflowRow::Model),
+            (minimal && !models).then_some(OverflowRow::Agent),
+            minimal.then_some(OverflowRow::Attach),
+            self.fast_state().map(|_| OverflowRow::Fast),
+            self.thinking_state().map(|_| OverflowRow::Thinking),
+            Some(OverflowRow::SessionPanel),
+            (narrow && self.background_tasks > 0).then_some(OverflowRow::BackgroundTasks),
+            narrow.then_some(OverflowRow::Context),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// Every row of ⋯, in the order drawn: what the layout moved out of the
+    /// row, then the menu's own.
+    pub(super) fn overflow_rows(&self) -> Vec<OverflowRow> {
+        let mut rows = self.overflowed_rows();
+        rows.extend([
+            OverflowRow::Follow,
+            OverflowRow::NewConversation,
+            OverflowRow::History,
+        ]);
+        rows
+    }
+
+    /// The context row's words in ⋯: the ring's own sentence once the agent has
+    /// said how full its context is, "Context" until then (a window of no size
+    /// gives no percentage, and never a zero nobody measured).
+    pub(super) fn context_row_label(&self) -> String {
+        self.context_usage
+            .as_ref()
+            .and_then(context_percent)
+            .map_or_else(|| "Context".to_string(), context_percent_label)
+    }
+
+    /// Whether a row can be chosen. The three that cannot are Fast mode while the
+    /// CLI has refused it, the task count, which only says how many tasks run, and
+    /// the agent's name; the menu draws those rows disabled, and the keys step over
+    /// them.
+    pub(super) fn picker_row_enabled(&self, row: &PickerRow) -> bool {
+        match row {
+            PickerRow::Overflow(OverflowRow::BackgroundTasks | OverflowRow::Agent) => false,
+            PickerRow::Overflow(OverflowRow::Fast) => self
+                .fast_state()
+                .is_some_and(|fast| fast.blocked_by.is_none()),
+            _ => true,
+        }
+    }
+
+    /// The row the keys have marked: the cursor, held to the rows there are. In ⋯,
+    /// whose rows come and go (a task ends, Fast is refused), the mark follows its
+    /// row: if that row is still there the mark is on it wherever it moved to, and
+    /// if it is gone the mark moves to the nearest row that can be chosen.
     pub(super) fn marked_picker_row(&self, rows: usize) -> Option<usize> {
-        (rows > 0).then(|| self.picker_cursor.unwrap_or(0).min(rows - 1))
+        if rows == 0 {
+            return None;
+        }
+        let at = self.picker_cursor.unwrap_or(0);
+        let held = at.min(rows - 1);
+        let marked = self
+            .overflow_open
+            .then(|| self.picker_cursor_rows.get(at).copied())
+            .flatten();
+        let Some(marked) = marked else {
+            return Some(held);
+        };
+        let now = self.overflow_rows();
+        if let Some(moved) = now.iter().position(|row| *row == marked) {
+            return Some(moved);
+        }
+        // Gone: the nearest row that can be chosen, the later one when two are as near.
+        let held = held.min(now.len().saturating_sub(1));
+        (0..now.len())
+            .map(|distance| {
+                [held + distance, held.wrapping_sub(distance)]
+                    .into_iter()
+                    .filter(|at| *at < now.len())
+            })
+            .flatten()
+            .find(|at| self.picker_row_enabled(&PickerRow::Overflow(now[*at])))
+            .or(Some(held))
+    }
+
+    /// Notes the rows ⋯ has now, which the cursor's index is into, so that the mark
+    /// can follow its row if they change.
+    fn remember_picker_cursor_rows(&mut self) {
+        self.picker_cursor_rows = if self.overflow_open {
+            self.overflow_rows()
+        } else {
+            Vec::new()
+        };
     }
 
     /// A popup opens on the row in force: the model, mode or setting now chosen.
@@ -1106,7 +1591,10 @@ impl Chat {
             PickerRow::Effort(value) => value == effort,
             PickerRow::Overflow(_) => false,
         });
-        self.picker_cursor = current.or((!rows.is_empty()).then_some(0));
+        // A row that cannot be chosen is never where the cursor starts.
+        let first_enabled = rows.iter().position(|row| self.picker_row_enabled(row));
+        self.picker_cursor = current.or(first_enabled);
+        self.remember_picker_cursor_rows();
     }
 
     /// The press a row runs. It is the path the keys take, so a click and
@@ -1142,6 +1630,46 @@ impl Chat {
                 self.select_effort(value, cx);
                 self.effort_picker_open = false;
             }
+            // Fast is a toggle like Follow: the menu stays open with the focus
+            // where it is, and its check moves when the CLI has agreed.
+            PickerRow::Overflow(OverflowRow::Fast) => {
+                self.toggle_fast_mode(cx);
+                return;
+            }
+            // The picker takes the focus itself, and keeps it.
+            PickerRow::Overflow(OverflowRow::Thinking) => {
+                self.overflow_open = false;
+                self.toggle_thinking_picker(window, cx);
+                return;
+            }
+            PickerRow::Overflow(OverflowRow::SessionPanel) => {
+                self.overflow_open = false;
+                self.toggle_session_panel(cx);
+            }
+            // The picker takes the focus itself, and keeps it. It opens, never
+            // toggles: the row is chosen to see it.
+            PickerRow::Overflow(OverflowRow::Model) => {
+                self.overflow_open = false;
+                self.model_picker_open = false;
+                self.toggle_model_picker(window, cx);
+                return;
+            }
+            // The same action the `+` button runs.
+            PickerRow::Overflow(OverflowRow::Attach) => {
+                self.overflow_open = false;
+                self.attach_image(window, cx);
+            }
+            // Information, not an action: nothing to run, and ⋯ stays as it is.
+            PickerRow::Overflow(OverflowRow::BackgroundTasks | OverflowRow::Agent) => return,
+            // The popover takes the focus itself, and keeps it. It opens, never
+            // toggles: the row is chosen to see it.
+            PickerRow::Overflow(OverflowRow::Context) => {
+                self.overflow_open = false;
+                self.picker_cursor = None;
+                self.context_popover_open = false;
+                self.toggle_context_popover(window, cx);
+                return;
+            }
             // Follow is a toggle: the menu stays open, with the focus where it is.
             PickerRow::Overflow(OverflowRow::Follow) => {
                 self.following_edited_files = !self.following_edited_files;
@@ -1168,12 +1696,22 @@ impl Chat {
     }
 
     fn step_picker(&mut self, by: isize, cx: &mut Context<Self>) {
-        let rows = self.picker_rows(cx).len() as isize;
+        let all = self.picker_rows(cx);
+        let rows = all.len() as isize;
         if rows == 0 {
             return;
         }
-        let at = self.marked_picker_row(rows as usize).unwrap_or(0) as isize;
-        self.picker_cursor = Some((at + by).rem_euclid(rows) as usize);
+        let mut at = self.marked_picker_row(rows as usize).unwrap_or(0) as isize;
+        // The next row that can be chosen, wrapping; none at all leaves the
+        // cursor where it is.
+        for _ in 0..rows {
+            at = (at + by).rem_euclid(rows);
+            if self.picker_row_enabled(&all[at as usize]) {
+                self.picker_cursor = Some(at as usize);
+                break;
+            }
+        }
+        self.remember_picker_cursor_rows();
         cx.notify();
     }
 

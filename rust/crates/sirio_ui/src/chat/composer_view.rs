@@ -384,7 +384,7 @@ mod tests {
     }
 }
 
-use gpui::{AnyElement, Context, SharedString, div, px};
+use gpui::{AnyElement, Context, SharedString, canvas, div, px};
 use sirio_acp::{EffortChoice, ModeCatalog};
 
 use super::{Chat, PopupAccept, PopupNext, PopupPrevious};
@@ -547,11 +547,13 @@ impl Chat {
     }
 }
 
+use super::composer_row::{BAND_COLUMN, BAND_TOP_PAD, RowLayout, row_layout, row_width};
 use super::*;
 use crate::popup::{hang_above_at, menu_card, menu_row};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant, IconButton},
     chat::{Attachment, AttachmentChip, PromptInput},
+    menus::Hang,
     primitives::{Icon, IconName},
     theme::{ActiveTheme as _, ControlSize, IconSize, Radius, TextSize},
     typography::EllipsisTooltip,
@@ -561,11 +563,11 @@ use ely_gpui_component::{
 /// card's field always had between its edge and its text.
 const FIELD_PAD_Y: f32 = 5.0;
 
-/// The distance from the shell's top edge to the field's first row: its 1px
-/// border and 12px padding. The completion popups hang above the token that
-/// opened them, and this keeps one opened on the first row above the card
-/// instead of over its border.
-const SHELL_TOP_INSET: f32 = 13.0;
+/// The distance from the band's top edge to the field's first row: its 1px
+/// rule and its top padding. The completion popups hang above the token that
+/// opened them, and this keeps one opened on the first row above the band
+/// instead of over its rule.
+const SHELL_TOP_INSET: f32 = 1.0 + BAND_TOP_PAD;
 
 /// What the chip calls an attached picture: the kind of file it will be sent as.
 fn attachment_chip_name(mime_type: &str) -> String {
@@ -975,17 +977,13 @@ impl Chat {
             None
         };
 
-        // Overflow menu (F-CHAT-14) and the Chat History popover
-        // (F-CHAT-34/35): the two secondary composer actions the control row
-        // does not carry inline.
-        let overflow_menu = self.overflow_open.then(|| self.render_chat_menu(theme, cx));
         let chat_history_menu = self.history_open.then(|| self.render_history(theme, cx));
 
         let attach_button = div()
             .flex_none()
             .debug_selector(|| "attach-image".into())
             .child(
-                IconButton::new("attach-image-button", IconName::Paperclip)
+                IconButton::new("attach-image-button", IconName::Plus)
                     .variant(ButtonVariant::Ghost)
                     .size(ControlSize::Sm)
                     .tooltip("Attach image")
@@ -1011,9 +1009,20 @@ impl Chat {
                     }),
             );
 
+        let overflow_frame = self.composer_row.clone();
         let overflow_button = div()
+            .relative()
             .flex_none()
             .debug_selector(|| "composer-overflow".into())
+            // Measures the trigger; paints nothing.
+            .child(
+                canvas(
+                    move |bounds, _, _| overflow_frame.overflow_button.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
             .child(
                 IconButton::new("composer-overflow-button", IconName::Ellipsis)
                     .variant(ButtonVariant::Ghost)
@@ -1026,6 +1035,69 @@ impl Chat {
 
         // With no agent configured the tool row holds only the send control.
         let has_agent = self.agent_launch.is_some();
+
+        // Which layout the row takes follows the chat's width (the probe's),
+        // never what the row itself measures, so the choice cannot move the
+        // width it is made from. Before the first paint nothing is known and
+        // the row is as wide as it can be.
+        let layout = if has_agent {
+            let docked = matches!(
+                self.session_panel_placement(),
+                Some(session_panel::Placement::Docked)
+            );
+            let chat_width = self.chat_width().map_or(f32::INFINITY, f32::from);
+            let needed = self.full_row_needed(theme, window);
+            let compact_needed = self.compact_row_needed(theme, window);
+            let narrow_needed = self.narrow_row_needed(theme, window);
+            let layout = row_layout(
+                row_width(chat_width, docked),
+                needed,
+                compact_needed,
+                narrow_needed,
+                self.composer_row.layout.get(),
+            );
+            self.composer_row.compact_needed.set(compact_needed);
+            self.composer_row.narrow_needed.set(narrow_needed);
+            self.composer_row.layout.set(layout);
+            self.composer_row.needed.set(needed);
+            self.composer_row.docked.set(docked);
+            layout
+        } else {
+            self.composer_row.layout.set(RowLayout::Full);
+            // Nothing to lay out: the probe has nothing to ask about.
+            self.composer_row.needed.set(0.0);
+            self.composer_row.compact_needed.set(0.0);
+            self.composer_row.narrow_needed.set(0.0);
+            self.composer_row.docked.set(false);
+            RowLayout::Full
+        };
+
+        // Overflow menu (F-CHAT-14) and the Chat History popover
+        // (F-CHAT-34/35): the secondary composer actions the control row does
+        // not carry inline. Built after the layout is known, because a Compact
+        // row hands Fast, Thinking and the panel toggle to this menu.
+        let overflow_menu = self.overflow_open.then(|| self.render_chat_menu(theme, cx));
+        if overflow_menu.is_none() {
+            *self.composer_row.menu.borrow_mut() = None;
+        }
+        // The thinking picker hangs from ⋯ in a Compact row, which has no chip
+        // for it (the Full row's chip hangs its own). ⋯ is in the left group, so
+        // the picker grows rightward into the chat.
+        let compact_thinking_picker = (layout != RowLayout::Full)
+            .then(|| self.render_thinking_picker(theme, Hang::Above, cx))
+            .flatten();
+        // A Narrow row has no ring for the context popover to hang from either,
+        // so it hangs from ⋯ the same way.
+        let narrow_context_popover = layout
+            .is_narrow()
+            .then(|| self.render_context_popover(theme, Hang::Above, cx))
+            .flatten();
+        // A Minimal row has no model chip for the model picker to hang from, so it
+        // hangs from ⋯ too, as the thinking picker does.
+        let minimal_model_picker = layout
+            .is_minimal()
+            .then(|| self.render_model_picker(theme, Hang::Above, cx))
+            .flatten();
 
         let composer_context_menu = self
             .composer_context_menu
@@ -1115,10 +1187,14 @@ impl Chat {
                 )
             });
 
+        let row_frame = self.composer_row.clone();
+        let send_frame = self.composer_row.clone();
         let streaming = self.streaming;
         let mut prompt = PromptInput::custom("composer-shell", editor, can_send, move |_, cx| {
             send_entity.update(cx, |chat, cx| chat.send(cx));
-        });
+        })
+        .band(px(BAND_COLUMN))
+        .send_probe(move |bounds| send_frame.send.set(Some(bounds)));
         if streaming {
             // While a turn runs the send control is stop: the same path Escape
             // takes, and it leaves the draft alone.
@@ -1130,22 +1206,31 @@ impl Chat {
             prompt = prompt.above(chips);
         }
         if has_agent {
+            // Minimal has room for ⋯ alone: attach is a row of it there, running
+            // the same `attach_image`.
+            if !layout.is_minimal() {
+                prompt = prompt.tool(attach_button);
+            }
+            // Every layout under Full moves the panel's toggle into ⋯.
+            if layout == RowLayout::Full {
+                prompt = prompt.tool(panel_button);
+            }
             prompt = prompt
-                .tool(self.render_agent_controls(theme, window, cx))
-                .trailing(attach_button)
-                .trailing(panel_button)
-                .trailing(
+                .tool(
                     div()
                         .relative()
                         .child(overflow_button)
                         .children(overflow_menu)
+                        .children(compact_thinking_picker)
+                        .children(narrow_context_popover)
+                        .children(minimal_model_picker)
                         .children(chat_history_menu),
-                );
+                )
+                .trailing(self.render_agent_controls(theme, layout, window, cx));
         }
 
         div()
             .w_full()
-            .max_w(px(TRANSCRIPT_WIDTH))
             .flex()
             .flex_col()
             .child(
@@ -1163,7 +1248,16 @@ impl Chat {
                                 .focus(window, cx);
                         }),
                     )
-                    .child(prompt),
+                    .child(prompt)
+                    // Measures the band; paints nothing.
+                    .child(
+                        canvas(
+                            move |bounds, _, _| row_frame.band.set(Some(bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    ),
             )
             .into_any_element()
     }

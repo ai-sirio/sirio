@@ -76,8 +76,19 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # captures; --display :N is a private Xvfb (at least --window-size, default 2200x1000)
 # with Mesa's lavapipe, and trace_tab and trace_idle need one (--state-only with it paints
 # but takes no captures), trace_keys, file_links and clipboard_keys a framed run at --window-size 2200x1000;
-# --appearance light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL".
-Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
+# --appearance light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL". The
+# composer_compact scenario uses Scripts/Tests/stubs/session-panel-bypass/claude, the fixture's
+# session_panel_bypass mode (the CLI starts in bypassPermissions), and proves the native Claude
+# chat's compact composer row at the default window (about 430 px) on the `composerRow` of
+# `surface.chat.read`: Fast, Thinking and the session panel in the overflow menu, the mode pill
+# the danger shield-off, the band spanning the chat, send inside it, the chips ending before send
+# and level with it (one line); then a real click on the overflow button (the measured
+# `overflowButton`) opens the menu, whose `menu` rows the render built list Fast disabled with the
+# CLI's reason as its tooltip (the stub's handshake says `preference`) and Thinking enabled, a real
+# Enter opens the thinking picker (`picker`) and Escape closes it. It needs a painted chat
+# (--display :N) and captures frames/composer-compact.png, composer-overflow.png and
+# composer-thinking.png.
+Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the
 # control socket (docs/testing/ely-agent-chat.md). The effort and effort_light scenarios (dark and
@@ -85,12 +96,13 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # effort list opens and takes a pick through the debug-only `surface.chat.effort`; they capture it.
 # effort_full and effort_full_light run the fixture's effort-full mode (Default, five levels,
 # Ultracode), capture the whole list (the notes, the separator) and choose Default from it.
-# Three scenarios need a display and are skipped under --state-only (`SKIP <name>: needs a
+# Five scenarios need a display (composer_keys, reduced_motion and unfocused_spinner below, and the two
+# composer_band ones after them) and are skipped under --state-only (`SKIP <name>: needs a
 # display`, recorded as `skipped` in summary.json): composer_keys types through xdotool (Return,
 # Shift+Return, Up and Down moving the caret, the slash popup taken with Down and Tab, closed by
 # Escape, proved by a frame diff of its box against the frame before the `/`; and the composer's
 # field paints nothing of its own (`composer_field_has_no_fill`: in the empty draft's frame every
-# pixel of a band across the field is the card's colour, for the default 1470x833 window); its
+# pixel of a band across the field is the band's colour, for the default 1470x833 window); its
 # fixture is `composer`, because `plain` advertises no slash commands) and reduced_motion
 # (SIRIO_REDUCED_MOTION=1: the transcript is pixel-identical in three frames 250 ms apart) and
 # unfocused_spinner (a second window, `surfaces_probe --frame tooltip`, takes the X focus, and the
@@ -100,6 +112,24 @@ Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SE
 # surfaces_probe example, built with the others unless --no-build; the CPU base and the ceiling
 # formula `base × 1.25 + 1` are in docs/testing/bezel-off.md, "The unfocused spinner and its CPU
 # base").
+# composer_band and composer_band_light (dark and light, also display-only) prove the composer band in the
+# real app on the `composer` fixture, from `composerRow` of `surface.chat.read` (layout, the band's, send's
+# and the chips' boxes, the chat root's, docked, overflow): wide is the full row, narrow and floor (a lone
+# chat pane never goes under 320 px) are the compact row with send inside the band and the chips ending
+# before it, docked (the session panel open, a chat about 690 px wide) ends the band at the panel; every lane
+# also asserts the row is one line (the band as tall as the default window's, the chips level with send);
+# the minimal lane (last) splits the chat's pane with `pane.split` (focus it with `pane.focus left`, split
+# right, until `layout` is `minimal`, about 209 px, since the window itself cannot go under 320 px), asserts
+# the same geometry and that `overflow` starts `model`, `attach`, then clicks the measured `overflowButton`,
+# reads `menu` (model first, attach second, both enabled), presses Enter (`picker` is `model`) and Escape;
+# frames per lane (minimal, minimal-overflow, minimal-model). The composer_band scenarios run with a private HOME,
+# XDG tree and SHELL=/bin/sh, so the terminals the splits spawn read none of the user's rc files (their frames
+# show a plain sh prompt). Each then runs a narrow lane against the `ely-catalogue` fixture, which advertises
+# modes (current `ask`): `modeIcon` is what the render drew for the pill, the shield every id
+# without an icon gets, and `modeDanger` is false (the `composer` fixture, with no modes, draws none).
+# The record also carries `overflowButton`, `menu` (the rows ⋯ drew, while open) and `picker`.
+# The frame constants (FIELD_BAND, BAND_BESIDE_FIELD, COMPOSER_CLICK, POPUP_REGION) are for a 1470x833
+# window: an Xvfb screen of 1474x833 opens one.
 # --display :N (an Xvfb; export VK_DRIVER_FILES and VK_ICD_FILENAMES as lavapipe's lvp_icd.json)
 # takes the captures, --state-only omits them,
 # --only NAME[,NAME] runs some scenarios, --out-dir DIR keeps the artifact.
