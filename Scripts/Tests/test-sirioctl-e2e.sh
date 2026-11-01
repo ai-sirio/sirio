@@ -1317,11 +1317,17 @@ assert request["params"]["cmd"] == "x", request' || fail "--dry-run did not prin
 
 # The `display_name` column of the project whose root is $2 in database $1:
 # `NULL` for no label, `row-missing` for no such project, else the stored text.
+# Matched by real path: the app stores the canonical root, and on macOS the run
+# directory under /var/folders is reached through the /var symlink.
 stored_label() { # db root
-  python3 -I -c 'import sqlite3, sys
+  python3 -I -c 'import os, sqlite3, sys
 connection = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
-row = connection.execute("SELECT display_name FROM project WHERE root_path = ?", (sys.argv[2],)).fetchone()
-print("row-missing" if row is None else ("NULL" if row[0] is None else row[0]))' "$1" "$2"
+target = os.path.realpath(sys.argv[2])
+for root, label in connection.execute("SELECT root_path, display_name FROM project"):
+    if os.path.realpath(root) == target:
+        print("NULL" if label is None else label)
+        raise SystemExit
+print("row-missing")' "$1" "$2"
 }
 # The `displayName` the project list gives the project rooted at $1; `row-missing` for none.
 listed_label() { # root
