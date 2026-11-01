@@ -666,6 +666,9 @@ impl Render for ProjectSettingsView {
                     .relative()
                     .w_full()
                     .h(px(32.0))
+                    // The column outgrows a short tab, and a clipped field
+                    // has no content height to stop the shrink.
+                    .flex_none()
                     .px(px(9.0))
                     .flex()
                     .items_center()
