@@ -34,3 +34,7 @@ shape `public.svg`, `rotate_cw.svg` and `sparkle.svg` already have here.
 rule, from that same commit: the right panel's pull/merge request view and
 its detail tab draw a change request's state, CI, reviews, commits and
 links with them.
+
+`text_snippet.svg` was added on 2026-11-01 under the same rule, from that same
+commit: it marks the right panel's Prompts view, whose rail needs a glyph unlike
+every other rail icon and unlike the chat's `chat.svg`.

@@ -185,6 +185,8 @@ pub enum Icon {
     ArrowUpRight,
     /// Copy to the clipboard (`zed/copy.svg`).
     Copy,
+    /// The right panel's saved prompts (`zed/text_snippet.svg`).
+    TextSnippet,
     /// GitHub's mark (`dashboard/github.svg`), tinted.
     GitHubMark,
     /// GitLab's mark (`dashboard/gitlab.svg`), in its own colours.
@@ -280,6 +282,7 @@ impl Icon {
             Icon::GitCommit => "icons/zed/git_commit.svg",
             Icon::ArrowUpRight => "icons/zed/arrow_up_right.svg",
             Icon::Copy => "icons/zed/copy.svg",
+            Icon::TextSnippet => "icons/zed/text_snippet.svg",
             Icon::GitHubMark => "icons/dashboard/github.svg",
             Icon::GitLabMark => "icons/dashboard/gitlab.svg",
             Icon::FileType(stem) => sirio_icons::asset_path(stem)
@@ -353,6 +356,7 @@ impl Icon {
             Icon::GitCommit => include_bytes!("../../../assets/icons/zed/git_commit.svg"),
             Icon::ArrowUpRight => include_bytes!("../../../assets/icons/zed/arrow_up_right.svg"),
             Icon::Copy => include_bytes!("../../../assets/icons/zed/copy.svg"),
+            Icon::TextSnippet => include_bytes!("../../../assets/icons/zed/text_snippet.svg"),
             Icon::GitHubMark => include_bytes!("../../../assets/icons/dashboard/github.svg"),
             Icon::GitLabMark => include_bytes!("../../../assets/icons/dashboard/gitlab.svg"),
             Icon::FileType(stem) => sirio_icons::asset(stem)
@@ -635,7 +639,7 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 55] = [
+pub const ALL_ICONS: [Icon; 56] = [
     Icon::FolderFill,
     Icon::FolderOpen,
     Icon::GitBranch,
@@ -689,6 +693,7 @@ pub const ALL_ICONS: [Icon; 55] = [
     Icon::GitCommit,
     Icon::ArrowUpRight,
     Icon::Copy,
+    Icon::TextSnippet,
     Icon::GitHubMark,
     Icon::GitLabMark,
 ];

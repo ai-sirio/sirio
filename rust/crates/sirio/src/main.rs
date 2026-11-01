@@ -8356,6 +8356,7 @@ impl SirioWorkspace {
                 RightPanelActionEvent::OpenSurface(surface) => {
                     workspace.queue_workspace_action(WorkspaceAction::OpenSurface(*surface))
                 }
+                RightPanelActionEvent::OpenPrompt(_) | RightPanelActionEvent::PromptDeleted(_) => {}
             },
         )
         .detach();

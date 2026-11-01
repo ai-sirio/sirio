@@ -308,6 +308,7 @@ impl Sidebar {
             Icon::GitCommit => "git-commit",
             Icon::ArrowUpRight => "arrow-up-right",
             Icon::Copy => "copy",
+            Icon::TextSnippet => "text-snippet",
             Icon::GitHubMark => "github-mark",
             Icon::GitLabMark => "gitlab-mark",
             Icon::FileType(_) => "file-type",
