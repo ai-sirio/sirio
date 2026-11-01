@@ -5867,7 +5867,8 @@ struct SirioWorkspace {
     /// would never see it once the callback had already set `true`.
     last_polled_window_active: bool,
     /// Per session, by persistence id: the unread mark and the running flag.
-    /// In memory only; a record outlives its session's panes until the tab closes.
+    /// In memory only; a record stays for the rest of the run, whether or not
+    /// its session is still open.
     session_attention: HashMap<String, TabAttention>,
     /// Debug-only override of the window's focus, driven by
     /// `surface.attention.act --focus`: under Xvfb with no window manager, and
@@ -10392,6 +10393,9 @@ impl SirioWorkspace {
                                     {
                                         any_transition = true;
                                     }
+                                    // `process_gone` can unmask a Layer E
+                                    // claim, which queues a change.
+                                    workspace.drain_activity_transitions(cx);
                                 }
                                 Err(error) => eprintln!(
                                     "[activity] process refresh failed for pane-{pane_id}: {error}"
@@ -13900,13 +13904,16 @@ impl SirioWorkspace {
     /// or in the Secondary half while that half is drawn. A retained or parked
     /// session is never on screen.
     fn session_on_screen(&self, tab: &OpenTab) -> bool {
-        self.effective_window_active()
+        // The split's own answer first: it is cheap, and it leaves the path
+        // comparison below to at most the two tabs a half shows.
+        let shown = self.center_split.active(PaneRole::Primary) == Some(tab.id)
+            || (self.center_split.active(PaneRole::Secondary) == Some(tab.id)
+                && self.secondary_pane_visible());
+        shown
+            && self.effective_window_active()
             && self.has_current_worktree()
             && self.tabs.iter().any(|held| held.id == tab.id)
             && paths_name_the_same_document(&self.tab_worktree_path(tab.id), &self.working_directory)
-            && (self.center_split.active(PaneRole::Primary) == Some(tab.id)
-                || (self.secondary_pane_visible()
-                    && self.center_split.active(PaneRole::Secondary) == Some(tab.id)))
     }
 
     /// Only an agent's stop is news: a chat, a terminal pane whose agent is
@@ -13922,8 +13929,14 @@ impl SirioWorkspace {
     /// What is known of a session's status record when a pane's status goes from
     /// nothing to something. Until the record outlives the run, that is only
     /// this run's own `session_attention`.
-    fn first_status_for(&self, persistence_id: &str, _chat: bool) -> FirstStatus {
+    ///
+    /// A chat with no record reads as recorded and idle: in this run a chat
+    /// reaches a stop through Running to settled, so a first settled status
+    /// is a restored transcript (`has_completed_turn`), not news. Task 5
+    /// replaces this with the persisted `Restored { chat: true }`.
+    fn first_status_for(&self, persistence_id: &str, chat: bool) -> FirstStatus {
         match self.session_attention.get(persistence_id) {
+            None if chat => FirstStatus::Recorded { was_running: false },
             None => FirstStatus::Unrecorded,
             Some(record) => FirstStatus::Recorded {
                 was_running: record.running,
@@ -14025,10 +14038,7 @@ impl SirioWorkspace {
     /// Sirio can reach, plus one per record whose session it no longer holds.
     fn control_attention_read(&self) -> Vec<(String, String)> {
         let status_word = |status: Option<AgentStatus>| match status {
-            Some(AgentStatus::Running) => serde_json::json!("running"),
-            Some(AgentStatus::NeedsInput) => serde_json::json!("needs-input"),
-            Some(AgentStatus::Done) => serde_json::json!("done"),
-            Some(AgentStatus::Error) => serde_json::json!("error"),
+            Some(_) => serde_json::json!(agent_status_word(status)),
             None => serde_json::Value::Null,
         };
         let held = self.held_sessions();
@@ -14046,7 +14056,7 @@ impl SirioWorkspace {
                     "worktree": session.worktree.to_string_lossy(),
                     "title": session.title,
                     "kind": if session.chat { "chat" } else { "terminal" },
-                    "unread": record.unread,
+                    "unread": self.is_unread(&session.persistence_id),
                     "running": record.running,
                     "status": status_word(self.activity.status_for_panes(&keys)),
                     "onScreen": session.on_screen,
@@ -26950,10 +26960,10 @@ impl Render for SirioWorkspace {
         // F-CORE-ACT-20: same "polled, not pushed" reasoning as the comment
         // above -- `Window::is_window_active` is a real, portable GPUI call
         // (every platform's own window backs it; nothing linux-specific is
-        // needed to read it), but the callbacks that actually decide
-        // whether to notify (`post_activity_notification`, off Layer B/C/D
-        // activity transitions) carry no `Window`. `render` does, every
-        // frame, so the value is cached here for those to read.
+        // needed to read it), but `on_pane_transition`, which decides each
+        // stop from every layer's status changes, is reached from callbacks
+        // that carry no `Window`. `render` does, every frame, so the value
+        // is cached here for it to read.
         //
         // #114 rides the same poll for free: on the false→true focus
         // transition only -- the user came back from doing git work in

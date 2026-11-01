@@ -1579,6 +1579,7 @@ for line in sys.stdin.read().split():
   # Leave A with another of its tabs shown, so that coming back is not yet a look.
   ctl tab select "$(tab_position_of Chat)" >/dev/null || fail "the Chat tab could not be selected"
   select_wt "$id_b"
+  [ "$(attention_get "$sess" unread)" = false ] || fail "the session was unread before any push of this step"
   ctl notify --session "$pane_a" --status running >/dev/null || fail "notify running for $pane_a was refused"
   ctl notify --session "$new_pane" --status running >/dev/null || fail "notify running for $new_pane was refused"
   ctl notify --session "$new_pane" --status needs-input >/dev/null || fail "notify needs-input for $new_pane was refused"
@@ -1600,8 +1601,8 @@ for line in sys.stdin.read().split():
   ctl surface attention act --focus inactive >/dev/null || fail "--focus inactive was refused"
   [ "$(reply_field windowActive surface attention read)" = false ] || fail "windowActive is not false after --focus inactive"
   select_wt "$id_b"
-  ctl notify --session "$pane_a" --status running >/dev/null
-  ctl notify --session "$pane_a" --status needs-input >/dev/null
+  ctl notify --session "$pane_a" --status running >/dev/null || fail "notify running for $pane_a was refused"
+  ctl notify --session "$pane_a" --status needs-input >/dev/null || fail "notify needs-input for $pane_a was refused"
   attention_wait "$sess" unread true 10
   select_wt "$id_a"
   ctl tab select "$(tab_position_of "$agent_title")" >/dev/null || fail "the agent tab could not be selected"
@@ -1612,6 +1613,29 @@ for line in sys.stdin.read().split():
   ctl surface attention act --focus active >/dev/null || fail "--focus active was refused"
   attention_wait "$sess" unread false 10
   echo "OK: the window turned active: unread cleared"
+
+  echo "step 14.7b: plain_shell_exit_is_not_a_stop: only an agent's pane stops, so a plain shell that exits 3 with the window inactive marks nothing"
+  # The plain tab stays mounted and shown: a tab in a parked worktree is not told
+  # that its shell exited, so a stop could not be read from there. An inactive
+  # window puts the shown tab off screen all the same, which is where an agent's
+  # stop would mark it.
+  local known_plain pane_plain sess_plain
+  known_plain="$(attention_ids | tr '\n' ' ')"
+  rm -f "$W/plain-gate" "$W/plain-exit.marker"
+  pane_plain="$(ctl_json surface terminal open --cmd "while [ ! -f $W/plain-gate ]; do sleep 0.2; done; echo exiting > $W/plain-exit.marker; exit 3" | pane_of)"
+  wait_until 30 attention_new_session "$W_REPO" "$known_plain" || fail "no session appeared in worktree A for the plain terminal tab"
+  sess_plain="$ATT_NEW"
+  [ "$(attention_get "$sess_plain" status)" = null ] || fail "the plain terminal's session reads an agent status before it exits"
+  ctl surface attention act --focus inactive >/dev/null || fail "--focus inactive was refused"
+  : > "$W/plain-gate"
+  wait_until 30 test -s "$W/plain-exit.marker" || fail "the plain shell never reached its exit"
+  wait_status "$pane_plain" error 20
+  sleep 2
+  [ "$(attention_get "$sess_plain" onScreen)" = false ] || fail "the plain tab reads onScreen in an inactive window, so the check proves nothing"
+  [ "$(attention_get "$sess_plain" unread)" = false ] || fail "a plain shell's exit marked its session unread"
+  echo "OK: the plain shell exited 3 (its pane reads error), off screen, and its session is not unread"
+  ctl surface attention act --focus active >/dev/null || fail "--focus active was refused"
+  [ "$(attention_get "$sess_plain" unread)" = false ] || fail "the plain session is unread once the window is active"
 
   echo "step 14.8: the artifact"
   ctl_json surface attention read | python3 -I -c 'import json, sys
