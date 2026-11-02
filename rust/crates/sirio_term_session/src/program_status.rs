@@ -5,6 +5,10 @@
 //! `ESC ] 7501 ; ? ST`. The scanner only reads: it never alters or removes bytes, a report
 //! may arrive split across any number of reads, and it keeps at most [`MAX_KEPT_BODY`] bytes
 //! of a body however long it runs. Fields the scanner does not know are ignored.
+//!
+//! The scanner is stricter than the emulator on purpose: a body interrupted by a bare ESC
+//! (CAN and SUB abort it too) is dropped, and a field holding other control bytes never
+//! matches a known value, so it can miss a report but never invent one.
 
 // Nothing consumes the scanner until the session engine wires it in; drop this then.
 #![allow(dead_code)]
@@ -34,8 +38,9 @@ pub struct StatusRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Scanned {
-    /// A probe. `end` is the offset in the chunk just past its terminator; `bel` is true
-    /// when BEL ended it, so the answer can use the same terminator.
+    /// A probe. `end` is the offset just past its terminator, counted from the start of the
+    /// chunk passed to the `scan` call that completed it (the engine splits the chunk there);
+    /// `bel` is true when BEL ended it, so the answer can use the same terminator.
     Probe { end: usize, bel: bool },
     /// A root report; `None` is `state=clear`.
     Root(Option<StatusRecord>),
@@ -60,6 +65,7 @@ const PREFIX: &[u8] = b"\x1b]7501;";
 const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
 const CAN: u8 = 0x18;
+const SUB: u8 = 0x1a;
 
 enum State {
     /// Outside any sequence of interest.
@@ -93,6 +99,7 @@ impl OscScanner {
     }
 
     /// Feed one read of PTY output; completed reports and probes are appended to `out`.
+    /// A probe's `end` counts from the start of `bytes`.
     pub(crate) fn scan(&mut self, bytes: &[u8], out: &mut Vec<Scanned>) {
         for (index, &byte) in bytes.iter().enumerate() {
             self.step(byte, index + 1, out);
@@ -126,7 +133,7 @@ impl OscScanner {
             State::Body => match byte {
                 BEL => self.finish(after, true, out),
                 ESC => self.state = State::BodyEsc,
-                CAN => self.abandon(),
+                CAN | SUB => self.abandon(),
                 _ => self.keep(byte),
             },
             State::BodyEsc => {
@@ -252,7 +259,7 @@ mod tests {
     //! - `field_cut_by_limit_dropped`: a field cut by the limit is dropped, not truncated.
     //! - `cut_on_field_boundary_keeps_field`: a field the limit ends exactly on is kept.
     //! - `other_osc_untouched`: OSC 2 and OSC 7502 yield nothing.
-    //! - `can_aborts`: CAN in a body drops it, and the next report parses.
+    //! - `can_aborts`: CAN or SUB in a body drops it, and the next report parses.
     //! - `esc_inside_body_restarts`: an ESC that is not an ST abandons the body and starts over.
     //! - `invalid_utf8_value`: a field with a non-UTF-8 value is dropped, the record stands.
 
@@ -476,6 +483,7 @@ mod tests {
     fn can_aborts() {
         let got = scan_chunks(&[
             b"\x1b]7501;state=work\x18ing:state=done\x1b\\",
+            b"\x1b]7501;state=work\x1aing:state=done\x1b\\",
             b"\x1b]7501;state=idle\x1b\\",
         ]);
         assert_eq!(got, [plain(ReportState::Idle)]);
