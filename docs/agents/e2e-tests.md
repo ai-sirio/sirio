@@ -67,9 +67,9 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # decided to post (`posted`): one per stop, built from the session's own worktree, none for
 # the agent's exit afterwards, and `act --click <tag>` opens the session the way a click on
 # the notification does (the app's D-Bus is dead, so the E2E never reaches a desktop). Its
-# step 14.7c (`parked_terminal_exit_reaches_status`) is the parked twin of a plain shell's
+# step 15.7c (`parked_terminal_exit_reaches_status`) is the parked twin of a plain shell's
 # exit: the shell exits 3 while its worktree is not selected, and its session reads error
-# and is not unread. Its step 14.8a (`settings_cover_is_not_on_screen`) opens Settings with
+# and is not unread. Its step 15.8a (`settings_cover_is_not_on_screen`) opens Settings with
 # `surface settings open`: a stop of the shown agent tab under it marks the session and
 # posts one notification, a look does not clear it, and Escape (a real key, pressed in the
 # app's window: no verb closes Settings) shows the tab again, which clears the mark. Linux

@@ -2286,7 +2286,7 @@ unread_chat() { # name [step-ms]
 }
 # A shown session is marked seen by the frame that draws it, and a --state-only run draws
 # none: the focus act runs the same marking (`mark_shown_sessions_seen`) without one. The
-# sirioctl E2E's case 14 proves the frame's own marking on a window.
+# sirioctl E2E's case 15 proves the frame's own marking on a window.
 look_at_shown() {
   ctl surface attention act --focus active >/dev/null || fail "surface attention act --focus active was refused"
 }
