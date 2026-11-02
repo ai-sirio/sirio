@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 /// At most this many argv entries are kept.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) const MAX_ARGS: usize = 32;
-/// Every kept string (name, argv entry, cwd) is cut to this many bytes, on a char boundary.
+/// A name or argv entry is cut to this many bytes, on a char boundary; a longer cwd is
+/// dropped, since a cut path names another directory.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) const MAX_ARG_BYTES: usize = 1024;
 /// A group that has not yet been read twice with the same result is read again this often.
