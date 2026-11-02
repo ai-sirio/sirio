@@ -48855,9 +48855,17 @@ browser  profile  "
         });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        let snapshot = terminal.read_with(&cx.cx, |terminal, _| terminal.snapshot());
+        let (snapshot, shell_pid) = terminal.read_with(&cx.cx, |terminal, _| {
+            (terminal.snapshot(), terminal.shell_pid())
+        });
         terminal.update(&mut cx.cx, |terminal, _| terminal.shutdown());
         cx.run_until_parked();
+        // A view that never started answers with its prelude, which holds the
+        // nonce too: only a running terminal proves the replay reached a VT.
+        assert!(
+            shell_pid.is_some(),
+            "the restored terminal must have started a session"
+        );
         assert!(
             snapshot
                 .scrollback

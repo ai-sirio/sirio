@@ -2778,15 +2778,19 @@ impl TerminalView {
     }
 
     /// Captures the renderer's current plain-text history for persistence or
-    /// headless verification. A restored pane not started yet (it starts on
-    /// its first render) is still `Pending`: it answers with the scrollback it
-    /// was restored with (`set_prelude`), so saving it does not overwrite that
-    /// history with nothing. Connecting and failed panes answer nothing.
+    /// headless verification. A pane with no running session (a restored one
+    /// not started yet, one still connecting to the host, or one whose open
+    /// failed) answers with the prelude its next session would get: the
+    /// scrollback it was restored with (`set_prelude`), or the replica's after
+    /// a lost session (`restart`). So saving it, or restarting it, does not
+    /// replace that history with nothing. Where the prelude was already
+    /// cleared (an attach-only failure), that is empty.
     pub fn capture_scrollback(&self) -> Vec<u8> {
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.capture_scrollback(),
-            TerminalState::Pending => self.pending_prelude.clone(),
-            TerminalState::Connecting | TerminalState::Failed { .. } => Vec::new(),
+            TerminalState::Pending | TerminalState::Connecting | TerminalState::Failed { .. } => {
+                self.pending_prelude.clone()
+            }
         }
     }
 
