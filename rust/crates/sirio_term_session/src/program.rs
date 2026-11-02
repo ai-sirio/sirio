@@ -70,6 +70,10 @@ pub(crate) struct ForegroundTracker {
     last_read: Option<Instant>,
     /// Reports are dropped until this instant, when set.
     late_until: Option<Instant>,
+    /// The live program a child group took the terminal from, with that program's group:
+    /// the terminal going back to it is the same program again, not a replacement. One
+    /// slot, kept for the first such hand-over (a child's own child does not displace it).
+    parked: Option<(u32, ForegroundProgram)>,
 }
 
 impl ForegroundTracker {
@@ -82,6 +86,7 @@ impl ForegroundTracker {
             settled: false,
             last_read: None,
             late_until: None,
+            parked: None,
         }
     }
 
@@ -101,6 +106,7 @@ impl ForegroundTracker {
             if self.shell_polls >= 2 && self.group.take().is_some() {
                 self.pending = None;
                 self.last_read = None;
+                self.parked = None;
                 if self.current.take().is_some() {
                     self.late_until = Some(now + LATE_REPORT_WINDOW);
                     return Update::ShellAgain;
@@ -113,10 +119,30 @@ impl ForegroundTracker {
         self.late_until = None;
         let mut replaced = false;
         if self.group != Some(group) {
+            if self.parked.as_ref().is_some_and(|(_, program)| leader_gone(program.pid)) {
+                self.parked = None;
+            }
+            // A child group that took the terminal from a live program has given it back:
+            // the program is the same one, and keeps its record.
+            if self.parked.as_ref().is_some_and(|(parked, _)| *parked == group) {
+                let (_, program) = self.parked.take().expect("checked above");
+                self.group = Some(group);
+                self.current = Some(program.clone());
+                self.pending = Some(program.clone());
+                self.settled = true;
+                self.last_read = Some(now);
+                return Update::Named(program);
+            }
             // The named leader is gone and another group has the terminal: the named
             // program is over. A leader still alive may just have handed the terminal to
-            // a child group, which keeps the record.
+            // a child group, which keeps the record, and is remembered for its return.
             replaced = self.current.as_ref().is_some_and(|named| leader_gone(named.pid));
+            if !replaced
+                && self.parked.is_none()
+                && let (Some(from), Some(named)) = (self.group, self.current.as_ref())
+            {
+                self.parked = Some((from, named.clone()));
+            }
             self.group = Some(group);
             self.pending = None;
             self.settled = false;

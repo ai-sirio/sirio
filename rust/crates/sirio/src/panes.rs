@@ -60,9 +60,15 @@ pub(crate) fn apply_terminal_activity_event(
             activity.apply_exit_result(pane_id, terminal_exit_code(*status), now)
         }
         TerminalActivityEvent::LifecycleChanged { .. } => None,
-        // A lost session keeps its scrollback and offers a Restart; it
-        // changes no agent identity or status on its own.
-        TerminalActivityEvent::SessionLost => None,
+        // A lost session keeps its scrollback and offers a Restart. The host is gone,
+        // and a program-owned pane's agent with it (the caller has settled a turn
+        // that was mid-way and dropped the record); the other owners change nothing.
+        TerminalActivityEvent::SessionLost => {
+            if activity.is_program_owned(pane_id) {
+                activity.program_gone(pane_id);
+            }
+            None
+        }
         // A refused open changes no agent identity; the pane is rebound.
         TerminalActivityEvent::IdTaken => None,
         // The host names the program holding the terminal: identity only, no

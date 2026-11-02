@@ -686,15 +686,27 @@ case_blocked_inside_turn_then_idle() {
   stepn "idle after a block" "$SESS"
 }
 
+# Waits until pane $1's screen shows $2, for $3 seconds.
+wait_screen() { # pane text seconds
+  for _ in $(seq 1 $(( $3 * 5 ))); do
+    "$PROBE" term-read "$1" text 2>/dev/null | grep -qF "$2" && return 0
+    sleep 0.2
+  done
+  fail "pane $1: the screen never showed '$2' within $3 s"
+}
+
 case_short_turn_is_silent() {
   local base
   start_agent codex
   base="$(posted_count)"
+  # Nothing between the two lines may take long: the turn is measured on the host's clock
+  # between the two reports, and a poll of the app in between would make it a long one.
   type_line "$PANE" work
-  wait_status "$SESS" running 3
   sleep 0.2
   type_line "$PANE" idle
-  wait_status "$SESS" null 3
+  wait_screen "$PANE" "ack idle" 5
+  sleep 1
+  expect_attention "$SESS" status null "a short turn"
   hold_status "$SESS" null 1
   expect_attention "$SESS" running false "a short turn"
   expect_posted "$base" 0 "a short turn"
@@ -855,14 +867,18 @@ child_alive() { kill -0 "$CHILD" 2>/dev/null; }
 child_gone() { ! child_alive; }
 
 case_agent_hands_the_terminal_to_a_child() {
-  # A reporting agent keeps its mark while a child holds the terminal (Refinement 6); one
-  # that never reports loses it for as long, and has it back when it takes the terminal.
+  # A reporting agent keeps its mark and its turn while a child holds the terminal and
+  # after the child gives it back (Refinement 6): the terminal returning to the live agent
+  # is not a replacement, so there is no finished stop. One that never reports loses the
+  # mark for as long, and has it back when it takes the terminal.
+  local base
   open_pane
   type_line "$PANE" claude
   wait_agent "$PANE" claude 3
   sleep 2.5
   type_line "$PANE" work
   wait_status "$SESS" running 3
+  base="$(posted_count)"
   type_line "$PANE" fgchild
   wait_foreground_child
   sleep 1.5
@@ -871,8 +887,15 @@ case_agent_hands_the_terminal_to_a_child() {
   expect_attention "$SESS" status running "claude with a live record, a child in the foreground"
   stepn "claude: child holds the terminal" "$SESS"
   wait_until 10 child_gone || fail "the child never ended"
-  sleep 1
+  sleep 1.5
   [ "$(agent_of "$PANE")" = claude ] || fail "claude lost its mark after its child ended"
+  expect_attention "$SESS" status running "claude after its child gave the terminal back"
+  expect_posted "$base" 0 "the child's group ending and the terminal coming back"
+  stepn "claude: terminal taken back" "$SESS"
+  type_line "$PANE" idle
+  wait_status "$SESS" done 3
+  expect_posted "$base" 1 "claude's idle after the child"
+  stepn "claude: idle after the child" "$SESS"
 
   open_pane
   type_line "$PANE" pi

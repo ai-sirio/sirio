@@ -76,10 +76,14 @@ set -eEuo pipefail
 #   26. events_carry_program_and_status
 #                         a subscriber to `term.sessions` gets the `program` and
 #                         `status` events, in order, as the app reads them
+#   27. record_survives_a_child_group
+#                         a live program hands the terminal to a child in its own
+#                         process group and takes it back: its record stays, with the
+#                         same `at_ms`, and no event clears it before the program ends
 # Cases 10 and 11 are unix-only and print SKIP on Windows; case 13 runs on
-# Linux only; cases 16 to 26 run on Linux and macOS and print SKIP on Windows.
+# Linux only; cases 16 to 27 run on Linux and macOS and print SKIP on Windows.
 # The systemd scope arm of case 3 runs only on Linux with a user manager.
-# Cases 16 to 26 need python3 on PATH (they read `term.list`'s JSON, and the
+# Cases 16 to 27 need python3 on PATH (they read `term.list`'s JSON, and the
 # probe stub is a python3 script).
 #
 # Each case force-shuts every host in its own root and retires the root
@@ -1225,6 +1229,59 @@ PY
   pass
 }
 
+case_record_survives_a_child_group() {
+  if [ "$OS" = windows ]; then skip "no OSC 7501 on Windows"; return 0; fi
+  interactive_shell pane-27
+  # A live program reports, hands the terminal to a child in its own process group, and takes
+  # it back. The terminal returning to that program is not a replacement: its record stays,
+  # with the same at_ms, and no event clears it before the program itself ends.
+  local out="$ROOT_BASE/events-$N.out" events first_at
+  "$PROBE" term-events 14000 >"$out" 2>"$ROOT_BASE/events-$N.err" &
+  events=$!
+  HELPERS+=("$events")
+  wait_until 10 has_line "$out" '^subscribed' || fail "the events probe never subscribed: $(cat "$out" "$ROOT_BASE/events-$N.err" 2>/dev/null | head -c 600)"
+  probe term-write pane-27 "$(printf 'python3 %s --fg-child\r' "$PROBE_STUB")"
+  wait_until 5 field_is pane-27 status.state working || fail "the report was never read: $SESSION_DOC"
+  first_at="$(doc_field status.at_ms)"
+  wait_until 6 program_is pane-27 sleep '["sleep","1.5"]' \
+    || fail "the child never held the terminal (the control: without it the check below proves nothing): $SESSION_DOC"
+  wait_until 6 argv_has pane-27 osc7501-probe.py || fail "the program is not named again after the child: $SESSION_DOC"
+  sleep 1
+  load_session pane-27 || fail "the session is not listed"
+  [ "$(doc_field status.state)" = working ] || fail "the record went away when the terminal came back from the child: $SESSION_DOC"
+  [ "$(doc_field status.at_ms)" = "$first_at" ] || fail "the record's at_ms moved from $first_at to $(doc_field status.at_ms)"
+  wait "$events" || fail "the events probe exited non-zero: $(cat "$ROOT_BASE/events-$N.err" 2>/dev/null | head -c 600)"
+  python3 - "pane-27" "$out" <<'PY' || fail "the session events cleared the record before the program ended: $(cat "$out")"
+import json, sys
+
+session, path = sys.argv[1], sys.argv[2]
+events = []
+for line in open(path):
+    line = line.strip()
+    if line.startswith("{"):
+        event = json.loads(line)
+        if event.get("session_id") == session:
+            events.append(event)
+
+# The program ends when a program event with no program arrives. Nothing before it may
+# clear the status, and the child must have been named in between.
+end = next((i for i, e in enumerate(events) if e["type"] == "program" and e.get("program") is None), len(events))
+before = events[:end]
+if not any(e["type"] == "status" and (e.get("status") or {}).get("state") == "working" for e in before):
+    print("no working status event before the end", file=sys.stderr)
+    sys.exit(1)
+if not any(e["type"] == "program" and (e.get("program") or {}).get("name") == "sleep" for e in before):
+    print("the child was never named", file=sys.stderr)
+    sys.exit(1)
+cleared = [e for e in before if e["type"] == "status" and e.get("status") is None]
+if cleared:
+    print("a status event with no status came before the program ended", file=sys.stderr)
+    sys.exit(1)
+PY
+  NOTE="at_ms $first_at kept"
+  pass
+}
+
 run_case start-and-adopt   case_start_and_adopt
 run_case concurrent-start  case_concurrent_start
 run_case client-killed     case_client_killed
@@ -1243,7 +1300,7 @@ run_case isolation         case_isolation 15
 # The program cases read `term.list`'s JSON and run a python3 stub. A missing
 # python3 is a failure of the machine, not a reason to skip them.
 if [ "$OS" != windows ] && ! command -v python3 >/dev/null 2>&1; then
-  echo "FAIL: python3 is required by the program cases (16 to 26) and is not on PATH" >&2
+  echo "FAIL: python3 is required by the program cases (16 to 27) and is not on PATH" >&2
   exit 1
 fi
 run_case program_is_named                  case_program_is_named
@@ -1257,5 +1314,6 @@ run_case program_is_named_after_a_slow_exec case_program_is_named_after_a_slow_e
 run_case record_ends_with_its_program      case_record_ends_with_its_program
 run_case report_after_exec_is_kept         case_report_after_exec_is_kept
 run_case events_carry_program_and_status   case_events_carry_program_and_status
+run_case record_survives_a_child_group     case_record_survives_a_child_group
 
 echo "HOST E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"

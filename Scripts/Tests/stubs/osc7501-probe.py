@@ -15,6 +15,13 @@ Used by Scripts/Tests/test-host-e2e.sh (python3 standard library only).
                                 answered (`ANSWERS 2`; no limiter reads 3, an
                                 answer that is never repeated reads 1)
 
+  osc7501-probe.py --fg-child   write a `working` report and nothing else, 1.5 s later
+                                fork a child (`sleep 1.5`) into its own process group,
+                                give it the terminal (`tcsetpgrp`), wait for it, take
+                                the terminal back, stay alive 4 s and exit: a live
+                                program handing the terminal to a child and getting it
+                                back (the stub reads and prints nothing else)
+
 Prints one `ANSWER OK` per OSC 7501 answer starting with `?` that arrived, or
 `ANSWER NONE` when none did, then `ANSWERS <n>`. With --then-da1 it also prints
 `ORDER OK` when the 7501 answer came before the DA1 reply and `ORDER WRONG`
@@ -25,6 +32,7 @@ echoed, and the output carries explicit CRs because raw mode turns OPOST off.
 """
 import os
 import select
+import signal
 import sys
 import termios
 import time
@@ -38,8 +46,30 @@ def say(line):
     os.write(1, line.encode() + b"\r\n")
 
 
+def fg_child():
+    tty.setraw(0, termios.TCSANOW)
+    os.write(1, b"\x1b]7501;state=working:app=codex\x07")
+    time.sleep(1.5)
+    pid = os.fork()
+    if pid == 0:
+        os.setpgid(0, 0)
+        os.execvp("sleep", ["sleep", "1.5"])
+    try:
+        os.setpgid(pid, pid)
+    except OSError:
+        pass
+    signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    os.tcsetpgrp(0, pid)
+    os.waitpid(pid, 0)
+    os.tcsetpgrp(0, os.getpgrp())
+    time.sleep(4)
+
+
 def main():
     args = sys.argv[1:]
+    if "--fg-child" in args:
+        fg_child()
+        return
     fd = 0
     # TCSANOW: the default (TCSAFLUSH) would discard input already queued.
     tty.setraw(fd, termios.TCSANOW)
