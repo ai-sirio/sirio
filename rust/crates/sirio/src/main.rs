@@ -10355,15 +10355,20 @@ impl SirioWorkspace {
                         | TerminalActivityEvent::ChildExited { .. }
                         | TerminalActivityEvent::SessionLost
                 ) {
-                    // A failed exit of a pane the program does not own is Running -> Error
-                    // in one stop (`apply_exit_result`, after the record drops below and
-                    // hands its Running down): settling it to Done first would make two.
-                    let fails_unowned = matches!(
-                        event,
-                        TerminalActivityEvent::ChildExited { status }
-                            if panes::terminal_exit_code(*status) != 0
-                                && !workspace.activity.is_program_owned(&activity_pane_id)
-                    );
+                    // A failed exit of a spawn-owned pane (none of program-, title- and
+                    // process-owned) is Running -> Error in one stop (`apply_exit_result`,
+                    // after the record drops below and hands its Running down): settling it
+                    // to Done first would make two. The other owners get no
+                    // `apply_exit_result`, so they keep the settle.
+                    let spawn_owned = !workspace.activity.is_program_owned(&activity_pane_id)
+                        && !workspace.activity.is_title_owned(&activity_pane_id)
+                        && !workspace.activity.is_process_owned(&activity_pane_id);
+                    let fails_unowned = spawn_owned
+                        && matches!(
+                            event,
+                            TerminalActivityEvent::ChildExited { status }
+                                if panes::terminal_exit_code(*status) != 0
+                        );
                     if !fails_unowned {
                         workspace
                             .activity
