@@ -28,6 +28,18 @@ is copied in `rust/assets/icons/zed/LICENSES`.
 > OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 > CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
+## Lucide icons
+
+The two panel icons in `rust/assets/icons/lucide/` (`panel-left-close.svg`,
+`panel-left-open.svg`) were copied byte-for-byte from
+[`lucide-icons/lucide`](https://github.com/lucide-icons/lucide) release tag
+`1.66.0`. Per-file provenance is recorded in
+`rust/assets/icons/lucide/ATTRIBUTION.md`, and the license file of that tag is
+copied in `rust/assets/icons/lucide/LICENSE`. It is the ISC license quoted
+under Zed icons above, with this tag's copyright line:
+
+> Copyright (c) 2026 Lucide Icons and Contributors
+
 ## Material Icon Theme (file and folder icons)
 
 The 1112 polychrome file and folder icons in `rust/crates/sirio_icons/assets/`
