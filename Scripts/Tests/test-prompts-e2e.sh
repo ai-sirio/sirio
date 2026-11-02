@@ -17,15 +17,22 @@ set -eEuo pipefail
 #    2 new_and_type              New, a typed title, Tab, three typed lines: saved with no Ctrl+S
 #    3 copy                      Copy puts the file's bytes on the CLIPBOARD and shows its check
 #    4 copy_right_after_typing   Edit focuses the text; a key then Copy at once copies that key
-#    5 edit_dedupes              Edit twice leaves one tab for the prompt
+#    5 edit_dedupes              Edit with another tab in front brings back the prompt's one tab
 #    6 new_then_close_untouched  New then Ctrl+W leaves no file and no index entry
 #    7 delete_with_tab_open      a key, then Delete: the file, the entry and the tab are gone for good
 #    8 plain_md_unchanged        a plain .md opens in Preview and stays dirty until Ctrl+S
-#    9 no_worktree               without a worktree New is off and Copy still works
-#   10 unwritable                an unwritable folder: Save failed, the text stays, New raises
-#                                the toast and writes nothing; the next key after the fix saves
-# Then light and dark captures of the view with three prompts and of the Delete
-# dialog (Escape cancels it and the prompt stays).
+#    9 no_worktree               without a worktree New, Edit and the card open nothing; Copy works
+#   10 unwritable                an unwritable folder: Save failed, the text stays and the tab
+#                                reads dirty, New raises the toast and writes nothing; the next
+#                                key after the fix saves and the tab reads clean
+#   11 worktree_switch           a key, then at once another worktree: the key is on disk
+#   12 delete_beside_terminal    Delete of a prompt split beside a terminal: only its leaf goes
+#   13 copy_unreadable           Copy of an open prompt the app cannot read: the toast, no check,
+#                                the CLIPBOARD unchanged
+# Then light captures of the view with three prompts and of the Delete dialog
+# (Escape cancels it and the prompt stays), and:
+#   14 quit_right_after_typing   a key, then at once Quit: the key is on disk
+# Then dark captures of the same, after a restart on a fresh database.
 #
 # Two traps this script avoids on purpose:
 #   - The CLIPBOARD is read through GTK forced onto X11 with nothing of the
@@ -260,6 +267,15 @@ fixture_git -C "$REPO" config user.name Tester
 printf '# Notes\n\nA plain Markdown file.\n' >"$REPO/notes.md"
 fixture_git -C "$REPO" add -A
 fixture_git -C "$REPO" commit -q -m first
+# A second project, only to switch worktree to (scenario 11).
+OTHER_REPO="$WORK/other"
+mkdir -p "$OTHER_REPO"
+fixture_git -C "$OTHER_REPO" init -q -b main
+fixture_git -C "$OTHER_REPO" config user.email tester@example.invalid
+fixture_git -C "$OTHER_REPO" config user.name Tester
+printf 'Another project.\n' >"$OTHER_REPO/README"
+fixture_git -C "$OTHER_REPO" add -A
+fixture_git -C "$OTHER_REPO" commit -q -m first
 
 # ---------------------------------------------------------------- calling the app
 
@@ -433,6 +449,71 @@ tabs_titled() { # title: how many
 tab_count_is() { # title n
   [ "$(tabs_titled "$1")" = "$2" ]
 }
+tabs_are() { [ "$(tab_titles)" = "$1" ]; }
+# One question about the tab strip, answered from `surface tabs read`:
+#   active TITLE    the active tab is titled TITLE
+#   dirty TITLE     the one tab titled TITLE is among those `dirty` lists
+#   clean TITLE     the one tab titled TITLE is not
+#   position TITLE  prints the position of the one tab titled TITLE
+tabs_query() { # question title
+  ctlq surface tabs read --json | python3 -I -c 'import json, sys
+row = json.load(sys.stdin)[0]
+question, want = sys.argv[1], sys.argv[2]
+titles = {i: row["tab." + str(i)].split("|", 2)[2] for i in range(1, int(row["count"]) + 1)}
+if question == "active":
+    sys.exit(0 if titles.get(int(row["active"])) == want else 1)
+hits = [i for i, title in titles.items() if title == want]
+if len(hits) != 1:
+    sys.exit(1)
+dirty = set(filter(None, row.get("dirty", "").split(",")))
+if question == "position":
+    print(hits[0])
+elif question == "dirty":
+    sys.exit(0 if str(hits[0]) in dirty else 1)
+elif question == "clean":
+    sys.exit(1 if str(hits[0]) in dirty else 0)' "$1" "$2"
+}
+active_is() { tabs_query active "$1" 2>/dev/null; }
+tab_dirty() { tabs_query dirty "$1" 2>/dev/null; }
+tab_clean() { tabs_query clean "$1" 2>/dev/null; }
+tab_position() { tabs_query position "$1" 2>/dev/null || true; }
+# Whether the active tab shows no editor of PATH (or no editor at all).
+editor_not_on() { # path
+  local state
+  state="$(ctlq surface editor state 2>/dev/null)" || return 0
+  ! grep -Fxq -- "path=$1" <<<"$state"
+}
+
+# ---------------------------------------------------------------- terminal panes
+
+pane_ids() {
+  ctlq panel list --json | python3 -I -c 'import json, sys
+for row in json.load(sys.stdin):
+    print(row["id"])' | sort
+}
+# The pane ids listed now and not in BEFORE.
+panes_since() { # before
+  comm -13 <(printf '%s\n' "$1") <(pane_ids)
+}
+new_pane_since() { [ -n "$(panes_since "$1")" ]; }
+# Whether the pane's session is listed and still running.
+pane_running() { # pane id
+  pane_ids | grep -Fxq -- "$1" || return 1
+  ctlq panel state "$1" --json | python3 -I -c 'import json, sys
+data = json.load(sys.stdin)
+row = data[0] if isinstance(data, list) else data
+sys.exit(0 if row.get("exitStatus") == "running" else 1)'
+}
+# Waits, with no sleep between reads, until the editor's text ends with TAIL;
+# used where a key must have landed before the next step, as fast as possible.
+editor_text_ends() { # tail
+  local n=0
+  while [ "$n" -lt 200 ]; do
+    ctlq surface editor state 2>/dev/null | grep -q -- "^text=.*$1\$" && return 0
+    n=$((n + 1))
+  done
+  return 1
+}
 
 # ---------------------------------------------------------------- the display
 
@@ -596,9 +677,11 @@ select_repo() {
   wait_on prompts canEdit=1
 }
 repo_listed() { [ -n "$(worktree_id)" ]; }
-worktree_id() {
-  ctlq list-workspaces 2>/dev/null | awk -F '\t' -v repo="$REPO" '$4 == repo {print $1; exit}'
+worktree_id() { worktree_id_of "$REPO"; }
+worktree_id_of() { # repository
+  ctlq list-workspaces 2>/dev/null | awk -F '\t' -v repo="$1" '$4 == repo {print $1; exit}'
 }
+other_listed() { [ -n "$(worktree_id_of "$OTHER_REPO")" ]; }
 # Clicks New prompt and answers the new prompt's path.
 new_prompt() {
   local before path
@@ -697,8 +780,15 @@ ok 4 copy_right_after_typing
 
 SCENARIO="edit_dedupes"
 click_card "$A" EditBounds
+wait_until "A's tab is the active one" active_is "$TITLE_A"
+# Another tab in front, then Edit again: the prompt's own tab comes back.
+ctl surface editor open --path "$REPO/notes.md" >/dev/null
+wait_until "notes.md is the active tab" active_is notes.md
 click_card "$A" EditBounds
+wait_until "the second Edit made A's tab active again" active_is "$TITLE_A"
 hold_until 2 "one tab for the prompt" tab_count_is "$TITLE_A" 1
+ctl surface tabs close "$(tab_position notes.md)" >/dev/null
+wait_until "notes.md closed" tab_count_is notes.md 0
 ok 5 edit_dedupes
 
 SCENARIO="new_then_close_untouched"
@@ -739,6 +829,12 @@ DISPLAY="$DISPLAY_TARGET" xdotool key Y click 3
 wait_on prompts 'menuDeleteBounds~=,'
 click_key menuDeleteBounds
 wait_on prompts 'confirmDeleteBounds~=,'
+# Not a check: whether the pause had already saved the key when Delete came.
+if ends_with "$B" "eliminareY"; then
+  note "Y was already on disk before the confirm"
+else
+  note "Y was not on disk yet before the confirm"
+fi
 click_key confirmDeleteBounds
 wait_until "B's file and entry are gone" gone "$B"
 wait_until "B's card is gone" no_card "$B"
@@ -770,11 +866,17 @@ SCENARIO="no_worktree"
 ctl close-workspace --workspace "$(worktree_id)" >/dev/null
 wait_on prompts canEdit=0 shown=1
 files_before="$(md_list)"
+entries_before="$(index_files)"
+tabs_before="$(tab_titles)"
 read_state prompts
 if [ -n "$(value newBounds)" ]; then
   click_key newBounds
 fi
+click_card "$A" EditBounds
+click_card "$A" Bounds
 hold_until 1 "New prompt made nothing" files_are "$files_before"
+hold_until 1 "Edit and the card opened no tab" tabs_are "$tabs_before"
+[ "$(index_files)" = "$entries_before" ] || fail "$SCENARIO: the index changed: $(index_files | tr '\n' ' ')"
 click_card "$A" CopyBounds
 wait_until "Copy still copies the file" clipboard_matches "$A"
 wait_until "Copy shows its check" card_shows "$A" Copied 1
@@ -795,6 +897,8 @@ note "the prompts folder is now read-only"
 xtype W
 wait_on editor 'message~=Save failed' 'text~=italianoXW' dirty=true
 hold_until 1 "the file is as before" cmp -s "$A" "$WORK/a-10.txt"
+# Its text is nowhere on disk, so its close asks first.
+wait_until "A's tab reads dirty" tab_dirty "$TITLE_A"
 click_key newBounds
 wait_on identity 'toast~=Could not create a prompt: '
 note "toast: $(value toast)"
@@ -811,7 +915,102 @@ xkey ctrl+End
 xtype V
 wait_until "the next key saved the text" ends_with "$A" "italianoXWV"
 wait_on editor dirty=false
+wait_until "A's tab reads clean again" tab_clean "$TITLE_A"
 ok 10 unwritable
+
+SCENARIO="worktree_switch"
+ctl project add "$OTHER_REPO" >/dev/null
+wait_until "the second repository is listed" other_listed
+ctl select-workspace --workspace "$(worktree_id)" >/dev/null
+wait_on prompts canEdit=1
+click_card "$A" EditBounds
+wait_on editor state=loaded "path=$A"
+settle_focus
+xkey ctrl+End
+other="$(worktree_id_of "$OTHER_REPO")"
+focus_app
+# The key, then, as soon as the editor holds it, the other worktree: the
+# outgoing tab is parked while its autosave may still be waiting.
+started="$(date +%s%N)"
+DISPLAY="$DISPLAY_TARGET" xdotool key S
+editor_text_ends italianoXWVS || fail "$SCENARIO: the key never reached the editor"
+arrived="$(date +%s%N)"
+ctlq select-workspace --workspace "$other" >/dev/null || fail "$SCENARIO: the switch was refused"
+finished="$(date +%s%N)"
+key_ms=$(( (arrived - started) / 1000000 ))
+total_ms=$(( (finished - started) / 1000000 ))
+# The autosave timer starts when the editor takes the key, so a switch that
+# has returned within 400 ms of the press surely beat it.
+if [ "$total_ms" -lt 400 ]; then
+  note "the editor held the key $key_ms ms after the press and the switch had returned at $total_ms ms: it landed before the 400 ms autosave"
+else
+  note "the editor held the key $key_ms ms after the press and the switch had returned at $total_ms ms: not proven to land before the 400 ms autosave"
+fi
+wait_until "the key is on disk" ends_with "$A" "italianoXWVS"
+ctl select-workspace --workspace "$(worktree_id)" >/dev/null
+wait_on prompts canEdit=1
+wait_until "A's tab came back with the worktree" tab_count_is "$TITLE_A" 1
+ok 11 worktree_switch
+
+SCENARIO="delete_beside_terminal"
+TITLE_E="Accanto al terminale"
+E="$(new_prompt)"
+note "new prompt: $E"
+xtype "$TITLE_E"
+xkey Tab
+xtype "Testo accanto"
+wait_until "E's text is saved" ends_with "$E" "Testo accanto"
+wait_until "E's title is saved" title_is "$E" "$TITLE_E"
+tabs_before="$(tab_titles)"
+panes_before="$(pane_ids)"
+# A terminal split beside the prompt, in the prompt's own tab.
+ctl pane split --direction right >/dev/null
+wait_until "a terminal opened" new_pane_since "$panes_before"
+T="$(panes_since "$panes_before" | head -n 1)"
+note "the terminal beside the prompt: $T"
+wait_until "the terminal runs" pane_running "$T"
+[ "$(tab_titles)" = "$tabs_before" ] || fail "$SCENARIO: the split opened another tab: $(tab_titles | tr '\n' '|')"
+open_delete_dialog "$E"
+click_key confirmDeleteBounds
+wait_until "E's file and entry are gone" gone "$E"
+wait_until "E's card is gone" no_card "$E"
+wait_until "no editor shows E" editor_not_on "$E"
+hold_until 1 "the terminal beside E still runs" pane_running "$T"
+tab_count_is "$TITLE_E" 1 || fail "$SCENARIO: the tab that held E and the terminal is gone"
+note "OK: the tab is still there, holding the terminal"
+# A live terminal asks before its tab closes: the confirmed close skips that.
+ctl surface tabs close "$(tab_position "$TITLE_E")" --confirm >/dev/null
+wait_until "the terminal's tab closed" tab_count_is "$TITLE_E" 0
+ok 12 delete_beside_terminal
+
+SCENARIO="copy_unreadable"
+TITLE_F="Illeggibile"
+F="$(new_prompt)"
+note "new prompt: $F"
+xtype "$TITLE_F"
+xkey Tab
+xtype "Testo nascosto"
+wait_until "F's text is saved" ends_with "$F" "Testo nascosto"
+wait_until "F's title is saved" title_is "$F" "$TITLE_F"
+xkey ctrl+w
+wait_until "F's tab closed" tab_count_is "$TITLE_F" 0
+# F opened again once the app cannot read it: a tab with no text loaded.
+chmod 000 "$F"
+click_card "$F" EditBounds
+wait_on editor state=error "path=$F"
+clipboard_to "$WORK/clipboard-13.bin"
+click_card "$F" CopyBounds
+hold_until 1 "Copy shows no check" card_shows "$F" Copied 0
+wait_on identity 'toast~=Could not copy the prompt: '
+note "toast: $(value toast)"
+clipboard_matches "$WORK/clipboard-13.bin" || fail "$SCENARIO: Copy changed the CLIPBOARD"
+note "OK: the CLIPBOARD is as before"
+chmod 644 "$F"
+open_delete_dialog "$F"
+click_key confirmDeleteBounds
+wait_until "F's file and entry are gone" gone "$F"
+wait_until "F's tab closed" tab_count_is "$TITLE_F" 0
+ok 13 copy_unreadable
 
 # ---------------------------------------------------------------- three prompts, both themes
 
@@ -838,7 +1037,28 @@ xkey Escape
 wait_on prompts confirmDeleteBounds=
 [ -f "$D" ] && title_is "$D" "$TITLE_D" || fail "$SCENARIO: Escape did not keep D"
 note "OK: Escape cancelled the delete"
+
+SCENARIO="quit_right_after_typing"
+click_card "$D" EditBounds
+wait_on editor state=loaded "path=$D"
+settle_focus
+xkey ctrl+End
+focus_app
+# The key, then, as soon as the editor holds it, Quit.
+started="$(date +%s%N)"
+DISPLAY="$DISPLAY_TARGET" xdotool key Q
+editor_text_ends commitQ || fail "$SCENARIO: the key never reached the editor"
+ctlq quit >/dev/null 2>&1 || true
+total_ms=$(( ($(date +%s%N) - started) / 1000000 ))
+if [ "$total_ms" -lt 400 ]; then
+  note "the quit had returned $total_ms ms after the key: it came before the 400 ms autosave"
+else
+  note "the quit had returned $total_ms ms after the key: not proven to come before the 400 ms autosave"
+fi
 app_quit
+ends_with "$D" "commitQ" || fail "$SCENARIO: the key typed just before Quit is not on disk"
+note "OK: the key is on disk"
+ok 14 quit_right_after_typing
 
 SCENARIO="dark"
 app_start dark
