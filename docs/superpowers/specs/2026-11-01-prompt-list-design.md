@@ -112,8 +112,10 @@ prompt** button on the right (Ely button, plus icon).
   *without saving*. In a tab where the prompt is split beside something else, a
   terminal for one, only the prompt's leaf goes and nothing else ends. A tab
   left holding only terminals is a terminal tab from then on, in the same half
-  and titled as a new terminal tab is unless it was renamed, so a worktree
-  switch or a relaunch brings it back with its session. Known limit: a prompt
+  and titled as a new terminal tab is unless it was renamed since it was opened
+  or restored (the rename is not saved, so a restored tab counts as not
+  renamed; a change request snapshot keeps its label), so a worktree switch or
+  a relaunch brings it back with its session. Known limit: a prompt
   deleted while such a split tab sits in a parked worktree stays in that tab's
   saved layout; when the worktree comes back, restore skips the tab because its
   file is gone, and the terminal beside it is not shown again (its session is
@@ -181,7 +183,10 @@ restart. In prompt mode:
   the dirty mark, and Ctrl+W or the close button asks before discarding it. A
   close request writes the tab's prompts before it checks, so a write that
   fails at the close asks too. A write that lands makes it clean again, and a
-  deleted prompt is never dirty.
+  deleted prompt is never dirty. Known limit: the pane banner (Ctrl+Alt+W, then
+  Close Anyway), for a prompt's leaf in a split or a prompt tab on its own,
+  asks about the pane and never about unsaved typing. The prompt writes what is
+  pending, and typing whose write fails there is lost.
   Quitting asks nothing for any tab, plain files included; the quit flush tries
   the save once more.
 - **Plain file tabs stay explicit-save** (Ctrl+S) and keep their dirty-close
@@ -415,10 +420,12 @@ Deviations accepted after the build (2026-11-02), each recorded in its section:
 Changes after the second review (2026-11-02), each recorded in its section:
 
 20. **A file tab left holding only terminals becomes a terminal tab**, in its
-    half and titled as a new terminal tab unless renamed, so a worktree switch
-    or a relaunch brings it back with its session. Known limit: a prompt
+    half and titled as a new terminal tab unless renamed since it was opened or
+    restored, so a worktree switch or a relaunch brings it back with its
+    session. Known limit: a prompt
     deleted while that split tab is parked in another worktree (§2).
 21. **Closing a prompt's leaf in a split saves it** as closing its tab does,
     and an untitled empty one is removed (§3).
 22. **A close request writes the tab's prompts before it checks for unsaved
-    typing**, so a write that fails at the close asks too (§3).
+    typing**, so a write that fails at the close asks too; the pane banner
+    (Ctrl+Alt+W) does not, a known limit (§3).
