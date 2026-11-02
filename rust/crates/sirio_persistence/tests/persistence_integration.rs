@@ -70,6 +70,7 @@ fn sample_worktree(id: &str, project_id: &str, branch: &str) -> WorktreeRecord {
         created_at: None,
         updated_at: None,
         secondary_pane_hidden: false,
+        primary_pane_collapsed: false,
     }
 }
 

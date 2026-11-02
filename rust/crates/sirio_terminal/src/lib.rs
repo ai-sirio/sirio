@@ -4555,7 +4555,11 @@ impl gpui::Render for TerminalView {
                 .border_1()
                 .border_color(theme.ely.border)
                 .bg(theme.menu_surface())
-                .shadow_lg();
+                .shadow_lg()
+                // A press on a row is the menu's alone: it neither reaches the
+                // pane under the menu nor counts as a press outside a floating
+                // card the terminal is drawn in (the Primary rail's peek).
+                .occlude();
 
             let items = context_menu::offered_items(
                 match split_pane_size {

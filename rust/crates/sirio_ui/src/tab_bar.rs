@@ -11,12 +11,35 @@ use sirio_theme::Theme;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use crate::popup::{Popup, divider, leaving, menu_card, menu_label, menu_row, reap_popup};
+use crate::popup::{
+    HANG_GAP, Popup, divider, leaving, menu_card, menu_label, menu_row, reap_popup,
+};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
 const HEIGHT: f32 = 34.0;
+/// The strip's buttons: the `+`, and the collapse button right of it. Each
+/// takes one `titlebar_control_frame` (this plus its 2 px right margin).
+const STRIP_BUTTON: f32 = 24.0;
+/// The rail's `+`: the same square as the rail's tab buttons above it.
+const RAIL_BUTTON: f32 = 30.0;
+/// The rail is 40 px wide, so its 30 px buttons sit 5 px in from either
+/// side; the `+` keeps the same 5 px from the rail's foot.
+const RAIL_INSET: f32 = 5.0;
 
 actions!(new_tab_menu, [DismissMenu]);
+
+/// Where the shell draws the tab bar. The shell draws exactly one placement
+/// per frame, so one popup and one anchor serve both.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabBarPlacement {
+    /// The Primary half's strip: the `+`, and the collapse button right of
+    /// it while [`TabBar::set_collapse_visible`] offers it.
+    #[default]
+    Strip,
+    /// The foot of the rail the collapsed Primary half becomes: only the
+    /// `+`, its menu hung above it.
+    Rail,
+}
 
 /// Actions emitted by the new-tab menu. The owner decides how to handle them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,7 +204,15 @@ pub struct TabBar {
     menu_open: Popup<()>,
     chat_picker_open: bool,
     focus_handle: FocusHandle,
+    /// The `+`'s bounds from its last paint, in whichever placement drew it.
     anchor_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    placement: TabBarPlacement,
+    collapse_visible: bool,
+    /// The collapse button's bounds from its last paint.
+    collapse_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The open menu's New Terminal row, from its last paint.
+    new_terminal_row_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    on_collapse: Option<Rc<dyn Fn()>>,
     on_new_tab: Option<Rc<dyn Fn(NewTabAction)>>,
     on_chat_agent: Option<Rc<dyn Fn(&'static str)>>,
     /// F-TAB-08: the empty-state "Other agents…" card has nowhere else to
@@ -221,6 +252,11 @@ impl TabBar {
             chat_picker_open: false,
             focus_handle: cx.focus_handle(),
             anchor_bounds: Rc::new(Cell::new(None)),
+            placement: TabBarPlacement::default(),
+            collapse_visible: false,
+            collapse_bounds: Rc::new(Cell::new(None)),
+            new_terminal_row_bounds: Rc::new(Cell::new(None)),
+            on_collapse: None,
             on_new_tab: None,
             on_chat_agent: None,
             on_open_agent_settings: None,
@@ -270,6 +306,63 @@ impl TabBar {
         self
     }
 
+    /// Installs the callback the strip's collapse button fires.
+    pub fn on_collapse(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_collapse = Some(Rc::new(callback));
+        self
+    }
+
+    /// Moves the bar between the Primary strip and the rail. Measured bounds
+    /// belong to the placement that painted them, so they are dropped until
+    /// the new placement paints.
+    pub fn set_placement(&mut self, placement: TabBarPlacement, cx: &mut Context<Self>) {
+        if self.placement != placement {
+            self.placement = placement;
+            self.anchor_bounds.set(None);
+            self.collapse_bounds.set(None);
+            cx.notify();
+        }
+    }
+
+    /// Whether the strip draws the collapse button right of the `+`. While
+    /// it does, the strip's trailing controls are two `titlebar_control_frame`
+    /// widths wide instead of one.
+    pub fn set_collapse_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.collapse_visible != visible {
+            self.collapse_visible = visible;
+            self.collapse_bounds.set(None);
+            cx.notify();
+        }
+    }
+
+    /// The collapse button's window bounds from its last paint; `None` while
+    /// it is not drawn (hidden, or the bar is on the rail).
+    pub fn collapse_bounds(&self) -> Option<Bounds<Pixels>> {
+        if self.placement == TabBarPlacement::Strip && self.collapse_visible {
+            self.collapse_bounds.get()
+        } else {
+            None
+        }
+    }
+
+    /// The `+`'s window bounds from its last paint, in the current
+    /// placement: `new-tab-button` on the strip, `primary-rail-new` on the
+    /// rail.
+    pub fn new_button_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.anchor_bounds.get()
+    }
+
+    /// The window bounds of the open menu's New Terminal row from its last
+    /// paint, in either placement; `None` while the menu is closed or
+    /// closing.
+    pub fn new_terminal_row_bounds(&self) -> Option<Bounds<Pixels>> {
+        if self.menu_open.is_open() {
+            self.new_terminal_row_bounds.get()
+        } else {
+            None
+        }
+    }
+
     /// #376: whether the `+` new-tab menu is currently mounted (open or
     /// playing its exit animation). The host reads this every frame to hide
     /// the native browser child while the menu is up: on Windows the WebView2
@@ -289,6 +382,9 @@ impl TabBar {
             return;
         }
         self.menu_open.open(());
+        // The row's last measurement is from the previous opening, possibly
+        // in the other placement: none until this opening paints it.
+        self.new_terminal_row_bounds.set(None);
         self.chat_picker_open = false;
         if self.menu_open.is_open() {
             // The menu is painted through `deferred(...)`, which links its
@@ -342,6 +438,12 @@ impl TabBar {
         }
     }
 
+    fn emit_collapse(&self) {
+        if let Some(callback) = &self.on_collapse {
+            callback();
+        }
+    }
+
     fn emit_open_agent_settings(&mut self, cx: &mut Context<Self>) {
         self.close_menu_now(cx);
         if let Some(callback) = &self.on_open_agent_settings {
@@ -361,7 +463,7 @@ impl TabBar {
         theme: Theme,
         cx: &App,
         chevron: bool,
-    ) -> impl IntoElement {
+    ) -> gpui::Stateful<gpui::Div> {
         let (icon, glyph_color) = match label {
             "New Terminal" => (Icon::SquareTerminal, theme.ely.fg_subtle),
             "Changes" => (Icon::File, theme.ely.fg_subtle),
@@ -584,20 +686,35 @@ impl Render for TabBar {
             ));
         }
 
+        let new_terminal_row_bounds = self.new_terminal_row_bounds.clone();
         let menu = menu_card("new-tab-menu", cx)
             .debug_selector(|| "new-tab-menu".to_owned())
             // #205 widened this from 170px for the "Not found on PATH" note the
             // agent rows carried. Those rows are gone; the width stays because
             // the chat picker draws inside this card and was laid out for it.
             .w(px(250.0))
-            .child(Self::render_menu_item(
-                "New Terminal",
-                NewTabAction::NewTerminal,
-                entity.clone(),
-                theme,
-                cx,
-                false,
-            ))
+            .child(
+                Self::render_menu_item(
+                    "New Terminal",
+                    NewTabAction::NewTerminal,
+                    entity.clone(),
+                    theme,
+                    cx,
+                    false,
+                )
+                .child(
+                    // Pinned to the row's corner: with no inset, an absolute
+                    // child sits inside the row's padding, 8 px off.
+                    canvas(
+                        move |bounds, _, _| new_terminal_row_bounds.set(Some(bounds)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                ),
+            )
             .child(Self::render_menu_item(
                 "Changes",
                 NewTabAction::NewChanges,
@@ -625,12 +742,16 @@ impl Render for TabBar {
 
         let menu = menu.on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_menu(cx)));
 
+        let placement = self.placement;
+        let (new_button_id, new_button_size, new_button_margin) = match placement {
+            TabBarPlacement::Strip => ("new-tab-button", STRIP_BUTTON, 2.0),
+            TabBarPlacement::Rail => ("primary-rail-new", RAIL_BUTTON, 0.0),
+        };
         let mut new_tab_button = div()
-            .id("new-tab-button")
-            .debug_selector(|| "new-tab-button".to_owned())
-            .w(px(24.0))
-            .h(px(24.0))
-            .mr(px(2.0))
+            .id(new_button_id)
+            .debug_selector(move || new_button_id.to_owned())
+            .size(px(new_button_size))
+            .mr(px(new_button_margin))
             .flex()
             .items_center()
             .justify_center()
@@ -685,39 +806,99 @@ impl Render for TabBar {
             .child(IconElement::new(Icon::Plus, IconSize::Small).text_color(theme.ely.fg));
 
         if menu_open {
-            let anchor = self
-                .anchor_bounds
-                .get()
-                .map(|bounds| bounds.corner(Anchor::BottomLeft))
-                .unwrap_or_default();
-            new_tab_button = new_tab_button.child(layer(
-                "new-tab-menu-layer",
-                Hang::At(point(anchor.x + px(6.0), anchor.y + px(3.0))),
-                leaving("new-tab-menu-layer", menu_closing, menu),
-                cx,
-            ));
+            let card = leaving("new-tab-menu-layer", menu_closing, menu);
+            new_tab_button = new_tab_button.child(match placement {
+                TabBarPlacement::Strip => {
+                    let anchor = self
+                        .anchor_bounds
+                        .get()
+                        .map(|bounds| bounds.corner(Anchor::BottomLeft))
+                        .unwrap_or_default();
+                    layer(
+                        "new-tab-menu-layer",
+                        Hang::At(point(anchor.x + px(6.0), anchor.y + px(3.0))),
+                        card,
+                        cx,
+                    )
+                }
+                // The rail's `+` sits at the foot of the window: the card
+                // opens upward, its left edge on the button's, and grows
+                // upward when the chat picker unfolds. Laid out from the
+                // button itself, so no measured anchor can lag behind it.
+                TabBarPlacement::Rail => layer(
+                    "new-tab-menu-layer",
+                    Hang::Above,
+                    div().pb(HANG_GAP).child(card),
+                    cx,
+                ),
+            });
         }
 
-        div()
+        let collapse_button =
+            (placement == TabBarPlacement::Strip && self.collapse_visible).then(|| {
+                let collapse_bounds = self.collapse_bounds.clone();
+                div()
+                    .id("primary-collapse-button")
+                    .debug_selector(|| "primary-collapse-button".to_owned())
+                    .size(px(STRIP_BUTTON))
+                    .mr(px(2.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radii.control)
+                    .text_color(theme.ely.fg_subtle)
+                    .hover(|style| style.bg(theme.ely.hover))
+                    .tooltip(crate::controls::tooltip("Collapse Pane"))
+                    // No `note_trigger_press`: this button is not the menu's
+                    // trigger, and a press on it must never toggle the menu.
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.emit_collapse();
+                    }))
+                    .child(
+                        canvas(
+                            move |bounds, _, _| collapse_bounds.set(Some(bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                    .child(
+                        IconElement::new(Icon::PanelLeftClose, IconSize::Small)
+                            .text_color(theme.ely.fg),
+                    )
+            });
+
+        let root = div()
             .key_context("NewTabMenu")
             .track_focus(&self.focus_handle)
-            .on_action(cx.listener(Self::dismiss_menu))
-            .relative()
-            .w_full()
-            .h(px(HEIGHT))
-            .flex()
-            .items_center()
-            .bg(theme.ely.bg)
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .flex()
-                    .items_start()
-                    .gap(px(1.0))
-                    .pl(px(5.0)),
-            )
-            .child(new_tab_button)
+            .on_action(cx.listener(Self::dismiss_menu));
+        match placement {
+            TabBarPlacement::Strip => root
+                .relative()
+                .w_full()
+                .h(px(HEIGHT))
+                .flex()
+                .items_center()
+                .bg(theme.ely.bg)
+                .child(
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .flex()
+                        .items_start()
+                        .gap(px(1.0))
+                        .pl(px(5.0)),
+                )
+                .child(new_tab_button)
+                .children(collapse_button),
+            TabBarPlacement::Rail => root
+                .w_full()
+                .flex()
+                .justify_center()
+                .py(px(RAIL_INSET))
+                .child(new_tab_button),
+        }
     }
 }
 
@@ -1279,6 +1460,189 @@ mod tests {
         assert!(
             cx.debug_bounds("new-tab-menu").is_none(),
             "Escape closes the drawn menu through GPUI action dispatch"
+        );
+    }
+
+    /// The collapsed Primary half pins the rail's `+` under its tab icons, at
+    /// the bottom of a 40 px column. A bare `TabBar` would fill the window
+    /// and put the button at its top, where the window edge rather than the
+    /// placement decides where the menu lands.
+    struct RailHost {
+        tab_bar: gpui::Entity<TabBar>,
+    }
+
+    impl Render for RailHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .size_full()
+                .child(
+                    div()
+                        .w(px(40.0))
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .child(div().flex_1())
+                        .child(self.tab_bar.clone()),
+                )
+                .child(div().id("secondary-gutter").flex_1().h_full())
+        }
+    }
+
+    /// Failure modes: the rail draws the strip's `+` instead of its own; the
+    /// menu hangs below the button, off the bottom of the window, and the
+    /// window snap drags it over the button; the bounds accessors report a
+    /// button the rail does not draw; the rail drops the menu's key context,
+    /// so Escape no longer dismisses it.
+    #[gpui::test]
+    async fn rail_placement_opens_the_menu_above_the_button(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let tab_bar_cell: Rc<RefCell<Option<gpui::Entity<TabBar>>>> = Rc::new(RefCell::new(None));
+        let tab_bar_cell_for_window = tab_bar_cell.clone();
+        let window = cx.add_window(move |_window, cx| {
+            let tab_bar = cx.new(|cx| {
+                let mut bar = TabBar::new(cx);
+                bar.set_placement(TabBarPlacement::Rail, cx);
+                bar
+            });
+            *tab_bar_cell_for_window.borrow_mut() = Some(tab_bar.clone());
+            RailHost { tab_bar }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let tab_bar = tab_bar_cell
+            .borrow_mut()
+            .take()
+            .expect("the window build captured the tab bar entity");
+
+        assert!(
+            cx.debug_bounds("new-tab-button").is_none(),
+            "the rail draws its own +, not the strip's"
+        );
+        let plus = cx
+            .debug_bounds("primary-rail-new")
+            .expect("the rail + is drawn");
+        assert_eq!(
+            tab_bar.read_with(&cx.cx, |bar, _| bar.new_button_bounds()),
+            Some(plus),
+            "new_button_bounds reports the drawn rail +"
+        );
+        assert_eq!(
+            tab_bar.read_with(&cx.cx, |bar, _| bar.collapse_bounds()),
+            None,
+            "the rail draws no collapse button"
+        );
+        assert_eq!(
+            tab_bar.read_with(&cx.cx, |bar, _| bar.new_terminal_row_bounds()),
+            None,
+            "no New Terminal row while the menu is closed"
+        );
+
+        cx.simulate_click(plus.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+
+        let menu = cx
+            .debug_bounds("new-tab-menu")
+            .expect("clicking the rail + draws the menu");
+        assert!(
+            menu.bottom() <= plus.top(),
+            "the menu hangs above the rail +: menu={menu:?} plus={plus:?}"
+        );
+        let new_terminal = cx
+            .debug_bounds("new-tab-item-new-terminal")
+            .expect("the open menu draws its New Terminal row");
+        assert_eq!(
+            tab_bar.read_with(&cx.cx, |bar, _| bar.new_terminal_row_bounds()),
+            Some(new_terminal),
+            "new_terminal_row_bounds reports the drawn New Terminal row"
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("new-tab-menu").is_none(),
+            "Escape dismisses the rail's menu as it does the strip's"
+        );
+        assert_eq!(
+            tab_bar.read_with(&cx.cx, |bar, _| bar.new_terminal_row_bounds()),
+            None,
+            "a closed menu reports no New Terminal row"
+        );
+    }
+
+    /// Failure modes: the click on collapse also counts as a press on the
+    /// `+` and opens the menu; the callback fires twice or not at all; the
+    /// button is drawn somewhere other than right of the `+`, or at another
+    /// size; once hidden, `collapse_bounds` keeps reporting the last paint.
+    #[gpui::test]
+    async fn collapse_button_calls_back_without_opening_the_menu(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        let collapses = Rc::new(Cell::new(0));
+        let counted = collapses.clone();
+        let tab_bar_cell: Rc<RefCell<Option<gpui::Entity<TabBar>>>> = Rc::new(RefCell::new(None));
+        let tab_bar_cell_for_window = tab_bar_cell.clone();
+        let window = cx.add_window(move |_window, cx| {
+            let tab_bar = cx.new(|cx| {
+                let mut bar = TabBar::new(cx).on_collapse(move || counted.set(counted.get() + 1));
+                bar.set_collapse_visible(true, cx);
+                bar
+            });
+            *tab_bar_cell_for_window.borrow_mut() = Some(tab_bar.clone());
+            ResizeHost { tab_bar }
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let tab_bar = tab_bar_cell
+            .borrow_mut()
+            .take()
+            .expect("the window build captured the tab bar entity");
+
+        let plus = cx.debug_bounds("new-tab-button").expect("the + is drawn");
+        let collapse = cx
+            .debug_bounds("primary-collapse-button")
+            .expect("the collapse button is drawn while collapse is visible");
+        assert!(
+            collapse.left() >= plus.right(),
+            "collapse sits right of the +: plus={plus:?} collapse={collapse:?}"
+        );
+        assert_eq!(collapse.size, plus.size, "collapse is the +'s size");
+        assert_eq!(
+            tab_bar.read_with(&cx.cx, |bar, _| bar.collapse_bounds()),
+            Some(collapse),
+            "collapse_bounds reports the drawn button"
+        );
+
+        cx.simulate_click(collapse.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(collapses.get(), 1, "one click, one collapse");
+        assert!(
+            !tab_bar.read_with(&cx.cx, |bar, _| bar.is_menu_open()),
+            "a click on collapse never opens the menu"
+        );
+        assert!(cx.debug_bounds("new-tab-menu").is_none());
+
+        tab_bar.update(&mut cx.cx, |bar, cx| bar.set_collapse_visible(false, cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("primary-collapse-button").is_none(),
+            "a hidden collapse button is not drawn"
+        );
+        assert_eq!(
+            tab_bar.read_with(&cx.cx, |bar, _| bar.collapse_bounds()),
+            None,
+            "a hidden collapse button reports no bounds"
         );
     }
 

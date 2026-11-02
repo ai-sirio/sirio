@@ -280,6 +280,8 @@ impl Sidebar {
             Icon::OhMyPi => "agent-omp",
             Icon::SidebarLeft => "sidebar-minimalistic-left",
             Icon::PanelRight => "sidebar-minimalistic",
+            Icon::PanelLeftClose => "panel-left-close",
+            Icon::PanelLeftOpen => "panel-left-open",
             Icon::Archive => "archive-minimalistic",
             Icon::Lock => "key-minimalistic",
             Icon::FileTree => "file-tree",

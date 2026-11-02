@@ -67,7 +67,10 @@ use sirio_ui::{
     status_bar::{
         StatusBar, UpdateState as UiUpdateState, UpdateStatus as UiUpdateStatus, UsageBarData,
     },
-    tab_bar::{NewTabAction, TabBar, TabContextAction, TabContextItem, render_tab_context_menu},
+    tab_bar::{
+        NewTabAction, TabBar, TabBarPlacement, TabContextAction, TabContextItem,
+        render_tab_context_menu,
+    },
     titlebar::{HostPlatform, Titlebar, TitlebarEvent},
 };
 use sirio_ui::pane_launcher::{LauncherItem, pane_launcher};
@@ -288,6 +291,7 @@ mod native_notification;
 mod native_perf;
 mod panel_layout;
 mod panes;
+mod primary_rail;
 mod session;
 mod shell_chrome;
 mod tab_machinery;
@@ -1649,6 +1653,8 @@ enum WorkspaceAction {
     /// A row of the right panel's Open list (spec 2026-10-15 §2). Queued
     /// because the panel's event arrives without a `Window`.
     OpenSurface(sirio_ui::right_panel::OpenSurface),
+    /// The Primary strip's collapse button (spec 2026-11-01-primary-rail §3).
+    CollapsePrimary,
     /// A hand-off's agent, started in `path` (the worktree it was checked out
     /// to). `asked` is the tab that asked, which reports the outcome.
     StartHandoffAgent {
@@ -4900,6 +4906,42 @@ fn tab_icon(kind: TabKind, file: Option<&Path>, agent_icon: Option<Icon>) -> Ico
     }
 }
 
+/// The tint a tab's glyph is drawn in, on the strip and on the Primary rail
+/// alike; `icon` is what `tab_icon` chose for it and `is_file` whether the tab
+/// shows a document.
+///
+/// An agent mark is drawn in that agent's brand, here, on the sidebar
+/// tab row and in the worktree badge alike — the reference has one
+/// `AgentIcon` view that every one of those three places draws, so a
+/// mark looks the same wherever it appears. This port had drifted
+/// into three different tints for the same mark, and the badge's was
+/// `theme.text` — a coral close enough to Claude's brand to
+/// read as it — so a Codex mark was painted in Claude's colour.
+///
+/// This is a deliberate, narrow divergence from a literal port:
+/// Swift fills the Codex, OpenCode and Pi marks with `.primary` and
+/// only Claude (`#D97757`) and omp (its gradient) with a brand. It
+/// can afford to, because those are rendered assets; `IconElement`
+/// tints one flat colour into a `currentColor` silhouette, so the
+/// tint is the only channel a mark has. Chromatic assets still ignore
+/// it — `Icon::is_chromatic`, omp's gradient — exactly as `OmpShape`
+/// ignores any inherited tint.
+fn tab_glyph_color(
+    kind: TabKind,
+    icon: Icon,
+    agent: Option<AgentMark>,
+    is_file: bool,
+    theme: Theme,
+) -> gpui::Hsla {
+    if icon.is_agent_mark() {
+        agent.map_or(theme.ely.fg, |agent| agent.brand.color().into())
+    } else if kind == TabKind::AgentChat {
+        if is_file { theme.ely.link } else { theme.ely.fg }
+    } else {
+        theme.ely.fg_subtle
+    }
+}
+
 /// The `agentStatus` words `surface.terminal.state` answers with, which the
 /// stub agents and the E2E read. They are not `human_label`'s words.
 fn agent_status_word(status: Option<AgentStatus>) -> &'static str {
@@ -5417,6 +5459,26 @@ struct SirioWorkspace {
     /// of the centre split that is stored rather than derived -- see
     /// `WorktreeRecord::secondary_pane_hidden` for why it has to be.
     secondary_pane_hidden: bool,
+    /// Whether this worktree's Primary half is collapsed to the rail (v25,
+    /// spec 2026-11-01-primary-rail §3). Drawn as a rail only while the
+    /// Secondary is visible (`primary_rail_drawn`); never outlives the
+    /// Secondary half.
+    primary_pane_collapsed: bool,
+    /// The Primary (rail included) and Secondary widths `columns()` last
+    /// drew, the Secondary 0 when it is not drawn, for `surface.layout.read`,
+    /// which has no `Window` to resolve them.
+    drawn_center_widths: std::cell::Cell<(f32, f32)>,
+    /// The rail's controls' window bounds from their last paint, for the debug
+    /// `railRects` read. `Rc` because the paint closures that record them must
+    /// be `'static`.
+    rail_rects: Rc<primary_rail::RailRects>,
+    /// The tab the rail's peek shows (spec 2026-11-01-primary-rail §5), by
+    /// tab id. Closed with `close`, never `begin_close`: a dying card would
+    /// keep painting a live terminal after focus moved on.
+    primary_peek: sirio_ui::popup::Popup<usize>,
+    /// Set when the peek opens; the render that draws it hands the peeked
+    /// view focus on the next frame, because focus reads the last drawn frame.
+    peek_focus_pending: bool,
     /// Where the centre divider was grabbed, and the ratio it held then.
     center_drag_anchor: Option<(f32, i64)>,
     /// Pointer x and panel width at the moment the edge was grabbed.
@@ -6013,6 +6075,10 @@ impl SirioWorkspace {
                                 }
                                 WorkspaceAction::OpenSurface(surface) => {
                                     workspace.open_surface(surface, window, cx);
+                                }
+                                WorkspaceAction::CollapsePrimary => {
+                                    workspace.set_primary_pane_collapsed(true, cx);
+                                    workspace.focus_active_pane(window, cx);
                                 }
                                 WorkspaceAction::StartHandoffAgent {
                                     path,
@@ -6674,6 +6740,15 @@ impl SirioWorkspace {
             // state survive the next restart as well.
             session.save_secondary_pane_hidden(&working_directory, false);
         }
+        let secondary_pane_hidden = persisted_secondary_pane_hidden && !restored_active_secondary;
+        let secondary_visible_at_boot =
+            !secondary_pane_hidden && tabs.iter().any(|tab| tab.pane == PaneRole::Secondary);
+        let persisted_primary_pane_collapsed =
+            session.primary_pane_collapsed_for(&working_directory);
+        if persisted_primary_pane_collapsed && !secondary_visible_at_boot {
+            // §3: the flag never outlives the Secondary half, across a restart too.
+            session.save_primary_pane_collapsed(&working_directory, false);
+        }
         let worktree_picker =
             cx.new(|cx| WorktreePicker::new(worktree_choices(&project_catalog), cx));
         cx.subscribe(
@@ -6702,7 +6777,12 @@ impl SirioWorkspace {
             right_panel_width,
             dragging_panel: None,
             center_split_ratio,
-            secondary_pane_hidden: persisted_secondary_pane_hidden && !restored_active_secondary,
+            secondary_pane_hidden,
+            primary_pane_collapsed: persisted_primary_pane_collapsed && secondary_visible_at_boot,
+            drawn_center_widths: std::cell::Cell::new((0.0, 0.0)),
+            rail_rects: Rc::default(),
+            primary_peek: sirio_ui::popup::Popup::default(),
+            peek_focus_pending: false,
             center_drag_anchor: None,
             panel_drag_anchor: None,
             panel_width_save_generation: 0,
@@ -8128,6 +8208,7 @@ impl SirioWorkspace {
         self.secondary_pane_hidden = hidden;
         self.session
             .save_secondary_pane_hidden(&self.working_directory, self.secondary_pane_hidden);
+        self.clear_primary_collapse_if_secondary_gone();
         // Hiding the pane the user was typing in would otherwise leave focus
         // on a half that is no longer drawn.
         if self.secondary_pane_hidden && self.center_split.focused() == PaneRole::Secondary {
@@ -8140,6 +8221,161 @@ impl SirioWorkspace {
             }
         }
         cx.notify();
+    }
+
+    /// Collapses the Primary half to the rail or expands it, and persists the
+    /// choice for the current worktree (spec 2026-11-01-primary-rail §3). The
+    /// one writer of the flag besides the clear when the Secondary goes.
+    /// Collapsing moves focus to the Secondary's active tab if the Primary
+    /// held it; expanding gives it to the Primary's active tab.
+    fn set_primary_pane_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        if !self.has_current_worktree() || (collapsed && !self.secondary_pane_visible()) {
+            return;
+        }
+        self.primary_pane_collapsed = collapsed;
+        self.session
+            .save_primary_pane_collapsed(&self.working_directory, collapsed);
+        let role = if collapsed {
+            PaneRole::Secondary
+        } else {
+            PaneRole::Primary
+        };
+        if !collapsed || self.center_split.focused() == PaneRole::Primary {
+            self.set_focused_pane(role);
+            if let Some(id) = self.center_split.active(role)
+                && let Some(index) = self.tabs.iter().position(|tab| tab.id == id)
+            {
+                self.active_tab = index;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The rail's expand button and the peek's pin (spec
+    /// 2026-11-01-primary-rail §3, §5): closes the peek and expands; the
+    /// Primary's active tab, the peeked one if a peek was open, takes focus.
+    fn expand_primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.primary_peek.close();
+        self.set_primary_pane_collapsed(false, cx);
+        self.focus_active_pane(window, cx);
+    }
+
+    /// A dismissal while the rail stays drawn (a press outside, the same rail
+    /// icon): focus goes back to the Secondary's active tab (spec §5).
+    fn close_primary_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.primary_peek.is_open() {
+            return;
+        }
+        self.primary_peek.close();
+        if let Some(id) = self.center_split.active(PaneRole::Secondary) {
+            self.select_tab(id, Some(window), cx);
+        }
+        self.focus_after_peek(window, cx);
+        cx.notify();
+    }
+
+    /// Hands the keyboard on once the peek that held it is gone and the rail
+    /// stays: to the active pane's own handle, or to the root when it has
+    /// none (a file, Changes, a browser). F-SID-19 reclaims focus only when
+    /// nothing is focused, and the peeked view's handle still exists, so
+    /// without this every key would go to a view that is no longer drawn.
+    fn focus_after_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self
+            .active_pane_focus_handle(cx)
+            .unwrap_or_else(|| self.root_focus.clone());
+        window.focus(&focus, cx);
+    }
+
+    /// A rail icon: the open peek's own icon closes it, any other opens or
+    /// switches it through `select_tab`, whose hook
+    /// (`peek_active_primary_tab`) does the opening. The rail is excluded from
+    /// the card's press-outside, so this sees the peek as it was before the
+    /// press.
+    fn toggle_primary_peek(&mut self, tab_id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.primary_peek.is_open() && self.primary_peek.get() == Some(&tab_id) {
+            self.close_primary_peek(window, cx);
+        } else {
+            self.select_tab(tab_id, Some(window), cx);
+        }
+    }
+
+    /// The one hook behind spec 2026-11-01-primary-rail §5's last row: a
+    /// Primary tab made active on a user's request while the rail is drawn
+    /// opens the peek on it (a rail icon, the sidebar pill, Ctrl+digit, tab
+    /// cycling, Ctrl+Shift+M, `surface.tabs.*`, a new chat or terminal).
+    /// State only: the render that draws the card focuses it
+    /// (`peek_focus_pending`). Restores set the active tab without coming
+    /// here, and `settle_primary_peek` hands it back to the Secondary.
+    fn peek_active_primary_tab(&mut self) {
+        if !self.primary_rail_drawn() {
+            return;
+        }
+        let Some(id) = self
+            .tabs
+            .get(self.active_tab)
+            .filter(|tab| tab.pane == PaneRole::Primary)
+            .map(|tab| tab.id)
+        else {
+            return;
+        };
+        if self.primary_peek.is_open() && self.primary_peek.get() == Some(&id) {
+            return;
+        }
+        self.primary_peek.open(id);
+        self.rail_rects.peek.set(None);
+        self.rail_rects.pin.set(None);
+        self.peek_focus_pending = true;
+    }
+
+    /// Run at the top of every render (spec §5).
+    /// - While the peek is open, it shows the active tab, and the rail is
+    ///   drawn. Otherwise it closes: the pin or Ctrl+Shift+B took the rail
+    ///   away, or its tab closed, or another tab was selected. If the rail
+    ///   stays, the keyboard the peek held is handed on (`focus_after_peek`).
+    /// - With the rail drawn and no peek, a Primary tab is never the active
+    ///   one: it is drawn nowhere (#323). The Secondary's active tab takes
+    ///   over, as it does on collapse, without taking focus itself: that is
+    ///   also how a worktree or a session restored collapsed lands, and a
+    ///   restore leaves focus alone.
+    /// - The rail draws no strip, so a Primary tab's context menu has nowhere
+    ///   to hang; one opened from the palette would stay invisible and keep
+    ///   aiming Close Tab at that tab. It is dropped.
+    fn settle_primary_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rail = self.primary_rail_drawn();
+        let mut hand_on_focus = false;
+        if let Some(&id) = self.primary_peek.get() {
+            let shows_active = self
+                .tabs
+                .get(self.active_tab)
+                .is_some_and(|tab| tab.id == id && tab.pane == PaneRole::Primary);
+            if !rail || !shows_active {
+                self.primary_peek.close();
+                hand_on_focus = rail;
+            }
+        }
+        if rail
+            && !self.primary_peek.is_open()
+            && self
+                .tabs
+                .get(self.active_tab)
+                .is_some_and(|tab| tab.pane == PaneRole::Primary)
+            && let Some(id) = self.center_split.active(PaneRole::Secondary)
+        {
+            self.select_tab(id, None, cx);
+        }
+        if hand_on_focus {
+            self.focus_after_peek(window, cx);
+        }
+        if rail
+            && self.tab_menu_open
+            && self
+                .tab_menu_tab
+                .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+                .is_some_and(|tab| tab.pane == PaneRole::Primary)
+        {
+            self.tab_menu_open = false;
+            self.tab_menu_tab = None;
+        }
     }
 
     fn subscribe_right_panel(right_panel: &Entity<RightPanel>, cx: &mut Context<Self>) {
@@ -11865,6 +12101,9 @@ impl SirioWorkspace {
             return Err(format!("unknown worktree: {}", selected_path.display()));
         }
         let outgoing_layout = if !paths_name_the_same_document(&selected_path, &old_path) {
+            // Tab ids restart with the incoming worktree's tabs: a peek left
+            // open would name one of them (spec 2026-11-01-primary-rail §5).
+            self.primary_peek.close();
             let outgoing_tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
             for tab_id in outgoing_tab_ids {
                 self.track_terminal_panes_in_cache(tab_id);
@@ -12027,6 +12266,7 @@ impl SirioWorkspace {
             // be written to the right worktree.
             self.working_directory = selected_path.clone();
             self.secondary_pane_hidden = self.session.secondary_pane_hidden_for(&selected_path);
+            self.primary_pane_collapsed = self.session.primary_pane_collapsed_for(&selected_path);
             self.restore_project_settings_tabs(&restored, cx);
             self.center_split = CenterSplit::new(&self.tabs);
             seed_shown_tabs(&mut self.center_split, &self.tabs, &restored);
@@ -12057,6 +12297,11 @@ impl SirioWorkspace {
         {
             self.reveal_secondary_for_active_tab();
         }
+        // The rail flag follows the switch like the Secondary's.
+        if !restored_secondary_pane_was_loaded {
+            self.primary_pane_collapsed = self.session.primary_pane_collapsed_for(&selected_path);
+        }
+        self.clear_primary_collapse_if_secondary_gone();
         self.worktree_label = context.activity_label;
         self.rebind_changes_tabs(cx);
         self.refresh_branch_and_sync_of_open_files(cx);
@@ -13197,6 +13442,7 @@ impl SirioWorkspace {
             });
             self.center_split.select_tab(id, &self.tabs);
             self.reveal_secondary_for_active_tab();
+            self.peek_active_primary_tab();
             if let Some(window) = window {
                 self.focus_active_pane(window, cx);
             }
@@ -13263,6 +13509,7 @@ impl SirioWorkspace {
             self.center_split.set_focused(PaneRole::Primary);
         }
         self.reveal_secondary_for_active_tab();
+        self.clear_primary_collapse_if_secondary_gone();
     }
 
     /// F-CORE-WSP-05: every "Insert" affordance (the tab-bar "+" menu's
@@ -14289,11 +14536,13 @@ impl SirioWorkspace {
         .detach();
     }
 
-    /// Makes the tab at `index` the active one.
+    /// Makes the tab at `index` the active one, the way every selection does:
+    /// its half shows it, and while the rail is drawn it is peeked (spec
+    /// 2026-11-01-primary-rail §5).
     fn focus_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.active_tab = index;
-        self.schedule_save(cx);
-        cx.notify();
+        if let Some(id) = self.tabs.get(index).map(|tab| tab.id) {
+            self.select_tab(id, None, cx);
+        }
     }
 
     /// The index of the tab whose terminal shows `session_id`, if any.
@@ -14638,6 +14887,9 @@ impl SirioWorkspace {
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Chat, &title) {
             self.rebuild_center_split();
         }
+        // A new Primary tab opens in the peek while the rail is drawn (spec
+        // 2026-11-01-primary-rail §5).
+        self.peek_active_primary_tab();
         self.schedule_save(cx);
         self.mark_activity_dirty();
         window.focus(&composer_focus, cx);
@@ -14754,6 +15006,7 @@ impl SirioWorkspace {
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Chat, &title) {
             self.rebuild_center_split();
         }
+        self.peek_active_primary_tab();
         self.schedule_save(cx);
         self.mark_activity_dirty();
         window.focus(&composer_focus, cx);
@@ -14886,6 +15139,7 @@ impl SirioWorkspace {
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Terminal, &title) {
             self.rebuild_center_split();
         }
+        self.peek_active_primary_tab();
         // A new terminal tab triggers an immediate session save (SP2 spec
         // §4.1), not the next periodic one, so a crash right after creation
         // rarely leaves an orphan.
@@ -18030,7 +18284,8 @@ impl SirioWorkspace {
     /// they are small, non-modal root notices, and blanking the page for
     /// their four seconds would be worse than the overlap. A movable tab
     /// dragged out of the Primary half also covers the Secondary one (spec
-    /// 2026-09-24 §5).
+    /// 2026-09-24 §5). The Primary rail's peek covers the Secondary too (spec
+    /// 2026-11-01-primary-rail §5).
     fn overlay_obscures_browsers(
         overflow_menu_open: bool,
         tab_menu_open: bool,
@@ -18040,6 +18295,7 @@ impl SirioWorkspace {
         tab_rename_open: bool,
         new_tab_menu_open: bool,
         tab_drag_toward_secondary: bool,
+        peek_open: bool,
     ) -> bool {
         overflow_menu_open
             || tab_menu_open
@@ -18049,6 +18305,7 @@ impl SirioWorkspace {
             || tab_rename_open
             || new_tab_menu_open
             || tab_drag_toward_secondary
+            || peek_open
     }
 
     /// #376: marks every browser surface as covered (or not) by a GPUI
@@ -18070,6 +18327,7 @@ impl SirioWorkspace {
             self.tab_rename.is_some(),
             self.tab_bar.read(cx).is_menu_open(),
             self.pane_drop_overlay_role(cx) == Some(PaneRole::Secondary),
+            self.primary_peek.is_open(),
         );
         for tab in &self.tabs {
             tab.panes.for_each(&mut |_, content| {
@@ -19666,6 +19924,9 @@ impl SirioWorkspace {
     /// `surface.layout.read` (spec 2026-10-15-secondary-on-demand §4).
     /// `secondaryPositions` are 1-based positions in `control_read_tabs`'s
     /// list, so a script can close a Secondary tab with `surface tabs close`.
+    /// The Primary rail's reads (`primaryCollapsed`, `peekTab`, `railTabs`,
+    /// the drawn widths and, in debug builds, `railRects`) are spec
+    /// 2026-11-01-primary-rail §8; `railTabs` positions are 1-based the same way.
     fn control_read_layout(&self, cx: &Context<Self>) -> Vec<(String, String)> {
         let secondary: Vec<(usize, &OpenTab)> = self
             .tabs
@@ -19674,7 +19935,8 @@ impl SirioWorkspace {
             .filter(|(_, tab)| tab.pane == PaneRole::Secondary)
             .collect();
         let join = |items: Vec<String>| items.join(",");
-        vec![
+        let widths = self.drawn_center_widths.get();
+        let mut layout = vec![
             ("secondaryVisible".into(), self.secondary_pane_visible().to_string()),
             ("secondaryHidden".into(), self.secondary_pane_hidden.to_string()),
             (
@@ -19717,7 +19979,89 @@ impl SirioWorkspace {
                         .collect(),
                 ),
             ),
-        ]
+            // The rail is *drawn*, not merely flagged.
+            ("primaryCollapsed".into(), self.primary_rail_drawn().to_string()),
+            (
+                "peekTab".into(),
+                self.primary_peek
+                    .get()
+                    .filter(|_| self.primary_peek.is_open())
+                    .and_then(|id| self.tabs.iter().position(|tab| tab.id == *id))
+                    .map(|index| (index + 1).to_string())
+                    .unwrap_or_default(),
+            ),
+            (
+                "railTabs".into(),
+                join(
+                    self.center_split
+                        .tabs_for(PaneRole::Primary, &self.tabs)
+                        .into_iter()
+                        .filter_map(|id| self.tabs.iter().position(|tab| tab.id == id))
+                        .map(|index| {
+                            let status = self
+                                .tab_status(&self.tabs[index], cx)
+                                .unwrap_or(ActivityStatus::Idle);
+                            format!("{}:{}", index + 1, tab_status_name(status))
+                        })
+                        .collect(),
+                ),
+            ),
+            ("primaryWidth".into(), widths.0.to_string()),
+            ("secondaryWidth".into(), widths.1.to_string()),
+        ];
+        if cfg!(debug_assertions) {
+            // Window rects `[x, y, w, h]` of the controls the E2E clicks, null
+            // while one is not drawn; `tabs` is keyed by the 1-based position
+            // `railTabs` uses. `peek` and `pin` are null while no peek is open.
+            let rect = |bounds: Bounds<gpui::Pixels>| {
+                serde_json::json!([
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y),
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height),
+                ])
+            };
+            let tab_bar = self.tab_bar.read(cx);
+            let rail_drawn = self.primary_rail_drawn();
+            let expand = if rail_drawn {
+                self.rail_rects.expand.get()
+            } else {
+                None
+            };
+            let peek_open = rail_drawn && self.primary_peek.is_open();
+            let peek = if peek_open {
+                self.rail_rects.peek.get()
+            } else {
+                None
+            };
+            let pin = if peek_open {
+                self.rail_rects.pin.get()
+            } else {
+                None
+            };
+            let mut tabs = serde_json::Map::new();
+            if rail_drawn {
+                for (id, bounds) in self.rail_rects.tabs.borrow().iter() {
+                    if let Some(index) = self.tabs.iter().position(|tab| tab.id == *id) {
+                        tabs.insert((index + 1).to_string(), rect(*bounds));
+                    }
+                }
+            }
+            layout.push((
+                "railRects".into(),
+                serde_json::json!({
+                    "collapse": tab_bar.collapse_bounds().map(rect),
+                    "expand": expand.map(rect),
+                    "new": tab_bar.new_button_bounds().map(rect),
+                    "menuTerminal": tab_bar.new_terminal_row_bounds().map(rect),
+                    "peek": peek.map(rect),
+                    "pin": pin.map(rect),
+                    "tabs": tabs,
+                })
+                .to_string(),
+            ));
+        }
+        layout
     }
 
     /// Debug-only `surface.open_list.open`: does what a click on that row
@@ -22020,29 +22364,7 @@ impl SirioWorkspace {
             Some((tab_status_name(status), bloom))
         });
         let icon = tab_icon(tab.kind, file.as_deref(), agent.map(|agent| agent.icon));
-        // An agent mark is drawn in that agent's brand, here, on the sidebar
-        // tab row and in the worktree badge alike — the reference has one
-        // `AgentIcon` view that every one of those three places draws, so a
-        // mark looks the same wherever it appears. This port had drifted
-        // into three different tints for the same mark, and the badge's was
-        // `theme.text` — a coral close enough to Claude's brand to
-        // read as it — so a Codex mark was painted in Claude's colour.
-        //
-        // This is a deliberate, narrow divergence from a literal port:
-        // Swift fills the Codex, OpenCode and Pi marks with `.primary` and
-        // only Claude (`#D97757`) and omp (its gradient) with a brand. It
-        // can afford to, because those are rendered assets; `IconElement`
-        // tints one flat colour into a `currentColor` silhouette, so the
-        // tint is the only channel a mark has. Chromatic assets still ignore
-        // it — `Icon::is_chromatic`, omp's gradient — exactly as `OmpShape`
-        // ignores any inherited tint.
-        let glyph_color = if icon.is_agent_mark() {
-            agent.map_or(theme.ely.fg, |agent| agent.brand.color().into())
-        } else if tab.kind == TabKind::AgentChat {
-            if is_file { theme.ely.link } else { theme.ely.fg }
-        } else {
-            theme.ely.fg_subtle
-        };
+        let glyph_color = tab_glyph_color(tab.kind, icon, agent, is_file, theme);
         let change_request_tint = (tab.kind == TabKind::ChangeRequest)
             .then(|| {
                 let mut tint = None;
@@ -23062,6 +23384,18 @@ impl SirioWorkspace {
         }
     }
 
+    /// The strip's fixed trailing controls: New Tab and, while the Secondary
+    /// is drawn, Collapse Pane in Primary (spec 2026-11-01-primary-rail §3);
+    /// Close Secondary in Secondary.
+    fn strip_trailing_width(&self, role: PaneRole, theme: Theme) -> gpui::Pixels {
+        let frame = theme.spacing.titlebar_control_frame.width;
+        if role == PaneRole::Primary && self.secondary_pane_visible() {
+            frame * 2.0
+        } else {
+            frame
+        }
+    }
+
     /// This shell overlay owns the visible tabs. The UI crate's TabBar remains
     /// underneath only for its typed + menu implementation; covering the full
     /// tab area prevents its fixture rows from leaking through after a close.
@@ -23081,12 +23415,14 @@ impl SirioWorkspace {
             .map(Self::tab_render_width)
             .collect::<Vec<_>>();
         let overflow_width = f32::from(theme.spacing.titlebar_control_frame.width);
-        // Each strip keeps one frame for its fixed trailing control: New Tab
-        // in Primary, Close Secondary in Secondary. This reservation belongs
-        // to the strip, not the pane geometry; subtracting it from the whole
-        // center left an unpainted band beside the right panel.
+        // Each strip keeps its fixed trailing controls (`strip_trailing_width`):
+        // one frame for New Tab in Primary, plus one for Collapse Pane while
+        // the Secondary is drawn, and one for Close Secondary in Secondary.
+        // This reservation belongs to the strip, not the pane geometry;
+        // subtracting it from the whole center left an unpainted band beside
+        // the right panel.
         let available_width = (self.center_pane_width(role, window, theme)
-            - f32::from(theme.spacing.titlebar_control_frame.width))
+            - f32::from(self.strip_trailing_width(role, theme)))
         .max(0.0);
         // F-TAB-02 (P104 §Group 1): checking fit against `available_width -
         // overflow_width` unconditionally reserves room for the chevron even
@@ -23107,7 +23443,13 @@ impl SirioWorkspace {
     }
 
     fn keep_active_tab_visible(&mut self, window: &Window, theme: Theme) {
-        let focused = self.center_split.focused();
+        // The rail draws no strip: the Secondary's is the only one, and a
+        // peeked tab must not scroll it (spec 2026-11-01-primary-rail §5).
+        let focused = if self.primary_rail_drawn() {
+            PaneRole::Secondary
+        } else {
+            self.center_split.focused()
+        };
         let (visible_count, _has_overflow, group_len) = self.tab_strip_fit(focused, window, theme);
         if visible_count == 0 || group_len == 0 {
             self.tab_strip_first_visible = 0;
@@ -23147,10 +23489,21 @@ impl SirioWorkspace {
     }
 
     /// Both panes at once, which is what the layout needs and what keeps the
-    /// two widths from being resolved twice against different inputs.
+    /// two widths from being resolved twice against different inputs. While
+    /// the rail is drawn the first width is the rail's and the Secondary
+    /// takes the rest (spec 2026-11-01-primary-rail §3).
     fn center_pane_widths(&self, window: &Window, theme: Theme) -> (f32, Option<f32>) {
+        let available = self.center_available_width(window, theme, self.secondary_pane_visible());
+        if self.primary_rail_drawn() {
+            let collapsed = panel_layout::resolve_collapsed_center(
+                available,
+                self.center_split_ratio,
+                CENTER_DIVIDER_WIDTH,
+            );
+            return (collapsed.rail, Some(collapsed.secondary));
+        }
         panel_layout::resolve_center_split(
-            self.center_available_width(window, theme, self.secondary_pane_visible()),
+            available,
             self.center_split_ratio,
             self.secondary_pane_visible(),
             CENTER_DIVIDER_WIDTH,
@@ -23165,6 +23518,27 @@ impl SirioWorkspace {
         self.has_current_worktree()
             && !self.secondary_pane_hidden
             && self.tabs.iter().any(|tab| tab.pane == PaneRole::Secondary)
+    }
+
+    /// Spec 2026-11-01-primary-rail §3: the Primary half is drawn as the rail
+    /// only while its flag is set and the Secondary half is drawn.
+    fn primary_rail_drawn(&self) -> bool {
+        self.primary_pane_collapsed && self.secondary_pane_visible()
+    }
+
+    /// §3: the flag never outlives the Secondary half. Called wherever the
+    /// Secondary can stop being drawn; clears and persists the flag, so the
+    /// Primary comes back at its width and a file opened later does not
+    /// re-collapse it by surprise.
+    fn clear_primary_collapse_if_secondary_gone(&mut self) {
+        if self.primary_pane_collapsed
+            && self.has_current_worktree()
+            && !self.secondary_pane_visible()
+        {
+            self.primary_pane_collapsed = false;
+            self.session
+                .save_primary_pane_collapsed(&self.working_directory, false);
+        }
     }
 
     /// #323: opening any Secondary surface opens the pane, even if it was
@@ -23188,6 +23562,18 @@ impl SirioWorkspace {
         }
     }
 
+    /// What the centre column needs: the rail and one pane while the rail
+    /// is drawn, otherwise `panel_layout::min_center_width`. `secondary_open`
+    /// as in `center_available_width`, so the drop ghost still sizes the
+    /// expanded split.
+    fn center_min_width(&self, secondary_open: bool) -> f32 {
+        if secondary_open && self.primary_rail_drawn() {
+            panel_layout::MIN_COLLAPSED_CENTER_WIDTH
+        } else {
+            panel_layout::min_center_width(secondary_open, CENTER_DIVIDER_WIDTH)
+        }
+    }
+
     /// The centre column's width once the side panels have given up what the
     /// centre needs. `secondary_open` is passed in rather than read from the
     /// state, because the ghost sizes itself for the pane *after* a drop.
@@ -23199,7 +23585,7 @@ impl SirioWorkspace {
             self.dragging_panel,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
-            panel_layout::min_center_width(secondary_open, CENTER_DIVIDER_WIDTH),
+            self.center_min_width(secondary_open),
         );
         center_available_width_for_shell(
             f32::from(window.bounds().size.width),
@@ -23341,7 +23727,7 @@ impl SirioWorkspace {
             .left_0()
             .top_0()
             .h_full()
-            .right(theme.spacing.titlebar_control_frame.width)
+            .right(self.strip_trailing_width(role, theme))
             .flex()
             .items_center()
             .gap(px(2.0))
@@ -23471,15 +23857,18 @@ impl SirioWorkspace {
         }
     }
 
-    /// The three columns. Content entities are mounted selectively, while
-    /// their owning entities remain in `tabs` above.
-    fn columns(
+    /// The Primary half: its strip over its surface. Built only while the rail
+    /// is not drawn, so a collapsed half mounts none of its views (spec
+    /// 2026-11-01-primary-rail §3).
+    fn render_primary_pane(
         &self,
         theme: &Theme,
         entity: Entity<Self>,
+        primary_width: f32,
+        menu_role: Option<PaneRole>,
         cx: &mut Context<Self>,
         window: &mut Window,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let primary_surface = if self.has_current_worktree() {
             div()
                 .id("group-surfaces-wrapper")
@@ -23580,20 +23969,7 @@ impl SirioWorkspace {
                 this.child(probe)
             });
 
-        // #320: the context menu is drawn by the strip that owns the tab it
-        // was opened on, so it lands over the right half rather than always
-        // over the Primary one.
-        let menu_role = self
-            .tab_menu_tab
-            .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
-            .map(|tab| tab.pane);
-
-        // #320: each pane is its own stack — strip on top, surface below —
-        // and the two sit side by side. The strip is *inside* the pane, so
-        // the seam between the strips is the divider itself and cannot drift
-        // out of alignment with it.
-        let (primary_width, secondary_width) = self.center_pane_widths(window, *theme);
-        let primary_pane = div()
+        div()
             .id("pane-primary")
             .debug_selector(|| "pane-primary".into())
             .flex()
@@ -23641,16 +24017,69 @@ impl SirioWorkspace {
                         |this| this.child(self.render_tab_context_menu(*theme, entity.clone(), cx)),
                     ),
             )
-            .child(primary_surface);
+            .child(primary_surface)
+            .into_any_element()
+    }
+
+    /// The three columns. Content entities are mounted selectively, while
+    /// their owning entities remain in `tabs` above.
+    fn columns(
+        &self,
+        theme: &Theme,
+        entity: Entity<Self>,
+        cx: &mut Context<Self>,
+        window: &mut Window,
+    ) -> impl IntoElement {
+        // #320: the context menu is drawn by the strip that owns the tab it
+        // was opened on, so it lands over the right half rather than always
+        // over the Primary one.
+        let menu_role = self
+            .tab_menu_tab
+            .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+            .map(|tab| tab.pane);
+
+        // #320: each pane is its own stack — strip on top, surface below —
+        // and the two sit side by side. The strip is *inside* the pane, so
+        // the seam between the strips is the divider itself and cannot drift
+        // out of alignment with it.
+        let (primary_width, secondary_width) = self.center_pane_widths(window, *theme);
+        self.drawn_center_widths
+            .set((primary_width, secondary_width.unwrap_or(0.0)));
+        let rail_drawn = self.primary_rail_drawn();
+        let collapse_visible = self.secondary_pane_visible();
+        self.tab_bar.update(cx, |tab_bar, cx| {
+            tab_bar.set_placement(
+                if rail_drawn {
+                    TabBarPlacement::Rail
+                } else {
+                    TabBarPlacement::Strip
+                },
+                cx,
+            );
+            // §3: collapsing with nothing in the Secondary would leave the centre empty.
+            tab_bar.set_collapse_visible(collapse_visible, cx);
+        });
+        let primary_pane = if rail_drawn {
+            self.render_primary_rail(theme, entity.clone(), cx)
+        } else {
+            self.render_primary_pane(theme, entity.clone(), primary_width, menu_role, cx, window)
+        };
+
+        let peek = if rail_drawn {
+            self.render_primary_peek(theme, entity.clone(), window, cx)
+        } else {
+            None
+        };
 
         let center_column = div()
             .flex()
+            .relative()
             .flex_row()
             .size_full()
             .min_w_0()
             .min_h_0()
             .child(primary_pane)
-            .when(self.secondary_pane_visible(), |this| {
+            .when(self.secondary_pane_visible() && !rail_drawn, |this| {
                 this.child(
                     div()
                         .id("center-divider")
@@ -23694,7 +24123,9 @@ impl SirioWorkspace {
                                 }),
                         ),
                 )
-                .child(
+            })
+            .when(self.secondary_pane_visible(), |this| {
+                this.child(
                     div()
                         .id("pane-secondary")
                         .debug_selector(|| "pane-secondary".into())
@@ -23763,7 +24194,9 @@ impl SirioWorkspace {
                                 )),
                         ),
                 )
-            });
+            })
+            // Last, so it paints over the Secondary; it never reaches a side panel.
+            .children(peek);
 
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
             // Same expression `center_available_width` uses above — not
@@ -23774,7 +24207,7 @@ impl SirioWorkspace {
             self.dragging_panel,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
-            panel_layout::min_center_width(self.secondary_pane_visible(), CENTER_DIVIDER_WIDTH),
+            self.center_min_width(self.secondary_pane_visible()),
         );
         // The History toolbar shapes itself from the panel's width, and the
         // view cannot measure its own container — push the resolved width
@@ -25210,6 +25643,8 @@ fn replay_persisted_terminal_scrollback(tabs: &mut [OpenTab], cx: &mut App) {
 impl Render for SirioWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("SirioWorkspace.render", cx.entity_id().as_u64());
+        // Spec 2026-11-01-primary-rail §5, before anything reads the active tab.
+        self.settle_primary_peek(window, cx);
         // Spec 2026-09-24 §5: a tab drag that ended without a drop leaves
         // its snapshot and target behind, and a later divider drag would
         // then read as a tab drag (gpui exposes `has_active_drag`, not the
@@ -25451,6 +25886,18 @@ impl Render for SirioWorkspace {
             window.on_next_frame(move |window, cx| window.focus(&focus, cx));
         }
 
+        // The peek drew its tab's view for the first time in this frame; focus
+        // it once that frame is the last drawn one (gpui focus reads it).
+        if std::mem::take(&mut self.peek_focus_pending)
+            && self.primary_peek.is_open()
+            && let Some(focus) = self.active_pane_focus_handle(cx)
+        {
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        }
+        let peek_open = self.primary_peek.is_open();
+        let peek_rail = self.rail_rects.clone();
+        let peek_entity = cx.entity();
+
         div()
             .id("shell-frame")
             .debug_selector(|| "shell-frame".into())
@@ -25475,6 +25922,25 @@ impl Render for SirioWorkspace {
             .capture_any_mouse_down(|_, _window, _| {
                 #[cfg(target_os = "windows")]
                 sirio_ui::browser::steal_win32_focus_from_webview_child(_window);
+            })
+            // Spec 2026-11-01-primary-rail §5: a press on what the peek floats
+            // over closes it. Capture phase on the root, which counts as
+            // hovered only where nothing occludes it: a press on the card, a
+            // menu, the palette or a modal stays theirs. The rail does not
+            // occlude, and a press on it is the rail's own.
+            .when(peek_open, |this| {
+                this.capture_any_mouse_down(move |event, window, cx| {
+                    if peek_rail
+                        .rail
+                        .get()
+                        .is_some_and(|rail| rail.contains(&event.position))
+                    {
+                        return;
+                    }
+                    peek_entity.update(cx, |workspace, cx| {
+                        workspace.close_primary_peek(window, cx)
+                    });
+                })
             })
             .on_action(cx.listener(Self::handle_new_terminal_tab))
             .on_action(cx.listener(Self::handle_open_file))
@@ -28915,6 +29381,7 @@ fn main() {
                 let catalog_for_sidebar =
                     sidebar_projects_with_comments(&project_catalog, &comments_for_sidebar);
                 let pending_for_chat_agent = pending_for_tab_bar.clone();
+                let pending_for_collapse = pending_for_tab_bar.clone();
                 let pending_for_agent_settings = pending_for_tab_bar.clone();
                 let tab_bar = cx.new(|cx| {
                     TabBar::new(cx)
@@ -28926,6 +29393,11 @@ fn main() {
                         .on_chat_agent(move |id| {
                             if let Ok(mut actions) = pending_for_chat_agent.lock() {
                                 actions.push(WorkspaceAction::NewChatAgent(id));
+                            }
+                        })
+                        .on_collapse(move || {
+                            if let Ok(mut actions) = pending_for_collapse.lock() {
+                                actions.push(WorkspaceAction::CollapsePrimary);
                             }
                         })
                         .on_open_agent_settings(move || {
