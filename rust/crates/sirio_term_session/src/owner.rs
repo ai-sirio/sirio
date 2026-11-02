@@ -225,10 +225,15 @@ fn run(inputs: Inputs) {
                         }
                     }
                     Scanned::Root(record) => {
-                        if cached.exit.is_some() || !tracker.accepts_reports() {
+                        if cached.exit.is_some() || !tracker.accepts_reports(Instant::now()) {
                             continue;
                         }
-                        let at_ms = elapsed_ms(started);
+                        // The stamp is when the state was first seen: a program repeats
+                        // the state it is already in (Claude sends `working` per tool).
+                        let at_ms = match (&record, &cached.status) {
+                            (Some(new), Some((kept, at))) if kept.state == new.state => *at,
+                            _ => elapsed_ms(started),
+                        };
                         cached.status = record.clone().map(|record| (record, at_ms));
                         let _ = events.send(Event::Status(record, at_ms));
                     }
@@ -395,6 +400,16 @@ fn run(inputs: Inputs) {
                     cached.program = Some(program.clone());
                     let _ = events.send(Event::Program(Some(program)));
                 }
+                Update::Replaced(program) => {
+                    // The old program is over: end it as `ShellAgain` does, then name
+                    // the new one.
+                    let _ = events.send(Event::Program(None));
+                    if cached.status.take().is_some() {
+                        let _ = events.send(Event::Status(None, elapsed_ms(started)));
+                    }
+                    cached.program = Some(program.clone());
+                    let _ = events.send(Event::Program(Some(program)));
+                }
                 Update::ShellAgain => {
                     cached.program = None;
                     let _ = events.send(Event::Program(None));
@@ -417,6 +432,7 @@ fn run(inputs: Inputs) {
                 // No event: the app settles a turn that was mid-way from `Exited`, and a
                 // `Status(None)` ahead of it would erase the state that settling needs.
                 cached.status = None;
+                cached.program = None;
                 let _ = events.send(Event::Exited(exit.clone()));
                 let (exit_lock, changed) = &*wait_state;
                 *exit_lock

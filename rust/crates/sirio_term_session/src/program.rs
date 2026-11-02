@@ -14,6 +14,12 @@ pub(crate) const MAX_ARGS: usize = 32;
 pub(crate) const MAX_ARG_BYTES: usize = 1024;
 /// A group that has not yet been read twice with the same result is read again this often.
 pub(crate) const PROGRAM_REREAD: Duration = Duration::from_millis(250);
+/// A group whose last two reads agree is still read this often while it stays the foreground:
+/// a wrapper that is still working when it takes the terminal (a shim, `sh -c 'sleep 1;
+/// exec prog'`) reads as the wrapper at first.
+pub(crate) const PROGRAM_SETTLED_REREAD: Duration = Duration::from_secs(2);
+/// After the shell takes the terminal back, status reports are dropped for this long.
+pub(crate) const LATE_REPORT_WINDOW: Duration = Duration::from_secs(1);
 /// Probes answered closer together than this are answered once.
 pub(crate) const PROBE_ANSWER_GAP: Duration = Duration::from_secs(1);
 
@@ -32,6 +38,9 @@ pub(crate) enum Update {
     Nothing,
     /// A program is now (or newly read as) the foreground.
     Named(ForegroundProgram),
+    /// A new group took the terminal while the named program's leader is gone: the named
+    /// program ends (as for `ShellAgain`) and this one is named.
+    Replaced(ForegroundProgram),
     /// The shell has been the foreground for two polls in a row after a named program.
     ShellAgain,
 }
@@ -39,21 +48,27 @@ pub(crate) enum Update {
 /// Follows the foreground process group across polls.
 ///
 /// A group is read on its first poll, then every [`PROGRAM_REREAD`] until two reads in a row
-/// agree (a fork that has not exec'd yet reads as its parent). Reports are accepted from the
-/// start: a tab without job control never sees its program leave the shell's group. They are
-/// ignored only from the moment a named program gives the terminal back to the shell until
-/// something other than the shell is in the foreground again, because a late report then
-/// belongs to a program that is gone.
+/// agree (a fork that has not exec'd yet reads as its parent), then every
+/// [`PROGRAM_SETTLED_REREAD`] for as long as it stays the foreground; a read that differs
+/// from the last one goes back to the fast rate.
+///
+/// Reports are accepted from the start: a tab without job control never sees its program
+/// leave the shell's group. They are dropped only for [`LATE_REPORT_WINDOW`] after a named
+/// program gives the terminal back to the shell (a late report then belongs to a program
+/// that is gone), or until something other than the shell is in the foreground again,
+/// whichever comes first. A program that replaces the shell without changing the group
+/// (`exec claude`) must be heard again once the window is over.
 pub(crate) struct ForegroundTracker {
     current: Option<ForegroundProgram>,
     /// The last group seen that was not the shell's.
     group: Option<u32>,
     shell_polls: u8,
-    /// The last read of `group`, waiting for a second identical read.
+    /// The last read of `group`; a second identical read settles it.
     pending: Option<ForegroundProgram>,
     settled: bool,
     last_read: Option<Instant>,
-    reports_ignored: bool,
+    /// Reports are dropped until this instant, when set.
+    late_until: Option<Instant>,
 }
 
 impl ForegroundTracker {
@@ -65,13 +80,13 @@ impl ForegroundTracker {
             pending: None,
             settled: false,
             last_read: None,
-            reports_ignored: false,
+            late_until: None,
         }
     }
 
-    /// Whether a status report arriving now is the current program's.
-    pub(crate) fn accepts_reports(&self) -> bool {
-        !self.reports_ignored
+    /// Whether a status report arriving at `now` is the current program's.
+    pub(crate) fn accepts_reports(&self, now: Instant) -> bool {
+        self.late_until.is_none_or(|until| now >= until)
     }
 
     /// `foreground` is the terminal's foreground process group, `None` when it cannot be read
@@ -86,7 +101,7 @@ impl ForegroundTracker {
                 self.pending = None;
                 self.last_read = None;
                 if self.current.take().is_some() {
-                    self.reports_ignored = true;
+                    self.late_until = Some(now + LATE_REPORT_WINDOW);
                     return Update::ShellAgain;
                 }
             }
@@ -94,15 +109,24 @@ impl ForegroundTracker {
         }
 
         self.shell_polls = 0;
-        self.reports_ignored = false;
+        self.late_until = None;
+        let mut replaced = false;
         if self.group != Some(group) {
+            // The named leader is gone and another group has the terminal: the named
+            // program is over. A leader still alive may just have handed the terminal to
+            // a child group, which keeps the record.
+            replaced = self.current.as_ref().is_some_and(|named| leader_gone(named.pid));
             self.group = Some(group);
             self.pending = None;
             self.settled = false;
             self.last_read = None;
         }
-        if self.settled || self.last_read.is_some_and(|at| now.duration_since(at) < PROGRAM_REREAD)
-        {
+        let interval = if self.settled {
+            PROGRAM_SETTLED_REREAD
+        } else {
+            PROGRAM_REREAD
+        };
+        if self.last_read.is_some_and(|at| now.duration_since(at) < interval) {
             return Update::Nothing;
         }
         self.last_read = Some(now);
@@ -110,7 +134,7 @@ impl ForegroundTracker {
         let program = match read_program(group) {
             Some(program) => program,
             None => {
-                // A leader we already named has gone: keep what we have and stop reading.
+                // A leader we already named has gone: keep what we have.
                 if self.current.as_ref().is_some_and(|named| named.pid == group) {
                     self.settled = true;
                     return Update::Nothing;
@@ -123,16 +147,36 @@ impl ForegroundTracker {
                 }
             }
         };
-        if self.pending.as_ref() == Some(&program) {
-            self.settled = true;
-        }
+        // Two identical reads in a row settle the group; a different one unsettles it.
+        self.settled = self.pending.as_ref() == Some(&program);
         self.pending = Some(program.clone());
-        if self.current.as_ref() == Some(&program) {
+        if !replaced && self.current.as_ref() == Some(&program) {
             return Update::Nothing;
         }
         self.current = Some(program.clone());
-        Update::Named(program)
+        if replaced {
+            Update::Replaced(program)
+        } else {
+            Update::Named(program)
+        }
     }
+}
+
+/// Whether the process `pid` no longer exists. A process we may not signal still exists.
+#[cfg(unix)]
+fn leader_gone(pid: u32) -> bool {
+    let Ok(raw) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    unsafe {
+        libc::kill(raw, 0) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+}
+
+#[cfg(not(unix))]
+fn leader_gone(_pid: u32) -> bool {
+    false
 }
 
 /// Keep at most [`MAX_ARG_BYTES`] bytes of `text`, cut on a char boundary.
@@ -146,6 +190,12 @@ fn cap_text(mut text: String) -> String {
         text.truncate(end);
     }
     text
+}
+
+/// A working directory is kept whole or not at all: a cut path names another directory.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn keep_cwd(path: String) -> Option<String> {
+    (path.len() <= MAX_ARG_BYTES).then_some(path)
 }
 
 /// Read the process `pid`: its name, argv and working directory. `None` when it is gone.
@@ -176,7 +226,7 @@ pub(crate) fn read_program(pid: u32) -> Option<ForegroundProgram> {
 
     let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
         .ok()
-        .map(|path| cap_text(path.to_string_lossy().into_owned()));
+        .and_then(|path| keep_cwd(path.to_string_lossy().into_owned()));
     Some(ForegroundProgram {
         pid,
         name,
@@ -302,7 +352,7 @@ fn read_cwd(pid: libc::c_int) -> Option<String> {
     if bytes.is_empty() {
         return None;
     }
-    Some(cap_text(String::from_utf8_lossy(&bytes).into_owned()))
+    keep_cwd(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Other Unixes have no reader yet; the poll then names every program with an empty name.
