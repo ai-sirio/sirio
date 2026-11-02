@@ -1548,6 +1548,21 @@ struct OpenTab {
     title_is_auto_named: bool,
 }
 
+impl OpenTab {
+    /// A file tab whose last file leaf has closed with only terminals left
+    /// beside it is a terminal tab from then on, so the strip's dirty mark,
+    /// Ctrl+S and restore treat it as one: restore keeps a file tab only with
+    /// its file. It stays in its half, and a title the user did not choose
+    /// becomes the one a new terminal tab gets.
+    fn become_terminal_tab(&mut self) {
+        self.kind = TabKind::Terminal;
+        self.agent_icon = None;
+        if self.title_is_auto_named {
+            self.title = "Terminal".to_string();
+        }
+    }
+}
+
 #[cfg(test)]
 impl OpenTab {
     /// Test fixtures build terminals and then re-kind some of them. The half
@@ -14350,6 +14365,9 @@ impl SirioWorkspace {
         if ids.is_empty() {
             return;
         }
+        for id in &ids {
+            self.flush_tab_prompts(*id, cx);
+        }
         let dirty = ids.iter().any(|id| {
             self.tabs
                 .iter()
@@ -21922,6 +21940,23 @@ impl SirioWorkspace {
             tab.session_state
                 .pane_events
                 .push(PaneEvent::Close { id: focused_pane });
+            if tab.kind == TabKind::Editor {
+                let mut only_terminals = true;
+                tab.panes.for_each(&mut |_, content| {
+                    only_terminals &= matches!(content, TabContent::Terminal { .. });
+                });
+                if only_terminals {
+                    tab.become_terminal_tab();
+                }
+            }
+            if let TabContent::File { view } = &removed
+                && view.read(cx).is_prompt()
+            {
+                // As in `close_tab`: the prompt writes what is still pending,
+                // and one left untitled and empty is removed. A deleted
+                // prompt's view writes nothing.
+                view.update(cx, |prompt, cx| prompt.close_prompt(cx));
+            }
             if let Some(terminal) = removed.terminal() {
                 // Closing a pane in a split ends its session (SP2 spec §4.2).
                 terminal.update(cx, |terminal, _| terminal.end_session());
@@ -23117,10 +23152,30 @@ impl SirioWorkspace {
         dirty
     }
 
+    /// Writes what the prompts in tab `id` still hold, before a close reads
+    /// whether the tab is dirty: a write that fails here marks it so, and the
+    /// close asks instead of losing the typing in its own failed write.
+    fn flush_tab_prompts(&mut self, id: usize, cx: &mut Context<Self>) {
+        let mut prompts = Vec::new();
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content
+                    && view.read(cx).is_prompt()
+                {
+                    prompts.push(view.clone());
+                }
+            });
+        }
+        for prompt in prompts {
+            prompt.update(cx, |prompt, cx| prompt.flush_prompt(cx));
+        }
+    }
+
     fn request_close_tab_by_id(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        self.flush_tab_prompts(id, cx);
         let dirty = self.tab_is_dirty(&self.tabs[index], cx);
         if !dirty {
             self.close_tab(index, Some(window), cx);
