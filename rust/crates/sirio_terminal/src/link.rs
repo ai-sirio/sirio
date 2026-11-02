@@ -343,6 +343,8 @@ fn forward_local(
                 Event::Title(title) => LinkChunk::Title(title),
                 Event::Foreground(running) => LinkChunk::Foreground(running),
                 Event::Exited(exit) => LinkChunk::Exited(session_exit_status(&exit)),
+                // Carried to the app by a later change.
+                Event::Program(_) | Event::Status(..) => continue,
             };
             if chunks_tx.send(chunk).is_err() {
                 return;

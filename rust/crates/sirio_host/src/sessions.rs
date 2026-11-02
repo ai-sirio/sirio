@@ -287,6 +287,8 @@ fn pump_events(
                     session_id: session_id.clone(),
                     running,
                 },
+                // Carried over the host protocol by a later change.
+                Event::Program(_) | Event::Status(..) => continue,
                 Event::Exited(exit) => {
                     let exit = entry
                         .session

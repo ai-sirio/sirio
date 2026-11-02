@@ -10,9 +10,6 @@
 //! (CAN and SUB abort it too) is dropped, and a field holding other control bytes never
 //! matches a known value, so it can miss a report but never invent one.
 
-// Nothing consumes the scanner until the session engine wires it in; drop this then.
-#![allow(dead_code)]
-
 /// The longest body kept; the scanner still finds the terminator of a longer one.
 pub(crate) const MAX_KEPT_BODY: usize = 4096;
 
