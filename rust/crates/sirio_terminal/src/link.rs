@@ -993,6 +993,26 @@ fn seed_chunks(summary: &sirio_host_protocol::term::SessionSummary) -> Vec<LinkC
     chunks
 }
 
+/// The session's whole program state after a reconnect: the program (`None`
+/// when there is none, so one that ended is ended in the app), then the status
+/// (`None` with stamp 0 when there is none; nothing for a state this build does
+/// not know). Unlike [`seed_chunks`], absent fields are sent, because a view
+/// that was already running may hold what the host has since dropped.
+fn reseed_chunks(summary: &sirio_host_protocol::term::SessionSummary) -> Vec<LinkChunk> {
+    let mut chunks = vec![LinkChunk::Program(
+        summary.program.as_ref().map(engine_program),
+    )];
+    match &summary.status {
+        None => chunks.push(LinkChunk::Status(None, 0)),
+        Some(status) => {
+            if let Some(record) = engine_status(status) {
+                chunks.push(LinkChunk::Status(Some(record), status.at_ms));
+            }
+        }
+    }
+    chunks
+}
+
 /// Whether the session's queued events end it: its close or its exit has
 /// gone out, and nothing follows on the session.
 fn session_ended(
@@ -1010,7 +1030,10 @@ fn session_ended(
 /// Re-establish the stream against a fresh client after the connection
 /// dropped. Every 500 ms for 10 s: no fresh client, or a host that no longer
 /// lists the id, ends in `Lost` (sent exactly once); `true` means the stream,
-/// events and size were replaced and the loop continues.
+/// events and size were replaced and the loop continues. Just before that
+/// `true`, the session's full program state from the fresh listing is sent
+/// ([`reseed_chunks`]): a program or a report that ended while the connection
+/// was down is cleared in the app instead of staying until the next event.
 #[allow(clippy::too_many_arguments)]
 fn reconnect_until_attached(
     session_id: &str,
@@ -1046,7 +1069,7 @@ fn reconnect_until_attached(
         let Some(fresh) = reconnect() else {
             continue;
         };
-        match fresh.list() {
+        let listed = match fresh.list() {
             Ok(listed)
                 if !listed
                     .sessions
@@ -1059,9 +1082,9 @@ fn reconnect_until_attached(
                 let _ = chunks_tx.send(LinkChunk::Lost);
                 return false;
             }
-            Ok(_) => {}
+            Ok(listed) => listed,
             Err(_) => continue,
-        }
+        };
         let attached = fresh.attach(session_id, resume_from);
         match attached {
             Ok((attached, fresh_rx)) => match fresh.events() {
@@ -1083,6 +1106,17 @@ fn reconnect_until_attached(
                     *stream_rx = fresh_rx;
                     *events_rx = fresh_events;
                     *size = attached.size;
+                    if let Some(summary) = listed
+                        .sessions
+                        .iter()
+                        .find(|summary| summary.session_id == session_id)
+                    {
+                        for chunk in reseed_chunks(summary) {
+                            if chunks_tx.send(chunk).is_err() {
+                                return false;
+                            }
+                        }
+                    }
                     return true;
                 }
                 Err(_) => continue,
