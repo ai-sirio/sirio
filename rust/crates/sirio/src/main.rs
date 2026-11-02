@@ -6080,11 +6080,11 @@ impl SirioWorkspace {
                                     workspace.set_primary_pane_collapsed(true, cx);
                                     workspace.focus_active_pane(window, cx);
                                     // `focus_active_pane` moves no keyboard to
-                                    // a file; the rail hands it on itself (§3).
-                                    if workspace.primary_rail_drawn()
-                                        && let Some(focus) = workspace.active_file_focus_target(cx)
-                                    {
-                                        window.focus(&focus, cx);
+                                    // a pane without a handle of its own (a
+                                    // file, Changes); the rail hands it on as
+                                    // a dismissal does (§3, §5).
+                                    if workspace.primary_rail_drawn() {
+                                        workspace.focus_after_peek(window, cx);
                                     }
                                 }
                                 WorkspaceAction::StartHandoffAgent {
@@ -8282,8 +8282,9 @@ impl SirioWorkspace {
     }
 
     /// Hands the keyboard on once the peek that held it is gone and the rail
-    /// stays: to the active pane's own handle, to a file's editor, or to the
-    /// root when the pane has none (Changes, a browser). F-SID-19 reclaims
+    /// stays, or the half has just collapsed: to the active pane's own handle,
+    /// to a loaded file's editor, or to the root when the pane has none (a
+    /// file loading or showing a notice, Changes, a browser). F-SID-19 reclaims
     /// focus only when nothing is focused, and the peeked view's handle still
     /// exists, so without this every key would go to a view that is no longer
     /// drawn.
@@ -8296,15 +8297,19 @@ impl SirioWorkspace {
     }
 
     /// The keyboard target of the active tab's focused pane when that pane is
-    /// a file. `active_pane_focus_handle` gives a file none (a file takes focus
-    /// from a click or a tab switch), so the rail's own hand-offs, which are
-    /// neither, ask for it here (spec 2026-11-01-primary-rail §3, §5).
+    /// a loaded file. `active_pane_focus_handle` gives a file none (a file
+    /// takes focus from a click or a tab switch), so the rail's own hand-offs,
+    /// which are neither, ask for it here (spec 2026-11-01-primary-rail §3,
+    /// §5). A file still loading, or showing a notice (missing, binary, too
+    /// large), draws no focus handle: focusing its target would leave every
+    /// key, shortcuts included, with nowhere to go, so it gets none.
     fn active_file_focus_target(&self, cx: &App) -> Option<FocusHandle> {
         let tab = self.tabs.get(self.active_tab)?;
         let mut handle = None;
         tab.panes.for_each(&mut |id, content| {
             if id == tab.focused_pane
                 && let TabContent::File { view } = content
+                && view.read(cx).is_loaded()
             {
                 handle = Some(view.read(cx).focus_target(cx));
             }
