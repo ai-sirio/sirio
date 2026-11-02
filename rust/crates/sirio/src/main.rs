@@ -10334,6 +10334,10 @@ impl SirioWorkspace {
                 }
 
                 let title_owned_before = workspace.activity.is_title_owned(&activity_pane_id);
+                let identity_before = (
+                    workspace.activity.agent_id(&activity_pane_id).map(str::to_owned),
+                    workspace.activity.is_program_owned(&activity_pane_id),
+                );
                 let transition = panes::apply_terminal_activity_event(
                     &mut workspace.activity,
                     &activity_pane_id,
@@ -10378,7 +10382,7 @@ impl SirioWorkspace {
                     // repaint like an exit; Layer D keeps polling `shell_pid()`,
                     // which now comes from the link.
                     TerminalActivityEvent::IdTaken => {}
-                    // Task 9/10: consumed once the app reads the program.
+                    // The program's identity was applied above; its status is Task 10.
                     TerminalActivityEvent::Program(_)
                     | TerminalActivityEvent::ProgramStatus { .. } => {}
                     TerminalActivityEvent::SessionLost => {
@@ -10398,8 +10402,17 @@ impl SirioWorkspace {
                 // own notify.
                 let title_owned_clear =
                     title_owned_before && !workspace.activity.is_title_owned(&activity_pane_id);
+                // An identity (or who owns it) can change with no status
+                // transition at all: a program names an agent that has no status
+                // yet, or the shell is back and the identity clears.
+                let identity_changed = identity_before
+                    != (
+                        workspace.activity.agent_id(&activity_pane_id).map(str::to_owned),
+                        workspace.activity.is_program_owned(&activity_pane_id),
+                    );
                 if transition.is_some()
                     || title_owned_clear
+                    || identity_changed
                     || matches!(
                         event,
                         TerminalActivityEvent::ChildExited { .. }
@@ -10609,7 +10622,8 @@ impl SirioWorkspace {
     /// inlined into the loop body is not.
     ///
     /// Chat, Changes, Browser and Editor panes are deliberately absent: only a
-    /// terminal has a shell pid to walk.
+    /// terminal has a shell pid to walk, and one whose session has named a
+    /// program (`is_program_session`) is absent too.
     ///
     /// A terminal of a worktree that is not selected is in no tab: the pane
     /// cache holds it, so it is walked too, with no tab id. Its shell keeps
@@ -10644,6 +10658,12 @@ impl SirioWorkspace {
                 found.push((None, pane_id, cached.controller.clone()));
             }
         }
+        // Refinement 9: Layer D stops for a pane once its session has named a
+        // program. The host tells what runs there; a tab without job control
+        // never names one and stays in the list.
+        found.retain(|(_, pane_id, _)| {
+            !self.activity.is_program_session(&format!("pane-{pane_id}"))
+        });
         found
     }
 

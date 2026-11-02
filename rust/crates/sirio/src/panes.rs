@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use gpui::{App, Entity, KeyBinding, actions};
-use sirio_activity::{AgentActivityModel, Transition, detect_content_status};
+use sirio_activity::{AgentActivityModel, Transition, agent_for_program, detect_content_status};
 use sirio_terminal::{TerminalActivityEvent, TerminalExitStatus, TerminalView};
 use sirio_ui::sidebar::project_settings::ProjectSettingsView;
 use sirio_ui::{browser::BrowserSurface, changes::ChangesTab, chat::Chat, file_view::FileView};
@@ -41,10 +41,13 @@ pub(crate) fn apply_terminal_activity_event(
             activity.apply_content_signal(pane_id, status, now)
         }
         TerminalActivityEvent::ChildExited { status } => {
-            // Process- and title-owned identities have independent clearing
-            // paths. A PTY child-exit notification is the spawn-owned path;
-            // never let it clear or rewrite either of the other two kinds.
-            if activity.is_process_owned(pane_id) || activity.is_title_owned(pane_id) {
+            // Process-, title- and program-owned identities have independent
+            // clearing paths. A PTY child-exit notification is the spawn-owned
+            // path; never let it clear or rewrite any of the other kinds.
+            if activity.is_process_owned(pane_id)
+                || activity.is_title_owned(pane_id)
+                || activity.is_program_owned(pane_id)
+            {
                 return None;
             }
             activity.apply_exit_result(pane_id, terminal_exit_code(*status), now)
@@ -55,9 +58,33 @@ pub(crate) fn apply_terminal_activity_event(
         TerminalActivityEvent::SessionLost => None,
         // A refused open changes no agent identity; the pane is rebound.
         TerminalActivityEvent::IdTaken => None,
-        // Task 9/10: the foreground program and its status become evidence.
-        TerminalActivityEvent::Program(_) => None,
-        // Task 9/10
+        // The host names the program holding the terminal: identity only, no
+        // status. Idempotent, so a seed or a reconnect that repeats what the
+        // pane has changes nothing. Never logged: the argv and cwd are content.
+        TerminalActivityEvent::Program(program) => {
+            match program.as_ref() {
+                Some(program) => {
+                    // Per pane, from the first program the session names: Layer D
+                    // stops polling it, whether or not this one is an agent.
+                    activity.note_program_session(pane_id);
+                    match agent_for_program(&program.argv, &program.name) {
+                        Some(agent_id) => activity.program_identified(pane_id, agent_id),
+                        // A transient (the shell's pre-exec copy, a wrapper) or a
+                        // program that is no agent. Task 10: only while no 7501
+                        // record is live (Refinement 6).
+                        None => activity.program_gone(pane_id),
+                    }
+                }
+                // The shell is the foreground again: no agent process holds the
+                // terminal, so neither a program's nor Layer D's claim stands.
+                None => {
+                    activity.program_gone(pane_id);
+                    activity.process_gone(pane_id);
+                }
+            }
+            None
+        }
+        // Task 10: the program's status becomes evidence.
         TerminalActivityEvent::ProgramStatus { .. } => None,
     }
 }

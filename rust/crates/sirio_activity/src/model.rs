@@ -23,7 +23,9 @@
 //! process exits), **title-owned** (cleared only when the title stops
 //! matching that agent's conventions), **process-owned** (cleared only by
 //! [`AgentActivityModel::process_gone`], never by an unrelated title
-//! change).
+//! change), **program-owned** (the host named the pane's foreground program —
+//! cleared only by [`AgentActivityModel::program_gone`]: title and process
+//! evidence never set or clear it).
 //!
 //! The crate decides, it does not go looking: feed it events (a hook push,
 //! a new title, a content match, a process list) and read the resolved
@@ -69,6 +71,12 @@ pub struct AgentActivityModel {
     pane_agents: HashMap<String, String>,
     title_owned_panes: HashSet<String>,
     process_owned_panes: HashSet<String>,
+    /// Panes whose identity came from the host naming their foreground program.
+    program_owned_panes: HashSet<String>,
+    /// Panes whose session has named a program at least once. Set by the first
+    /// `Program(Some(_))` the pane receives and kept across `Program(None)`:
+    /// the session still names programs, so Layer D no longer polls the pane.
+    program_session_panes: HashSet<String>,
     /// Every change of a pane's resolved status, in order and uncoalesced,
     /// until [`Self::take_resolved_transitions`] drains it.
     resolved_transitions: Vec<Transition>,
@@ -421,6 +429,70 @@ impl AgentActivityModel {
     }
 
     // ------------------------------------------------------------------
+    // Foreground program named by the host
+    // ------------------------------------------------------------------
+
+    /// The pane's session has named a program (even one that is no agent): from
+    /// now on the host, not the Layer-D process walk, tells what runs in it.
+    /// Idempotent; survives [`Self::program_gone`]. Only a session that names
+    /// programs ever calls this, so a tab without job control keeps Layer D.
+    pub fn note_program_session(&mut self, pane_id: &str) {
+        if !self.program_session_panes.contains(pane_id) {
+            self.program_session_panes.insert(pane_id.to_string());
+        }
+    }
+
+    /// Whether this pane's session has named a program.
+    pub fn is_program_session(&self, pane_id: &str) -> bool {
+        self.program_session_panes.contains(pane_id)
+    }
+
+    /// The pane's foreground program is `agent_id`: identity only, never a
+    /// status. The pane is in `pane_agents` (so it is an agent pane) and owned
+    /// by the program, leaving title and process ownership. Idempotent: a
+    /// reconnect seeds the program the pane already has. Another agent
+    /// replacing the standing identity drops the status the old one had.
+    /// A pane whose agent Sirio itself registered (a spawn, a restore) keeps
+    /// that ownership: its own exit path clears it.
+    pub fn program_identified(&mut self, pane_id: &str, agent_id: &'static str) {
+        let owned_by_evidence = self.title_owned_panes.contains(pane_id)
+            || self.process_owned_panes.contains(pane_id)
+            || self.program_owned_panes.contains(pane_id);
+        if self.pane_agents.contains_key(pane_id) && !owned_by_evidence {
+            return;
+        }
+        let same = self.pane_agents.get(pane_id).map(String::as_str) == Some(agent_id);
+        if same && self.program_owned_panes.contains(pane_id) {
+            return;
+        }
+        // Read before ownership changes what `resolved` consults.
+        let old = self.resolved(pane_id);
+        self.pane_agents
+            .insert(pane_id.to_string(), agent_id.to_string());
+        self.title_owned_panes.remove(pane_id);
+        self.process_owned_panes.remove(pane_id);
+        self.program_owned_panes.insert(pane_id.to_string());
+        if !same {
+            self.agent_status.remove(pane_id);
+        }
+        self.track_status_change(pane_id, old, Instant::now());
+    }
+
+    /// The foreground is no longer the agent, or never named one: clears a
+    /// program-owned pane's identity and status. Title-, process- and
+    /// spawn-owned panes have their own clearing paths and are left alone.
+    pub fn program_gone(&mut self, pane_id: &str) {
+        if !self.program_owned_panes.contains(pane_id) {
+            return;
+        }
+        let old = self.resolved(pane_id);
+        self.agent_status.remove(pane_id);
+        self.pane_agents.remove(pane_id);
+        self.program_owned_panes.remove(pane_id);
+        self.track_status_change(pane_id, old, Instant::now());
+    }
+
+    // ------------------------------------------------------------------
     // Layer E: live-surface evidence
     // ------------------------------------------------------------------
 
@@ -466,9 +538,7 @@ impl AgentActivityModel {
     /// on every redraw can skip the redraw it would otherwise cause.
     pub fn set_entity_status(&mut self, pane_id: &str, status: Option<AgentStatus>) -> bool {
         let old = self.resolved(pane_id);
-        let changed = if self.title_owned_panes.contains(pane_id)
-            || self.process_owned_panes.contains(pane_id)
-        {
+        let changed = if self.is_evidence_owned(pane_id) {
             self.entity_status.remove(pane_id).is_some()
         } else {
             match status {
@@ -487,6 +557,14 @@ impl AgentActivityModel {
         self.entity_status.get(pane_id).copied()
     }
 
+    /// Whether a layer other than the surface owns this pane's identity (its
+    /// title, its process, its foreground program), so only that layer clears it.
+    fn is_evidence_owned(&self, pane_id: &str) -> bool {
+        self.title_owned_panes.contains(pane_id)
+            || self.process_owned_panes.contains(pane_id)
+            || self.program_owned_panes.contains(pane_id)
+    }
+
     /// The pane's resolved status: Layer E when the surface is making a
     /// claim, the layered A–D status otherwise. Every "what is this pane
     /// doing" question in the app answers with this.
@@ -497,8 +575,7 @@ impl AgentActivityModel {
     /// agent would otherwise have staked an error the sweep could no longer
     /// displace. Owned panes are cleared by their own layer, full stop.
     fn resolved(&self, pane_id: &str) -> Option<AgentStatus> {
-        if !self.title_owned_panes.contains(pane_id)
-            && !self.process_owned_panes.contains(pane_id)
+        if !self.is_evidence_owned(pane_id)
             && let Some(status) = self.entity_status.get(pane_id)
         {
             return Some(*status);
@@ -520,6 +597,8 @@ impl AgentActivityModel {
         self.pane_agents.remove(pane_id);
         self.title_owned_panes.remove(pane_id);
         self.process_owned_panes.remove(pane_id);
+        self.program_owned_panes.remove(pane_id);
+        self.program_session_panes.remove(pane_id);
     }
 
     // ------------------------------------------------------------------
@@ -543,6 +622,12 @@ impl AgentActivityModel {
     /// identification.
     pub fn is_process_owned(&self, pane_id: &str) -> bool {
         self.process_owned_panes.contains(pane_id)
+    }
+
+    /// Whether this pane's agent identity came from the host naming its
+    /// foreground program.
+    pub fn is_program_owned(&self, pane_id: &str) -> bool {
+        self.program_owned_panes.contains(pane_id)
     }
 
     /// Highest-priority agent status among the given pane ids

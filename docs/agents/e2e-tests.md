@@ -84,6 +84,19 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # claude-prompt-hook is case 6's mutation check.
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 
+# An agent typed by hand into a terminal shows its mark: a debug sirio on a private Xvfb (or
+# --display :N), in an `env -i` world (its own HOME, XDG directories, SIRIO_DB, SIRIO_HOST_HOME and
+# OpenCode service config) whose PATH holds only stubs. A stub (stubs/hand-agents/agent.py) plays
+# claude, codex, omp and pi; `node` is python3 and `$RUN/bg/codex` a copy of it. Each case opens a
+# terminal with `surface terminal open` (no --cmd: the host names its foreground program), types
+# through `host_probe term-write`, and reads the pane's `agent` in `panel list --json`: the four
+# agents typed by name (a frame of each), a package script run by `node`, leaving it, a background
+# `codex` that Layer D would name but is not the foreground, and an omp title. --out-dir DIR keeps
+# transcript.log, steps.log (each step's `panel list` and `surface attention read`), frames/ and the
+# logs (default ~/.cache/st/hand-agents-e2e-<time>; TMPDIR defaults to ~/.cache/st/hand-agents-tmp,
+# on disk); --only NAME[,NAME...] prints "HAND AGENTS E2E PARTIAL"; --no-build reuses the binaries.
+Scripts/Tests/test-hand-agents-e2e.sh   # -> prints "HAND AGENTS E2E OK (<n> cases, <s>s)"
+
 # The "Project added" dialog after every add from the UI, in a real debug Sirio per scenario (a
 # fresh SIRIO_DB, private HOME and SIRIO_PROJECTS_DIR), driven by real X keys and clicks and
 # asserted on the debug `surface project-identity read` verb, `project list --json` and the stored
