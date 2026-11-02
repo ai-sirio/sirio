@@ -277,6 +277,14 @@ the peek is not part of this work.
 A Secondary half hidden with Ctrl+Shift+B already works this way today: its
 tabs are not drawn and keep running.
 
+**A restore that lands collapsed** (boot, worktree switch back) draws no
+Primary tab. Its terminals therefore start lazily, on first draw (a peek or
+the pin), like any tab not drawn. A host session that survived the quit keeps
+running in `sirio-host` meanwhile, and the view attaches at its drawn size on
+the first peek. Starting it earlier, undrawn, would resize the session to
+80×24 (coordinator's call, 2026-11-02). Until then the restored scrollback is
+what a save writes back, so a quit before any peek loses nothing.
+
 **What the builder must not add.** No code path may detach, park, pause or
 throttle a tab because the Primary half is collapsed. The E2E in §8 proves
 it.
