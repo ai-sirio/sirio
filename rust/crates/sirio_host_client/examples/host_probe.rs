@@ -14,7 +14,9 @@
 //!                                        client's verdict uses; needs no data root)
 //!   host_probe term-create <cwd> [--id ID] [--origin app|control] [--prelude TEXT]
 //!       [-- <program> [args…]]
-//!   host_probe term-list
+//!   host_probe term-list                 per session `session=… pid=… …`, then `program=<json>`: its
+//!                                        {session_id, program, status} (null when absent), for
+//!                                        a script to read with a JSON parser
 //!   host_probe term-read <id> [text|raw] [--max N]
 //!   host_probe term-write <id> <text> | term-key <id> <name> | term-feed <id> <text>
 //!   host_probe term-resize <id> <cols> <rows> | term-close <id> | term-wait <id> <ms>
@@ -204,6 +206,14 @@ fn main() {
                     origin_label(&session.origin),
                     session.clients,
                     u8::from(session.foreground.running)
+                );
+                println!(
+                    "program={}",
+                    serde_json::json!({
+                        "session_id": session.session_id,
+                        "program": session.program,
+                        "status": session.status,
+                    })
                 );
             }
         }

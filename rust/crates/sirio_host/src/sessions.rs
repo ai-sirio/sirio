@@ -107,6 +107,8 @@ impl SessionTable {
                     parent: entry.parent.clone(),
                     clients: info.attachments.min(u32::MAX as usize) as u32,
                     created_at: entry.created_at,
+                    program: info.program.map(foreground_program),
+                    status: info.status.map(|(record, at_ms)| program_status(record, at_ms)),
                 }
             })
             .collect()
@@ -287,8 +289,15 @@ fn pump_events(
                     session_id: session_id.clone(),
                     running,
                 },
-                // Carried over the host protocol by a later change.
-                Event::Program(_) | Event::Status(..) => continue,
+                Event::Program(program) => SessionEvent::Program {
+                    session_id: session_id.clone(),
+                    program: program.map(foreground_program),
+                },
+                Event::Status(record, at_ms) => SessionEvent::Status {
+                    session_id: session_id.clone(),
+                    status: record.map(|record| program_status(record, at_ms)),
+                    at_ms,
+                },
                 Event::Exited(exit) => {
                     let exit = entry
                         .session
@@ -324,6 +333,31 @@ fn spawn_env(
     let mut env = env_fallback.clone();
     env.extend(client);
     env
+}
+
+fn foreground_program(program: sirio_term_session::ForegroundProgram) -> ForegroundProgram {
+    ForegroundProgram {
+        pid: program.pid,
+        name: program.name,
+        argv: program.argv,
+        cwd: program.cwd,
+    }
+}
+
+fn program_status(record: sirio_term_session::StatusRecord, at_ms: u64) -> ProgramStatus {
+    use sirio_term_session::ReportState;
+    ProgramStatus {
+        state: match record.state {
+            ReportState::Idle => ProgramState::Idle,
+            ReportState::Working => ProgramState::Working,
+            ReportState::Done => ProgramState::Done,
+            ReportState::Blocked => ProgramState::Blocked,
+            ReportState::Error => ProgramState::Error,
+        },
+        kind: record.kind,
+        app: record.app,
+        at_ms,
+    }
 }
 
 pub(crate) fn exit_status(exit: Exit) -> ExitStatus {

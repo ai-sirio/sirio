@@ -48,9 +48,35 @@ set -eEuo pipefail
 #                         remains available to another client
 #   15. isolation         different absolute SIRIO_DB paths start and stop
 #                         different hosts
+#   16. program_is_named  a typed `sleep` is named, with its argv and cwd, by
+#                         `term.list`; Ctrl+C takes it away again
+#   17. program_is_named_every_time
+#                         the same, 20 times in one shell: never a shell name
+#                         once settled
+#   18. probe_is_answered_once
+#                         a program that asks the OSC 7501 probe gets one answer
+#   19. report_is_kept    a program's `working` report shows in `term.list`, and
+#                         a repeat of that state keeps its `at_ms`
+#   20. fed_bytes_are_not_scanned
+#                         a report fed with `term.feed`, and a probe in the
+#                         prelude, are neither kept nor answered
+#   21. argv_stays_out_of_the_log
+#                         a typed argument never reaches host.log
+#   22. probe_answer_precedes_da1
+#                         the probe's answer reaches the program before the
+#                         reply to a DA1 query sent right after it
+#   23. program_is_named_after_a_slow_exec
+#                         a wrapper is named, then the program it execs
+#   24. record_ends_with_its_program
+#                         a report is dropped when the program that made it ends
+#   25. report_after_exec_is_kept
+#                         a report from a program the shell exec'd, long after
+#                         the shell had the terminal, is kept
 # Cases 10 and 11 are unix-only and print SKIP on Windows; case 13 runs on
-# Linux only. The systemd scope arm of case 3 runs only on Linux with a user
-# manager.
+# Linux only; cases 16 to 25 run on Linux and macOS and print SKIP on Windows.
+# The systemd scope arm of case 3 runs only on Linux with a user manager.
+# Cases 16 to 25 need python3 on PATH (they read `term.list`'s JSON, and the
+# probe stub is a python3 script).
 #
 # Each case force-shuts every host in its own root and retires the root
 # afterwards (a staged host binary is 7 MB; a dozen of them have no business
@@ -893,6 +919,234 @@ case_handshake_deadline() {
   pass
 }
 
+# ------------------------------------------------- the foreground program (term.program)
+
+# Everything below types real commands into a real /bin/sh -i that a real host
+# owns, and reads what `term.list` says about the session, as the app does.
+# The typed text never holds a real ESC byte: the terminal echoes what is
+# typed, and a report in the echo would be read as the program's own. A report
+# is made by `printf '\033...\007'` (the shell turns the text into the bytes).
+
+# workdir: a fresh directory of this case, by its canonical path (macOS /tmp is
+# /private/tmp, and the host names the directory the process really has).
+WORKDIR=""
+workdir() {
+  mkdir -p "$ROOT_BASE/w$N"
+  WORKDIR="$(cd "$ROOT_BASE/w$N" && pwd -P)"
+}
+
+# load_session ID: the session's `program=` line of `term.list`, in SESSION_DOC
+# (empty when the session is not listed).
+SESSION_DOC=""
+load_session() {
+  run_probe term-list
+  [ "$RC" -eq 0 ] || return 1
+  SESSION_DOC="$(printf '%s\n' "$OUT" | grep '^program=' | grep -F "\"session_id\":\"$1\"" | head -n 1 | sed 's/^program=//' || true)"
+  [ -n "$SESSION_DOC" ]
+}
+# doc_field PATH: a dotted path into SESSION_DOC ("program.name", "status.at_ms");
+# a string prints as it is, anything else as compact JSON, an absent or null
+# field as nothing.
+doc_field() {
+  printf '%s' "$SESSION_DOC" | python3 -c '
+import json, sys
+node = json.load(sys.stdin)
+for part in sys.argv[1].split("."):
+    if not isinstance(node, dict) or node.get(part) is None:
+        sys.exit(0)
+    node = node[part]
+print(node if isinstance(node, str) else json.dumps(node, separators=(",", ":")))
+' "$1" || true
+}
+# field_is ID PATH VALUE / field_absent ID PATH: one `term.list` each, for wait_until.
+field_is() { load_session "$1" && [ "$(doc_field "$2")" = "$3" ]; }
+field_absent() { load_session "$1" && [ -z "$(doc_field "$2")" ]; }
+# program_is ID NAME ARGV_JSON: the name and the argv, from one `term.list`.
+program_is() {
+  load_session "$1" && [ "$(doc_field program.name)" = "$2" ] && [ "$(doc_field program.argv)" = "$3" ]
+}
+# argv_has ID TEXT: the program's argv holds TEXT.
+argv_has() {
+  load_session "$1" && printf '%s\n' "$(doc_field program.argv)" | grep -qF "$2"
+}
+# session_shows ID TEXT: the session's screen holds TEXT.
+session_shows() {
+  run_probe term-read "$1" text
+  [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qF "$2"
+}
+# screen_count ID TEXT: how many lines of the session's screen hold TEXT.
+screen_count() {
+  run_probe term-read "$1" text
+  printf '%s\n' "$OUT" | grep -cF "$2" || true
+}
+# interactive_shell ID: a /bin/sh -i in a fresh directory (WORKDIR) of a fresh host.
+interactive_shell() {
+  fresh_root
+  probe ensure
+  workdir
+  probe term-create "$WORKDIR" --id "$1" -- /bin/sh -i
+}
+# A report of `working` by `codex`, as text for the typed shell's printf.
+REPORT_WORKING="printf '\\033]7501;state=working:app=codex\\007'"
+
+case_program_is_named() {
+  if [ "$OS" = windows ]; then skip "no foreground process group to read on Windows"; return 0; fi
+  interactive_shell pane-16
+  probe term-write pane-16 $'sleep 37\r'
+  wait_until 5 program_is pane-16 sleep '["sleep","37"]' \
+    || fail "the typed 'sleep 37' is not named within 5 s: name '$(doc_field program.name)', argv '$(doc_field program.argv)' in $SESSION_DOC"
+  [ "$(doc_field program.cwd)" = "$WORKDIR" ] \
+    || fail "the program's cwd is '$(doc_field program.cwd)', not the session's $WORKDIR"
+  probe term-write pane-16 $'\003'
+  wait_until 2 field_absent pane-16 program.name \
+    || fail "the program is still named 2 s after Ctrl+C: $SESSION_DOC"
+  pass
+}
+
+case_program_is_named_every_time() {
+  if [ "$OS" = windows ]; then skip "no foreground process group to read on Windows"; return 0; fi
+  interactive_shell pane-17
+  local i
+  for i in $(seq 20); do
+    probe term-write pane-17 $'sleep 37\r'
+    wait_until 5 program_is pane-17 sleep '["sleep","37"]' \
+      || fail "round $i: 'sleep 37' is not named within 5 s: $SESSION_DOC"
+    # Settled means it stays: no later read may name the shell instead.
+    sleep 0.6
+    program_is pane-17 sleep '["sleep","37"]' \
+      || fail "round $i: the name did not stay 'sleep' after it settled: $SESSION_DOC"
+    probe term-write pane-17 $'\003'
+    wait_until 3 field_absent pane-17 program.name \
+      || fail "round $i: the program is still named 3 s after Ctrl+C: $SESSION_DOC"
+  done
+  NOTE="20 rounds"
+  pass
+}
+
+PROBE_STUB="$REPO_ROOT/Scripts/Tests/stubs/osc7501-probe.py"
+
+case_probe_is_answered_once() {
+  if [ "$OS" = windows ]; then skip "no OSC 7501 on Windows"; return 0; fi
+  fresh_root
+  probe ensure
+  workdir
+  probe term-create "$WORKDIR" --id pane-18 -- python3 "$PROBE_STUB"
+  wait_until 10 session_shows pane-18 READY || fail "the probe stub never printed READY: $OUT"
+  [ "$(screen_count pane-18 'ANSWER OK')" = 1 ] || fail "the probe was not answered exactly once: $OUT"
+  session_shows pane-18 'ANSWERS 1' || fail "the stub did not count one answer: $OUT"
+  pass
+}
+
+case_report_is_kept() {
+  if [ "$OS" = windows ]; then skip "no OSC 7501 on Windows"; return 0; fi
+  fresh_root
+  probe ensure
+  workdir
+  # The first report, two seconds, the same state again with a message, a visible
+  # marker (the report before it is read by then), and the program stays.
+  probe term-create "$WORKDIR" --id pane-19 -- sh -c \
+    "printf '\\033]7501;state=working:app=codex\\007'; sleep 2; printf '\\033]7501;state=working:app=codex:msg=aGVsbG8=\\007'; echo SECOND-REPORT-SENT; sleep 30"
+  wait_until 5 field_is pane-19 status.state working || fail "no 'working' status within 5 s: $SESSION_DOC"
+  [ "$(doc_field status.app)" = codex ] || fail "the status app is '$(doc_field status.app)', not codex: $SESSION_DOC"
+  local first_at
+  first_at="$(doc_field status.at_ms)"
+  [ -n "$first_at" ] || fail "the status has no at_ms: $SESSION_DOC"
+  wait_until 6 session_shows pane-19 SECOND-REPORT-SENT || fail "the second report was never sent: $OUT"
+  load_session pane-19 || fail "the session is not listed"
+  [ "$(doc_field status.state)" = working ] || fail "the status went away after the second report: $SESSION_DOC"
+  [ "$(doc_field status.at_ms)" = "$first_at" ] \
+    || fail "a repeat of the same state moved at_ms from $first_at to $(doc_field status.at_ms)"
+  NOTE="at_ms $first_at kept"
+  pass
+}
+
+case_fed_bytes_are_not_scanned() {
+  if [ "$OS" = windows ]; then skip "no OSC 7501 on Windows"; return 0; fi
+  fresh_root
+  probe ensure
+  workdir
+  # 1. a report in fed bytes sets no status. The visible text before it proves
+  # the bytes were processed by the time the status is looked at.
+  probe term-create "$WORKDIR" --id pane-20 -- sleep 60
+  probe term-feed pane-20 $'FED-BYTES-SEEN\e]7501;state=blocked:app=codex\a'
+  wait_until 5 session_shows pane-20 FED-BYTES-SEEN || fail "the fed bytes never reached the screen: $OUT"
+  sleep 1
+  load_session pane-20 || fail "the session is not listed"
+  [ -z "$(doc_field status.state)" ] || fail "a report in fed bytes set a status: $SESSION_DOC"
+  # 2. a probe in the prelude is not answered into the program.
+  probe term-create "$WORKDIR" --id pane-2001 --prelude $'\e]7501;?\e\\' -- python3 "$PROBE_STUB" --no-probe
+  wait_until 10 session_shows pane-2001 READY || fail "the stub never printed READY: $OUT"
+  session_shows pane-2001 'ANSWER NONE' || fail "a probe in the prelude was answered: $OUT"
+  # 3. the positive control: the same stub, asking itself, is answered.
+  probe term-create "$WORKDIR" --id pane-2002 -- python3 "$PROBE_STUB"
+  wait_until 10 session_shows pane-2002 READY || fail "the control stub never printed READY: $OUT"
+  session_shows pane-2002 'ANSWER OK' || fail "the control probe was not answered: $OUT"
+  pass
+}
+
+case_argv_stays_out_of_the_log() {
+  if [ "$OS" = windows ]; then skip "no foreground process group to read on Windows"; return 0; fi
+  interactive_shell pane-21
+  local log="$ROOT/log/host-v1.log"
+  # `sleep` would refuse a non-numeric argument and end at once, so the marker
+  # is the $0 of a wrapper (`; :` keeps the shell from exec'ing the sleep).
+  probe term-write pane-21 $'sh -c "sleep 38; :" SIRIO-ARGV-MARKER\r'
+  wait_until 5 argv_has pane-21 SIRIO-ARGV-MARKER \
+    || fail "the typed command is not named within 5 s (the control: without it the log proves nothing): $SESSION_DOC"
+  # Let every read the host makes of that program happen first.
+  sleep 3
+  [ -f "$log" ] || fail "the host log $log does not exist"
+  has_line "$log" 'start.ready' || fail "the host log holds no start.ready, so it is not the log of this host"
+  [ "$(grep -c SIRIO-ARGV-MARKER "$log" || true)" = 0 ] || fail "an argument of the typed program reached host.log"
+  [ "$(grep -c sleep "$log" || true)" = 0 ] || fail "the typed program's argv reached host.log"
+  pass
+}
+
+case_probe_answer_precedes_da1() {
+  if [ "$OS" = windows ]; then skip "no OSC 7501 on Windows"; return 0; fi
+  fresh_root
+  probe ensure
+  workdir
+  probe term-create "$WORKDIR" --id pane-22 -- python3 "$PROBE_STUB" --then-da1
+  wait_until 10 session_shows pane-22 READY || fail "the probe stub never printed READY: $OUT"
+  session_shows pane-22 'ORDER OK' || fail "the 7501 answer did not come before the DA1 reply: $OUT"
+  pass
+}
+
+case_program_is_named_after_a_slow_exec() {
+  if [ "$OS" = windows ]; then skip "no foreground process group to read on Windows"; return 0; fi
+  interactive_shell pane-23
+  probe term-write pane-23 $'sh -c "sleep 1; exec sleep 39"\r'
+  wait_until 5 program_is pane-23 sleep '["sleep","39"]' \
+    || fail "the program a wrapper exec'd is not named within 5 s: $SESSION_DOC"
+  pass
+}
+
+case_record_ends_with_its_program() {
+  if [ "$OS" = windows ]; then skip "no OSC 7501 on Windows"; return 0; fi
+  interactive_shell pane-24
+  # A program reports and ends, and another program takes the terminal at once.
+  probe term-write pane-24 "$(printf "sh -c \"%s; sleep 2\"; sleep 37\r" "$REPORT_WORKING")"
+  wait_until 5 field_is pane-24 status.state working \
+    || fail "the report was never read (the control: without it 'no status' below proves nothing): $SESSION_DOC"
+  wait_until 10 program_is pane-24 sleep '["sleep","37"]' \
+    || fail "the second program is not named within 10 s: $SESSION_DOC"
+  [ -z "$(doc_field status.state)" ] || fail "the first program's record outlived it: $SESSION_DOC"
+  pass
+}
+
+case_report_after_exec_is_kept() {
+  if [ "$OS" = windows ]; then skip "no OSC 7501 on Windows"; return 0; fi
+  interactive_shell pane-25
+  probe term-write pane-25 $'sleep 0.2\r'
+  sleep 1.5
+  probe term-write pane-25 "$(printf "exec sh -c \"%s; sleep 30\"\r" "$REPORT_WORKING")"
+  wait_until 3 field_is pane-25 status.state working \
+    || fail "a report from the exec'd program is not kept within 3 s: $SESSION_DOC"
+  [ "$(doc_field status.app)" = codex ] || fail "the status app is '$(doc_field status.app)', not codex: $SESSION_DOC"
+  pass
+}
+
 run_case start-and-adopt   case_start_and_adopt
 run_case concurrent-start  case_concurrent_start
 run_case client-killed     case_client_killed
@@ -908,5 +1162,15 @@ run_case foreign-client    case_foreign_client
 run_case successor         case_successor
 run_case handshake-deadline case_handshake_deadline 14
 run_case isolation         case_isolation 15
+run_case program_is_named                  case_program_is_named
+run_case program_is_named_every_time       case_program_is_named_every_time
+run_case probe_is_answered_once            case_probe_is_answered_once
+run_case report_is_kept                    case_report_is_kept
+run_case fed_bytes_are_not_scanned         case_fed_bytes_are_not_scanned
+run_case argv_stays_out_of_the_log         case_argv_stays_out_of_the_log
+run_case probe_answer_precedes_da1         case_probe_answer_precedes_da1
+run_case program_is_named_after_a_slow_exec case_program_is_named_after_a_slow_exec
+run_case record_ends_with_its_program      case_record_ends_with_its_program
+run_case report_after_exec_is_kept         case_report_after_exec_is_kept
 
 echo "HOST E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"
