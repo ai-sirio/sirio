@@ -73,10 +73,10 @@ impl TurnTracker {
     /// last applied one is a replay and is dropped, and the same state at the same
     /// time is a repeat that changes nothing.
     pub(crate) fn report(&mut self, state: ReportedState, at_ms: u64) {
-        if let Some((last_state, last_at)) = self.last {
-            if at_ms < last_at || (at_ms == last_at && state == last_state) {
-                return;
-            }
+        if let Some((last_state, last_at)) = self.last
+            && (at_ms < last_at || (at_ms == last_at && state == last_state))
+        {
+            return;
         }
         self.last = Some((state, at_ms));
         match state {
@@ -102,9 +102,9 @@ impl TurnTracker {
                 self.status = Some(AgentStatus::Error);
             }
             ReportedState::Idle => {
-                let finished = self
-                    .turn_start
-                    .is_some_and(|start| self.blocked_in_turn || at_ms.saturating_sub(start) >= MIN_TURN_MS);
+                let finished = self.turn_start.is_some_and(|start| {
+                    self.blocked_in_turn || at_ms.saturating_sub(start) >= MIN_TURN_MS
+                });
                 self.close_turn();
                 self.status = finished.then_some(AgentStatus::Done);
             }

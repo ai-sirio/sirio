@@ -103,15 +103,14 @@ pub(crate) fn apply_terminal_activity_event(
         }
         // What the program reports: the record the turn tracker reads. The report
         // is kept for the pane whether or not the pane is an agent yet; one that
-        // arrives before the program is named shows once it is. A pane no program
-        // names (Windows, a Sirio-spawned `$SHELL -lc <agent>`) takes its agent from
-        // the report's `app=`; where the host names programs, `Program` decides.
-        // Never logged: `kind` and `app` are content.
+        // arrives before the program is named shows once it is. A pane with no agent
+        // yet takes it from the report's `app=` (a pane no program names, or a
+        // launcher the resolver misses); a `Program` that names an agent decides
+        // later. Never logged: `kind` and `app` are content.
         TerminalActivityEvent::ProgramStatus { status, at_ms } => {
             match status {
                 Some(record) => {
                     if activity.agent_id(pane_id).is_none()
-                        && !activity.is_program_session(pane_id)
                         && let Some(agent_id) = record.app.as_deref().and_then(agent_for_app)
                     {
                         activity.program_identified(pane_id, agent_id);
@@ -123,7 +122,17 @@ pub(crate) fn apply_terminal_activity_event(
                         now,
                     );
                 }
-                None => activity.program_report(pane_id, None, *at_ms, now),
+                None => {
+                    activity.program_report(pane_id, None, *at_ms, now);
+                    // Windows names no program, so a cleared record is also what says
+                    // an identity a report gave is over. A clear is not a stop.
+                    if cfg!(windows)
+                        && activity.is_program_owned(pane_id)
+                        && !activity.is_program_session(pane_id)
+                    {
+                        activity.program_gone(pane_id);
+                    }
+                }
             }
             None
         }

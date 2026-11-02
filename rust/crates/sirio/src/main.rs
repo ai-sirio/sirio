@@ -10334,17 +10334,31 @@ impl SirioWorkspace {
                 }
 
                 // The program left (the shell is the foreground again, or the session
-                // ended): a turn that was mid-way settles to Done first, and that stop
+                // ended or was lost): a turn that was mid-way settles to Done first, and that stop
                 // is drained while the pane is still an agent's. Only then does
                 // `apply_terminal_activity_event` clear the identity.
                 if matches!(
                     event,
-                    TerminalActivityEvent::Program(None) | TerminalActivityEvent::ChildExited { .. }
+                    TerminalActivityEvent::Program(None)
+                        | TerminalActivityEvent::ChildExited { .. }
+                        | TerminalActivityEvent::SessionLost
                 ) {
                     workspace
                         .activity
                         .program_exited(&activity_pane_id, Instant::now());
                     workspace.drain_activity_transitions(cx);
+                }
+                // A record lives as long as its session: when the child exits or the
+                // host is lost it goes, whoever owns the pane, and the owner's own
+                // handling follows (a program-owned pane clears, a spawn-owned one
+                // shows its exit code). A new session restarts its clock at zero.
+                if matches!(
+                    event,
+                    TerminalActivityEvent::ChildExited { .. } | TerminalActivityEvent::SessionLost
+                ) {
+                    workspace
+                        .activity
+                        .drop_report(&activity_pane_id, Instant::now());
                 }
                 let title_owned_before = workspace.activity.is_title_owned(&activity_pane_id);
                 let identity_before = (
@@ -10585,6 +10599,26 @@ impl SirioWorkspace {
                             let process_owned_before =
                                 workspace.activity.is_process_owned(&activity_pane_id)
                                     || workspace.activity.is_program_owned(&activity_pane_id);
+                            // Windows names no foreground program: an identity a report
+                            // gave lives until Layer D, having seen the agent's process
+                            // there, sees none. A turn that was mid-way settles first.
+                            if cfg!(windows) {
+                                let seen = matches!(observation, Ok(Some(_)));
+                                let none = match &observation {
+                                    Ok(found) => found.is_none(),
+                                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                                };
+                                if seen {
+                                    workspace.activity.note_process_seen(&activity_pane_id);
+                                } else if none && workspace.activity.process_lost(&activity_pane_id)
+                                {
+                                    workspace
+                                        .activity
+                                        .program_exited(&activity_pane_id, Instant::now());
+                                    workspace.drain_activity_transitions(cx);
+                                    workspace.activity.program_gone(&activity_pane_id);
+                                }
+                            }
                             match workspace
                                 .activity
                                 .apply_process_signal(&activity_pane_id, observation)

@@ -89,6 +89,10 @@ pub struct AgentActivityModel {
     /// When the host named each program-owned pane's agent: a title and the screen
     /// set no status for [`TITLE_GRACE`] after it.
     program_identified_at: HashMap<String, Instant>,
+    /// Windows only: program-owned panes in a session that never names a program
+    /// whose agent process Layer D has seen. Its disappearing is the one signal
+    /// there that the agent left.
+    process_seen: HashSet<String>,
     /// Panes whose resolved status went to nothing since the last
     /// [`Self::take_cleared_panes`]: a cleared status queues no transition, yet a
     /// pane that was Running must stop reading as running.
@@ -169,7 +173,7 @@ impl AgentActivityModel {
     pub fn notify(&mut self, pane_id: &str, status: AgentStatus, now: Instant) -> Transition {
         // The agent reports its own turns: while its record is live a hook sets no
         // status (the session it carries is the caller's business) and is a non-change.
-        if self.reports.contains_key(pane_id) {
+        if self.record_shows(pane_id) {
             let standing = self.resolved(pane_id);
             return Transition {
                 pane_id: pane_id.to_string(),
@@ -298,6 +302,8 @@ impl AgentActivityModel {
             // title names the agent; what it says is a startup, and says nothing of a
             // turn: identity only. The next title applies as it always did.
             if self.program_session_panes.contains(pane_id) {
+                self.program_identified_at
+                    .insert(pane_id.to_string(), Instant::now());
                 self.track_status_change(pane_id, old, now);
                 return None;
             }
@@ -317,9 +323,12 @@ impl AgentActivityModel {
             // Title no longer matches this agent's conventions at all.
             // Only clear title-owned panes; spawn-owned panes rely on
             // process exit and must survive a transient nil classification.
-            if self.title_owned_panes.contains(pane_id) {
+            // Nothing a title says clears the identity a report shows: the report's
+            // turn end would lose its stop.
+            if self.title_owned_panes.contains(pane_id) && !self.record_shows(pane_id) {
                 let old = self.resolved(pane_id);
                 self.agent_status.remove(pane_id);
+                self.program_identified_at.remove(pane_id);
                 self.pane_agents.remove(pane_id);
                 self.title_owned_panes.remove(pane_id);
                 self.track_status_change(pane_id, old, now);
@@ -411,17 +420,6 @@ impl AgentActivityModel {
     /// plain shell. Clears process-owned panes only — spawn- and
     /// title-owned panes have their own exit/clearing paths.
     pub fn process_gone(&mut self, pane_id: &str) {
-        // Windows names no foreground program, so Layer D is the one that sees the
-        // agent leave: an identity a report gave (program-owned, in a session that
-        // never named a program) clears with it. Elsewhere that identity lives as
-        // long as its record or the program event that ends it.
-        if cfg!(windows)
-            && self.program_owned_panes.contains(pane_id)
-            && !self.program_session_panes.contains(pane_id)
-        {
-            self.program_gone(pane_id);
-            return;
-        }
         if !self.process_owned_panes.contains(pane_id) {
             return;
         }
@@ -522,6 +520,8 @@ impl AgentActivityModel {
         }
         // Read before ownership changes what `resolved` consults.
         let old = self.resolved(pane_id);
+        // A different agent than the one standing: the record is the old one's.
+        let replaced = !same && self.pane_agents.contains_key(pane_id);
         self.program_identified_at
             .insert(pane_id.to_string(), Instant::now());
         self.pane_agents
@@ -531,6 +531,9 @@ impl AgentActivityModel {
         self.program_owned_panes.insert(pane_id.to_string());
         if !same {
             self.agent_status.remove(pane_id);
+            if replaced {
+                self.reports.remove(pane_id);
+            }
         }
         self.track_status_change(pane_id, old, Instant::now());
     }
@@ -548,6 +551,7 @@ impl AgentActivityModel {
         self.program_owned_panes.remove(pane_id);
         self.reports.remove(pane_id);
         self.program_identified_at.remove(pane_id);
+        self.process_seen.remove(pane_id);
         self.track_status_change(pane_id, old, Instant::now());
     }
 
@@ -605,12 +609,65 @@ impl AgentActivityModel {
         self.reports.contains_key(pane_id)
     }
 
-    /// A program-owned pane's title and screen set no status while a record is live
-    /// and for [`TITLE_GRACE`] after the agent is recognised: what a CLI writes
-    /// while it starts says nothing about a turn.
+    /// The record decides the pane's status: it exists and the pane is an agent
+    /// pane. A record with no identity waits, and swallows nothing meanwhile.
+    fn record_shows(&self, pane_id: &str) -> bool {
+        self.reports.contains_key(pane_id) && self.pane_agents.contains_key(pane_id)
+    }
+
+    /// The pane's session ended (its child exited, or the host was lost): the record
+    /// belongs to that session and goes, whoever owns the pane. What it last showed
+    /// becomes the layered status, so nothing changes yet; the owner's own handling
+    /// (a spawn-owned pane's exit code, `program_gone`) follows and now shows. A new
+    /// session starts its clock again at zero, which a kept record would treat as a
+    /// replay. Call it after [`Self::program_exited`] and the drain.
+    pub fn drop_report(&mut self, pane_id: &str, now: Instant) {
+        let shows = self.record_shows(pane_id);
+        let old = self.resolved(pane_id);
+        let Some(tracker) = self.reports.remove(pane_id) else {
+            return;
+        };
+        if shows {
+            match tracker.status() {
+                Some(status) => {
+                    self.agent_status.insert(pane_id.to_string(), status);
+                }
+                None => {
+                    self.agent_status.remove(pane_id);
+                }
+            }
+        }
+        self.track_status_change(pane_id, old, now);
+    }
+
+    /// Windows only: Layer D saw the agent's process on this pane. See
+    /// [`Self::process_lost`].
+    pub fn note_process_seen(&mut self, pane_id: &str) {
+        if self.program_owned_panes.contains(pane_id) && !self.program_session_panes.contains(pane_id)
+        {
+            self.process_seen.insert(pane_id.to_string());
+        }
+    }
+
+    /// Windows only: Layer D sees no agent process on a pane it had seen one on. Names no
+    /// foreground program there, so this is the edge that says the agent left; a pane
+    /// Layer D never saw one on (a Node agent it cannot see) is not cleared by it.
+    pub fn process_lost(&mut self, pane_id: &str) -> bool {
+        self.process_seen.remove(pane_id)
+            && self.program_owned_panes.contains(pane_id)
+            && !self.program_session_panes.contains(pane_id)
+    }
+
+    /// A pane's title and screen set no status while its record shows and for
+    /// [`TITLE_GRACE`] after the agent is recognised: what a CLI writes while it
+    /// starts says nothing about a turn. Covers a program-owned pane, and a
+    /// title-owned one in a session that names programs (the title came first).
     fn startup_is_silent(&self, pane_id: &str, now: Instant) -> bool {
-        self.program_owned_panes.contains(pane_id)
-            && (self.reports.contains_key(pane_id)
+        let covered = self.program_owned_panes.contains(pane_id)
+            || (self.title_owned_panes.contains(pane_id)
+                && self.program_session_panes.contains(pane_id));
+        covered
+            && (self.record_shows(pane_id)
                 || self
                     .program_identified_at
                     .get(pane_id)
@@ -703,8 +760,8 @@ impl AgentActivityModel {
         // The program's own reports come first, `None` included: a record that shows
         // no status is the agent saying nothing is going on. Until the pane is an
         // agent pane they wait, and show once the program is named.
-        if let Some(tracker) = self.reports.get(pane_id)
-            && self.pane_agents.contains_key(pane_id)
+        if self.record_shows(pane_id)
+            && let Some(tracker) = self.reports.get(pane_id)
         {
             return tracker.status();
         }
@@ -734,6 +791,7 @@ impl AgentActivityModel {
         self.program_session_panes.remove(pane_id);
         self.reports.remove(pane_id);
         self.program_identified_at.remove(pane_id);
+        self.process_seen.remove(pane_id);
     }
 
     // ------------------------------------------------------------------

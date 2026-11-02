@@ -23,6 +23,10 @@ Typed lines (the whole line, then Enter):
                       send none)
   hook <status>       `sirioctl notify --session "$SIRIO_PANE_ID" --status <status>`,
                       as an agent's hook runs it
+  title <text>        set the window title to <text>
+  fgchild             run `sleep 6.123` in its own process group as the terminal's
+                      foreground group, wait for it, then take the terminal back (an
+                      agent handing the terminal to a child it runs)
   exit                leave, with code 0
 
 Startup, per profile:
@@ -39,6 +43,7 @@ every line carries an explicit CR (raw mode turns output post-processing off).
 import atexit
 import os
 import select
+import signal
 import subprocess
 import sys
 import termios
@@ -89,6 +94,23 @@ def report(name, state):
     app = APPS.get(name)
     body = "state=" + state + (":app=" + app if app else "")
     os.write(1, b"\x1b]7501;" + body.encode() + b"\x1b\\")
+
+
+def fgchild():
+    """Hands the terminal to a child in its own process group, then takes it back."""
+    pid = os.fork()
+    if pid == 0:
+        os.setpgid(0, 0)
+        os.execvp("sleep", ["sleep", "6.123"])
+    try:
+        os.setpgid(pid, pid)
+    except OSError:
+        pass
+    signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    os.tcsetpgrp(0, pid)
+    os.waitpid(pid, 0)
+    os.tcsetpgrp(0, os.getpgrp())
+    signal.signal(signal.SIGTTOU, signal.SIG_DFL)
 
 
 class Input:
@@ -193,6 +215,10 @@ def main():
                     ],
                     check=False,
                 )
+            elif words[0] == "title" and len(words) > 1:
+                title(" ".join(words[1:]))
+            elif words[0] == "fgchild":
+                fgchild()
             elif words[0] == "exit":
                 return
 

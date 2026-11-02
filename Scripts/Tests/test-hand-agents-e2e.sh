@@ -46,6 +46,10 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  Stop hook that follows changes nothing
 #   relaunch_mid_turn              codex mid-turn, `system.quit`, restart: the turn is
 #                                  still open and its idle is a stop (+1); an idle tab stays silent
+#   agent_hands_the_terminal_to_a_child
+#                                  an agent stub gives the terminal to a child (`fgchild`): claude, with
+#                                  a live record, keeps its mark; pi, which reports nothing, loses it
+#                                  while the child is the foreground and has it back after
 #   argv_stays_out_of_app_stderr   `claude SIRIO-ARGV-MARKER`: the marker is not in the app's stderr
 #
 # The world is isolated: `env -i` with an allow-list (a private HOME, every XDG
@@ -481,7 +485,7 @@ PY
 # posted count, then the pane list and the attention read (`step`).
 stepn() { # label session
   {
-    echo "=== $1 -- session $2: status=$(attention_get "$2" status) unread=$(attention_get "$2" unread) running=$(attention_get "$2" running) posted=$(posted_count)"
+    echo "=== $1 -- session $2: status=$(attention_get "$2" status) unread=$(attention_get "$2" unread) running=$(attention_get "$2" running) posted=$(posted_count) tags=$(posted_rows | python3 -I -c 'import json, sys; print(",".join(json.loads(l)["tag"][-6:] for l in sys.stdin))')"
   } >> "$OUT_DIR/steps.log"
   step "$1"
 }
@@ -624,8 +628,7 @@ case_startup_is_silent() {
 case_claude_states() {
   local base
   start_agent claude
-  type_line "$PANE" work
-  wait_status "$SESS" running 3
+  long_work "$PANE" "$SESS"
   stepn "claude working" "$SESS"
   capture "claude-running"
   base="$(posted_count)"
@@ -715,6 +718,10 @@ case_exit_mid_turn_is_finished() {
 case_clear_mid_turn_is_silent() {
   local base
   start_agent claude
+  # A status under the record: past the startup grace a title is the layer below it, and
+  # the clear must take it away with the record, or it would come back as the status.
+  type_line "$PANE" "title . thinking"
+  wait_status "$SESS" running 3
   long_work "$PANE" "$SESS"
   base="$(posted_count)"
   type_line "$PANE" clear
@@ -825,6 +832,62 @@ case_relaunch_mid_turn() {
   expect_attention "$sess_b" status null "tab B after A's idle"
 }
 
+# The pid of the `sleep 6.123` an agent stub handed the terminal to, once it is the
+# terminal's foreground group (its process group is the terminal's: fields 3 and 6 of
+# /proc/<pid>/stat after the command name). Sets CHILD. A pass that never saw the child
+# in the foreground would prove nothing.
+wait_foreground_child() {
+  local pid stat rest
+  CHILD=""
+  for _ in $(seq 1 50); do
+    for pid in $(pgrep -f 'sleep 6.123' 2>/dev/null || true); do
+      stat="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+      [ -n "$stat" ] || continue
+      rest="${stat##*) }"
+      set -- $rest
+      if [ "$3" = "$6" ] && [ "$6" != 0 ] && [ "$6" != -1 ]; then CHILD="$pid"; return 0; fi
+    done
+    sleep 0.2
+  done
+  fail "the stub's child never became the terminal's foreground group"
+}
+child_alive() { kill -0 "$CHILD" 2>/dev/null; }
+child_gone() { ! child_alive; }
+
+case_agent_hands_the_terminal_to_a_child() {
+  # A reporting agent keeps its mark while a child holds the terminal (Refinement 6); one
+  # that never reports loses it for as long, and has it back when it takes the terminal.
+  open_pane
+  type_line "$PANE" claude
+  wait_agent "$PANE" claude 3
+  sleep 2.5
+  type_line "$PANE" work
+  wait_status "$SESS" running 3
+  type_line "$PANE" fgchild
+  wait_foreground_child
+  sleep 1.5
+  child_alive || fail "the child is gone before the mark could be checked"
+  [ "$(agent_of "$PANE")" = claude ] || fail "claude lost its mark while its child held the terminal"
+  expect_attention "$SESS" status running "claude with a live record, a child in the foreground"
+  stepn "claude: child holds the terminal" "$SESS"
+  wait_until 10 child_gone || fail "the child never ended"
+  sleep 1
+  [ "$(agent_of "$PANE")" = claude ] || fail "claude lost its mark after its child ended"
+
+  open_pane
+  type_line "$PANE" pi
+  wait_agent "$PANE" pi 3
+  sleep 2.5
+  type_line "$PANE" fgchild
+  wait_foreground_child
+  wait_agent "$PANE" "" 4
+  child_alive || fail "the child ended before pi's mark cleared, so the check proves nothing"
+  stepn "pi: child holds the terminal, mark cleared" "$SESS"
+  wait_until 10 child_gone || fail "the child never ended"
+  wait_agent "$PANE" pi 5
+  stepn "pi: terminal taken back, mark back" "$SESS"
+}
+
 case_argv_stays_out_of_app_stderr() {
   local count
   open_pane
@@ -876,6 +939,7 @@ run_case hooks_yield_to_reports
 run_case hooks_still_rule_without_reports
 run_case spawned_agent_reports
 run_case relaunch_mid_turn
+run_case agent_hands_the_terminal_to_a_child
 run_case argv_stays_out_of_app_stderr
 
 [ "$CASES_RUN" -gt 0 ] || { echo "FAIL: --only named no case" >&2; exit 1; }
