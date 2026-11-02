@@ -24,15 +24,23 @@ set -eEuo pipefail
 #    9 no_worktree               without a worktree New, Edit and the card open nothing; Copy works
 #   10 unwritable                an unwritable folder: Save failed, the text stays and the tab
 #                                reads dirty, New raises the toast and writes nothing; the next
-#                                key after the fix saves and the tab reads clean
-#   11 worktree_switch           a key, then at once another worktree: the key is on disk
-#   12 delete_beside_terminal    Delete of a prompt split beside a terminal: only its leaf goes
+#                                key after the fix saves and the tab reads clean; then, unwritable
+#                                again right after a good save, a key and Ctrl+W at once: the
+#                                close asks and the tab stays
+#   11 worktree_switch           a key, then at once another worktree: the key is on disk, and
+#                                one try's switch had returned within the 400 ms autosave delay
+#   12 delete_beside_terminal    Delete of a prompt split beside a terminal: only its leaf goes,
+#                                the tab left is a terminal tab, and it comes back with its
+#                                session after a switch to another worktree and back
 #   13 copy_unreadable           Copy of an open prompt the app cannot read: the toast, no check,
-#                                the CLIPBOARD unchanged
+#                                the marker put on the CLIPBOARD before it still there
 # Then light captures of the view with three prompts and of the Delete dialog
 # (Escape cancels it and the prompt stays), and:
 #   14 quit_right_after_typing   a key, then at once Quit: the key is on disk
-# Then dark captures of the same, after a restart on a fresh database.
+# Then dark captures of the same, after a restart on a fresh database, and:
+#   15 close_prompt_leaf         a key, then at once the prompt's leaf closed beside a terminal:
+#                                the key is on disk; a new prompt's leaf closed untouched leaves
+#                                no file and no index entry
 #
 # Two traps this script avoids on purpose:
 #   - The CLIPBOARD is read through GTK forced onto X11 with nothing of the
@@ -43,6 +51,12 @@ set -eEuo pipefail
 #     the app to take the new mapping, then presses the key through XTest.
 #     xdotool binds and presses at once, and the app sometimes reads the key
 #     before the mapping and drops the character.
+#
+# Two dialogs take clicks only, and no verb reports where their buttons are:
+# gpui's own "Close dirty tab?" prompt (scenario 10) and the "Close terminal?"
+# banner (scenario 15). Each is found in a capture by its colour: the prompt is
+# the only pure white under its grey veil, Close Anyway the only bright red
+# under the banner's black one.
 #
 # The artifact: --out-dir DIR (default artifacts/prompts-e2e-<stamp>-<pid>)
 # keeps transcript.log (every sirioctl call and its reply), prompts/ (the
@@ -103,7 +117,7 @@ esac
 [ ! -e "$SIRIO_PROMPTS_DIR" ] || fail "$OUT_DIR already holds a prompts folder; pass a fresh --out-dir"
 echo "prompts folder: $SIRIO_PROMPTS_DIR"
 
-for tool in python3 git Xvfb xdpyinfo xdotool xwininfo xprop import identify; do
+for tool in python3 git Xvfb xdpyinfo xdotool xwininfo xprop import identify magick; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
 python3 -I -c 'import gi; gi.require_version("Gtk", "3.0")' 2>/dev/null || fail "python3-gi with GTK 3 is required (it reads the CLIPBOARD)"
@@ -130,6 +144,7 @@ mkdir -p "$BASE"
 WORK="$(python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$(mktemp -d "$BASE/prompts-XXXXXX")")"
 SD=""
 APP_PID=""
+CLIP_PID=""
 XVFB_PID=""
 WIN=""
 DISPLAY_TARGET=""
@@ -168,6 +183,7 @@ cleanup() {
   # Scenario 10 takes the folder's write bit away; the artifact keeps it.
   [ ! -d "$SIRIO_PROMPTS_DIR" ] || chmod u+w "$SIRIO_PROMPTS_DIR"
   [ -z "$APP_PID" ] || terminate "$APP_PID"
+  [ -z "$CLIP_PID" ] || terminate "$CLIP_PID"
   collect_logs
   stop_hosts
   [ -z "$XVFB_PID" ] || terminate "$XVFB_PID"
@@ -252,6 +268,56 @@ for char in text + "\0":
     if char != "\0":
         glyph(char)
 x.XCloseDisplay(display)
+PY
+
+# A key, then a control call the moment the editor holds it, in one process:
+# a sirioctl start per read costs more than the 400 ms autosave delay leaves
+# on a loaded machine. Prints `<key_ms> <total_ms>`, both from just before the
+# press: to the read that showed the key, and to the call's reply.
+cat >"$WORK/race.py" <<'PY'
+import json, os, socket, subprocess, sys, time
+
+def call(path, method, params):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(20)
+        conn.connect(path)
+        conn.sendall((json.dumps({"id": "race", "method": method, "params": params}) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    return json.loads(data)
+
+path, display, key, tail, method = sys.argv[1:6]
+params = dict(arg.split("=", 1) for arg in sys.argv[6:])
+started = time.monotonic()
+subprocess.run(["xdotool", "key", key], check=True, env={**os.environ, "DISPLAY": display})
+for _ in range(200):
+    reply = call(path, "surface.editor.state", {})
+    if reply.get("ok") and (reply.get("result") or {}).get("text", "").endswith(tail):
+        break
+else:
+    sys.exit("the key never reached the editor")
+arrived = time.monotonic()
+reply = call(path, method, params)
+finished = time.monotonic()
+if not reply.get("ok"):
+    sys.exit(method + " was refused: " + str(reply.get("error")))
+print(round((arrived - started) * 1000), round((finished - started) * 1000))
+PY
+
+# Owns this display's CLIPBOARD with a text until it is stopped (60 s at most).
+cat >"$WORK/clipown.py" <<'PY'
+import sys
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk
+Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(sys.argv[1], -1)
+GLib.timeout_add_seconds(60, Gtk.main_quit)
+Gtk.main()
 PY
 
 # The project the prompts are used beside: a git repository with a plain note.
@@ -477,11 +543,22 @@ active_is() { tabs_query active "$1" 2>/dev/null; }
 tab_dirty() { tabs_query dirty "$1" 2>/dev/null; }
 tab_clean() { tabs_query clean "$1" 2>/dev/null; }
 tab_position() { tabs_query position "$1" 2>/dev/null || true; }
-# Whether the active tab shows no editor of PATH (or no editor at all).
+# Whether the active tab shows no editor of PATH: one on another file, or no
+# file leaf at all, the one error that means "no editor there". Any other
+# failure of the verb answers nothing, so it is not a yes.
 editor_not_on() { # path
-  local state
-  state="$(ctlq surface editor state 2>/dev/null)" || return 0
+  local state rc=0
+  state="$(ctlq surface editor state 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    grep -Fq 'no file tab is active' <<<"$state"
+    return
+  fi
   ! grep -Fxq -- "path=$1" <<<"$state"
+}
+# The `kind|snapshot|title` of the tab at POSITION, from `surface tabs read`.
+tab_at() { # position
+  ctlq surface tabs read --json | python3 -I -c 'import json, sys
+print(json.load(sys.stdin)[0].get("tab." + sys.argv[1], ""))' "$1"
 }
 
 # ---------------------------------------------------------------- terminal panes
@@ -496,6 +573,37 @@ panes_since() { # before
   comm -13 <(printf '%s\n' "$1") <(pane_ids)
 }
 new_pane_since() { [ -n "$(panes_since "$1")" ]; }
+pane_gone() { ! pane_ids | grep -Fxq -- "$1"; }
+# The title of the tab that holds pane ID, from `panel list`.
+pane_tab() { # pane id
+  ctlq panel list --json | python3 -I -c 'import json, sys
+for row in json.load(sys.stdin):
+    if row["id"] == sys.argv[1]:
+        print(row["tab"])' "$1"
+}
+# Whether the tab at POSITION is a terminal tab, not titled NOT_TITLE, and the
+# one that holds pane ID.
+terminal_tab_at() { # position pane not_title
+  local tab
+  tab="$(tab_at "$1")" || return 1
+  [ "${tab%%|*}" = terminal ] && [ "${tab#*|*|}" != "$3" ] && [ "$(pane_tab "$2")" = "${tab#*|*|}" ]
+}
+# The position of the tab that holds pane ID, when it is a terminal tab not
+# titled NOT_TITLE and the only tab with its title; fails otherwise. A restore
+# lays tabs out in its own order, so after one the place is not the proof.
+terminal_tab_of() { # pane not_title
+  local title
+  title="$(pane_tab "$1")"
+  [ -n "$title" ] && [ "$title" != "$2" ] || return 1
+  ctlq surface tabs read --json | python3 -I -c 'import json, sys
+row = json.load(sys.stdin)[0]
+tabs = {i: row["tab." + str(i)].split("|", 2) for i in range(1, int(row["count"]) + 1)}
+hits = [i for i, (kind, _, title) in tabs.items() if title == sys.argv[1]]
+if len(hits) != 1 or tabs[hits[0]][0] != "terminal":
+    sys.exit(1)
+print(hits[0])' "$title"
+}
+terminal_tab_back() { terminal_tab_of "$@" >/dev/null; }
 # Whether the pane's session is listed and still running.
 pane_running() { # pane id
   pane_ids | grep -Fxq -- "$1" || return 1
@@ -602,6 +710,29 @@ click_card() { # path suffix [button]
   [ -n "$bounds" ] || fail "$SCENARIO: card $2 of $1 has no bounds -- read: $(last_read)"
   click_at_bounds "$bounds" "${3:-1}"
 }
+# Where a capture's patch of COLOUR is, as `x y w h` window pixels, or nothing:
+# white is gpui's own prompt, the only pure white under its grey veil; red is a
+# destructive button, the only bright red under a modal's black veil. The open
+# drops what is thinner than 7 px, such as the coloured fringes of text.
+patch_of() { # file white|red
+  local range box
+  case "$2" in
+    white) range='sRGB(250,250,250)-sRGB(255,255,255)' ;;
+    red) range='sRGB(180,0,0)-sRGB(255,140,140)' ;;
+  esac
+  box="$(magick "$1" -color-threshold "$range" -morphology Open Square:3 -format '%@' info: 2>/dev/null)" || return 0
+  case "$box" in 0x0+*|'') return 0 ;; esac
+  sed -E 's/^([0-9]+)x([0-9]+)\+([0-9]+)\+([0-9]+)$/\3 \4 \1 \2/' <<<"$box"
+}
+# A fresh capture NAME shows no patch of COLOUR.
+no_patch() { # name white|red
+  capture "$1" 0.3
+  [ -z "$(patch_of "$OUT_DIR/captures/$THEME-$1.png" "$2")" ]
+}
+click_point() { # x y
+  focus_app
+  DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$WIN" "$1" "$2" click 1
+}
 # The CLIPBOARD of this display, as bytes, into FILE.
 clipboard_to() { # file
   with_timeout 10 env -i PATH=/usr/bin:/bin HOME="$SD/home" GDK_BACKEND=x11 DISPLAY="$DISPLAY_TARGET" \
@@ -617,6 +748,16 @@ PY
 }
 clipboard_matches() { # file
   clipboard_to "$SD/clipboard.bin" && cmp -s "$SD/clipboard.bin" "$1"
+}
+# Puts TEXT on this display's CLIPBOARD, held by clipown.py until clipboard_stop.
+clipboard_own() { # text
+  env -i PATH=/usr/bin:/bin HOME="$SD/home" GDK_BACKEND=x11 DISPLAY="$DISPLAY_TARGET" \
+    python3 -I "$WORK/clipown.py" "$1" &
+  CLIP_PID=$!
+}
+clipboard_stop() {
+  [ -z "$CLIP_PID" ] || terminate "$CLIP_PID"
+  CLIP_PID=""
 }
 
 # ---------------------------------------------------------------- an app
@@ -916,40 +1057,67 @@ xtype V
 wait_until "the next key saved the text" ends_with "$A" "italianoXWV"
 wait_on editor dirty=false
 wait_until "A's tab reads clean again" tab_clean "$TITLE_A"
+# Unwritable again right after that good save, then a key and Ctrl+W at once:
+# the close writes the key first, that fails, so the close asks and A stays.
+chmod a-w "$SIRIO_PROMPTS_DIR"
+note "the prompts folder is read-only again"
+focus_app
+DISPLAY="$DISPLAY_TARGET" xdotool key --delay 0 K ctrl+w
+capture 10-close-asks 0.5
+asked="$(patch_of "$OUT_DIR/captures/$THEME-10-close-asks.png" white)"
+[ -n "$asked" ] || fail "$SCENARIO: Ctrl+W asked nothing: no prompt in captures/$THEME-10-close-asks.png"
+note "the close asked: its prompt is at $asked (x y w h)"
+hold_until 1 "A's tab stays while the close asks" tab_count_is "$TITLE_A" 1
+wait_until "A's tab reads dirty" tab_dirty "$TITLE_A"
+# The prompt has no keys: a click on Cancel, its last row, dismisses it.
+read -r ask_x ask_y ask_w ask_h <<<"$asked"
+click_point "$((ask_x + ask_w / 2))" "$((ask_y + ask_h - 24))"
+wait_until "the prompt is gone after the click on Cancel" no_patch 10-close-cancelled white
+hold_until 1 "A's tab stays after Cancel" tab_count_is "$TITLE_A" 1
+wait_on editor "path=$A" 'text~=italianoXWVK'
+chmod u+w "$SIRIO_PROMPTS_DIR"
+note "the prompts folder is writable again"
+xkey ctrl+s
+wait_until "Ctrl+S saved the key" ends_with "$A" "italianoXWVK"
+wait_until "A's tab reads clean again" tab_clean "$TITLE_A"
 ok 10 unwritable
 
 SCENARIO="worktree_switch"
 ctl project add "$OTHER_REPO" >/dev/null
 wait_until "the second repository is listed" other_listed
+OTHER_ID="$(worktree_id_of "$OTHER_REPO")"
 ctl select-workspace --workspace "$(worktree_id)" >/dev/null
 wait_on prompts canEdit=1
-click_card "$A" EditBounds
-wait_on editor state=loaded "path=$A"
-settle_focus
-xkey ctrl+End
-other="$(worktree_id_of "$OTHER_REPO")"
-focus_app
-# The key, then, as soon as the editor holds it, the other worktree: the
-# outgoing tab is parked while its autosave may still be waiting.
-started="$(date +%s%N)"
-DISPLAY="$DISPLAY_TARGET" xdotool key S
-editor_text_ends italianoXWVS || fail "$SCENARIO: the key never reached the editor"
-arrived="$(date +%s%N)"
-ctlq select-workspace --workspace "$other" >/dev/null || fail "$SCENARIO: the switch was refused"
-finished="$(date +%s%N)"
-key_ms=$(( (arrived - started) / 1000000 ))
-total_ms=$(( (finished - started) / 1000000 ))
-# The autosave timer starts when the editor takes the key, so a switch that
-# has returned within 400 ms of the press surely beat it.
-if [ "$total_ms" -lt 400 ]; then
-  note "the editor held the key $key_ms ms after the press and the switch had returned at $total_ms ms: it landed before the 400 ms autosave"
-else
-  note "the editor held the key $key_ms ms after the press and the switch had returned at $total_ms ms: not proven to land before the 400 ms autosave"
-fi
-wait_until "the key is on disk" ends_with "$A" "italianoXWVS"
-ctl select-workspace --workspace "$(worktree_id)" >/dev/null
-wait_on prompts canEdit=1
-wait_until "A's tab came back with the worktree" tab_count_is "$TITLE_A" 1
+# No verb says where a worktree's sidebar row is and no key switches worktree,
+# so the switch is the socket's: a key, then, as soon as the editor holds it,
+# the other worktree (race.py). The outgoing tab is parked while its autosave
+# may still be waiting. The timer starts when the editor takes the key, so a
+# switch that had returned within 400 ms of the press surely beat it: up to
+# five tries, each with a fresh key, until one does; every key must reach disk.
+proven=""
+for key in S J L N P; do
+  click_card "$A" EditBounds
+  wait_on editor state=loaded "path=$A"
+  settle_focus
+  xkey ctrl+End
+  want="$(tail -c 12 "$A")$key"
+  focus_app
+  timing="$(python3 -I "$WORK/race.py" "$SIRIO_SOCKET" "$DISPLAY_TARGET" "$key" "$want" \
+    workspace.select "workspace=$OTHER_ID")" || fail "$SCENARIO: the try with $key failed"
+  read -r key_ms total_ms <<<"$timing"
+  if [ "$total_ms" -lt 400 ]; then
+    note "try $key: the editor held the key $key_ms ms after the press and the switch had returned at $total_ms ms: it landed before the 400 ms autosave"
+    proven="$key"
+  else
+    note "try $key: the editor held the key $key_ms ms after the press and the switch had returned at $total_ms ms: not proven to land before the 400 ms autosave"
+  fi
+  wait_until "the key $key is on disk" ends_with "$A" "$want"
+  ctl select-workspace --workspace "$(worktree_id)" >/dev/null
+  wait_on prompts canEdit=1
+  wait_until "A's tab came back with the worktree" tab_count_is "$TITLE_A" 1
+  [ -z "$proven" ] || break
+done
+[ -n "$proven" ] || fail "$SCENARIO: not proven: no try's switch returned within the 400 ms autosave delay"
 ok 11 worktree_switch
 
 SCENARIO="delete_beside_terminal"
@@ -963,6 +1131,8 @@ wait_until "E's text is saved" ends_with "$E" "Testo accanto"
 wait_until "E's title is saved" title_is "$E" "$TITLE_E"
 tabs_before="$(tab_titles)"
 panes_before="$(pane_ids)"
+position="$(tab_position "$TITLE_E")"
+[ -n "$position" ] || fail "$SCENARIO: E's tab is not listed"
 # A terminal split beside the prompt, in the prompt's own tab.
 ctl pane split --direction right >/dev/null
 wait_until "a terminal opened" new_pane_since "$panes_before"
@@ -970,17 +1140,29 @@ T="$(panes_since "$panes_before" | head -n 1)"
 note "the terminal beside the prompt: $T"
 wait_until "the terminal runs" pane_running "$T"
 [ "$(tab_titles)" = "$tabs_before" ] || fail "$SCENARIO: the split opened another tab: $(tab_titles | tr '\n' '|')"
+wait_on editor state=loaded "path=$E"
+note "OK: E's leaf is beside the terminal, in tab $position"
 open_delete_dialog "$E"
 click_key confirmDeleteBounds
 wait_until "E's file and entry are gone" gone "$E"
 wait_until "E's card is gone" no_card "$E"
 wait_until "no editor shows E" editor_not_on "$E"
 hold_until 1 "the terminal beside E still runs" pane_running "$T"
-tab_count_is "$TITLE_E" 1 || fail "$SCENARIO: the tab that held E and the terminal is gone"
-note "OK: the tab is still there, holding the terminal"
+# What is left in the tab is the terminal, so it is a terminal tab now.
+wait_until "tab $position is a terminal tab holding the terminal, not titled E" \
+  terminal_tab_at "$position" "$T" "$TITLE_E"
+note "the tab left: $(tab_at "$position")"
+# Another worktree and back: the tab comes back, and the same session in it.
+ctl select-workspace --workspace "$OTHER_ID" >/dev/null
+ctl select-workspace --workspace "$(worktree_id)" >/dev/null
+wait_on prompts canEdit=1
+wait_until "the terminal is back and still runs" pane_running "$T"
+wait_until "the terminal's tab is back, a terminal tab not titled E" terminal_tab_back "$T" "$TITLE_E"
+position="$(terminal_tab_of "$T" "$TITLE_E")"
+note "the tab back, at $position: $(tab_at "$position")"
 # A live terminal asks before its tab closes: the confirmed close skips that.
-ctl surface tabs close "$(tab_position "$TITLE_E")" --confirm >/dev/null
-wait_until "the terminal's tab closed" tab_count_is "$TITLE_E" 0
+ctl surface tabs close "$position" --confirm >/dev/null
+wait_until "the terminal's tab closed" pane_gone "$T"
 ok 12 delete_beside_terminal
 
 SCENARIO="copy_unreadable"
@@ -998,13 +1180,18 @@ wait_until "F's tab closed" tab_count_is "$TITLE_F" 0
 chmod 000 "$F"
 click_card "$F" EditBounds
 wait_on editor state=error "path=$F"
-clipboard_to "$WORK/clipboard-13.bin"
+# A known marker on the CLIPBOARD right before Copy: a Copy that wrote
+# anything, even nothing, would replace it.
+printf 'Segnaposto prima di Copy' >"$WORK/clipboard-13.txt"
+clipboard_own "$(cat "$WORK/clipboard-13.txt")"
+wait_until "the marker is on the CLIPBOARD" clipboard_matches "$WORK/clipboard-13.txt"
 click_card "$F" CopyBounds
 hold_until 1 "Copy shows no check" card_shows "$F" Copied 0
 wait_on identity 'toast~=Could not copy the prompt: '
 note "toast: $(value toast)"
-clipboard_matches "$WORK/clipboard-13.bin" || fail "$SCENARIO: Copy changed the CLIPBOARD"
-note "OK: the CLIPBOARD is as before"
+clipboard_matches "$WORK/clipboard-13.txt" || fail "$SCENARIO: Copy changed the CLIPBOARD"
+note "OK: the marker is still on the CLIPBOARD"
+clipboard_stop
 chmod 644 "$F"
 open_delete_dialog "$F"
 click_key confirmDeleteBounds
@@ -1050,10 +1237,12 @@ DISPLAY="$DISPLAY_TARGET" xdotool key Q
 editor_text_ends commitQ || fail "$SCENARIO: the key never reached the editor"
 ctlq quit >/dev/null 2>&1 || true
 total_ms=$(( ($(date +%s%N) - started) / 1000000 ))
+# What is measured is the reply to the quit request, which the app sends just
+# before it calls cx.quit(): the quit, and the save it makes, start after it.
 if [ "$total_ms" -lt 400 ]; then
-  note "the quit had returned $total_ms ms after the key: it came before the 400 ms autosave"
+  note "the reply to the quit request came $total_ms ms after the key: the quit began before the 400 ms autosave"
 else
-  note "the quit had returned $total_ms ms after the key: not proven to come before the 400 ms autosave"
+  note "the reply to the quit request came $total_ms ms after the key: not proven to begin before the 400 ms autosave"
 fi
 app_quit
 ends_with "$D" "commitQ" || fail "$SCENARIO: the key typed just before Quit is not on disk"
@@ -1074,6 +1263,84 @@ open_delete_dialog "$C"
 capture delete-dialog
 xkey Escape
 wait_on prompts confirmDeleteBounds=
+
+SCENARIO="close_prompt_leaf"
+click_card "$D" EditBounds
+wait_on editor state=loaded "path=$D"
+position="$(tab_position "$TITLE_D")"
+[ -n "$position" ] || fail "$SCENARIO: D's tab is not listed"
+panes_before="$(pane_ids)"
+# A terminal split beside the prompt; then the prompt's leaf is the focused one.
+ctl pane split --direction right >/dev/null
+wait_until "a terminal opened" new_pane_since "$panes_before"
+T="$(panes_since "$panes_before" | head -n 1)"
+wait_until "the terminal runs" pane_running "$T"
+ctl pane focus --direction left >/dev/null
+# Ctrl+Alt+W holds the close for the "Close terminal?" banner, which only a
+# click on Close Anyway confirms: the button is found once, in a capture.
+xkey ctrl+alt+w
+wait_on identity pendingPaneClose=true
+capture 15-close-pane 0.5
+anyway="$(patch_of "$OUT_DIR/captures/$THEME-15-close-pane.png" red)"
+[ -n "$anyway" ] || fail "$SCENARIO: no Close Anyway in captures/$THEME-15-close-pane.png"
+note "Close Anyway is at $anyway (x y w h)"
+read -r anyway_x anyway_y anyway_w anyway_h <<<"$anyway"
+anyway_x=$((anyway_x + anyway_w / 2))
+anyway_y=$((anyway_y + anyway_h / 2))
+xkey Escape
+wait_on identity pendingPaneClose=false
+click_card "$D" EditBounds
+wait_on editor state=loaded "path=$D"
+settle_focus
+xkey ctrl+End
+focus_app
+# One xdotool call: the key, Ctrl+Alt+W, a pause for the banner's first frame
+# (a click hits what was drawn last), and the click on Close Anyway.
+started="$(date +%s%N)"
+DISPLAY="$DISPLAY_TARGET" xdotool key --delay 0 Z key ctrl+alt+w sleep 0.25 \
+  mousemove --window "$WIN" "$anyway_x" "$anyway_y" click 1
+elapsed=$(( ($(date +%s%N) - started) / 1000000 ))
+# The call's length counts xdotool's own start and the 250 ms pause, so it
+# bounds the time from the key to the click from above.
+if [ "$elapsed" -lt 400 ]; then
+  note "the key, the close and the click were one xdotool call of $elapsed ms: the close came before the 400 ms autosave"
+else
+  note "the key, the close and the click were one xdotool call of $elapsed ms, its start and the 250 ms pause included: not proven by its length to come before the 400 ms autosave"
+fi
+wait_on identity pendingPaneClose=false
+wait_until "no editor shows D" editor_not_on "$D"
+wait_until "the key typed just before the close is on disk" ends_with "$D" "commitQZ"
+hold_until 1 "the terminal beside D still runs" pane_running "$T"
+wait_until "tab $position is a terminal tab holding the terminal, not titled D" \
+  terminal_tab_at "$position" "$T" "$TITLE_D"
+ctl surface tabs close "$position" --confirm >/dev/null
+wait_until "the terminal's tab closed" pane_gone "$T"
+# A new prompt's leaf closed untouched beside a terminal leaves nothing behind.
+files_before="$(md_list)"
+entries_before="$(index_files)"
+U="$(new_prompt)"
+note "new prompt: $U"
+position="$(tab_position "Untitled prompt")"
+[ -n "$position" ] || fail "$SCENARIO: the new prompt's tab is not listed"
+panes_before="$(pane_ids)"
+ctl pane split --direction right >/dev/null
+wait_until "a terminal opened" new_pane_since "$panes_before"
+T="$(panes_since "$panes_before" | head -n 1)"
+wait_until "the terminal runs" pane_running "$T"
+ctl pane focus --direction left >/dev/null
+xkey ctrl+alt+w
+wait_on identity pendingPaneClose=true
+sleep 0.25
+click_point "$anyway_x" "$anyway_y"
+wait_on identity pendingPaneClose=false
+wait_until "no editor shows the new prompt" editor_not_on "$U"
+wait_until "no new file remains" [ ! -e "$U" ]
+[ "$(md_list)" = "$files_before" ] || fail "$SCENARIO: the files changed: $(md_list | tr '\n' ' ')"
+[ "$(index_files)" = "$entries_before" ] || fail "$SCENARIO: the index changed: $(index_files | tr '\n' ' ')"
+note "OK: the folder and the index are as before"
+ctl surface tabs close "$position" --confirm >/dev/null
+wait_until "the terminal's tab closed" pane_gone "$T"
+ok 15 close_prompt_leaf
 app_quit
 
 # ---------------------------------------------------------------- teardown
