@@ -163,7 +163,7 @@ fn reported_state(state: ReportState) -> ReportedState {
     }
 }
 
-fn terminal_exit_code(status: TerminalExitStatus) -> i32 {
+pub(crate) fn terminal_exit_code(status: TerminalExitStatus) -> i32 {
     match status {
         TerminalExitStatus::Success => 0,
         TerminalExitStatus::Code(code) => code,
