@@ -117,7 +117,7 @@ pub(crate) fn resolve_collapsed_center(
     CollapsedCenter {
         rail: PRIMARY_RAIL_WIDTH,
         secondary: room,
-        peek: expanded.clamp(MIN_CENTER_PANE_WIDTH.min(room), room),
+        peek: expanded.min(room),
     }
 }
 
@@ -350,9 +350,9 @@ mod tests {
     // Spec 2026-11-01-primary-rail §3/§5, written from their failure modes
     // before the code: the rail and the Secondary leave a gap or overlap; the
     // peek is not the expanded Primary at a normal width; the peek runs past
-    // the space right of the rail; the peek drops under its floor although
-    // there is room; a tiny centre goes negative; an out-of-range ratio
-    // escapes the clamp.
+    // the space right of the rail; the peek drops under the expanded half's
+    // floor although there is room; a tiny centre goes negative; an
+    // out-of-range ratio escapes the clamp.
 
     #[test]
     fn collapsed_center_secondary_fills_the_rest() {
