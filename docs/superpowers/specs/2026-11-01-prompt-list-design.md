@@ -130,6 +130,13 @@ itself: autosave, title change, new, delete. Edits made in another program show
 up the next time the view is shown. There is no watcher. `sirio_markdown`'s
 monitor is inert on macOS, and the host's `notify` watcher covers worktrees only.
 
+**Failures:** a Copy, New prompt or Delete that fails (a file that cannot be
+read, a folder that cannot be written) raises the workspace's existing toast
+(`show_toast` in `main.rs`, the one a failed project identity save uses) with
+the reason. The card stays as it was and Copy shows no check. The editor's
+per-tab bell is not reachable from the right panel, and no new kind of notice
+is added.
+
 ## §3 The editor tab: prompt mode on `FileView`
 
 A prompt opens as an ordinary **file tab**: `TabKind::Editor`,
@@ -337,3 +344,6 @@ the code. Nothing tautological gets added.
     last write wins.** A tab with nothing unsaved takes the new text. A tab
     where you are typing keeps your text and overwrites the file. Sirio never
     asks and never discards what you typed.
+11. **A failed Copy, New prompt or Delete is reported** in the workspace's
+    existing toast (§2, "Failures"). Chosen by Enzo on 2026-11-02 over staying
+    silent.
