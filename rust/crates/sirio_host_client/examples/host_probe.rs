@@ -17,6 +17,8 @@
 //!   host_probe term-list                 per session `session=… pid=… …`, then `program=<json>`: its
 //!                                        {session_id, program, status} (null when absent), for
 //!                                        a script to read with a JSON parser
+//!   host_probe term-events <ms>         subscribe to term.sessions, print `subscribed`, then each
+//!                                        SessionEvent as one compact JSON line for <ms>, and exit
 //!   host_probe term-read <id> [text|raw] [--max N]
 //!   host_probe term-write <id> <text> | term-key <id> <name> | term-feed <id> <text>
 //!   host_probe term-resize <id> <cols> <rows> | term-close <id> | term-wait <id> <ms>
@@ -215,6 +217,24 @@ fn main() {
                         "status": session.status,
                     })
                 );
+            }
+        }
+        Some("term-events") => {
+            let millis: u64 = args.get(1).and_then(|v| v.parse().ok()).expect("term-events <ms>");
+            // The client is kept: dropping it closes the connection the events come over.
+            let client = term_client(&paths, major, &majors);
+            let events = client.events().expect("term.sessions");
+            println!("subscribed");
+            std::io::stdout().flush().expect("flush");
+            let deadline = Instant::now() + Duration::from_millis(millis);
+            while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                match events.recv_timeout(left) {
+                    Ok(event) => {
+                        println!("{}", serde_json::to_string(&event).expect("event json"));
+                        std::io::stdout().flush().expect("flush");
+                    }
+                    Err(_) => break,
+                }
             }
         }
         Some("term-read") => term_read(&paths, major, &majors, &args),

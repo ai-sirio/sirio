@@ -23,10 +23,11 @@ Scripts/Tests/test-update-ui-e2e.sh   # -> prints "UPDATE UI E2E OK"
 # The host foundation: a real sirio-host started detached, adopted, killed
 # around, idled out and drained across a protocol major; --out-dir DIR keeps
 # every host's log and state; SIRIO_HOST_E2E_VERBOSE=1 prints each probe line. Cases
-# program_is_named .. report_after_exec_is_kept (Linux and macOS; they need python3) type
+# program_is_named .. events_carry_program_and_status (Linux and macOS; they need python3) type
 # real commands into a /bin/sh -i the host owns and read `term.list`'s program and status,
-# the OSC 7501 probe answer (and its order before a DA1 reply), that bytes from `term.feed`
-# or the prelude are never scanned, and that no argv reaches host.log.
+# the OSC 7501 probe answer (at most one a second, and before a DA1 reply), that bytes from
+# `term.feed` or the prelude are never scanned, that no argv, script or cwd reaches host.log,
+# and the `program` and `status` events a `host_probe term-events <ms>` subscriber receives.
 Scripts/Tests/test-host-e2e.sh      # -> prints "HOST E2E OK (<n> cases, <s>s)"
 # Whether a detached process survives its parent's world, row by row.
 Scripts/Tests/probe-host-detach.sh  # -> prints "DETACH PROBE OK"

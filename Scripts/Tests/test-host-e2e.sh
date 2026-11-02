@@ -54,14 +54,15 @@ set -eEuo pipefail
 #                         the same, 20 times in one shell: never a shell name
 #                         once settled
 #   18. probe_is_answered_once
-#                         a program that asks the OSC 7501 probe gets one answer
+#                         three probes in 1.2 s from one program are answered
+#                         twice: at most one answer a second
 #   19. report_is_kept    a program's `working` report shows in `term.list`, and
 #                         a repeat of that state keeps its `at_ms`
 #   20. fed_bytes_are_not_scanned
 #                         a report fed with `term.feed`, and a probe in the
 #                         prelude, are neither kept nor answered
 #   21. argv_stays_out_of_the_log
-#                         a typed argument never reaches host.log
+#                         a typed argument, script and cwd never reach host.log
 #   22. probe_answer_precedes_da1
 #                         the probe's answer reaches the program before the
 #                         reply to a DA1 query sent right after it
@@ -72,10 +73,13 @@ set -eEuo pipefail
 #   25. report_after_exec_is_kept
 #                         a report from a program the shell exec'd, long after
 #                         the shell had the terminal, is kept
+#   26. events_carry_program_and_status
+#                         a subscriber to `term.sessions` gets the `program` and
+#                         `status` events, in order, as the app reads them
 # Cases 10 and 11 are unix-only and print SKIP on Windows; case 13 runs on
-# Linux only; cases 16 to 25 run on Linux and macOS and print SKIP on Windows.
+# Linux only; cases 16 to 26 run on Linux and macOS and print SKIP on Windows.
 # The systemd scope arm of case 3 runs only on Linux with a user manager.
-# Cases 16 to 25 need python3 on PATH (they read `term.list`'s JSON, and the
+# Cases 16 to 26 need python3 on PATH (they read `term.list`'s JSON, and the
 # probe stub is a python3 script).
 #
 # Each case force-shuts every host in its own root and retires the root
@@ -969,6 +973,16 @@ program_is() {
 argv_has() {
   load_session "$1" && printf '%s\n' "$(doc_field program.argv)" | grep -qF "$2"
 }
+# typed_program_is_read ID: the program's argv holds the markers of the argv
+# case and its cwd ends in the marker directory.
+typed_program_is_read() {
+  local argv
+  load_session "$1" || return 1
+  argv="$(doc_field program.argv)"
+  case "$argv" in *SIRIO-ARGV-MARKER*) ;; *) return 1 ;; esac
+  case "$argv" in *SIRIO-SCRIPT-MARKER*) ;; *) return 1 ;; esac
+  case "$(doc_field program.cwd)" in */SIRIO-CWD-MARKER) return 0 ;; *) return 1 ;; esac
+}
 # session_shows ID TEXT: the session's screen holds TEXT.
 session_shows() {
   run_probe term-read "$1" text
@@ -1030,10 +1044,14 @@ case_probe_is_answered_once() {
   fresh_root
   probe ensure
   workdir
-  probe term-create "$WORKDIR" --id pane-18 -- python3 "$PROBE_STUB"
-  wait_until 10 session_shows pane-18 READY || fail "the probe stub never printed READY: $OUT"
-  [ "$(screen_count pane-18 'ANSWER OK')" = 1 ] || fail "the probe was not answered exactly once: $OUT"
-  session_shows pane-18 'ANSWERS 1' || fail "the stub did not count one answer: $OUT"
+  # The stub asks three times: at 0 s, 0.1 s and 1.2 s. A session's probe is
+  # answered at most once a second, so the second is dropped and the third is
+  # answered: two answers. With no limit there would be three, and with an
+  # answer that is never repeated, one.
+  probe term-create "$WORKDIR" --id pane-18 -- python3 "$PROBE_STUB" --repeat
+  wait_until 15 session_shows pane-18 READY || fail "the probe stub never printed READY: $OUT"
+  [ "$(screen_count pane-18 'ANSWER OK')" = 2 ] || fail "three probes in 1.2 s were not answered twice (the second dropped, the third answered): $OUT"
+  session_shows pane-18 'ANSWERS 2' || fail "the stub did not count two answers: $OUT"
   pass
 }
 
@@ -1089,16 +1107,21 @@ case_argv_stays_out_of_the_log() {
   interactive_shell pane-21
   local log="$ROOT/log/host-v1.log"
   # `sleep` would refuse a non-numeric argument and end at once, so the marker
-  # is the $0 of a wrapper (`; :` keeps the shell from exec'ing the sleep).
-  probe term-write pane-21 $'sh -c "sleep 38; :" SIRIO-ARGV-MARKER\r'
-  wait_until 5 argv_has pane-21 SIRIO-ARGV-MARKER \
-    || fail "the typed command is not named within 5 s (the control: without it the log proves nothing): $SESSION_DOC"
+  # is the $0 of a wrapper (`; :` keeps the shell from exec'ing the sleep), and
+  # the script holds one of its own. The program runs in a directory whose leaf
+  # is a marker too: the argv and the cwd are both read and neither is logged.
+  mkdir -p "$WORKDIR/SIRIO-CWD-MARKER"
+  probe term-write pane-21 $'cd SIRIO-CWD-MARKER\r'
+  probe term-write pane-21 $'sh -c "sleep 38; : SIRIO-SCRIPT-MARKER" SIRIO-ARGV-MARKER\r'
+  wait_until 5 typed_program_is_read pane-21 \
+    || fail "the typed command is not read with its argv and cwd within 5 s (the control: without it the log proves nothing): $SESSION_DOC"
   # Let every read the host makes of that program happen first.
   sleep 3
   [ -f "$log" ] || fail "the host log $log does not exist"
   has_line "$log" 'start.ready' || fail "the host log holds no start.ready, so it is not the log of this host"
   [ "$(grep -c SIRIO-ARGV-MARKER "$log" || true)" = 0 ] || fail "an argument of the typed program reached host.log"
-  [ "$(grep -c sleep "$log" || true)" = 0 ] || fail "the typed program's argv reached host.log"
+  [ "$(grep -c SIRIO-SCRIPT-MARKER "$log" || true)" = 0 ] || fail "the typed program's script reached host.log"
+  [ "$(grep -c SIRIO-CWD-MARKER "$log" || true)" = 0 ] || fail "the typed program's cwd reached host.log"
   pass
 }
 
@@ -1139,11 +1162,66 @@ case_report_after_exec_is_kept() {
   if [ "$OS" = windows ]; then skip "no OSC 7501 on Windows"; return 0; fi
   interactive_shell pane-25
   probe term-write pane-25 $'sleep 0.2\r'
-  sleep 1.5
+  sleep 2.5
   probe term-write pane-25 "$(printf "exec sh -c \"%s; sleep 30\"\r" "$REPORT_WORKING")"
   wait_until 3 field_is pane-25 status.state working \
     || fail "a report from the exec'd program is not kept within 3 s: $SESSION_DOC"
   [ "$(doc_field status.app)" = codex ] || fail "the status app is '$(doc_field status.app)', not codex: $SESSION_DOC"
+  pass
+}
+
+case_events_carry_program_and_status() {
+  if [ "$OS" = windows ]; then skip "no OSC 7501 on Windows"; return 0; fi
+  interactive_shell pane-26
+  # The live path the app reads: a subscriber to term.sessions, for 8 s, in the
+  # background, and the shell is typed into once it is subscribed.
+  local out="$ROOT_BASE/events-$N.out" events
+  "$PROBE" term-events 8000 >"$out" 2>"$ROOT_BASE/events-$N.err" &
+  events=$!
+  HELPERS+=("$events")
+  wait_until 10 has_line "$out" '^subscribed' || fail "the events probe never subscribed: $(cat "$out" "$ROOT_BASE/events-$N.err" 2>/dev/null | head -c 600)"
+  # The wrapper waits before it reports, and `; :` keeps the shell from exec'ing
+  # the last sleep: it stays the named program, and the first read of it comes
+  # before the report. (A program that reports at once can have its status event
+  # before its program event: the report is scanned as the bytes arrive, the
+  # program is read after the foreground group changes.)
+  probe term-write pane-26 "$(printf "sh -c \"sleep 1; %s; sleep 2; :\"\r" "$REPORT_WORKING")"
+  wait "$events" || fail "the events probe exited non-zero: $(cat "$ROOT_BASE/events-$N.err" 2>/dev/null | head -c 600)"
+  # In this order, anything else allowed in between: the wrapper is named, it
+  # reports working, the shell is back (no program), the record is cleared.
+  python3 - "pane-26" "$out" <<'PY' || fail "the session events are not the expected sequence: $(cat "$out")"
+import json, sys
+
+session, path = sys.argv[1], sys.argv[2]
+events = []
+for line in open(path):
+    line = line.strip()
+    if line.startswith("{"):
+        event = json.loads(line)
+        if event.get("session_id") == session:
+            events.append(event)
+
+steps = [
+    ("a program event naming sh",
+     lambda e: e["type"] == "program" and (e.get("program") or {}).get("name") == "sh"),
+    ("a status event: working, with an at_ms",
+     lambda e: e["type"] == "status" and (e.get("status") or {}).get("state") == "working"
+     and isinstance(e.get("at_ms"), int)),
+    ("a program event with no program",
+     lambda e: e["type"] == "program" and e.get("program") is None),
+    ("a status event with no status, with an at_ms",
+     lambda e: e["type"] == "status" and e.get("status") is None
+     and isinstance(e.get("at_ms"), int)),
+]
+step = 0
+for event in events:
+    if step < len(steps) and steps[step][1](event):
+        step += 1
+if step < len(steps):
+    print("missing: " + steps[step][0], file=sys.stderr)
+    sys.exit(1)
+PY
+  NOTE="4 events in order"
   pass
 }
 
@@ -1162,6 +1240,12 @@ run_case foreign-client    case_foreign_client
 run_case successor         case_successor
 run_case handshake-deadline case_handshake_deadline 14
 run_case isolation         case_isolation 15
+# The program cases read `term.list`'s JSON and run a python3 stub. A missing
+# python3 is a failure of the machine, not a reason to skip them.
+if [ "$OS" != windows ] && ! command -v python3 >/dev/null 2>&1; then
+  echo "FAIL: python3 is required by the program cases (16 to 26) and is not on PATH" >&2
+  exit 1
+fi
 run_case program_is_named                  case_program_is_named
 run_case program_is_named_every_time       case_program_is_named_every_time
 run_case probe_is_answered_once            case_probe_is_answered_once
@@ -1172,5 +1256,6 @@ run_case probe_answer_precedes_da1         case_probe_answer_precedes_da1
 run_case program_is_named_after_a_slow_exec case_program_is_named_after_a_slow_exec
 run_case record_ends_with_its_program      case_record_ends_with_its_program
 run_case report_after_exec_is_kept         case_report_after_exec_is_kept
+run_case events_carry_program_and_status   case_events_carry_program_and_status
 
 echo "HOST E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"
