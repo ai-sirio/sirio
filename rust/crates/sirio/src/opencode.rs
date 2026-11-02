@@ -76,7 +76,10 @@ impl OpenCodeStatus {
         now: Instant,
     ) -> bool {
         match event {
-            TerminalActivityEvent::OscTitle(title) => {
+            // A title the terminal reported, or the one the host held when the session was
+            // attached again (a relaunch, a reconnect): events arrive in order, so the
+            // last one is the pane's title.
+            TerminalActivityEvent::OscTitle(title) | TerminalActivityEvent::SeededTitle(title) => {
                 self.titles.insert(pane_id.to_string(), title.clone());
             }
             TerminalActivityEvent::Program(Some(program)) => {

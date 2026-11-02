@@ -71,6 +71,9 @@ pub(crate) fn apply_terminal_activity_event(
         }
         // A refused open changes no agent identity; the pane is rebound.
         TerminalActivityEvent::IdTaken => None,
+        // The title the host held at an attach: no change of title, so Layer B never
+        // sees it. Only OpenCode's link reads it (`opencode.rs`).
+        TerminalActivityEvent::SeededTitle(_) => None,
         // The host names the program holding the terminal: identity only, no
         // status. Idempotent, so a seed or a reconnect that repeats what the
         // pane has changes nothing. Never logged: the argv and cwd are content.

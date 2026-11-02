@@ -56,6 +56,10 @@ pub enum LinkChunk {
     Snapshot { cols: u16, rows: u16, bytes: Vec<u8> },
     Output(Vec<u8>),
     Title(String),
+    /// The title the host's engine held when the session was listed (an attach, a
+    /// reconnect's re-seed): not a change of title, so nothing that reads titles for
+    /// their own sake (Layer B, the tab's name) may see it.
+    SeededTitle(String),
     Foreground(bool),
     /// The program holding the terminal changed; `None` is the shell again.
     Program(Option<ForegroundProgram>),
@@ -982,6 +986,9 @@ fn engine_status(status: &ProgramStatus) -> Option<StatusRecord> {
 /// absent field or a state this build does not know.
 fn seed_chunks(summary: &sirio_host_protocol::term::SessionSummary) -> Vec<LinkChunk> {
     let mut chunks = Vec::new();
+    if !summary.title.is_empty() {
+        chunks.push(LinkChunk::SeededTitle(summary.title.clone()));
+    }
     if let Some(program) = &summary.program {
         chunks.push(LinkChunk::Program(Some(engine_program(program))));
     }
@@ -999,9 +1006,13 @@ fn seed_chunks(summary: &sirio_host_protocol::term::SessionSummary) -> Vec<LinkC
 /// not know). Unlike [`seed_chunks`], absent fields are sent, because a view
 /// that was already running may hold what the host has since dropped.
 fn reseed_chunks(summary: &sirio_host_protocol::term::SessionSummary) -> Vec<LinkChunk> {
-    let mut chunks = vec![LinkChunk::Program(
+    let mut chunks = Vec::new();
+    if !summary.title.is_empty() {
+        chunks.push(LinkChunk::SeededTitle(summary.title.clone()));
+    }
+    chunks.push(LinkChunk::Program(
         summary.program.as_ref().map(engine_program),
-    )];
+    ));
     match &summary.status {
         None => chunks.push(LinkChunk::Status(None, 0)),
         Some(status) => {
@@ -1435,6 +1446,7 @@ mod tests {
             LinkChunk::Snapshot { .. } => "Snapshot",
             LinkChunk::Output(_) => "Output",
             LinkChunk::Title(_) => "Title",
+            LinkChunk::SeededTitle(_) => "SeededTitle",
             LinkChunk::Foreground(_) => "Foreground",
             LinkChunk::Program(_) => "Program",
             LinkChunk::Status(..) => "Status",

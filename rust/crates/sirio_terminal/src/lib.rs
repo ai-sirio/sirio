@@ -191,6 +191,10 @@ pub enum TerminalActivityEvent {
     /// on the host. The pane stays failed until its owner gives it a fresh
     /// identity and reopens it (fix batch 5, N5 and #11).
     IdTaken,
+    /// The title the host's engine held when the session was attached or re-listed.
+    /// Not an `OscTitle`: it is no change, so Layer B and tab names never see it. Only
+    /// OpenCode's link reads it (the pane's title after a relaunch).
+    SeededTitle(String),
     /// The program holding the terminal changed; `None` is the shell again.
     /// Never coalesced: every change is emitted, in arrival order.
     Program(Option<ForegroundProgram>),
@@ -287,6 +291,8 @@ enum TerminalEvent {
     ViewportChanged,
     /// The OSC title changed. An empty string is an OSC title reset.
     Title(String),
+    /// The title the host held when the session was listed (not a change).
+    SeededTitle(String),
     /// The session exited after its final output was drained.
     ChildExit(TerminalExitStatus),
     /// The host is gone or the stream could not be re-established.
@@ -1342,6 +1348,9 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     }
                     LinkChunk::Title(title) => {
                         let _ = event_tx.unbounded_send(TerminalEvent::Title(title));
+                    }
+                    LinkChunk::SeededTitle(title) => {
+                        let _ = event_tx.unbounded_send(TerminalEvent::SeededTitle(title));
                     }
                     LinkChunk::Foreground(running) => {
                         foreground_running.store(running, Ordering::Relaxed);
@@ -3192,6 +3201,8 @@ impl TerminalView {
                                         status: status.clone(),
                                         at_ms: *at_ms,
                                     }),
+                                TerminalEvent::SeededTitle(title) => program_events
+                                    .push(TerminalActivityEvent::SeededTitle(title.clone())),
                                 _ => {}
                             }
                             session_lost |=

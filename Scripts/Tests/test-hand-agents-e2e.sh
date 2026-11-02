@@ -65,9 +65,9 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  either; with titles `OC | a`, `OC | b`: each follows its own
 #   opencode_failed_turn_is_error  a failed turn -> error; the service's error text and its
 #                                  password stay out of the app's stderr
-#   opencode_after_relaunch        busy, the app quits and starts again: the mark and no status
-#                                  (the pane's title is not known again); once the TUI sets its
-#                                  title the running turn is read from the service's list
+#   opencode_after_relaunch        a titled session, the app quits and starts again: the pane's
+#                                  title comes from the host's seed, so busy -> running and idle
+#                                  after >= 1 s -> done (+1)
 #   no_service_degrades            the service stops: the mark stays, no status, and the app's
 #                                  stderr names the failure kind once and nothing else
 #
@@ -1097,12 +1097,14 @@ case_opencode_after_relaunch() {
   local base
   start_agent opencode
   oc "create ses_r $OC_DIR"
-  oc "busy ses_r"
-  wait_status "$SESS" running 4
   oc "rename ses_r relaunched"
   type_line "$PANE" "title OC | relaunched"
-  sleep 1.5
-  stepn "opencode before the quit: running" "$SESS"
+  oc "busy ses_r"
+  wait_status "$SESS" running 4
+  sleep 1.3
+  oc "idle ses_r"
+  wait_status "$SESS" done 4
+  stepn "opencode before the quit: done" "$SESS"
   ctl quit >/dev/null 2>&1 || true
   for _ in $(seq 1 100); do alive "$APP_PID" || break; sleep 0.2; done
   alive "$APP_PID" && fail "sirio did not quit after sirioctl quit"
@@ -1110,24 +1112,20 @@ case_opencode_after_relaunch() {
   app_start
   ctl select-workspace --workspace "$wt" >/dev/null
   sleep 2
-  # The new app knows the program (the host names it) but not the pane's title, which the
-  # host does not send again, and the session is older than this app's `opencode`: nothing
-  # is sure, so the mark shows and no status is guessed.
+  # The new app learns the program from the host, and the pane's title from the host's
+  # seed of the session it attaches (the title does not change again). The session is older
+  # than this app's `opencode`, so only the title can link it.
   wait_agent "$PANE" opencode 15
-  hold_status "$SESS" null 3
-  stepn "opencode after the relaunch: the mark, no status" "$SESS"
-  # The TUI changes its title (the host reports a change only, so it goes through another
-  # one first): the session the service lists, still running, is the pane's, and its turn
-  # goes on from the service's own times.
-  type_line "$PANE" "title OpenCode"
-  sleep 1
-  type_line "$PANE" "title OC | relaunched"
-  wait_status "$SESS" running 6
-  stepn "opencode after the relaunch: linked by title" "$SESS"
+  sleep 2
+  stepn "opencode after the relaunch: the mark" "$SESS"
+  oc "busy ses_r"
+  wait_status "$SESS" running 5
+  sleep 1.3
+  stepn "opencode after the relaunch: running" "$SESS"
   base="$(posted_count)"
   oc "idle ses_r"
   wait_status "$SESS" done 5
-  expect_posted "$base" 1 "the end of a turn the relaunch found open"
+  expect_posted "$base" 1 "the end of a turn after the relaunch"
   stepn "opencode after the relaunch: done" "$SESS"
   leave_opencode "$PANE"
 }

@@ -10317,6 +10317,7 @@ impl SirioWorkspace {
                         TerminalActivityEvent::SessionLost => "activity_event.session_lost",
                         TerminalActivityEvent::IdTaken => "activity_event.id_taken",
                         TerminalActivityEvent::Program(_) => "activity_event.program",
+                        TerminalActivityEvent::SeededTitle(_) => "activity_event.seeded_title",
                         TerminalActivityEvent::ProgramStatus { .. } => {
                             "activity_event.program_status"
                         }
@@ -10430,7 +10431,8 @@ impl SirioWorkspace {
                     TerminalActivityEvent::IdTaken => {}
                     // The program's identity and its reports were applied above.
                     TerminalActivityEvent::Program(_)
-                    | TerminalActivityEvent::ProgramStatus { .. } => {}
+                    | TerminalActivityEvent::ProgramStatus { .. }
+                    | TerminalActivityEvent::SeededTitle(_) => {}
                     TerminalActivityEvent::SessionLost => {
                         workspace.mark_activity_dirty();
                         cx.notify();
