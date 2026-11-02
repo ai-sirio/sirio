@@ -1865,6 +1865,10 @@ struct SessionInner {
     /// How many real database writes have happened (the debounce test's
     /// observable).
     writes: AtomicUsize,
+    /// How many layouts have been written (the debounced save, the switch's own
+    /// save, and the two edits of a worktree's persisted layout): a tab row
+    /// that was missing before a count is looked for again after it moves.
+    layout_saves: AtomicUsize,
     interval: Duration,
 }
 
@@ -1915,6 +1919,7 @@ impl SessionStore {
                 pending: Mutex::new(None),
                 next_flush: Mutex::new(Instant::now()),
                 writes: AtomicUsize::new(0),
+                layout_saves: AtomicUsize::new(0),
                 interval,
             }),
         };
@@ -2117,6 +2122,47 @@ impl SessionStore {
         }
     }
 
+    /// The tabs persisted for a worktree, each with the pane ids its layout gives
+    /// it, by the same rule `persisted_pane_ids_for` reads them with. Nothing for a
+    /// worktree with no row, no tabs, or a database in fallback mode. One read,
+    /// for the attention funnel's index of the worktrees no tab is mounted for.
+    pub fn persisted_tab_panes_for(&self, working_directory: &Path) -> Vec<(SessionTab, Vec<usize>)> {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(Some(worktree_id)) = worktree_id_for_database(db, working_directory) else {
+            return Vec::new();
+        };
+        let restored = match tabs_for_worktree(db, &worktree_id, working_directory.to_path_buf())
+        {
+            Ok(restored) => restored,
+            Err(error) => {
+                eprintln!("[session] failed to read the tabs of {worktree_id}: {error}");
+                return Vec::new();
+            }
+        };
+        let roots = crate::restored_pane_ids(&restored, 0);
+        restored
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let root = roots.get(index).copied().unwrap_or(0);
+                let mut ids: Vec<usize> = match restored.tab_states.get(index) {
+                    Some(state) => crate::restored_tab_pane_ids(root, state).into_iter().collect(),
+                    None => vec![root],
+                };
+                ids.sort_unstable();
+                (tab.clone(), ids)
+            })
+            .collect()
+    }
+
     /// Edits a worktree's persisted layout in place (fix batch 5: the pane-id
     /// dedup moves ids in the rows of worktrees that are not mounted). `edit`
     /// returns whether it changed anything; the row is written only then.
@@ -2159,7 +2205,10 @@ impl SessionStore {
             tab_states: restored.tab_states,
         };
         match write_layout(db, &layout) {
-            Ok(()) => true,
+            Ok(()) => {
+                self.inner.layout_saves.fetch_add(1, Ordering::Relaxed);
+                true
+            }
             Err(error) => {
                 eprintln!("[session] failed to rewrite a worktree's pane ids: {error}");
                 false
@@ -2219,7 +2268,10 @@ impl SessionStore {
             tab_states,
         };
         match write_layout(db, &layout) {
-            Ok(()) => true,
+            Ok(()) => {
+                self.inner.layout_saves.fetch_add(1, Ordering::Relaxed);
+                true
+            }
             Err(error) => {
                 eprintln!("[session] failed to add an adopted terminal tab: {error}");
                 false
@@ -2533,6 +2585,7 @@ impl SessionStore {
         match write_layout(db, layout) {
             Ok(()) => {
                 self.inner.writes.fetch_add(1, Ordering::Relaxed);
+                self.inner.layout_saves.fetch_add(1, Ordering::Relaxed);
             }
             Err(error) => {
                 eprintln!("[session] failed to save the outgoing worktree before switch: {error}");
@@ -2903,6 +2956,12 @@ impl SessionStore {
         }
     }
 
+    /// How many layouts have been written so far. A tab younger than the last
+    /// one has no row yet; see `SirioWorkspace::flush_attention_writes`.
+    pub fn layout_saves(&self) -> usize {
+        self.inner.layout_saves.load(Ordering::Relaxed)
+    }
+
     /// The number of real database writes performed so far.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn writes(&self) -> usize {
@@ -2970,6 +3029,7 @@ fn flush_if_due(inner: &SessionInner) {
     match write_layout(db, &layout) {
         Ok(()) => {
             inner.writes.fetch_add(1, Ordering::Relaxed);
+            inner.layout_saves.fetch_add(1, Ordering::Relaxed);
         }
         Err(error) => {
             eprintln!("[session] failed to persist the layout: {error}");

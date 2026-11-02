@@ -3077,9 +3077,14 @@ impl Sidebar {
             let section_matches = section.iter().any(|row| Self::row_matches(row, &query));
 
             if project_matches || section_matches {
+                // A folded project that the filter opens draws its rows, and a badge
+                // counting rows that are on screen would count them twice.
+                let rows_hidden = !project.expanded && !(searching && section_matches);
                 let mut project_row = project.clone();
                 if !project.expanded {
                     project_row.agent_status = Self::collapsed_project_status(section);
+                }
+                if rows_hidden {
                     project_row.unread_count = Self::unread_pills(section);
                 }
                 filtered.push(project_row);

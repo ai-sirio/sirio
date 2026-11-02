@@ -74,9 +74,10 @@ set -euo pipefail
 #                      reveal its Agent row, a click on the Follow checkbox toggles it
 #   unread_parked_chat a turn that ends while its worktree is not selected marks the chat unread and posts
 #                      one notification naming its branch; showing the worktree clears the mark
-#                      (with --display, also what the sidebar and the tray hold in the read's `rows`, `projects`
-#                      and `tray`, a click that folds the project, and captures of the row, the Sessions
-#                      card and the folded project's badge)
+#                      and the tray's roster lists the worktree with a leading dot until it is shown, in every
+#                      mode, a no-display --state-only run included (with --display, also what the sidebar
+#                      holds in the read's `rows` and `projects`, a click that folds the project, and captures
+#                      of the row, the Sessions card and the folded project's badge)
 #   unread_question    a permission the turn asks while the worktree is not selected reads needs-input and
 #                      unread, and is still open when the worktree is shown
 #   unread_secondary_seen  a chat in the shown Secondary half, beside a terminal in the Primary, stops
@@ -2377,8 +2378,9 @@ for row in json.loads(reply["rows"]):
         break' "$1"
 }
 # The sidebar's pills are refreshed by the reconcile, which a frame drives: a --state-only run
-# with no display paints nothing, so its `rows`, `projects` and `tray` reads have nothing to say
-# and are not asserted (the tray's unread flag is computed by the same reconcile).
+# with no display paints nothing, so its `rows` and `projects` reads have nothing to say and are
+# not asserted. The `tray` read is not frame-driven (a minimized window paints nothing and the
+# tray is meant for exactly then), so it is asserted in every mode.
 rows_painted() { [ -n "$DISPLAY_TARGET" ]; }
 # The fold and view clicks are real X input at window pixels: only a run that opened the window
 # (no --state-only), which the display preflight checked, makes them.
@@ -2434,6 +2436,16 @@ wait_tray() { # desc worktree field want seconds
   done
   fail "$desc: the tray's $field for $worktree is '$got', not '$want' after $seconds s; read: $(reply surface attention read | tr '\n' ' ')"
 }
+# Polls until the tray lists worktree $2 with no unread mark: `unread` false, or no entry.
+wait_tray_unread_gone() { # desc worktree seconds
+  local desc=$1 worktree=$2 seconds=$3 got="" _
+  for _ in $(seq 1 $((seconds * 5))); do
+    got=$(attention_tray "$worktree" unread)
+    [ "$got" != true ] && { echo "OK: $desc (tray unread = '${got:-not listed}')"; return 0; }
+    sleep 0.2
+  done
+  fail "$desc: the tray still lists $worktree as unread after $seconds s; read: $(reply surface attention read | tr '\n' ' ')"
+}
 # Polls until the sidebar's unread count for worktree $2 reads WANT.
 wait_marks() { # desc worktree want seconds
   local desc=$1 worktree=$2 want=$3 seconds=$4 got="" _
@@ -2466,7 +2478,7 @@ scenario_unread_parked_chat() {
   if rows_painted; then
     wait_marks "the sidebar holds no unread pill before any turn" "$LINKED" 0 10
   else
-    echo "SKIP: no display, so no frame refreshes the sidebar: the rows, projects and tray assertions are not run"
+    echo "SKIP: no display, so no frame refreshes the sidebar: the rows and projects assertions are not run (the tray's are, in every mode)"
   fi
   capture unread_parked_chat-before
   send_prompt request
@@ -2488,14 +2500,17 @@ scenario_unread_parked_chat() {
   [ "$(( $(posted_count) - base ))" = 1 ] || fail "the stop posted more than one notification: $(posted_rows | tr '\n' ' ')"
   case "$(posted_bodies_since "$base")" in *feat/login*) ;; *) fail "the notification's body does not name feat/login: $(posted_bodies_since "$base")" ;; esac
   echo "OK: one notification, '$(posted_bodies_since "$base")'"
+  # The tray is for the user who is away, a minimized window that paints no frame: its roster
+  # follows the unread marks without one, so it is asserted in every mode, a --state-only run
+  # with no display included.
+  echo "step: the tray lists the unread worktree, marked"
+  wait_tray "the tray lists the parked worktree as unread" "$LINKED" unread true 10
+  wait_tray "its menu label leads with the unread dot" "$LINKED" label "● " 10
   if rows_painted; then
     echo "step: the sidebar draws the unread mark on the worktree's row"
     wait_marks "the sidebar counts the unread chat under the worktree" "$LINKED" 1 10
     wait_project "the project header is open and draws no badge" expanded true 10
     wait_project "an open project header counts nothing" unreadCount 0 10
-    echo "step: the tray lists the unread worktree, marked"
-    wait_tray "the tray lists the parked worktree as unread" "$LINKED" unread true 10
-    wait_tray "its menu label leads with the unread dot" "$LINKED" label "● " 10
     capture unread_parked_chat-unread
     if window_clicks; then
       echo "step: the Sessions view draws the same mark on the session's card"
@@ -2522,10 +2537,13 @@ scenario_unread_parked_chat() {
   wait_attention "showing the chat's worktree cleared the mark" unread false 10
   if rows_painted; then
     wait_marks "showing the worktree cleared the sidebar's count" "$LINKED" 0 10
-    wait_tray "showing the worktree cleared the tray's unread flag" "$LINKED" unread false 10
-    case "$(attention_tray "$LINKED" label)" in "● "*) fail "the tray label still leads with the unread dot: $(attention_tray "$LINKED" label)" ;; esac
-    echo "OK: the tray label no longer leads with the unread dot"
   fi
+  # Once cleared the roster lists the worktree only while it has a status to show (a run that
+  # paints reconciles the pane list and does; one that does not may list it no more), so the
+  # flag must read false or the entry be gone.
+  wait_tray_unread_gone "showing the worktree cleared the tray's unread flag" "$LINKED" 10
+  case "$(attention_tray "$LINKED" label)" in "● "*) fail "the tray label still leads with the unread dot: $(attention_tray "$LINKED" label)" ;; esac
+  echo "OK: the tray label no longer leads with the unread dot"
   capture unread_parked_chat-after
   save_attention unread_parked_chat
   stop_app

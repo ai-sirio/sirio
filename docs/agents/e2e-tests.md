@@ -47,6 +47,14 @@ Scripts/Tests/test-term-e2e.sh      # -> prints "TERM E2E OK (<n> cases, <s>s)"
 # leaves case33-restored.json, case33-saved.json and case33-closed.json (the
 # `surface attention read` of each start) and case33-db.json (the saved `unread, last_running`
 # row, read from the world's database between the quits).
+# Case 34 (unread in an unmounted worktree) needs no display, so it runs under --state-only on
+# every platform: a second worktree B holds a codex agent tab whose record saved running, the
+# primary worktree is selected, the app quits and starts again (B is neither mounted nor parked),
+# and a bare needs-input hook (Codex sends no Running first) reaches B's pane. B's session reads
+# unread, the tray lists B with a leading dot though nothing of B was ever drawn, and `posted`
+# holds exactly one entry for it (its tag, its body naming B's branch); selecting B and looking
+# clears the mark, the session is listed once, and no second notification is posted. It leaves
+# case34-restored.json and case34-shown.json (the `surface attention read` of each moment).
 Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> cases, <s>s)"
 # The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
 # socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
@@ -61,10 +69,14 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # the notification does (the app's D-Bus is dead, so the E2E never reaches a desktop). Its
 # step 14.7c (`parked_terminal_exit_reaches_status`) is the parked twin of a plain shell's
 # exit: the shell exits 3 while its worktree is not selected, and its session reads error
-# and is not unread. Linux runs it with --xvfb or --display :N; --state-only skips cases 4,
-# 4c, 5, 6, 10 and 15 and is what macOS runs. --out-dir DIR keeps the transcript, logs and
-# env dumps (and case 15's case15-attention.json); --only N[,N...] prints "SIRIOCTL E2E
-# PARTIAL"; --mutate claude-prompt-hook is case 6's mutation check.
+# and is not unread. Its step 14.8a (`settings_cover_is_not_on_screen`) opens Settings with
+# `surface settings open`: a stop of the shown agent tab under it marks the session and
+# posts one notification, a look does not clear it, and Escape (a real key, pressed in the
+# app's window: no verb closes Settings) shows the tab again, which clears the mark. Linux
+# runs it with --xvfb or --display :N; --state-only skips cases 4, 4c, 5, 6, 10 and 15 and
+# is what macOS runs. --out-dir DIR keeps the transcript, logs and env dumps (and case 15's
+# case15-attention.json); --only N[,N...] prints "SIRIOCTL E2E PARTIAL"; --mutate
+# claude-prompt-hook is case 6's mutation check.
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 
 # The "Project added" dialog after every add from the UI, in a real debug Sirio per scenario (a
@@ -167,23 +179,25 @@ Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "
 # notification, and looking at it clears the mark for good). Each leaves
 # attention-<scenario>.json (so attention-unread_restored_chat_quiet.json), the last
 # `surface attention read`, in the out dir.
-# With --display :N (a window that paints, or --state-only --display :N), `unread_parked_chat` also
-# asserts what the sidebar and the tray hold, through three keys of the debug-only
-# `surface attention read`: `rows` (each worktree row's number of unread pills, from
+# In every mode, a no-display --state-only run included, `unread_parked_chat` asserts the tray's
+# roster through the debug-only `surface attention read` key `tray` (one object per roster entry,
+# with the label the menu would show): the worktree is listed with `unread: true` and a label led
+# by "● " while the chat is unread, and has no unread flag (or no entry) after it is shown. No
+# frame maintains it, because a minimized window paints nothing and the tray is for exactly then.
+# With --display :N (a window that paints, or --state-only --display :N) it also asserts what the
+# sidebar holds, through two more keys: `rows` (each worktree row's number of unread pills, from
 # `Sidebar::unread_marks`) names the chat's worktree with 1 while it is unread and with 0 once it is
 # shown; `projects` (one object per project header as the tree draws it: `expanded` and the
-# `unreadCount` the folded badge is drawn from) reads open with 0 before the fold; and `tray` (one
-# object per tray roster entry, with the label the menu would show) lists the worktree with
-# `unread: true` and a label led by "● " while it is unread, and `unread: false` with no "● " after
-# it is shown. In a window that paints it also clicks the Sessions segment, the project's chevron
-# and the chevron again, and asserts `projects` reads `expanded: false` with `unreadCount: 1`, then
-# `expanded: true` with 0, so a click that misses fails. The socket reports no position for the
-# chevron, so that click is at a fixed window pixel. It captures
+# `unreadCount` the folded badge is drawn from) reads open with 0 before the fold. In a window that
+# paints it also clicks the Sessions segment, the project's chevron and the chevron again, and
+# asserts `projects` reads `expanded: false` with `unreadCount: 1`, then `expanded: true` with 0,
+# so a click that misses fails. The socket reports no position for the chevron, so that click is
+# at a fixed window pixel. It captures
 # frames/unread_parked_chat-unread.png (dot, bold title, ring), unread-sessions-view.png (the same
 # dot and weight on the Sessions card), unread-collapsed-project.png (the count badge on the folded
-# project header) and unread_parked_chat-after.png. The pills' mark and the tray's unread flag are
-# refreshed by the reconcile a frame drives, so a --state-only run with no display prints a SKIP
-# line for these assertions and keeps the rest.
+# project header) and unread_parked_chat-after.png. The pills' mark is refreshed by the reconcile a
+# frame drives, so a --state-only run with no display prints a SKIP line for the `rows` and
+# `projects` assertions and keeps the rest.
 # The opt-in scenario `notification_click` (never in the default set; name it with --only, with
 # --state-only) proves the Linux notification route against a real D-Bus server. It needs
 # `dbus-daemon` and python3-gi with Gio 2.0, and the script refuses it without them. It starts a

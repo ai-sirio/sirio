@@ -56,7 +56,9 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #      on screen and reads unread until A is shown; a stop in a split pane marks the
 #      tab and leaves the other pane's running beside it; an inactive window keeps
 #      the mark until the window is active; a plain shell that exits 3 reads error and
-#      is not unread, shown or in a parked worktree (needs a pane's shell, like 6)
+#      is not unread, shown or in a parked worktree (needs a pane's shell, like 6); a
+#      stop while Settings covers the window marks and posts, and closing Settings
+#      (Escape) shows the tab again and clears the mark
 #
 # --out-dir DIR keeps transcript.log, app-<world>.log, host-<world>-log/ (the
 # host's logs), env/<case>.env (each pane's `env -0` dump, never printed),
@@ -1524,6 +1526,35 @@ posted_wait() { # baseline want seconds
   done
   fail "the app posted $got notification(s) since the baseline, wanted $2; posted: $(posted_rows | tr '\n' ' ')"
 }
+settings_closed() { ! ctl surface settings read >/dev/null 2>&1; }
+# Presses Escape in the app's own window, found by its _NET_WM_PID: the key a user closes
+# Settings with (framed runs only; the case needs a window).
+app_press_escape() {
+  local window
+  window="$(DISPLAY_TARGET="$DISPLAY_TARGET" APP_PID="$APP_PID" python3 -I - <<'PY'
+import os, re, subprocess
+display = os.environ["DISPLAY_TARGET"]
+want = int(os.environ["APP_PID"])
+listing = subprocess.run(["xwininfo", "-display", display, "-root", "-children"], capture_output=True, text=True, timeout=5).stdout
+best = None
+for line in listing.splitlines():
+    match = re.match(r"\s+(0x[0-9a-fA-F]+).*?\s(\d+)x(\d+)\+", line)
+    if not match:
+        continue
+    window, width, height = match.group(1), int(match.group(2)), int(match.group(3))
+    prop = subprocess.run(["xprop", "-display", display, "-id", window, "_NET_WM_PID"], capture_output=True, text=True, timeout=5).stdout
+    pid = re.search(r"=\s*(\d+)\s*$", prop)
+    if pid and int(pid.group(1)) == want and (best is None or width * height > best[0]):
+        best = (width * height, window)
+if best:
+    print(best[1])
+PY
+)"
+  [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID to press Escape in"
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowfocus --sync "$window" >/dev/null 2>&1 || true
+  sleep 0.5
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool key Escape >/dev/null 2>&1 || fail "xdotool could not press Escape"
+}
 # The selected worktree's path and the active tab's 1-based position.
 current_path() { ctl_json current-workspace | field path; }
 active_tab() { ctl_json surface tabs read | field active; }
@@ -1757,6 +1788,33 @@ for line in sys.stdin.read().split():
   [ "$(active_tab)" = "$(tab_position_of "$agent_title")" ] || fail "the click did not select the agent tab: active $(active_tab), the agent tab is $(tab_position_of "$agent_title")"
   [ "$(attention_get "$sess" onScreen)" = true ] || fail "the clicked session is not on screen"
   echo "OK: the click selected A and the agent tab, and the session is no longer unread"
+
+  echo "step 14.8a: settings_cover_is_not_on_screen: a stop under Settings is off screen, and closing Settings shows the tab again"
+  # A and its agent tab are the active ones, the window is active, and the tab is seen. Settings
+  # replaces the whole window, so nothing shows the tab any more: its stop marks and posts, and
+  # the mark stays until Settings closes (no verb closes it: the Escape key does, like a user).
+  [ "$(attention_get "$sess" unread)" = false ] || fail "the agent session is unread before the Settings step"
+  [ "$(attention_get "$sess" onScreen)" = true ] || fail "the agent session is not on screen before Settings opens, so the check proves nothing"
+  ctl surface settings open >/dev/null || fail "surface settings open was refused"
+  wait_until 10 settings_readable || fail "the Settings surface did not open"
+  attention_wait "$sess" onScreen false 10
+  posted_base="$(posted_count)"
+  ctl notify --session "$pane_a" --status running >/dev/null || fail "notify running for $pane_a was refused"
+  ctl notify --session "$pane_a" --status needs-input >/dev/null || fail "notify needs-input for $pane_a was refused"
+  attention_wait "$sess" unread true 10
+  posted_wait "$posted_base" 1 10
+  sleep 1
+  [ "$(( $(posted_count) - posted_base ))" = 1 ] || fail "the stop under Settings posted $(( $(posted_count) - posted_base )) notifications, not one: $(posted_since "$posted_base" | tr '\n' ' ')"
+  ctl surface attention act --focus active >/dev/null || fail "--focus active was refused"
+  sleep 1
+  [ "$(attention_get "$sess" unread)" = true ] || fail "looking at the window cleared the mark while Settings still covers the tab"
+  echo "OK: under Settings the agent session stopped: unread, one notification, and a look does not clear it"
+  app_press_escape
+  wait_until 10 settings_closed || fail "Escape did not close the Settings surface"
+  ctl surface attention act --focus active >/dev/null || fail "--focus active was refused"
+  attention_wait "$sess" unread false 10
+  [ "$(attention_get "$sess" onScreen)" = true ] || fail "the agent session is not on screen once Settings is closed"
+  echo "OK: Settings closed: the tab is shown again and the mark is cleared"
 
   echo "step 14.9: the agent's exit after its stop posts nothing more"
   # A stays mounted and shown: an inactive window puts the shown tab off screen,
