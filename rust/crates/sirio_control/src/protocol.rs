@@ -1161,6 +1161,12 @@ pub mod request {
         request("surface.project_identity.read", BTreeMap::new())
     }
 
+    /// Debug-only `surface.prompts.read`: the right panel's saved prompts
+    /// view, its cards and the window bounds of its controls.
+    pub fn prompts_read() -> ControlRequest {
+        request("surface.prompts.read", BTreeMap::new())
+    }
+
     /// Debug-only `surface.project_identity.act {action, value?}`: runs a
     /// dialog button's handler (`save`, `skip`) or drives its picker (`mode`,
     /// `open-emoji-grid`, `pick-glyph`).

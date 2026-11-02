@@ -107,19 +107,24 @@ pub fn copy_text(path: &Path, cx: &mut App) -> io::Result<String> {
     std::fs::read_to_string(path)
 }
 
-/// Deletes the prompt. Every open editor of it is forgotten first, so a
-/// pending autosave cannot write the file back.
+/// Deletes the prompt, then forgets every open editor of it, so a pending
+/// autosave cannot write the file back. Both happen in this one call, so no
+/// autosave runs between them. A delete that fails forgets nothing: its
+/// editors keep saving.
 pub fn delete(path: &Path, cx: &mut App) -> io::Result<()> {
     let store = store(cx).ok_or_else(not_found)?;
+    // Both read while the file is there: the registry keys by its
+    // canonical path, which a missing file no longer has.
     let key = key(path);
-    for live in live_for(path, cx) {
+    let editors = live_for(path, cx);
+    store.delete(path)?;
+    for live in editors {
         live.forget(cx);
     }
     if let Some(mut registry) = cx.try_global::<LivePrompts>().map(|l| l.0.clone()) {
         registry.remove(&key);
         cx.set_global(LivePrompts(registry));
     }
-    store.delete(path)?;
     changed(cx);
     Ok(())
 }

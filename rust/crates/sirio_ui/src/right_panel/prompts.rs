@@ -219,14 +219,23 @@ impl RightPanel {
         if !self.worktree_selected {
             return;
         }
-        if let Ok(path) = prompts::create(cx) {
-            cx.emit(RightPanelActionEvent::OpenPrompt(path));
+        match prompts::create(cx) {
+            Ok(path) => cx.emit(RightPanelActionEvent::OpenPrompt(path)),
+            Err(error) => cx.emit(RightPanelActionEvent::PromptFailed(format!(
+                "Could not create a prompt: {error}"
+            ))),
         }
     }
 
     fn copy_prompt(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let Ok(text) = prompts::copy_text(&path, cx) else {
-            return;
+        let text = match prompts::copy_text(&path, cx) {
+            Ok(text) => text,
+            Err(error) => {
+                cx.emit(RightPanelActionEvent::PromptFailed(format!(
+                    "Could not copy the prompt: {error}"
+                )));
+                return;
+            }
         };
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.prompts.copies += 1;
@@ -260,11 +269,16 @@ impl RightPanel {
         let Some(card) = self.prompts.deleting.take() else {
             return;
         };
-        if prompts::delete(&card.path, cx).is_ok() {
-            if self.prompts.copied.as_ref().is_some_and(|(path, _)| *path == card.path) {
-                self.prompts.copied = None;
+        match prompts::delete(&card.path, cx) {
+            Ok(()) => {
+                if self.prompts.copied.as_ref().is_some_and(|(path, _)| *path == card.path) {
+                    self.prompts.copied = None;
+                }
+                cx.emit(RightPanelActionEvent::PromptDeleted(card.path));
             }
-            cx.emit(RightPanelActionEvent::PromptDeleted(card.path));
+            Err(error) => cx.emit(RightPanelActionEvent::PromptFailed(format!(
+                "Could not delete the prompt: {error}"
+            ))),
         }
         cx.notify();
     }

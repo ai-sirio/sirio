@@ -314,6 +314,51 @@ fn browser_profile_path_for(database: &Path) -> PathBuf {
         .join("browser")
 }
 
+/// The saved prompts folder (prompt list spec §4). `SIRIO_PROMPTS_DIR` wins
+/// verbatim in every build; a debug build otherwise keeps its prompts beside
+/// its checkout-scoped database, so a dev build never touches the installed
+/// app's prompts; a release build uses the per-user data folder. Creates
+/// nothing: the store makes the folder on its first write.
+pub(crate) fn prompts_dir(database: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("SIRIO_PROMPTS_DIR").filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    if cfg!(debug_assertions) {
+        return database
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("prompts");
+    }
+    release_data_root()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Sirio")
+        .join("prompts")
+}
+
+/// The per-user data folder a release build keeps its prompts under, or
+/// `None` when the environment names none.
+fn release_data_root() -> Option<PathBuf> {
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    #[cfg(target_os = "macos")]
+    {
+        absolute("HOME").map(|home| home.join("Library").join("Application Support"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        absolute("LOCALAPPDATA")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        absolute("XDG_DATA_HOME")
+            .or_else(|| absolute("HOME").map(|home| home.join(".local").join("share")))
+    }
+}
+
 /// The root under which every Sirio database lives: the stable
 /// `sirio.sqlite` for installed binaries plus a `checkouts/` subtree with
 /// one directory per development checkout. Linux uses XDG_STATE_HOME (or

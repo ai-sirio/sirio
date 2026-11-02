@@ -81,6 +81,9 @@ pub enum RightPanelActionEvent {
     OpenPrompt(PathBuf),
     /// This saved prompt's file is gone: close its tabs.
     PromptDeleted(PathBuf),
+    /// A Copy, New prompt or Delete failed; the host shows this sentence in
+    /// its toast. The list itself stays as it was.
+    PromptFailed(String),
 }
 
 /// Which view the right panel is showing.

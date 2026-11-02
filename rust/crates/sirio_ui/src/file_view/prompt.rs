@@ -61,8 +61,10 @@ pub(super) struct PromptMode {
     /// with the registry's handle, which sets it without touching this view:
     /// a delete can run while this view is being updated.
     forgotten: Rc<Cell<bool>>,
-    /// Whether the keyboard still has to be placed, at the first frame that
-    /// draws the title field.
+    /// Whether the keyboard still has to be placed, at the next frame that
+    /// draws the title field. Only an explicit open asks for it
+    /// (`focus_prompt_on_open`): a tab restored at launch or shown on a
+    /// worktree switch takes no focus.
     focus_pending: bool,
 }
 
@@ -129,8 +131,18 @@ impl FileView {
             generation: 0,
             autosave: None,
             forgotten,
-            focus_pending: true,
+            focus_pending: false,
         });
+    }
+
+    /// The user opened this prompt (Edit, a card, New): at the next frame
+    /// that draws it, the keyboard goes to the title when it is empty, else
+    /// to the text. Also for a tab that was already open.
+    pub fn focus_prompt_on_open(&mut self, cx: &mut Context<Self>) {
+        if let Some(prompt) = self.prompt.as_mut() {
+            prompt.focus_pending = true;
+            cx.notify();
+        }
     }
 
     /// Whether this tab is a saved prompt.
@@ -306,8 +318,11 @@ impl FileView {
             window,
             |view, _title, event: &InputEvent, window, cx| match event {
                 // Never write the title back from here: `set_text` emits
-                // `Changed` again.
-                InputEvent::Changed => view.schedule_prompt_save(cx),
+                // `Changed` again. The notify lets the tab label follow.
+                InputEvent::Changed => {
+                    view.schedule_prompt_save(cx);
+                    cx.notify();
+                }
                 InputEvent::Submit => view.focus_prompt_text(window, cx),
                 _ => {}
             },
@@ -325,8 +340,8 @@ impl FileView {
         }
     }
 
-    /// At the first frame that draws the title field, the keyboard goes to
-    /// the field when the title is empty (a new prompt), else to the text.
+    /// When an open asked for it, the keyboard goes to the title field when
+    /// the title is empty (a new prompt), else to the text.
     /// On the next frame: focus reads the last drawn frame, and neither was
     /// in it.
     pub(super) fn settle_prompt_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
