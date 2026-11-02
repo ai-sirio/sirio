@@ -63,7 +63,8 @@ scripts are throwaway and not in the repo; §6 asks for their equivalent as a te
 | F12 | Every PTY byte passes through `terminal.vt_write(&bytes); journal.push(&bytes)` in the session engine, which runs in the host and in the in-process `LocalLink` fallback alike. `libghostty-vt` 0.2.2 (ghostty `a887df42`) has no 7501 support and no newer crate exists. | [read] `owner.rs:199,410`, `sirio_terminal/src/link.rs:200` |
 | F13 | Today the hooks end a Claude, Codex or omp **turn** with `needs-input`; only a process exit gives `done`. The status model is `Running`, `NeedsInput`, `Done`, `Error`. | [read] `sirio_agents/src/claude.rs:136-141`, `sirio_activity/src/status.rs`; unread-sessions F6 |
 | F14 | unread-sessions: a *stop* is a pane going from Running to a settled state (Done, NeedsInput, Error), or a pane whose first status is already settled. A stop posts one notification when the session is not on screen and leaves an unread mark until seen. | [read] unread-sessions design §3–§5 |
-| F15 | The Clawd path is already in the repo, monochrome: `rust/assets/icons/chat/claude-code.svg` (LobeHub `claudecode.svg` 1.95.0, MIT, attributed in `rust/assets/icons/chat/ATTRIBUTION.md`). `Icon::ClaudeCode` draws `icons/lobehub/claude-color.svg`, the starburst, on the tinted path with `#D97757`; a test keeps tint and asset in step. | [read] `sirio_ui/src/icons.rs:246,313,385-391` |
+| F15 | The Clawd path is already in the repo, monochrome: `rust/assets/icons/chat/claude-code.svg` (LobeHub `claudecode.svg` 1.95.0, MIT, attributed in `rust/assets/icons/chat/ATTRIBUTION.md`). `Icon::ClaudeCode` draws `icons/lobehub/claude-color.svg`, the starburst, on the tinted path with `#D97757`. A comment there says a test keeps tint and asset in step; no such test exists (the chromatic-mark test exempts `ClaudeCode` instead). | [read] `sirio_ui/src/icons.rs:246,313,385-391,846-868` |
+| F18 | Windows' own ConPTY swallows the answers a terminal writes to a program, the 7501 probe answer included; herdr ships Microsoft's newer ConPTY for this reason. | [read] herdr-core `scripts/fetch-conpty.ps1` |
 | F16 | herdr-app and herdr-core are Apache-2.0; Sirio is MIT. | [read] their `LICENSE` files |
 | F17 | herdr names a program from the foreground process **argv**, unwrapping shell wrappers (`zsh -ic '"$@"'`), PowerShell `& 'cmd'` and interpreters (node, bun, npx, uv…, by the script). It shows no status for programs that do not speak 7501 ("do not guess status from screen text"). | [read] herdr-app `src/programs.rs`, herdr-core `SKILL.md` |
 
@@ -132,7 +133,7 @@ The app resolves the agent from that argv, not from a walk of the shell's descen
   path counts by its package (`…/node_modules/@anthropic-ai/claude-code/cli.js` →
   Claude Code).
 
-For panes on a host with the capability, this replaces Layer D (the descendant walk
+On macOS and Linux, for panes on a host with the capability, this replaces Layer D (the descendant walk
 polled every 500 ms) as the source of identity. Layer D stays for the in-process
 fallback only if the engine path cannot serve it; the builder checks, since `LocalLink`
 runs the same engine (F12). *[my call]* herdr's resolver is Apache-2.0 (F16): port the
@@ -282,8 +283,11 @@ provider**, the starburst stays: the Settings account card (`ProviderKind::icon`
 `sirio_ui/src/settings.rs`) and the status bar's Claude usage segment
 (`sirio_ui/src/status_bar.rs:691`). Those surfaces get their own icon variant. The chat's
 own Clawd (`chat/identity.rs`, monochrome, theme-coloured) is unchanged. *[my call]*
-The agent mark stays on the tinted path with the same hex, and the test that keeps tint
-and asset in step keeps passing. The attribution is already there. herdr's `claude.svg`
+The agent mark stays on the tinted path with the same hex. Clawd's asset is monochrome
+(`fill="currentColor"`), so the tint is its only colour. The exemption that
+`every_chromatic_mark_declares_its_own_colours` gives `ClaudeCode` today moves to the
+account variant, which keeps the starburst and its baked fill (F15 corrects the earlier
+claim of a tint test). The attribution is already there. herdr's `claude.svg`
 is the same path and adds nothing to attribute.
 
 ### §3.8 Platforms
@@ -292,9 +296,14 @@ is the same path and adds nothing to attribute.
   7501, OpenCode's server. The Mac failure (F3) is not reproduced on Linux, so the E2E
   cannot prove the fix there; the macOS hand check (§6) can.
 - **Linux** gets all of it.
-- **Windows**: ConPTY has no foreground process group (F11). Identity comes only from a
-  7501 `app=` and from OpenCode's server, so an agent that never reports is not
-  recognised there. The 7501 scanner and probe answer work the same. *[my call]*
+- **Windows**: ConPTY has no foreground process group (F11), so the host names no program
+  there and Layer D keeps identifying agents as it does today. A 7501 `app=` and
+  OpenCode's server add identity on top. The scanner runs the same, but Windows' own
+  ConPTY swallows the probe answer (F18). A hand-typed Claude, which reports only once
+  answered, therefore gets no 7501 status on Windows. Codex and omp report unprompted
+  and get theirs, provided ConPTY passes their reports through, which is unverified.
+  Shipping another ConPTY is out of scope. *[correction made while planning,
+  2026-11-02]*
 
 ## §4 Constraints
 
@@ -377,3 +386,44 @@ PR.
 - The exact names of the capability, events and fields.
 - How the host reads argv on macOS without new permissions (libproc and `sysctl` need
   none for the user's own processes).
+
+## §8 Decided while planning
+
+Approved by the user on 2026-11-02 ("va bene così"), with the plan. Where they differ
+from §3, these win.
+
+1. **Windows** keeps Layer D for identity (§3.8, corrected above). An identity that came
+   from a 7501 `app=` clears with its record, on the shell's exit, or when Layer D finds
+   no agent process.
+2. **A `blocked` before any turn** (a startup dialog) shows amber and is a stop, so it
+   notifies when the session is off screen (F14). The anti-goal "no notification at
+   startup" covers the startup `idle`, the Codex blip and startup titles.
+3. **The turn clock is the host's.** Each record carries the time the host saw its state
+   (ms since the session started), in events and in `SessionSummary` alike. A turn's
+   length is measured between two such times, so neither an app stall nor a relaunch
+   changes it.
+4. **argv on the wire** is capped at 32 arguments of at most 1024 bytes. The program's
+   cwd travels with it, for OpenCode's linking (§3.6). Neither is ever logged.
+5. **No flicker** (§3.1) is one rule: a program-owned pane keeps its agent while a 7501
+   record or an OpenCode link is live. The descendant-chain rule is built only if the
+   live facts show the foreground group changing during a tool run.
+6. **The OpenCode watch** runs only while some pane's foreground program is `opencode`.
+   It reconnects with back-off (2 s doubling to 60 s), logs each failure kind once per
+   run, and ignores proxy variables.
+7. **Startup titles are silent.** On a program-owned pane, title and screen content set
+   no status for 2 s after the agent is recognised, and none while a record is live.
+   After that an agent that never reports (pi, an older Claude) gets today's title
+   mapping. Clearing a record also clears the title status under it.
+8. **Layer D stops for a pane once its session has named a program.** Tabs without job
+   control (a `--cmd` tab, a Sirio-spawned `$SHELL -lc`) never name one and keep it.
+9. **The probe is answered at most once per second per session,** in byte order with the
+   emulator's own replies. An echoed answer cannot start a loop.
+10. **The host E2E proves the protocol's behaviour.** A conformance case cannot wait for
+    output and skips events, so conformance pins only the Welcome capability array.
+11. **The resolver tries the process name after argv** (node's `process.title`). No
+    executable path is carried; a native install's file name is its version (F10).
+12. **The host re-reads the foreground program** every 250 ms until two reads agree:
+    the child takes the terminal before it `exec`s. When the shell is back in the
+    foreground for two polls, the host sends "no program", clears the record, and drops
+    late reports until the foreground changes again. On the shell's exit the record is
+    dropped from the summary, and the app settles a turn that was mid-way.
