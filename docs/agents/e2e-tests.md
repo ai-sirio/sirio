@@ -62,6 +62,19 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # python3-gi with gir1.2-gtk-3.0 for the clipboard.
 Scripts/Tests/test-project-identity-e2e.sh   # -> prints "PROJECT IDENTITY E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
 
+# Saved prompts in the right panel, in one real, isolated debug Sirio on a private Xvfb, driven by
+# real X clicks and keys at the bounds the debug `surface prompts read` verb reports, and checked
+# against the prompts folder, the X CLIPBOARD, `surface tabs read`, `surface editor state` and the
+# workspace toast: the empty view creates no folder, New and typing save with no Ctrl+S, Copy (also
+# right after a key), Edit twice opens one tab, an untouched New leaves nothing, Delete with the tab
+# open never comes back, a plain .md keeps Preview and Ctrl+S, no worktree, and an unwritable folder
+# (Save failed, the toast, the save after the fix). A second app on a fresh database seeded dark
+# shows the same three prompts. Linux only: --xvfb is required; --out-dir DIR (it must not hold a
+# prompts folder) keeps transcript.log, prompts/ (the SIRIO_PROMPTS_DIR the script sets under it and
+# refuses to run without), captures/{light,dark}-*.png and both app logs. It needs python3-gi with
+# gir1.2-gtk-3.0 for the clipboard, which it reads through X11 even when WAYLAND_DISPLAY is set.
+Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 10", then "PROMPTS E2E OK"
+
 # The chat's session panel column in a real, isolated Sirio: a stub `claude`
 # (Scripts/Tests/stubs/session-panel/claude over claude_fixture.py's session_panel
 # mode) and the fake forge, asserted on `surface.chat.read`'s `sessionPanel`:
