@@ -2537,11 +2537,14 @@ scenario_unread_parked_chat() {
   wait_attention "showing the chat's worktree cleared the mark" unread false 10
   if rows_painted; then
     wait_marks "showing the worktree cleared the sidebar's count" "$LINKED" 0 10
+    # A run that paints keeps listing the shown worktree, now with no unread flag.
+    wait_tray "showing the worktree cleared the tray's unread flag" "$LINKED" unread false 10
+  else
+    # A run with no display never reconciles the control pane registry (a frame drives
+    # `sync_control_panes`), so the shown worktree has no status to list and the roster drops
+    # its entry once the flag is gone: the flag must read false or the entry be gone.
+    wait_tray_unread_gone "showing the worktree cleared the tray's unread flag" "$LINKED" 10
   fi
-  # Once cleared the roster lists the worktree only while it has a status to show (a run that
-  # paints reconciles the pane list and does; one that does not may list it no more), so the
-  # flag must read false or the entry be gone.
-  wait_tray_unread_gone "showing the worktree cleared the tray's unread flag" "$LINKED" 10
   case "$(attention_tray "$LINKED" label)" in "● "*) fail "the tray label still leads with the unread dot: $(attention_tray "$LINKED" label)" ;; esac
   echo "OK: the tray label no longer leads with the unread dot"
   capture unread_parked_chat-after
