@@ -13,6 +13,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -119,17 +121,18 @@ impl Client {
 
     /// Opens the event stream and reads it on its own thread: whole frames go to `inbox`
     /// tagged with `connection`, then one `End` when it ends. The thread ends with the
-    /// stream, or at the first frame after the receiver is gone (a heartbeat comes about
-    /// every ten seconds).
+    /// stream, or at the first line after `abandoned` is set (a heartbeat comes about
+    /// every ten seconds), which closes the socket.
     pub(crate) fn open_stream(
         &self,
         connection: u64,
         inbox: Sender<Msg>,
+        abandoned: Arc<AtomicBool>,
     ) -> Result<(), &'static str> {
         let body = self.get(&self.stream, "/api/event", &[])?;
         std::thread::Builder::new()
             .name("opencode-stream".into())
-            .spawn(move || read_frames(body.into_reader(), connection, &inbox))
+            .spawn(move || read_frames(body.into_reader(), connection, &inbox, &abandoned))
             .map_err(|_| UNREACHABLE)?;
         Ok(())
     }
@@ -158,20 +161,16 @@ impl Client {
         Ok(data.keys().cloned().collect())
     }
 
-    /// Whether the session waits on a permission or a question.
-    pub(crate) fn waiting(&self, session: &str) -> Result<bool, &'static str> {
-        for what in ["permission", "form"] {
-            let reply = self.json(&format!("/api/session/{session}/{what}"), &[])?;
-            if data_array(&reply)
-                .ok_or(UNEXPECTED_REPLY)?
-                .iter()
-                .next()
-                .is_some()
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+    /// Whether the session waits on a permission or a question. A lookup that fails (the
+    /// service does not answer that path) says the session is not waiting: it is no
+    /// reason to treat the whole connection as down.
+    pub(crate) fn waiting(&self, session: &str) -> bool {
+        ["permission", "form"].iter().any(|what| {
+            self.json(&format!("/api/session/{session}/{what}"), &[])
+                .ok()
+                .and_then(|reply| data_array(&reply))
+                .is_some_and(|asks| !asks.is_empty())
+        })
     }
 }
 
@@ -183,24 +182,47 @@ fn data_array(reply: &Value) -> Option<Vec<Value>> {
     }
 }
 
-/// Reads the stream line by line and hands over each frame.
-fn read_frames(reader: impl Read, connection: u64, inbox: &Sender<Msg>) {
+/// Reads the stream line by line and hands over each frame. Ends quietly once `abandoned`
+/// is set: the watch has moved on and nobody listens.
+fn read_frames(reader: impl Read, connection: u64, inbox: &Sender<Msg>, abandoned: &AtomicBool) {
     let mut reader = std::io::BufReader::new(reader);
     let mut data = String::new();
+    // A line longer than `MAX_LINE` was skipped: the frame it belonged to is lost.
+    let mut broken = false;
     let end = loop {
         let mut line = String::new();
         match reader.by_ref().take(MAX_LINE).read_line(&mut line) {
             Ok(0) => break STREAM_CLOSED,
-            Ok(_) if !line.ends_with('\n') => break UNEXPECTED_STREAM,
+            Ok(_) if !line.ends_with('\n') => {
+                // Skipped up to its end; a stream that ends inside it is just ended.
+                match skip_line(&mut reader) {
+                    Ok(true) => {
+                        data.clear();
+                        broken = true;
+                        continue;
+                    }
+                    Ok(false) => break STREAM_CLOSED,
+                    Err(_) => break STREAM_LOST,
+                }
+            }
             Ok(_) => {}
             Err(_) => break STREAM_LOST,
         }
+        if abandoned.load(Ordering::SeqCst) {
+            return;
+        }
         let line = line.trim_end_matches(['\r', '\n']);
         let sent = if line.is_empty() {
+            if std::mem::take(&mut broken) {
+                data.clear();
+                continue;
+            }
             if data.is_empty() {
                 continue;
             }
             inbox.send(Msg::Frame(connection, std::mem::take(&mut data)))
+        } else if broken {
+            continue;
         } else if line.starts_with(':') {
             inbox.send(Msg::Beat(connection))
         } else if let Some(value) = line.strip_prefix("data:") {
@@ -218,6 +240,26 @@ fn read_frames(reader: impl Read, connection: u64, inbox: &Sender<Msg>) {
         }
     };
     let _ = inbox.send(Msg::End(connection, end));
+}
+
+/// Discards the rest of a line. False when the stream ends first.
+fn skip_line(reader: &mut impl BufRead) -> std::io::Result<bool> {
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok(false);
+        }
+        match buffer.iter().position(|byte| *byte == b'\n') {
+            Some(at) => {
+                reader.consume(at + 1);
+                return Ok(true);
+            }
+            None => {
+                let all = buffer.len();
+                reader.consume(all);
+            }
+        }
+    }
 }
 
 /// Base64 (standard alphabet, padded), for the Basic credentials.

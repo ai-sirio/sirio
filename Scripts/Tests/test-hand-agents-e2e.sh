@@ -60,7 +60,8 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  title: busy -> running; a permission ask -> needs-input (+1);
 #                                  replied -> running; idle after >= 1 s -> done (+1)
 #   opencode_first_turn_links      one OpenCode pane and a session born after it: linked with no
-#                                  title, busy -> running, idle -> done
+#                                  title, busy -> running, idle -> done (+1); the TUI's title
+#                                  before the service's rename keeps Done and adds no stop
 #   two_opencode_panes_one_folder  two panes in one folder, one then two sessions: no status on
 #                                  either; with titles `OC | a`, `OC | b`: each follows its own
 #   opencode_failed_turn_is_error  a failed turn -> error; the service's error text and its
@@ -991,6 +992,15 @@ case_opencode_three_states() {
   sleep 3
   stepn "opencode: linked by title, idle" "$SESS"
   expect_attention "$SESS" status null "an idle OpenCode"
+  # A plain turn, no ask in it: running, then done after more than a second (+1).
+  oc "busy ses_t"
+  wait_status "$SESS" running 4
+  sleep 1.3
+  base="$(posted_count)"
+  oc "idle ses_t"
+  wait_status "$SESS" done 4
+  expect_posted "$base" 1 "the end of a plain turn"
+  stepn "opencode: a plain turn done" "$SESS"
   oc "busy ses_t"
   wait_status "$SESS" running 4
   sleep 1.3
@@ -1020,20 +1030,34 @@ case_opencode_three_states() {
 case_opencode_first_turn_links() {
   # The title is `OpenCode` until the first turn ends: the session born after the pane,
   # the only one in the folder and the only OpenCode pane there, is the pane's.
+  local base
   start_agent opencode
   oc "create ses_f $OC_DIR"
   oc "busy ses_f"
   wait_status "$SESS" running 4
   sleep 1.3
   stepn "opencode: first turn, linked with no title" "$SESS"
+  base="$(posted_count)"
   oc "idle ses_f"
   wait_status "$SESS" done 4
+  expect_posted "$base" 1 "the end of the first turn"
   stepn "opencode: first turn done" "$SESS"
+  # The TUI's title (`OC | <t>`) can reach the app before the service's rename does: the
+  # link, and the turn's Done with it, must not go in between, and the rename adds no stop.
+  base="$(posted_count)"
+  type_line "$PANE" "title OC | firstturn"
+  sleep 1.5
+  hold_status "$SESS" done 1
+  oc "rename ses_f firstturn"
+  sleep 1.5
+  hold_status "$SESS" done 1
+  expect_posted "$base" 0 "a title that came before the rename"
+  stepn "opencode: first turn kept across the title and the rename" "$SESS"
   leave_opencode "$PANE"
 }
 
 case_two_opencode_panes_one_folder() {
-  local pane_a sess_a pane_b sess_b
+  local pane_a sess_a pane_b sess_b base
   start_agent opencode
   pane_a="$PANE"; sess_a="$SESS"
   start_agent opencode
@@ -1064,26 +1088,32 @@ case_two_opencode_panes_one_folder() {
   oc "busy ses_b"
   wait_status "$sess_b" running 4
   sleep 1.3
+  base="$(posted_count)"
   oc "idle ses_a"
   wait_status "$sess_a" done 4
+  expect_posted "$base" 1 "the end of A's turn"
   expect_attention "$sess_b" status running "B while A finished"
   stepn "opencode A done, B running" "$sess_a"
+  base="$(posted_count)"
   oc "idle ses_b"
   wait_status "$sess_b" done 4
+  expect_posted "$base" 1 "the end of B's turn"
   stepn "opencode B done" "$sess_b"
   leave_opencode "$pane_a"
   leave_opencode "$pane_b"
 }
 
 case_opencode_failed_turn_is_error() {
-  local password
+  local password base
   start_agent opencode
   oc "create ses_e $OC_DIR"
   oc "busy ses_e"
   wait_status "$SESS" running 4
   sleep 1.3
+  base="$(posted_count)"
   oc "fail ses_e"
   wait_status "$SESS" error 4
+  expect_posted "$base" 1 "a failed turn"
   stepn "opencode failed" "$SESS"
   # The error text is the provider's, and the password is a secret: neither is logged.
   password="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["password"])' "$W/xdg/state/opencode/service.json")"

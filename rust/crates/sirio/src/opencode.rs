@@ -19,7 +19,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures::channel::mpsc::UnboundedSender;
 use sirio_activity::{AgentActivityModel, ReportedState};
-use sirio_opencode_watch::{OcPane, OcSession, OcState, Watch, WatchEvent, discover, link};
+use sirio_opencode_watch::{
+    OcPane, OcSession, OcState, TITLED, Watch, WatchEvent, discover, link,
+};
 use sirio_terminal::TerminalActivityEvent;
 
 /// The catalog id the host's program resolution gives OpenCode.
@@ -34,9 +36,13 @@ struct Running {
 }
 
 pub(crate) struct OpenCodeStatus {
-    /// Where the watch's thread hands over what it has to say; the workspace drains the
-    /// other end (`SirioWorkspace::start_opencode_delivery`).
-    sink: UnboundedSender<WatchEvent>,
+    /// Where the watch's thread hands over what it has to say, tagged with the watch's
+    /// generation; the workspace drains the other end
+    /// (`SirioWorkspace::start_opencode_delivery`).
+    sink: UnboundedSender<(u64, WatchEvent)>,
+    /// The generation of the watch now running: a late word from one that was dropped
+    /// (a call in flight when its last pane left) is not this one's.
+    generation: u64,
     home: PathBuf,
     /// The last OSC title of every terminal pane: a title can come before the program
     /// event that names the pane's program.
@@ -51,9 +57,10 @@ pub(crate) struct OpenCodeStatus {
 }
 
 impl OpenCodeStatus {
-    pub(crate) fn new(sink: UnboundedSender<WatchEvent>, home: PathBuf) -> Self {
+    pub(crate) fn new(sink: UnboundedSender<(u64, WatchEvent)>, home: PathBuf) -> Self {
         Self {
             sink,
+            generation: 0,
             home,
             titles: HashMap::new(),
             panes: BTreeMap::new(),
@@ -108,23 +115,33 @@ impl OpenCodeStatus {
             | TerminalActivityEvent::ChildExited { .. }
             | TerminalActivityEvent::SessionLost => {
                 // The caller has settled the pane's turn and the model clears the record
-                // itself (`program_exited`, `program_gone`): only the bookkeeping goes.
-                self.panes.remove(pane_id);
-                self.reported.remove(pane_id);
+                // itself (`program_exited`, `program_gone`): only the bookkeeping goes, the
+                // title too (the next `opencode` in this pane must not link by it).
+                self.forget(pane_id);
             }
             _ => return false,
         }
         self.sync(activity, now)
     }
 
-    /// What the watch said. Ignored once no pane runs `opencode`.
+    /// A pane is gone (closed, or its program left): nothing of it stays, so a pane id
+    /// that is used again starts clean.
+    pub(crate) fn forget(&mut self, pane_id: &str) {
+        self.titles.remove(pane_id);
+        self.panes.remove(pane_id);
+        self.reported.remove(pane_id);
+    }
+
+    /// What the watch of `generation` said. Ignored once no pane runs `opencode`, and when
+    /// it is a watch that was dropped.
     pub(crate) fn on_watch(
         &mut self,
         activity: &mut AgentActivityModel,
+        generation: u64,
         event: WatchEvent,
         now: Instant,
     ) -> bool {
-        if self.watch.is_none() {
+        if self.watch.is_none() || generation != self.generation {
             return false;
         }
         match event {
@@ -142,8 +159,15 @@ impl OpenCodeStatus {
         if self.panes.is_empty() && self.watch.is_none() {
             return false;
         }
-        self.panes
-            .retain(|pane_id, _| activity.agent_id(pane_id) == Some(AGENT));
+        let gone: Vec<String> = self
+            .panes
+            .keys()
+            .filter(|pane_id| activity.agent_id(pane_id) != Some(AGENT))
+            .cloned()
+            .collect();
+        for pane_id in gone {
+            self.forget(&pane_id);
+        }
         let mut directories: Vec<PathBuf> = self
             .panes
             .values()
@@ -160,10 +184,12 @@ impl OpenCodeStatus {
         } else if self.watch.is_none() {
             let sink = self.sink.clone();
             let home = self.home.clone();
+            self.generation += 1;
+            let generation = self.generation;
             self.watch = Some(Watch::start(
                 move || discover(&home, &|name| std::env::var(name).ok()),
                 move |event| {
-                    let _ = sink.unbounded_send(event);
+                    let _ = sink.unbounded_send((generation, event));
                 },
                 directories.clone(),
             ));
@@ -191,7 +217,36 @@ impl OpenCodeStatus {
                 started_ms: running.started_ms,
             })
             .collect();
-        let links = link(&panes, &self.sessions);
+        let mut links = link(&panes, &self.sessions);
+        // The TUI's title can reach the app milliseconds before the service's rename does
+        // (the title is set from it): a pane that was linked keeps its session while its
+        // `OC | <t>` names no titled session in its folder and its own session has no title
+        // yet. `link` stays pure; this is the one state it cannot see.
+        for pane in &panes {
+            if links.iter().any(|(linked, _)| *linked == pane.pane_id) {
+                continue;
+            }
+            let (Some((held, ..)), Some(title)) = (
+                self.reported.get(&pane.pane_id),
+                pane.title.strip_prefix(TITLED),
+            ) else {
+                continue;
+            };
+            let in_folder = |session: &&OcSession| session.directory == pane.cwd;
+            let untitled = self
+                .sessions
+                .iter()
+                .filter(in_folder)
+                .any(|session| session.id == *held && session.title.is_empty());
+            let named = self
+                .sessions
+                .iter()
+                .filter(in_folder)
+                .any(|session| session.title == title);
+            if untitled && !named {
+                links.push((pane.pane_id.clone(), held.clone()));
+            }
+        }
         let mut changed = false;
         let lost: Vec<String> = self
             .reported

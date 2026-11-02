@@ -262,20 +262,26 @@ Sirio:
   not emitted by v2]*
 - links a server session to a pane only when it is sure. The pane's foreground is
   `opencode` (§3.1), the session's directory is the pane's cwd, and the session's title
-  equals the pane title after `OC | `. The title is plain `OpenCode` until the first
-  turn ends (F8), so for the first turn a pane links to the one session in its cwd that
-  starts after the pane's `opencode` did, provided **it is the only pane running
-  `opencode` in that cwd**. Otherwise it waits for the title. If two panes match, or none,
-  the pane shows the OpenCode mark and **no status**: no guessing (anti-goal).
-  *[my call]* The builder first checks live whether a session title exists before the
-  first turn ends, which would make the first-turn rule unnecessary.
+  equals the pane title after `OC | `. A session has no title when it is created (at the
+  first prompt): the service names it with a separate `session.renamed` a moment later,
+  sometimes after the first turn ended and sometimes during it (L17), and the TUI's title
+  follows that rename. So until then a pane links to the one session in its cwd that was
+  created after the pane's `opencode` started, provided **it is the only pane running
+  `opencode` in that cwd**; and a pane that is linked keeps its session when its `OC | <t>`
+  title arrives before the rename does, while no titled session in the folder matches it.
+  Otherwise it waits for the title. If two panes match, or none, the pane shows the
+  OpenCode mark and **no status**: no guessing (anti-goal). A reconnect or a relaunch
+  restores Busy and Waiting from REST, but not a finished or failed result: the seed does
+  not read `outcome`, so an idle session shows no status until its next event.
 - maps busy → Running, waiting → NeedsInput, idle after busy → Done, an error →
   Error, the same table as §3.3.
 
 This depends on an undocumented API, accepted by the user (§0, 7). Like the Claude
 stdio protocol (`docs/agents/architecture/claude-chat.md`), it **degrades rather than
-fails**: no server, a refused connection, an unknown event or an unknown version leaves
-the OpenCode mark with no status, and is logged once by name, never with content.
+fails**: no server, a refused connection, a stream that ends or goes quiet or a reply it
+does not understand leaves the OpenCode mark with no status, and is logged once by name per
+run of the app, never with content. An event name it does not know is ignored without a
+log, and the service's version is not read.
 OpenCode 1.x (no managed service) keeps today's behaviour. The native chat transports
 plan (`docs/native-chat-transports`, PR #691) runs *Sirio's own* OpenCode server; this
 one is the user's. They are different servers, and they may share the client code for

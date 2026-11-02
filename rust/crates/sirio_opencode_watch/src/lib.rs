@@ -13,23 +13,23 @@
 //! then reconnects, re-reading the registration each time, because a restarted service has
 //! a new port, password and pid. Event names it does not know are ignored.
 //!
-//! Nothing here touches the network on the caller's thread: `Watch::start` and
-//! `set_directories` only queue a message.
+//! Nothing here touches the network on the caller's thread: `Watch::start` does a
+//! `canonicalize` per directory (the filesystem) and spawns the thread, and
+//! `set_directories` only queues a message.
 
 mod endpoint;
 mod link;
 mod stream;
 
-use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 pub use endpoint::{Endpoint, EndpointError, discover};
-pub use link::{OcPane, link};
+pub use link::{OcPane, TITLED, link};
 
 use stream::{Client, Table};
 
@@ -94,6 +94,30 @@ const QUIET: Duration = Duration::from_secs(35);
 /// The longest the thread waits on its inbox before looking at the clock.
 const TICK: Duration = Duration::from_secs(2);
 
+/// The failure kinds logged so far in this process: each is logged once per run of the
+/// app, however many watches it starts.
+static LOGGED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+fn log_once(kind: &'static str) {
+    let Ok(mut logged) = LOGGED.lock() else {
+        return;
+    };
+    if !logged.contains(&kind) {
+        logged.push(kind);
+        eprintln!("[opencode-watch] {kind}");
+    }
+}
+
+/// Sets the flag when it goes out of scope: the connection that holds it was left, so its
+/// reader has nobody to read for.
+struct Abandon(Arc<AtomicBool>);
+
+impl Drop for Abandon {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// The thread that keeps the connection. Dropping it asks the thread to end; `stop` waits.
 pub struct Watch {
     inbox: Sender<Msg>,
@@ -120,13 +144,13 @@ impl Watch {
             inbox: inbox.clone(),
             stopping: stopping.clone(),
             directories: directories.iter().map(stream::canonical).collect(),
-            logged: HashSet::new(),
             down: None,
             connection: 0,
         };
         let thread = std::thread::Builder::new()
             .name("opencode-watch".into())
             .spawn(move || run.run())
+            .inspect_err(|_| log_once("spawn_failed"))
             .ok();
         Watch {
             inbox,
@@ -179,8 +203,6 @@ struct Run {
     inbox: Sender<Msg>,
     stopping: Arc<AtomicBool>,
     directories: Vec<PathBuf>,
-    /// The failure kinds already logged in this run.
-    logged: HashSet<&'static str>,
     /// The kind of the last `Down` sent, until the connection is up again.
     down: Option<&'static str>,
     connection: u64,
@@ -196,6 +218,10 @@ impl Run {
             match self.connect() {
                 Outcome::Stopped => return,
                 Outcome::Lost { kind, up } => {
+                    // Stopped while the call was in flight: nobody wants to hear of it.
+                    if self.stopping.load(Ordering::SeqCst) {
+                        return;
+                    }
                     if up {
                         backoff = RETRY_MIN;
                     }
@@ -211,9 +237,7 @@ impl Run {
 
     /// Logs a failure kind once per run and tells the owner once per kind.
     fn report_down(&mut self, kind: &'static str) {
-        if self.logged.insert(kind) {
-            eprintln!("[opencode-watch] {kind}");
-        }
+        log_once(kind);
         if self.down != Some(kind) {
             self.down = Some(kind);
             (self.sink)(WatchEvent::Down(kind));
@@ -260,7 +284,11 @@ impl Run {
         // inbox and is applied once the list is in.
         self.connection += 1;
         let connection = self.connection;
-        if let Err(kind) = client.open_stream(connection, self.inbox.clone()) {
+        // Set on every way out of this function: the reader of an abandoned stream ends at
+        // its next line instead of keeping the socket open for the life of the app.
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let _abandon = Abandon(abandoned.clone());
+        if let Err(kind) = client.open_stream(connection, self.inbox.clone(), abandoned) {
             return lost(kind);
         }
         let mut heard = Instant::now();
@@ -319,6 +347,9 @@ impl Run {
                 table.retain_directories(&self.directories);
                 announce = true;
             }
+            if self.stopping.load(Ordering::SeqCst) {
+                return Outcome::Stopped;
+            }
             if announce {
                 announce = false;
                 up = true;
@@ -362,7 +393,7 @@ fn seed(client: &Client, table: &mut Table, directories: &[PathBuf]) -> Result<(
         for row in client.sessions_in(directory)? {
             let id = row.get("id").and_then(serde_json::Value::as_str).unwrap_or_default();
             let running = active.contains(id);
-            let waiting = running && client.waiting(id)?;
+            let waiting = running && client.waiting(id);
             table.seed(&row, running, waiting);
         }
     }

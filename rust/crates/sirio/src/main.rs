@@ -6309,7 +6309,7 @@ impl SirioWorkspace {
         panes::bind_keys(cx);
         Self::start_process_signal_polling(cx);
         let (opencode_events, opencode_inbox) =
-            futures::channel::mpsc::unbounded::<sirio_opencode_watch::WatchEvent>();
+            futures::channel::mpsc::unbounded::<(u64, sirio_opencode_watch::WatchEvent)>();
         Self::start_opencode_delivery(opencode_inbox, cx);
         cx.bind_keys([
             // cmd-w is the macOS close convention, not a readline key, so it
@@ -9969,6 +9969,7 @@ impl SirioWorkspace {
             (tab.id, tab.agent_id.clone(), was_root)
         };
         self.activity.pane_closed(&format!("pane-{from}"));
+        self.opencode.forget(&format!("pane-{from}"));
         register_restored_agent(&mut self.activity, to, agent_id.as_deref());
         if let Some(terminal) = terminal {
             Self::bind_terminal(terminal, tab_id, to, cx);
@@ -10546,16 +10547,22 @@ impl SirioWorkspace {
     /// own and wakes this loop through the channel (the way `install_host_sessions` wakes
     /// its views), so nothing polls: the loop sleeps until the watch has something to say.
     fn start_opencode_delivery(
-        mut events: futures::channel::mpsc::UnboundedReceiver<sirio_opencode_watch::WatchEvent>,
+        mut events: futures::channel::mpsc::UnboundedReceiver<(
+            u64,
+            sirio_opencode_watch::WatchEvent,
+        )>,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
-            while let Some(event) = events.next().await {
+            while let Some((generation, event)) = events.next().await {
                 let delivered = this.update(cx, |workspace, cx| {
-                    if workspace
-                        .opencode
-                        .on_watch(&mut workspace.activity, event, Instant::now())
+                    if workspace.opencode.on_watch(
+                        &mut workspace.activity,
+                        generation,
+                        event,
+                        Instant::now(),
+                    )
                     {
                         workspace.drain_activity_transitions(cx);
                         workspace.mark_activity_dirty();
@@ -12955,6 +12962,7 @@ impl SirioWorkspace {
                 .filter(|pane_id| !mounted.contains(pane_id))
             {
                 self.activity.pane_closed(&format!("pane-{pane_id}"));
+                self.opencode.forget(&format!("pane-{pane_id}"));
             }
         }
         if let Some(chats) = self.retained_worktree_chats.get(worktree_id) {
@@ -16047,6 +16055,7 @@ impl SirioWorkspace {
         // unselected worktrees read their status from the model).
         for pane_id in closed_panes {
             self.activity.pane_closed(&format!("pane-{pane_id}"));
+            self.opencode.forget(&format!("pane-{pane_id}"));
         }
         if self.tab_menu_tab == Some(tab_id) {
             self.tab_menu_tab = None;
@@ -23864,6 +23873,7 @@ impl SirioWorkspace {
             // Same reason as `close_tab`: the id is free for reuse the moment
             // the leaf is gone, and its model entry must not outlive it.
             self.activity.pane_closed(&format!("pane-{focused_pane}"));
+            self.opencode.forget(&format!("pane-{focused_pane}"));
             self.mark_activity_dirty();
             self.schedule_save(cx);
             cx.notify();

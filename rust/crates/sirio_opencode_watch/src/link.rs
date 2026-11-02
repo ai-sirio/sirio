@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use crate::OcSession;
 
 /// The title OpenCode's TUI gives its window once a session has one: `OC | <title>`.
-const TITLED: &str = "OC | ";
+pub const TITLED: &str = "OC | ";
 /// The title it has until the first turn of a session ends.
 const UNTITLED: &str = "OpenCode";
 

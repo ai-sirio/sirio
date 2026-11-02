@@ -106,6 +106,10 @@ fn is_loopback_http(url: &str) -> bool {
         return false;
     };
     let authority = rest.split('/').next().unwrap_or_default();
+    // `user@host`: the host is what follows the `@`, never what a prefix check sees.
+    if authority.contains('@') {
+        return false;
+    }
     let host = if let Some(bracketed) = authority.strip_prefix('[') {
         bracketed.split(']').next().unwrap_or_default()
     } else {
