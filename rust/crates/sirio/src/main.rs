@@ -10333,6 +10333,19 @@ impl SirioWorkspace {
                     return;
                 }
 
+                // The program left (the shell is the foreground again, or the session
+                // ended): a turn that was mid-way settles to Done first, and that stop
+                // is drained while the pane is still an agent's. Only then does
+                // `apply_terminal_activity_event` clear the identity.
+                if matches!(
+                    event,
+                    TerminalActivityEvent::Program(None) | TerminalActivityEvent::ChildExited { .. }
+                ) {
+                    workspace
+                        .activity
+                        .program_exited(&activity_pane_id, Instant::now());
+                    workspace.drain_activity_transitions(cx);
+                }
                 let title_owned_before = workspace.activity.is_title_owned(&activity_pane_id);
                 let identity_before = (
                     workspace.activity.agent_id(&activity_pane_id).map(str::to_owned),
@@ -10382,7 +10395,7 @@ impl SirioWorkspace {
                     // repaint like an exit; Layer D keeps polling `shell_pid()`,
                     // which now comes from the link.
                     TerminalActivityEvent::IdTaken => {}
-                    // The program's identity was applied above; its status is Task 10.
+                    // The program's identity and its reports were applied above.
                     TerminalActivityEvent::Program(_)
                     | TerminalActivityEvent::ProgramStatus { .. } => {}
                     TerminalActivityEvent::SessionLost => {
@@ -10417,6 +10430,7 @@ impl SirioWorkspace {
                         event,
                         TerminalActivityEvent::ChildExited { .. }
                             | TerminalActivityEvent::LifecycleChanged { .. }
+                            | TerminalActivityEvent::ProgramStatus { .. }
                     )
                 {
                     if matches!(event, TerminalActivityEvent::ChildExited { .. }) {
@@ -10569,7 +10583,8 @@ impl SirioWorkspace {
                             }
                             let activity_pane_id = format!("pane-{pane_id}");
                             let process_owned_before =
-                                workspace.activity.is_process_owned(&activity_pane_id);
+                                workspace.activity.is_process_owned(&activity_pane_id)
+                                    || workspace.activity.is_program_owned(&activity_pane_id);
                             match workspace
                                 .activity
                                 .apply_process_signal(&activity_pane_id, observation)
@@ -10586,6 +10601,7 @@ impl SirioWorkspace {
                                     // removal explicitly for the render gate.
                                     if process_owned_before
                                         && !workspace.activity.is_process_owned(&activity_pane_id)
+                                        && !workspace.activity.is_program_owned(&activity_pane_id)
                                     {
                                         any_transition = true;
                                     }
@@ -14587,7 +14603,34 @@ impl SirioWorkspace {
         for transition in self.activity.take_resolved_transitions() {
             self.on_pane_transition(&transition, cx);
         }
+        for pane_id in self.activity.take_cleared_panes() {
+            self.refresh_running_after_clear(&pane_id);
+        }
         self.flush_attention_writes(cx);
+    }
+
+    /// A pane's status went to nothing: no transition carries that, yet a session
+    /// whose pane was Running must stop reading as running (a turn too short to
+    /// count, a report cleared). Refreshes the running flag the way
+    /// `on_pane_transition` does for a change, and only for a session that has one.
+    fn refresh_running_after_clear(&mut self, pane_id: &str) {
+        let Some(session) = self.session_for_pane(pane_id) else {
+            return;
+        };
+        let running = session
+            .pane_keys
+            .iter()
+            .any(|key| self.activity.status(key) == Some(AgentStatus::Running));
+        let Some(record) = self.session_attention.get_mut(&session.persistence_id) else {
+            return;
+        };
+        if record.running == running {
+            return;
+        }
+        record.running = running;
+        let after = *record;
+        self.queue_attention_write(session.persistence_id.clone(), after);
+        self.mark_activity_dirty();
     }
 
     /// The one place a status change becomes a stop: the unread mark, the running

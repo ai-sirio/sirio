@@ -7,7 +7,9 @@ run links it as `claude`, `codex`, `omp`, `pi` and `opencode`, and copies it to
 python3 there). Which agent it plays comes from the basename of argv[0], or from
 a `claude-code`, `codex`, `opencode-ai` or `pi-coding-agent` segment of its path.
 
-  agent --no-title    sets no window title (for a case that must not be told by one)
+  agent --no-title    sets no window title (for a case that must not be told by one);
+                      so does a file `<argv0>.no-title` beside the executable (a launch
+                      that cannot pass the flag, such as `surface terminal open --agent`)
   agent --version     prints `<name> 9.9.9` and exits (a version probe, as
                       Scripts/Tests/stubs/session-panel/claude answers one)
   agent               with a terminal on stdin: starts as its agent does (below),
@@ -78,7 +80,7 @@ def say(line):
 
 
 def title(text):
-    if "--no-title" in sys.argv[1:]:
+    if "--no-title" in sys.argv[1:] or os.path.exists(sys.argv[0] + ".no-title"):
         return
     os.write(1, b"\x1b]2;" + text.encode() + b"\x07")
 

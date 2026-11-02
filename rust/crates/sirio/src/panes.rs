@@ -8,8 +8,11 @@
 use std::time::{Duration, Instant};
 
 use gpui::{App, Entity, KeyBinding, actions};
-use sirio_activity::{AgentActivityModel, Transition, agent_for_program, detect_content_status};
-use sirio_terminal::{TerminalActivityEvent, TerminalExitStatus, TerminalView};
+use sirio_activity::{
+    AgentActivityModel, ReportedState, Transition, agent_for_app, agent_for_program,
+    detect_content_status,
+};
+use sirio_terminal::{ReportState, TerminalActivityEvent, TerminalExitStatus, TerminalView};
 use sirio_ui::sidebar::project_settings::ProjectSettingsView;
 use sirio_ui::{browser::BrowserSurface, changes::ChangesTab, chat::Chat, file_view::FileView};
 
@@ -41,13 +44,17 @@ pub(crate) fn apply_terminal_activity_event(
             activity.apply_content_signal(pane_id, status, now)
         }
         TerminalActivityEvent::ChildExited { status } => {
-            // Process-, title- and program-owned identities have independent
-            // clearing paths. A PTY child-exit notification is the spawn-owned
-            // path; never let it clear or rewrite any of the other kinds.
-            if activity.is_process_owned(pane_id)
-                || activity.is_title_owned(pane_id)
-                || activity.is_program_owned(pane_id)
-            {
+            // The session ended: a program-owned pane's agent went with it. The
+            // caller has settled a turn that was mid-way (`program_exited`) and
+            // drained its stop before this runs.
+            if activity.is_program_owned(pane_id) {
+                activity.program_gone(pane_id);
+                return None;
+            }
+            // Process- and title-owned identities have independent clearing paths.
+            // A PTY child-exit notification is the spawn-owned path; never let it
+            // clear or rewrite either of the other kinds.
+            if activity.is_process_owned(pane_id) || activity.is_title_owned(pane_id) {
                 return None;
             }
             activity.apply_exit_result(pane_id, terminal_exit_code(*status), now)
@@ -70,22 +77,66 @@ pub(crate) fn apply_terminal_activity_event(
                     match agent_for_program(&program.argv, &program.name) {
                         Some(agent_id) => activity.program_identified(pane_id, agent_id),
                         // A transient (the shell's pre-exec copy, a wrapper) or a
-                        // program that is no agent. Task 10: only while no 7501
-                        // record is live (Refinement 6).
-                        None => activity.program_gone(pane_id),
+                        // program that is no agent. A pane keeps its agent while
+                        // its record is live: the agent runs a tool, and the
+                        // foreground is that tool's.
+                        None => {
+                            if !activity.has_live_report(pane_id) {
+                                activity.program_gone(pane_id);
+                            }
+                        }
                     }
                 }
                 // The shell is the foreground again: no agent process holds the
-                // terminal, so neither a program's nor Layer D's claim stands.
+                // terminal, so neither a program's nor Layer D's claim stands. The
+                // caller has settled a turn that was mid-way and drained its stop.
+                // A session that never named a program is Layer D's, which a
+                // reconnect's re-seed must not clear.
                 None => {
                     activity.program_gone(pane_id);
-                    activity.process_gone(pane_id);
+                    if activity.is_program_session(pane_id) {
+                        activity.process_gone(pane_id);
+                    }
                 }
             }
             None
         }
-        // Task 10: the program's status becomes evidence.
-        TerminalActivityEvent::ProgramStatus { .. } => None,
+        // What the program reports: the record the turn tracker reads. The report
+        // is kept for the pane whether or not the pane is an agent yet; one that
+        // arrives before the program is named shows once it is. A pane no program
+        // names (Windows, a Sirio-spawned `$SHELL -lc <agent>`) takes its agent from
+        // the report's `app=`; where the host names programs, `Program` decides.
+        // Never logged: `kind` and `app` are content.
+        TerminalActivityEvent::ProgramStatus { status, at_ms } => {
+            match status {
+                Some(record) => {
+                    if activity.agent_id(pane_id).is_none()
+                        && !activity.is_program_session(pane_id)
+                        && let Some(agent_id) = record.app.as_deref().and_then(agent_for_app)
+                    {
+                        activity.program_identified(pane_id, agent_id);
+                    }
+                    activity.program_report(
+                        pane_id,
+                        Some(reported_state(record.state)),
+                        *at_ms,
+                        now,
+                    );
+                }
+                None => activity.program_report(pane_id, None, *at_ms, now),
+            }
+            None
+        }
+    }
+}
+
+fn reported_state(state: ReportState) -> ReportedState {
+    match state {
+        ReportState::Idle => ReportedState::Idle,
+        ReportState::Working => ReportedState::Working,
+        ReportState::Done => ReportedState::Done,
+        ReportState::Blocked => ReportedState::Blocked,
+        ReportState::Error => ReportedState::Error,
     }
 }
 

@@ -26,6 +26,28 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  agent stays "" -- Layer D would have named it
 #   omp_title_is_omp               an OSC title `π > /x` from the plain shell is omp
 #
+# and, from what the agents report over OSC 7501, the status the tab shows and the
+# stops it makes (each step takes its own `posted_count` baseline and logs the pane's
+# attention row in steps.log):
+#   startup_is_silent              claude, codex and omp typed: no status, nothing posted
+#   claude_states                  work -> running; idle after >= 1 s -> done (+1, unread);
+#                                  block -> needs-input (+0: done -> needs-input is no stop)
+#   first_report_blocked           a first `block` is needs-input and a stop (+1)
+#   turn_end_notifies_once         codex work, 1.3 s, done: done, +1
+#   blocked_inside_turn_then_idle  work, block, idle: needs-input +1, then done +0
+#   short_turn_is_silent           work, idle 0.2 s later: no status, +0, running false
+#   exit_mid_turn_is_finished      work, 1.3 s, exit: a stop (+1), then no agent, no status
+#   clear_mid_turn_is_silent       claude work, 1.3 s, clear: no status, +0
+#   hooks_yield_to_reports         a hook after an idle changes nothing
+#   hooks_still_rule_without_reports
+#                                  pi reports nothing: its hooks set the status (and prove
+#                                  a hook from a pane reaches the app)
+#   spawned_agent_reports          `surface terminal open --agent claude`: reports show, the
+#                                  Stop hook that follows changes nothing
+#   relaunch_mid_turn              codex mid-turn, `system.quit`, restart: the turn is
+#                                  still open and its idle is a stop (+1); an idle tab stays silent
+#   argv_stays_out_of_app_stderr   `claude SIRIO-ARGV-MARKER`: the marker is not in the app's stderr
+#
 # The world is isolated: `env -i` with an allow-list (a private HOME, every XDG
 # directory, SIRIO_DB, SIRIO_SOCKET, SIRIO_HOST_HOME and no session bus), its own
 # OpenCode service config pointing at nothing, and a PATH that holds the stubs and
@@ -336,21 +358,84 @@ hold_agent() { # pane want seconds
   done
 }
 
-# Opens a terminal (no --cmd: a job-control shell) and prints its pane id.
+# `surface attention read`'s sessions, one JSON object per line (the attention rows
+# are keyed by the tab's persistence id, not by the pane id).
+attention_rows() {
+  ctl surface attention read --json | python3 -I -c 'import json, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+for row in json.loads(reply["sessions"]):
+    print(json.dumps(row))'
+}
+# One field of one session row: strings as they are, everything else as JSON.
+attention_get() { # id field
+  attention_rows | python3 -I -c 'import json, sys
+for line in sys.stdin:
+    row = json.loads(line)
+    if row["id"] == sys.argv[1]:
+        value = row[sys.argv[2]]
+        print(value if isinstance(value, str) else json.dumps(value))
+        break' "$1" "$2"
+}
+# The notifications the app decided to post, one JSON object per line, oldest first
+# (`posted` is kept by a debug build only).
+posted_rows() {
+  ctl surface attention read --json | python3 -I -c 'import json, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+if "posted" not in reply:
+    sys.exit("the attention read has no posted key")
+for row in json.loads(reply["posted"]):
+    print(json.dumps(row))'
+}
+# Every assertion about a step compares against the count taken just before the step.
+posted_count() { posted_rows | wc -l | tr -d ' '; }
+posted_since() { posted_rows | tail -n +"$(( $1 + 1 ))"; }
+
+# Opens a terminal (`surface terminal open` plus any arguments; no --cmd by default: a
+# job-control shell) and sets PANE to its pane id and SESS to its attention session.
+# Not called in a subshell: it sets globals.
+PANE=""
+SESS=""
 open_pane() {
-  local before after pane
+  local before after known
   before="$(ctl panel list --json 2>/dev/null | python3 -I -c 'import json, sys; print(" ".join(r["id"] for r in json.load(sys.stdin)))')"
-  ctl surface terminal open >/dev/null
+  known="$(attention_rows | python3 -I -c 'import json, sys
+print(" ".join(json.loads(line)["id"] for line in sys.stdin))')"
+  ctl surface terminal open "$@" >/dev/null
+  PANE=""
   for _ in $(seq 1 100); do
     after="$(ctl panel list --json 2>/dev/null | python3 -I -c 'import json, sys; print(" ".join(r["id"] for r in json.load(sys.stdin)))')"
-    pane="$(python3 -I -c 'import sys
+    PANE="$(python3 -I -c 'import sys
 old = set(sys.argv[1].split())
 new = [p for p in sys.argv[2].split() if p not in old]
 print(new[0] if new else "")' "$before" "$after")"
-    [ -z "$pane" ] || { printf '%s' "$pane"; return 0; }
+    [ -z "$PANE" ] || break
     sleep 0.2
   done
-  fail "no new pane appeared after surface terminal open"
+  [ -n "$PANE" ] || fail "no new pane appeared after surface terminal open"
+  SESS=""
+  for _ in $(seq 1 100); do
+    SESS="$(attention_rows | python3 -I -c 'import json, os, sys
+known = set(sys.argv[2].split())
+for line in sys.stdin:
+    row = json.loads(line)
+    if row["kind"] == "terminal" and row["id"] not in known \
+            and os.path.realpath(row["worktree"]) == os.path.realpath(sys.argv[1]):
+        print(row["id"])
+        break' "$W_REPO" "$known")"
+    [ -z "$SESS" ] || break
+    sleep 0.2
+  done
+  [ -n "$SESS" ] || fail "no attention session appeared for pane $PANE"
+}
+
+# The 1-based position of pane $1 in the tab strip: one pane per tab, tabs in the order
+# the panes were opened (`panel list` sorts its ids as text, so pane-10 precedes pane-2).
+tab_index_of() { # pane
+  ctl panel list --json | python3 -I -c 'import json, sys
+ids = sorted((row["id"] for row in json.load(sys.stdin)), key=lambda i: int(i.rsplit("-", 1)[1]))
+print(ids.index(sys.argv[1]) + 1)' "$1"
 }
 
 # Types $2 and Enter into pane $1, through the world's host, as a user types.
@@ -392,6 +477,63 @@ PY
 
 # ---------------------------------------------------------------- the cases
 
+# A step's evidence for one session: its status, unread mark and running flag, and the
+# posted count, then the pane list and the attention read (`step`).
+stepn() { # label session
+  {
+    echo "=== $1 -- session $2: status=$(attention_get "$2" status) unread=$(attention_get "$2" unread) running=$(attention_get "$2" running) posted=$(posted_count)"
+  } >> "$OUT_DIR/steps.log"
+  step "$1"
+}
+
+# Waits until session $1's status reads $2 (null, running, needs-input, done, error) within $3 s.
+wait_status() { # session want seconds
+  local got=""
+  for _ in $(seq 1 $(( $3 * 5 ))); do
+    got="$(attention_get "$1" status)"
+    [ "$got" = "$2" ] && return 0
+    sleep 0.2
+  done
+  step "FAILED: session $1 wanted status '$2', last '$got'"
+  fail "session $1: the status never read '$2' within $3 s (last: '$got')"
+}
+# Holds for $3 s that session $1's status stays $2.
+hold_status() { # session want seconds
+  local got=""
+  for _ in $(seq 1 $(( $3 * 5 ))); do
+    got="$(attention_get "$1" status)"
+    [ "$got" = "$2" ] || { step "FAILED: session $1 read '$got' while it had to stay '$2'"; fail "session $1: the status read '$got' while it had to stay '$2'"; }
+    sleep 0.2
+  done
+}
+# After a settling second, the app has posted exactly $2 notifications since baseline $1.
+expect_posted() { # baseline want what
+  local got
+  sleep 1.5
+  got="$(( $(posted_count) - $1 ))"
+  [ "$got" = "$2" ] || fail "$3: the app posted $got notification(s), wanted $2; posted since: $(posted_since "$1" | tr '\n' ' ')"
+}
+expect_attention() { # session field want what
+  local got
+  got="$(attention_get "$1" "$2")"
+  [ "$got" = "$3" ] || fail "$4: $2 reads '$got', wanted '$3'"
+}
+
+# A terminal with agent $1 typed and its mark shown (sets PANE and SESS), then 2.5 s:
+# past the 2 s the app keeps a startup title silent, and the probe's answer is in.
+start_agent() { # name
+  open_pane
+  type_line "$PANE" "$1"
+  wait_agent "$PANE" "$1" 3
+  sleep 2.5
+}
+# A turn of at least a second: work, then 1.3 s.
+long_work() { # pane session
+  type_line "$1" work
+  wait_status "$2" running 3
+  sleep 1.3
+}
+
 # A pane that has named a program and gone back to the shell: what the Layer D case needs.
 prime_named_pane() { # pane
   type_line "$1" codex
@@ -403,7 +545,7 @@ prime_named_pane() { # pane
 case_typed_agents_show_their_mark() {
   local name pane
   for name in claude codex omp pi; do
-    pane="$(open_pane)"
+    open_pane; pane="$PANE"
     echo "  $name: pane $pane"
     type_line "$pane" "$name"
     wait_agent "$pane" "$name" 3
@@ -414,7 +556,7 @@ case_typed_agents_show_their_mark() {
 
 case_wrapped_claude_is_claude() {
   local pane
-  pane="$(open_pane)"
+  open_pane; pane="$PANE"
   # --no-title: the stub sets no `✳ Claude Code` title, so only the program names it.
   type_line "$pane" "node $RUN/lib/node_modules/@anthropic-ai/claude-code/cli.js --no-title"
   wait_agent "$pane" claude 3
@@ -423,7 +565,7 @@ case_wrapped_claude_is_claude() {
 
 case_leaving_clears_the_mark() {
   local pane
-  pane="$(open_pane)"
+  open_pane; pane="$PANE"
   type_line "$pane" codex
   wait_agent "$pane" codex 3
   type_line "$pane" exit
@@ -433,7 +575,7 @@ case_leaving_clears_the_mark() {
 
 case_layer_d_is_off_for_named_programs() {
   local pane pids pid
-  pane="$(open_pane)"
+  open_pane; pane="$PANE"
   prime_named_pane "$pane"
   type_line "$pane" "$RUN/bg/codex -c 'import time; time.sleep(600)' &"
   # The process exists, and its comm is codex: what Layer D reads.
@@ -457,10 +599,241 @@ case_layer_d_is_off_for_named_programs() {
 
 case_omp_title_is_omp() {
   local pane
-  pane="$(open_pane)"
+  open_pane; pane="$PANE"
   type_line "$pane" "printf '\\033]2;π > /x\\007'"
   wait_agent "$pane" omp 3
   step "omp title in $pane"
+}
+
+case_startup_is_silent() {
+  local name base
+  for name in claude codex omp; do
+    base="$(posted_count)"
+    open_pane
+    type_line "$PANE" "$name"
+    wait_agent "$PANE" "$name" 3
+    sleep 3
+    stepn "startup $name in $PANE" "$SESS"
+    expect_attention "$SESS" status null "$name at startup"
+    expect_attention "$SESS" running false "$name at startup"
+    expect_attention "$SESS" unread false "$name at startup"
+    expect_posted "$base" 0 "$name at startup"
+  done
+}
+
+case_claude_states() {
+  local base
+  start_agent claude
+  type_line "$PANE" work
+  wait_status "$SESS" running 3
+  stepn "claude working" "$SESS"
+  capture "claude-running"
+  base="$(posted_count)"
+  type_line "$PANE" idle
+  wait_status "$SESS" done 3
+  expect_posted "$base" 1 "claude's idle after a turn"
+  expect_attention "$SESS" unread true "claude's idle after a turn"
+  stepn "claude idle after a turn" "$SESS"
+  capture "claude-done"
+  base="$(posted_count)"
+  type_line "$PANE" block
+  wait_status "$SESS" needs-input 3
+  expect_posted "$base" 0 "done -> needs-input is no stop"
+  stepn "claude blocked after done" "$SESS"
+  capture "claude-needs-input"
+}
+
+case_first_report_blocked() {
+  local base
+  start_agent claude
+  base="$(posted_count)"
+  type_line "$PANE" block
+  wait_status "$SESS" needs-input 3
+  expect_posted "$base" 1 "a first blocked"
+  expect_attention "$SESS" unread true "a first blocked"
+  stepn "first report blocked" "$SESS"
+}
+
+case_turn_end_notifies_once() {
+  local base
+  start_agent codex
+  long_work "$PANE" "$SESS"
+  base="$(posted_count)"
+  type_line "$PANE" done
+  wait_status "$SESS" done 3
+  expect_posted "$base" 1 "codex's done"
+  expect_attention "$SESS" unread true "codex's done"
+  stepn "codex done" "$SESS"
+}
+
+case_blocked_inside_turn_then_idle() {
+  local base
+  start_agent codex
+  type_line "$PANE" work
+  wait_status "$SESS" running 3
+  base="$(posted_count)"
+  type_line "$PANE" block
+  wait_status "$SESS" needs-input 3
+  expect_posted "$base" 1 "a block inside a turn"
+  stepn "blocked inside a turn" "$SESS"
+  base="$(posted_count)"
+  type_line "$PANE" idle
+  wait_status "$SESS" done 3
+  expect_posted "$base" 0 "the idle after a block (needs-input -> done)"
+  stepn "idle after a block" "$SESS"
+}
+
+case_short_turn_is_silent() {
+  local base
+  start_agent codex
+  base="$(posted_count)"
+  type_line "$PANE" work
+  wait_status "$SESS" running 3
+  sleep 0.2
+  type_line "$PANE" idle
+  wait_status "$SESS" null 3
+  hold_status "$SESS" null 1
+  expect_attention "$SESS" running false "a short turn"
+  expect_posted "$base" 0 "a short turn"
+  stepn "short turn" "$SESS"
+}
+
+case_exit_mid_turn_is_finished() {
+  local base
+  start_agent codex
+  long_work "$PANE" "$SESS"
+  base="$(posted_count)"
+  type_line "$PANE" exit
+  wait_agent "$PANE" "" 3
+  wait_status "$SESS" null 3
+  expect_posted "$base" 1 "an exit mid-turn"
+  expect_attention "$SESS" unread true "an exit mid-turn"
+  expect_attention "$SESS" running false "an exit mid-turn"
+  stepn "exit mid-turn" "$SESS"
+}
+
+case_clear_mid_turn_is_silent() {
+  local base
+  start_agent claude
+  long_work "$PANE" "$SESS"
+  base="$(posted_count)"
+  type_line "$PANE" clear
+  wait_status "$SESS" null 3
+  hold_status "$SESS" null 1
+  expect_attention "$SESS" running false "a clear mid-turn"
+  expect_posted "$base" 0 "a clear mid-turn"
+  stepn "clear mid-turn" "$SESS"
+}
+
+case_hooks_yield_to_reports() {
+  local base
+  start_agent claude
+  long_work "$PANE" "$SESS"
+  type_line "$PANE" idle
+  wait_status "$SESS" done 3
+  sleep 1
+  base="$(posted_count)"
+  type_line "$PANE" "hook needs-input"
+  hold_status "$SESS" done 2
+  expect_posted "$base" 0 "a hook while a record is live"
+  stepn "hook after a report" "$SESS"
+}
+
+case_hooks_still_rule_without_reports() {
+  local base
+  start_agent pi
+  base="$(posted_count)"
+  type_line "$PANE" "hook needs-input"
+  wait_status "$SESS" needs-input 3
+  expect_posted "$base" 1 "pi's first hook"
+  stepn "pi hook needs-input" "$SESS"
+  base="$(posted_count)"
+  type_line "$PANE" "hook running"
+  wait_status "$SESS" running 3
+  type_line "$PANE" "hook needs-input"
+  wait_status "$SESS" needs-input 3
+  expect_posted "$base" 1 "pi's running then needs-input"
+  stepn "pi hook running then needs-input" "$SESS"
+}
+
+case_spawned_agent_reports() {
+  local base
+  # The stub sets no title when a `<argv0>.no-title` file sits beside it: the pane's agent
+  # can then come from the report's `app=` alone, which is what a Sirio-spawned tab needs.
+  : > "$RUN/bin/claude.no-title"
+  open_pane --agent claude
+  sleep 3
+  rm -f "$RUN/bin/claude.no-title"
+  stepn "spawned claude before its first report" "$SESS"
+  # Nothing has told the app what this tab runs or does: the report is the only evidence.
+  expect_attention "$SESS" status null "a spawned claude before it reports"
+  type_line "$PANE" work
+  wait_status "$SESS" running 5
+  sleep 1.3
+  stepn "spawned claude working" "$SESS"
+  base="$(posted_count)"
+  type_line "$PANE" idle
+  wait_status "$SESS" done 3
+  expect_posted "$base" 1 "a spawned claude's idle"
+  expect_attention "$SESS" unread true "a spawned claude's idle"
+  base="$(posted_count)"
+  # The Stop hook, which fires when a turn ends: the report already said finished.
+  type_line "$PANE" "hook needs-input"
+  hold_status "$SESS" done 2
+  expect_posted "$base" 0 "the Stop hook after the report"
+  stepn "spawned claude: Stop hook after idle" "$SESS"
+}
+
+case_relaunch_mid_turn() {
+  local pane_a sess_a pane_b sess_b base
+  start_agent codex
+  pane_b="$PANE"; sess_b="$SESS"
+  type_line "$pane_b" idle
+  start_agent codex
+  pane_a="$PANE"; sess_a="$SESS"
+  type_line "$pane_a" work
+  wait_status "$sess_a" running 3
+  sleep 1.5
+  stepn "before the quit: A mid-turn, B idle" "$sess_a"
+  ctl quit >/dev/null 2>&1 || true
+  for _ in $(seq 1 100); do alive "$APP_PID" || break; sleep 0.2; done
+  alive "$APP_PID" && fail "sirio did not quit after sirioctl quit"
+  APP_PID=""
+  app_start
+  ctl select-workspace --workspace "$wt" >/dev/null
+  sleep 2
+  # Only the selected tab (A, the last opened) is mounted: its terminal attaches to the
+  # host's live session, and the host's record seeds the open turn.
+  wait_agent "$pane_a" codex 15
+  wait_status "$sess_a" running 10
+  stepn "after the relaunch: A mid-turn" "$sess_a"
+  # Tab B is selected: it attaches and its host record (idle) seeds no status.
+  ctl tab select "$(tab_index_of "$pane_b")" >/dev/null
+  wait_agent "$pane_b" codex 15
+  sleep 1
+  expect_attention "$sess_b" status null "tab B selected after the relaunch"
+  stepn "after the relaunch: B selected, at idle" "$sess_b"
+  ctl tab select "$(tab_index_of "$pane_a")" >/dev/null
+  sleep 1
+  wait_status "$sess_a" running 5
+  base="$(posted_count)"
+  type_line "$pane_a" idle
+  wait_status "$sess_a" done 5
+  expect_posted "$base" 1 "the idle of a turn the relaunch found open"
+  expect_attention "$sess_a" unread true "the idle after the relaunch"
+  stepn "after the relaunch: A's idle" "$sess_a"
+  expect_attention "$sess_b" status null "tab B after A's idle"
+}
+
+case_argv_stays_out_of_app_stderr() {
+  local count
+  open_pane
+  type_line "$PANE" "claude SIRIO-ARGV-MARKER"
+  wait_agent "$PANE" claude 3
+  sleep 2
+  count="$(grep -c SIRIO-ARGV-MARKER "$W/app.log" || true)"
+  [ "$count" = 0 ] || fail "the app's stderr holds the argv marker $count time(s)"
+  echo "  marker in the app's stderr: $count"
 }
 
 run_case() { # name
@@ -491,6 +864,19 @@ run_case wrapped_claude_is_claude
 run_case leaving_clears_the_mark
 run_case layer_d_is_off_for_named_programs
 run_case omp_title_is_omp
+run_case startup_is_silent
+run_case claude_states
+run_case first_report_blocked
+run_case turn_end_notifies_once
+run_case blocked_inside_turn_then_idle
+run_case short_turn_is_silent
+run_case exit_mid_turn_is_finished
+run_case clear_mid_turn_is_silent
+run_case hooks_yield_to_reports
+run_case hooks_still_rule_without_reports
+run_case spawned_agent_reports
+run_case relaunch_mid_turn
+run_case argv_stays_out_of_app_stderr
 
 [ "$CASES_RUN" -gt 0 ] || { echo "FAIL: --only named no case" >&2; exit 1; }
 if [ -n "$ONLY" ]; then label=PARTIAL; else label=OK; fi

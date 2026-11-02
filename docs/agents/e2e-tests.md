@@ -91,8 +91,15 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # terminal with `surface terminal open` (no --cmd: the host names its foreground program), types
 # through `host_probe term-write`, and reads the pane's `agent` in `panel list --json`: the four
 # agents typed by name (a frame of each), a package script run by `node`, leaving it, a background
-# `codex` that Layer D would name but is not the foreground, and an omp title. --out-dir DIR keeps
-# transcript.log, steps.log (each step's `panel list` and `surface attention read`), frames/ and the
+# `codex` that Layer D would name but is not the foreground, and an omp title. It then types the
+# stub's OSC 7501 reports (work, idle, done, block, error, clear) and `hook <status>` lines and
+# asserts the status the tab shows, its unread mark, running flag and the notifications the app
+# posted (a baseline per step): a silent startup, claude's and codex's turns (a frame at running,
+# needs-input and done), a first `block`, a short turn, an exit or a clear mid-turn, hooks that
+# yield to a live report and rule without one, a Sirio-spawned `--agent claude` tab, a
+# `system.quit` and relaunch mid-turn, and the argv kept out of the app's stderr. --out-dir DIR
+# keeps transcript.log, steps.log (each step's `panel list` and `surface attention read`, and the
+# session's status, unread, running and posted count), frames/ and the
 # logs (default ~/.cache/st/hand-agents-e2e-<time>; TMPDIR defaults to ~/.cache/st/hand-agents-tmp,
 # on disk); --only NAME[,NAME...] prints "HAND AGENTS E2E PARTIAL"; --no-build reuses the binaries.
 Scripts/Tests/test-hand-agents-e2e.sh   # -> prints "HAND AGENTS E2E OK (<n> cases, <s>s)"
