@@ -179,6 +179,7 @@ shape.
 | pin button in the peek header, or the rail's expand button | the half expands showing that tab; the peek is gone |
 | worktree switch, or the peeked tab closes | the peek closes |
 | any other route that makes a Primary tab active while the rail is drawn: sidebar pill, Ctrl+digit, tab cycling, palette New Terminal / New Chat, Ctrl+Shift+M into the Primary, `surface.tabs.*` over the socket | the peek opens on that tab |
+| with a peek open, an open the user did not ask for: Follow Edited Files, `browser.open` over the socket | the file or page becomes the Secondary's active tab under the card; the peek, the active tab and the keyboard stay on the peeked tab (coordinator's call, 2026-11-02) |
 
 **Other routes.** That last row is a single hook where the Primary's active
 tab changes on a user's request, not a list of call sites. Today
@@ -243,7 +244,9 @@ one: translucency is never in the foreground
 - While the peek is open, the centre split's focused role is Primary with the
   peeked tab active, so tab-level shortcuts act on what the user is looking
   at.
-- Closing the peek returns focus to the Secondary's active tab.
+- Closing the peek returns focus to the Secondary's active tab. A press that
+  closes it on chrome that takes focus itself (the status bar, the strip's empty
+  space) keeps that focus, as the same press does with no peek open.
 
 **Native browser.** `overlay_obscures_browsers` (`main.rs:18034`) must
 include "peek open" and "rail New menu open". Otherwise a Browser tab in the
