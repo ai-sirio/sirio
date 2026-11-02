@@ -354,10 +354,12 @@ are written first.
 
 ## §9 Left to the builder
 
-- **Icons.** The collapse and expand icon pair, copied byte-for-byte from
-  Zed's catalog like the others in `rust/assets/icons/zed/`, with
-  `ATTRIBUTION.md` updated. If Zed has no fitting pair, ask before drawing
-  one.
+- **Icons.** Zed's catalog has no directional panel pair, so Enzo chose
+  Lucide's `panel-left-close` (collapse) and `panel-left-open` (expand),
+  copied byte-for-byte into `rust/assets/icons/lucide/` with their own
+  `ATTRIBUTION.md` and a `THIRD_PARTY_NOTICES.md` entry. Zed's state pair
+  was rejected because its "open" glyph is the titlebar's sidebar toggle, and
+  plain chevrons because the titlebar uses them for back and forward.
 - **Sizing.** Exact pixels within the sizes above, and the peek's entry
   animation (reuse `layer`'s fade).
 - **Socket fields.** The shape of the debug rects and of the
