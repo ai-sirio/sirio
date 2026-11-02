@@ -97,7 +97,14 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # posted (a baseline per step): a silent startup, claude's and codex's turns (a frame at running,
 # needs-input and done), a first `block`, a short turn, an exit or a clear mid-turn, hooks that
 # yield to a live report and rule without one, a Sirio-spawned `--agent claude` tab, a
-# `system.quit` and relaunch mid-turn, and the argv kept out of the app's stderr. --out-dir DIR
+# `system.quit` and relaunch mid-turn, and the argv kept out of the app's stderr. OpenCode, which
+# reports nothing in the terminal, is read from its service: a stub (stubs/opencode-server.py: the
+# real v2 endpoints, Basic auth, an SSE stream; driven by lines in $RUN/oc.cmd) registers itself
+# in the world's own $XDG_STATE_HOME/opencode/service.json, and the cases cover a session linked
+# by its title and one linked by being the first in its folder (a frame at running and at done), a
+# permission ask, two panes in one folder (no guess, then each by its title), a failed turn (the
+# service's error text and password stay out of the app's stderr), a relaunch, and a service that
+# goes away (the mark stays, no status, one `[opencode-watch] <kind>` line). --out-dir DIR
 # keeps transcript.log, steps.log (each step's `panel list` and `surface attention read`, and the
 # session's status, unread, running and posted count), frames/ and the
 # logs (default ~/.cache/st/hand-agents-e2e-<time>; TMPDIR defaults to ~/.cache/st/hand-agents-tmp,

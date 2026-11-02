@@ -30,7 +30,7 @@ sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_activity, sirio_markdown, sirio_registry, sirio_release,
 sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram,
 sirio_forge, sirio_privacy, sirio_ipc, sirio_host_protocol,
-sirio_term_session, sirio_chat_vocab
+sirio_term_session, sirio_chat_vocab, sirio_opencode_watch
                                 (leaves — no local deps beyond sirio_perf and sirio_env;
                                  sirio_theme takes `bezel-theme` (pinned
                                  `=0.1.4`) and the vendored `ely-palette`;
@@ -64,7 +64,15 @@ sirio_term_session, sirio_chat_vocab
                                  sirio_chat_vocab is the chat vocabulary every
                                  transport emits — `ChatEvent`, `ChatError`,
                                  the trace and permission types — with only
-                                 `async-channel` and `serde_json` behind it)
+                                 `async-channel` and `serde_json` behind it;
+                                 sirio_opencode_watch is OpenCode's own status
+                                 read from the background service its TUI talks
+                                 to — registration file, one HTTP/SSE watch on a
+                                 thread of its own, and the pure `link` of a
+                                 session to a pane — with no GPUI and no local
+                                 crate: it takes `ureq`, `serde` and `serde_json`
+                                 only, `sirio` is its one dependent, and its
+                                 `discover` makes no network call)
     ^
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)

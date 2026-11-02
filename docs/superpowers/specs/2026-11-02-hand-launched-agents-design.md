@@ -242,15 +242,24 @@ OpenCode reports nothing in the terminal (F8). Its v2 work happens in the user's
 managed background server (F9), which is also what the hand-typed `opencode` talks to.
 Sirio:
 
-- finds that server: the port, and the password if one is set
-  (`OPENCODE_SERVER_PASSWORD` exists in the binary), resolved from OpenCode's service
-  configuration the way `opencode` itself resolves them. If the password names an
-  environment variable that Sirio's own environment lacks (an app started from the Dock
-  does not inherit the shell's), OpenCode status is off and this is logged once by name.
-  Sirio never asks for the password. *[my call]*
-- subscribes to its event stream and keeps, per session, busy / idle / waiting on a
-  permission or a question (`session.status`, `session.idle`, `permission.asked`, and
-  the question/form events: names seen in the binary, to be confirmed);
+- finds that server through its registration file, the one `opencode` itself reads:
+  `$XDG_STATE_HOME/opencode/service.json` (else `~/.local/state/opencode/service.json`),
+  `{id, version, url, pid, password}`, mode 600. Sirio reads the file (no network call,
+  no environment variable: the service ignores `OPENCODE_SERVER_PASSWORD`, so an app started
+  from the Dock finds it too) and its watch thread confirms the service with
+  `GET <url>/api/info` (Basic `opencode:<password>`), accepting it only when the reply's
+  `pid` is the file's. The file is read again on every reconnect: a restarted service has a
+  new port, password and pid. *[measured, Task 2 L12, L13]*
+- reads the state before the stream from REST (`GET /api/session?directory=`, an exact
+  match on the pane's canonical cwd; `GET /api/session/active`; `GET
+  /api/session/{id}/permission` and `/form`) and subscribes to `GET /api/event` (SSE,
+  `data:` frames, a `server.connected` first, nothing replayed). Per session: busy on
+  `session.execution.started`; idle on `.succeeded` and `.interrupted`; error on `.failed`;
+  waiting on `permission.asked` and `form.created`, busy again on `permission.replied`,
+  `permission.rejected`, `form.replied` and `form.cancelled`. `session.execution.*` carry
+  no `location`, so they map through `data.sessionID`; the title comes from
+  `session.renamed`. *[measured, Task 2 L14 to L16; `session.status` and `session.idle` are
+  not emitted by v2]*
 - links a server session to a pane only when it is sure. The pane's foreground is
   `opencode` (§3.1), the session's directory is the pane's cwd, and the session's title
   equals the pane title after `OC | `. The title is plain `OpenCode` until the first

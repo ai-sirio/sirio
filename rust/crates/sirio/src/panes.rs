@@ -114,6 +114,11 @@ pub(crate) fn apply_terminal_activity_event(
         // launcher the resolver misses); a `Program` that names an agent decides
         // later. Never logged: `kind` and `app` are content.
         TerminalActivityEvent::ProgramStatus { status, at_ms } => {
+            // OpenCode sends no 7501, so every host status for it is a none (a reconnect's
+            // re-seed included): the watch's link is the only writer of such a pane's record.
+            if activity.agent_id(pane_id) == Some("opencode") {
+                return None;
+            }
             match status {
                 Some(record) => {
                     if activity.agent_id(pane_id).is_none()

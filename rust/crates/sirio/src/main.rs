@@ -293,6 +293,7 @@ mod lsp_install;
 mod native_notification;
 #[cfg(feature = "perf-native")]
 mod native_perf;
+mod opencode;
 mod panel_layout;
 mod panes;
 mod primary_rail;
@@ -5846,6 +5847,9 @@ struct SirioWorkspace {
     /// pane, through `Chat`'s own state) —
     /// never a second, independently-tracked flag.
     activity: AgentActivityModel,
+    /// OpenCode sends no status in the terminal: the panes that run it and the watch
+    /// that reads their sessions from OpenCode's own service (`opencode.rs`).
+    opencode: opencode::OpenCodeStatus,
     /// Shell-only terminal facts, keyed by the terminal entity rather than
     /// pane id because pane ids are reused when another worktree is mounted.
     /// Content repaint notifications must never invalidate this workspace.
@@ -6304,6 +6308,9 @@ impl SirioWorkspace {
         let terminal_font_size = settings.read(cx).snapshot().terminal_font_size;
         panes::bind_keys(cx);
         Self::start_process_signal_polling(cx);
+        let (opencode_events, opencode_inbox) =
+            futures::channel::mpsc::unbounded::<sirio_opencode_watch::WatchEvent>();
+        Self::start_opencode_delivery(opencode_inbox, cx);
         cx.bind_keys([
             // cmd-w is the macOS close convention, not a readline key, so it
             // stays unguarded.
@@ -7219,6 +7226,10 @@ impl SirioWorkspace {
                 sink
             },
             activity,
+            opencode: opencode::OpenCodeStatus::new(
+                opencode_events,
+                user_home_dir().unwrap_or_default(),
+            ),
             terminal_shell_evidence,
             chat_evidence: HashMap::new(),
             activity_dirty: true,
@@ -10371,6 +10382,14 @@ impl SirioWorkspace {
                     event,
                     Instant::now(),
                 );
+                // OpenCode's panes: where they run, their titles, and the link to a session.
+                let opencode_changed = workspace.opencode.note_event(
+                    &mut workspace.activity,
+                    &activity_pane_id,
+                    event,
+                    identity_before.0.as_deref() == Some("opencode"),
+                    Instant::now(),
+                );
                 match event {
                     TerminalActivityEvent::ChildExited { status } => {
                         let evidence = TerminalShellEvidence {
@@ -10440,6 +10459,7 @@ impl SirioWorkspace {
                 if transition.is_some()
                     || title_owned_clear
                     || identity_changed
+                    || opencode_changed
                     || matches!(
                         event,
                         TerminalActivityEvent::ChildExited { .. }
@@ -10500,6 +10520,34 @@ impl SirioWorkspace {
                     cx.notify();
                 }
             });
+        })
+        .detach();
+    }
+
+    /// What OpenCode's watch says, onto the UI thread. The watch lives on a thread of its
+    /// own and wakes this loop through the channel (the way `install_host_sessions` wakes
+    /// its views), so nothing polls: the loop sleeps until the watch has something to say.
+    fn start_opencode_delivery(
+        mut events: futures::channel::mpsc::UnboundedReceiver<sirio_opencode_watch::WatchEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(event) = events.next().await {
+                let delivered = this.update(cx, |workspace, cx| {
+                    if workspace
+                        .opencode
+                        .on_watch(&mut workspace.activity, event, Instant::now())
+                    {
+                        workspace.drain_activity_transitions(cx);
+                        workspace.mark_activity_dirty();
+                        cx.notify();
+                    }
+                });
+                if delivered.is_err() {
+                    return;
+                }
+            }
         })
         .detach();
     }
@@ -14634,6 +14682,10 @@ impl SirioWorkspace {
     /// Hands every resolved status change since the last drain to
     /// `on_pane_transition`. Every path that can change a status reaches one.
     fn drain_activity_transitions(&mut self, cx: &mut Context<Self>) {
+        // A closed pane loses its identity: OpenCode's panes and watch follow it here.
+        if self.opencode.sync(&mut self.activity, Instant::now()) {
+            self.mark_activity_dirty();
+        }
         for transition in self.activity.take_resolved_transitions() {
             self.on_pane_transition(&transition, cx);
         }

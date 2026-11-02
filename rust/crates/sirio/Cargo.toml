@@ -33,6 +33,8 @@ sirio_claude = { path = "../sirio_claude" }
 sirio_project.workspace = true
 sirio_persistence.workspace = true
 sirio_activity.workspace = true
+# OpenCode reports nothing in the terminal: its status is read from its own service.
+sirio_opencode_watch = { path = "../sirio_opencode_watch" }
 sirio_control.workspace = true
 sirio_release.workspace = true
 sirio_update.workspace = true

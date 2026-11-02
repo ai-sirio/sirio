@@ -52,10 +52,30 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  while the child is the foreground and has it back after
 #   argv_stays_out_of_app_stderr   `claude SIRIO-ARGV-MARKER`: the marker is not in the app's stderr
 #
+# and OpenCode, which reports nothing in the terminal: its status is read from the service
+# it talks to, played by Scripts/Tests/stubs/opencode-server.py (the same endpoints, auth
+# and events as the real v2 service; driven by lines in $RUN/oc.cmd; registered in the
+# world's own $XDG_STATE_HOME/opencode/service.json):
+#   opencode_three_states          a session that exists before the pane starts, linked by its
+#                                  title: busy -> running; a permission ask -> needs-input (+1);
+#                                  replied -> running; idle after >= 1 s -> done (+1)
+#   opencode_first_turn_links      one OpenCode pane and a session born after it: linked with no
+#                                  title, busy -> running, idle -> done
+#   two_opencode_panes_one_folder  two panes in one folder, one then two sessions: no status on
+#                                  either; with titles `OC | a`, `OC | b`: each follows its own
+#   opencode_failed_turn_is_error  a failed turn -> error; the service's error text and its
+#                                  password stay out of the app's stderr
+#   opencode_after_relaunch        busy, the app quits and starts again: the mark and no status
+#                                  (the pane's title is not known again); once the TUI sets its
+#                                  title the running turn is read from the service's list
+#   no_service_degrades            the service stops: the mark stays, no status, and the app's
+#                                  stderr names the failure kind once and nothing else
+#
 # The world is isolated: `env -i` with an allow-list (a private HOME, every XDG
 # directory, SIRIO_DB, SIRIO_SOCKET, SIRIO_HOST_HOME and no session bus), its own
 # OpenCode service config pointing at nothing, and a PATH that holds the stubs and
-# the system bin. No file of the user's own ~/.config, ~/.claude or ~/.codex is read.
+# the system bin. No file of the user's own ~/.config, ~/.claude or ~/.codex is read, and
+# the OpenCode service it finds is the stub's: never the one a person runs on port 49374.
 #
 # --out-dir DIR keeps transcript.log, steps.log (each step's `panel list --json` and
 # `surface attention read`), frames/ (PID-matched window captures) and the app and
@@ -95,6 +115,7 @@ CTL="$BIN_DIR/sirioctl"
 HOST_BIN="$BIN_DIR/sirio-host"
 PROBE="$BIN_DIR/examples/host_probe"
 STUB="$REPO_ROOT/Scripts/Tests/stubs/hand-agents/agent.py"
+OC_STUB="$REPO_ROOT/Scripts/Tests/stubs/opencode-server.py"
 
 # /tmp is a small tmpfs: the run lives on disk, and short (a socket path is limited
 # to 108 bytes).
@@ -112,6 +133,8 @@ exec > >(tee "$OUT_DIR/transcript.log") 2>&1
 
 APP_PID=""
 XVFB_PID=""
+OC_PID=""
+OC_SENT=0
 RUN=""
 W=""
 VULKAN_ENV=()
@@ -163,6 +186,7 @@ cleanup() {
     SIRIO_HOST_HOME="$W/host" "$PROBE" shutdown --force >/dev/null 2>&1
   fi
   [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
+  [ -n "$OC_PID" ] && kill "$OC_PID" 2>/dev/null
   if [ -n "$RUN" ]; then
     # By path: only a process of this run's own directory is ever signalled. A stub
     # the app started itself on a pty (it waits for typed lines) and the background
@@ -266,6 +290,18 @@ chmod 700 "$W/xdg/runtime"
 # can never reach the service a person runs on port 49374.
 printf '{"service":{"port":1,"host":"127.0.0.1"}}\n' > "$W/xdg/config/opencode/service.json"
 export SIRIO_SOCKET="$W_SOCK" SIRIO_DB="$W/s.sqlite" SIRIO_HOST_HOME="$W/host"
+# The OpenCode service of this world: a stub that registers itself where OpenCode's own
+# service does (`$XDG_STATE_HOME/opencode/service.json`, mode 600) and takes its commands
+# from $RUN/oc.cmd. It is up before the app starts.
+: > "$RUN/oc.cmd"
+python3 -I "$OC_STUB" --registry "$W/xdg/state/opencode/service.json" --cmd "$RUN/oc.cmd" \
+  --ack "$RUN/oc.ack" --log "$RUN/oc.log" >"$RUN/oc-stub.out" 2>&1 &
+OC_PID=$!
+for _ in $(seq 1 100); do
+  [ -s "$W/xdg/state/opencode/service.json" ] && break
+  sleep 0.1
+done
+[ -s "$W/xdg/state/opencode/service.json" ] || { echo "the OpenCode stub never registered" >&2; exit 2; }
 mkdir -p "$W_REPO"
 git -C "$W_REPO" init -q -b main
 git -C "$W_REPO" config user.email tester@example.invalid
@@ -922,6 +958,204 @@ case_argv_stays_out_of_app_stderr() {
   echo "  marker in the app's stderr: $count"
 }
 
+# ---------------------------------------------------------------- OpenCode
+
+# The folder every terminal of this world opens in, as the service names it (a session's
+# directory is the exact cwd its TUI started in).
+OC_DIR="$(realpath "$W_REPO")"
+
+oc_acked() { [ "$(cat "$RUN/oc.ack" 2>/dev/null || echo 0)" -ge "$OC_SENT" ]; }
+# One command to the stub service ($RUN/oc.cmd), returned once the stub has handled it.
+oc() {
+  OC_SENT=$((OC_SENT + 1))
+  echo "$*" >> "$RUN/oc.cmd"
+  wait_until 5 oc_acked || fail "the OpenCode stub never took '$*'"
+}
+# The number of `[opencode-watch] <kind>` lines in the app's stderr.
+watch_lines() { grep -c '^\[opencode-watch\] ' "$W/app.log" || true; }
+# Leaves the OpenCode stub in pane $1 and waits for the mark to go: a case's last step, so
+# that the next one starts with no OpenCode pane in the folder.
+leave_opencode() { # pane
+  type_line "$1" exit
+  wait_agent "$1" "" 3
+}
+
+case_opencode_three_states() {
+  local base
+  # A session that exists before the pane starts: the watch reads it from the service's
+  # list, and the pane's title (`OC | alpha`) is what links it. No event announces it.
+  oc "create ses_t $OC_DIR"
+  oc "rename ses_t alpha"
+  start_agent opencode
+  type_line "$PANE" "title OC | alpha"
+  sleep 3
+  stepn "opencode: linked by title, idle" "$SESS"
+  expect_attention "$SESS" status null "an idle OpenCode"
+  oc "busy ses_t"
+  wait_status "$SESS" running 4
+  sleep 1.3
+  stepn "opencode working" "$SESS"
+  capture "opencode-running"
+  base="$(posted_count)"
+  oc "wait ses_t"
+  wait_status "$SESS" needs-input 4
+  expect_posted "$base" 1 "a permission ask inside a turn"
+  stepn "opencode asks for a permission" "$SESS"
+  oc "reply ses_t"
+  wait_status "$SESS" running 4
+  base="$(posted_count)"
+  oc "idle ses_t"
+  wait_status "$SESS" done 4
+  expect_posted "$base" 1 "the end of a turn"
+  expect_attention "$SESS" unread true "the end of a turn"
+  stepn "opencode done" "$SESS"
+  capture "opencode-done"
+  # The service saw the app authenticate every call.
+  grep -q '^GET /api/info 200$' "$RUN/oc.log" || fail "the stub never answered an authenticated /api/info"
+  grep -q '^GET /api/event 200$' "$RUN/oc.log" || fail "the stub never opened an event stream"
+  ! grep -q ' 401$' "$RUN/oc.log" || fail "the app made a call the stub refused (401)"
+  leave_opencode "$PANE"
+}
+
+case_opencode_first_turn_links() {
+  # The title is `OpenCode` until the first turn ends: the session born after the pane,
+  # the only one in the folder and the only OpenCode pane there, is the pane's.
+  start_agent opencode
+  oc "create ses_f $OC_DIR"
+  oc "busy ses_f"
+  wait_status "$SESS" running 4
+  sleep 1.3
+  stepn "opencode: first turn, linked with no title" "$SESS"
+  oc "idle ses_f"
+  wait_status "$SESS" done 4
+  stepn "opencode: first turn done" "$SESS"
+  leave_opencode "$PANE"
+}
+
+case_two_opencode_panes_one_folder() {
+  local pane_a sess_a pane_b sess_b
+  start_agent opencode
+  pane_a="$PANE"; sess_a="$SESS"
+  start_agent opencode
+  pane_b="$PANE"; sess_b="$SESS"
+  # One new session, two panes that could own it: it is nobody's, and no status is guessed.
+  oc "create ses_a $OC_DIR"
+  oc "busy ses_a"
+  sleep 2
+  hold_status "$sess_a" null 1
+  hold_status "$sess_b" null 1
+  stepn "two opencode panes, one session: no guess (A)" "$sess_a"
+  stepn "two opencode panes, one session: no guess (B)" "$sess_b"
+  oc "idle ses_a"
+  # A second session: both are new, still nobody's.
+  oc "create ses_b $OC_DIR"
+  oc "rename ses_a a"
+  oc "rename ses_b b"
+  sleep 1.5
+  hold_status "$sess_a" null 1
+  hold_status "$sess_b" null 1
+  # The titles say which is which.
+  type_line "$pane_a" "title OC | a"
+  type_line "$pane_b" "title OC | b"
+  sleep 1.5
+  oc "busy ses_a"
+  wait_status "$sess_a" running 4
+  hold_status "$sess_b" null 1
+  oc "busy ses_b"
+  wait_status "$sess_b" running 4
+  sleep 1.3
+  oc "idle ses_a"
+  wait_status "$sess_a" done 4
+  expect_attention "$sess_b" status running "B while A finished"
+  stepn "opencode A done, B running" "$sess_a"
+  oc "idle ses_b"
+  wait_status "$sess_b" done 4
+  stepn "opencode B done" "$sess_b"
+  leave_opencode "$pane_a"
+  leave_opencode "$pane_b"
+}
+
+case_opencode_failed_turn_is_error() {
+  local password
+  start_agent opencode
+  oc "create ses_e $OC_DIR"
+  oc "busy ses_e"
+  wait_status "$SESS" running 4
+  sleep 1.3
+  oc "fail ses_e"
+  wait_status "$SESS" error 4
+  stepn "opencode failed" "$SESS"
+  # The error text is the provider's, and the password is a secret: neither is logged.
+  password="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["password"])' "$W/xdg/state/opencode/service.json")"
+  [ -n "$password" ] || fail "the stub's registration has no password"
+  [ "$(grep -c 'STUB-ERROR-TEXT' "$W/app.log" || true)" = 0 ] || fail "the app's stderr holds the service's error text"
+  [ "$(grep -cF "$password" "$W/app.log" || true)" = 0 ] || fail "the app's stderr holds the service's password"
+  leave_opencode "$PANE"
+}
+
+case_opencode_after_relaunch() {
+  local base
+  start_agent opencode
+  oc "create ses_r $OC_DIR"
+  oc "busy ses_r"
+  wait_status "$SESS" running 4
+  oc "rename ses_r relaunched"
+  type_line "$PANE" "title OC | relaunched"
+  sleep 1.5
+  stepn "opencode before the quit: running" "$SESS"
+  ctl quit >/dev/null 2>&1 || true
+  for _ in $(seq 1 100); do alive "$APP_PID" || break; sleep 0.2; done
+  alive "$APP_PID" && fail "sirio did not quit after sirioctl quit"
+  APP_PID=""
+  app_start
+  ctl select-workspace --workspace "$wt" >/dev/null
+  sleep 2
+  # The new app knows the program (the host names it) but not the pane's title, which the
+  # host does not send again, and the session is older than this app's `opencode`: nothing
+  # is sure, so the mark shows and no status is guessed.
+  wait_agent "$PANE" opencode 15
+  hold_status "$SESS" null 3
+  stepn "opencode after the relaunch: the mark, no status" "$SESS"
+  # The TUI changes its title (the host reports a change only, so it goes through another
+  # one first): the session the service lists, still running, is the pane's, and its turn
+  # goes on from the service's own times.
+  type_line "$PANE" "title OpenCode"
+  sleep 1
+  type_line "$PANE" "title OC | relaunched"
+  wait_status "$SESS" running 6
+  stepn "opencode after the relaunch: linked by title" "$SESS"
+  base="$(posted_count)"
+  oc "idle ses_r"
+  wait_status "$SESS" done 5
+  expect_posted "$base" 1 "the end of a turn the relaunch found open"
+  stepn "opencode after the relaunch: done" "$SESS"
+  leave_opencode "$PANE"
+}
+
+case_no_service_degrades() {
+  local kinds
+  # A healthy service logs nothing.
+  [ "$(watch_lines)" = 0 ] || fail "the app logged a watch failure while the service was up: $(grep '^\[opencode-watch\] ' "$W/app.log" | head -n 3 | tr '\n' ' ')"
+  start_agent opencode
+  oc "create ses_n $OC_DIR"
+  oc "busy ses_n"
+  wait_status "$SESS" running 4
+  oc "stop"
+  # The status goes with the link, the mark does not, and the retries (2 s, 4 s, ...) name
+  # the failure once.
+  wait_status "$SESS" null 5
+  sleep 8
+  [ "$(agent_of "$PANE")" = opencode ] || fail "the OpenCode mark went with the service"
+  expect_attention "$SESS" status null "an OpenCode whose service is gone"
+  kinds="$(grep '^\[opencode-watch\] ' "$W/app.log" | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+  echo "  watch failures logged: $kinds"
+  [ "$(grep -c '^\[opencode-watch\] unreachable$' "$W/app.log" || true)" = 1 ] || fail "the failure kind 'unreachable' was not logged exactly once: $kinds"
+  [ "$(grep '^\[opencode-watch\] ' "$W/app.log" | sort | uniq -d | wc -l | tr -d ' ')" = 0 ] || fail "a failure kind was logged twice: $kinds"
+  [ "$(grep '^\[opencode-watch\] ' "$W/app.log" | grep -vc '^\[opencode-watch\] [a-z_]*$' || true)" = 0 ] || fail "a watch line holds more than a kind name"
+  stepn "opencode: the service is gone" "$SESS"
+  leave_opencode "$PANE"
+}
+
 run_case() { # name
   CASE_N=$((CASE_N + 1))
   CASE_NAME="$1"
@@ -964,6 +1198,12 @@ run_case spawned_agent_reports
 run_case relaunch_mid_turn
 run_case agent_hands_the_terminal_to_a_child
 run_case argv_stays_out_of_app_stderr
+run_case opencode_three_states
+run_case opencode_first_turn_links
+run_case two_opencode_panes_one_folder
+run_case opencode_failed_turn_is_error
+run_case opencode_after_relaunch
+run_case no_service_degrades
 
 [ "$CASES_RUN" -gt 0 ] || { echo "FAIL: --only named no case" >&2; exit 1; }
 if [ -n "$ONLY" ]; then label=PARTIAL; else label=OK; fi
