@@ -13,7 +13,8 @@ set -eEuo pipefail
 #       tabs in strip order
 #    3  the anti-goal: a terminal and a native chat produce output and change
 #       status while collapsed, the rail follows, and each one's peek holds all
-#       of it
+#       of it; the terminal writes about 270 KB, more than a PTY buffer holds,
+#       and its scrollback is read before any peek has drawn it
 #    4  a peeked terminal has the columns it had in the half, and a real Esc
 #       reaches its program with the peek still open
 #    5  a real Esc in a peeked chat cancels its running turn, the peek stays
@@ -28,8 +29,8 @@ set -eEuo pipefail
 #       Browser tab (the page blank while the peek is open, back after)
 #   12  closing the peeked tab over the socket closes the peek
 #   13  a worktree switch and back with a peek open: no peek, still collapsed
-#   14  closing the last Primary tab from inside the peek leaves the rail with
-#       its expand button and its +
+#   14  closing the last Primary tab while it is peeked (over the socket) leaves
+#       the rail with its expand button and its +
 #   15  Ctrl+Shift+B while collapsed hides the Secondary and expands the
 #       Primary, and a relaunch keeps it expanded
 #
@@ -44,9 +45,11 @@ set -eEuo pipefail
 # Two routes are not the ones §8 names, and say so where they run:
 #   - step 10 selects the tab with `surface tabs select`, a route §5 lists:
 #     the socket reports no rect for a sidebar pill to click. Its status change
-#     is an agent terminal's, not a chat's: a chat's status never posts a
-#     desktop notification (post_activity_notification needs the pane's agent
-#     id, which only terminals have), so "no line" would prove nothing for it.
+#     is a codex stub's run from a shell, not a chat's: a chat's status never
+#     posts a desktop notification (it reaches the activity model through
+#     set_entity_status, which never calls post_activity_notification), so
+#     "no line" would prove nothing for it. Nor would a fresh agent terminal's
+#     (the step says why).
 #     The step first proves, on the same tab collapsed and not peeked, that the
 #     change does post a line.
 #   - the status-changing terminal is not stubs/hook-agents/claude: `claude`
@@ -71,8 +74,9 @@ set -eEuo pipefail
 #
 # --state-only runs with no display: nothing paints, so no rect exists and no
 # click or key can be sent, and no socket verb collapses the half (§2). It
-# runs step 1's reads and prints a SKIP line, with its reason, for each of
-# steps 2-15. A framed run needs --display :N, a private Xvfb of at least
+# runs step 1's reads, prints a SKIP line, with its reason, for each of
+# steps 2-15, and ends with PRIMARY RAIL E2E OK (state only). A framed run
+# needs --display :N, a private Xvfb of at least
 # 1600x1000 that this user started (never $DISPLAY), Mesa's lavapipe
 # (lvp_icd*.json) and import, identify, xwininfo, xprop, xdotool and
 # ImageMagick's magick or convert; step 11's Browser tab needs WebKitGTK. The
@@ -193,7 +197,7 @@ cleanup() {
   [ -z "$APP_PID" ] || { kill "$APP_PID" 2>/dev/null || true; wait "$APP_PID" 2>/dev/null || true; }
   [ -z "$PAGE_PID" ] || kill "$PAGE_PID" 2>/dev/null || true
   stop_run_processes
-  cp "$RUN_DIR"/*.log "$OUT_DIR/" 2>/dev/null || true
+  cp "$RUN_DIR"/*.log "$RUN_DIR"/stub/stub.log "$OUT_DIR/" 2>/dev/null || true
   rm -rf --one-file-system "$RUN_DIR"
 }
 trap cleanup EXIT
@@ -241,14 +245,17 @@ while :; do
     rm -f "$gate"
     case "$what" in
       output)
-        for n in 01 02 03 04 05 06 07 08 09 10 11 12; do echo "rail-line-$n"; sleep 0.2; done
-        echo "rail-output-end"
-        touch "$dir/output.$pane" ;;
+        # About 270 KB, far more than a PTY buffer holds: if nothing drains the
+        # pane while it is not drawn, this blocks and output.<pane> never appears.
+        seq -f 'rail-fill-%06g ............................................' 1 4400
+        for n in 01 02 03 04 05 06 07 08 09 10 11 12; do echo "rail-line-$n"; done
+        echo "rail-end-$pane"
+        echo done >"$dir/output.$pane" ;; # non-empty: wait_file waits for -s
       size)
         stty size >"$dir/size.$pane.$$" && mv -f "$dir/size.$pane.$$" "$dir/size.$pane" ;;
       esc)
         echo "ESC-READY"
-        touch "$dir/esc-ready.$pane"
+        echo ready >"$dir/esc-ready.$pane"
         IFS= read -rsn1 key
         printf 'GOT[%q]\n' "$key"
         printf '%q\n' "$key" >"$dir/esc.$pane" ;;
@@ -293,7 +300,7 @@ reply() { timeout -k 5 "$CALL_TIMEOUT" "$CTL" "$@" --json 2>/dev/null; }
 
 # The reads: the control socket's line-delimited JSON, spoken directly.
 cat >"$RUN_DIR/rail.py" <<'PY'
-import json, os, socket, sys, time
+import base64, json, os, socket, sys, time
 
 
 def rpc(method, params=None):
@@ -448,6 +455,10 @@ elif command == "tabs":
 elif command == "rpc":
     params = dict(arg.split("=", 1) for arg in sys.argv[3:])
     print(json.dumps(rpc(sys.argv[2], params)))
+elif command == "pane-text":
+    # pane-text ID: an app pane's scrollback, which `panel.read` answers in base64, decoded.
+    data = rpc("panel.read", {"id": sys.argv[2]}).get("data", "")
+    sys.stdout.write(base64.b64decode(data).decode("utf-8", "replace"))
 elif command == "chat-surface":
     print(rpc("surface.chat.open")["surfaceId"])
 elif command in ("chat-wait", "chat-find"):
@@ -571,8 +582,14 @@ launch_app() {
     DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowmove "$window" 0 0 windowsize "$window" "$WINDOW_W" "$WINDOW_H" \
       || fail "could not size the window to ${WINDOW_W}x${WINDOW_H}"
     # No window manager gives the window the input focus, and a desktop
-    # notification is held back only while the app is active (step 10).
-    DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowfocus "$window" || fail "could not focus the window"
+    # notification is held back only while the app is active (step 10). X
+    # refuses the focus (BadMatch) until the window is mapped.
+    local _
+    for _ in $(seq 1 50); do
+      DISPLAY="$DISPLAY_TARGET" timeout 5 xwininfo -id "$window" | grep -q 'Map State: IsViewable' && break
+      sleep 0.2
+    done
+    DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool windowfocus --sync "$window" || fail "could not focus the window"
     sleep 1
   fi
 }
@@ -664,11 +681,14 @@ wait_file() { # path seconds
   done
   return 1
 }
-# Opens an agent terminal on the codex stub and waits for the stub to report its pane.
-open_stub_terminal() {
+# Opens a terminal on the codex stub and waits for the stub to report its pane:
+# by default an agent terminal (`--agent codex`); with `--cmd ...`, a shell
+# that runs it, as a hand-typed `codex` would.
+open_stub_terminal() { # [surface terminal open arguments]
   local pane
   rm -f "$STUB_DIR/codex.pane"
-  pane=$(reply surface terminal open --agent codex | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["pane"])') \
+  [ $# -gt 0 ] || set -- --agent codex
+  pane=$(reply surface terminal open "$@" | python3 -c 'import json, sys; print(json.load(sys.stdin)[0]["pane"])') \
     || fail "the codex terminal did not open"
   wait_file "$STUB_DIR/codex.pane" 30 || fail "the codex stub never started in $pane"
   [ "$(cat "$STUB_DIR/codex.pane")" = "$pane" ] || fail "the codex stub runs in $(cat "$STUB_DIR/codex.pane"), not the new tab's $pane"
@@ -681,13 +701,42 @@ stub_columns() { # pane
   wait_file "$STUB_DIR/size.$1" 15 || fail "the codex stub in $1 never reported its size"
   cut -d' ' -f2 "$STUB_DIR/size.$1"
 }
-# Runs `sirioctl notify --status STATUS` inside the stub's pane, and waits for the
-# rail icon of POSITION to show it.
+# Runs `sirioctl notify --status STATUS` inside the stub's pane, waits for it to
+# return, then for the rail icon of POSITION to show it. The rail alone is not
+# enough: it can already show the status (Layer D marks a pane it identifies
+# running), and a gate left unconsumed would run after the next one.
+stub_log_lines() { if [ -f "$STUB_DIR/stub.log" ]; then wc -l <"$STUB_DIR/stub.log" | tr -d ' '; else echo 0; fi; }
 stub_status() { # pane position status
+  local before _
+  before=$(stub_log_lines)
   stub_go "$1" "status-$3"
+  for _ in $(seq 1 75); do
+    [ "$(stub_log_lines)" -gt "$before" ] && break
+    sleep 0.2
+  done
+  [ "$(stub_log_lines)" -gt "$before" ] || fail "the codex stub in $1 never ran sirioctl notify --status $3"
+  [ "$(tail -n 1 "$STUB_DIR/stub.log")" = "$1 $3 exit=0" ] \
+    || fail "sirioctl notify --status $3 in $1 did not succeed: $(tail -n 1 "$STUB_DIR/stub.log")"
   wait_layout "the rail shows tab $2 as $3" "status($2) == '$3'"
 }
 notify_lines() { wc -l <"$NOTIFY_LOG" | tr -d ' '; }
+# Fails unless the pane's scrollback holds the end of the stub's output: its
+# last filler line, rail-line-01..12 and its end marker.
+check_stub_output() { # pane when
+  local text="" _ n
+  for _ in $(seq 1 50); do
+    text=$(RAIL pane-text "$1") || fail "$2: panel read of $1 failed"
+    grep -Fq "rail-end-$1" <<<"$text" && break
+    sleep 0.3
+  done
+  grep -Fq "rail-end-$1" <<<"$text" \
+    || fail "$2: the terminal's scrollback lacks its end marker rail-end-$1; it ends with: $(tail -n 3 <<<"$text")"
+  grep -Fq "rail-fill-004400" <<<"$text" || fail "$2: the terminal's scrollback lacks the last filler line"
+  for n in 01 02 03 04 05 06 07 08 09 10 11 12; do
+    grep -Fq "rail-line-$n" <<<"$text" || fail "$2: the terminal's scrollback lacks rail-line-$n"
+  done
+  echo "OK: $2: the terminal's scrollback holds the end of its output"
+}
 
 # ---- the chat ---------------------------------------------------------------
 SURFACE=""
@@ -762,7 +811,7 @@ if [ "$STATE_ONLY" -eq 1 ]; then
   leftover=$(run_processes)
   [ -z "$leftover" ] || fail "processes of this run survived the quit: $leftover"
   echo "OK: no process of this run is left"
-  echo "PRIMARY RAIL E2E OK"
+  echo "PRIMARY RAIL E2E OK (state only)"
   exit 0
 fi
 
@@ -795,7 +844,10 @@ step 3 "the anti-goal: nothing stops while collapsed"
 # Everything below happens after the collapse, with no peek open.
 stub_status "$TPANE" "$TPOS" running
 stub_go "$TPANE" output
-wait_file "$STUB_DIR/output.$TPANE" 30 || fail "the terminal never finished its output while collapsed"
+wait_file "$STUB_DIR/output.$TPANE" 60 \
+  || fail "the terminal's program never got through its 270 KB of output while collapsed: nothing drained its pane"
+wait_layout "no peek has drawn the terminal yet" 'L["peekTab"] == "" and L["primaryCollapsed"] == "true"'
+check_stub_output "$TPANE" "collapsed, before any peek"
 stub_status "$TPANE" "$TPOS" needs-input
 send_prompt subagents
 wait_layout "the rail shows the chat running" "status($CPOS) == 'running'"
@@ -808,12 +860,7 @@ wait_chat "the turn ran to its end while collapsed" 'c["status"] == "completed"'
 wait_layout "the rail shows the chat done" "status($CPOS) == 'done'"
 click_rect tabs "$TPOS"
 wait_layout "the terminal is peeked" "peek() == $TPOS"
-screen=$(reply panel read --id "$TPANE") || fail "panel read of $TPANE failed"
-for n in 01 02 03 04 05 06 07 08 09 10 11 12; do
-  grep -Fq "rail-line-$n" <<<"$screen" || fail "the peeked terminal lacks rail-line-$n, written while collapsed: $screen"
-done
-grep -Fq "rail-output-end" <<<"$screen" || fail "the peeked terminal lacks the end of its output"
-echo "OK: the peeked terminal holds every line written while collapsed"
+check_stub_output "$TPANE" "peeked"
 click_rect tabs "$CPOS"
 wait_layout "the peek switched to the chat" "peek() == $CPOS"
 wait_chat "the peeked chat holds every call of the turn, the permission answered" \
@@ -905,7 +952,11 @@ for position in $(RAIL get "sorted((p for p in primary() if p != $CPOS), reverse
   ctl surface tabs close "$position" --confirm >/dev/null
 done
 CPOS=$(RAIL positions chat)
-T2PANE=$(open_stub_terminal)
+# A desktop notification needs the pane's agent known to the activity model,
+# and a fresh `--agent` terminal never is (no production path registers a
+# spawned agent; Layer D walks only the PTY child's descendants, and there the
+# agent is the PTY child). A shell running codex is: Layer D finds it.
+T2PANE=$(open_stub_terminal --cmd 'codex; exit')
 T2POS=$(tab_count)
 echo "OK: the codex stub runs in $T2PANE, tab $T2POS"
 FILEPOS=$(layout_get 'L["secondaryPositions"]')
@@ -1003,7 +1054,7 @@ wait_layout "back: still collapsed, no peek" \
 sleep 2
 wait_layout "the restore reopened no peek" 'L["peekTab"] == ""' 1
 
-step 14 "closing the last Primary tab from inside the peek"
+step 14 "closing the last Primary tab while it is peeked"
 LAST=$(layout_get 'rail[0][0]')
 for position in $(RAIL get "sorted((p for p, _ in rail if p != $LAST), reverse=True)" | tr -d '[],'); do
   ctl surface tabs close "$position" --confirm >/dev/null
@@ -1013,10 +1064,15 @@ wait_layout "one Primary tab is left" "[p for p, _ in rail] == [$LAST]"
 click_rect tabs "$LAST"
 wait_layout "the last Primary tab is peeked" "peek() == $LAST"
 [ "$(tab_active)" = "$LAST" ] || fail "the peeked tab $LAST is not the active tab ($(tab_active))"
-# `pane close` closes the focused pane of the active tab: the one in the peek.
-ctl pane close >/dev/null
+# The peeked tab is closed over the socket (`surface tabs close`): `pane close`
+# cannot close a tab's last pane (close_terminal_at's F-TAB-13 guard). The end
+# state is the one any close of the peeked tab leaves: no peek, the rail empty
+# but for its expand button and +, and the Secondary's file the active tab.
+ctl surface tabs close "$LAST" --confirm >/dev/null
 wait_layout "the peek closed and the rail is empty but for its expand button and +" \
   'L["peekTab"] == "" and rail == [] and L["primaryCollapsed"] == "true" and R["expand"] is not None and R["new"] is not None'
+FILEPOS=$(layout_get 'L["secondaryPositions"]')
+[ "$(tab_active)" = "$FILEPOS" ] || fail "the active tab is $(tab_active), not the Secondary's file $FILEPOS"
 capture empty-rail
 
 step 15 "Ctrl+Shift+B while collapsed hides the Secondary and expands the Primary"
@@ -1024,10 +1080,10 @@ press_key ctrl+shift+b
 wait_layout "the Secondary is hidden and the Primary expanded" \
   'L["secondaryHidden"] == "true" and L["primaryCollapsed"] == "false" and num("secondaryWidth") == 0'
 relaunch
-wait_layout "still hidden and expanded after the relaunch" 'L["secondaryHidden"] == "true" and L["primaryCollapsed"] == "false"'
-# A hidden Secondary draws no rail whatever the flag: showing it shows whether it was cleared.
-press_key ctrl+shift+b
-wait_layout "the Secondary is back beside an expanded Primary: the flag was cleared" \
+# The only tab left is the Secondary's file, so the boot shows the Secondary
+# again (a restored active Secondary tab clears the hide flag, a repair older
+# than the rail). A collapsed flag that survived would draw the rail now.
+wait_layout "after the relaunch the Secondary is back beside an expanded Primary: the collapsed flag was cleared" \
   'L["secondaryVisible"] == "true" and L["primaryCollapsed"] == "false" and R["collapse"] is not None'
 
 STEP="the last check"
