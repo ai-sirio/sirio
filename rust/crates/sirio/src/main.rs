@@ -8336,7 +8336,9 @@ impl SirioWorkspace {
     ///   one: it is drawn nowhere (#323). The Secondary's active tab takes
     ///   over, as it does on collapse, without taking focus itself: that is
     ///   also how a worktree or a session restored collapsed lands, and a
-    ///   restore leaves focus alone.
+    ///   restore leaves focus alone. Only a keyboard left on the bounced
+    ///   tab's own view is handed on with it: `close_tab` focuses the tab
+    ///   that slid into the closed one's index, which can be a Primary one.
     /// - The rail draws no strip, so a Primary tab's context menu has nowhere
     ///   to hang; one opened from the palette would stay invisible and keep
     ///   aiming Close Tab at that tab. It is dropped.
@@ -8361,6 +8363,9 @@ impl SirioWorkspace {
                 .is_some_and(|tab| tab.pane == PaneRole::Primary)
             && let Some(id) = self.center_split.active(PaneRole::Secondary)
         {
+            hand_on_focus |= self
+                .active_pane_focus_handle(cx)
+                .is_some_and(|handle| handle.is_focused(window));
             self.select_tab(id, None, cx);
         }
         if hand_on_focus {
