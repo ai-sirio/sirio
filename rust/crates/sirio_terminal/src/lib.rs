@@ -2182,7 +2182,9 @@ pub struct TerminalView {
     /// path there, not a fallback.
     fallback_reason: Option<String>,
     /// Scrollback to feed the next session as its prelude: set by
-    /// `restart` after a lost session, consumed by `ensure_started`.
+    /// `set_prelude` on a restored tab and by `restart` after a lost session,
+    /// sent with every open request and cleared once a session opens (or an
+    /// attach-only open fails).
     pending_prelude: Vec<u8>,
     /// A restart re-opens under the same id: carried into `OpenRequest.recreate`
     /// so the factory closes the old session before re-creating.
@@ -2776,13 +2778,15 @@ impl TerminalView {
     }
 
     /// Captures the renderer's current plain-text history for persistence or
-    /// headless verification. Failed panes have no emulator contents.
+    /// headless verification. A restored pane not started yet (it starts on
+    /// its first render) is still `Pending`: it answers with the scrollback it
+    /// was restored with (`set_prelude`), so saving it does not overwrite that
+    /// history with nothing. Connecting and failed panes answer nothing.
     pub fn capture_scrollback(&self) -> Vec<u8> {
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.capture_scrollback(),
-            TerminalState::Pending | TerminalState::Connecting | TerminalState::Failed { .. } => {
-                Vec::new()
-            }
+            TerminalState::Pending => self.pending_prelude.clone(),
+            TerminalState::Connecting | TerminalState::Failed { .. } => Vec::new(),
         }
     }
 
