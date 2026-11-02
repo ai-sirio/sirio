@@ -340,7 +340,8 @@ End to end, against the real binary, following `test-project-identity-e2e.sh`.
     New raises the toast and writes nothing; a key and Ctrl+W at once right
     after a good save make the close ask.
 11. A key, then at once another worktree: the key is on disk, and one try's
-    switch returned within the autosave delay.
+    switch returned within the autosave delay of the last read that did not
+    show the key yet, so before the autosave.
 12. Delete of a prompt split beside a terminal: only its leaf goes, the tab left
     is a terminal tab, and a switch away and back brings it and its session back.
 13. Copy of an open prompt the app cannot read: the toast, no check, and the

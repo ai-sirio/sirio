@@ -70,7 +70,8 @@ Scripts/Tests/test-project-identity-e2e.sh   # -> prints "PROJECT IDENTITY E2E O
 # with the tab open never comes back, a plain .md keeps Preview and Ctrl+S, no worktree, an
 # unwritable folder (Save failed and a dirty tab, the toast, the save after the fix, and a key with
 # Ctrl+W at once making the close ask), a key then at once a worktree switch (one of up to five
-# tries must have switched within the 400 ms autosave delay) or Quit (the key is on disk), Delete
+# tries must have switched within 400 ms of the last read that did not show its key yet, so before
+# its autosave) or Quit (the key is on disk), Delete
 # of a prompt split beside a terminal (the tab left is a terminal tab that comes back with its
 # session after a switch away and back) and Copy of an open prompt the app cannot read (the toast,
 # the marker on the CLIPBOARD untouched). A second app on a fresh database seeded dark shows the
