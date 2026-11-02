@@ -171,7 +171,7 @@ fn usage() {
            \x20 surface change-request thread --reveal ID|--toggle ID|--compose PATH:SIDE:LINE[-LAST]|--suggest|--cancel\n\
            \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment|reply|resolve|unresolve|line-comment|edit-thread-comment|review-add|review-open-submit|review-submit|review-discard|review-discard-confirm|draft-edit|draft-delete|rerun-job|rerun-failed\n\
          \x20 panel show <id>                   show a session in a tab (app only)\n\
-         \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
+         \x20 surface tabs read                 every tab's kind, snapshot flag and title, and which tabs are dirty\n\
          \x20 surface layout read               whether the right pane is drawn, each half's tabs, the right panel's view\n\
          \x20 surface chat panel <surfaceId> open|close|toggle <key>|activate <key>  (debug builds) drive a chat's session panel\n\
          \x20 surface trace read <surfaceId>     whether the chat has a Trace tab, and the turn and spans it shows\n\
