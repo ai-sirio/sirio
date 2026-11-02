@@ -28,7 +28,8 @@ set -eEuo pipefail
 #                                again right after a good save, a key and Ctrl+W at once: the
 #                                close asks and the tab stays
 #   11 worktree_switch           a key, then at once another worktree: the key is on disk, and
-#                                one try's switch had returned within the 400 ms autosave delay
+#                                one try's switch returned within 400 ms of the last read that did
+#                                not show its key yet, so before its autosave
 #   12 delete_beside_terminal    Delete of a prompt split beside a terminal: only its leaf goes,
 #                                the tab left is a terminal tab, and it comes back with its
 #                                session after a switch to another worktree and back
@@ -272,8 +273,13 @@ PY
 
 # A key, then a control call the moment the editor holds it, in one process:
 # a sirioctl start per read costs more than the 400 ms autosave delay leaves
-# on a loaded machine. Prints `<key_ms> <total_ms>`, both from just before the
-# press: to the read that showed the key, and to the call's reply.
+# on a loaded machine. Prints `<key_ms> <total_ms> <since_ms>`: from just
+# before the press to the read that showed the key and to the call's reply,
+# and from the last read sent that did not show it yet (the press, when the
+# first one did) to that reply. The app answered that read before it took the
+# key, so the autosave timer, started when the key is taken, started after
+# the read was sent: a reply within 400 ms of it beat the autosave, however
+# late a loaded app takes the key.
 cat >"$WORK/race.py" <<'PY'
 import json, os, socket, subprocess, sys, time
 
@@ -294,10 +300,15 @@ path, display, key, tail, method = sys.argv[1:6]
 params = dict(arg.split("=", 1) for arg in sys.argv[6:])
 started = time.monotonic()
 subprocess.run(["xdotool", "key", key], check=True, env={**os.environ, "DISPLAY": display})
+before_key = started
 for _ in range(200):
+    sent = time.monotonic()
     reply = call(path, "surface.editor.state", {})
-    if reply.get("ok") and (reply.get("result") or {}).get("text", "").endswith(tail):
+    if not reply.get("ok"):
+        continue
+    if (reply.get("result") or {}).get("text", "").endswith(tail):
         break
+    before_key = sent
 else:
     sys.exit("the key never reached the editor")
 arrived = time.monotonic()
@@ -305,7 +316,8 @@ reply = call(path, method, params)
 finished = time.monotonic()
 if not reply.get("ok"):
     sys.exit(method + " was refused: " + str(reply.get("error")))
-print(round((arrived - started) * 1000), round((finished - started) * 1000))
+print(round((arrived - started) * 1000), round((finished - started) * 1000),
+      round((finished - before_key) * 1000))
 PY
 
 # Owns this display's CLIPBOARD with a text until it is stopped (60 s at most).
@@ -724,7 +736,11 @@ patch_of() { # file white|red
   case "$box" in 0x0+*|'') return 0 ;; esac
   sed -E 's/^([0-9]+)x([0-9]+)\+([0-9]+)\+([0-9]+)$/\3 \4 \1 \2/' <<<"$box"
 }
-# A fresh capture NAME shows no patch of COLOUR.
+# A fresh capture NAME shows a patch of COLOUR, or none.
+has_patch() { # name white|red
+  capture "$1" 0.3
+  [ -n "$(patch_of "$OUT_DIR/captures/$THEME-$1.png" "$2")" ]
+}
 no_patch() { # name white|red
   capture "$1" 0.3
   [ -z "$(patch_of "$OUT_DIR/captures/$THEME-$1.png" "$2")" ]
@@ -1063,9 +1079,8 @@ chmod a-w "$SIRIO_PROMPTS_DIR"
 note "the prompts folder is read-only again"
 focus_app
 DISPLAY="$DISPLAY_TARGET" xdotool key --delay 0 K ctrl+w
-capture 10-close-asks 0.5
+wait_until "the close asks: gpui's prompt is drawn" has_patch 10-close-asks white
 asked="$(patch_of "$OUT_DIR/captures/$THEME-10-close-asks.png" white)"
-[ -n "$asked" ] || fail "$SCENARIO: Ctrl+W asked nothing: no prompt in captures/$THEME-10-close-asks.png"
 note "the close asked: its prompt is at $asked (x y w h)"
 hold_until 1 "A's tab stays while the close asks" tab_count_is "$TITLE_A" 1
 wait_until "A's tab reads dirty" tab_dirty "$TITLE_A"
@@ -1091,9 +1106,9 @@ wait_on prompts canEdit=1
 # No verb says where a worktree's sidebar row is and no key switches worktree,
 # so the switch is the socket's: a key, then, as soon as the editor holds it,
 # the other worktree (race.py). The outgoing tab is parked while its autosave
-# may still be waiting. The timer starts when the editor takes the key, so a
-# switch that had returned within 400 ms of the press surely beat it: up to
-# five tries, each with a fresh key, until one does; every key must reach disk.
+# may still be waiting. A switch that returned within 400 ms of the last read
+# that did not show the key yet surely beat it (see race.py): up to five
+# tries, each with a fresh key, until one does; every key must reach disk.
 proven=""
 for key in S J L N P; do
   click_card "$A" EditBounds
@@ -1104,12 +1119,13 @@ for key in S J L N P; do
   focus_app
   timing="$(python3 -I "$WORK/race.py" "$SIRIO_SOCKET" "$DISPLAY_TARGET" "$key" "$want" \
     workspace.select "workspace=$OTHER_ID")" || fail "$SCENARIO: the try with $key failed"
-  read -r key_ms total_ms <<<"$timing"
-  if [ "$total_ms" -lt 400 ]; then
-    note "try $key: the editor held the key $key_ms ms after the press and the switch had returned at $total_ms ms: it landed before the 400 ms autosave"
+  read -r key_ms total_ms since_ms <<<"$timing"
+  facts="the editor held the key $key_ms ms after the press, the switch returned $total_ms ms after it and $since_ms ms after the last read that did not show the key"
+  if [ "$since_ms" -lt 400 ]; then
+    note "try $key: $facts: it landed before the 400 ms autosave"
     proven="$key"
   else
-    note "try $key: the editor held the key $key_ms ms after the press and the switch had returned at $total_ms ms: not proven to land before the 400 ms autosave"
+    note "try $key: $facts: not proven to land before the 400 ms autosave"
   fi
   wait_until "the key $key is on disk" ends_with "$A" "$want"
   ctl select-workspace --workspace "$(worktree_id)" >/dev/null
@@ -1117,7 +1133,7 @@ for key in S J L N P; do
   wait_until "A's tab came back with the worktree" tab_count_is "$TITLE_A" 1
   [ -z "$proven" ] || break
 done
-[ -n "$proven" ] || fail "$SCENARIO: not proven: no try's switch returned within the 400 ms autosave delay"
+[ -n "$proven" ] || fail "$SCENARIO: not proven: no try's switch returned within 400 ms of a read without its key"
 ok 11 worktree_switch
 
 SCENARIO="delete_beside_terminal"
@@ -1307,6 +1323,14 @@ if [ "$elapsed" -lt 400 ]; then
 else
   note "the key, the close and the click were one xdotool call of $elapsed ms, its start and the 250 ms pause included: not proven by its length to come before the 400 ms autosave"
 fi
+# A loaded app may take the click before it draws the banner (the click then
+# lands on what was drawn last): one more click closes it, and says so.
+sleep 1
+read_state identity
+if pair_holds pendingPaneClose=true; then
+  note "the click came before the banner was drawn: a second click closes the leaf, so the close may follow the autosave"
+  click_point "$anyway_x" "$anyway_y"
+fi
 wait_on identity pendingPaneClose=false
 wait_until "no editor shows D" editor_not_on "$D"
 wait_until "the key typed just before the close is on disk" ends_with "$D" "commitQZ"
@@ -1330,7 +1354,7 @@ wait_until "the terminal runs" pane_running "$T"
 ctl pane focus --direction left >/dev/null
 xkey ctrl+alt+w
 wait_on identity pendingPaneClose=true
-sleep 0.25
+wait_until "the banner is drawn" has_patch 15-close-pane-2 red
 click_point "$anyway_x" "$anyway_y"
 wait_on identity pendingPaneClose=false
 wait_until "no editor shows the new prompt" editor_not_on "$U"
