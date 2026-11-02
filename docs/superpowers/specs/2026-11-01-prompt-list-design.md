@@ -106,8 +106,11 @@ prompt** button on the right (Ely button, plus icon).
 - **Delete…** opens a confirmation dialog: "Delete *title*?", detail "This
   removes the prompt from disk.", a ghost Cancel and a Danger **Delete**. Follow
   `render_discard_dialog` in `changes.rs`. A confirmed delete removes the file
-  and its index entry, and closes any open tab of that prompt *without saving*
-  (see §3, "never recreate").
+  and its index entry first, then forgets the prompt's open editors, so no
+  pending save writes it back (see §3, "never recreate"). A delete that fails
+  forgets nothing: the editors keep saving. The prompt's open tabs then close
+  *without saving*. In a tab where the prompt is split beside something else, a
+  terminal for one, only the prompt's leaf goes and nothing else ends.
 
 **Copy:**
 
@@ -119,7 +122,7 @@ prompt** button on the right (Ely button, plus icon).
   read from the view. The builder decides how, as long as the result holds.
 - **Feedback:** the copy button turns into a check for 2 s, the way
   `copy_local_text` in `chat/mod.rs` does it. A later copy restarts the timer.
-  There is no toast.
+  There is no toast. The check keeps the icon's colour; it is not tinted green.
 
 **Empty state:** a short line ("No prompts yet") and a New prompt button in the
 body. The header button stays too.
@@ -156,14 +159,24 @@ restart. In prompt mode:
   `TextInput::set_text` emits `Changed`, so **never write the title back from the
   `Changed` handler**, or it loops.
 - **Code mode is forced.** A `.md` file opens in Preview today
-  (`initial_markdown_mode`), so prompt mode skips that and hides the
-  Preview/Code switch.
+  (`initial_markdown_mode`), so prompt mode skips that and hides the whole
+  Markdown row: the Preview/Code switch, and the bold, italic and heading
+  buttons with it.
 - **Autosave:** after an edit to the text or the title, the prompt is saved once
   typing pauses, on a short debounce. The builder picks the delay. A few hundred
-  milliseconds is right. Pending saves are also flushed when the tab closes and
-  when the app quits. **Closing a prompt tab never asks a question.** **Plain
-  file tabs stay explicit-save** (Ctrl+S) and keep their dirty-close prompt.
-  Prompt mode must not change them.
+  milliseconds is right. Pending saves are also flushed when the tab closes,
+  when its worktree is switched away from (the tab comes back with the
+  worktree), and when the app quits. Ctrl+S on a prompt tab writes the text and
+  the title at once.
+- **Closing a prompt tab asks no question while its typing is on disk.** A
+  prompt whose last save failed (an unwritable folder) and whose text or title
+  is still not on disk is dirty, like a plain file with unsaved text: it draws
+  the dirty mark, and Ctrl+W or the close button asks before discarding it. A
+  write that lands makes it clean again, and a deleted prompt is never dirty.
+  Quitting asks nothing for any tab, plain files included; the quit flush tries
+  the save once more.
+- **Plain file tabs stay explicit-save** (Ctrl+S) and keep their dirty-close
+  prompt. Prompt mode must not change them.
 - **Never recreate:** a prompt save does not write a file that is no longer on
   disk, whether Sirio's own delete removed it or another program did. The tab
   then shows the editor's existing missing-file state. This rule is what keeps a
@@ -186,7 +199,9 @@ restart. In prompt mode:
 `CodeEditor` for a missing file. It then creates an empty index entry at the top,
 opens the tab and **focuses the title field**. Focus a freshly drawn element via
 `on_next_frame`, from the render that draws it. Focusing it directly reads the
-last drawn frame, the known gpui trap. **An untitled prompt with an empty text
+last drawn frame, the known gpui trap. A prompt takes the keyboard only on an
+explicit open (Edit, a card click, New): a tab restored at launch or shown again
+on a worktree switch takes no focus. **An untitled prompt with an empty text
 deletes itself** (file and index entry) when its tab closes, so pressing New and
 backing out leaves nothing behind.
 
@@ -213,6 +228,12 @@ the autosave exception, and the never-recreate rule.
 database. This follows `database_path_for` in `rust/crates/sirio/src/session.rs`,
 the precedent that keeps a dev build away from the installed app's data. Only
 release builds use the folders above.
+
+Known limit: a debug build run from outside any checkout has no
+checkout-scoped database. It uses the installed app's database, as
+`database_path_for` already does, and the `prompts` folder beside it: on macOS
+that is the release prompts folder itself, on Linux the one beside the
+release database. `SIRIO_PROMPTS_DIR` keeps such a run away from real prompts.
 
 **`SIRIO_PROMPTS_DIR`** overrides the folder verbatim, in every build. Every E2E
 sets it anyway (§7), so the test's isolation does not rest on the build profile.
@@ -295,7 +316,9 @@ End to end, against the real binary, following `test-project-identity-e2e.sh`.
 3. Copy: the X CLIPBOARD (read as in the project-identity test) equals the file
    bytes, and the button shows the check.
 4. Type into the open tab and copy immediately. The clipboard has the last
-   keystroke.
+   keystroke. The key and the click go in one xdotool call, which must stay
+   under the 400 ms autosave delay, so Copy is what writes the key. The bound
+   is not 100 ms: xdotool's own start takes about 120 ms.
 5. Edit an existing prompt. The pencil selects the already-open tab instead of
    opening a second one.
 6. New prompt, then close the tab untouched. No file and no index entry remain.
@@ -347,3 +370,21 @@ the code. Nothing tautological gets added.
 11. **A failed Copy, New prompt or Delete is reported** in the workspace's
     existing toast (§2, "Failures"). Chosen by Enzo on 2026-11-02 over staying
     silent.
+
+Deviations accepted after the build (2026-11-02), each recorded in its section:
+
+12. **A prompt takes the keyboard only on an explicit open** (Edit, a card,
+    New), never on a restore at launch or a worktree switch (§3).
+13. **Ctrl+S on a prompt** writes the text and the title at once (§3).
+14. **The Copy check is not tinted green**; it keeps the icon's colour (§2).
+15. **E2E scenario 4** sends the key and the click in one xdotool call, bounded
+    by the 400 ms autosave delay, not by 100 ms (§7).
+16. **Prompt mode hides the whole Markdown row**, bold, italic and headings
+    included, not only the Preview switch (§3).
+17. **Delete removes the file first, then forgets the open editors**, so a
+    failed delete leaves them saving (§2).
+18. **A failed autosave makes the prompt's tab dirty**, so its close asks
+    before discarding the typing (§3).
+19. **Known limit:** a debug build run outside a checkout uses the installed
+    app's data, as its database does: the release prompts folder on macOS, the
+    folder beside the release database on Linux (§4).
