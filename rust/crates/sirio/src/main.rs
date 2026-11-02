@@ -12274,6 +12274,12 @@ impl SirioWorkspace {
             return Err(format!("unknown worktree: {}", selected_path.display()));
         }
         let outgoing_layout = if !paths_name_the_same_document(&selected_path, &old_path) {
+            // The outgoing file views are dropped below, and a prompt's
+            // pending autosave with its view: a prompt typed less than the
+            // delay ago is written now. Only written, not closed: its tab
+            // comes back with the worktree. The flush updates the prompt
+            // views, never this workspace.
+            sirio_ui::prompts::flush_all(cx);
             let outgoing_tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
             for tab_id in outgoing_tab_ids {
                 self.track_terminal_panes_in_cache(tab_id);
@@ -17115,25 +17121,37 @@ impl SirioWorkspace {
         }
     }
 
-    /// The prompt at `path` was deleted: its tabs in this worktree close.
-    /// Nothing is saved, because the delete already forgot their views.
+    /// The prompt at `path` was deleted: its editors in this worktree go.
+    /// Nothing is saved, because the delete already forgot their views. In a
+    /// tab that holds something else too (a terminal split beside the
+    /// prompt), only the prompt's leaf is removed and nothing else ends; a tab
+    /// that holds only the prompt closes.
     fn close_prompt_tabs(&mut self, path: &Path, cx: &mut Context<Self>) {
-        let holding: Vec<usize> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter_map(|(index, tab)| {
-                let mut holds = false;
-                tab.panes.for_each(&mut |_, content| {
-                    if let TabContent::File { view } = content {
-                        holds |= view.read(cx).path() == path;
-                    }
-                });
-                holds.then_some(index)
-            })
-            .collect();
+        let mut whole_tabs = Vec::new();
+        let mut leaves = Vec::new();
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let mut prompt_leaves = Vec::new();
+            tab.panes.for_each(&mut |pane_id, content| {
+                if let TabContent::File { view } = content
+                    && paths_name_the_same_document(view.read(cx).path(), path)
+                {
+                    prompt_leaves.push(pane_id);
+                }
+            });
+            if prompt_leaves.is_empty() {
+                continue;
+            }
+            if prompt_leaves.len() == tab.panes.leaf_ids().len() {
+                whole_tabs.push(index);
+            } else {
+                leaves.extend(prompt_leaves.into_iter().map(|pane_id| (tab.id, pane_id)));
+            }
+        }
+        for (tab_id, pane_id) in leaves {
+            self.close_terminal_at(tab_id, pane_id, None, cx);
+        }
         // From the last, so every index still names its tab.
-        for index in holding.into_iter().rev() {
+        for index in whole_tabs.into_iter().rev() {
             self.close_tab(index, None, cx);
         }
     }
@@ -20263,6 +20281,15 @@ impl SirioWorkspace {
                 format!("{}|{}|{}", session::persisted_kind(tab.kind), if snapshot { "yes" } else { "no" }, tab.title),
             ));
         }
+        // The positions whose close asks first, the tabs the strip marks dirty.
+        let dirty: Vec<String> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| self.tab_is_dirty(tab, cx))
+            .map(|(index, _)| (index + 1).to_string())
+            .collect();
+        report.push(("dirty".to_string(), dirty.join(",")));
         report
     }
 
@@ -23059,11 +23086,16 @@ impl SirioWorkspace {
         let mut dirty = false;
         tab.panes.for_each(&mut |_, content| {
             dirty |= match content {
-                // A prompt saves itself, on a pause and on close, so it never
-                // asks before closing and draws no dirty mark.
+                // A prompt saves itself, on a pause and on close, so it asks
+                // before closing only when its last save failed and typing is
+                // still not on disk.
                 TabContent::File { view } => {
                     let view = view.read(cx);
-                    view.is_dirty() && !view.is_prompt()
+                    if view.is_prompt() {
+                        view.prompt_unsaved(cx)
+                    } else {
+                        view.is_dirty()
+                    }
                 }
                 // A live terminal owns a process whose input/output would be
                 // lost on close. Failed and already-exited panes are clean.

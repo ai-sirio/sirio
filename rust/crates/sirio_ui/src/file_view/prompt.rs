@@ -18,7 +18,7 @@
 //! A plain file tab has none of this.
 
 use std::cell::Cell;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -66,25 +66,27 @@ pub(super) struct PromptMode {
     /// (`focus_prompt_on_open`): a tab restored at launch or shown on a
     /// worktree switch takes no focus.
     focus_pending: bool,
+    /// Whether the last flush that had something to write failed, for the
+    /// text or the title. The next flush that writes clears it. With typing
+    /// still not on disk it makes the tab dirty, so its close asks.
+    save_failed: bool,
 }
 
 /// The registry's handle on an open prompt view.
 struct LiveView {
     view: WeakEntity<FileView>,
-    path: PathBuf,
     forgotten: Rc<Cell<bool>>,
 }
 
 impl LivePrompt for LiveView {
-    /// `None` only once the view is gone, which is what lets the registry drop
-    /// it. A view still reading its file answers with the file.
+    fn alive(&self, _cx: &App) -> bool {
+        self.view.upgrade().is_some()
+    }
+
+    /// Only the text the view has loaded: a view still reading its file, or
+    /// one that could not, answers `None`, and Copy reads the file itself.
     fn text(&self, cx: &App) -> Option<String> {
-        let view = self.view.upgrade()?;
-        Some(
-            view.read(cx)
-                .prompt_text()
-                .unwrap_or_else(|| std::fs::read_to_string(&self.path).unwrap_or_default()),
-        )
+        self.view.upgrade()?.read(cx).prompt_text()
     }
 
     fn flush(&self, cx: &mut App) {
@@ -117,7 +119,6 @@ impl FileView {
         let forgotten = Rc::new(Cell::new(false));
         let live = LiveView {
             view: cx.weak_entity(),
-            path: self.path.clone(),
             forgotten: forgotten.clone(),
         };
         // Registered once this view exists: `new` runs before it does, and
@@ -132,6 +133,7 @@ impl FileView {
             autosave: None,
             forgotten,
             focus_pending: false,
+            save_failed: false,
         });
     }
 
@@ -199,6 +201,15 @@ impl FileView {
             .then_some("the prompt was deleted")
     }
 
+    /// Whether closing this prompt would lose typing: its last save failed
+    /// and the text or the title is still not on disk. A deleted prompt never
+    /// is.
+    pub fn prompt_unsaved(&self, cx: &App) -> bool {
+        self.prompt.as_ref().is_some_and(|prompt| prompt.save_failed)
+            && !self.prompt_deleted()
+            && self.prompt_pending(cx)
+    }
+
     /// Whether something is still to save: text the file does not hold yet,
     /// or a title the index does not.
     fn prompt_pending(&self, cx: &App) -> bool {
@@ -234,9 +245,10 @@ impl FileView {
     }
 
     /// Writes the pending text and title now. A deleted prompt writes
-    /// nothing. A failed write keeps what was typed and says so (`Save
-    /// failed: …`); the next change tries again. Each write that lands emits
-    /// `Saved` once and tells the prompts list.
+    /// nothing. A failed write keeps what was typed, says so (`Save failed:
+    /// …`) and leaves the tab dirty until a later write lands; the next
+    /// change tries again. Each write that lands emits `Saved` once and tells
+    /// the prompts list.
     pub fn flush_prompt(&mut self, cx: &mut Context<Self>) {
         let Some(prompt) = self.prompt.as_mut() else {
             return;
@@ -255,12 +267,14 @@ impl FileView {
         if self.is_dirty() {
             // `save` raises its own failure.
             if self.save(cx).is_err() {
+                self.set_prompt_save_failed(true);
                 return;
             }
             saved_text = true;
         }
         let title = self.prompt_title_text(cx);
         let mut retitled = false;
+        let mut retitle_failed = false;
         if self
             .prompt
             .as_ref()
@@ -273,9 +287,13 @@ impl FileView {
                     }
                     retitled = true;
                 }
-                Err(error) => self.set_message(format!("Save failed: {error}"), cx),
+                Err(error) => {
+                    self.set_message(format!("Save failed: {error}"), cx);
+                    retitle_failed = true;
+                }
             }
         }
+        self.set_prompt_save_failed(retitle_failed);
         // `save` has emitted `Saved` for the text, and `retitle` has told the
         // list: each is said once.
         if saved_text && !retitled {
@@ -283,6 +301,12 @@ impl FileView {
         }
         if retitled && !saved_text {
             cx.emit(FileViewEvent::Saved(self.path.clone()));
+        }
+    }
+
+    fn set_prompt_save_failed(&mut self, failed: bool) {
+        if let Some(prompt) = self.prompt.as_mut() {
+            prompt.save_failed = failed;
         }
     }
 

@@ -36,7 +36,10 @@ impl Global for PromptsRevision {}
 
 /// An open prompt editor, as the list sees it.
 pub trait LivePrompt {
-    /// The editor's current text, or `None` once the editor is gone.
+    /// Whether the editor is still open; the registry drops it once it is not.
+    fn alive(&self, cx: &App) -> bool;
+    /// The editor's current text, or `None` when it has none: still reading
+    /// the file, unable to read it, or gone.
     fn text(&self, cx: &App) -> Option<String>;
     /// Writes any pending text and title now.
     fn flush(&self, cx: &mut App);
@@ -95,8 +98,9 @@ pub fn register_live(path: PathBuf, live: Box<dyn LivePrompt>, cx: &mut App) {
 }
 
 /// The prompt's full text. An open editor is flushed first and its text is
-/// returned, so a keystroke still waiting for its autosave is copied too;
-/// otherwise the file's text, unchanged.
+/// returned, so a keystroke still waiting for its autosave is copied too.
+/// With no editor holding the text, the file's text, unchanged; a file that
+/// cannot be read is an error, never an empty text.
 pub fn copy_text(path: &Path, cx: &mut App) -> io::Result<String> {
     for live in live_for(path, cx) {
         live.flush(cx);
@@ -173,7 +177,7 @@ fn prune(cx: &mut App) {
         .0
         .iter()
         .map(|(path, editors)| {
-            let alive = editors.iter().filter(|e| e.text(cx).is_some()).cloned().collect::<Vec<_>>();
+            let alive = editors.iter().filter(|e| e.alive(cx)).cloned().collect::<Vec<_>>();
             (path.clone(), alive)
         })
         .filter(|(_, editors)| !editors.is_empty())
