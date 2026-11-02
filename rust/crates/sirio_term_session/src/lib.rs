@@ -20,11 +20,13 @@ pub mod journal;
 pub mod terminate;
 mod keys;
 mod owner;
+mod program_status;
 
 pub use owner::{
     KITTY_APC_MAX_BYTES, KITTY_DECOMPRESSED_MAX_BYTES, KITTY_IMAGE_STORAGE_LIMIT,
     KittyPngDecoder, apply_kitty_ingest_limits,
 };
+pub use program_status::{ReportState, StatusRecord};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const JOURNAL_BYTES: usize = 4 << 20;
