@@ -5472,6 +5472,13 @@ struct SirioWorkspace {
     /// `railRects` read. `Rc` because the paint closures that record them must
     /// be `'static`.
     rail_rects: Rc<primary_rail::RailRects>,
+    /// The tab the rail's peek shows (spec 2026-11-01-primary-rail §5), by
+    /// tab id. Closed with `close`, never `begin_close`: a dying card would
+    /// keep painting a live terminal after focus moved on.
+    primary_peek: sirio_ui::popup::Popup<usize>,
+    /// Set when the peek opens; the render that draws it hands the peeked
+    /// view focus on the next frame, because focus reads the last drawn frame.
+    peek_focus_pending: bool,
     /// Where the centre divider was grabbed, and the ratio it held then.
     center_drag_anchor: Option<(f32, i64)>,
     /// Pointer x and panel width at the moment the edge was grabbed.
@@ -6774,6 +6781,8 @@ impl SirioWorkspace {
             primary_pane_collapsed: persisted_primary_pane_collapsed && secondary_visible_at_boot,
             drawn_center_widths: std::cell::Cell::new((0.0, 0.0)),
             rail_rects: Rc::default(),
+            primary_peek: sirio_ui::popup::Popup::default(),
+            peek_focus_pending: false,
             center_drag_anchor: None,
             panel_drag_anchor: None,
             panel_width_save_generation: 0,
@@ -8242,12 +8251,120 @@ impl SirioWorkspace {
         cx.notify();
     }
 
-    /// The rail's expand button and, later, the peek's pin (spec
-    /// 2026-11-01-primary-rail §3): expands and gives focus to the Primary's
-    /// active tab.
+    /// The rail's expand button and the peek's pin (spec
+    /// 2026-11-01-primary-rail §3, §5): closes the peek and expands; the
+    /// Primary's active tab, the peeked one if a peek was open, takes focus.
     fn expand_primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.primary_peek.close();
         self.set_primary_pane_collapsed(false, cx);
         self.focus_active_pane(window, cx);
+    }
+
+    /// Opens the peek on a Primary tab, or switches it (spec §5): the tab
+    /// becomes the Primary's active tab and `active_tab`, so tab-level
+    /// shortcuts and notifications treat it as the tab being looked at.
+    fn open_primary_peek(&mut self, tab_id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.primary_rail_drawn()
+            || !self
+                .tabs
+                .iter()
+                .any(|tab| tab.id == tab_id && tab.pane == PaneRole::Primary)
+        {
+            return;
+        }
+        self.primary_peek.open(tab_id);
+        self.rail_rects.peek.set(None);
+        self.rail_rects.pin.set(None);
+        self.peek_focus_pending = true;
+        self.select_tab(tab_id, Some(window), cx);
+    }
+
+    /// A dismissal while the rail stays drawn (a press outside, the same rail
+    /// icon): focus goes back to the Secondary's active tab (spec §5).
+    fn close_primary_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.primary_peek.is_open() {
+            return;
+        }
+        self.primary_peek.close();
+        if let Some(id) = self.center_split.active(PaneRole::Secondary) {
+            self.select_tab(id, Some(window), cx);
+        }
+        self.focus_after_peek(window, cx);
+        cx.notify();
+    }
+
+    /// Hands the keyboard on once the peek that held it is gone and the rail
+    /// stays: to the active pane's own handle, or to the root when it has
+    /// none (a file, Changes, a browser). F-SID-19 reclaims focus only when
+    /// nothing is focused, and the peeked view's handle still exists, so
+    /// without this every key would go to a view that is no longer drawn.
+    fn focus_after_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self
+            .active_pane_focus_handle(cx)
+            .unwrap_or_else(|| self.root_focus.clone());
+        window.focus(&focus, cx);
+    }
+
+    /// A rail icon: the open peek's own icon closes it, any other opens or
+    /// switches it. The rail is excluded from the card's press-outside, so
+    /// this sees the peek as it was before the press.
+    fn toggle_primary_peek(&mut self, tab_id: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.primary_peek.is_open() && self.primary_peek.get() == Some(&tab_id) {
+            self.close_primary_peek(window, cx);
+        } else {
+            self.open_primary_peek(tab_id, window, cx);
+        }
+    }
+
+    /// Run at the top of every render (spec §5).
+    /// - While the peek is open, it shows the active tab, and the rail is
+    ///   drawn. Otherwise it closes: the pin or Ctrl+Shift+B took the rail
+    ///   away, or its tab closed, or another tab was selected. If the rail
+    ///   stays, the keyboard the peek held is handed on (`focus_after_peek`).
+    /// - With the rail drawn and no peek, a Primary tab is never the active
+    ///   one: it is drawn nowhere (#323). The Secondary's active tab takes
+    ///   over, as it does on collapse, without taking focus itself: that is
+    ///   also how a worktree or a session restored collapsed lands, and a
+    ///   restore leaves focus alone.
+    /// - The rail draws no strip, so a Primary tab's context menu has nowhere
+    ///   to hang; one opened from the palette would stay invisible and keep
+    ///   aiming Close Tab at that tab. It is dropped.
+    fn settle_primary_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rail = self.primary_rail_drawn();
+        let mut hand_on_focus = false;
+        if let Some(&id) = self.primary_peek.get() {
+            let shows_active = self
+                .tabs
+                .get(self.active_tab)
+                .is_some_and(|tab| tab.id == id && tab.pane == PaneRole::Primary);
+            if !rail || !shows_active {
+                self.primary_peek.close();
+                hand_on_focus = rail;
+            }
+        }
+        if rail
+            && !self.primary_peek.is_open()
+            && self
+                .tabs
+                .get(self.active_tab)
+                .is_some_and(|tab| tab.pane == PaneRole::Primary)
+            && let Some(id) = self.center_split.active(PaneRole::Secondary)
+        {
+            self.select_tab(id, None, cx);
+        }
+        if hand_on_focus {
+            self.focus_after_peek(window, cx);
+        }
+        if rail
+            && self.tab_menu_open
+            && self
+                .tab_menu_tab
+                .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+                .is_some_and(|tab| tab.pane == PaneRole::Primary)
+        {
+            self.tab_menu_open = false;
+            self.tab_menu_tab = None;
+        }
     }
 
     fn subscribe_right_panel(right_panel: &Entity<RightPanel>, cx: &mut Context<Self>) {
@@ -11973,6 +12090,9 @@ impl SirioWorkspace {
             return Err(format!("unknown worktree: {}", selected_path.display()));
         }
         let outgoing_layout = if !paths_name_the_same_document(&selected_path, &old_path) {
+            // Tab ids restart with the incoming worktree's tabs: a peek left
+            // open would name one of them (spec 2026-11-01-primary-rail §5).
+            self.primary_peek.close();
             let outgoing_tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
             for tab_id in outgoing_tab_ids {
                 self.track_terminal_panes_in_cache(tab_id);
@@ -19838,7 +19958,15 @@ impl SirioWorkspace {
             ),
             // The rail is *drawn*, not merely flagged.
             ("primaryCollapsed".into(), self.primary_rail_drawn().to_string()),
-            ("peekTab".into(), String::new()),
+            (
+                "peekTab".into(),
+                self.primary_peek
+                    .get()
+                    .filter(|_| self.primary_peek.is_open())
+                    .and_then(|id| self.tabs.iter().position(|tab| tab.id == *id))
+                    .map(|index| (index + 1).to_string())
+                    .unwrap_or_default(),
+            ),
             (
                 "railTabs".into(),
                 join(
@@ -19861,7 +19989,7 @@ impl SirioWorkspace {
         if cfg!(debug_assertions) {
             // Window rects `[x, y, w, h]` of the controls the E2E clicks, null
             // while one is not drawn; `tabs` is keyed by the 1-based position
-            // `railTabs` uses. `peek` and `pin` stay null until the peek lands.
+            // `railTabs` uses. `peek` and `pin` are null while no peek is open.
             let rect = |bounds: Bounds<gpui::Pixels>| {
                 serde_json::json!([
                     f32::from(bounds.origin.x),
@@ -19874,6 +20002,17 @@ impl SirioWorkspace {
             let rail_drawn = self.primary_rail_drawn();
             let expand = if rail_drawn {
                 self.rail_rects.expand.get()
+            } else {
+                None
+            };
+            let peek_open = rail_drawn && self.primary_peek.is_open();
+            let peek = if peek_open {
+                self.rail_rects.peek.get()
+            } else {
+                None
+            };
+            let pin = if peek_open {
+                self.rail_rects.pin.get()
             } else {
                 None
             };
@@ -19892,8 +20031,8 @@ impl SirioWorkspace {
                     "expand": expand.map(rect),
                     "new": tab_bar.new_button_bounds().map(rect),
                     "menuTerminal": tab_bar.new_terminal_row_bounds().map(rect),
-                    "peek": null,
-                    "pin": null,
+                    "peek": peek.map(rect),
+                    "pin": pin.map(rect),
                     "tabs": tabs,
                 })
                 .to_string(),
@@ -23281,7 +23420,13 @@ impl SirioWorkspace {
     }
 
     fn keep_active_tab_visible(&mut self, window: &Window, theme: Theme) {
-        let focused = self.center_split.focused();
+        // The rail draws no strip: the Secondary's is the only one, and a
+        // peeked tab must not scroll it (spec 2026-11-01-primary-rail §5).
+        let focused = if self.primary_rail_drawn() {
+            PaneRole::Secondary
+        } else {
+            self.center_split.focused()
+        };
         let (visible_count, _has_overflow, group_len) = self.tab_strip_fit(focused, window, theme);
         if visible_count == 0 || group_len == 0 {
             self.tab_strip_first_visible = 0;
@@ -23897,8 +24042,15 @@ impl SirioWorkspace {
             self.render_primary_pane(theme, entity.clone(), primary_width, menu_role, cx, window)
         };
 
+        let peek = if rail_drawn {
+            self.render_primary_peek(theme, entity.clone(), window, cx)
+        } else {
+            None
+        };
+
         let center_column = div()
             .flex()
+            .relative()
             .flex_row()
             .size_full()
             .min_w_0()
@@ -24019,7 +24171,9 @@ impl SirioWorkspace {
                                 )),
                         ),
                 )
-            });
+            })
+            // Last, so it paints over the Secondary; it never reaches a side panel.
+            .children(peek);
 
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
             // Same expression `center_available_width` uses above — not
@@ -25466,6 +25620,8 @@ fn replay_persisted_terminal_scrollback(tabs: &mut [OpenTab], cx: &mut App) {
 impl Render for SirioWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _perf = sirio_perf::span("SirioWorkspace.render", cx.entity_id().as_u64());
+        // Spec 2026-11-01-primary-rail §5, before anything reads the active tab.
+        self.settle_primary_peek(window, cx);
         // Spec 2026-09-24 §5: a tab drag that ended without a drop leaves
         // its snapshot and target behind, and a later divider drag would
         // then read as a tab drag (gpui exposes `has_active_drag`, not the
@@ -25707,6 +25863,18 @@ impl Render for SirioWorkspace {
             window.on_next_frame(move |window, cx| window.focus(&focus, cx));
         }
 
+        // The peek drew its tab's view for the first time in this frame; focus
+        // it once that frame is the last drawn one (gpui focus reads it).
+        if std::mem::take(&mut self.peek_focus_pending)
+            && self.primary_peek.is_open()
+            && let Some(focus) = self.active_pane_focus_handle(cx)
+        {
+            window.on_next_frame(move |window, cx| window.focus(&focus, cx));
+        }
+        let peek_open = self.primary_peek.is_open();
+        let peek_rail = self.rail_rects.clone();
+        let peek_entity = cx.entity();
+
         div()
             .id("shell-frame")
             .debug_selector(|| "shell-frame".into())
@@ -25731,6 +25899,25 @@ impl Render for SirioWorkspace {
             .capture_any_mouse_down(|_, _window, _| {
                 #[cfg(target_os = "windows")]
                 sirio_ui::browser::steal_win32_focus_from_webview_child(_window);
+            })
+            // Spec 2026-11-01-primary-rail §5: a press on what the peek floats
+            // over closes it. Capture phase on the root, which counts as
+            // hovered only where nothing occludes it: a press on the card, a
+            // menu, the palette or a modal stays theirs. The rail does not
+            // occlude, and a press on it is the rail's own.
+            .when(peek_open, |this| {
+                this.capture_any_mouse_down(move |event, window, cx| {
+                    if peek_rail
+                        .rail
+                        .get()
+                        .is_some_and(|rail| rail.contains(&event.position))
+                    {
+                        return;
+                    }
+                    peek_entity.update(cx, |workspace, cx| {
+                        workspace.close_primary_peek(window, cx)
+                    });
+                })
             })
             .on_action(cx.listener(Self::handle_new_terminal_tab))
             .on_action(cx.listener(Self::handle_open_file))
