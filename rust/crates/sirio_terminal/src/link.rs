@@ -19,10 +19,11 @@ use sirio_host_client::term::TermClient;
 use sirio_host_client::{StreamItem, StreamReceiver};
 use sirio_host_protocol::messages::ErrorCode;
 use sirio_host_protocol::term::{
-    CreateParams, ExitStatus, Origin, SessionEvent, TermCommand, TermSize, b64_encode,
+    CreateParams, ExitStatus, ForegroundProgram as HostProgram, Origin, ProgramState,
+    ProgramStatus, SessionEvent, TermCommand, TermSize, b64_encode,
 };
 use sirio_term_session::{
-    Event, Exit, Session, SpawnSpec,
+    Event, Exit, ForegroundProgram, ReportState, Session, SpawnSpec, StatusRecord,
     fanout::{Attachment, Chunk},
 };
 
@@ -43,6 +44,12 @@ pub trait SessionLink: Send + 'static {
     /// `LocalLink` this ends it too: an in-process session cannot outlive the app.
     fn detach(&self);
     fn survives_app(&self) -> bool;
+    /// Whether this session names the program holding the terminal. `Status`
+    /// chunks flow either way; only the naming depends on the platform and on
+    /// the host's `term.program` capability. A link that does not say names none.
+    fn names_programs(&self) -> bool {
+        false
+    }
 }
 
 pub enum LinkChunk {
@@ -50,6 +57,10 @@ pub enum LinkChunk {
     Output(Vec<u8>),
     Title(String),
     Foreground(bool),
+    /// The program holding the terminal changed; `None` is the shell again.
+    Program(Option<ForegroundProgram>),
+    /// The program's report changed, stamped with `at_ms`; `None` clears it.
+    Status(Option<StatusRecord>, u64),
     Exited(TerminalExitStatus),
     /// The host is gone or the stream could not be re-established.
     Lost,
@@ -343,8 +354,8 @@ fn forward_local(
                 Event::Title(title) => LinkChunk::Title(title),
                 Event::Foreground(running) => LinkChunk::Foreground(running),
                 Event::Exited(exit) => LinkChunk::Exited(session_exit_status(&exit)),
-                // Carried to the app by a later change.
-                Event::Program(_) | Event::Status(..) => continue,
+                Event::Program(program) => LinkChunk::Program(program),
+                Event::Status(status, at_ms) => LinkChunk::Status(status, at_ms),
             };
             if chunks_tx.send(chunk).is_err() {
                 return;
@@ -391,6 +402,10 @@ impl SessionLink for LocalLink {
     fn survives_app(&self) -> bool {
         false
     }
+
+    fn names_programs(&self) -> bool {
+        cfg!(unix)
+    }
 }
 
 impl Drop for LocalLink {
@@ -416,6 +431,8 @@ pub struct HostLink {
     #[allow(dead_code)]
     reconnect: ReconnectFn,
     done: Arc<AtomicBool>,
+    /// The host reports `term.program` and this platform reads programs.
+    names_programs: bool,
 }
 
 type ReconnectFn = Arc<dyn Fn() -> Option<TermClient> + Send + Sync>;
@@ -605,6 +622,13 @@ impl HostLink {
             OpenPlan::Attach => listed_exit,
             OpenPlan::Create | OpenPlan::Duplicate | OpenPlan::Lost => None,
         };
+        // The program and status the listing found are sent first, before any
+        // live event of this attach. A session created here has none to seed.
+        let seed = match plan {
+            OpenPlan::Attach => listed_summary.map(seed_chunks).unwrap_or_default(),
+            OpenPlan::Create | OpenPlan::Duplicate | OpenPlan::Lost => Vec::new(),
+        };
+        let names_programs = client.names_programs() && cfg!(unix);
         let stream = attached.stream;
         let (chunks_tx, chunks_rx) = mpsc::channel();
         let done = Arc::new(AtomicBool::new(false));
@@ -629,6 +653,7 @@ impl HostLink {
                         size,
                         done,
                         exit_at_attach,
+                        seed,
                     );
                 }
             })
@@ -651,6 +676,7 @@ impl HostLink {
             latest_size,
             reconnect,
             done,
+            names_programs,
         })
     }
 }
@@ -681,7 +707,13 @@ fn forward_host(
     mut size: TermSize,
     done: Arc<AtomicBool>,
     exit_at_attach: Option<ExitStatus>,
+    seed: Vec<LinkChunk>,
 ) {
+    for chunk in seed {
+        if chunks_tx.send(chunk).is_err() {
+            return;
+        }
+    }
     let mut next_offset = 0u64;
     // Whether this session's exit has been sent: once, from whichever of the
     // listing, an `Exited` event or a `Closed` event comes first (finding 9).
@@ -873,6 +905,23 @@ fn forward_session_events(
                 session_id: id,
                 running,
             } if id == session_id => LinkChunk::Foreground(running),
+            SessionEvent::Program {
+                session_id: id,
+                program,
+            } if id == session_id => LinkChunk::Program(program.as_ref().map(engine_program)),
+            SessionEvent::Status {
+                session_id: id,
+                status,
+                at_ms,
+            } if id == session_id => match status {
+                None => LinkChunk::Status(None, at_ms),
+                Some(status) => match engine_status(&status) {
+                    Some(record) => LinkChunk::Status(Some(record), at_ms),
+                    // A state a newer host sent: the engine has none, so
+                    // nothing is sent in its place.
+                    None => continue,
+                },
+            },
             SessionEvent::Exited {
                 session_id: id,
                 status,
@@ -901,6 +950,47 @@ fn forward_session_events(
             return Events::ViewGone;
         }
     }
+}
+
+fn engine_program(program: &HostProgram) -> ForegroundProgram {
+    ForegroundProgram {
+        pid: program.pid,
+        name: program.name.clone(),
+        argv: program.argv.clone(),
+        cwd: program.cwd.clone(),
+    }
+}
+
+/// `None` for a state the engine does not have (a newer host's).
+fn engine_status(status: &ProgramStatus) -> Option<StatusRecord> {
+    let state = match status.state {
+        ProgramState::Idle => ReportState::Idle,
+        ProgramState::Working => ReportState::Working,
+        ProgramState::Done => ReportState::Done,
+        ProgramState::Blocked => ReportState::Blocked,
+        ProgramState::Error => ReportState::Error,
+        ProgramState::Other => return None,
+    };
+    Some(StatusRecord {
+        state,
+        kind: status.kind.clone(),
+        app: status.app.clone(),
+    })
+}
+
+/// The program, then the status, a listed session already has. Nothing for an
+/// absent field or a state this build does not know.
+fn seed_chunks(summary: &sirio_host_protocol::term::SessionSummary) -> Vec<LinkChunk> {
+    let mut chunks = Vec::new();
+    if let Some(program) = &summary.program {
+        chunks.push(LinkChunk::Program(Some(engine_program(program))));
+    }
+    if let Some(status) = &summary.status
+        && let Some(record) = engine_status(status)
+    {
+        chunks.push(LinkChunk::Status(Some(record), status.at_ms));
+    }
+    chunks
 }
 
 /// Whether the session's queued events end it: its close or its exit has
@@ -1046,6 +1136,10 @@ impl SessionLink for HostLink {
 
     fn survives_app(&self) -> bool {
         true
+    }
+
+    fn names_programs(&self) -> bool {
+        self.names_programs
     }
 }
 
@@ -1300,6 +1394,8 @@ mod tests {
             LinkChunk::Output(_) => "Output",
             LinkChunk::Title(_) => "Title",
             LinkChunk::Foreground(_) => "Foreground",
+            LinkChunk::Program(_) => "Program",
+            LinkChunk::Status(..) => "Status",
             LinkChunk::Exited(_) => "Exited",
             LinkChunk::Lost => "Lost",
         }

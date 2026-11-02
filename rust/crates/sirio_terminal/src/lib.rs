@@ -63,6 +63,7 @@ pub use link::{
     Abandon, HostLink, LinkChunk, LocalLink, OpenOutcome, OpenRequest, SessionFactory,
     SessionFactoryGlobal, SessionLink,
 };
+pub use sirio_term_session::{ForegroundProgram, ReportState, StatusRecord};
 pub use link_router::{opens_terminal_link, resolve_click_cell, url_at_column};
 
 const FONT_SIZE: Pixels = px(13.0);
@@ -190,6 +191,15 @@ pub enum TerminalActivityEvent {
     /// on the host. The pane stays failed until its owner gives it a fresh
     /// identity and reopens it (fix batch 5, N5 and #11).
     IdTaken,
+    /// The program holding the terminal changed; `None` is the shell again.
+    /// Never coalesced: every change is emitted, in arrival order.
+    Program(Option<ForegroundProgram>),
+    /// The program's OSC 7501 report changed, stamped `at_ms`; `None` clears
+    /// it. Never coalesced: a `working` then `idle` arrive as two events.
+    ProgramStatus {
+        status: Option<StatusRecord>,
+        at_ms: u64,
+    },
 }
 
 /// The renderer-owned state that persistence and headless verification can
@@ -281,6 +291,10 @@ enum TerminalEvent {
     ChildExit(TerminalExitStatus),
     /// The host is gone or the stream could not be re-established.
     SessionLost,
+    /// The program holding the terminal changed.
+    Program(Option<ForegroundProgram>),
+    /// The program's report changed.
+    Status(Option<StatusRecord>, u64),
 }
 
 /// Codepoints kept inline in one [`SnapshotCell`] before truncation. Flags
@@ -1332,6 +1346,12 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     LinkChunk::Foreground(running) => {
                         foreground_running.store(running, Ordering::Relaxed);
                     }
+                    LinkChunk::Program(program) => {
+                        let _ = event_tx.unbounded_send(TerminalEvent::Program(program));
+                    }
+                    LinkChunk::Status(status, at_ms) => {
+                        let _ = event_tx.unbounded_send(TerminalEvent::Status(status, at_ms));
+                    }
                     LinkChunk::Exited(status) => {
                         let _ = event_tx.unbounded_send(TerminalEvent::ChildExit(status));
                     }
@@ -2176,6 +2196,9 @@ pub struct TerminalView {
     /// Whether this pane's session survives the app, and why not when it is
     /// the in-process fallback. Set when the link opens.
     view_mode: TerminalViewMode,
+    /// Whether the open session names its foreground program (see
+    /// [`TerminalView::host_names_programs`]). Set when the link opens.
+    names_programs: bool,
     /// Why the in-process fallback was used, when it was: drawn as a
     /// one-line banner above the grid. `None` on a host session — and on a
     /// local session opened with no factory installed, which is the normal
@@ -2404,6 +2427,7 @@ impl TerminalView {
             terminal: TerminalState::Pending,
             spawn,
             view_mode: TerminalViewMode::default(),
+            names_programs: false,
             fallback_reason: None,
             pending_prelude: Vec::new(),
             pending_recreate: false,
@@ -2446,6 +2470,7 @@ impl TerminalView {
                 shell: TerminalShell::System,
             },
             view_mode: TerminalViewMode::default(),
+            names_programs: false,
             fallback_reason: None,
             pending_prelude: Vec::new(),
             pending_recreate: false,
@@ -2510,6 +2535,7 @@ impl TerminalView {
                 shell,
             },
             view_mode: TerminalViewMode::default(),
+            names_programs: false,
             fallback_reason: None,
             pending_prelude: Vec::new(),
             pending_recreate: false,
@@ -2660,6 +2686,14 @@ impl TerminalView {
     /// Whether this pane's session outlives the app (a host session does).
     pub fn survives_app(&self) -> bool {
         self.view_mode.survives
+    }
+
+    /// Whether this pane's session names the program holding the terminal:
+    /// a local session on Unix, or a host session on Unix whose host has
+    /// `term.program`. Where it is false, status reports still flow; only the
+    /// program naming is absent. False until a session is open.
+    pub fn host_names_programs(&self) -> bool {
+        self.names_programs && matches!(self.terminal, TerminalState::Running(_))
     }
 
     /// F-TERM-03: whether the pane's status pill should show "Running" right
@@ -2892,6 +2926,7 @@ impl TerminalView {
         match outcome {
             OpenOutcome::Linked(link) => {
                 let survives = link.survives_app();
+                let names_programs = link.names_programs();
                 let (handle, wakeup_rx) = TerminalHandle::new_with_link(link);
                 Self::pump_terminal_events(
                     handle.clone(),
@@ -2900,6 +2935,7 @@ impl TerminalView {
                     cx,
                 );
                 self.view_mode.survives = survives;
+                self.names_programs = names_programs;
                 self.fallback_reason = None;
                 self.pending_prelude.clear();
                 self.pending_recreate = false;
@@ -2969,6 +3005,7 @@ impl TerminalView {
                             cx,
                         );
                         self.view_mode.survives = false;
+                        self.names_programs = cfg!(unix);
                         self.fallback_reason = Some(reason);
                         self.pending_prelude.clear();
                         self.pending_recreate = false;
@@ -3128,6 +3165,9 @@ impl TerminalView {
                 since_repaint = since_repaint.saturating_add(poll_interval);
                 let mut exit_status = None;
                 let mut osc_title = None;
+                // Program and status changes are never coalesced: each is
+                // kept, in arrival order.
+                let mut program_events: Vec<TerminalActivityEvent> = Vec::new();
                 let mut session_lost = false;
                 let mut viewport_changed = false;
                 let mut output_seen = false;
@@ -3143,6 +3183,16 @@ impl TerminalView {
                             }
                             if let Some(title) = Self::osc_title_from_event(&event) {
                                 osc_title = Some(title);
+                            }
+                            match &event {
+                                TerminalEvent::Program(program) => program_events
+                                    .push(TerminalActivityEvent::Program(program.clone())),
+                                TerminalEvent::Status(status, at_ms) => program_events
+                                    .push(TerminalActivityEvent::ProgramStatus {
+                                        status: status.clone(),
+                                        at_ms: *at_ms,
+                                    }),
+                                _ => {}
                             }
                             session_lost |=
                                 matches!(event, TerminalEvent::SessionLost);
@@ -3175,6 +3225,12 @@ impl TerminalView {
                                 // is from a session the view has already moved
                                 // past.
                                 return;
+                            }
+                            // Before the exit and the title: a program that
+                            // ended or reported does so before its session
+                            // does.
+                            for event in program_events {
+                                cx.emit(event);
                             }
                             if let Some(exit_status) = exit_status {
                                 view.exit_status = Some(exit_status);

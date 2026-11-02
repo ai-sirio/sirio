@@ -10305,6 +10305,10 @@ impl SirioWorkspace {
                         }
                         TerminalActivityEvent::SessionLost => "activity_event.session_lost",
                         TerminalActivityEvent::IdTaken => "activity_event.id_taken",
+                        TerminalActivityEvent::Program(_) => "activity_event.program",
+                        TerminalActivityEvent::ProgramStatus { .. } => {
+                            "activity_event.program_status"
+                        }
                     },
                     pane_id as u64,
                 );
@@ -10374,6 +10378,9 @@ impl SirioWorkspace {
                     // repaint like an exit; Layer D keeps polling `shell_pid()`,
                     // which now comes from the link.
                     TerminalActivityEvent::IdTaken => {}
+                    // Task 9/10: consumed once the app reads the program.
+                    TerminalActivityEvent::Program(_)
+                    | TerminalActivityEvent::ProgramStatus { .. } => {}
                     TerminalActivityEvent::SessionLost => {
                         workspace.mark_activity_dirty();
                         cx.notify();

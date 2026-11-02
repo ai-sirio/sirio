@@ -55,6 +55,10 @@ pub(crate) fn apply_terminal_activity_event(
         TerminalActivityEvent::SessionLost => None,
         // A refused open changes no agent identity; the pane is rebound.
         TerminalActivityEvent::IdTaken => None,
+        // Task 9/10: the foreground program and its status become evidence.
+        TerminalActivityEvent::Program(_) => None,
+        // Task 9/10
+        TerminalActivityEvent::ProgramStatus { .. } => None,
     }
 }
 
