@@ -3702,6 +3702,13 @@ impl Render for Sidebar {
         // in, notify only on change, and mount it cached at the height the
         // row will take, so a still row is replayed rather than laid out
         // again. Views of rows that are no longer visible are dropped.
+        //
+        // A row whose inputs changed in this render is mounted uncached for
+        // this frame. Its notify comes during a draw, which gpui defers to
+        // the next frame without scheduling one, so a cached mount would
+        // replay the row as it was until some unrelated frame came: a tab
+        // closed while nothing else redraws, such as the last Primary tab
+        // under the rail, kept its pill.
         let cache_rows = self.cache_rows;
         let mut rendered_rows = Vec::new();
         if view == SidebarView::Projects {
@@ -3732,11 +3739,13 @@ impl Render for Sidebar {
                 };
                 let row_id = inputs.row.id;
                 let row_height = Self::row_drawn_height(&inputs.row, &theme.typography);
+                let mut changed = false;
                 let view = match row_views.remove(&row_id) {
                     Some(view) => {
                         view.update(cx, |view, cx| {
                             if view.inputs != inputs {
                                 view.inputs = inputs;
+                                changed = true;
                                 cx.notify();
                             }
                         });
@@ -3748,7 +3757,7 @@ impl Render for Sidebar {
                         render_count: 0,
                     }),
                 };
-                rendered_rows.push(if cache_rows {
+                rendered_rows.push(if cache_rows && !changed {
                     view.clone()
                         .cached(StyleRefinement::default().w_full().h(px(row_height)))
                         .into_any_element()
