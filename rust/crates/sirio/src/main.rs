@@ -8327,6 +8327,28 @@ impl SirioWorkspace {
         self.peek_focus_pending = true;
     }
 
+    /// An open the user did not ask for (Follow Edited Files, `browser.open`
+    /// over the socket) lands as the Secondary's active tab under an open
+    /// peek; the peek, the active tab and the keyboard stay on the peeked
+    /// tab. `peeked` is the peek's tab read before the open; with no peek
+    /// open this changes nothing, and the open takes the screen as before.
+    fn keep_peek_over_open(&mut self, peeked: Option<usize>, cx: &mut Context<Self>) {
+        let Some(peeked) = peeked
+            .filter(|id| self.primary_peek.is_open() && self.primary_peek.get() == Some(id))
+        else {
+            return;
+        };
+        if let Some(opened) = self
+            .tabs
+            .get(self.active_tab)
+            .filter(|tab| tab.pane == PaneRole::Secondary)
+            .map(|tab| tab.id)
+        {
+            self.center_split.set_active(PaneRole::Secondary, Some(opened));
+        }
+        self.select_tab(peeked, None, cx);
+    }
+
     /// Run at the top of every render (spec §5).
     /// - While the peek is open, it shows the active tab, and the rail is
     ///   drawn. Otherwise it closes: the pin or Ctrl+Shift+B took the rail
@@ -9162,6 +9184,12 @@ impl SirioWorkspace {
             chat,
             |workspace, chat_entity, event: &ChatEvent, cx| match event {
                 ChatEvent::OpenFile(path) => workspace.add_file_tab(path.clone(), cx),
+                // Not the user's own request: it opens under an open peek.
+                ChatEvent::FollowFile(path) => {
+                    let peeked = workspace.primary_peek.get().copied();
+                    workspace.add_file_tab(path.clone(), cx);
+                    workspace.keep_peek_over_open(peeked, cx);
+                }
                 ChatEvent::OpenFileAt { path, line, column } => {
                     workspace.open_chat_file(path.clone(), *line, *column, cx)
                 }
@@ -18491,7 +18519,10 @@ impl SirioWorkspace {
             // does internally when handed bad input.
             normalize_address(initial_url)
                 .map_err(|error| format!("browser.open failed: {error}"))?;
+            // An agent's open, not the user's: it lands under an open peek.
+            let peeked = self.primary_peek.get().copied();
             let (surface_id, browser) = self.add_browser_tab(initial_url, window, cx);
+            self.keep_peek_over_open(peeked, cx);
             // #131: a surface whose webview could not be created must answer
             // `ok:false`. It used to answer `ok:true` with a surface id for a
             // dead surface, which is the worst of both: an agent is told it

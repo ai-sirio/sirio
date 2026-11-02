@@ -1740,6 +1740,11 @@ impl TranscriptContextItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatEvent {
     OpenFile(PathBuf),
+    /// Follow Edited Files: the location a tool call reported. The
+    /// workspace opens it the way it opens `OpenFile`, except that the user
+    /// did not ask for it: while a peek of the collapsed Primary half is
+    /// open, the file lands under it instead of closing it.
+    FollowFile(PathBuf),
     /// A file named in an assistant response was clicked: the file, and the
     /// line (and column) the agent wrote after it, 1-based as written.
     OpenFileAt {
@@ -5099,11 +5104,11 @@ impl Chat {
     // --- Overflow menu (F-CHAT-14) ---
 
     /// The toggle's other half: while Follow Edited Files is on, the most
-    /// recent location a tool call reports is opened the same way an
-    /// edit-summary card's own "open" link does — `ChatEvent::OpenFile`,
-    /// which the host already routes to a file tab (`Workspace::bind_chat`).
-    /// Reusing that event means Follow needs no new host-side wiring: it
-    /// rides the same seam F-CHAT-32 already built. Throttled 500ms, same
+    /// recent location a tool call reports is opened: it emits
+    /// `ChatEvent::FollowFile`, which the host opens as a file tab the way
+    /// it opens the edit-summary card's own "open" link, `ChatEvent::OpenFile`
+    /// (`Workspace::bind_chat`), except under an open peek, which it leaves
+    /// open. Throttled 500ms, same
     /// as the Swift original's `followThrottle`, so a burst of location
     /// patches on one tool call doesn't reopen the same file repeatedly.
     fn maybe_follow_location(
@@ -5125,7 +5130,7 @@ impl Chat {
             return;
         }
         self.last_follow_at = Some(now);
-        cx.emit(ChatEvent::OpenFile(location.path.clone()));
+        cx.emit(ChatEvent::FollowFile(location.path.clone()));
     }
 
     fn toggle_overflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -15995,11 +16000,11 @@ two"
     }
 
     /// F-CHAT-14: the toggle's other half — while Follow Edited Files is
-    /// on, a tool call reporting a location emits `ChatEvent::OpenFile`
-    /// for it (the same event an edit-summary card's own "open" link
-    /// uses, already wired by the host to a file tab); while it's off,
-    /// the same location never fires the event. A second location inside
-    /// the 500ms throttle window is dropped.
+    /// on, a tool call reporting a location emits `ChatEvent::FollowFile`
+    /// for it (not the card link's `ChatEvent::OpenFile`; the host opens
+    /// both as a file tab); while it's off, the same location never fires
+    /// the event. A second location inside the 500ms throttle window is
+    /// dropped.
     #[gpui::test]
     async fn following_edited_files_opens_the_tool_calls_reported_location(
         cx: &mut TestAppContext,
@@ -16070,7 +16075,7 @@ two"
         });
         assert_eq!(
             events.borrow().as_slice(),
-            &[ChatEvent::OpenFile(PathBuf::from("src/other.rs"))],
+            &[ChatEvent::FollowFile(PathBuf::from("src/other.rs"))],
             "a location reported while following opens that file"
         );
 
