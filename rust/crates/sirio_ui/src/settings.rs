@@ -713,7 +713,7 @@ impl ProviderKind {
     /// is an asset that draws on every platform.
     fn icon(self) -> Icon {
         match self {
-            Self::Claude => Icon::ClaudeCode,
+            Self::Claude => Icon::ClaudeAccount,
             Self::Codex => Icon::Codex,
             Self::OpenCodeGo => Icon::OpenCode,
             Self::OllamaCloud => Icon::Globe,
@@ -3392,7 +3392,7 @@ impl Settings {
         window: &Window,
     ) -> gpui::Div {
         let accounts = self.provider_accounts.clone();
-        let claude_mark = Icon::ClaudeCode
+        let claude_mark = Icon::ClaudeAccount
             .agent_mark_color(theme.ely.fg)
             .unwrap_or_else(|| theme.ely.fg);
         let monochrome_mark = theme.ely.fg;

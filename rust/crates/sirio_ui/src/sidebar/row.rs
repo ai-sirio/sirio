@@ -276,6 +276,7 @@ impl Sidebar {
             Icon::Browser => "screen",
             Icon::Globe => "global",
             Icon::ClaudeCode => "claude-mark",
+            Icon::ClaudeAccount => "claude-account-mark",
             Icon::Codex => "openai-mark",
             Icon::OpenCode => "agent-opencode",
             Icon::Pi => "pi-mark",
