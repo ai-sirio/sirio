@@ -23614,6 +23614,12 @@ impl SirioWorkspace {
     /// centre needs. `secondary_open` is passed in rather than read from the
     /// state, because the ghost sizes itself for the pane *after* a drop.
     fn center_available_width(&self, window: &Window, theme: Theme, secondary_open: bool) -> f32 {
+        self.center_width_for_floor(window, theme, self.center_min_width(secondary_open))
+    }
+
+    /// The centre column's width once the side panels have given up
+    /// `min_center` (`panel_layout::resolve_panel_widths`).
+    fn center_width_for_floor(&self, window: &Window, theme: Theme, min_center: f32) -> f32 {
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
             f32::from(window.bounds().size.width),
             self.sidebar_visible.then_some(self.sidebar_width),
@@ -23621,7 +23627,7 @@ impl SirioWorkspace {
             self.dragging_panel,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
-            self.center_min_width(secondary_open),
+            min_center,
         );
         center_available_width_for_shell(
             f32::from(window.bounds().size.width),

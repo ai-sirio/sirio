@@ -228,14 +228,27 @@ impl SirioWorkspace {
             .tabs
             .iter()
             .position(|tab| tab.id == id && tab.pane == PaneRole::Primary)?;
-        let collapsed = panel_layout::resolve_collapsed_center(
+        let room = panel_layout::resolve_collapsed_center(
             self.center_available_width(window, *theme, true),
+            self.center_split_ratio,
+            CENTER_DIVIDER_WIDTH,
+        )
+        .secondary;
+        // The width comes from the layout the pin would draw: its side panels
+        // give up two panes' floors, not the rail and one, so its centre can
+        // be wider than this one (spec §5).
+        let expanded = panel_layout::resolve_collapsed_center(
+            self.center_width_for_floor(
+                window,
+                *theme,
+                panel_layout::min_center_width(true, CENTER_DIVIDER_WIDTH),
+            ),
             self.center_split_ratio,
             CENTER_DIVIDER_WIDTH,
         );
         // The card's 1 px border on each side lies outside the half's width,
         // so its body, and a peeked terminal's column count, match the half.
-        let width = (collapsed.peek + 2.0).min(collapsed.secondary);
+        let width = (expanded.peek + 2.0).min(room);
         // The closures below are `'static`, so they take a copy.
         let theme = *theme;
         let rects = self.rail_rects.clone();
