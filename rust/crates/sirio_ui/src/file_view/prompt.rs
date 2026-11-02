@@ -9,7 +9,10 @@
 //! - draws a title field where the breadcrumb was;
 //! - stays in Code: no Preview, no Markdown row;
 //! - saves the text and the title by itself, `AUTOSAVE_DELAY` after the last
-//!   change to either, and when its tab closes or the app quits;
+//!   change to either, and on Ctrl+S, on a switch to another worktree, when
+//!   its tab or its leaf in a split closes, and when the app quits;
+//! - after a failed save, reads as unsaved until a write lands
+//!   (`prompt_unsaved`), so its close asks first;
 //! - never writes a file that is no longer on disk, so a deleted prompt stays
 //!   deleted, and shows the missing-file state instead;
 //! - on an edit made elsewhere, keeps what is still to save, with no banner,

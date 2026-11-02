@@ -110,7 +110,14 @@ prompt** button on the right (Ely button, plus icon).
   pending save writes it back (see §3, "never recreate"). A delete that fails
   forgets nothing: the editors keep saving. The prompt's open tabs then close
   *without saving*. In a tab where the prompt is split beside something else, a
-  terminal for one, only the prompt's leaf goes and nothing else ends.
+  terminal for one, only the prompt's leaf goes and nothing else ends. A tab
+  left holding only terminals is a terminal tab from then on, in the same half
+  and titled as a new terminal tab is unless it was renamed, so a worktree
+  switch or a relaunch brings it back with its session. Known limit: a prompt
+  deleted while such a split tab sits in a parked worktree stays in that tab's
+  saved layout; when the worktree comes back, restore skips the tab because its
+  file is gone, and the terminal beside it is not shown again (its session is
+  detached, not ended).
 
 **Copy:**
 
@@ -164,15 +171,17 @@ restart. In prompt mode:
   buttons with it.
 - **Autosave:** after an edit to the text or the title, the prompt is saved once
   typing pauses, on a short debounce. The builder picks the delay. A few hundred
-  milliseconds is right. Pending saves are also flushed when the tab closes,
-  when its worktree is switched away from (the tab comes back with the
-  worktree), and when the app quits. Ctrl+S on a prompt tab writes the text and
+  milliseconds is right. Pending saves are also flushed when the tab closes or
+  its leaf in a split does, when its worktree is switched away from (the tab
+  comes back with the worktree), and when the app quits. Ctrl+S on a prompt tab writes the text and
   the title at once.
 - **Closing a prompt tab asks no question while its typing is on disk.** A
   prompt whose last save failed (an unwritable folder) and whose text or title
   is still not on disk is dirty, like a plain file with unsaved text: it draws
   the dirty mark, and Ctrl+W or the close button asks before discarding it. A
-  write that lands makes it clean again, and a deleted prompt is never dirty.
+  close request writes the tab's prompts before it checks, so a write that
+  fails at the close asks too. A write that lands makes it clean again, and a
+  deleted prompt is never dirty.
   Quitting asks nothing for any tab, plain files included; the quit flush tries
   the save once more.
 - **Plain file tabs stay explicit-save** (Ctrl+S) and keep their dirty-close
@@ -202,8 +211,8 @@ opens the tab and **focuses the title field**. Focus a freshly drawn element via
 last drawn frame, the known gpui trap. A prompt takes the keyboard only on an
 explicit open (Edit, a card click, New): a tab restored at launch or shown again
 on a worktree switch takes no focus. **An untitled prompt with an empty text
-deletes itself** (file and index entry) when its tab closes, so pressing New and
-backing out leaves nothing behind.
+deletes itself** (file and index entry) when its tab or its leaf in a split
+closes, so pressing New and backing out leaves nothing behind.
 
 **Edit / card click:** `add_file_tab` already dedupes against the current
 worktree's tabs, so the pencil on an open prompt selects its tab. File tabs open
@@ -232,8 +241,8 @@ release builds use the folders above.
 Known limit: a debug build run from outside any checkout has no
 checkout-scoped database. It uses the installed app's database, as
 `database_path_for` already does, and the `prompts` folder beside it: on macOS
-that is the release prompts folder itself, on Linux the one beside the
-release database. `SIRIO_PROMPTS_DIR` keeps such a run away from real prompts.
+and on Windows (`%LOCALAPPDATA%\Sirio\prompts`) that is the release prompts
+folder itself, on Linux the one beside the release database. `SIRIO_PROMPTS_DIR` keeps such a run away from real prompts.
 
 **`SIRIO_PROMPTS_DIR`** overrides the folder verbatim, in every build. Every E2E
 sets it anyway (§7), so the test's isolation does not rest on the build profile.
@@ -317,8 +326,7 @@ End to end, against the real binary, following `test-project-identity-e2e.sh`.
    bytes, and the button shows the check.
 4. Type into the open tab and copy immediately. The clipboard has the last
    keystroke. The key and the click go in one xdotool call, which must stay
-   under the 400 ms autosave delay, so Copy is what writes the key. The bound
-   is not 100 ms: xdotool's own start takes about 120 ms.
+   under the 400 ms autosave delay, so Copy is what writes the key.
 5. Edit an existing prompt. The pencil selects the already-open tab instead of
    opening a second one.
 6. New prompt, then close the tab untouched. No file and no index entry remain.
@@ -328,6 +336,20 @@ End to end, against the real binary, following `test-project-identity-e2e.sh`.
 8. A plain `.md` file tab in a worktree still opens in Preview and still needs
    Ctrl+S. This guards the autosave anti-goal.
 9. No worktree: the list and Copy work, and New and Edit are disabled.
+10. An unwritable folder: Save failed, the text stays and the tab reads dirty;
+    New raises the toast and writes nothing; a key and Ctrl+W at once right
+    after a good save make the close ask.
+11. A key, then at once another worktree: the key is on disk, and one try's
+    switch returned within the autosave delay.
+12. Delete of a prompt split beside a terminal: only its leaf goes, the tab left
+    is a terminal tab, and a switch away and back brings it and its session back.
+13. Copy of an open prompt the app cannot read: the toast, no check, and the
+    marker put on the CLIPBOARD before it is still there.
+14. A key, then at once Quit: the key is on disk.
+15. A key, then at once the prompt's leaf closed beside a terminal: the key is
+    on disk; a new prompt's leaf closed untouched leaves no file and no entry.
+
+`docs/agents/e2e-tests.md` says what each scenario proves and the line it prints.
 
 **Unit tests:** only for the store's reconciliation (§4 rules 1 to 4, atomic
 write). Following the repo rule, the list of ways it can fail is written before
@@ -386,5 +408,16 @@ Deviations accepted after the build (2026-11-02), each recorded in its section:
 18. **A failed autosave makes the prompt's tab dirty**, so its close asks
     before discarding the typing (§3).
 19. **Known limit:** a debug build run outside a checkout uses the installed
-    app's data, as its database does: the release prompts folder on macOS, the
-    folder beside the release database on Linux (§4).
+    app's data, as its database does: the release prompts folder on macOS and
+    on Windows, the folder beside the release database on Linux (§4).
+
+Changes after the second review (2026-11-02), each recorded in its section:
+
+20. **A file tab left holding only terminals becomes a terminal tab**, in its
+    half and titled as a new terminal tab unless renamed, so a worktree switch
+    or a relaunch brings it back with its session. Known limit: a prompt
+    deleted while that split tab is parked in another worktree (§2).
+21. **Closing a prompt's leaf in a split saves it** as closing its tab does,
+    and an untitled empty one is removed (§3).
+22. **A close request writes the tab's prompts before it checks for unsaved
+    typing**, so a write that fails at the close asks too (§3).

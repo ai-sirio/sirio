@@ -20299,7 +20299,9 @@ impl SirioWorkspace {
                 format!("{}|{}|{}", session::persisted_kind(tab.kind), if snapshot { "yes" } else { "no" }, tab.title),
             ));
         }
-        // The positions whose close asks first, the tabs the strip marks dirty.
+        // `tab_is_dirty`'s positions: the tabs whose close asks first. Every
+        // tab with a live terminal is among them; the strip marks no
+        // terminal tab (`tab_shows_dirty_mark`).
         let dirty: Vec<String> = self
             .tabs
             .iter()

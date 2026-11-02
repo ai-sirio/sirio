@@ -68,14 +68,20 @@ Scripts/Tests/test-project-identity-e2e.sh   # -> prints "PROJECT IDENTITY E2E O
 # workspace toast: the empty view creates no folder, New and typing save with no Ctrl+S, Copy (also
 # right after a key), Edit brings back the prompt's one tab, an untouched New leaves nothing, Delete
 # with the tab open never comes back, a plain .md keeps Preview and Ctrl+S, no worktree, an
-# unwritable folder (Save failed and a dirty tab, the toast, the save after the fix), a key then at
-# once a worktree switch or Quit (the key is on disk), Delete of a prompt split beside a terminal
-# (the terminal keeps running) and Copy of an open prompt the app cannot read (the toast, the
-# CLIPBOARD unchanged). A second app on a fresh database seeded dark shows the same three prompts. Linux only: --xvfb is required; --out-dir DIR (it must not hold a
+# unwritable folder (Save failed and a dirty tab, the toast, the save after the fix, and a key with
+# Ctrl+W at once making the close ask), a key then at once a worktree switch (one of up to five
+# tries must have switched within the 400 ms autosave delay) or Quit (the key is on disk), Delete
+# of a prompt split beside a terminal (the tab left is a terminal tab that comes back with its
+# session after a switch away and back) and Copy of an open prompt the app cannot read (the toast,
+# the marker on the CLIPBOARD untouched). A second app on a fresh database seeded dark shows the
+# same three prompts, then closes a prompt's leaf beside a terminal right after a key (the key is on
+# disk; an untouched new prompt's leaf leaves nothing). gpui's close prompt and the "Close
+# terminal?" banner take clicks only and no verb reports their buttons, so the script finds them in
+# a capture by colour (magick). Linux only: --xvfb is required; --out-dir DIR (it must not hold a
 # prompts folder) keeps transcript.log, prompts/ (the SIRIO_PROMPTS_DIR the script sets under it and
 # refuses to run without), captures/{light,dark}-*.png and both app logs. It needs python3-gi with
 # gir1.2-gtk-3.0 for the clipboard, which it reads through X11 even when WAYLAND_DISPLAY is set.
-Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 14", then "PROMPTS E2E OK"
+Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "PROMPTS E2E OK"
 
 # The chat's session panel column in a real, isolated Sirio: a stub `claude`
 # (Scripts/Tests/stubs/session-panel/claude over claude_fixture.py's session_panel
