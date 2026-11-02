@@ -1034,6 +1034,11 @@ fn session_ended(
 /// `true`, the session's full program state from the fresh listing is sent
 /// ([`reseed_chunks`]): a program or a report that ended while the connection
 /// was down is cleared in the app instead of staying until the next event.
+/// The events subscription is made before the listing, the way the open does
+/// it: an event emitted after the listing is then queued behind the re-seed
+/// rather than lost between the two. On an early return the fresh subscription
+/// is dropped; its relay thread ends on its next event or when the dropped
+/// client's connection closes, as a failed attach's did before.
 #[allow(clippy::too_many_arguments)]
 fn reconnect_until_attached(
     session_id: &str,
@@ -1069,6 +1074,9 @@ fn reconnect_until_attached(
         let Some(fresh) = reconnect() else {
             continue;
         };
+        let Ok(fresh_events) = fresh.events() else {
+            continue;
+        };
         let listed = match fresh.list() {
             Ok(listed)
                 if !listed
@@ -1076,7 +1084,10 @@ fn reconnect_until_attached(
                     .iter()
                     .any(|summary| summary.session_id == session_id) =>
             {
-                if session_ended(session_id, events_rx, chunks_tx, exited) {
+                // A `Closed` queued on either subscription makes it an exit.
+                if session_ended(session_id, events_rx, chunks_tx, exited)
+                    || session_ended(session_id, &fresh_events, chunks_tx, exited)
+                {
                     return false;
                 }
                 let _ = chunks_tx.send(LinkChunk::Lost);
@@ -1087,40 +1098,37 @@ fn reconnect_until_attached(
         };
         let attached = fresh.attach(session_id, resume_from);
         match attached {
-            Ok((attached, fresh_rx)) => match fresh.events() {
-                Ok(fresh_events) => {
-                    if done.load(Ordering::Acquire) {
-                        let _ = fresh.detach(attached.stream);
-                        return false;
-                    }
-                    {
-                        // The new client owns the re-established stream from
-                        // here: every later input, resize, end and detach must
-                        // travel on its connection.
-                        let mut control = control
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        control.stream = attached.stream;
-                        control.client = fresh;
-                    }
-                    *stream_rx = fresh_rx;
-                    *events_rx = fresh_events;
-                    *size = attached.size;
-                    if let Some(summary) = listed
-                        .sessions
-                        .iter()
-                        .find(|summary| summary.session_id == session_id)
-                    {
-                        for chunk in reseed_chunks(summary) {
-                            if chunks_tx.send(chunk).is_err() {
-                                return false;
-                            }
+            Ok((attached, fresh_rx)) => {
+                if done.load(Ordering::Acquire) {
+                    let _ = fresh.detach(attached.stream);
+                    return false;
+                }
+                {
+                    // The new client owns the re-established stream from
+                    // here: every later input, resize, end and detach must
+                    // travel on its connection.
+                    let mut control = control
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    control.stream = attached.stream;
+                    control.client = fresh;
+                }
+                *stream_rx = fresh_rx;
+                *events_rx = fresh_events;
+                *size = attached.size;
+                if let Some(summary) = listed
+                    .sessions
+                    .iter()
+                    .find(|summary| summary.session_id == session_id)
+                {
+                    for chunk in reseed_chunks(summary) {
+                        if chunks_tx.send(chunk).is_err() {
+                            return false;
                         }
                     }
-                    return true;
                 }
-                Err(_) => continue,
-            },
+                return true;
+            }
             Err(_) => continue,
         }
     }
