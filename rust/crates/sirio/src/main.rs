@@ -8260,25 +8260,6 @@ impl SirioWorkspace {
         self.focus_active_pane(window, cx);
     }
 
-    /// Opens the peek on a Primary tab, or switches it (spec §5): the tab
-    /// becomes the Primary's active tab and `active_tab`, so tab-level
-    /// shortcuts and notifications treat it as the tab being looked at.
-    fn open_primary_peek(&mut self, tab_id: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.primary_rail_drawn()
-            || !self
-                .tabs
-                .iter()
-                .any(|tab| tab.id == tab_id && tab.pane == PaneRole::Primary)
-        {
-            return;
-        }
-        self.primary_peek.open(tab_id);
-        self.rail_rects.peek.set(None);
-        self.rail_rects.pin.set(None);
-        self.peek_focus_pending = true;
-        self.select_tab(tab_id, Some(window), cx);
-    }
-
     /// A dismissal while the rail stays drawn (a press outside, the same rail
     /// icon): focus goes back to the Secondary's active tab (spec §5).
     fn close_primary_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -8306,14 +8287,44 @@ impl SirioWorkspace {
     }
 
     /// A rail icon: the open peek's own icon closes it, any other opens or
-    /// switches it. The rail is excluded from the card's press-outside, so
-    /// this sees the peek as it was before the press.
+    /// switches it through `select_tab`, whose hook
+    /// (`peek_active_primary_tab`) does the opening. The rail is excluded from
+    /// the card's press-outside, so this sees the peek as it was before the
+    /// press.
     fn toggle_primary_peek(&mut self, tab_id: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.primary_peek.is_open() && self.primary_peek.get() == Some(&tab_id) {
             self.close_primary_peek(window, cx);
         } else {
-            self.open_primary_peek(tab_id, window, cx);
+            self.select_tab(tab_id, Some(window), cx);
         }
+    }
+
+    /// The one hook behind spec 2026-11-01-primary-rail §5's last row: a
+    /// Primary tab made active on a user's request while the rail is drawn
+    /// opens the peek on it (a rail icon, the sidebar pill, Ctrl+digit, tab
+    /// cycling, Ctrl+Shift+M, `surface.tabs.*`, a new chat or terminal).
+    /// State only: the render that draws the card focuses it
+    /// (`peek_focus_pending`). Restores set the active tab without coming
+    /// here, and `settle_primary_peek` hands it back to the Secondary.
+    fn peek_active_primary_tab(&mut self) {
+        if !self.primary_rail_drawn() {
+            return;
+        }
+        let Some(id) = self
+            .tabs
+            .get(self.active_tab)
+            .filter(|tab| tab.pane == PaneRole::Primary)
+            .map(|tab| tab.id)
+        else {
+            return;
+        };
+        if self.primary_peek.is_open() && self.primary_peek.get() == Some(&id) {
+            return;
+        }
+        self.primary_peek.open(id);
+        self.rail_rects.peek.set(None);
+        self.rail_rects.pin.set(None);
+        self.peek_focus_pending = true;
     }
 
     /// Run at the top of every render (spec §5).
@@ -13431,6 +13442,7 @@ impl SirioWorkspace {
             });
             self.center_split.select_tab(id, &self.tabs);
             self.reveal_secondary_for_active_tab();
+            self.peek_active_primary_tab();
             if let Some(window) = window {
                 self.focus_active_pane(window, cx);
             }
@@ -14524,11 +14536,13 @@ impl SirioWorkspace {
         .detach();
     }
 
-    /// Makes the tab at `index` the active one.
+    /// Makes the tab at `index` the active one, the way every selection does:
+    /// its half shows it, and while the rail is drawn it is peeked (spec
+    /// 2026-11-01-primary-rail §5).
     fn focus_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.active_tab = index;
-        self.schedule_save(cx);
-        cx.notify();
+        if let Some(id) = self.tabs.get(index).map(|tab| tab.id) {
+            self.select_tab(id, None, cx);
+        }
     }
 
     /// The index of the tab whose terminal shows `session_id`, if any.
@@ -14873,6 +14887,9 @@ impl SirioWorkspace {
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Chat, &title) {
             self.rebuild_center_split();
         }
+        // A new Primary tab opens in the peek while the rail is drawn (spec
+        // 2026-11-01-primary-rail §5).
+        self.peek_active_primary_tab();
         self.schedule_save(cx);
         self.mark_activity_dirty();
         window.focus(&composer_focus, cx);
@@ -14989,6 +15006,7 @@ impl SirioWorkspace {
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Chat, &title) {
             self.rebuild_center_split();
         }
+        self.peek_active_primary_tab();
         self.schedule_save(cx);
         self.mark_activity_dirty();
         window.focus(&composer_focus, cx);
@@ -15121,6 +15139,7 @@ impl SirioWorkspace {
         if self.insert_requires_rebuild(tab_id, sirio_project::ContentKind::Terminal, &title) {
             self.rebuild_center_split();
         }
+        self.peek_active_primary_tab();
         // A new terminal tab triggers an immediate session save (SP2 spec
         // §4.1), not the next periodic one, so a crash right after creation
         // rarely leaves an orphan.
@@ -18265,7 +18284,8 @@ impl SirioWorkspace {
     /// they are small, non-modal root notices, and blanking the page for
     /// their four seconds would be worse than the overlap. A movable tab
     /// dragged out of the Primary half also covers the Secondary one (spec
-    /// 2026-09-24 §5).
+    /// 2026-09-24 §5). The Primary rail's peek covers the Secondary too (spec
+    /// 2026-11-01-primary-rail §5).
     fn overlay_obscures_browsers(
         overflow_menu_open: bool,
         tab_menu_open: bool,
@@ -18275,6 +18295,7 @@ impl SirioWorkspace {
         tab_rename_open: bool,
         new_tab_menu_open: bool,
         tab_drag_toward_secondary: bool,
+        peek_open: bool,
     ) -> bool {
         overflow_menu_open
             || tab_menu_open
@@ -18284,6 +18305,7 @@ impl SirioWorkspace {
             || tab_rename_open
             || new_tab_menu_open
             || tab_drag_toward_secondary
+            || peek_open
     }
 
     /// #376: marks every browser surface as covered (or not) by a GPUI
@@ -18305,6 +18327,7 @@ impl SirioWorkspace {
             self.tab_rename.is_some(),
             self.tab_bar.read(cx).is_menu_open(),
             self.pane_drop_overlay_role(cx) == Some(PaneRole::Secondary),
+            self.primary_peek.is_open(),
         );
         for tab in &self.tabs {
             tab.panes.for_each(&mut |_, content| {
