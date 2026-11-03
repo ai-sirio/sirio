@@ -243,9 +243,12 @@ pub struct FileView {
     /// The language and span count of the first line as the highlighter last
     /// answered (`highlight_text`).
     highlight_drawn: Rc<Cell<Option<(Language, usize)>>>,
-    /// Focus target for everything that is not the code: Loading, the
-    /// notices and the Markdown Preview. The code editor takes the keyboard
-    /// while it draws the file (see `focus_target`).
+    /// Focus target for a loaded file whose code is not drawn (the Markdown
+    /// Preview); the code editor takes the keyboard while it draws the file
+    /// (see `focus_target`). Only the loaded render tracks it: while the file
+    /// loads, or shows a notice (missing, binary, too large, unreadable) or a
+    /// snapshot failure, nothing draws it, and a keyboard sent here goes
+    /// nowhere. `is_loaded` says when it is drawn.
     editor_focus: FocusHandle,
     /// Re-check the disk snapshot whenever this tab's editor focus is
     /// regained after another surface owned it.

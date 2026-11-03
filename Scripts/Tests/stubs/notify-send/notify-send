@@ -1,0 +1,8 @@
+#!/bin/sh
+# The `notify-send` of test-primary-rail-e2e.sh: it posts nothing and records
+# each call's arguments, one line per call, in $NOTIFY_LOG. Sirio's Linux
+# desktop notification is a `notify-send --app-name=Sirio TITLE BODY` spawn
+# (post_desktop_notification in rust/crates/sirio/src/main.rs), so a line here is a
+# notification Sirio posted.
+[ -n "${NOTIFY_LOG:-}" ] || exit 0
+printf '%s\n' "$*" >>"$NOTIFY_LOG"

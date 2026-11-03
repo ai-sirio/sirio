@@ -30,7 +30,7 @@ __pycache__/
 *.pyc
 
 # Local tool/IDE/planning artifacts — not shared repo content. docs/ stays
-# local except six directories and one file the repo itself depends on. Each needs the
+# local except seven directories and one file the repo itself depends on. Each needs the
 # `/docs/*` + `!` shape, because a parent excluded with `/docs/` could not
 # be re-included:
 #   - agents: CLAUDE.md links each area's notes there (architecture, the
@@ -56,8 +56,12 @@ __pycache__/
 #     exists, and an untracked RFC reaches no reviewer. Once the spec lands
 #     in superpowers/specs, the RFC stays as the record of the alternatives
 #     weighed and of why each was rejected.
+#   - adr: CLAUDE.md's domain docs and docs/agents/domain.md send every
+#     engineering skill to docs/adr/ for the decisions behind an area, so an
+#     untracked ADR is a dead link and the decision it records is lost.
 /.codegraph/
 /docs/*
+!/docs/adr/
 !/docs/agents/
 !/docs/designs/
 !/docs/release-notes/
