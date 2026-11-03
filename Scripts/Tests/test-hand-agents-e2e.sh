@@ -533,10 +533,11 @@ for line in sys.stdin:
 }
 
 # The 1-based position of pane $1 in the tab strip: one pane per tab, tabs in the order
-# the panes were opened (`panel list` sorts its ids as text, so pane-10 precedes pane-2).
+# the panes were opened (`panel list` sorts its ids as text, so pane-10 precedes pane-2, and
+# lists a control session, which is no tab, under an id of its own).
 tab_index_of() { # pane
-  ctl panel list --json | python3 -I -c 'import json, sys
-ids = sorted((row["id"] for row in json.load(sys.stdin)), key=lambda i: int(i.rsplit("-", 1)[1]))
+  ctl panel list --json | python3 -I -c 'import json, re, sys
+ids = sorted((row["id"] for row in json.load(sys.stdin) if re.fullmatch(r"pane-[0-9]+", row["id"])), key=lambda i: int(i.rsplit("-", 1)[1]))
 print(ids.index(sys.argv[1]) + 1)' "$1"
 }
 
