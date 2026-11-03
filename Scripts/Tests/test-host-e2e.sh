@@ -83,10 +83,13 @@ set -eEuo pipefail
 #   28. argv_is_bounded   a program started with 40 arguments of 1000 bytes is
 #                         listed with at most 4096 bytes of argv in all, and the
 #                         entries it keeps are the first ones, cut at the budget
+#   29. repeated_report_is_one_event
+#                         the same report written five times is one `status`
+#                         event of `term.sessions`, not five
 # Cases 10 and 11 are unix-only and print SKIP on Windows; case 13 runs on
-# Linux only; cases 16 to 28 run on Linux and macOS and print SKIP on Windows.
+# Linux only; cases 16 to 29 run on Linux and macOS and print SKIP on Windows.
 # The systemd scope arm of case 3 runs only on Linux with a user manager.
-# Cases 16 to 28 need python3 on PATH (they read `term.list`'s JSON, and the
+# Cases 16 to 29 need python3 on PATH (they read `term.list`'s JSON, and the
 # probe stub is a python3 script).
 #
 # Each case force-shuts every host in its own root and retires the root
@@ -1285,6 +1288,50 @@ PY
   pass
 }
 
+# A program that repeats the state it is in (Claude sends `working` per tool) must not make an
+# event per report: each is a frame to every subscriber and a repaint of the app.
+case_repeated_report_is_one_event() {
+  if [ "$OS" = windows ]; then skip "no OSC 7501 on Windows"; return 0; fi
+  interactive_shell pane-29
+  cat > "$WORKDIR/repeat.sh" <<'SH'
+sleep 1
+i=0
+while [ "$i" -lt 5 ]; do
+  printf '\033]7501;state=working:app=codex\007'
+  i=$((i + 1))
+  sleep 0.3
+done
+sleep 2
+:
+SH
+  local out="$ROOT_BASE/events-$N.out"
+  "$PROBE" term-events 8000 >"$out" 2>"$ROOT_BASE/events-$N.err" &
+  local events=$!
+  HELPERS+=("$events")
+  wait_until 10 has_line "$out" '^subscribed' || fail "the events probe never subscribed: $(cat "$out" "$ROOT_BASE/events-$N.err" 2>/dev/null | head -c 600)"
+  probe term-write pane-29 $'sh repeat.sh\r'
+  wait "$events" || fail "the events probe exited non-zero: $(cat "$ROOT_BASE/events-$N.err" 2>/dev/null | head -c 600)"
+  local count
+  count="$(python3 - "pane-29" "$out" <<'PY'
+import json, sys
+
+session, path = sys.argv[1], sys.argv[2]
+count = 0
+for line in open(path):
+    line = line.strip()
+    if line.startswith("{"):
+        event = json.loads(line)
+        if event.get("session_id") == session and event["type"] == "status" \
+                and (event.get("status") or {}).get("state") == "working":
+            count += 1
+print(count)
+PY
+)"
+  [ "$count" = 1 ] || fail "five identical reports made $count 'working' status events, wanted 1: $(cat "$out" | head -c 1200)"
+  NOTE="5 reports, $count event"
+  pass
+}
+
 # The whole argv of a listed program is bounded: `term.list` answers every list() of every
 # tab open, and a reply over the protocol's 1 MiB payload fails them all.
 case_argv_is_bounded() {
@@ -1329,7 +1376,7 @@ run_case isolation         case_isolation 15
 # The program cases read `term.list`'s JSON and run a python3 stub. A missing
 # python3 is a failure of the machine, not a reason to skip them.
 if [ "$OS" != windows ] && ! command -v python3 >/dev/null 2>&1; then
-  echo "FAIL: python3 is required by the program cases (16 to 28) and is not on PATH" >&2
+  echo "FAIL: python3 is required by the program cases (16 to 29) and is not on PATH" >&2
   exit 1
 fi
 run_case program_is_named                  case_program_is_named
@@ -1345,5 +1392,6 @@ run_case report_after_exec_is_kept         case_report_after_exec_is_kept
 run_case events_carry_program_and_status   case_events_carry_program_and_status
 run_case record_survives_a_child_group     case_record_survives_a_child_group
 run_case argv_is_bounded                   case_argv_is_bounded
+run_case repeated_report_is_one_event      case_repeated_report_is_one_event
 
 echo "HOST E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"

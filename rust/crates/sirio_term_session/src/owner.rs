@@ -234,7 +234,14 @@ fn run(inputs: Inputs) {
                             (Some(new), Some((kept, at))) if kept.state == new.state => *at,
                             _ => elapsed_ms(started),
                         };
-                        cached.status = record.clone().map(|record| (record, at_ms));
+                        // One event per change: the same record at the same stamp (a program
+                        // repeating the state it is in, or a log full of reports) is no news,
+                        // and every event is a frame to each subscriber and a repaint.
+                        let new = record.clone().map(|record| (record, at_ms));
+                        if new == cached.status {
+                            continue;
+                        }
+                        cached.status = new;
                         let _ = events.send(Event::Status(record, at_ms));
                     }
                 }
