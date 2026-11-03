@@ -10397,6 +10397,10 @@ impl SirioWorkspace {
                     workspace
                         .activity
                         .drop_report(&activity_pane_id, Instant::now());
+                    // The session ended, so no program of it runs: a Restart under the same
+                    // pane id starts a session that has named none, and a `Program(None)`
+                    // re-seed of it must end nothing.
+                    workspace.activity.note_program_ended(&activity_pane_id);
                 }
                 let title_owned_before = workspace.activity.is_title_owned(&activity_pane_id);
                 let identity_before = (
