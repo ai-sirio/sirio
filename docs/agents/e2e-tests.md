@@ -107,7 +107,11 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # permission ask, a link kept through a title an older session also has, a turn under a second
 # (finished, +1), two panes in one folder (no guess, then each by its title), a failed turn (the
 # service's error text and password stay out of the app's stderr), a relaunch, and a service that
-# goes away (the mark stays, no status, one `[opencode-watch] <kind>` line). --out-dir DIR
+# goes away (the mark stays, no status, one `[opencode-watch] <kind>` line). Tabs no terminal
+# holds are covered too: after a relaunch a turn typed into a tab never shown (codex, an exit mid-turn,
+# OpenCode) or into a worktree never selected makes one stop and an unread mark, showing the tab adds
+# none, a finished claude turn read before the quit stays silent, and a `panel create` session that
+# belongs to no tab gets no state. --out-dir DIR
 # keeps transcript.log, steps.log (each step's `panel list` and `surface attention read`, and the
 # session's status, unread, running and posted count), frames/ and the
 # logs (default ~/.cache/st/hand-agents-e2e-<time>; TMPDIR defaults to ~/.cache/st/hand-agents-tmp,

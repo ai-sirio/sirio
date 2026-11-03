@@ -244,7 +244,7 @@ rings, same unread-sessions stops. **Tabs no terminal holds.** After a relaunch 
 on screen attaches (the others attach as they are shown), and an evicted worktree's tabs
 detach (`docs/agents/architecture/panes.md`). Their turns still make a stop and an unread
 mark: one app-wide listener on the host's `term.sessions` topic feeds the program, the
-status, the title and the end of every session whose pane no terminal is bound to (§9, 13;
+status, the title and the end of every session whose pane no terminal's link runs for (§9, 13;
 Enzo asked for it on 2026-11-03). Today `tab_agent_mark` falls back to the
 activity model only for a tab's primary pane; a split tab follows unread-sessions F2
 (the most urgent pane decides the status). The tab label does not change (§2).
@@ -390,7 +390,7 @@ is the same path and adds nothing to attribute.
 
 **End to end, with an artifact** (the shape of `Scripts/Tests/test-host-sessions-e2e.sh`):
 `Scripts/Tests/test-hand-agents-e2e.sh` drives a real `sirio`, `sirio-host` and `sirioctl`
-under Xvfb with an isolated root, and prints `HAND AGENTS E2E OK (25 cases, <s>s)`. One stub,
+under Xvfb with an isolated root, and prints `HAND AGENTS E2E OK (38 cases, <s>s)`. One stub,
 `Scripts/Tests/stubs/hand-agents/agent.py`, plays `claude`, `codex`, `omp` and `pi` on
 `PATH`, and behaves like the measured CLIs: the stub `claude` sends the probe and reports
 only when answered, the stub `codex` reports unprompted, including the 10 ms startup blip.
@@ -613,10 +613,10 @@ marked *[my call]* and is open to the user.
       none.
     - **Who it feeds.** It feeds a session only when two things hold:
       - its pane is a known tab's (`session_for_pane`);
-      - no `TerminalView` is bound to that pane.
+      - no `TerminalView` bound to that pane has a running link. A restored tab's view is bound
+        at once and opens its link on its first render, so until then the listener is the route.
 
-      A bound terminal's link stays the only route for its pane, so one event is never applied
-      twice. A session with no tab, such as a control session or a Show-session tab's, gets no
+      A running link stays the only route for its pane, so one event is never applied twice. A session with no tab, such as a control session or a Show-session tab's, gets no
       state.
     - **What it forwards.**
       - `program` and `status`, as the link sends them.
