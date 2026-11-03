@@ -39,9 +39,11 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #   exit_mid_turn_is_finished      work, 1.3 s, exit: a stop (+1), then no agent, no status
 #   clear_mid_turn_is_silent       claude work, 1.3 s, clear: no status, +0
 #   hooks_yield_to_reports         a hook after an idle changes nothing
+#   pi_reports_once_answered       pi, as Pi 1.4.0 does, reports once the probe is answered: work ->
+#                                  running; idle after >= 1 s -> done (+1, unread)
 #   hooks_still_rule_without_reports
-#                                  pi reports nothing: its hooks set the status (and prove
-#                                  a hook from a pane reaches the app)
+#                                  `pi --no-reports` sends nothing: its hooks set the status (and
+#                                  prove a hook from a pane reaches the app)
 #   spawned_agent_reports          `surface terminal open --agent claude`: reports show, the
 #                                  Stop hook that follows changes nothing
 #   relaunch_mid_turn              codex mid-turn, `system.quit`, restart: the startup posts nothing,
@@ -49,7 +51,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  stays silent
 #   agent_hands_the_terminal_to_a_child
 #                                  an agent stub gives the terminal to a child (`fgchild`): claude, with
-#                                  a live record, keeps its mark; pi, which reports nothing, loses it
+#                                  a live record, keeps its mark; `pi --no-reports`, with no record, loses it
 #                                  while the child is the foreground and has it back after
 #   argv_stays_out_of_app_stderr   `claude SIRIO-ARGV-MARKER`: the marker is not in the app's stderr
 #
@@ -569,9 +571,9 @@ expect_attention() { # session field want what
 
 # A terminal with agent $1 typed and its mark shown (sets PANE and SESS), then 2.5 s:
 # past the 2 s the app keeps a startup title silent, and the probe's answer is in.
-start_agent() { # name
+start_agent() { # name [arguments]
   open_pane
-  type_line "$PANE" "$1"
+  type_line "$PANE" "$1${2:+ $2}"
   wait_agent "$PANE" "$1" 3
   sleep 2.5
 }
@@ -805,21 +807,35 @@ case_hooks_yield_to_reports() {
   stepn "hook after a report" "$SESS"
 }
 
-case_hooks_still_rule_without_reports() {
+case_pi_reports_once_answered() {
   local base
   start_agent pi
+  long_work "$PANE" "$SESS"
+  stepn "pi working" "$SESS"
+  base="$(posted_count)"
+  type_line "$PANE" idle
+  wait_status "$SESS" done 3
+  expect_posted "$base" 1 "pi's idle after a turn"
+  expect_attention "$SESS" unread true "pi's idle after a turn"
+  stepn "pi idle after a turn" "$SESS"
+}
+
+case_hooks_still_rule_without_reports() {
+  local base
+  # `--no-reports`: an agent that sends no OSC 7501 at all (here Pi, with no probe sent either).
+  start_agent pi --no-reports
   base="$(posted_count)"
   type_line "$PANE" "hook needs-input"
   wait_status "$SESS" needs-input 3
-  expect_posted "$base" 1 "pi's first hook"
-  stepn "pi hook needs-input" "$SESS"
+  expect_posted "$base" 1 "a silent agent's first hook"
+  stepn "silent agent: hook needs-input" "$SESS"
   base="$(posted_count)"
   type_line "$PANE" "hook running"
   wait_status "$SESS" running 3
   type_line "$PANE" "hook needs-input"
   wait_status "$SESS" needs-input 3
-  expect_posted "$base" 1 "pi's running then needs-input"
-  stepn "pi hook running then needs-input" "$SESS"
+  expect_posted "$base" 1 "a silent agent's running then needs-input"
+  stepn "silent agent: hook running then needs-input" "$SESS"
 }
 
 case_spawned_agent_reports() {
@@ -947,17 +963,17 @@ case_agent_hands_the_terminal_to_a_child() {
   stepn "claude: idle after the child" "$SESS"
 
   open_pane
-  type_line "$PANE" pi
+  type_line "$PANE" "pi --no-reports"
   wait_agent "$PANE" pi 3
   sleep 2.5
   type_line "$PANE" fgchild
   wait_foreground_child
   wait_agent "$PANE" "" 4
-  child_alive || fail "the child ended before pi's mark cleared, so the check proves nothing"
-  stepn "pi: child holds the terminal, mark cleared" "$SESS"
+  child_alive || fail "the child ended before the silent pi's mark cleared, so the check proves nothing"
+  stepn "silent pi: child holds the terminal, mark cleared" "$SESS"
   wait_until 10 child_gone || fail "the child never ended"
   wait_agent "$PANE" pi 5
-  stepn "pi: terminal taken back, mark back" "$SESS"
+  stepn "silent pi: terminal taken back, mark back" "$SESS"
 }
 
 case_argv_stays_out_of_app_stderr() {
@@ -1285,6 +1301,7 @@ run_case short_turn_is_silent
 run_case exit_mid_turn_is_finished
 run_case clear_mid_turn_is_silent
 run_case hooks_yield_to_reports
+run_case pi_reports_once_answered
 run_case hooks_still_rule_without_reports
 run_case spawned_agent_reports
 run_case relaunch_mid_turn

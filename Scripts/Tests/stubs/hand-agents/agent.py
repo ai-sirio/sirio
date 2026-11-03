@@ -10,6 +10,8 @@ a `claude-code`, `codex`, `opencode-ai` or `pi-coding-agent` segment of its path
   agent --no-title    sets no window title (for a case that must not be told by one);
                       so does a file `<argv0>.no-title` beside the executable (a launch
                       that cannot pass the flag, such as `surface terminal open --agent`)
+  agent --no-reports  sends no OSC 7501 and no probe, whichever agent it plays (an agent that
+                      reports nothing: its hooks are all it has)
   agent --version     prints `<name> 9.9.9` and exits (a version probe, as
                       Scripts/Tests/stubs/session-panel/claude answers one)
   agent               with a terminal on stdin: starts as its agent does (below),
@@ -19,8 +21,8 @@ a `claude-code`, `codex`, `opencode-ai` or `pi-coding-agent` segment of its path
 Typed lines (the whole line, then Enter):
   work | idle | done | block | error | clear
                       an OSC 7501 report: state=working|idle|done|blocked|error,
-                      or `clear` (the profile's reports only: pi and opencode
-                      send none)
+                      or `clear` (the profile's reports only: opencode sends none,
+                      and `--no-reports` turns every profile's off)
   hook <status>       `sirioctl notify --session "$SIRIO_PANE_ID" --status <status>`,
                       as an agent's hook runs it
   title <text>        set the window title to <text>
@@ -35,7 +37,8 @@ Startup, per profile:
   codex     reports unprompted with app=codex: idle, then working and idle 10 ms apart;
             a typed `done` is followed at once by an `idle`, as Codex 0.166 sends
   omp       title `π > <cwd>`, then reports idle with app=omp
-  pi        sends the probe and never reports
+  pi        sends the probe and reports (with app=pi) only once the terminal has answered
+            it, as Pi 1.4.0 does
   opencode  no OSC 7501; title `OpenCode`, and `OC | <title>` after its first `idle`
 
 The terminal is raw before anything is written, so nothing typed is echoed, and
@@ -61,7 +64,8 @@ STATES = {
     "error": "error",
     "clear": "clear",
 }
-APPS = {"claude": "claude-code", "codex": "codex", "omp": "omp"}
+APPS = {"claude": "claude-code", "codex": "codex", "omp": "omp", "pi": "pi"}
+NO_REPORTS = "--no-reports" in sys.argv[1:]
 
 
 def profile():
@@ -92,6 +96,8 @@ def title(text):
 
 
 def report(name, state):
+    if NO_REPORTS:
+        return
     app = APPS.get(name)
     body = "state=" + state + (":app=" + app if app else "")
     os.write(1, b"\x1b]7501;" + body.encode() + b"\x1b\\")
@@ -165,9 +171,11 @@ def main():
 
     if name == "claude":
         title("✳ Claude Code")
-        os.write(1, PROBE)
+        if not NO_REPORTS:
+            os.write(1, PROBE)
     elif name == "pi":
-        os.write(1, PROBE)
+        if not NO_REPORTS:
+            os.write(1, PROBE)
     elif name == "codex":
         report(name, "idle")
         report(name, "working")
@@ -197,7 +205,7 @@ def main():
             say("ack " + line)
             if words[0] in STATES:
                 state = STATES[words[0]]
-                if name == "claude" and not source.answered:
+                if name in ("claude", "pi") and not NO_REPORTS and not source.answered:
                     continue
                 if name in APPS:
                     report(name, state)
