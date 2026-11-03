@@ -10351,11 +10351,13 @@ impl SirioWorkspace {
                 // is drained while the pane is still an agent's. Only then does
                 // `apply_terminal_activity_event` clear the identity.
                 //
-                // A `Program(None)` ends something only for a session that named a program:
-                // a reconnect's re-seed sends one for a session that never did (a spawned
-                // agent's, an `exec`ed one, every Windows pane), and that is no exit.
+                // A `Program(None)` ends something only when the pane's last `Program` event
+                // named a program: a reconnect's re-seed sends one for a session that never
+                // named one, or whose last event was already a `None` (a spawned agent's, an
+                // agent that took the shell's group with `exec` after an earlier job, every
+                // Windows pane), and that is no exit.
                 let program_none_ends_one = matches!(event, TerminalActivityEvent::Program(None))
-                    && workspace.activity.is_program_session(&activity_pane_id);
+                    && workspace.activity.is_program_running(&activity_pane_id);
                 if program_none_ends_one
                     || matches!(
                         event,

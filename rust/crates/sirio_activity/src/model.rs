@@ -81,6 +81,11 @@ pub struct AgentActivityModel {
     /// `Program(Some(_))` the pane receives and kept across `Program(None)`:
     /// the session still names programs, so Layer D no longer polls the pane.
     program_session_panes: HashSet<String>,
+    /// Panes whose last `Program` event named a program: set by `Program(Some(_))`, cleared
+    /// by `Program(None)`. A `Program(None)` ends a program only for such a pane; one that
+    /// follows another `Program(None)`, or comes for a session that never named a program
+    /// (a reconnect's re-seed of an `exec`ed agent, a spawned one), ends nothing.
+    program_running_panes: HashSet<String>,
     /// What the program on the pane reports over OSC 7501, one turn
     /// tracker per pane holding a live record. Kept per pane, apart from identity:
     /// a report can arrive before the program is named. While a pane holds one
@@ -497,6 +502,18 @@ impl AgentActivityModel {
         if !self.program_session_panes.contains(pane_id) {
             self.program_session_panes.insert(pane_id.to_string());
         }
+        self.program_running_panes.insert(pane_id.to_string());
+    }
+
+    /// The pane's session says no program holds its terminal now (`Program(None)`).
+    pub fn note_program_ended(&mut self, pane_id: &str) {
+        self.program_running_panes.remove(pane_id);
+    }
+
+    /// Whether the pane's last `Program` event named a program: only then does a
+    /// `Program(None)` mean one ended.
+    pub fn is_program_running(&self, pane_id: &str) -> bool {
+        self.program_running_panes.contains(pane_id)
     }
 
     /// Whether this pane's session has named a program.
@@ -793,6 +810,7 @@ impl AgentActivityModel {
         self.process_owned_panes.remove(pane_id);
         self.program_owned_panes.remove(pane_id);
         self.program_session_panes.remove(pane_id);
+        self.program_running_panes.remove(pane_id);
         self.reports.remove(pane_id);
         self.program_identified_at.remove(pane_id);
         self.process_seen.remove(pane_id);
