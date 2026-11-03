@@ -288,11 +288,13 @@ Sirio:
   title arrives before the rename does (the held session has no title yet, even if an older
   session of the folder has the pane's title; the next relink after the rename decides by
   title), and while the held session is in the folder and has the pane's title even if an older
-  session has the same one (the held one wins). A pane that links to a session it did not hold
-  never takes news from a finish: a Done or Error state of that session is reported as idle,
-  whatever its time, because the turn predates the pane (a resumed session) or belongs to
-  another pane (a sibling TUI in the folder that ran a turn and quit). Its next turns report
-  normally.
+  session has the same one (the held one wins). A pane that newly links to a session
+  hides the finish it holds (a Done or Error state is reported as idle) only where it cannot be
+  the pane's own: a first-turn link (the title is still `OpenCode`: the session is another
+  pane's, such as a sibling TUI in the folder that ran a turn and quit), or a finish older than
+  the pane's `opencode` (a resumed session). A title link to a finish that came after the pane
+  started is the pane's own turn, whose rename landed after it ended, and reports as it is. Its
+  next turns report normally.
   Otherwise it waits for the title. If two panes match, or none, the pane shows the
   OpenCode mark and **no status**: no guessing (anti-goal). A reconnect or a relaunch
   restores Busy and Waiting from REST, but not a finished or failed result: the seed does
@@ -567,6 +569,9 @@ marked *[my call]* and is open to the user.
      failed result.
    - A subagent's child session can keep OpenCode's first-turn link from forming until the
      session has a title.
+   - If an OpenCode session's first turn is interrupted before it is titled and the TUI then
+     opens another session, the tab keeps showing the untitled one until it is renamed or
+     deleted.
    - An OpenCode tab whose cwd the host cannot read is not counted by the "only tab in that
      folder" rule.
    - The Windows paths compile on Linux and are not run.
