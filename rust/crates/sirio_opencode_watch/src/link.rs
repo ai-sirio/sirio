@@ -31,7 +31,9 @@ pub struct OcPane {
 ///
 /// - By title: the pane's title is `OC | <title>`, and exactly one session in the pane's
 ///   directory has that title; or, among several with it, the one the pane already holds
-///   (an older session with a generic title must not break a link that is sure).
+///   (an older session with a generic title must not break a link that is sure). A held
+///   session that has no title yet keeps the link while its rename is on the way, whatever
+///   other session has the pane's title; the next relink after the rename decides by title.
 /// - By the first turn, while the title is still `OpenCode`: the pane is the only
 ///   `opencode` pane in its directory, and exactly one session there was created at or
 ///   after the pane's `opencode` started.
@@ -45,10 +47,17 @@ pub fn link(panes: &[OcPane], sessions: &[OcSession]) -> Vec<(String, String)> {
         };
         let chosen = if let Some(title) = pane.title.strip_prefix(TITLED) {
             let titled = || here().filter(|session| !session.title.is_empty() && session.title == title);
-            pane.held
+            // The session the pane holds, if it is in the folder: it keeps the link while it
+            // has no title yet (the TUI's title can land before the service's rename, and
+            // only an older session then has the title) or has the pane's title.
+            let held = pane
+                .held
                 .as_deref()
-                .and_then(|held| titled().find(|session| session.id == held))
-                .or_else(|| only(titled()))
+                .and_then(|held| here().find(|session| session.id == held));
+            match held {
+                Some(held) if held.title.is_empty() || held.title == title => Some(held),
+                _ => only(titled()),
+            }
         } else if pane.title == UNTITLED {
             let alone = panes.iter().filter(|other| other.cwd == pane.cwd).count() == 1;
             if alone {

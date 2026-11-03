@@ -67,8 +67,8 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  before the service's rename keeps Done and adds no stop
 #   opencode_duplicate_title_keeps_link
 #                                  an older session of the folder has the title the service later
-#                                  gives the pane's first-turn session: the link stays, and the
-#                                  next turn shows running, then done (+1)
+#                                  gives the pane's first-turn session, the TUI's title coming
+#                                  first: the link stays, and the next turn shows running, then done (+1)
 #   opencode_short_turn_is_finished
 #                                  a turn the service ends under a second after it began: done, +1
 #   opencode_resumed_finish_is_not_replayed
@@ -1105,11 +1105,15 @@ case_opencode_duplicate_title_keeps_link() {
   wait_status "$SESS" done 4
   expect_posted "$base" 1 "the end of the first turn"
   base="$(posted_count)"
-  oc "rename ses_d Greeting"
+  # The TUI's title lands before the service's rename (the order that happens): the held
+  # session is untitled, and only the older session carries the title.
   type_line "$PANE" "title OC | Greeting"
   sleep 1.5
   hold_status "$SESS" done 2
-  expect_posted "$base" 0 "a rename to a title another session has"
+  oc "rename ses_d Greeting"
+  sleep 1.5
+  hold_status "$SESS" done 2
+  expect_posted "$base" 0 "a title, then a rename, to a title another session has"
   stepn "opencode: first turn kept across a duplicate title" "$SESS"
   oc "busy ses_d"
   wait_status "$SESS" running 4
