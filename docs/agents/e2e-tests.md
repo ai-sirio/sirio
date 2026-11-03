@@ -41,11 +41,26 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
 # socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
 # mount kept out of a pane, quit and relaunch, every stub agent's hooks, the skill,
-# SIRIO_WORKTREE_ID and the flags sirioctl offers. Linux runs it with --xvfb or
+# SIRIO_WORKTREE_ID and the flags sirioctl offers, `project add --display-name` (case 14: the
+# label, no dialog, a duplicate). Linux runs it with --xvfb or
 # --display :N; --state-only skips cases 4, 4c, 5, 6 and 10 and is what macOS runs.
 # --out-dir DIR keeps the transcript, logs and env dumps; --only N[,N...] prints
 # "SIRIOCTL E2E PARTIAL"; --mutate claude-prompt-hook is case 6's mutation check.
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
+
+# The "Project added" dialog after every add from the UI, in a real debug Sirio per scenario (a
+# fresh SIRIO_DB, private HOME and SIRIO_PROJECTS_DIR), driven by real X keys and clicks and
+# asserted on the debug `surface project-identity read` verb, `project list --json` and the stored
+# rows: focus, Enter and Esc, skip against save, the queue, the clone and non-git paths, the
+# Project Settings tab's label, the privacy of the perf trace, and the label across a focus refresh
+# and a relaunch. A git wrapper in the debug build's own bin directory logs every git call and
+# floods or stalls a clone or a discovery when a scenario asks. Linux runs it with --xvfb or
+# --display :N, also under --state-only, which skips only the captures and the real X input;
+# --out-dir DIR keeps transcript.log, <scenario>/app.log, projects.tsv and git-calls.log, and
+# frames/<scenario>-*.png; --appearance light|dark (default light); --only NAME[,NAME...] prints
+# "PROJECT IDENTITY E2E PARTIAL (<n> scenarios)". It needs xset (x11-xserver-utils) and
+# python3-gi with gir1.2-gtk-3.0 for the clipboard.
+Scripts/Tests/test-project-identity-e2e.sh   # -> prints "PROJECT IDENTITY E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
 
 # The chat's session panel column in a real, isolated Sirio: a stub `claude`
 # (Scripts/Tests/stubs/session-panel/claude over claude_fixture.py's session_panel

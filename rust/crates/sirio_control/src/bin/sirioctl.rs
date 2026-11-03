@@ -127,7 +127,9 @@ fn usage() {
          \x20 quit                              gracefully quit Sirio\n\
          \x20 capabilities [--json]             list available socket methods\n\
          \x20 project list [--json]              list discovered projects and worktrees\n\
-         \x20 project add <path> [--json]        add a project and report the new catalog\n\
+         \x20 project add <path> [--display-name <label>] [--json]\n\
+         \x20                                    add a project, optionally with a sidebar label\n\
+         \x20                                    (--display-name=--x for a label starting with --)\n\
          \x20 identify [--json]                 show the current workspace/surface context\n\
          \x20 list-workspaces [--json]          list all worktrees\n\
          \x20 new-workspace --project <p> [--branch <b>]\n\
@@ -176,6 +178,9 @@ fn usage() {
          \x20 surface open-list open --entry show|chat|terminal|browser|changes|open-file|project-settings|other-agents|agent:<id>  (debug builds) click that row of the Open list\n\
          \x20 surface terminal open [--cmd c | --agent a]  (debug builds) open an app terminal tab running c, or agent a\n\
          \x20 surface host end-all             (debug builds) End All sessions without its dialog\n\
+         \x20 surface project-add --kind path|clone|create --value <path|url|name> [--submit] [--answer 0|1|2]  (debug builds) start an add without the folder chooser; --answer 0|1|2 (path only) answers the not-a-git prompt: Initialize Git, Add without Git, Cancel\n\
+         \x20 surface project-identity read     (debug builds) the Project added dialog's state, one key=value per line\n\
+         \x20 surface project-identity act <action> [<value>]  (debug builds) press save|skip in the dialog, or drive its picker with mode|open-emoji-grid|pick-glyph\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
          \x20 surface editor open --path p      (debug builds) open a file as a tab; prints its editor state\n\
@@ -433,8 +438,9 @@ fn print_result(response: &ControlResponse, columns: &[&str], as_json: bool) {
     println!("{}", line.join("\t"));
 }
 
-/// A `surface editor` answer as `key=value` lines, sorted by key, or the whole
-/// answer as JSON with `--json`: a value may hold a tab, which a column cannot.
+/// A `surface editor` (or `project-identity`) answer as `key=value` lines,
+/// sorted by key, or the whole answer as JSON with `--json`: a value may hold a
+/// tab, which a column cannot.
 fn print_editor_result(response: &ControlResponse, as_json: bool) {
     let result = response.result.clone().unwrap_or_default();
     if as_json {
@@ -540,12 +546,42 @@ fn cmd_project(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
                 .or_else(|| parsed.positional.get(1).map(String::as_str))
                 .filter(|path| !path.is_empty())
                 .ok_or_else(|| "Missing project path".to_string())?;
-            let response = require_ok(socket, &sirio_control::protocol::request::project_add(path));
-            print_result(
-                &response,
-                &["added", "projectId", "worktreeCount"],
-                parsed.flag("json"),
+            // The flag given with no value lands among the booleans, and
+            // `--display-name=` as an empty value: both fail before a socket
+            // is touched.
+            if parsed.flag("display-name") || parsed.value("display-name") == Some("") {
+                return Err("--display-name needs a value".to_string());
+            }
+            let display_name = parsed.value("display-name");
+            let response = require_ok(
+                socket,
+                &sirio_control::protocol::request::project_add(path, display_name),
             );
+            let mut columns = vec!["added", "projectId", "worktreeCount"];
+            if display_name.is_some() {
+                let result = response.result.clone().unwrap_or_default();
+                let added = result.get("added").map(String::as_str) == Some("true");
+                match result.get("displayNameApplied").map(String::as_str) {
+                    None => {
+                        return Err(if added {
+                            "this Sirio predates --display-name; the project was added without \
+                             a label"
+                                .to_string()
+                        } else {
+                            "this Sirio predates --display-name; the project was not added \
+                             (already tracked, inside a tracked project, or containing one)"
+                                .to_string()
+                        });
+                    }
+                    Some("false") => eprintln!(
+                        "not added: already tracked, inside a tracked project, or containing \
+                         one; label ignored"
+                    ),
+                    Some(_) => {}
+                }
+                columns.push("displayName");
+            }
+            print_result(&response, &columns, parsed.flag("json"));
             Ok(())
         }
         other => Err(format!("unknown project action '{other}'")),
@@ -883,11 +919,13 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         .positional
         .first()
         .ok_or_else(|| "Missing surface name".to_string())?;
-    let action = parsed
-        .positional
-        .get(1)
-        .ok_or_else(|| "Missing surface action".to_string())?;
-    let response = match (surface.as_str(), action.as_str()) {
+    // `project-add` takes options only, so it has no action word.
+    let action = match parsed.positional.get(1) {
+        Some(action) => action.as_str(),
+        None if surface == "project-add" => "",
+        None => return Err("Missing surface action".to_string()),
+    };
+    let response = match (surface.as_str(), action) {
         ("changes", "open") => require_ok(
             socket,
             &sirio_control::protocol::request::changes_open(parsed.value("worktree")),
@@ -1136,6 +1174,38 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             socket,
             &sirio_control::protocol::request::host_end_all(),
         ),
+        ("project-add", "") => {
+            let answer = match parsed.value("answer") {
+                None => None,
+                Some(answer @ ("0" | "1" | "2")) => answer.parse::<u8>().ok(),
+                Some(_) => return Err("--answer must be 0, 1 or 2".to_string()),
+            };
+            require_ok(
+                socket,
+                &sirio_control::protocol::request::surface_project_add(
+                    &parsed.require("kind")?,
+                    &parsed.require("value")?,
+                    editor_bool(parsed, "submit")?,
+                    answer,
+                ),
+            )
+        }
+        ("project-identity", "read") => require_ok(
+            socket,
+            &sirio_control::protocol::request::project_identity_read(),
+        ),
+        ("project-identity", "act") => {
+            let act = parsed.positional.get(2).ok_or_else(|| {
+                "Missing action: save, skip, mode, open-emoji-grid or pick-glyph".to_string()
+            })?;
+            require_ok(
+                socket,
+                &sirio_control::protocol::request::project_identity_act(
+                    act,
+                    parsed.positional.get(3).map(String::as_str),
+                ),
+            )
+        }
         ("terminal", "open") => require_ok(
             socket,
             &sirio_control::protocol::request::terminal_open(
@@ -1391,7 +1461,7 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ),
         _ => return Err(format!("unknown surface action '{surface} {action}'")),
     };
-    if surface == "editor" {
+    if matches!(surface.as_str(), "editor" | "project-add" | "project-identity") {
         print_editor_result(&response, parsed.flag("json"));
         return Ok(());
     }
