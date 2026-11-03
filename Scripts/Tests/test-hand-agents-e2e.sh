@@ -117,7 +117,19 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  unread, not running; showing the tab adds none
 #   show_session_of_hidden_tab_is_one_stop
 #                                  `panel show` of a hidden tab's session from another worktree opens a
-#                                  Show-session tab: one turn is one stop, not two
+#                                  Show-session tab; a turn begun before it and ended while it is open is
+#                                  one stop, the hidden tab's own (its mark, its notification, whose body
+#                                  names its branch), and after the Show tab closes the hidden tab still
+#                                  notifies
+#   show_session_on_screen_is_silent
+#                                  the same Show tab selected, the window active: the turn is watched, so
+#                                  nothing is posted and the hidden tab is not unread
+#   restart_agent_tab_mid_turn_is_silent / restart_hand_typed_agent_tab_mid_turn_is_silent
+#                                  `surface terminal restart` of an attached agent tab (Sirio-launched, or
+#                                  typed) mid-turn: nothing posted, no status, not running, no agent on a
+#                                  typed one; the restarted launched tab's next full turn is one stop
+#   one_end_per_session            a hidden agent tab exits, the host publishes a title after the exit and
+#                                  then closes the session: one stop, not a second end
 #   close_hidden_worktree_mid_turn_is_silent
 #                                  closing a worktree nobody selected since the relaunch, its agent
 #                                  mid-turn: nothing posted, nothing left running
@@ -1884,9 +1896,8 @@ case_show_session_of_hidden_tab_is_one_stop() {
   type_line "$PANE_B" done
   wait_status "$SESS_B" done 6
   expect_posted "$base" 1 "a turn in a hidden tab whose session a Show-session tab also shows"
-  expect_attention "$SESS_B" unread true "the hidden tab whose turn a Show-session tab also shows"
   expect_attention "$SESS_B" running false "the hidden tab whose turn a Show-session tab also shows"
-  case "$(posted_since "$base")" in *wt-b*) ;; *) fail "the notification is not the hidden tab's (repo-b): $(posted_since "$base")" ;; esac
+  case "$(posted_since "$base")" in *'"body": "wt-b'*) ;; *) fail "the notification's body does not name the hidden tab's branch (wt-b): $(posted_since "$base")" ;; esac
   [ "$(running_rows)" = "$running_before" ] || fail "the running count is $(running_rows), it was $running_before before the turn"
   [ "$(agents_working)" = "$working_before" ] || fail "the activity model counts $(agents_working) agents working, it was $working_before"
   stepn "show session: one stop for one turn, the hidden tab's" "$SESS_B"
@@ -1900,7 +1911,38 @@ case_show_session_of_hidden_tab_is_one_stop() {
   type_line "$PANE_B" done
   wait_status "$SESS_B" done 6
   expect_posted "$base" 1 "a turn in a hidden tab after the Show-session tab of its session closed"
+  case "$(posted_since "$base")" in *'"body": "wt-b'*) ;; *) fail "the notification's body does not name the hidden tab's branch (wt-b): $(posted_since "$base")" ;; esac
   stepn "show session closed: the hidden tab still notifies" "$SESS_B"
+}
+
+# A Show-session tab on screen, the window active: the turn of the hidden tab it shows is watched,
+# so it is no news (no notification, no unread mark), as it would be in the tab itself.
+case_show_session_on_screen_is_silent() {
+  local wt_b base
+  wt_b="$(worktree_id_of "$W/repo-b")"
+  [ -n "$wt_b" ] || fail "the project does not list the worktree repo-b"
+  ctl select-workspace --workspace "$wt_b" >/dev/null
+  sleep 2
+  OPEN_DIR="$W/repo-b" start_agent codex
+  PANE_B="$PANE"; SESS_B="$SESS"
+  ctl select-workspace --workspace "$wt" >/dev/null
+  sleep 2
+  relaunch_app
+  ctl panel show "$PANE_B" >/dev/null
+  sleep 4
+  ctl surface attention act --focus active >/dev/null
+  sleep 1
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 6
+  sleep 1.3
+  base="$(posted_count)"
+  type_line "$PANE_B" done
+  wait_status "$SESS_B" done 6
+  sleep 1.5
+  stepn "show session on screen: the turn is watched" "$SESS_B"
+  ctl surface attention act --focus inactive >/dev/null
+  expect_posted "$base" 0 "a turn in a hidden tab whose Show-session tab is on screen"
+  expect_attention "$SESS_B" unread false "the hidden tab whose Show-session tab is on screen"
 }
 
 # A Restart is the user's own act: the session it ends and the one it opens make no stop.
@@ -1917,10 +1959,35 @@ case_restart_agent_tab_mid_turn_is_silent() {
   sleep 6
   stepn "restarted agent tab R" "$SESS_R"
   expect_posted "$base" 0 "a Restart of an agent tab mid-turn"
-  [ "$(attention_get "$SESS_R" status)" != error ] || fail "the restarted tab reads error"
-  # Not asserted: whether the tab still reads running (it does, and the listener does not feed
-  # it). A likely cause, not established: the turn tracker of the old session is kept and drops
-  # the new session's reports, whose `at_ms` is small, as replays.
+  expect_attention "$SESS_R" status null "the restarted agent tab"
+  expect_attention "$SESS_R" running false "the restarted agent tab"
+  # The new session's reports are accepted: a full turn is one stop.
+  type_line "$PANE_R" work
+  wait_status "$SESS_R" running 5
+  sleep 1.3
+  base="$(posted_count)"
+  type_line "$PANE_R" done
+  wait_status "$SESS_R" done 5
+  expect_posted "$base" 1 "a turn in the restarted agent tab"
+  stepn "restarted agent tab R: a full turn" "$SESS_R"
+}
+
+# The same for a hand-typed agent: the restart opens a plain shell, so the pane names no agent.
+case_restart_hand_typed_agent_tab_mid_turn_is_silent() {
+  local base
+  start_agent codex
+  PANE_R="$PANE"; SESS_R="$SESS"
+  type_line "$PANE_R" work
+  wait_status "$SESS_R" running 5
+  sleep 1.3
+  base="$(posted_count)"
+  ctl surface terminal restart "$PANE_R" >/dev/null
+  sleep 6
+  stepn "restarted hand-typed agent tab R" "$SESS_R"
+  expect_posted "$base" 0 "a Restart of a hand-typed agent tab mid-turn"
+  expect_attention "$SESS_R" status null "the restarted hand-typed agent tab"
+  expect_attention "$SESS_R" running false "the restarted hand-typed agent tab"
+  [ "$(agent_of "$PANE_R")" = "" ] || fail "the restarted pane still lists agent '$(agent_of "$PANE_R")'"
 }
 
 # One end per session: a title the host publishes after the exit does not make the session a new
@@ -1976,6 +2043,7 @@ print(len({(json.loads(l)["title"], json.loads(l)["body"]) for l in sys.stdin}))
   expect_attention "$SESS_B" running false "the hidden tab after End all sessions"
   expect_attention "$SESS_A" running false "the attached tab after End all sessions"
   echo "  statuses after End all sessions: hidden '$(attention_get "$SESS_B" status)', attached '$(attention_get "$SESS_A" status)'"
+  [ "$(attention_get "$SESS_B" status)" = "$(attention_get "$SESS_A" status)" ] || fail "the hidden tab reads '$(attention_get "$SESS_B" status)' after End all sessions, the attached tab '$(attention_get "$SESS_A" status)'"
 }
 
 run_case() { # name
@@ -2043,7 +2111,9 @@ run_case background_agent_tab_ends_mid_turn
 run_case background_agent_tab_fails_mid_turn
 run_case background_exec_agent_ends_mid_turn
 run_case show_session_of_hidden_tab_is_one_stop
+run_case show_session_on_screen_is_silent
 run_case restart_agent_tab_mid_turn_is_silent
+run_case restart_hand_typed_agent_tab_mid_turn_is_silent
 run_case one_end_per_session
 run_case close_hidden_worktree_mid_turn_is_silent
 run_case background_exit_while_app_down_is_silent
