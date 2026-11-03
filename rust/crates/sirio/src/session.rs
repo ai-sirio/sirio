@@ -1460,9 +1460,10 @@ fn write_catalog(db: &AppDatabase, catalog: &ProjectCatalog) -> Result<(), Persi
                 record.created_at = existing.created_at;
                 // #323: same hazard as the comment above -- this upsert
                 // re-derives the row from a catalog that has no idea a pane
-                // is open, so without carrying it forward every startup
-                // normalization would close it.
+                // is open or collapsed, so without carrying it forward every
+                // startup normalization would close or expand it.
                 record.secondary_pane_hidden = existing.secondary_pane_hidden;
+                record.primary_pane_collapsed = existing.primary_pane_collapsed;
             }
             db.save_worktree(&record)?;
         }
@@ -2225,6 +2226,63 @@ impl SessionStore {
                 record.secondary_pane_hidden = hidden;
                 if let Err(error) = db.save_worktree(&record) {
                     eprintln!("[session] failed to persist the pane flag for {path}: {error}");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("[session] failed to read the worktree row for {path}: {error}");
+            }
+        }
+    }
+
+    /// Whether this worktree's Primary centre half was collapsed to the rail
+    /// when the session was last written (v25). `false` — expanded — for a
+    /// worktree with no row yet, for a database in fallback mode, and on a
+    /// read error: an expanded half is the safe answer, its chats and
+    /// terminals stay in view.
+    pub fn primary_pane_collapsed_for(&self, working_directory: &Path) -> bool {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return false;
+        };
+        match db.worktree_by_path(&working_directory.to_string_lossy()) {
+            Ok(record) => record.is_some_and(|record| record.primary_pane_collapsed),
+            Err(error) => {
+                eprintln!(
+                    "[session] failed to read the primary rail flag: {error}; assuming expanded"
+                );
+                false
+            }
+        }
+    }
+
+    /// Records that this worktree's Primary half is collapsed to the rail or
+    /// expanded. A no-op for a worktree with no persisted row, for the same
+    /// reason as [`Self::save_secondary_pane_hidden`].
+    pub fn save_primary_pane_collapsed(&self, working_directory: &Path, collapsed: bool) {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return;
+        };
+        let path = working_directory.to_string_lossy();
+        match db.worktree_by_path(&path) {
+            Ok(Some(mut record)) => {
+                if record.primary_pane_collapsed == collapsed {
+                    return;
+                }
+                record.primary_pane_collapsed = collapsed;
+                if let Err(error) = db.save_worktree(&record) {
+                    eprintln!(
+                        "[session] failed to persist the primary rail flag for {path}: {error}"
+                    );
                 }
             }
             Ok(None) => {}

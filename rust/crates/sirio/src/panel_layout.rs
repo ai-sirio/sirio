@@ -83,6 +83,44 @@ pub(crate) fn resolve_center_split(
     (primary, Some(usable - primary))
 }
 
+/// How wide the Primary half is while collapsed to its rail of tab icons
+/// (spec 2026-11-01-primary-rail §3). Fixed, with no pane floor.
+pub(crate) const PRIMARY_RAIL_WIDTH: f32 = 40.0;
+
+/// What the whole centre column needs while the rail is drawn: the rail and
+/// one pane's floor, with no divider between them.
+pub(crate) const MIN_COLLAPSED_CENTER_WIDTH: f32 = PRIMARY_RAIL_WIDTH + MIN_CENTER_PANE_WIDTH;
+
+/// The centre while the Primary half is collapsed to the rail.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CollapsedCenter {
+    /// Always [`PRIMARY_RAIL_WIDTH`].
+    pub rail: f32,
+    /// Everything right of the rail.
+    pub secondary: f32,
+    /// The peek's width: what the Primary half would get expanded (§5), so
+    /// a peeked terminal keeps its columns. Never wider than the space right
+    /// of the rail.
+    pub peek: f32,
+}
+
+/// Splits the centre while the Primary half is collapsed. The divider is not
+/// drawn, so the Secondary gets everything right of the rail; the stored
+/// ratio is only read, for the peek, and expanding returns to it unchanged.
+pub(crate) fn resolve_collapsed_center(
+    center_width: f32,
+    ratio_millis: i64,
+    divider: f32,
+) -> CollapsedCenter {
+    let room = (center_width - PRIMARY_RAIL_WIDTH).max(0.0);
+    let expanded = resolve_center_split(center_width, ratio_millis, true, divider).0;
+    CollapsedCenter {
+        rail: PRIMARY_RAIL_WIDTH,
+        secondary: room,
+        peek: expanded.min(room),
+    }
+}
+
 /// Narrows each panel's preferred width to what the viewport can actually
 /// give it. `None` means the panel is hidden, on the way in and on the way
 /// out.
@@ -307,5 +345,49 @@ mod tests {
             right_ceiling,
             *settings_ranges::RIGHT_PANEL_WIDTH.end() as f32
         );
+    }
+
+    // Spec 2026-11-01-primary-rail §3/§5, written from their failure modes
+    // before the code: the rail and the Secondary leave a gap or overlap; the
+    // peek is not the expanded Primary at a normal width; the peek runs past
+    // the space right of the rail; the peek drops under the expanded half's
+    // floor although there is room; a tiny centre goes negative; an
+    // out-of-range ratio escapes the clamp.
+
+    #[test]
+    fn collapsed_center_secondary_fills_the_rest() {
+        let c = resolve_collapsed_center(1400.0, 500, 1.0);
+        assert_eq!(c.rail, PRIMARY_RAIL_WIDTH);
+        assert_eq!(c.rail + c.secondary, 1400.0);
+    }
+
+    #[test]
+    fn collapsed_center_peek_matches_the_expanded_primary() {
+        let c = resolve_collapsed_center(1400.0, 400, 1.0);
+        assert_eq!(c.peek, resolve_center_split(1400.0, 400, true, 1.0).0);
+    }
+
+    #[test]
+    fn collapsed_center_peek_fits_beside_the_rail() {
+        let c = resolve_collapsed_center(500.0, 900, 1.0);
+        assert!(c.peek <= 500.0 - PRIMARY_RAIL_WIDTH);
+    }
+
+    #[test]
+    fn collapsed_center_peek_keeps_its_floor_when_there_is_room() {
+        let c = resolve_collapsed_center(700.0, 50, 1.0);
+        assert!(c.peek >= MIN_CENTER_PANE_WIDTH);
+    }
+
+    #[test]
+    fn collapsed_center_never_goes_negative() {
+        let c = resolve_collapsed_center(10.0, 500, 1.0);
+        assert!(c.secondary >= 0.0 && c.peek >= 0.0);
+    }
+
+    #[test]
+    fn collapsed_center_clamps_the_ratio() {
+        let c = resolve_collapsed_center(1400.0, 5000, 1.0);
+        assert!(c.peek <= 1400.0 - PRIMARY_RAIL_WIDTH);
     }
 }

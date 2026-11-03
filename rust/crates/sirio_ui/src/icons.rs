@@ -49,10 +49,12 @@ use sirio_theme::AgentBrandColor;
 /// # Pinned Zed catalog
 ///
 /// Generic icons resolve to byte-identical SVGs vendored from Zed's pinned
-/// upstream catalog; see `rust/assets/icons/zed/ATTRIBUTION.md`. Agent marks
-/// come from LobeHub's lobe-icons (`rust/assets/icons/lobehub/`, which
-/// carries its own `ATTRIBUTION.md`); Oh My Pi keeps its Sirio asset
-/// because no library provides its mark.
+/// upstream catalog; see `rust/assets/icons/zed/ATTRIBUTION.md`. The Primary
+/// half's collapse and expand pair comes from Lucide instead
+/// (`rust/assets/icons/lucide/`): the Zed catalog has no panel icon with a
+/// direction. Agent marks come from LobeHub's lobe-icons
+/// (`rust/assets/icons/lobehub/`, which carries its own `ATTRIBUTION.md`);
+/// Oh My Pi keeps its Sirio asset because no library provides its mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     /// A project directory (`zed/folder.svg`).
@@ -121,6 +123,12 @@ pub enum Icon {
     SidebarLeft,
     /// Right-panel toggle (`zed/threads_sidebar_right_open.svg`).
     PanelRight,
+    /// Collapses the centre's Primary half to its rail
+    /// (`lucide/panel-left-close.svg`).
+    PanelLeftClose,
+    /// Expands the Primary half again, from the rail or a peek
+    /// (`lucide/panel-left-open.svg`).
+    PanelLeftOpen,
     /// The Zed catalog's archive mark (`zed/archive.svg`). It was the Files
     /// tree's glyph for zip, tar, 7z, … until that tree moved to the Material
     /// theme, which draws `zip` instead; nothing draws it today.
@@ -252,6 +260,8 @@ impl Icon {
             Icon::OhMyPi => "icons/agent-omp.svg",
             Icon::SidebarLeft => "icons/zed/threads_sidebar_left_open.svg",
             Icon::PanelRight => "icons/zed/threads_sidebar_right_open.svg",
+            Icon::PanelLeftClose => "icons/lucide/panel-left-close.svg",
+            Icon::PanelLeftOpen => "icons/lucide/panel-left-open.svg",
             Icon::Archive => "icons/zed/archive.svg",
             Icon::Lock => "icons/zed/lock.svg",
             Icon::FileTree => "icons/zed/file_tree.svg",
@@ -322,6 +332,12 @@ impl Icon {
             }
             Icon::PanelRight => {
                 include_bytes!("../../../assets/icons/zed/threads_sidebar_right_open.svg")
+            }
+            Icon::PanelLeftClose => {
+                include_bytes!("../../../assets/icons/lucide/panel-left-close.svg")
+            }
+            Icon::PanelLeftOpen => {
+                include_bytes!("../../../assets/icons/lucide/panel-left-open.svg")
             }
             Icon::Archive => include_bytes!("../../../assets/icons/zed/archive.svg"),
             Icon::Lock => include_bytes!("../../../assets/icons/zed/lock.svg"),
@@ -635,7 +651,7 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 55] = [
+pub const ALL_ICONS: [Icon; 57] = [
     Icon::FolderFill,
     Icon::FolderOpen,
     Icon::GitBranch,
@@ -664,6 +680,8 @@ pub const ALL_ICONS: [Icon; 55] = [
     Icon::OhMyPi,
     Icon::SidebarLeft,
     Icon::PanelRight,
+    Icon::PanelLeftClose,
+    Icon::PanelLeftOpen,
     Icon::Archive,
     Icon::Lock,
     Icon::MagnifyingGlass,
@@ -797,6 +815,32 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 6, "the six LobeHub marks must all be walked");
+    }
+
+    /// `icons/lucide/` follows the same byte-for-byte rule, and its pair is
+    /// the folder pair's slip again: `panel-left-close.svg` and
+    /// `panel-left-open.svg`, one word apart at the `include_bytes!` site,
+    /// would swap the collapse and expand buttons without failing anything
+    /// else.
+    #[test]
+    fn every_lucide_icon_embeds_the_file_its_path_names() {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut checked = 0;
+        for icon in ALL_ICONS {
+            let Some(name) = icon.path().strip_prefix("icons/lucide/") else {
+                continue;
+            };
+            let on_disk = std::fs::read(assets.join("icons/lucide").join(name))
+                .unwrap_or_else(|error| panic!("{} is not vendored: {error}", icon.path()));
+            assert_eq!(
+                icon.svg(),
+                on_disk.as_slice(),
+                "{icon:?} embeds bytes other than {}",
+                icon.path()
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 2, "both Lucide panel icons must be walked");
     }
 
     #[test]

@@ -195,6 +195,29 @@ Scripts/Tests/test-unplugged-volume-e2e.sh   # -> prints "UNPLUGGED VOLUME E2E O
 # relaunch; same flags as test-changes-e2e.sh.
 Scripts/Tests/test-open-list-e2e.sh   # -> prints "OPEN LIST E2E OK"
 
+# The Primary rail and its peek (spec 2026-11-01-primary-rail-design.md §8) in
+# a real, isolated Sirio, with real X clicks and keys at the rects
+# `surface layout read` reports (railRects, debug builds): no collapse button
+# without a Secondary tab; collapse to the 40 px rail; a codex stub terminal
+# and the native chat (Scripts/Tests/stubs/trace/claude) producing output and
+# changing status while collapsed (the terminal's 270 KB, more than a PTY
+# buffer, read back before any peek draws it), all of it in their peeks; a
+# peeked terminal keeping its columns and receiving Esc; Esc cancelling a
+# peeked chat's turn;
+# click outside, the same icon twice, the rail's + -> New Terminal, the pin;
+# the collapsed flag across relaunches, cleared by the last Secondary tab and
+# by Ctrl+Shift+B; a peeked tab's status change posting no notification
+# (Scripts/Tests/stubs/notify-send logs what would be posted, against a
+# positive control on the same tab unpeeked); a Browser tab blank under the
+# peek and back after it; the peeked tab closed over the socket, a worktree
+# switch, the last Primary tab closed while peeked. Each failure names its
+# step. --display :N is a private Xvfb of at least 1600x1000 with Mesa's
+# lavapipe; --state-only takes no display, runs step 1's reads only, prints
+# SKIP for steps 2-15 and ends with "PRIMARY RAIL E2E OK (state only)";
+# --out-dir DIR keeps the transcript, the app log, notify.log, stub.log and
+# PID-matched captures; --appearance light|dark.
+Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
+
 # Acting on a change request: every write of sirio_forge on the wire (the token
 # transport and the real gh/glab), then the tab's actions in a real, isolated
 # Sirio driven by the debug-only `surface change-request act` verb. --stage NAME

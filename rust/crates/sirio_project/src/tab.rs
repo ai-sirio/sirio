@@ -46,8 +46,9 @@ pub enum TabKind {
 /// "Secondary pane role".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneRole {
-    /// The left half. Always shown; takes the whole work area when
-    /// Secondary is not.
+    /// The left half. Shown, or collapsed to a rail of its tabs' icons while
+    /// Secondary is drawn (the choice is stored per worktree); takes the
+    /// whole work area when Secondary is not.
     Primary,
     /// The right half. Drawn from the first frame, even empty (it then shows
     /// a launcher); the keyboard toggle hides it and the choice is stored

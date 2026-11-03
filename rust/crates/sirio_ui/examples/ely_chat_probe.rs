@@ -45,6 +45,7 @@ fn seed_history(path: &std::path::Path) {
         created_at: None,
         updated_at: None,
         secondary_pane_hidden: false,
+        primary_pane_collapsed: false,
     })
     .unwrap();
     let tab = |id: &str, title: &str| TabRecord {

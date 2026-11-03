@@ -29,8 +29,10 @@ be moved to the other half and is stored there, every other kind stays home.
 ### Primary pane role
 
 The left half of the [center split](#center-split): home to conversations
-with agents and terminals. It is always shown, and takes the whole work area
-whenever the [secondary](#secondary-pane-role) half is not.
+with agents and terminals. It is shown, or collapsed to a rail of its tabs'
+icons while the [secondary](#secondary-pane-role) half is drawn, and takes the
+whole work area whenever the secondary half is not. Collapsed, its chats and
+terminals keep running; one of them can be peeked at from the rail.
 
 Despite the name it is not a [pane](#pane) — "role" is part of the term, not a
 qualifier that can be dropped.

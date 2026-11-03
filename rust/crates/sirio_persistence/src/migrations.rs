@@ -557,6 +557,18 @@ fn migrate_v24(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v25 — whether the worktree's Primary centre half is collapsed to the rail
+/// (`docs/superpowers/specs/2026-11-01-primary-rail-design.md`).
+///
+/// `0` — expanded — for every existing worktree, so an upgrade changes
+/// nothing on screen until the user collapses a Primary half.
+fn migrate_v25(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "ALTER TABLE worktree
+         ADD COLUMN primary_pane_collapsed INTEGER NOT NULL DEFAULT 0;",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -584,6 +596,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v22,
     migrate_v23,
     migrate_v24,
+    migrate_v25,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
