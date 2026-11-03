@@ -29,6 +29,9 @@ Typed lines (the whole line, then Enter):
   fgchild             run `sleep 6.123` in its own process group as the terminal's
                       foreground group, wait for it, then take the terminal back (an
                       agent handing the terminal to a child it runs)
+  spin                every 100 ms sets a new window title and re-reports `working`, with and without a
+                      `kind`, so the host sends events all along (the state stays working), until the
+                      next typed line or until it exits
   exit [code]         leave, with that exit code (default 0)
 
 Startup, per profile:
@@ -95,11 +98,11 @@ def title(text):
     os.write(1, b"\x1b]2;" + text.encode() + b"\x07")
 
 
-def report(name, state):
+def report(name, state, kind=None):
     if NO_REPORTS:
         return
     app = APPS.get(name)
-    body = "state=" + state + (":app=" + app if app else "")
+    body = "state=" + state + (":kind=" + kind if kind else "") + (":app=" + app if app else "")
     os.write(1, b"\x1b]7501;" + body.encode() + b"\x1b\\")
 
 
@@ -168,6 +171,7 @@ def main():
     tty.setraw(0, termios.TCSANOW)
     source = Input()
     oc_title = False
+    spinning = 0
 
     if name == "claude":
         title("✳ Claude Code")
@@ -189,7 +193,13 @@ def main():
     say(name + " ready")
 
     while True:
-        ready, _, _ = select.select([0], [], [], 0.2)
+        ready, _, _ = select.select([0], [], [], 0.1 if spinning else 0.2)
+        if spinning and not ready:
+            spinning += 1
+            title("spin " + str(spinning))
+            if name in APPS:
+                # The state stays working; the record changes, so the host sends an event each tick.
+                report(name, "working", "permission" if spinning % 2 else None)
         if ready:
             chunk = os.read(0, 4096)
             if not chunk:
@@ -203,6 +213,7 @@ def main():
                 continue
             words = line.split()
             say("ack " + line)
+            spinning = 0
             if words[0] in STATES:
                 state = STATES[words[0]]
                 if name in ("claude", "pi") and not NO_REPORTS and not source.answered:
@@ -229,6 +240,8 @@ def main():
                 )
             elif words[0] == "title" and len(words) > 1:
                 title(" ".join(words[1:]))
+            elif words[0] == "spin":
+                spinning = 1
             elif words[0] == "fgchild":
                 fgchild()
             elif words[0] == "exit":
