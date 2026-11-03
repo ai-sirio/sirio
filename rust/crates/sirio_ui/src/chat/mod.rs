@@ -53,6 +53,9 @@ use file_links::file_link_target;
 mod history;
 pub(crate) mod list_scroll;
 mod menus;
+mod mode_cycle;
+mod prompt_history;
+pub use prompt_history::PromptRecord;
 mod question_dock;
 mod session_panel;
 mod thought;
@@ -65,7 +68,9 @@ pub use composer_row::ComposerSnapshot;
 pub use session_panel::{
     RowSnapshot, SectionSnapshot, SessionPanelAction, SessionPanelSnapshot,
 };
-use composer_view::{TokenPopup, assemble_prompt, effort_target, mention_token, slash_token};
+use composer_view::{
+    TokenPopup, assemble_prompt, effort_target, mention_token, normalized_record, slash_token,
+};
 use question_dock::{DockCancel, DockConfirm, DockNext, DockPrevious};
 use trace::{RevealTarget, TraceStore};
 
@@ -812,6 +817,8 @@ actions!(
         PopupPrevious,
         PopupNext,
         PopupAccept,
+        /// Shift+Tab: the next permission mode, as the mode menu lists them.
+        CycleMode,
         /// The catalogue popups (model, mode, thinking): the keys mark a row
         /// and Enter chooses it.
         PickerPrevious,
@@ -1740,6 +1747,11 @@ impl TranscriptContextItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatEvent {
     OpenFile(PathBuf),
+    /// Follow Edited Files: the location a tool call reported. The
+    /// workspace opens it the way it opens `OpenFile`, except that the user
+    /// did not ask for it: while a peek of the collapsed Primary half is
+    /// open, the file lands under it instead of closing it.
+    FollowFile(PathBuf),
     /// A file named in an assistant response was clicked: the file, and the
     /// line (and column) the agent wrote after it, 1-based as written.
     OpenFileAt {
@@ -2156,6 +2168,14 @@ pub struct Chat {
     /// still in the draft. Lifted into the prompt's mention paths on send;
     /// cleared on send and on `control_compose`.
     accepted_mentions: Vec<String>,
+    /// The prompts this chat has sent, newest first, at most
+    /// `prompt_history::HISTORY_CAP`: what ↑ and ↓ walk through. Saved with
+    /// the tab like the draft.
+    prompt_history: Vec<PromptRecord>,
+    /// The position in `prompt_history` ↑ last put in the composer. It counts
+    /// only while the draft is still exactly that prompt (`recall_shown`);
+    /// an edit makes the text an ordinary draft again.
+    recall_at: Option<usize>,
     /// Images attached through the picker or a drop, drawn as a strip above
     /// the field. Not persisted, as before.
     attachments: Vec<ImageAttachment>,
@@ -2593,6 +2613,8 @@ impl Chat {
             draft: SharedString::default(),
             draft_caret: 0,
             accepted_mentions: Vec::new(),
+            prompt_history: Vec::new(),
+            recall_at: None,
             attachments: Vec::new(),
             open_verb_folds: HashSet::new(),
             composer_placeholder_shown: String::new(),
@@ -2912,6 +2934,7 @@ impl Chat {
             KeyBinding::new("up", PopupPrevious, Some("ChatComposer")),
             KeyBinding::new("down", PopupNext, Some("ChatComposer")),
             KeyBinding::new("tab", PopupAccept, Some("ChatComposer")),
+            KeyBinding::new("shift-tab", CycleMode, Some("ChatComposer")),
             // The platform's paste chord reaches the chat first so a picture
             // on the clipboard becomes an attachment; `paste_composer`
             // propagates everything else to Ely's own `Paste`. Same chords
@@ -3709,6 +3732,28 @@ impl Chat {
         self.draft.to_string()
     }
 
+    /// The prompts ↑ walks through, newest first. Read live at save time
+    /// like [`Self::draft_text`] and pushed back through
+    /// [`Self::restore_prompt_history`].
+    pub fn prompt_history(&self) -> Vec<PromptRecord> {
+        self.prompt_history.clone()
+    }
+
+    /// Puts a saved history back. An empty one changes nothing, so a chat
+    /// saved before the history existed keeps the one its transcript seeded.
+    pub fn restore_prompt_history(&mut self, records: Vec<PromptRecord>) {
+        if records.is_empty() {
+            return;
+        }
+        // Oldest first into `remember`, which keeps the cap and the order.
+        let mut history = Vec::new();
+        for record in records.into_iter().rev() {
+            prompt_history::remember(&mut history, normalized_record(record));
+        }
+        self.prompt_history = history;
+        self.recall_at = None;
+    }
+
     /// The agent-side session this tab continues, once the agent names it.
     /// Read live at session-save time, the same pattern as [`Self::draft_text`].
     pub fn agent_session_id(&self) -> Option<String> {
@@ -3754,6 +3799,7 @@ impl Chat {
     /// socket route. Attachments deliberately remain a pointer-only concern.
     pub fn control_compose(&mut self, text: &str, cx: &mut Context<Self>) {
         self.accepted_mentions.clear();
+        self.recall_at = None;
         self.attachments.clear();
         self.reset_composer_popups();
         self.set_composer_text(text.to_string(), cx);
@@ -4140,6 +4186,7 @@ impl Chat {
             }
         }
         self.has_completed_turn = !self.entries.is_empty();
+        self.seed_prompt_history();
     }
 
     /// F-CHAT-34: toggles the Chat History popover, loading every persisted
@@ -4573,7 +4620,7 @@ impl Chat {
             .mode_catalog
             .as_ref()
             .map(|catalog| catalog.current_id.as_str());
-        if mode.id == BYPASS_PERMISSIONS_MODE && current != Some(BYPASS_PERMISSIONS_MODE) {
+        if mode_cycle::needs_confirmation(&mode.id) && current != Some(BYPASS_PERMISSIONS_MODE) {
             self.ask_before_bypass(mode, cx);
             return;
         }
@@ -4653,7 +4700,7 @@ impl Chat {
     }
 
     fn slash_popup_visible(&self) -> bool {
-        !self.slash_candidates().is_empty() && !self.slash_dismissed
+        !self.slash_candidates().is_empty() && !self.slash_dismissed && !self.recall_shown()
     }
 
     fn accept_slash_command(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -5105,11 +5152,11 @@ impl Chat {
     // --- Overflow menu (F-CHAT-14) ---
 
     /// The toggle's other half: while Follow Edited Files is on, the most
-    /// recent location a tool call reports is opened the same way an
-    /// edit-summary card's own "open" link does — `ChatEvent::OpenFile`,
-    /// which the host already routes to a file tab (`Workspace::bind_chat`).
-    /// Reusing that event means Follow needs no new host-side wiring: it
-    /// rides the same seam F-CHAT-32 already built. Throttled 500ms, same
+    /// recent location a tool call reports is opened: it emits
+    /// `ChatEvent::FollowFile`, which the host opens as a file tab the way
+    /// it opens the edit-summary card's own "open" link, `ChatEvent::OpenFile`
+    /// (`Workspace::bind_chat`), except under an open peek, which it leaves
+    /// open. Throttled 500ms, same
     /// as the Swift original's `followThrottle`, so a burst of location
     /// patches on one tool call doesn't reopen the same file repeatedly.
     fn maybe_follow_location(
@@ -5131,7 +5178,7 @@ impl Chat {
             return;
         }
         self.last_follow_at = Some(now);
-        cx.emit(ChatEvent::OpenFile(location.path.clone()));
+        cx.emit(ChatEvent::FollowFile(location.path.clone()));
     }
 
     fn toggle_overflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5162,6 +5209,7 @@ impl Chat {
         self.tool_output_scroll.clear();
         self.list_state.splice(0..old_count, 0);
         self.accepted_mentions.clear();
+        self.recall_at = None;
         self.attachments.clear();
         self.set_composer_text("", cx);
         self.reset_composer_popups();
@@ -5268,6 +5316,7 @@ impl Chat {
             return;
         }
         let (text, mention_paths) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        self.remember_prompt();
         let images = std::mem::take(&mut self.attachments);
         self.accepted_mentions.clear();
         self.reset_composer_popups();
@@ -5316,6 +5365,7 @@ impl Chat {
             return;
         }
         let (text, _) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        self.remember_prompt();
         self.accepted_mentions.clear();
         self.reset_composer_popups();
         self.set_composer_text("", cx);
@@ -5691,8 +5741,12 @@ impl Chat {
             }
             self.last_slash_token = slash;
         }
-        let mention =
-            mention_token(&self.draft, self.draft_caret).map(|(_, token)| token.to_string());
+        // A prompt ↑ brought back opens no popup: its tokens are history.
+        let mention = if self.recall_shown() {
+            None
+        } else {
+            mention_token(&self.draft, self.draft_caret).map(|(_, token)| token.to_string())
+        };
         if mention != self.mention_query {
             self.mention_candidates.clear();
             self.mention_filter = Filter::new(Vec::new());
@@ -6970,6 +7024,7 @@ impl Render for Chat {
             .on_action(cx.listener(Self::paste_composer))
             .on_action(cx.listener(Self::popup_previous))
             .on_action(cx.listener(Self::popup_next))
+            .on_action(cx.listener(Self::cycle_mode))
             .on_action(cx.listener(Self::popup_accept))
             .on_action(cx.listener(Self::send_answer_action))
             .on_action(cx.listener(Self::cancel_answer_action))
@@ -16007,11 +16062,11 @@ two"
     }
 
     /// F-CHAT-14: the toggle's other half — while Follow Edited Files is
-    /// on, a tool call reporting a location emits `ChatEvent::OpenFile`
-    /// for it (the same event an edit-summary card's own "open" link
-    /// uses, already wired by the host to a file tab); while it's off,
-    /// the same location never fires the event. A second location inside
-    /// the 500ms throttle window is dropped.
+    /// on, a tool call reporting a location emits `ChatEvent::FollowFile`
+    /// for it (not the card link's `ChatEvent::OpenFile`; the host opens
+    /// both as a file tab); while it's off, the same location never fires
+    /// the event. A second location inside the 500ms throttle window is
+    /// dropped.
     #[gpui::test]
     async fn following_edited_files_opens_the_tool_calls_reported_location(
         cx: &mut TestAppContext,
@@ -16082,7 +16137,7 @@ two"
         });
         assert_eq!(
             events.borrow().as_slice(),
-            &[ChatEvent::OpenFile(PathBuf::from("src/other.rs"))],
+            &[ChatEvent::FollowFile(PathBuf::from("src/other.rs"))],
             "a location reported while following opens that file"
         );
 
@@ -17919,6 +17974,7 @@ two"
             created_at: None,
             updated_at: None,
             secondary_pane_hidden: false,
+            primary_pane_collapsed: false,
         })
         .unwrap();
         let tab = |id: &str| TabRecord {

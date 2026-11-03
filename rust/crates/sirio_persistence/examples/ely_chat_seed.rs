@@ -72,6 +72,7 @@ fn seed_chat(
         created_at: None,
         updated_at: None,
         secondary_pane_hidden: false,
+        primary_pane_collapsed: false,
     })?;
     db.save_tabs(
         &worktree_id,

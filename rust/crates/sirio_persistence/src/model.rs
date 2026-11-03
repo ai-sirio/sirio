@@ -98,6 +98,10 @@ pub struct WorktreeRecord {
     /// default, for a new worktree and for every worktree that predates the
     /// column.
     pub secondary_pane_hidden: bool,
+    /// Whether this worktree's Primary centre half is collapsed to the rail
+    /// (v25). `false` — expanded — is the default, for a new worktree and for
+    /// every worktree that predates the column.
+    pub primary_pane_collapsed: bool,
     /// Creation time as Unix milliseconds, when known.
     pub created_at: Option<i64>,
     /// Last update time as Unix milliseconds, when known.
@@ -122,6 +126,7 @@ impl WorktreeRecord {
             created_at: None,
             updated_at: None,
             secondary_pane_hidden: false,
+            primary_pane_collapsed: false,
         }
     }
 }

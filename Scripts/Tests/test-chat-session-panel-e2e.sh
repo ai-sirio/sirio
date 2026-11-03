@@ -103,12 +103,23 @@ set -euo pipefail
 #                      the CLI's reason as its tooltip and Thinking enabled; a real Enter chooses
 #                      the first enabled row, Thinking, and `picker` is `thinking`; Escape closes it.
 #                      The stub's handshake names `preference` as the reason Fast is refused
+# The composer_keys scenario (this script's own; test-ely-chat-ui-e2e.py has one of the same name)
+# uses the default stub, whose fixture logs every prompt it hears (SIRIO_FIXTURE_USER_LOG) and every
+# control request (SIRIO_FIXTURE_CONTROL_LOG), and presses real X keys in the composer:
+#   composer_keys      Up and Down recall the chat's own prompts: after two prompts, the second with an
+#                      `@` mention picked from the popup with Tab, Up shows it with its `@path` text, a
+#                      second Up the first, Down twice goes back to empty; sending the recalled prompt
+#                      again goes out as a mention (the fixture's log holds the link, not the literal
+#                      `@path`); after a relaunch Up still recalls that prompt with its mention. Then
+#                      Shift+Tab cycles the permission modes through a full lap and a bit more: the
+#                      fixture's log of set_permission_mode requests is the menu's order with Bypass left
+#                      out, no danger shield is drawn and no dialog holds the keyboard
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
 # whatever the code does.
-# trace_keys, file_links and clipboard_keys need a framed run at --window-size 2200x1000 (no
-# --state-only): they click at pixels.
+# trace_keys, file_links, clipboard_keys and composer_keys need a framed run at --window-size 2200x1000
+# (no --state-only): they click at pixels or send real keys.
 #
 # Isolation: every Sirio starts under `env -i` with an allowlist (see launch()), the
 # stub agent CLIs first on PATH, a private HOME, XDG directories, database, socket,
@@ -143,7 +154,7 @@ CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
-  trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact)
+  trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys)
 STATE_ONLY=0
 OUT_DIR=""
 DISPLAY_TARGET=""
@@ -171,10 +182,10 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys "
 # trace_keys, file_links and clipboard_keys send real X clicks, keys and drags at pixels, so they need a
 # framed run (no --state-only) at the 2200x1000 window size.
-FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys "
+FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys "
 framed_run() { [ "$STATE_ONLY" -eq 0 ] && [ "$WINDOW_SIZE" = 2200x1000 ]; }
 SCENARIOS=()
 SKIPPED=()
@@ -875,6 +886,8 @@ capture() { # name
 #   SIRIO_FIXTURE_REPO  where the stub claude says the project memory lives
 #   SIRIO_STUB_LOG  the shim's call log; SIRIO_CSP_E2E_RUN marks this run's processes
 #   TRACE_STEP_MS  the pace of the trace fixture's scripted lines
+#   SIRIO_FIXTURE_USER_LOG, SIRIO_FIXTURE_CONTROL_LOG  the files the fixture appends every prompt and
+#                  every control request to (composer_keys reads them)
 #   SIRIO_PERF_TRACE  trace_idle's performance trace (a file that does not exist yet)
 # How many `claude --version` probes the shim has recorded.
 probe_count() { local n; n=$(grep -c '^claude --version$' "$RUN_DIR/stub-calls.log" 2>/dev/null || true); echo "${n:-0}"; }
@@ -898,6 +911,7 @@ launch() { # name (a relaunch under the same name keeps its database and host)
     "GH_CONFIG_DIR=$home/gh" "GLAB_CONFIG_DIR=$home/glab"
     "SIRIO_FIXTURE_REPO=$LINKED" "SIRIO_STUB_LOG=$RUN_DIR/stub-calls.log"
     "SIRIO_CSP_E2E_RUN=$RUN_DIR" "TRACE_STEP_MS=${TRACE_STEP_MS:-400}"
+    "SIRIO_FIXTURE_USER_LOG=$RUN_DIR/fixture-user.log" "SIRIO_FIXTURE_CONTROL_LOG=$RUN_DIR/fixture-control.log"
   )
   # A performance trace names a file that does not exist yet, one per launch.
   [ -z "${PERF_TRACE:-}" ] || pairs+=("SIRIO_PERF_TRACE=$PERF_TRACE")
@@ -2061,6 +2075,160 @@ scenario_composer_compact() {
   echo "step: a real Escape closes the picker"
   press_key Escape
   wait_panel "Escape closed the thinking picker" 'c["composerRow"]["picker"] is None and c["composerRow"]["menu"] is None' 10
+  stop_app
+}
+
+# What the composer's keys do, with real X keys (xdotool). Up and Down walk the chat's own
+# prompts, a prompt keeps the file it mentioned (the mention goes out as one when the prompt is sent
+# again, and survives a relaunch), and Shift+Tab cycles the permission modes without ever reaching
+# Bypass. The fixture is the other witness: it logs every prompt it hears and every control request.
+type_text() { # text
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool type --delay 60 "$1" || fail "xdotool could not type '$1'"
+  sleep 0.5
+}
+# The composer holds exactly TEXT.
+composer_is() { # desc text
+  local literal
+  literal=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$2")
+  wait_panel "$1" "c[\"composerText\"] == $literal" 10
+}
+# The user rows of the transcript, and the turn over.
+turn_over() { # desc user-rows
+  wait_panel "$1" "len([r for r in c['transcript'] if r.get('kind') == 'user']) == $2 and c['status'] == 'completed'" 40
+}
+# What the fixture heard: user_log_check INDEX EXPECT where EXPECT is link (the prompt carries the file as
+# a mention link and no literal @path) or plain (the opposite).
+user_log_check() { # index link|plain
+  python3 - "$RUN_DIR/fixture-user.log" "$1" "$2" "$LINKED" <<'PY' || fail "the fixture's log of prompts is not what a $2 mention is"
+import json, sys
+path, index, want, root = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+lines = [json.loads(line) for line in open(path) if line.strip()]
+text = "".join(b.get("text", "") for b in lines[index]["message"]["content"])
+print(f"  heard[{index}]: {text!r}")
+link = f"](file://{root}/src/main.rs)"
+has_link, has_literal = link in text, "@src/main.rs" in text
+if (want == "link") != (has_link and not has_literal):
+    print(f"FAIL: expected a {want} mention: link={has_link} literal={has_literal}", file=sys.stderr)
+    sys.exit(1)
+PY
+  echo "OK: prompt $1 reached the CLI with its mention as a $2"
+}
+# The permission modes the CLI was asked for, in order.
+modes_asked() {
+  python3 -c '
+import json, sys
+print(" ".join(r["mode"] for r in (json.loads(l) for l in open(sys.argv[1]) if l.strip()) if r.get("subtype") == "set_permission_mode"))' "$RUN_DIR/fixture-control.log"
+}
+# The chat tab is the only one and holds the focus: a character typed lands in the composer.
+prove_composer_focus() {
+  type_text "x"
+  composer_is "the composer has the focus" "x"
+  press_key BackSpace
+  composer_is "the composer is empty again" ""
+}
+scenario_composer_keys() {
+  : >"$RUN_DIR/fixture-user.log"
+  : >"$RUN_DIR/fixture-control.log"
+  launch composer_keys
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  show_chat
+  wait_panel "the chat is ready" 'c["status"] in ("idle", "completed")' 30
+  prove_composer_focus
+
+  echo "step: two prompts, the second with a file picked from the @ popup"
+  type_text "first prompt"
+  press_key Return
+  turn_over "the first turn is over" 1
+  type_text "see @main"
+  # The popup's walk of the worktree runs off the UI thread; Tab with no popup is not a no-op.
+  sleep 2
+  capture composer-keys-mention-popup
+  press_key Tab
+  composer_is "Tab picked the file: its path is the token" "see @src/main.rs "
+  type_text "now"
+  composer_is "the prompt reads on" "see @src/main.rs now"
+  press_key Return
+  turn_over "the second turn is over" 2
+  user_log_check 1 link
+
+  echo "step: Up brings the prompts back newest first, Down walks forward and then to the empty draft"
+  press_key Up
+  composer_is "Up shows the second prompt with its @path text" "see @src/main.rs now"
+  capture composer-keys-recalled
+  press_key Up
+  composer_is "a second Up shows the first prompt" "first prompt"
+  press_key Up
+  composer_is "Up at the oldest prompt stays" "first prompt"
+  press_key Down
+  composer_is "Down shows the second prompt again" "see @src/main.rs now"
+  press_key Down
+  composer_is "Down past the newest is the empty draft" ""
+  press_key Down
+  composer_is "Down on the empty draft stays empty" ""
+
+  echo "step: the recalled prompt, sent again, is a new turn with its mention as a mention"
+  press_key Up
+  composer_is "Up shows the second prompt" "see @src/main.rs now"
+  press_key Return
+  turn_over "the recalled prompt is a third turn" 3
+  user_log_check 2 link
+  composer_is "the composer is empty after the send" ""
+
+  echo "step: an edited prompt is a draft: Up moves the caret instead of the history"
+  press_key Up
+  composer_is "Up shows the newest prompt" "see @src/main.rs now"
+  type_text "!"
+  press_key Up
+  composer_is "after an edit Up no longer steps the history" "see @src/main.rs now!"
+  press_key ctrl+a
+  press_key BackSpace
+  composer_is "the composer is empty" ""
+
+  echo "step: Sirio starts again; Up still recalls the prompt with its mention"
+  stop_app
+  launch composer_keys
+  SURFACE=""
+  for _ in $(seq 1 100); do
+    SURFACE=$(E2E chat-surface 2>/dev/null || true)
+    [ -n "$SURFACE" ] && break
+    sleep 0.3
+  done
+  [ -n "$SURFACE" ] || fail "the chat was not restored"
+  echo "OK: the restored chat is $SURFACE"
+  show_chat
+  wait_panel "the restored chat is ready" 'c["status"] in ("idle", "completed")' 30
+  prove_composer_focus
+  press_key Up
+  composer_is "after the relaunch Up recalls the prompt with its @path text" "see @src/main.rs now"
+  press_key Up
+  composer_is "and the one before it" "first prompt"
+  press_key Down
+  press_key Return
+  turn_over "the prompt recalled after the relaunch is sent" 4
+  user_log_check 3 link
+  capture composer-keys-restored
+
+  echo "step: Shift+Tab cycles the permission modes and never lands on Bypass"
+  : >"$RUN_DIR/fixture-control.log"
+  local n
+  for n in 1 2 3 4 5 6; do
+    press_key shift+Tab
+  done
+  local asked
+  asked=$(modes_asked)
+  echo "  asked: $asked"
+  [ "$asked" = "acceptEdits plan auto default acceptEdits plan" ] \
+    || fail "six Shift+Tab asked for '$asked', not the menu's order from Ask with Bypass left out"
+  echo "OK: six Shift+Tab walked acceptEdits, plan, auto, default, acceptEdits, plan"
+  wait_panel "no mode is drawn as the danger shield" 'c["composerRow"].get("modeDanger") is not True' 10
+  capture composer-keys-modes
+  type_text "ok"
+  composer_is "no dialog holds the keyboard: typing reaches the composer" "ok"
+  press_key BackSpace
+  press_key BackSpace
+  composer_is "the composer is empty" ""
+  echo "OK: composer_keys: Up and Down recall prompts and their mentions across a relaunch, Shift+Tab cycles the modes short of Bypass"
   stop_app
 }
 

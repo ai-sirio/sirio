@@ -194,13 +194,29 @@ impl ControlHandler for TestHandler {
                     BTreeMap::from([("projects".to_string(), rows::encode(&[row]))]),
                 )
             }
-            "project.add" => ControlResponse::success(
-                &request.id,
-                BTreeMap::from([
+            "project.add" => {
+                let mut result = BTreeMap::from([
                     ("added".to_string(), "true".to_string()),
                     ("projectId".to_string(), "project-1".to_string()),
-                ]),
-            ),
+                ]);
+                // The app answers a label with `displayNameApplied`: false for
+                // a path it did not add. `/old-app` stands in for an app that
+                // predates the parameter and leaves the key out.
+                if let Some(label) = request.params.get("displayName") {
+                    match request.params.get("path").map(String::as_str) {
+                        Some("/old-app") => {}
+                        Some("/tracked") => {
+                            result.insert("added".to_string(), "false".to_string());
+                            result.insert("displayNameApplied".to_string(), "false".to_string());
+                        }
+                        _ => {
+                            result.insert("displayName".to_string(), label.clone());
+                            result.insert("displayNameApplied".to_string(), "true".to_string());
+                        }
+                    }
+                }
+                ControlResponse::success(&request.id, result)
+            }
             "workspace.current" => {
                 let mut result = BTreeMap::new();
                 result.insert("id".to_string(), "wt-1".to_string());
@@ -1317,6 +1333,99 @@ fn sirioctl_project_add_sends_the_path_and_reports_identity() {
     assert_eq!(
         request.params.get("path").map(String::as_str),
         Some("/tmp/sirio-fixture")
+    );
+}
+
+fn project_add_requests(handler: &TestHandler) -> Vec<ControlRequest> {
+    handler
+        .requests()
+        .into_iter()
+        .filter(|request| request.method == "project.add")
+        .collect()
+}
+
+#[test]
+fn sirioctl_project_add_rejects_a_display_name_flag_without_a_value() {
+    let (server, handler) = TestServer::start();
+    let output = sirioctl(
+        &server.socket_path,
+        &["project", "add", "/tmp/sirio-fixture", "--display-name"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--display-name needs a value"), "got: {stderr}");
+    assert!(project_add_requests(&handler).is_empty());
+}
+
+#[test]
+fn sirioctl_project_add_rejects_an_empty_display_name() {
+    let (server, handler) = TestServer::start();
+    let output = sirioctl(
+        &server.socket_path,
+        &["project", "add", "/tmp/sirio-fixture", "--display-name="],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--display-name needs a value"), "got: {stderr}");
+    assert!(project_add_requests(&handler).is_empty());
+}
+
+#[test]
+fn sirioctl_project_add_sends_the_label_as_given_and_prints_it() {
+    let (server, handler) = TestServer::start();
+    let output = sirioctl(
+        &server.socket_path,
+        &[
+            "project",
+            "add",
+            "/tmp/sirio-fixture",
+            "--display-name",
+            "  client app  ",
+        ],
+    );
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim_end_matches('\n'),
+        "true\tproject-1\t  client app  "
+    );
+    let requests = project_add_requests(&handler);
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].params.get("displayName").map(String::as_str),
+        Some("  client app  ")
+    );
+}
+
+#[test]
+fn sirioctl_project_add_fails_when_the_app_predates_display_name() {
+    let (server, _) = TestServer::start();
+    let output = sirioctl(
+        &server.socket_path,
+        &["project", "add", "/old-app", "--display-name", "client app"],
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("predates --display-name; the project was added without a label"),
+        "got: {stderr}"
+    );
+}
+
+#[test]
+fn sirioctl_project_add_notes_that_a_tracked_path_ignored_the_label() {
+    let (server, _) = TestServer::start();
+    let output = sirioctl(
+        &server.socket_path,
+        &["project", "add", "/tracked", "--display-name", "client app"],
+    );
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "not added: already tracked, inside a tracked project, or containing one; \
+             label ignored"
+        ),
+        "got: {stderr}"
     );
 }
 

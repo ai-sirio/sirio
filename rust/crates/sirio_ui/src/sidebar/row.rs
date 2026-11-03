@@ -280,6 +280,8 @@ impl Sidebar {
             Icon::OhMyPi => "agent-omp",
             Icon::SidebarLeft => "sidebar-minimalistic-left",
             Icon::PanelRight => "sidebar-minimalistic",
+            Icon::PanelLeftClose => "panel-left-close",
+            Icon::PanelLeftOpen => "panel-left-open",
             Icon::Archive => "archive-minimalistic",
             Icon::Lock => "key-minimalistic",
             Icon::FileTree => "file-tree",
@@ -507,8 +509,8 @@ impl Sidebar {
             // A locally chosen PNG is real file content already on disk — no
             // network fetch needed, so it can render as an actual image
             // instead of the generic globe glyph every other avatar source
-            // still falls back to (F-PRJ-14: GitHub/Favicon need an HTTP
-            // client this app doesn't have yet; see project_identity.rs).
+            // still falls back to (F-PRJ-14: GitHub/Favicon need an avatar
+            // download, which Sirio does not do yet; see project_identity.rs).
             Some(ProjectIconValue::Avatar(AvatarSource::LocalPng(path))) => img(path.clone())
                 .w(mark_size)
                 .h(mark_size)

@@ -41,11 +41,26 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
 # socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
 # mount kept out of a pane, quit and relaunch, every stub agent's hooks, the skill,
-# SIRIO_WORKTREE_ID and the flags sirioctl offers. Linux runs it with --xvfb or
+# SIRIO_WORKTREE_ID and the flags sirioctl offers, `project add --display-name` (case 14: the
+# label, no dialog, a duplicate). Linux runs it with --xvfb or
 # --display :N; --state-only skips cases 4, 4c, 5, 6 and 10 and is what macOS runs.
 # --out-dir DIR keeps the transcript, logs and env dumps; --only N[,N...] prints
 # "SIRIOCTL E2E PARTIAL"; --mutate claude-prompt-hook is case 6's mutation check.
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
+
+# The "Project added" dialog after every add from the UI, in a real debug Sirio per scenario (a
+# fresh SIRIO_DB, private HOME and SIRIO_PROJECTS_DIR), driven by real X keys and clicks and
+# asserted on the debug `surface project-identity read` verb, `project list --json` and the stored
+# rows: focus, Enter and Esc, skip against save, the queue, the clone and non-git paths, the
+# Project Settings tab's label, the privacy of the perf trace, and the label across a focus refresh
+# and a relaunch. A git wrapper in the debug build's own bin directory logs every git call and
+# floods or stalls a clone or a discovery when a scenario asks. Linux runs it with --xvfb or
+# --display :N, also under --state-only, which skips only the captures and the real X input;
+# --out-dir DIR keeps transcript.log, <scenario>/app.log, projects.tsv and git-calls.log, and
+# frames/<scenario>-*.png; --appearance light|dark (default light); --only NAME[,NAME...] prints
+# "PROJECT IDENTITY E2E PARTIAL (<n> scenarios)". It needs xset (x11-xserver-utils) and
+# python3-gi with gir1.2-gtk-3.0 for the clipboard.
+Scripts/Tests/test-project-identity-e2e.sh   # -> prints "PROJECT IDENTITY E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
 
 # The chat's session panel column in a real, isolated Sirio: a stub `claude`
 # (Scripts/Tests/stubs/session-panel/claude over sirio_chat's claude_fixture.py in
@@ -75,7 +90,7 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # a fresh Sirio; --state-only skips the
 # captures; --display :N is a private Xvfb (at least --window-size, default 2200x1000)
 # with Mesa's lavapipe, and trace_tab and trace_idle need one (--state-only with it paints
-# but takes no captures), trace_keys, file_links and clipboard_keys a framed run at --window-size 2200x1000;
+# but takes no captures), trace_keys, file_links, clipboard_keys and composer_keys a framed run at --window-size 2200x1000;
 # --appearance light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL". The
 # composer_compact scenario uses Scripts/Tests/stubs/session-panel-bypass/claude, the fixture's
 # session_panel_bypass mode (the CLI starts in bypassPermissions), and proves the native Claude
@@ -87,7 +102,19 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # CLI's reason as its tooltip (the stub's handshake says `preference`) and Thinking enabled, a real
 # Enter opens the thinking picker (`picker`) and Escape closes it. It needs a painted chat
 # (--display :N) and captures frames/composer-compact.png, composer-overflow.png and
-# composer-thinking.png.
+# composer-thinking.png. The composer_keys scenario (not the one of that name in
+# test-ely-chat-ui-e2e.py) presses real X keys in a native Claude chat's composer, on the default
+# stub, whose fixture logs every prompt it hears (SIRIO_FIXTURE_USER_LOG) and every control request
+# (SIRIO_FIXTURE_CONTROL_LOG): after two prompts, the second with a file picked from the @ popup
+# with Tab, Up recalls the second with its @path text, a second Up the first, Down twice goes back
+# to the empty draft; the recalled prompt sent again reaches the CLI with the file as a mention
+# link and no literal @path; an edited recall is an ordinary draft (Up moves the caret); after a
+# relaunch Up still recalls that prompt, mention included, and sending it mentions the file again.
+# Then six Shift+Tab walk the permission modes in the menu's order with Bypass left out (the
+# fixture's set_permission_mode requests read acceptEdits plan auto default acceptEdits plan), no
+# mode is drawn as the danger shield, and typing still reaches the composer, so no dialog holds the
+# keyboard. It needs --display :N --window-size 2200x1000 and captures
+# frames/composer-keys-*.png.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
 
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the
@@ -167,6 +194,29 @@ Scripts/Tests/test-unplugged-volume-e2e.sh   # -> prints "UNPLUGGED VOLUME E2E O
 # expansion, a pane that comes and goes with its tabs, across a quit and
 # relaunch; same flags as test-changes-e2e.sh.
 Scripts/Tests/test-open-list-e2e.sh   # -> prints "OPEN LIST E2E OK"
+
+# The Primary rail and its peek (spec 2026-11-01-primary-rail-design.md §8) in
+# a real, isolated Sirio, with real X clicks and keys at the rects
+# `surface layout read` reports (railRects, debug builds): no collapse button
+# without a Secondary tab; collapse to the 40 px rail; a codex stub terminal
+# and the native chat (Scripts/Tests/stubs/trace/claude) producing output and
+# changing status while collapsed (the terminal's 270 KB, more than a PTY
+# buffer, read back before any peek draws it), all of it in their peeks; a
+# peeked terminal keeping its columns and receiving Esc; Esc cancelling a
+# peeked chat's turn;
+# click outside, the same icon twice, the rail's + -> New Terminal, the pin;
+# the collapsed flag across relaunches, cleared by the last Secondary tab and
+# by Ctrl+Shift+B; a peeked tab's status change posting no notification
+# (Scripts/Tests/stubs/notify-send logs what would be posted, against a
+# positive control on the same tab unpeeked); a Browser tab blank under the
+# peek and back after it; the peeked tab closed over the socket, a worktree
+# switch, the last Primary tab closed while peeked. Each failure names its
+# step. --display :N is a private Xvfb of at least 1600x1000 with Mesa's
+# lavapipe; --state-only takes no display, runs step 1's reads only, prints
+# SKIP for steps 2-15 and ends with "PRIMARY RAIL E2E OK (state only)";
+# --out-dir DIR keeps the transcript, the app log, notify.log, stub.log and
+# PID-matched captures; --appearance light|dark.
+Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 
 # Acting on a change request: every write of sirio_forge on the wire (the token
 # transport and the real gh/glab), then the tab's actions in a real, isolated

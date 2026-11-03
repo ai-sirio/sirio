@@ -69,6 +69,27 @@ grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-host-sessions-e2e\.sh 
 grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-sirioctl-e2e\.sh --xvfb --out-dir sirioctl-e2e[[:space:]]*$" "$PR_CODE" \
   || fail "pr.yml must run the sirioctl E2E under Xvfb"
 
+# The project identity E2E (the "Project added" dialog after every add from the
+# UI) drives the real app too, so it takes the same private Xvfb, after the
+# sirioctl E2E in the same job. Anchored to the `run:` line, as above.
+grep -qE "^[[:space:]]*run:[[:space:]]*Scripts/Tests/test-project-identity-e2e\.sh --xvfb --out-dir project-identity-e2e[[:space:]]*$" "$PR_CODE" \
+  || fail "pr.yml must run the project identity E2E under Xvfb"
+
+# That script needs three tools the job did not install for the earlier E2Es:
+# xset (x11-xserver-utils) to turn key repeat off, and python3-gi with
+# gir1.2-gtk-3.0 to read the display's real clipboard. They are installed by
+# the display-tools step, so read that step's own block (from its name to the
+# next step) rather than the whole file, where the words appear elsewhere.
+DISPLAY_STEP="$(awk '
+  /^[[:space:]]*- name:/ { in_step = ($0 ~ /Install the display tools for the host sessions E2E/) }
+  in_step { print }
+' "$PR_CODE")"
+[ -n "$DISPLAY_STEP" ] || fail "pr.yml must have the display-tools install step"
+for pkg in x11-xserver-utils python3-gi gir1.2-gtk-3.0; do
+  printf '%s\n' "$DISPLAY_STEP" | grep -qE "^[[:space:]]*$pkg([[:space:]]|\\\\|$)" \
+    || fail "the display-tools apt step must install $pkg for the project identity E2E"
+done
+
 # Scripts/ci.sh runs check-cycle-version.sh, which compares the workspace
 # version against the last released tag. A shallow clone carries no tags, so
 # the check would pass by knowing nothing -- the exact failure it exists to

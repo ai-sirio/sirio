@@ -2182,7 +2182,9 @@ pub struct TerminalView {
     /// path there, not a fallback.
     fallback_reason: Option<String>,
     /// Scrollback to feed the next session as its prelude: set by
-    /// `restart` after a lost session, consumed by `ensure_started`.
+    /// `set_prelude` on a restored tab and by `restart` after a lost session,
+    /// sent with every open request and cleared once a session opens (or an
+    /// attach-only open fails).
     pending_prelude: Vec<u8>,
     /// A restart re-opens under the same id: carried into `OpenRequest.recreate`
     /// so the factory closes the old session before re-creating.
@@ -2776,12 +2778,18 @@ impl TerminalView {
     }
 
     /// Captures the renderer's current plain-text history for persistence or
-    /// headless verification. Failed panes have no emulator contents.
+    /// headless verification. A pane with no running session (a restored one
+    /// not started yet, one still connecting to the host, or one whose open
+    /// failed) answers with the prelude its next session would get: the
+    /// scrollback it was restored with (`set_prelude`), or the replica's after
+    /// a lost session (`restart`). So saving it, or restarting it, does not
+    /// replace that history with nothing. Where the prelude was already
+    /// cleared (an attach-only failure), that is empty.
     pub fn capture_scrollback(&self) -> Vec<u8> {
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.capture_scrollback(),
             TerminalState::Pending | TerminalState::Connecting | TerminalState::Failed { .. } => {
-                Vec::new()
+                self.pending_prelude.clone()
             }
         }
     }
@@ -4555,7 +4563,11 @@ impl gpui::Render for TerminalView {
                 .border_1()
                 .border_color(theme.ely.border)
                 .bg(theme.menu_surface())
-                .shadow_lg();
+                .shadow_lg()
+                // A press on a row is the menu's alone: it neither reaches the
+                // pane under the menu nor counts as a press outside a floating
+                // card the terminal is drawn in (the Primary rail's peek).
+                .occlude();
 
             let items = context_menu::offered_items(
                 match split_pane_size {

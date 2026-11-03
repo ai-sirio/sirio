@@ -824,6 +824,7 @@ fn history_database(path: &std::path::Path, long_title: &str) {
         created_at: None,
         updated_at: None,
         secondary_pane_hidden: false,
+        primary_pane_collapsed: false,
     })
     .unwrap();
     let tab = |id: &str, title: &str| TabRecord {
