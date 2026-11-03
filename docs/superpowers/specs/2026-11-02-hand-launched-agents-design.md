@@ -241,8 +241,8 @@ an exit mid-turn still produces its stop. An unread mark already set stays until
 A hand-started agent behaves like one Sirio launched while its tab is attached: same mark in
 the tab (`tab_agent_mark` / `tab_icon`, `main.rs:12537`, `:4884`) and in the sidebar row, same
 rings, same unread-sessions stops. **Tabs no terminal holds.** After a relaunch only the tab
-on screen attaches (the others attach as they are shown), and an evicted worktree's tabs
-detach (`docs/agents/architecture/panes.md`). Their turns still make a stop and an unread
+on screen attaches (the others attach as they are shown), and a worktree not selected since
+the relaunch has no terminal at all. Their turns still make a stop and an unread
 mark: one app-wide listener on the host's `term.sessions` topic feeds the program, the
 status, the title and the end of every session whose pane no terminal's link runs for (§9, 13;
 Enzo asked for it on 2026-11-03). Today `tab_agent_mark` falls back to the
@@ -390,7 +390,7 @@ is the same path and adds nothing to attribute.
 
 **End to end, with an artifact** (the shape of `Scripts/Tests/test-host-sessions-e2e.sh`):
 `Scripts/Tests/test-hand-agents-e2e.sh` drives a real `sirio`, `sirio-host` and `sirioctl`
-under Xvfb with an isolated root, and prints `HAND AGENTS E2E OK (38 cases, <s>s)`. One stub,
+under Xvfb with an isolated root, and prints `HAND AGENTS E2E OK (46 cases, <s>s)`. One stub,
 `Scripts/Tests/stubs/hand-agents/agent.py`, plays `claude`, `codex`, `omp` and `pi` on
 `PATH`, and behaves like the measured CLIs: the stub `claude` sends the probe and reports
 only when answered, the stub `codex` reports unprompted, including the 10 ms startup blip.
@@ -401,7 +401,9 @@ mark, and checks that leaving the agent clears the mark. OpenCode reports nothin
 terminal, so its stub is a server: `Scripts/Tests/stubs/opencode-server.py` speaks the
 real v2 endpoints and the events of §3.6. Tabs no terminal holds (§9, 13) are proven the
 same way: after a relaunch, a turn typed into a tab never shown ends with one notification
-and an unread mark, and showing the tab adds none. The host side is cases 16 to 27 of
+and an unread mark, and showing the tab adds none; the end of a hidden agent tab's session, a
+lost host and an End all sessions end it the way they end the tab on screen, and closing a
+worktree nobody selected posts nothing. The host side is cases 16 to 27 of
 `Scripts/Tests/test-host-e2e.sh`, the script `macos-check.yml` runs on `macos-15`.
 
 **Opt-in live tests** (like `sirio_agents`' `hooks_live`): the real CLIs against local fake
@@ -545,11 +547,10 @@ marked *[my call]* and is open to the user.
    - A crash mid-turn reads "finished", per §3.3.
    - After a relaunch, a Codex tab whose last turn ended shows no status: its last report
      is `idle`, which is what the host's record holds, so the seed has no finish to show.
-   - When a terminal bound to a pane is released, the listener's last state of that session
-     is applied to the pane (§9, 13). That state is written on the listener's thread as each
-     event arrives. It lags the released terminal only if that thread has not run since the
-     host sent an event the terminal already applied, and the terminal's own path is longer:
-     its link thread, then the UI thread.
+   - A listener event in flight to the UI thread when a hidden tab's link opens is dropped
+     by the gate. The link's first seed omits an absent program, so a `Program(None)` caught in
+     that window leaves the pane's last program shown until the next command the shell runs.
+     The window is one UI-thread turn.
    - Another OpenCode client's session created in the same folder after the pane started can
      link to that pane by the first-turn rule, which counts only Sirio's panes.
    - Ctrl+Z on a working agent reads *finished* (the shell has the terminal), and after `fg`
@@ -609,30 +610,49 @@ marked *[my call]* and is open to the user.
       a timer (§3.1, the host route's rule).
     - **Subscribe, then list.** It subscribes before it lists, so a change between the two
       arrives as an event. The listing seeds every session, and a `Lagged` or `Resync` lists
-      again. Both seeds take the re-seed's form, where an absent program or status is sent as
+      again (whether or not one ever reaches this subscription: the topic's outbound is
+      unbounded, so it does not lag today). Both seeds take the re-seed's form, where an absent program or status is sent as
       none.
-    - **Who it feeds.** It feeds a session only when two things hold:
+    - **Who it feeds.** It feeds a session's program, status and title only when two things
+      hold:
       - its pane is a known tab's (`session_for_pane`);
-      - no `TerminalView` bound to that pane has a running link. A restored tab's view is bound
-        at once and opens its link on its first render, so until then the listener is the route.
+      - no bound `TerminalView` has a running link that follows that session. The session a
+        link follows is the view's identity, which is not always its pane's key: a
+        Show-session tab is bound under its own pane and follows another pane's session. A
+        restored tab's view is bound at once and opens its link on its first render, so until
+        then the listener is the route. A view whose session was lost (`SessionLost`) has no
+        running link, and Restart sets one again before the old session's `Closed` is
+        processed.
 
-      A running link stays the only route for its pane, so one event is never applied twice. A session with no tab, such as a control session or a Show-session tab's, gets no
-      state.
+      A running link stays the only route for its session, so one event is never applied
+      twice. A session with no tab, such as a control session, gets no state.
     - **What it forwards.**
       - `program` and `status`, as the link sends them.
       - `title`, as the seed's title: it reaches OpenCode's link and never the title layer.
         Titles are coalesced per session between two wakes of the UI thread, so a spinner
         title in a background tab is not one update per frame.
-      - The session's end (`exited`, `closed`). It ends the program the way a `Program(None)`
-        does, and drops the record; the exit code stays the attached terminal's business.
+      - The session's end, as a `ChildExited` with the host's exit status, which is the order
+        an attached terminal's end gets: settle, drain, drop the record, then the owner's own
+        handling (`program_gone` or the exit result). It is sent once per session, as a
+        link's `exited` flag does: an `Exited` carries its status and a `Closed` alone is
+        `Unknown`. A listed session that already exited sends its end once, after its
+        re-seed, as a link's attach does. When the tab is shown later, the link sends the
+        same end again, and it is idempotent: the record is already dropped and a status
+        that does not change is no stop. A close the app itself causes (a worktree or a
+        project) first forgets what the listener fed to the panes its layouts name, so the
+        `Closed` that follows posts nothing.
 
       `foreground` is not read.
-    - **A released terminal.** The listener keeps the last program, status and title of every
-      session, written on its thread as each event arrives. When a terminal bound to a pane is
-      released (a worktree's terminals evicted, a pane moved to a fresh id), that state is
-      applied to the pane once, in the re-seed's form. An event the terminal's link received
-      and never delivered is therefore not lost. The turn tracker drops a report older than,
-      or equal to, the last, and a `Program(None)` ends only a running program, so the replay
-      makes no second stop.
+    - **Ends of panes it fed.** The listener keeps the set of panes it applied anything to.
+      When it gives up after the grace it says so, and each pane of the set that no link
+      runs for is ended as `SessionLost`, as a link ends its own after its grace. Every seed
+      does the same for the panes of the set that the listing no longer names. A pane of the
+      set whose tab is gone (a never-selected worktree was closed) is ended too, then gets
+      what a closed tab's pane gets (`activity.pane_closed` and the OpenCode link's forget),
+      so a Running pane is not counted forever.
+    - **No released terminal.** No terminal is released today: `TerminalBindings` holds every
+      bound terminal for the app's life (a pre-existing leak), so an evicted worktree's tabs
+      keep their links and notify through them. If that changes, the pane of a released
+      terminal needs the listener's last state of its session.
     - **One handler.** Both routes go through the handler terminals already use, so the order
       settle → drain → drop → clear is the same on both.

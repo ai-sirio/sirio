@@ -111,6 +111,23 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  nothing posted and no attention row
 #   other_worktree_notifies        a codex tab of a worktree never selected since the relaunch: a turn
 #                                  makes done, +1, unread
+#   background_agent_tab_ends_mid_turn / _fails_mid_turn / background_exec_agent_ends_mid_turn
+#                                  a hidden Sirio-launched agent tab (exit 0, exit 3) or a hand-typed
+#                                  `exec codex`: work, 1.3 s, the stub exits so the session ends: +1,
+#                                  unread, not running; showing the tab adds none
+#   show_session_of_hidden_tab_is_one_stop
+#                                  `panel show` of a hidden tab's session from another worktree opens a
+#                                  Show-session tab: one turn is one stop, not two
+#   close_hidden_worktree_mid_turn_is_silent
+#                                  closing a worktree nobody selected since the relaunch, its agent
+#                                  mid-turn: nothing posted, nothing left running
+#   background_exit_while_app_down_is_silent
+#                                  a session that exited while the app was down posts nothing at the
+#                                  relaunch, hidden or on screen
+#   background_host_lost           the world's host killed under a tab on screen and a hidden one, both
+#                                  mid-turn: one stop each, then a turn on the fresh host is one stop
+#   end_all_sessions_parity        `host.shutdown {force}` (End all sessions) under both: one stop each,
+#                                  the same notification; last, because it shuts the host down
 #
 # The world is isolated: `env -i` with an allow-list (a private HOME, every XDG
 # directory, SIRIO_DB, SIRIO_SOCKET, SIRIO_HOST_HOME and no session bus), its own
