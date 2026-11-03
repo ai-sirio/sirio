@@ -94,6 +94,24 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #   no_service_degrades            the service stops: the mark stays, no status, and the app's
 #                                  stderr names the failure kind once and nothing else
 #
+# and the tabs no terminal holds: after a relaunch only the selected tab has a terminal, and a
+# worktree never selected since has none; the app's listener on the host's `term.sessions`
+# topic reads those tabs' programs and reports (docs/agents/architecture/activity-detection.md):
+#   background_tab_notifies        two codex tabs, a relaunch: B, never shown since, runs work, 1.3 s,
+#                                  done: done, +1, unread
+#   showing_the_tab_adds_no_stop   continued: showing B adds no stop and clears its mark; a full turn
+#                                  in B while it is shown makes exactly one
+#   background_finish_at_relaunch_is_silent
+#                                  a claude tab whose turn ended and was read: after a relaunch, hidden,
+#                                  nothing is posted and its mark is unchanged
+#   background_exit_mid_turn_is_one_stop
+#                                  hidden codex tab: work, 1.3 s, exit: +1, the agent and status clear
+#   background_opencode_notifies   a hidden OpenCode tab after a relaunch: busy -> running, idle -> done (+1)
+#   control_session_gets_no_state  a `panel create` session that belongs to no tab: codex typed, a turn:
+#                                  nothing posted and no attention row
+#   other_worktree_notifies        a codex tab of a worktree never selected since the relaunch: a turn
+#                                  makes done, +1, unread
+#
 # The world is isolated: `env -i` with an allow-list (a private HOME, every XDG
 # directory, SIRIO_DB, SIRIO_SOCKET, SIRIO_HOST_HOME and no session bus), its own
 # OpenCode service config pointing at nothing, and a PATH that holds the stubs and
@@ -332,6 +350,9 @@ git -C "$W_REPO" config user.name Tester
 echo "# app" > "$W_REPO/README.md"
 git -C "$W_REPO" add -A
 git -C "$W_REPO" commit -q -m first
+# Two more worktrees, for the case that fills the mount cap.
+git -C "$W_REPO" worktree add -q -b wt-b "$W/repo-b"
+git -C "$W_REPO" worktree add -q -b wt-c "$W/repo-c"
 
 ctl() { "$CTL" "$@"; }
 ctl_ready() { "$CTL" surface tabs read >/dev/null 2>&1; }
@@ -486,7 +507,7 @@ for line in sys.stdin:
     if row["kind"] == "terminal" and row["id"] not in known \
             and os.path.realpath(row["worktree"]) == os.path.realpath(sys.argv[1]):
         print(row["id"])
-        break' "$W_REPO" "$known")"
+        break' "${OPEN_DIR:-$W_REPO}" "$known")"
     [ -z "$SESS" ] || break
     sleep 0.2
   done
@@ -1394,6 +1415,221 @@ case_no_service_degrades() {
   leave_opencode "$PANE"
 }
 
+# ---------------------------------------------------------------- tabs no terminal holds
+
+# Quits the app and starts it again, then selects the worktree: only the tab that was
+# selected at the quit attaches; every other tab stays unbound until it is shown.
+relaunch_app() {
+  ctl quit >/dev/null 2>&1 || true
+  for _ in $(seq 1 100); do alive "$APP_PID" || break; sleep 0.2; done
+  alive "$APP_PID" && fail "sirio did not quit after sirioctl quit"
+  APP_PID=""
+  app_start
+  ctl select-workspace --workspace "$wt" >/dev/null
+  sleep 2
+}
+
+# Two tabs of agent $1, B opened first and A last, then a quit and a relaunch: A is the
+# tab on screen and B has not been shown since. Sets PANE_A, SESS_A, PANE_B and SESS_B.
+PANE_A=""; SESS_A=""; PANE_B=""; SESS_B=""
+relaunch_with_a_hidden_tab() { # agent
+  start_agent "$1"
+  PANE_B="$PANE"; SESS_B="$SESS"
+  start_agent "$1"
+  PANE_A="$PANE"; SESS_A="$SESS"
+  relaunch_app
+  wait_agent "$PANE_A" "$1" 15
+}
+
+# A turn typed into the hidden tab B (host_probe writes to its host session): work, 1.3 s,
+# done. Nothing selects the tab, so no terminal holds it.
+case_background_tab_notifies() {
+  local base
+  relaunch_with_a_hidden_tab codex
+  stepn "after the relaunch: A on screen, B hidden" "$SESS_B"
+  expect_posted 0 0 "the relaunch's own startup"
+  base="$(posted_count)"
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 5
+  sleep 1.3
+  stepn "hidden tab B: working" "$SESS_B"
+  type_line "$PANE_B" done
+  wait_status "$SESS_B" done 5
+  expect_posted "$base" 1 "the end of a turn in a tab no terminal holds"
+  expect_attention "$SESS_B" unread true "the end of a turn in a tab no terminal holds"
+  expect_attention "$SESS_B" running false "the end of a turn in a tab no terminal holds"
+  stepn "hidden tab B: done, never shown" "$SESS_B"
+}
+
+case_showing_the_tab_adds_no_stop() {
+  local base
+  relaunch_with_a_hidden_tab codex
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 5
+  sleep 1.3
+  type_line "$PANE_B" done
+  wait_status "$SESS_B" done 5
+  expect_attention "$SESS_B" unread true "B's turn before it is shown"
+  # Showing B attaches a terminal to it: the link seeds the same state, and the stop that
+  # the listener already made is not made again. Being shown clears the mark.
+  # The app's window reads inactive in this world (SIRIO_DEBUG_WINDOW_ACTIVE), so a tab on
+  # screen is only seen while the window is told it is active.
+  base="$(posted_count)"
+  ctl surface attention act --focus active >/dev/null
+  ctl tab select "$(tab_index_of "$PANE_B")" >/dev/null
+  wait_agent "$PANE_B" codex 10
+  sleep 2
+  expect_posted "$base" 0 "showing a tab whose turn already ended"
+  expect_attention "$SESS_B" unread false "B shown"
+  expect_attention "$SESS_B" status done "B shown"
+  stepn "B shown: no second stop" "$SESS_B"
+  ctl surface attention act --focus inactive >/dev/null
+  # The tab is bound now: its terminal's link is the route, the listener feeds nothing, and
+  # a turn makes exactly one stop.
+  base="$(posted_count)"
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 5
+  sleep 1.3
+  type_line "$PANE_B" done
+  wait_status "$SESS_B" done 5
+  expect_posted "$base" 1 "a turn in the tab that is shown"
+  stepn "B shown: one stop for a full turn" "$SESS_B"
+}
+
+case_background_finish_at_relaunch_is_silent() {
+  start_agent claude
+  PANE_B="$PANE"; SESS_B="$SESS"
+  long_work "$PANE_B" "$SESS_B"
+  type_line "$PANE_B" done
+  wait_status "$SESS_B" done 5
+  start_agent claude
+  PANE_A="$PANE"; SESS_A="$SESS"
+  # B is read: shown, with the window active, while its turn is over; then A is on screen again.
+  ctl surface attention act --focus active >/dev/null
+  ctl tab select "$(tab_index_of "$PANE_B")" >/dev/null
+  sleep 2
+  ctl tab select "$(tab_index_of "$PANE_A")" >/dev/null
+  sleep 1
+  ctl surface attention act --focus inactive >/dev/null
+  expect_attention "$SESS_B" unread false "B read before the quit"
+  stepn "before the quit: B done and read, A on screen" "$SESS_B"
+  relaunch_app
+  wait_agent "$PANE_A" claude 15
+  sleep 3
+  stepn "after the relaunch: B hidden, its record is done" "$SESS_B"
+  expect_posted 0 0 "the relaunch's own startup, B's finished turn in the host's record"
+  expect_attention "$SESS_B" unread false "B hidden after the relaunch"
+}
+
+case_background_exit_mid_turn_is_one_stop() {
+  local base
+  relaunch_with_a_hidden_tab codex
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 5
+  wait_agent "$PANE_B" codex 5
+  sleep 1.3
+  base="$(posted_count)"
+  type_line "$PANE_B" exit
+  wait_status "$SESS_B" null 5
+  # A hidden tab's row may be gone from `panel list` or list no agent: either is no agent.
+  for _ in $(seq 1 25); do
+    case "$(agent_of "$PANE_B")" in ""|__ABSENT__) break ;; esac
+    sleep 0.2
+  done
+  case "$(agent_of "$PANE_B")" in ""|__ABSENT__) ;; *) fail "pane $PANE_B still lists agent '$(agent_of "$PANE_B")' after its agent exited" ;; esac
+  expect_posted "$base" 1 "an exit mid-turn in a tab no terminal holds"
+  expect_attention "$SESS_B" unread true "an exit mid-turn in a tab no terminal holds"
+  expect_attention "$SESS_B" running false "an exit mid-turn in a tab no terminal holds"
+  stepn "hidden tab B: exit mid-turn" "$SESS_B"
+}
+
+case_background_opencode_notifies() {
+  local base
+  start_agent opencode
+  PANE_B="$PANE"; SESS_B="$SESS"
+  oc "create ses_h $OC_DIR"
+  oc "rename ses_h hidden"
+  type_line "$PANE_B" "title OC | hidden"
+  oc "busy ses_h"
+  wait_status "$SESS_B" running 4
+  oc "idle ses_h"
+  wait_status "$SESS_B" done 4
+  # A codex tab opened last is the one on screen after the relaunch.
+  start_agent codex
+  PANE_A="$PANE"; SESS_A="$SESS"
+  relaunch_app
+  wait_agent "$PANE_A" codex 15
+  # B is hidden: its program and its title come from the host through the app's listener.
+  wait_agent "$PANE_B" opencode 15
+  sleep 2
+  stepn "opencode hidden after the relaunch: the mark" "$SESS_B"
+  expect_posted 0 0 "the relaunch's own startup (the service said nothing new)"
+  oc "busy ses_h"
+  wait_status "$SESS_B" running 5
+  sleep 1.3
+  base="$(posted_count)"
+  oc "idle ses_h"
+  wait_status "$SESS_B" done 5
+  expect_posted "$base" 1 "the end of an OpenCode turn in a hidden tab"
+  expect_attention "$SESS_B" unread true "the end of an OpenCode turn in a hidden tab"
+  stepn "opencode hidden: done" "$SESS_B"
+  leave_opencode "$PANE_B"
+}
+
+case_control_session_gets_no_state() {
+  local base rows id
+  base="$(posted_count)"
+  rows="$(attention_rows | wc -l | tr -d ' ')"
+  # A session that belongs to no tab: `panel create` makes a login shell the app lists
+  # as a control panel.
+  id="$(ctl panel create --worktree "$wt" --json | python3 -I -c 'import json, sys
+row = json.load(sys.stdin)
+row = row[0] if isinstance(row, list) else row
+print(row.get("id", ""))')"
+  [ -n "$id" ] || fail "panel create named no id"
+  sleep 1
+  type_line "$id" codex
+  sleep 2.5
+  type_line "$id" work
+  sleep 1.5
+  type_line "$id" done
+  sleep 2
+  step "control session $id after a turn"
+  expect_posted "$base" 0 "a turn in a session that belongs to no tab"
+  [ "$(attention_rows | wc -l | tr -d ' ')" = "$rows" ] || fail "a control session added an attention row: $(attention_rows | tr '\n' ' ')"
+  type_line "$id" exit
+}
+
+# A worktree the app has not selected since the relaunch: no terminal of it is mounted, and
+# its tab is named only by the layout the database keeps. (Evicting a mounted worktree
+# from the pane cache would be the other way to get here, but no terminal is dropped
+# today: `subscribe_terminal` keeps a strong handle to its terminal in `TerminalBindings`,
+# which is never emptied, so a worktree's views outlive their eviction.)
+case_other_worktree_notifies() {
+  local wt_b base
+  wt_b="$(worktree_id_of "$W/repo-b")"
+  [ -n "$wt_b" ] || fail "the project does not list the worktree repo-b"
+  ctl select-workspace --workspace "$wt_b" >/dev/null
+  sleep 2
+  OPEN_DIR="$W/repo-b" start_agent codex
+  PANE_B="$PANE"; SESS_B="$SESS"
+  ctl select-workspace --workspace "$wt" >/dev/null
+  sleep 2
+  relaunch_app
+  # The worktree repo-b is not selected, so none of its terminals is mounted.
+  step "after the relaunch: repo-b not selected, A selected"
+  expect_posted 0 0 "the relaunch's own startup"
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 5
+  sleep 1.3
+  base="$(posted_count)"
+  type_line "$PANE_B" done
+  wait_status "$SESS_B" done 5
+  expect_posted "$base" 1 "the end of a turn in a worktree not selected since the relaunch"
+  expect_attention "$SESS_B" unread true "the end of a turn in a worktree not selected since the relaunch"
+  stepn "worktree repo-b, not selected: done" "$SESS_B"
+}
+
 run_case() { # name
   CASE_N=$((CASE_N + 1))
   CASE_NAME="$1"
@@ -1448,6 +1684,13 @@ run_case two_opencode_panes_one_folder
 run_case opencode_failed_turn_is_error
 run_case opencode_after_relaunch
 run_case no_service_degrades
+run_case background_tab_notifies
+run_case showing_the_tab_adds_no_stop
+run_case background_finish_at_relaunch_is_silent
+run_case background_exit_mid_turn_is_one_stop
+run_case background_opencode_notifies
+run_case control_session_gets_no_state
+run_case other_worktree_notifies
 
 [ "$CASES_RUN" -gt 0 ] || { echo "FAIL: --only named no case" >&2; exit 1; }
 if [ -n "$ONLY" ]; then label=PARTIAL; else label=OK; fi
