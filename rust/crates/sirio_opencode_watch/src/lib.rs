@@ -40,8 +40,11 @@ pub enum OcState {
     Busy,
     /// An execution waits on a permission or a question.
     Waiting,
-    /// No execution is running.
+    /// No execution is running, and the service has not said how the last one ended: a
+    /// session read from the list.
     Idle,
+    /// The service said the last execution ended: it succeeded or was interrupted.
+    Done,
     /// The last execution failed.
     Error,
 }

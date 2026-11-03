@@ -117,7 +117,7 @@ fn service_events_match_task_2() {
     );
     wait_for("the session to end its turn", &events, |events| {
         let states = states_of(events, &session);
-        states.iter().rposition(|s| matches!(s, OcState::Idle | OcState::Error))
+        states.iter().rposition(|s| matches!(s, OcState::Idle | OcState::Done | OcState::Error))
             > states.iter().position(|s| *s == OcState::Waiting)
     });
 
@@ -128,8 +128,8 @@ fn service_events_match_task_2() {
     let waiting = states.iter().position(|s| *s == OcState::Waiting).expect("Waiting");
     let end = states
         .iter()
-        .rposition(|s| matches!(s, OcState::Idle | OcState::Error))
-        .expect("Idle or Error");
+        .rposition(|s| matches!(s, OcState::Idle | OcState::Done | OcState::Error))
+        .expect("Done or Error");
     assert!(busy < waiting && waiting < end, "order Busy < Waiting < end, saw {states:?}");
     // `permission.replied` takes the session back to Busy until the execution ends.
     assert!(
@@ -138,7 +138,7 @@ fn service_events_match_task_2() {
     );
     assert_eq!(
         states[end],
-        OcState::Idle,
+        OcState::Done,
         "the approved shell call ends the turn normally, saw {states:?}"
     );
     live.finish();

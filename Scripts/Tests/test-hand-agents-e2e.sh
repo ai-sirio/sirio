@@ -67,6 +67,8 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  an older session of the folder has the title the service later
 #                                  gives the pane's first-turn session: the link stays, and the
 #                                  next turn shows running, then done (+1)
+#   opencode_short_turn_is_finished
+#                                  a turn the service ends under a second after it began: done, +1
 #   two_opencode_panes_one_folder  two panes in one folder, one then two sessions: no status on
 #                                  either; with titles `OC | a`, `OC | b`: each follows its own
 #   opencode_failed_turn_is_error  a failed turn -> error; the service's error text and its
@@ -1100,6 +1102,22 @@ case_opencode_duplicate_title_keeps_link() {
   leave_opencode "$PANE"
 }
 
+case_opencode_short_turn_is_finished() {
+  # The service's own end of a turn is a finish whatever its length: the one-second floor
+  # that hides the blip Codex sends does not apply to it.
+  local base
+  start_agent opencode
+  base="$(posted_count)"
+  oc "create ses_q $OC_DIR"
+  oc "busy ses_q"
+  oc "idle ses_q"
+  wait_status "$SESS" done 4
+  expect_posted "$base" 1 "the end of a turn under a second"
+  expect_attention "$SESS" unread true "the end of a turn under a second"
+  stepn "opencode: a short turn done" "$SESS"
+  leave_opencode "$PANE"
+}
+
 case_two_opencode_panes_one_folder() {
   local pane_a sess_a pane_b sess_b base
   start_agent opencode
@@ -1275,6 +1293,7 @@ run_case argv_stays_out_of_app_stderr
 run_case opencode_three_states
 run_case opencode_first_turn_links
 run_case opencode_duplicate_title_keeps_link
+run_case opencode_short_turn_is_finished
 run_case two_opencode_panes_one_folder
 run_case opencode_failed_turn_is_error
 run_case opencode_after_relaunch

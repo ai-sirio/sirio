@@ -288,6 +288,8 @@ fn reported(state: OcState) -> ReportedState {
         OcState::Busy => ReportedState::Working,
         OcState::Waiting => ReportedState::Blocked,
         OcState::Idle => ReportedState::Idle,
+        // The service's own end of a turn is a finish however short the turn was.
+        OcState::Done => ReportedState::Done,
         OcState::Error => ReportedState::Error,
     }
 }

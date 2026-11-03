@@ -370,7 +370,7 @@ impl Table {
                 return session.is_some_and(|id| self.sessions.remove(id).is_some());
             }
             "session.execution.started" => OcState::Busy,
-            "session.execution.succeeded" | "session.execution.interrupted" => OcState::Idle,
+            "session.execution.succeeded" | "session.execution.interrupted" => OcState::Done,
             "session.execution.failed" => OcState::Error,
             "permission.asked" | "form.created" => OcState::Waiting,
             "permission.replied" | "permission.rejected" | "form.replied" | "form.cancelled" => {
