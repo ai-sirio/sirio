@@ -387,7 +387,8 @@ mod tests {
 use gpui::{AnyElement, Context, SharedString, canvas, div, px};
 use sirio_acp::{EffortChoice, ModeCatalog};
 
-use super::{Chat, PopupAccept, PopupNext, PopupPrevious};
+use super::prompt_history::{self, Direction, PromptRecord, Step};
+use super::{Chat, CycleMode, Entry, PopupAccept, PopupNext, PopupPrevious, mode_cycle};
 
 /// Which token picker is on screen, if any. Enter/up/down/tab belong to it
 /// while it is; otherwise they fall through to the field.
@@ -396,6 +397,15 @@ pub(crate) enum TokenPopup {
     None,
     Slash,
     Mention,
+}
+
+/// A record with its text as the field holds it (`\n` line endings), so it
+/// compares equal to the draft it is put back as.
+pub(crate) fn normalized_record(record: PromptRecord) -> PromptRecord {
+    PromptRecord {
+        text: crate::ely_ui::normalize(&record.text, true),
+        mentions: record.mentions,
+    }
 }
 
 impl Chat {
@@ -474,10 +484,13 @@ impl Chat {
     pub(crate) fn mention_popup_visible(&self) -> bool {
         mention_token(&self.draft, self.draft_caret).is_some()
             && !self.mention_filter.filtered().is_empty()
+            && !self.recall_shown()
     }
 
-    /// `up`: the popup's row when one is open, otherwise the field's own
-    /// vertical motion — `propagate` lets gpui try the field's binding next.
+    /// `up`: the popup's row when one is open, otherwise the history's
+    /// previous prompt when the composer is fresh or shows one, otherwise the
+    /// field's own vertical motion — `propagate` lets gpui try the field's
+    /// binding next.
     pub(crate) fn popup_previous(
         &mut self,
         _: &PopupPrevious,
@@ -487,7 +500,12 @@ impl Chat {
         match self.open_token_popup() {
             TokenPopup::Slash => self.slash_filter.step(-1),
             TokenPopup::Mention => self.mention_filter.step(-1),
-            TokenPopup::None => return cx.propagate(),
+            TokenPopup::None => {
+                if !self.recall(Direction::Older, cx) {
+                    cx.propagate();
+                }
+                return;
+            }
         }
         cx.notify();
     }
@@ -501,9 +519,136 @@ impl Chat {
         match self.open_token_popup() {
             TokenPopup::Slash => self.slash_filter.step(1),
             TokenPopup::Mention => self.mention_filter.step(1),
-            TokenPopup::None => return cx.propagate(),
+            TokenPopup::None => {
+                if !self.recall(Direction::Newer, cx) {
+                    cx.propagate();
+                }
+                return;
+            }
         }
         cx.notify();
+    }
+
+    /// Shift+Tab: the next permission mode in the menu's order, through the
+    /// one entry point a pick takes. The key is the composer's even when
+    /// nothing moves (no catalogue, nowhere to go): letting it through would
+    /// take the focus out of the composer.
+    pub(crate) fn cycle_mode(
+        &mut self,
+        _: &CycleMode,
+        _: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(catalog) = &self.mode_catalog else {
+            return;
+        };
+        let ids: Vec<&str> = catalog.options.iter().map(|mode| mode.id.as_str()).collect();
+        let next = mode_cycle::next_cycle_mode(&ids, &catalog.current_id)
+            .and_then(|index| catalog.options.get(index).cloned());
+        if let Some(mode) = next {
+            self.select_mode(mode, cx);
+        }
+    }
+
+    // --- Prompt history (↑ / ↓) ---
+
+    /// The position of the prompt the composer shows unedited, if it does.
+    fn recall_shown_position(&self) -> Option<usize> {
+        let at = self.recall_at?;
+        let record = self.prompt_history.get(at)?;
+        (record.text == self.draft.as_ref()).then_some(at)
+    }
+
+    /// Whether the draft is exactly a prompt ↑ brought back. Its `/` and `@`
+    /// tokens are history, not something being typed, so no popup opens on
+    /// them until an edit makes the text an ordinary draft again.
+    pub(crate) fn recall_shown(&self) -> bool {
+        self.recall_shown_position().is_some()
+    }
+
+    /// Records the draft as the newest prompt, with the accepted mentions
+    /// that are still in it. Called where the prompt leaves the composer,
+    /// before the draft is cleared.
+    pub(crate) fn remember_prompt(&mut self) {
+        let (_, mentions) = assemble_prompt(&self.draft, &self.accepted_mentions);
+        prompt_history::remember(
+            &mut self.prompt_history,
+            PromptRecord {
+                text: self.draft.to_string(),
+                mentions,
+            },
+        );
+        self.recall_at = None;
+    }
+
+    /// A chat saved before the history existed starts it from what its
+    /// transcript says the user sent: plain text, with no mentions.
+    pub(crate) fn seed_prompt_history(&mut self) {
+        if !self.prompt_history.is_empty() {
+            return;
+        }
+        let mut history = Vec::new();
+        for entry in &self.entries {
+            if let Entry::User { text, .. } = entry {
+                prompt_history::remember(
+                    &mut history,
+                    normalized_record(PromptRecord {
+                        text: text.clone(),
+                        mentions: Vec::new(),
+                    }),
+                );
+            }
+        }
+        self.prompt_history = history;
+    }
+
+    /// ↑ or ↓ as history: `true` when the key was taken. Applies only to a
+    /// fresh composer (no text, no image) or one showing a prompt unedited,
+    /// with the caret on the first line for ↑ and the last for ↓; anything
+    /// else is the field's own motion.
+    fn recall(&mut self, direction: Direction, cx: &mut Context<Self>) -> bool {
+        // A disabled composer refuses edits; this would write past that.
+        if self.composer_disabled() {
+            return false;
+        }
+        let shown = self.recall_shown_position();
+        if shown.is_none() && !(self.draft.is_empty() && self.attachments.is_empty()) {
+            return false;
+        }
+        let caret = self.draft_caret.min(self.draft.len());
+        if !self.draft.is_char_boundary(caret) {
+            return false;
+        }
+        let on_edge_line = match direction {
+            Direction::Older => !self.draft[..caret].contains('\n'),
+            Direction::Newer => !self.draft[caret..].contains('\n'),
+        };
+        if !on_edge_line {
+            return false;
+        }
+        match prompt_history::step(shown, self.prompt_history.len(), direction) {
+            Step::Show(position) => {
+                let record = self.prompt_history[position].clone();
+                self.recall_at = Some(position);
+                self.accepted_mentions = record.mentions;
+                self.reset_composer_popups();
+                // The caret lands at the end, which is where the last line is
+                // for the key the other way.
+                self.set_composer_text(record.text, cx);
+            }
+            Step::Restore => {
+                // A recall starts only from an empty composer, so that is
+                // what ↓ past the newest gives back.
+                self.recall_at = None;
+                self.accepted_mentions.clear();
+                self.reset_composer_popups();
+                self.set_composer_text("", cx);
+            }
+            Step::Stay => {}
+            Step::Pass => return false,
+        }
+        cx.notify();
+        true
     }
 
     /// `tab`: accept the active row; with no popup, ordinary focus traversal.

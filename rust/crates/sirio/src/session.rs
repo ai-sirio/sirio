@@ -89,6 +89,12 @@ pub struct SessionTabState {
     /// at restore, so a draft the user never hit Enter on survives a restart.
     #[serde(default)]
     pub chat_draft: String,
+    /// The prompts a chat tab has sent, newest first, which ↑ in its composer
+    /// walks back through: captured live from the `Chat` at save time like
+    /// `chat_draft` and pushed back at restore. A session written before this
+    /// field has none, and the chat seeds its own from the transcript.
+    #[serde(default)]
+    pub chat_prompt_history: Vec<sirio_ui::chat::PromptRecord>,
     /// Whether a chat tab's session panel column was open: captured live
     /// from the `Chat` at save time like `chat_draft`, and applied again at
     /// restore. Which sections inside it were folded is not kept.
@@ -220,6 +226,7 @@ impl SessionTabState {
                 .map(|(pane_id, bytes)| (*pane_id, Self::bounded_scrollback(bytes)))
                 .collect(),
             chat_draft: self.chat_draft.clone(),
+            chat_prompt_history: self.chat_prompt_history.clone(),
             chat_session_panel_open: self.chat_session_panel_open,
             browser_url: self.browser_url.clone(),
             editor_path: self.editor_path.clone(),

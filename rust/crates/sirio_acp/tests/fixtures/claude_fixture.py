@@ -50,6 +50,9 @@ CONTROL_LOG_PATH = next(
     (arg[len("--fixture-control-log="):] for arg in sys.argv if arg.startswith("--fixture-control-log=")),
     os.environ.get("SIRIO_FIXTURE_CONTROL_LOG"),
 )
+# The file every `user` line (a prompt, as the CLI heard it) is appended to,
+# one JSON line each, before the turn runs: what a mention became on the wire.
+USER_LOG_PATH = os.environ.get("SIRIO_FIXTURE_USER_LOG")
 # The worker appends its protocol flags after our own argv, so a second
 # positional starting with "-" is one of those, not a pid file.
 # Where the project's memory file is said to live: a test that wants the row
@@ -1069,6 +1072,9 @@ def main():
             if cli_request_id in PENDING:
                 finish_permission(cli_request_id, message)
         elif kind == "user":
+            if USER_LOG_PATH:
+                with open(USER_LOG_PATH, "a", encoding="utf-8") as log:
+                    log.write(json.dumps(message, separators=(",", ":")) + "\n")
             if MODE == "logged_out":
                 init_line()
                 result(subtype="error_during_execution", is_error=True,
