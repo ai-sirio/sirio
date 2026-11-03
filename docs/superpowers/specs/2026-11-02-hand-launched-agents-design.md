@@ -377,7 +377,7 @@ is the same path and adds nothing to attribute.
     after a relaunch that is the tab on screen, and the others as they are shown, while a
     Sirio-launched agent in an unattached tab still notifies through its hooks (§3.5);
   - Sirio-launched Claude, Codex and omp tabs show *finished* at a turn's end, instead of
-    *waiting for you*, once the host reads their reports (M9: their Stop hook used to say
+    *waiting for you*, once the host reads their reports (their Stop hook used to say
     *waiting for you*).
 
 ## §6 How it is proven
@@ -541,15 +541,20 @@ marked *[my call]* and is open to the user.
      terminal (§3.5): until a tab attaches (after a relaunch only the tab on screen does, and
      an evicted worktree's tabs detach), its turns make no stop and no unread mark.
    - Another OpenCode client's session created in the same folder after the pane started can
-     link to that pane by the first-turn rule, which counts only Sirio's panes (M8).
+     link to that pane by the first-turn rule, which counts only Sirio's panes.
    - Ctrl+Z on a working agent reads *finished* (the shell has the terminal), and after `fg`
-     there is no status until the agent's next report (M11).
+     there is no status until the agent's next report.
    - An older Sirio on a host this version started loses Claude's title status: Claude drops
-     its title once the host answers its probe, and an older app cannot read 7501 (critic 6).
+     its title once the host answers its probe, and an older app cannot read 7501.
    - Under `ssh` the first remote `app=` names the tab for the whole connection, and a remote
-     crash mid-turn stays running until ssh exits (critic 10).
+     crash mid-turn stays running until ssh exits.
+   - Two agents run back to back, faster than Layer D's 500 ms tick can see the gap between
+     them (`--cmd 'codex; claude'`), can leave the second with the first's record: the first
+     `app=` named the pane, and the second's reports land in that tracker under that mark.
+   - An OpenCode TUI that switches to another session with the same title keeps showing the
+     session it held: the held one wins among same-titled sessions (§3.6).
    - Replaying a recorded agent session in a plain terminal (`cat`, `less -r`) shows the
-     agent's mark and can notify (critic 11).
+     agent's mark and can notify.
    - After a reconnect or relaunch OpenCode restores busy and waiting, but not a finished or
      failed result.
    - A subagent's child session can keep OpenCode's first-turn link from forming until the
