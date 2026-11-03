@@ -1,23 +1,23 @@
 {
   "schema": 1,
   "channel": "stable",
-  "version": "0.38.0",
-  "notes": "The chat's composer is now a band across the bottom of the chat, as in Zed,\nand its controls stay on one line however narrow the chat gets.\n\n**The composer is a band**\n\n- It runs the full width of the chat under the conversation, with a thin\n  rule above it, and its text lines up with the conversation's. With the\n  session panel docked beside the chat, it stops at the panel.\n- Attach (now a +), the session panel and ⋯ sit on the left. The agent's\n  controls and send sit on the right.\n- The permission mode is an icon: a hand for the default mode, a pen for\n  accepting edits, a clipboard for plan, sparkles for auto, and a red\n  struck-through shield for Bypass. The connection's dot sits on its\n  corner. In a wide chat the mode's name stays beside it, and the tooltip\n  always has it.\n\n**One line at every width**\n\nThe controls no longer wrap onto a second line. As the chat narrows they\nmake room in steps, and what leaves the line becomes a row of ⋯:\n\n- First Fast, Thinking and the session panel toggle move into ⋯, and the\n  mode shows only its icon.\n- Then the background-task count and the context ring.\n- Then the model, or the agent's name, and attach, and the chips that stay\n  lose their arrows. Down to the narrowest pane Sirio allows, the mode, the\n  effort and send stay on the line. There *Default* shows as empty bars and\n  Ultracode as full ones, and the tooltip names the level.\n\nA picker you open from ⋯ opens there, inside the chat. ⋯ marks the first\nrow you can choose, and the mark stays on its row when the rows change\nunder it, for example when a background task ends. Nothing covers send.",
+  "version": "0.39.0",
+  "notes": "Sirio now asks for a project's name and icon when you add it, keeps your\nsaved prompts in the right panel, and lets the chats and terminals fold into\na narrow rail. In the chat, ↑ brings back what you sent and Shift+Tab moves\nto the next permission mode.\n\n**A name and an icon for a new project**\n\nAfter you add a project, with Open folder, Clone, Create, the empty centre\nor the prompt for a folder that is not a git repository, a *Project added*\ndialog asks for the name the sidebar shows and for the project's icon.\n\n- The folder on disk keeps its own name.\n- Esc or Skip keeps the defaults.\n- Projects added over the control socket never open it.\n  `sirioctl project add` takes `--display-name` instead.\n\n**Saved prompts**\n\nThe right panel has a *Prompts* section for the prompts you send again and\nagain.\n\n- One click on a prompt's copy button puts its text on the clipboard.\n- The pencil, or a click on the card, opens the prompt in a centre tab with\n  a title field. It saves itself 400 ms after you stop typing, and also on\n  Ctrl/Cmd+S, on a worktree switch, when you close its tab and when you quit.\n- *New prompt* adds one, and right-click › Delete removes one after asking.\n- Each prompt is a Markdown file, holding exactly the text Copy copies, in\n  `~/.local/share/Sirio/prompts` on Linux,\n  `~/Library/Application Support/Sirio/prompts` on macOS and\n  `%LOCALAPPDATA%\\Sirio\\prompts` on Windows.\n- When the last file in a tab closes and a terminal is split beside it,\n  the tab becomes a terminal tab, and comes back as one after a restart.\n\n**Fold the chats and terminals into a rail**\n\nThe half that holds the chats and terminals has a new button to the right of\nits +. It folds the half into a 40 px rail, and the editor, Changes and the\nbrowser take the width.\n\n- The rail has one icon per open chat or terminal, with its status dot, a\n  button on top that unfolds the half again, and a + at its foot.\n- A click on an icon shows that chat or terminal in a card over the editor,\n  as wide as the half was. A click outside the card closes it. Esc does not:\n  it still goes to the chat's Cancel or to the terminal.\n- Folding changes only what is drawn. Chats keep answering and terminals\n  keep running, and what they wrote while folded is there when you look.\n- Sirio remembers, per worktree, whether the half is folded.\n\n**Recall a prompt, cycle the mode**\n\n- In an empty composer, ↑ brings back the prompts sent in this chat, newest\n  first, with their `@` mentions, and ↓ walks forward again. The last 50\n  are kept with the chat and survive a restart. With text in the box, or\n  the caret off its first or last line, the arrows move the caret as before.\n- Shift+Tab in the composer moves to the agent's next permission mode. It\n  never lands on Bypass, which still asks first when you pick it.\n\n**Fixes**\n\n- Ctrl+Shift+P no longer opens the command palette over a close that is\n  waiting for an answer, the End All confirmation or the Set Title prompt.\n- A closed tab's pill no longer stays on its project's row in the sidebar.\n- `sirioctl project list` shows a project's new name right after it is\n  changed in Project Settings.\n- The name field in Project Settings no longer shrinks to a few pixels in a\n  short tab.",
   "artifacts": {
     "darwin-aarch64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.38.0/Sirio-0.38.0.dmg",
-      "sha256": "9c0d73f2738bd5dd17a57cc8e68572b64c71c6e74d26db4a60c2a691a2b143c4",
-      "signature": "5oBW/wO+HVGzXdi5iQsundX/Jt3pLQ01qbK/cUPwzdqaZE8lCmDyKmvOaxK4HRibeRj29I+MdLapXSKD4ZdRDg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.39.0/Sirio-0.39.0.dmg",
+      "sha256": "52d68bf431b1461f6cdc748264ca64089a24d54a4dfb2abdb7b1d32a76681624",
+      "signature": "chufdcuouhIDwKM860ROlgZy6otDwCnXF0Srl5EyVdPan9W3hCCjt8nvoRgVc9UHFui0vMiGxKa9pHgsjdySAA=="
     },
     "linux-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.38.0/Sirio-0.38.0-x86_64.AppImage",
-      "sha256": "3b7986fc43b85b08892154d9708e695e35059c25766e7e74ceef7fcb23498e2a",
-      "signature": "dzST2R5s6qEvEFE2J6UZDag/Y6EeSj0QKD2MzBf5vqF1dw1DK/+wZYZC9eZTDk2mFolvfm8/EhXXF8ULaDTTCg=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.39.0/Sirio-0.39.0-x86_64.AppImage",
+      "sha256": "77a600cd8940b1be7044ce1439d761eb08aec211ccd652946daa6e83e726ac32",
+      "signature": "BqfKqjL4e2CQkVGWSFgvUNJdQXATDvkExZOe47ts+RWyHfkKpoKvqW0PoILHCAS0pIw9TyoGG+jKXR6s6vXeCQ=="
     },
     "windows-x86_64": {
-      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.38.0/SirioSetup-0.38.0.exe",
-      "sha256": "9ac8d3ed89747c74067e997441acb3d8c4cea59287a972bd3f1111f531b058b8",
-      "signature": "j39XT8SnI+C6KWHgyPYoUccp6+GzNTOLwm6r+ayKsMoWpb8XuksxCQ4+HNf6UnpK/HS6N9eXyOqko3aMotpbAQ=="
+      "url": "https://github.com/ai-sirio/sirio/releases/download/v0.39.0/SirioSetup-0.39.0.exe",
+      "sha256": "356d88431a56b80726d470efc10c48a7b9adfcfe8444f1df7fc6b4f6ab497054",
+      "signature": "ZgJgXinCx42RVjps2c+0jFuQPF40PObUhaDgfDZGnCqA71/ZljWN1COoCzekahLlUi+z1c+XZ55CyLan5s3ICg=="
     }
   }
 }
