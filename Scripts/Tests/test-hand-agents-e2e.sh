@@ -1596,6 +1596,7 @@ print(row.get("id", ""))')"
   sleep 2
   step "control session $id after a turn"
   expect_posted "$base" 0 "a turn in a session that belongs to no tab"
+  case "$(agent_of "$id")" in ""|__ABSENT__) ;; *) fail "the control session $id lists agent '$(agent_of "$id")': the listener fed a session no tab names" ;; esac
   [ "$(attention_rows | wc -l | tr -d ' ')" = "$rows" ] || fail "a control session added an attention row: $(attention_rows | tr '\n' ' ')"
   type_line "$id" exit
 }
@@ -1683,12 +1684,12 @@ run_case opencode_own_finish_links_late
 run_case two_opencode_panes_one_folder
 run_case opencode_failed_turn_is_error
 run_case opencode_after_relaunch
+run_case background_opencode_notifies
 run_case no_service_degrades
 run_case background_tab_notifies
 run_case showing_the_tab_adds_no_stop
 run_case background_finish_at_relaunch_is_silent
 run_case background_exit_mid_turn_is_one_stop
-run_case background_opencode_notifies
 run_case control_session_gets_no_state
 run_case other_worktree_notifies
 
