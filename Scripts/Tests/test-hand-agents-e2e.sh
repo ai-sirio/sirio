@@ -33,7 +33,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #   claude_states                  work -> running; idle after >= 1 s -> done (+1, unread);
 #                                  block -> needs-input (+0: done -> needs-input is no stop)
 #   first_report_blocked           a first `block` is needs-input and a stop (+1)
-#   turn_end_notifies_once         codex work, 1.3 s, done: done, +1
+#   turn_end_notifies_once         codex work, 1.3 s, done: done, +1; its idle right after keeps done
 #   blocked_inside_turn_then_idle  work, block, idle: needs-input +1, then done +0
 #   short_turn_is_silent           work, idle 0.2 s later: no status, +0, running false
 #   exit_mid_turn_is_finished      work, 1.3 s, exit: a stop (+1), then no agent, no status
@@ -703,7 +703,10 @@ case_turn_end_notifies_once() {
   wait_status "$SESS" done 3
   expect_posted "$base" 1 "codex's done"
   expect_attention "$SESS" unread true "codex's done"
-  stepn "codex done" "$SESS"
+  # The stub sends the idle Codex 0.166 sends right after every done: the finish stays.
+  hold_status "$SESS" done 2
+  expect_posted "$base" 1 "the idle after codex's done"
+  stepn "codex done, then its idle" "$SESS"
 }
 
 case_blocked_inside_turn_then_idle() {

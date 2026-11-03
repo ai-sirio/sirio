@@ -12,10 +12,12 @@
 //!   `idle`, `done` or `error`. A `blocked` spell inside it does not end it.
 //! - `working` is Running. `blocked` is NeedsInput, a first one included. `done` is
 //!   Done and `error` is Error, and both close the turn.
-//! - `idle` is Done when a turn is open and either it lasted at least
-//!   [`MIN_TURN_MS`] or a `blocked` came inside it (a rejected permission).
-//!   Otherwise it shows no status: a startup, the 10 ms blip Codex sends, a startup
-//!   dialog that was answered. Either way the turn closes.
+//! - `idle` with a turn open is Done when it lasted at least [`MIN_TURN_MS`] or a
+//!   `blocked` came inside it (a rejected permission); otherwise it shows no status
+//!   (the 10 ms blip Codex sends, a startup dialog that was answered). Either way
+//!   the turn closes. With no turn open a Done or Error stays (Codex sends an `idle`
+//!   right after every `done`), a `blocked` outside any turn clears, and no status
+//!   stays none: a startup `idle` shows nothing.
 //! - A report older than the one the tracker holds is a replay and is ignored; the
 //!   same report again changes nothing.
 
@@ -102,11 +104,17 @@ impl TurnTracker {
                 self.status = Some(AgentStatus::Error);
             }
             ReportedState::Idle => {
-                let finished = self.turn_start.is_some_and(|start| {
-                    self.blocked_in_turn || at_ms.saturating_sub(start) >= MIN_TURN_MS
-                });
-                self.close_turn();
-                self.status = finished.then_some(AgentStatus::Done);
+                if let Some(start) = self.turn_start {
+                    let finished =
+                        self.blocked_in_turn || at_ms.saturating_sub(start) >= MIN_TURN_MS;
+                    self.close_turn();
+                    self.status = finished.then_some(AgentStatus::Done);
+                } else if self.status == Some(AgentStatus::NeedsInput) {
+                    // A `blocked` outside any turn, then the agent went idle.
+                    self.status = None;
+                }
+                // With no turn open a Done or Error stays (Codex sends an `idle`
+                // right after every `done`), and no status stays none.
             }
         }
     }

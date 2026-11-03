@@ -32,7 +32,8 @@ Typed lines (the whole line, then Enter):
 Startup, per profile:
   claude    title `✳ Claude Code`; sends the OSC 7501 probe and reports (with
             app=claude-code) only once the terminal has answered it
-  codex     reports unprompted with app=codex: idle, then working and idle 10 ms apart
+  codex     reports unprompted with app=codex: idle, then working and idle 10 ms apart;
+            a typed `done` is followed at once by an `idle`, as Codex 0.166 sends
   omp       title `π > <cwd>`, then reports idle with app=omp
   pi        sends the probe and never reports
   opencode  no OSC 7501; title `OpenCode`, and `OC | <title>` after its first `idle`
@@ -200,6 +201,9 @@ def main():
                     continue
                 if name in APPS:
                     report(name, state)
+                    if name == "codex" and state == "done":
+                        # Codex 0.166 reports idle right after every done.
+                        report(name, "idle")
                 elif name == "opencode" and words[0] == "idle" and not oc_title:
                     oc_title = True
                     title("OC | OpenCode")
