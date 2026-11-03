@@ -10699,6 +10699,26 @@ impl SirioWorkspace {
                                     workspace.activity.program_gone(&activity_pane_id);
                                 }
                             }
+                            // Layer D loses the agent it named: what a program's exit does, in
+                            // the same order. A turn that was mid-way settles to Done and its
+                            // stop is drained while the pane is still the agent's, then the
+                            // record goes, and only then does `apply_process_signal` clear
+                            // the identity. The next agent Layer D names here starts with no
+                            // record, so its startup `idle` closes no turn of the last one's.
+                            let layer_d_lost = match &observation {
+                                Ok(found) => found.is_none(),
+                                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                            };
+                            if layer_d_lost && workspace.activity.is_process_owned(&activity_pane_id)
+                            {
+                                workspace
+                                    .activity
+                                    .program_exited(&activity_pane_id, Instant::now());
+                                workspace.drain_activity_transitions(cx);
+                                workspace
+                                    .activity
+                                    .drop_report(&activity_pane_id, Instant::now());
+                            }
                             match workspace
                                 .activity
                                 .apply_process_signal(&activity_pane_id, observation)

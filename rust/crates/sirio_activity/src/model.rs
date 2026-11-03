@@ -418,7 +418,8 @@ impl AgentActivityModel {
 
     /// The foreground agent process disappeared: the pane is back to a
     /// plain shell. Clears process-owned panes only — spawn- and
-    /// title-owned panes have their own exit/clearing paths.
+    /// title-owned panes have their own exit/clearing paths. The pane's report
+    /// record goes with its identity.
     pub fn process_gone(&mut self, pane_id: &str) {
         if !self.process_owned_panes.contains(pane_id) {
             return;
@@ -427,6 +428,9 @@ impl AgentActivityModel {
         self.agent_status.remove(pane_id);
         self.pane_agents.remove(pane_id);
         self.process_owned_panes.remove(pane_id);
+        // The record is the lost agent's: the next one named here starts with none. A caller
+        // that settles a turn does so first (`program_exited`, then `drop_report`).
+        self.reports.remove(pane_id);
         self.track_status_change(pane_id, old, Instant::now());
     }
 
