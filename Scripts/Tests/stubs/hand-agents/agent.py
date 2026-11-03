@@ -29,7 +29,7 @@ Typed lines (the whole line, then Enter):
   fgchild             run `sleep 6.123` in its own process group as the terminal's
                       foreground group, wait for it, then take the terminal back (an
                       agent handing the terminal to a child it runs)
-  exit                leave, with code 0
+  exit [code]         leave, with that exit code (default 0)
 
 Startup, per profile:
   claude    title `✳ Claude Code`; sends the OSC 7501 probe and reports (with
@@ -232,6 +232,8 @@ def main():
             elif words[0] == "fgchild":
                 fgchild()
             elif words[0] == "exit":
+                if len(words) > 1 and words[1].isdigit():
+                    sys.exit(int(words[1]))
                 return
 
 

@@ -350,7 +350,8 @@ git -C "$W_REPO" config user.name Tester
 echo "# app" > "$W_REPO/README.md"
 git -C "$W_REPO" add -A
 git -C "$W_REPO" commit -q -m first
-# Two more worktrees, for the case that fills the mount cap.
+# Two more worktrees, for the cases about tabs of a worktree nobody selected since the
+# relaunch (repo-c is the one a case closes).
 git -C "$W_REPO" worktree add -q -b wt-b "$W/repo-b"
 git -C "$W_REPO" worktree add -q -b wt-c "$W/repo-c"
 
@@ -1631,6 +1632,230 @@ case_other_worktree_notifies() {
   stepn "worktree repo-b, not selected: done" "$SESS_B"
 }
 
+
+# Kills this world's host, by pid: only a process of this run's own directory is signalled
+# (the way `cleanup` finds the hosts).
+kill_world_hosts() {
+  local pid
+  for pid in $(pgrep -f "$RUN" 2>/dev/null); do
+    is_a_host "$pid" && kill -9 "$pid" 2>/dev/null
+  done
+  return 0
+}
+
+# The number of sessions the attention read reports as running.
+running_rows() {
+  attention_rows | python3 -I -c 'import json, sys
+print(sum(1 for line in sys.stdin if json.loads(line).get("running") is True))'
+}
+
+# Waits until the app has posted $2 notifications since baseline $1, for $3 s.
+posted_reached() { [ "$(( $(posted_count) - $1 ))" -ge "$2" ]; }
+
+# A hidden agent tab whose session ends mid-turn. Mode "spawn" is a Sirio-launched agent
+# (`surface terminal open --agent`): restored by the relaunch, spawn-owned, and the PTY child is the
+# stub itself, so the host names no program. Mode "exec" is a hand-typed `exec codex`: the stub
+# takes the shell's place, the host names no program either, and the report's `app=` gives the
+# identity. The stub exits with code $2; the session's end is the host's `Exited` with that code.
+hidden_agent_ends_mid_turn() { # mode code
+  local mode="$1" code="$2" base
+  case "$mode" in
+    spawn) open_pane --agent codex ;;
+    exec)
+      open_pane
+      type_line "$PANE" "exec codex"
+      wait_agent "$PANE" codex 5 ;;
+  esac
+  PANE_B="$PANE"; SESS_B="$SESS"
+  sleep 3
+  start_agent codex
+  PANE_A="$PANE"; SESS_A="$SESS"
+  relaunch_app
+  wait_agent "$PANE_A" codex 15
+  sleep 2
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 5
+  sleep 1.3
+  stepn "hidden $mode agent tab B, mid-turn" "$SESS_B"
+  base="$(posted_count)"
+  type_line "$PANE_B" "exit $code"
+  wait_until 8 posted_reached "$base" 1 || true
+  sleep 1.5
+  stepn "hidden $mode agent tab B, its session ended with code $code" "$SESS_B"
+  expect_posted "$base" 1 "the end of a hidden $mode agent tab's session mid-turn (exit $code)"
+  expect_attention "$SESS_B" unread true "the end of a hidden $mode agent tab mid-turn (exit $code)"
+  expect_attention "$SESS_B" running false "the end of a hidden $mode agent tab mid-turn (exit $code)"
+  # Showing the tab attaches a link to the exited session: its own end is the same end, and
+  # makes no second stop.
+  base="$(posted_count)"
+  ctl tab select "$(tab_index_of "$PANE_B")" >/dev/null
+  sleep 4
+  expect_posted "$base" 0 "showing a tab whose session already ended (exit $code)"
+  stepn "hidden $mode agent tab B shown after its end" "$SESS_B"
+}
+
+case_background_agent_tab_ends_mid_turn() { hidden_agent_ends_mid_turn spawn 0; }
+# A non-zero exit takes the path that skips the settle and goes straight to the exit result.
+case_background_agent_tab_fails_mid_turn() { hidden_agent_ends_mid_turn spawn 3; }
+case_background_exec_agent_ends_mid_turn() { hidden_agent_ends_mid_turn exec 0; }
+
+# The host dies under two tabs mid-turn, the one on screen and a hidden one: both end the same
+# way, and a fresh host is then used by the hidden tab, whose turn makes one stop.
+case_background_host_lost() {
+  local base
+  relaunch_with_a_hidden_tab codex
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 5
+  type_line "$PANE_A" work
+  wait_status "$SESS_A" running 5
+  sleep 1.3
+  stepn "before the host dies: A and B mid-turn" "$SESS_B"
+  base="$(posted_count)"
+  kill_world_hosts
+  # The links' grace is 10 s; the listener's the same.
+  wait_until 25 posted_reached "$base" 2 || true
+  sleep 2
+  stepn "after the host died: B" "$SESS_B"
+  stepn "after the host died: A" "$SESS_A"
+  expect_attention "$SESS_B" running false "the hidden tab B after the host was lost"
+  expect_attention "$SESS_A" running false "the tab on screen A after the host was lost"
+  expect_attention "$SESS_B" unread true "the hidden tab B after the host was lost"
+  expect_attention "$SESS_A" unread true "the tab on screen A after the host was lost"
+  expect_posted "$base" 2 "the host lost under two tabs mid-turn (one stop each)"
+  [ "$(posted_since "$base" | python3 -I -c 'import json, sys
+print(len({(json.loads(l)["title"], json.loads(l)["body"]) for l in sys.stdin}))')" = 1 ] || fail "the two tabs were not told the same thing: $(posted_since "$base" | tr '\n' ' ')"
+  # Showing B ensures a new host; B is a plain shell there. A full turn through its link, and
+  # the listener that follows the new adoption, make one stop.
+  ctl tab select "$(tab_index_of "$PANE_B")" >/dev/null
+  sleep 8
+  type_line "$PANE_B" codex
+  wait_agent "$PANE_B" codex 15
+  sleep 2.5
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 5
+  sleep 1.3
+  base="$(posted_count)"
+  type_line "$PANE_B" done
+  wait_status "$SESS_B" done 5
+  expect_posted "$base" 1 "a turn on the fresh host"
+  stepn "B on the fresh host: one stop" "$SESS_B"
+}
+
+# A worktree nobody selected since the relaunch is closed while its agent is mid-turn: the end
+# of its session is the app's own doing and posts nothing, and nothing of it stays running.
+case_close_hidden_worktree_mid_turn_is_silent() {
+  local wt_c base running_before
+  wt_c="$(worktree_id_of "$W/repo-c")"
+  [ -n "$wt_c" ] || fail "the project does not list the worktree repo-c"
+  ctl select-workspace --workspace "$wt_c" >/dev/null
+  sleep 2
+  OPEN_DIR="$W/repo-c" start_agent codex
+  PANE_B="$PANE"; SESS_B="$SESS"
+  ctl select-workspace --workspace "$wt" >/dev/null
+  sleep 2
+  relaunch_app
+  running_before="$(running_rows)"
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 5
+  sleep 1.3
+  [ "$(running_rows)" = "$(( running_before + 1 ))" ] || fail "the running count did not count the hidden turn: $(attention_rows | tr '\n' ' ')"
+  base="$(posted_count)"
+  ctl close-workspace --workspace "$wt_c" >/dev/null
+  sleep 6
+  stepn "repo-c closed mid-turn" "$SESS_B"
+  expect_posted "$base" 0 "closing a worktree whose hidden tab is mid-turn"
+  [ -z "$(attention_get "$SESS_B" status)" ] || [ "$(attention_get "$SESS_B" status)" = null ] || fail "the closed worktree's session still has status '$(attention_get "$SESS_B" status)'"
+  [ "$(running_rows)" = "$running_before" ] || fail "the running count is $(running_rows), it was $running_before before the turn: $(attention_rows | tr '\n' ' ')"
+}
+
+# A Sirio-launched agent tab whose session exits (code 3) while the app is down, once hidden and
+# once on screen after the relaunch. Prints the number of notifications the relaunch posted.
+exit_while_the_app_is_down() { # hidden|shown
+  if [ "$1" = shown ]; then
+    start_agent codex
+    open_pane --agent codex
+    PANE_X="$PANE"; SESS_X="$SESS"
+    sleep 3
+  else
+    open_pane --agent codex
+    PANE_X="$PANE"; SESS_X="$SESS"
+    sleep 3
+    start_agent codex
+  fi
+  ctl quit >/dev/null 2>&1 || true
+  for _ in $(seq 1 100); do alive "$APP_PID" || break; sleep 0.2; done
+  alive "$APP_PID" && fail "sirio did not quit after sirioctl quit"
+  APP_PID=""
+  type_line "$PANE_X" "exit 3"
+  sleep 2
+  app_start
+  ctl select-workspace --workspace "$wt" >/dev/null
+  sleep 6
+  stepn "$1 agent tab X after its session exited while the app was down" "$SESS_X"
+}
+
+case_background_exit_while_app_down_is_silent() {
+  local hidden shown
+  exit_while_the_app_is_down hidden
+  hidden="$(posted_count)"
+  echo "  the relaunch posted $hidden for the hidden tab: $(posted_rows | tr '\n' ' ')"
+  exit_while_the_app_is_down shown
+  shown="$(( $(posted_count) - hidden ))"
+  echo "  the relaunch posted $(posted_count) in all, so $shown for the tab on screen (the hidden tab of the first run included)"
+  [ "$hidden" = "$shown" ] || fail "a hidden tab's session that exited while the app was down posted $hidden, the tab on screen $shown"
+  [ "$hidden" = 0 ] || fail "a session that exited while the app was down posted $hidden at the relaunch"
+}
+
+case_show_session_of_hidden_tab_is_one_stop() {
+  local wt_b base
+  wt_b="$(worktree_id_of "$W/repo-b")"
+  [ -n "$wt_b" ] || fail "the project does not list the worktree repo-b"
+  ctl select-workspace --workspace "$wt_b" >/dev/null
+  sleep 2
+  OPEN_DIR="$W/repo-b" start_agent codex
+  PANE_B="$PANE"; SESS_B="$SESS"
+  ctl select-workspace --workspace "$wt" >/dev/null
+  sleep 2
+  relaunch_app
+  # From the selected worktree: the session is not a tab of it, so a tab that shows it opens.
+  ctl panel show "$PANE_B" >/dev/null
+  sleep 4
+  step "session $PANE_B shown from the selected worktree"
+  type_line "$PANE_B" work
+  sleep 2
+  sleep 1.3
+  base="$(posted_count)"
+  type_line "$PANE_B" done
+  sleep 3
+  expect_posted "$base" 1 "a turn in a hidden tab whose session a Show-session tab also shows"
+  stepn "show session: one stop for one turn" "$SESS_B"
+}
+
+# End all sessions (`host.shutdown {force}`, the call `perform_end_all_sessions` makes, here from
+# another client of the same host): the tab on screen and a hidden one, both mid-turn, are told the
+# same. It shuts the host down, so it runs last.
+case_end_all_sessions_parity() {
+  local base
+  relaunch_with_a_hidden_tab codex
+  type_line "$PANE_B" work
+  wait_status "$SESS_B" running 5
+  type_line "$PANE_A" work
+  wait_status "$SESS_A" running 5
+  sleep 1.3
+  base="$(posted_count)"
+  SIRIO_HOST_HOME="$W/host" "$PROBE" shutdown --force >/dev/null
+  wait_until 25 posted_reached "$base" 2 || true
+  sleep 3
+  stepn "after End all sessions: B" "$SESS_B"
+  stepn "after End all sessions: A" "$SESS_A"
+  echo "  posted: $(posted_since "$base" | tr '\n' ' ')"
+  expect_posted "$base" 2 "End all sessions under a tab on screen and a hidden one (one each)"
+  [ "$(posted_since "$base" | python3 -I -c 'import json, sys
+print(len({(json.loads(l)["title"], json.loads(l)["body"]) for l in sys.stdin}))')" = 1 ] || fail "the hidden tab was not told what the tab on screen was: $(posted_since "$base" | tr '\n' ' ')"
+  expect_attention "$SESS_B" running false "the hidden tab after End all sessions"
+  expect_attention "$SESS_A" running false "the tab on screen after End all sessions"
+}
+
 run_case() { # name
   CASE_N=$((CASE_N + 1))
   CASE_NAME="$1"
@@ -1692,6 +1917,14 @@ run_case background_finish_at_relaunch_is_silent
 run_case background_exit_mid_turn_is_one_stop
 run_case control_session_gets_no_state
 run_case other_worktree_notifies
+run_case background_agent_tab_ends_mid_turn
+run_case background_agent_tab_fails_mid_turn
+run_case background_exec_agent_ends_mid_turn
+run_case show_session_of_hidden_tab_is_one_stop
+run_case close_hidden_worktree_mid_turn_is_silent
+run_case background_exit_while_app_down_is_silent
+run_case background_host_lost
+run_case end_all_sessions_parity
 
 [ "$CASES_RUN" -gt 0 ] || { echo "FAIL: --only named no case" >&2; exit 1; }
 if [ -n "$ONLY" ]; then label=PARTIAL; else label=OK; fi
