@@ -23,11 +23,12 @@ Scripts/Tests/test-update-ui-e2e.sh   # -> prints "UPDATE UI E2E OK"
 # The host foundation: a real sirio-host started detached, adopted, killed
 # around, idled out and drained across a protocol major; --out-dir DIR keeps
 # every host's log and state; SIRIO_HOST_E2E_VERBOSE=1 prints each probe line. Cases
-# program_is_named .. events_carry_program_and_status (Linux and macOS; they need python3) type
+# program_is_named .. repeated_report_is_one_event (Linux and macOS; they need python3) type
 # real commands into a /bin/sh -i the host owns and read `term.list`'s program and status,
 # the OSC 7501 probe answer (at most one a second, and before a DA1 reply), that bytes from
 # `term.feed` or the prelude are never scanned, that no argv, script or cwd reaches host.log,
-# and the `program` and `status` events a `host_probe term-events <ms>` subscriber receives.
+# the `program` and `status` events a `host_probe term-events <ms>` subscriber receives (a report
+# repeated five times is one event), and that a program's argv is bounded to 4096 bytes in all.
 Scripts/Tests/test-host-e2e.sh      # -> prints "HOST E2E OK (<n> cases, <s>s)"
 # Whether a detached process survives its parent's world, row by row.
 Scripts/Tests/probe-host-detach.sh  # -> prints "DETACH PROBE OK"
@@ -94,15 +95,17 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # `codex` that Layer D would name but is not the foreground, and an omp title. It then types the
 # stub's OSC 7501 reports (work, idle, done, block, error, clear) and `hook <status>` lines and
 # asserts the status the tab shows, its unread mark, running flag and the notifications the app
-# posted (a baseline per step): a silent startup, claude's and codex's turns (a frame at running,
+# posted (a baseline per step): a silent startup, claude's, pi's and codex's turns (codex's `idle`
+# right after its `done` keeps the finish) (a frame at running,
 # needs-input and done), a first `block`, a short turn, an exit or a clear mid-turn, hooks that
 # yield to a live report and rule without one, a Sirio-spawned `--agent claude` tab, a
-# `system.quit` and relaunch mid-turn, and the argv kept out of the app's stderr. OpenCode, which
+# `system.quit` and relaunch mid-turn (the startup posts nothing on its own), and the argv kept out of the app's stderr. OpenCode, which
 # reports nothing in the terminal, is read from its service: a stub (stubs/opencode-server.py: the
 # real v2 endpoints, Basic auth, an SSE stream; driven by lines in $RUN/oc.cmd) registers itself
 # in the world's own $XDG_STATE_HOME/opencode/service.json, and the cases cover a session linked
 # by its title and one linked by being the first in its folder (a frame at running and at done), a
-# permission ask, two panes in one folder (no guess, then each by its title), a failed turn (the
+# permission ask, a link kept through a title an older session also has, a turn under a second
+# (finished, +1), two panes in one folder (no guess, then each by its title), a failed turn (the
 # service's error text and password stay out of the app's stderr), a relaunch, and a service that
 # goes away (the mark stays, no status, one `[opencode-watch] <kind>` line). --out-dir DIR
 # keeps transcript.log, steps.log (each step's `panel list` and `surface attention read`, and the

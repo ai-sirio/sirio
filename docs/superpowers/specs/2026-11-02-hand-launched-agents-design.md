@@ -121,10 +121,14 @@ That older host is also the one already running when Sirio updates. The client a
 any live host of the same major (`sirio_host_client/src/ensure.rs`, `adopt_if_live`) and
 replaces one (`retire`) only when it lacks the terminal capability and has no sessions.
 So while any terminal stays open, the old host keeps serving every pane, new tabs
-included, and the new detection reaches none of them. It starts once every session has
-ended: all tabs closed, or **End all sessions**. This is accepted (decision 9). There is
-no app-side fallback that scans the attach stream and answers the probe. Nothing here
-retires a host that has sessions (§4).
+included, and the new detection reaches none of them. Closing every tab is not enough
+either: the app holds a host connection for its whole life (`ensure.rs` returns it and the
+app keeps it), and a host leaves on its own only with no client and no session
+(`try_begin_idle_exit`, idle grace 60 s in `sirio_host/src/main.rs`). The new host starts
+once the old one has gone: after **End all sessions**, or after every terminal is closed and
+Sirio stays closed for over a minute (an update that relaunches within that minute adopts the
+old host again). This is accepted (decision 9). There is no app-side fallback that scans the
+attach stream and answers the probe. Nothing here retires a host that has sessions (§4).
 
 The app resolves the agent from that argv, not from a walk of the shell's descendants:
 
@@ -184,7 +188,9 @@ written to the PTY.
 | `done` | Done | green ring, full: *finished* |
 | `idle` after a `working` that lasted at least 1 s | Done | green ring, full: *finished* |
 | `idle` after a `blocked` that came inside a turn (for example a rejected permission) | Done | green ring, full. NeedsInput → Done is not a new stop, so no second notification |
-| `idle` with no turn before it (startup, the 10 ms Codex blip, a startup dialog that was answered), `clear` | no status | the agent's mark alone |
+| `idle` after a turn too short to count (the 10 ms Codex blip, a startup dialog that was answered), `idle` with no turn open and no status shown (startup), `clear` | no status | the agent's mark alone |
+| `idle` with no turn open, after a `done` or an `error` (Codex sends one right after every `done`) | the status stays | *finished* or the red ring, until the next `working` or `blocked` |
+| `idle` with no turn open, after a `blocked` that came outside any turn | no status | the agent's mark alone |
 
 - **A turn** starts at `working` and ends at the first `idle`, `done` or `error`. A
   `blocked` spell inside it does not end it. *[my call]*
@@ -232,9 +238,14 @@ an exit mid-turn still produces its stop. An unread mark already set stays until
 
 ### §3.5 Tabs, sidebar, notifications
 
-A hand-started agent behaves exactly like one Sirio launched: same mark in the tab
-(`tab_agent_mark` / `tab_icon`, `main.rs:12537`, `:4884`) and in the sidebar row, same
-rings, same unread-sessions stops. *[my call]* Today `tab_agent_mark` falls back to the
+A hand-started agent behaves like one Sirio launched while its tab is attached: same mark in
+the tab (`tab_agent_mark` / `tab_icon`, `main.rs:12537`, `:4884`) and in the sidebar row, same
+rings, same unread-sessions stops. *[my call]* **The limit.** A hand-typed agent's program and
+status reach the app only through its tab's attached terminal. After a relaunch only the tab
+on screen attaches (the others attach as they are shown), and an evicted worktree's tabs
+detach (`docs/agents/architecture/panes.md`). Until a tab attaches, its turns make no stop and
+no unread mark, while a Sirio-launched agent in the same place still notifies through its
+hooks. Today `tab_agent_mark` falls back to the
 activity model only for a tab's primary pane; a split tab follows unread-sessions F2
 (the most urgent pane decides the status). The tab label does not change (§2).
 `sirioctl panel list` reports the recognised agent in its `agent` field, which is how
@@ -258,7 +269,9 @@ Sirio:
   match on the pane's canonical cwd; `GET /api/session/active`; `GET
   /api/session/{id}/permission` and `/form`) and subscribes to `GET /api/event` (SSE,
   `data:` frames, a `server.connected` first, nothing replayed). Per session: busy on
-  `session.execution.started`; idle on `.succeeded` and `.interrupted`; error on `.failed`;
+  `session.execution.started`; done on `.succeeded` and `.interrupted` (the service's own end of
+  a turn is a finish however short it was; a session the list reports as not running is idle,
+  no status); error on `.failed`;
   waiting on `permission.asked` and `form.created`, busy again on `permission.replied`,
   `permission.rejected`, `form.replied` and `form.cancelled`. `session.execution.*` carry
   no `location`, so they map through `data.sessionID`; the title comes from
@@ -272,7 +285,9 @@ Sirio:
   follows that rename. So until then a pane links to the one session in its cwd that was
   created after the pane's `opencode` started, provided **it is the only pane running
   `opencode` in that cwd**; and a pane that is linked keeps its session when its `OC | <t>`
-  title arrives before the rename does, while no titled session in the folder matches it.
+  title arrives before the rename does, while no titled session in the folder matches it, and
+  while the held session is in the folder and has the pane's title even if an older session
+  of the folder has the same one (the held one wins).
   Otherwise it waits for the title. If two panes match, or none, the pane shows the
   OpenCode mark and **no status**: no guessing (anti-goal). A reconnect or a relaunch
   restores Busy and Waiting from REST, but not a finished or failed result: the seed does
@@ -349,14 +364,21 @@ is the same path and adds nothing to attribute.
   kept per session.
 - `protocol/host-v1/`: capability ledger, schema, conformance case.
 - `docs/agents/e2e-tests.md`: the new E2E (§6).
-- The release notes of the version that ships it carry three lines:
-  - agents typed by hand are recognised once every terminal open at update time has been
-    closed, or after **End all sessions** (decision 9);
+- The release notes of the version that ships it carry five lines:
+  - agents typed by hand are recognised once the old host has gone: after **End all
+    sessions**, or after every terminal is closed and Sirio stays closed for over a minute
+    (decision 9; closing the tabs of a running Sirio is not enough);
   - in a terminal tab whose session has named a program, an agent title that arrives before
     the program is named gives the tab its agent mark only, and the first 2 seconds set no
     status from titles or screen (§9, 5);
   - OpenCode's status needs OpenCode v2's background service; with 1.x, or with no service
-    running, the mark shows without a status (§3.6).
+    running, the mark shows without a status (§3.6);
+  - a hand-typed agent's turns make a stop and an unread mark only while its tab is attached:
+    after a relaunch that is the tab on screen, and the others as they are shown, while a
+    Sirio-launched agent in an unattached tab still notifies through its hooks (§3.5);
+  - Sirio-launched Claude, Codex and omp tabs show *finished* at a turn's end, instead of
+    *waiting for you*, once the host reads their reports (M9: their Stop hook used to say
+    *waiting for you*).
 
 ## §6 How it is proven
 
@@ -513,8 +535,21 @@ marked *[my call]* and is open to the user.
    - Each failure kind is logged once per app run, by name and never with content.
 8. **Known limits, left as they are.**
    - A crash mid-turn reads "finished", per §3.3.
-   - A later `idle` clears Done or Error: omp sends one at the next prompt (measured: a
-     second `idle` at Enter).
+   - After a relaunch, a Codex tab whose last turn ended shows no status: its last report
+     is `idle`, which is what the host's record holds, so the seed has no finish to show.
+   - A hand-typed agent's program and status reach the app only through its tab's attached
+     terminal (§3.5): until a tab attaches (after a relaunch only the tab on screen does, and
+     an evicted worktree's tabs detach), its turns make no stop and no unread mark.
+   - Another OpenCode client's session created in the same folder after the pane started can
+     link to that pane by the first-turn rule, which counts only Sirio's panes (M8).
+   - Ctrl+Z on a working agent reads *finished* (the shell has the terminal), and after `fg`
+     there is no status until the agent's next report (M11).
+   - An older Sirio on a host this version started loses Claude's title status: Claude drops
+     its title once the host answers its probe, and an older app cannot read 7501 (critic 6).
+   - Under `ssh` the first remote `app=` names the tab for the whole connection, and a remote
+     crash mid-turn stays running until ssh exits (critic 10).
+   - Replaying a recorded agent session in a plain terminal (`cat`, `less -r`) shows the
+     agent's mark and can notify (critic 11).
    - After a reconnect or relaunch OpenCode restores busy and waiting, but not a finished or
      failed result.
    - A subagent's child session can keep OpenCode's first-turn link from forming until the
@@ -522,3 +557,22 @@ marked *[my call]* and is open to the user.
    - An OpenCode tab whose cwd the host cannot read is not counted by the "only tab in that
      folder" rule.
    - The Windows paths compile on Linux and are not run.
+
+9. **`idle` keeps a finish.** An `idle` with no turn open leaves a Done or an Error as it is,
+   clears a NeedsInput that came outside any turn, and leaves no status as none. Codex 0.166
+   sends an `idle` right after every `done` (measured live), which used to wipe the finish
+   milliseconds after the stop. omp's `idle` at Enter, followed by its next `working`, still
+   works. *[my call]*
+10. **The host sends a status once per change.** A report that changes neither the record
+    (state, `kind`, `app`) nor its `at_ms` sends no event, so a program repeating `working`
+    per tool, or a `cat` of a log full of reports, is not a frame to every subscriber and a
+    repaint per report. *[my call]*
+11. **Layer D losing an agent takes its record with it.** It settles a turn that was mid-way
+    (a stop), drains it, drops the record and only then clears the identity, the order of an
+    exit, so the next agent named in that session starts with no record. A `Program(None)`
+    settles and clears only for a session that named a program: a reconnect's re-seed sends
+    one for a session that never did and must end nothing. *[my call]*
+12. **OpenCode's explicit end is a finish.** `session.execution.succeeded` and `.interrupted`
+    are Done, so the one-second floor does not hide a short turn; `.failed` is Error. A
+    session the list reports as not running stays Idle. The watch follows no redirect, and a
+    program's argv in a listing is bounded to 4096 bytes in all. *[my call]*
