@@ -42,7 +42,8 @@ pub(crate) const UNEXPECTED_STREAM: &str = "unexpected_stream";
 pub(crate) const STALLED: &str = "stalled";
 
 /// One endpoint's calls. Both agents ignore the proxy variables (the service is on this
-/// machine) and ask for no compression (a stream must not be buffered by a decoder).
+/// machine), follow no redirect (the registration's URL was checked for loopback, a
+/// `Location` is not) and ask for no compression (a stream must not be buffered by a decoder).
 pub(crate) struct Client {
     calls: Agent,
     stream: Agent,
@@ -55,6 +56,7 @@ impl Client {
     pub(crate) fn new(endpoint: &Endpoint) -> Client {
         let calls = Agent::config_builder()
             .proxy(None)
+            .max_redirects(0)
             .timeout_global(Some(CALL_TIMEOUT))
             .build()
             .new_agent();
@@ -62,6 +64,7 @@ impl Client {
         // liveness check (the heartbeat) and the stop flag.
         let stream = Agent::config_builder()
             .proxy(None)
+            .max_redirects(0)
             .timeout_connect(Some(CALL_TIMEOUT))
             .timeout_recv_response(Some(CALL_TIMEOUT))
             .build()
