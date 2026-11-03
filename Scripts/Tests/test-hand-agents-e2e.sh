@@ -62,6 +62,10 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #   opencode_first_turn_links      one OpenCode pane and a session born after it: linked with no
 #                                  title, busy -> running, idle -> done (+1); the TUI's title
 #                                  before the service's rename keeps Done and adds no stop
+#   opencode_duplicate_title_keeps_link
+#                                  an older session of the folder has the title the service later
+#                                  gives the pane's first-turn session: the link stays, and the
+#                                  next turn shows running, then done (+1)
 #   two_opencode_panes_one_folder  two panes in one folder, one then two sessions: no status on
 #                                  either; with titles `OC | a`, `OC | b`: each follows its own
 #   opencode_failed_turn_is_error  a failed turn -> error; the service's error text and its
@@ -1059,6 +1063,40 @@ case_opencode_first_turn_links() {
   leave_opencode "$PANE"
 }
 
+case_opencode_duplicate_title_keeps_link() {
+  # An older session of the folder already has the title the service gives this pane's
+  # session (a generic one, "Greeting"): the pane was linked by the first-turn rule, and
+  # the link must survive the rename and the TUI's title, which now match two sessions.
+  local base
+  oc "create ses_old $OC_DIR"
+  oc "rename ses_old Greeting"
+  start_agent opencode
+  oc "create ses_d $OC_DIR"
+  oc "busy ses_d"
+  wait_status "$SESS" running 4
+  sleep 1.3
+  base="$(posted_count)"
+  oc "idle ses_d"
+  wait_status "$SESS" done 4
+  expect_posted "$base" 1 "the end of the first turn"
+  base="$(posted_count)"
+  oc "rename ses_d Greeting"
+  type_line "$PANE" "title OC | Greeting"
+  sleep 1.5
+  hold_status "$SESS" done 2
+  expect_posted "$base" 0 "a rename to a title another session has"
+  stepn "opencode: first turn kept across a duplicate title" "$SESS"
+  oc "busy ses_d"
+  wait_status "$SESS" running 4
+  sleep 1.3
+  base="$(posted_count)"
+  oc "idle ses_d"
+  wait_status "$SESS" done 4
+  expect_posted "$base" 1 "the end of a turn under a duplicate title"
+  stepn "opencode: a later turn under a duplicate title" "$SESS"
+  leave_opencode "$PANE"
+}
+
 case_two_opencode_panes_one_folder() {
   local pane_a sess_a pane_b sess_b base
   start_agent opencode
@@ -1231,6 +1269,7 @@ run_case agent_hands_the_terminal_to_a_child
 run_case argv_stays_out_of_app_stderr
 run_case opencode_three_states
 run_case opencode_first_turn_links
+run_case opencode_duplicate_title_keeps_link
 run_case two_opencode_panes_one_folder
 run_case opencode_failed_turn_is_error
 run_case opencode_after_relaunch

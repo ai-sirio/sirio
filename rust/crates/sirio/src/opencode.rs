@@ -215,6 +215,7 @@ impl OpenCodeStatus {
                 cwd: running.cwd.clone(),
                 title: self.titles.get(pane_id).cloned().unwrap_or_default(),
                 started_ms: running.started_ms,
+                held: self.reported.get(pane_id).map(|(held, ..)| held.clone()),
             })
             .collect();
         let mut links = link(&panes, &self.sessions);

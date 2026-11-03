@@ -23,12 +23,15 @@ pub struct OcPane {
     pub title: String,
     /// Wall-clock milliseconds at which the app learned the program was `opencode`.
     pub started_ms: u64,
+    /// The session the pane is linked to now, if any.
+    pub held: Option<String>,
 }
 
 /// `(pane_id, session_id)` for each pane that can be linked with certainty.
 ///
 /// - By title: the pane's title is `OC | <title>`, and exactly one session in the pane's
-///   directory has that title.
+///   directory has that title; or, among several with it, the one the pane already holds
+///   (an older session with a generic title must not break a link that is sure).
 /// - By the first turn, while the title is still `OpenCode`: the pane is the only
 ///   `opencode` pane in its directory, and exactly one session there was created at or
 ///   after the pane's `opencode` started.
@@ -41,7 +44,11 @@ pub fn link(panes: &[OcPane], sessions: &[OcSession]) -> Vec<(String, String)> {
                 .filter(move |session| session.directory == pane.cwd)
         };
         let chosen = if let Some(title) = pane.title.strip_prefix(TITLED) {
-            only(here().filter(|session| !session.title.is_empty() && session.title == title))
+            let titled = || here().filter(|session| !session.title.is_empty() && session.title == title);
+            pane.held
+                .as_deref()
+                .and_then(|held| titled().find(|session| session.id == held))
+                .or_else(|| only(titled()))
         } else if pane.title == UNTITLED {
             let alone = panes.iter().filter(|other| other.cwd == pane.cwd).count() == 1;
             if alone {
