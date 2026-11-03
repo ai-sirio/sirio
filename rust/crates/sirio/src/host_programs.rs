@@ -1,18 +1,20 @@
 //! The app's one listener on the host's `term.sessions` topic, for the tabs no terminal holds.
 //!
 //! A hand-typed agent's program and status reach the app through its terminal's link
-//! (`sirio_terminal`'s `HostLink`). After a relaunch only the tab on screen has a terminal,
-//! and a worktree whose terminals were dropped has none, so their turns would make no stop and
-//! no unread mark. This thread reads the same events from one subscription of its own and
-//! hands them to the GPUI thread, which applies a session's only when its pane is a tab's and no
-//! terminal is bound to it (`SirioWorkspace::apply_host_program_messages`): a bound terminal's
-//! link is the only route for its pane.
+//! (`sirio_terminal`'s `HostLink`). After a relaunch only the tab shown has a running link (the
+//! others open theirs when they are shown), and a worktree not selected since the relaunch has no
+//! terminal at all, so their turns would make no stop and no unread mark. This thread reads the
+//! same events from one subscription of its own and hands them to the GPUI thread, which applies
+//! a session's only when its pane is a known tab's, the app is not closing it and no view bound
+//! under its key is its route (`SirioWorkspace::apply_host_program_messages`,
+//! `TerminalView::has_link`): a running link is the only route for its pane.
 //!
 //! The thread subscribes, then lists (so a change between the two arrives as an event), sends
 //! every listed session in the re-seed's form (a listed session that already exited also sends
 //! its end, after the re-seed, as a link's attach does), and forwards the events. It sends at
 //! most one end per session, as a link's `exited` flag does: a `Closed` after an `Exited` is the
-//! same end. It lists again after a `Lagged` or `Resync`, which a subscription of this topic is
+//! same end, and only the host's `Created`, or a listing that shows the session alive, lets the
+//! id end again. It lists again after a `Lagged` or `Resync`, which a subscription of this topic is
 //! not known to deliver. When the subscription is lost it retries through the reconnect closure
 //! the terminals' links use, at their interval and within their grace; that closure reaches the
 //! same endpoint and never starts a host. After the grace it sends `Lost` and ends, and the next
@@ -117,8 +119,11 @@ fn run(
     tx: &UnboundedSender<Message>,
 ) {
     let mut deadline: Option<Instant> = None;
+    // The sessions whose end has been sent: one end per session for the life of this listener,
+    // across the reconnects of its subscription.
+    let mut ended: HashSet<String> = HashSet::new();
     loop {
-        match subscribed(&client, generation, current, tx) {
+        match subscribed(&client, generation, current, &mut ended, tx) {
             Ended::Stop => return,
             Ended::Lost { established } => {
                 if established {
@@ -156,14 +161,13 @@ fn subscribed(
     client: &TermClient,
     generation: u64,
     current: &AtomicU64,
+    ended: &mut HashSet<String>,
     tx: &UnboundedSender<Message>,
 ) -> Ended {
     let Ok(events) = client.events() else {
         return Ended::Lost { established: false };
     };
-    // The sessions whose end has been sent: one end per session.
-    let mut ended: HashSet<String> = HashSet::new();
-    if let Err(why) = seed(client, generation, &mut ended, tx) {
+    if let Err(why) = seed(client, generation, ended, tx) {
         return why;
     }
     loop {
@@ -181,26 +185,24 @@ fn subscribed(
             event,
             SessionEvent::Lagged { .. } | SessionEvent::Resync { .. }
         ) {
-            match seed(client, generation, &mut ended, tx) {
+            match seed(client, generation, ended, tx) {
                 Ok(()) => {}
                 Err(Ended::Stop) => return Ended::Stop,
                 Err(Ended::Lost { .. }) => return Ended::Lost { established: true },
             }
             continue;
         }
+        // A new session under an id that ended: only the host's `Created` says so. What a
+        // session publishes after its exit (a title) does not make it a new one.
+        if let SessionEvent::Created { session_id } = &event {
+            ended.remove(session_id);
+            continue;
+        }
         let Some((session_id, note)) = host_session_note(&event) else {
             continue;
         };
-        match &note {
-            HostSessionNote::Ended(_) => {
-                if !ended.insert(session_id.to_owned()) {
-                    continue;
-                }
-            }
-            // A session that speaks again after its end is a new one under the same id.
-            HostSessionNote::Activity(_) => {
-                ended.remove(session_id);
-            }
+        if matches!(note, HostSessionNote::Ended(_)) && !ended.insert(session_id.to_owned()) {
+            continue;
         }
         let message = Message::Event {
             generation,
@@ -229,7 +231,15 @@ fn seed(
         .sessions
         .iter()
         .map(|summary| {
-            let exit = summary_exit(summary).filter(|_| ended.insert(summary.session_id.clone()));
+            // A listed session without an exit is alive: any earlier end of that id was another
+            // session's.
+            let exit = match summary_exit(summary) {
+                Some(exit) => ended.insert(summary.session_id.clone()).then_some(exit),
+                None => {
+                    ended.remove(&summary.session_id);
+                    None
+                }
+            };
             ListedSession {
                 session_id: summary.session_id.clone(),
                 events: summary_reseed_events(summary),

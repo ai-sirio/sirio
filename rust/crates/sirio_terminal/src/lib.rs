@@ -2222,6 +2222,9 @@ pub struct TerminalView {
     pending_recreate: bool,
     /// The link reported `Lost` and no new session has opened since.
     session_lost: bool,
+    /// The view gave its session up (`detach`, `shutdown`) and has not opened one since
+    /// (`restart`, `retry`): its link is no route for anything.
+    released: std::cell::Cell<bool>,
     /// The factory-global observer, registered once while Connecting.
     /// Replaced, never stacked: assigning drops the previous subscription,
     /// which unsubscribes it.
@@ -2439,6 +2442,7 @@ impl TerminalView {
             pending_prelude: Vec::new(),
             pending_recreate: false,
             session_lost: false,
+            released: std::cell::Cell::new(false),
             factory_observer: None,
             connecting_factory: None,
             abandoned: std::cell::Cell::new(None),
@@ -2481,6 +2485,7 @@ impl TerminalView {
             pending_prelude: Vec::new(),
             pending_recreate: false,
             session_lost: false,
+            released: std::cell::Cell::new(false),
             factory_observer: None,
             connecting_factory: None,
             abandoned: std::cell::Cell::new(None),
@@ -2545,6 +2550,7 @@ impl TerminalView {
             pending_prelude: Vec::new(),
             pending_recreate: false,
             session_lost: false,
+            released: std::cell::Cell::new(false),
             factory_observer: None,
             connecting_factory: None,
             abandoned: std::cell::Cell::new(None),
@@ -2663,12 +2669,24 @@ impl TerminalView {
         self.session_lost
     }
 
-    /// Whether a session link runs for this view: its program and status reach the app through
-    /// the link. A restored tab's view is created with its tab but opens its link on its first
-    /// render, so a tab not shown since a relaunch has none; so has a view with no host yet, one
-    /// whose last open failed and one whose session was lost.
+    /// Whether the view gave its session up (`detach`, `shutdown`) and has not opened one since.
+    pub fn is_released(&self) -> bool {
+        self.released.get()
+    }
+
+    /// Whether this view is its session's route: it has opened its link or is opening it (the
+    /// factory has not answered yet), the session was not lost, and the view has not given its
+    /// session up. Its program and status then reach the app through the view. A restored tab's
+    /// view is created with its tab but opens its link on its first render, so a tab not shown
+    /// since a relaunch has none; so has a view with no open attempted yet, one whose last open
+    /// failed, one whose session was lost and one that was detached or shut down (until a
+    /// `restart` or `retry` opens a session again).
     pub fn has_link(&self) -> bool {
-        matches!(self.terminal, TerminalState::Running(_)) && !self.session_lost
+        matches!(
+            self.terminal,
+            TerminalState::Running(_) | TerminalState::Connecting
+        ) && !self.session_lost
+            && !self.released.get()
     }
 
     /// Whether this pane is in the failed state (no session link could be
@@ -3043,6 +3061,7 @@ impl TerminalView {
         self.terminal = TerminalState::Pending;
         self.exit_status = None;
         self.session_lost = false;
+        self.released.set(false);
         self.ensure_started(cx);
         cx.notify();
     }
@@ -3093,6 +3112,7 @@ impl TerminalView {
         self.terminal = TerminalState::Pending;
         self.exit_status = None;
         self.session_lost = false;
+        self.released.set(false);
         self.ensure_started(cx);
         cx.notify();
     }
@@ -3365,6 +3385,7 @@ impl TerminalView {
     /// GPUI entity is still alive, avoiding background-test scheduler
     /// activity during drop.
     pub fn shutdown(&self) {
+        self.released.set(true);
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.shutdown(),
             TerminalState::Pending | TerminalState::Connecting => {
@@ -3378,6 +3399,7 @@ impl TerminalView {
     /// close). Dropping a view must never end a host session, so `Drop`
     /// calls this, not `shutdown()`.
     pub fn detach(&self) {
+        self.released.set(true);
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.detach(),
             TerminalState::Pending | TerminalState::Connecting => {

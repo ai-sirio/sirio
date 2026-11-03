@@ -9822,10 +9822,26 @@ impl SirioWorkspace {
         if !cx.has_global::<BoundTerminalPanes>() {
             cx.set_global(BoundTerminalPanes::default());
         }
+        // A view that is gone or gave its session up is no route for anything.
+        let dead: Vec<gpui::EntityId> = cx
+            .global::<BoundTerminalPanes>()
+            .0
+            .iter()
+            .filter(|(_, (_, held))| {
+                held.upgrade()
+                    .is_none_or(|view| view.read(cx).is_released())
+            })
+            .map(|(id, _)| *id)
+            .collect();
         {
             let bound = &mut cx.global_mut::<BoundTerminalPanes>().0;
-            bound.retain(|_, held| held.upgrade().is_some());
-            bound.insert(terminal.entity_id(), terminal.downgrade());
+            for id in dead {
+                bound.remove(&id);
+            }
+            bound.insert(
+                terminal.entity_id(),
+                (format!("pane-{pane_id}"), terminal.downgrade()),
+            );
         }
         let subscriptions = vec![
             Self::subscribe_terminal(terminal, tab_id, pane_id, cx),
@@ -10605,31 +10621,53 @@ impl SirioWorkspace {
         .detach();
     }
 
-    /// Whether a bound terminal's link follows `session_id` and runs: that link is then the only
-    /// route for the session's program and status. The session a link follows is the view's
-    /// identity (a Show-session tab follows another pane's session), and a restored tab's view
-    /// opens its link on its first render, so until then the listener is the route.
-    fn host_session_is_linked(session_id: &str, cx: &App) -> bool {
+    /// Whether a view bound under `pane_key` is its session's route (`TerminalView::has_link`):
+    /// its link then applies the pane's program and status, and the listener leaves the pane
+    /// alone. The key is the one the view's events are applied under, not the session it
+    /// follows: a Show-session tab's events land under its own pane, so while it is open the pane
+    /// it shows is still fed by its own route, and once it closes (its view lives on) it gates
+    /// nothing. A restored tab's view opens its link on its first render, so until then the
+    /// listener is the route.
+    fn host_pane_is_linked(pane_key: &str, cx: &App) -> bool {
         cx.try_global::<BoundTerminalPanes>().is_some_and(|bound| {
-            bound.0.values().any(|terminal| {
-                terminal.upgrade().is_some_and(|terminal| {
-                    let terminal = terminal.read(cx);
-                    terminal.has_link() && terminal.identity().pane_id() == session_id
-                })
+            bound.0.values().any(|(key, terminal)| {
+                key == pane_key
+                    && terminal
+                        .upgrade()
+                        .is_some_and(|terminal| terminal.read(cx).has_link())
             })
         })
     }
 
+    /// The live view bound under `pane_key`, in any state: the one a listener end puts its shell
+    /// evidence under. The one whose link runs wins.
+    fn bound_view_of_pane(pane_key: &str, cx: &App) -> Option<Entity<TerminalView>> {
+        let bound = cx.try_global::<BoundTerminalPanes>()?;
+        let views: Vec<Entity<TerminalView>> = bound
+            .0
+            .values()
+            .filter(|(key, _)| key == pane_key)
+            .filter_map(|(_, terminal)| terminal.upgrade())
+            .collect();
+        views
+            .iter()
+            .find(|view| view.read(cx).has_link())
+            .or_else(|| views.first())
+            .cloned()
+    }
+
     /// What the listener may tell the activity model about `pane_key`: its program, status and
-    /// title, while the pane is a known tab's and no link runs for it.
+    /// title, while the pane is a known tab's, no link runs for it and the app is not closing it.
     fn host_programs_feeds(&self, pane_key: &str, cx: &App) -> bool {
-        !Self::host_session_is_linked(pane_key, cx) && self.session_for_pane(pane_key).is_some()
+        !self.host_programs.closing.contains(pane_key)
+            && !Self::host_pane_is_linked(pane_key, cx)
+            && self.session_for_pane(pane_key).is_some()
     }
 
     /// What the listener may end for `pane_key`: the same, or a pane it fed whose tab is gone, so
     /// that what it fed does not outlive the tab.
     fn host_programs_ends(&self, pane_key: &str, cx: &App) -> bool {
-        !Self::host_session_is_linked(pane_key, cx)
+        !Self::host_pane_is_linked(pane_key, cx)
             && (self.session_for_pane(pane_key).is_some()
                 || self.host_programs.fed.contains(pane_key))
     }
@@ -10645,8 +10683,6 @@ impl SirioWorkspace {
         if !self.host_programs_feeds(pane_key, cx) {
             return;
         }
-        // A session that speaks is not the one that was being closed.
-        self.host_programs.closing.remove(pane_key);
         self.host_programs.fed.insert(pane_key.to_owned());
         self.apply_activity_event(pane_key, event, None, cx);
     }
@@ -10669,7 +10705,13 @@ impl SirioWorkspace {
         if !self.host_programs_ends(pane_key, cx) {
             return;
         }
-        self.apply_activity_event(pane_key, event, None, cx);
+        // An exit keeps the shell evidence of the view bound to the pane, as an attached
+        // terminal's does: `sync_entity_evidence` would otherwise wipe the status it sets.
+        let view = match event {
+            TerminalActivityEvent::ChildExited { .. } => Self::bound_view_of_pane(pane_key, cx),
+            _ => None,
+        };
+        self.apply_activity_event(pane_key, event, view.as_ref(), cx);
         self.host_programs.fed.remove(pane_key);
         if self.session_for_pane(pane_key).is_none() {
             self.forget_pane_activity(pane_key);
@@ -10781,8 +10823,20 @@ impl SirioWorkspace {
     /// the panes the layouts name, before their sessions end: the host's `Closed` that follows
     /// is then no stop and no evidence, whether the layout rows are still there when it arrives or
     /// not.
-    fn forget_layout_panes(&mut self, session_ids: &HashSet<String>) {
+    ///
+    /// Only the closing worktrees' panes: a layout id that resolves to a tab of another worktree
+    /// (live, parked or persisted) names a session `app_sessions_to_end` leaves alone, since pane
+    /// ids are not unique across layouts.
+    fn forget_layout_panes(&mut self, session_ids: &HashSet<String>, closing: &[PathBuf]) {
         for session_id in session_ids {
+            let elsewhere = self.session_for_pane(session_id).is_some_and(|session| {
+                !closing
+                    .iter()
+                    .any(|path| paths_name_the_same_document(&session.worktree, path))
+            });
+            if elsewhere {
+                continue;
+            }
             self.forget_pane_activity(session_id);
             self.host_programs.closing.insert(session_id.clone());
         }
@@ -11778,7 +11832,7 @@ impl SirioWorkspace {
             self.sync_control_state(cx);
             self.refresh_sidebar(cx);
             // Closing a project ends its sessions (SP2 spec §4.2).
-            self.forget_layout_panes(&layout_ids);
+            self.forget_layout_panes(&layout_ids, &removed_paths);
             self.end_app_sessions(removed_paths.clone(), known_before, layout_ids, cx);
             for path in &removed_paths {
                 let worktrees = self.known_worktree_paths();
@@ -13349,9 +13403,12 @@ impl SirioWorkspace {
         };
         for id in evicted {
             // An evicted worktree is no longer mounted, so release the strong
-            // entity references here. TerminalView::drop then detaches its
-            // session instead of leaving a shell behind in the cache (a host
-            // session lives on; a local one ends with its link).
+            // entity references here. TerminalView::drop is meant to detach
+            // its session then, instead of leaving a shell behind in the cache
+            // (a host session lives on; a local one ends with its link). Today
+            // no view is dropped: `TerminalBindings` holds a strong handle to
+            // every bound terminal for the app's life, so an evicted worktree's
+            // views keep their links.
             self.terminal_pane_cache.remove_worktree(&id);
             self.forget_parked_panes(&id);
             self.parked_worktree_tabs.remove(&id);
@@ -13945,7 +14002,7 @@ impl SirioWorkspace {
                 path.display()
             ),
         }
-        self.forget_layout_panes(&layout_ids);
+        self.forget_layout_panes(&layout_ids, std::slice::from_ref(&path));
         self.end_app_sessions(vec![path.clone()], worktrees, layout_ids, cx);
         let worktree_id = path.to_string_lossy().into_owned();
         // Closing a worktree ends its sessions (SP2 spec §4.2): shut down
@@ -14977,6 +15034,25 @@ impl SirioWorkspace {
             && paths_name_the_same_document(&self.tab_worktree_path(tab.id), &self.working_directory)
     }
 
+    /// Whether `pane_key` is bound to an attached (Show-session) view whose session is a known
+    /// tab's.
+    fn shows_a_session_another_tab_owns(&self, pane_key: &str, cx: &App) -> bool {
+        let Some(bound) = cx.try_global::<BoundTerminalPanes>() else {
+            return false;
+        };
+        bound
+            .0
+            .values()
+            .filter(|(key, _)| key == pane_key)
+            .filter_map(|(_, terminal)| terminal.upgrade())
+            .any(|terminal| {
+                let terminal = terminal.read(cx);
+                terminal.attached()
+                    && terminal.identity().pane_id() != pane_key
+                    && self.session_for_pane(terminal.identity().pane_id()).is_some()
+            })
+    }
+
     /// Only an agent's stop is news: a chat, a terminal pane whose agent is
     /// identified, or one an agent's hooks have already pushed to. A hook can
     /// arrive before the title or the process sweep names the agent, which is
@@ -15074,6 +15150,13 @@ impl SirioWorkspace {
         let Some(session) = self.session_for_pane(&transition.pane_id) else {
             return;
         };
+        // A Show-session tab applies its link's events under its own pane, but the session it
+        // shows belongs to another tab, whose own route (link or listener) makes the stop: this
+        // one would be a second stop, or the same one marked on the wrong tab. A tab that shows
+        // a session no tab owns (a control session) is the only one to report it.
+        if self.shows_a_session_another_tab_owns(&transition.pane_id, cx) {
+            return;
+        }
         if !self.pane_is_agent(&transition.pane_id, &session) {
             return;
         }
@@ -16737,6 +16820,8 @@ impl SirioWorkspace {
                 }
             }
             leaves.insert(leaf);
+            // A session that has a tab again is no longer one being closed.
+            self.host_programs.closing.remove(&summary.session_id);
         }
         // Every adoption of a host ends here: the listener for the tabs no terminal holds
         // follows the host this adoption installed.
@@ -30847,13 +30932,14 @@ struct NewAgentLaunch {
 struct TerminalBindings(HashMap<gpui::EntityId, Vec<gpui::Subscription>>);
 impl gpui::Global for TerminalBindings {}
 
-/// Every terminal `bind_terminal` has bound. The host listener (`host_programs`) leaves a session
-/// alone while a bound terminal whose link follows it runs (`TerminalView::has_link`): a restored
-/// tab's view is bound at once and opens its link on its first render. The session a link follows
-/// is the view's identity, which is not always its pane's key (a Show-session tab is bound under
-/// its own pane and follows another's session), so the gate reads the identity of each.
+/// Every terminal `bind_terminal` has bound, with the pane key (`pane-N`) its events are applied
+/// under. The host listener (`host_programs`) leaves a pane alone while a view bound under its
+/// key is its route (`TerminalView::has_link`): a restored tab's view is bound at once and opens
+/// its link on its first render. A Show-session tab's view is bound under its own pane and its
+/// events are applied there, whatever session it shows, so the key is the bind key and not the
+/// view's identity.
 #[derive(Default)]
-struct BoundTerminalPanes(HashMap<gpui::EntityId, gpui::WeakEntity<TerminalView>>);
+struct BoundTerminalPanes(HashMap<gpui::EntityId, (String, gpui::WeakEntity<TerminalView>)>);
 impl gpui::Global for BoundTerminalPanes {}
 
 /// What the workspace keeps of the host listener (`host_programs`).
