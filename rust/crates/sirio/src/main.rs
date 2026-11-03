@@ -10350,12 +10350,19 @@ impl SirioWorkspace {
                 // ended or was lost): a turn that was mid-way settles to Done first, and that stop
                 // is drained while the pane is still an agent's. Only then does
                 // `apply_terminal_activity_event` clear the identity.
-                if matches!(
-                    event,
-                    TerminalActivityEvent::Program(None)
-                        | TerminalActivityEvent::ChildExited { .. }
-                        | TerminalActivityEvent::SessionLost
-                ) {
+                //
+                // A `Program(None)` ends something only for a session that named a program:
+                // a reconnect's re-seed sends one for a session that never did (a spawned
+                // agent's, an `exec`ed one, every Windows pane), and that is no exit.
+                let program_none_ends_one = matches!(event, TerminalActivityEvent::Program(None))
+                    && workspace.activity.is_program_session(&activity_pane_id);
+                if program_none_ends_one
+                    || matches!(
+                        event,
+                        TerminalActivityEvent::ChildExited { .. }
+                            | TerminalActivityEvent::SessionLost
+                    )
+                {
                     // A failed exit of a spawn-owned pane (none of program-, title- and
                     // process-owned) is Running -> Error in one stop (`apply_exit_result`,
                     // after the record drops below and hands its Running down): settling it

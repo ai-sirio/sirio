@@ -99,11 +99,12 @@ pub(crate) fn apply_terminal_activity_event(
                 // The shell is the foreground again: no agent process holds the
                 // terminal, so neither a program's nor Layer D's claim stands. The
                 // caller has settled a turn that was mid-way and drained its stop.
-                // A session that never named a program is Layer D's, which a
-                // reconnect's re-seed must not clear.
+                // A session that never named a program has no program to end: its
+                // identity is a spawn's, a report's or Layer D's, which a reconnect's
+                // re-seed (a `Program(None)` for it) must not clear.
                 None => {
-                    activity.program_gone(pane_id);
                     if activity.is_program_session(pane_id) {
+                        activity.program_gone(pane_id);
                         activity.process_gone(pane_id);
                     }
                 }
