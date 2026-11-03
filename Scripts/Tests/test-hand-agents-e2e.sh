@@ -79,6 +79,10 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  two TUIs in one folder, B runs a turn and quits: A, now alone,
 #                                  links to B's finished session by the first-turn rule and shows
 #                                  no status, no unread mark and posts nothing
+#   opencode_own_finish_links_late
+#                                  two TUIs in one folder, A's first turn ends before its title and
+#                                  the rename arrive: the title link forms at Done, and A shows
+#                                  finished and posts once
 #   two_opencode_panes_one_folder  two panes in one folder, one then two sessions: no status on
 #                                  either; with titles `OC | a`, `OC | b`: each follows its own
 #   opencode_failed_turn_is_error  a failed turn -> error; the service's error text and its
@@ -1223,6 +1227,33 @@ case_opencode_sibling_finish_is_not_replayed() {
   leave_opencode "$pane_a"
 }
 
+case_opencode_own_finish_links_late() {
+  # Two TUIs in one folder (the first-turn rule never applies): A's first turn ends before its
+  # `OC | <t>` title and the service's rename arrive, so the title link forms at Done. That
+  # finish is A's own, from a turn that began after A started: it shows, and A, off screen
+  # (B is the tab on screen), posts one notification.
+  local pane_a sess_a pane_b sess_b base
+  start_agent opencode
+  pane_a="$PANE"; sess_a="$SESS"
+  start_agent opencode
+  pane_b="$PANE"; sess_b="$SESS"
+  oc "create ses_late $OC_DIR"
+  oc "busy ses_late"
+  sleep 1.3
+  oc "idle ses_late"
+  sleep 1
+  expect_attention "$sess_a" status null "A before its title and the rename"
+  base="$(posted_count)"
+  type_line "$pane_a" "title OC | late"
+  oc "rename ses_late late"
+  wait_status "$sess_a" done 4
+  expect_posted "$base" 1 "A's own finish, linked after the turn ended"
+  expect_attention "$sess_b" status null "B, which ran nothing"
+  stepn "opencode: A's own finish, linked late" "$sess_a"
+  leave_opencode "$pane_a"
+  leave_opencode "$pane_b"
+}
+
 case_two_opencode_panes_one_folder() {
   local pane_a sess_a pane_b sess_b base
   start_agent opencode
@@ -1405,6 +1436,7 @@ run_case opencode_duplicate_title_keeps_link
 run_case opencode_short_turn_is_finished
 run_case opencode_resumed_finish_is_not_replayed
 run_case opencode_sibling_finish_is_not_replayed
+run_case opencode_own_finish_links_late
 run_case two_opencode_panes_one_folder
 run_case opencode_failed_turn_is_error
 run_case opencode_after_relaunch

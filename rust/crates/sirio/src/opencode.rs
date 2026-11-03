@@ -266,15 +266,28 @@ impl OpenCodeStatus {
                 continue;
             };
             let held = (session_id, session.state, session.at_ms);
-            // A pane that newly links to a session takes no news from a finish it holds: the
-            // turn predates the pane (a resumed session) or belongs to another pane (a
-            // sibling TUI in the folder that ran a turn and quit), so Done or Error
-            // starts at Idle whatever its time. The turns that follow report normally.
+            // A finish a new link holds is hidden (reported Idle) only where it cannot be the
+            // pane's own: a first-turn link (the title is still `OpenCode`: the session is
+            // another pane's, or the pane's own would have been seen busy at its link) or a
+            // finish older than the pane's `opencode` (a resumed session). A title link to a
+            // finish that came after the pane started is the pane's own turn whose rename
+            // landed after it ended, and reports as it is. Both clocks are wall milliseconds
+            // of this machine.
             let newly = self
                 .reported
                 .get(&pane_id)
                 .is_none_or(|(old_session, ..)| *old_session != held.0);
-            let shown = if newly && matches!(session.state, OcState::Done | OcState::Error) {
+            let pane_state = self.panes.get(&pane_id);
+            let first_turn_link = !self
+                .titles
+                .get(&pane_id)
+                .is_some_and(|title| title.starts_with(TITLED));
+            let older_than_pane =
+                pane_state.is_some_and(|running| session.at_ms < running.started_ms);
+            let shown = if newly
+                && matches!(session.state, OcState::Done | OcState::Error)
+                && (first_turn_link || older_than_pane)
+            {
                 OcState::Idle
             } else {
                 session.state
