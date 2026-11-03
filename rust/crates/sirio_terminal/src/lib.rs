@@ -62,6 +62,8 @@ pub use link::{
     HostOpenError,
     Abandon, HostLink, LinkChunk, LocalLink, OpenOutcome, OpenRequest, SessionFactory,
     SessionFactoryGlobal, SessionLink,
+    HOST_RECONNECT_GRACE, HOST_RECONNECT_INTERVAL, HostSessionNote, HostSessionState,
+    host_session_note, summary_reseed_events,
 };
 pub use sirio_term_session::{ForegroundProgram, ReportState, StatusRecord};
 pub use link_router::{opens_terminal_link, resolve_click_cell, url_at_column};
@@ -2659,6 +2661,14 @@ impl TerminalView {
     /// pane offers Restart. Read by the debug-only `surface.terminal.state`.
     pub fn session_lost(&self) -> bool {
         self.session_lost
+    }
+
+    /// Whether a session link runs for this view: its program and status reach the app through
+    /// the link. A restored tab's view is created with its tab but opens its link on its first
+    /// render, so a tab not shown since a relaunch has none; so has a view with no host yet or
+    /// one whose last open failed.
+    pub fn has_link(&self) -> bool {
+        matches!(self.terminal, TerminalState::Running(_))
     }
 
     /// Whether this pane is in the failed state (no session link could be
