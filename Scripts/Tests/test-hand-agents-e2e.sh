@@ -44,8 +44,9 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  a hook from a pane reaches the app)
 #   spawned_agent_reports          `surface terminal open --agent claude`: reports show, the
 #                                  Stop hook that follows changes nothing
-#   relaunch_mid_turn              codex mid-turn, `system.quit`, restart: the turn is
-#                                  still open and its idle is a stop (+1); an idle tab stays silent
+#   relaunch_mid_turn              codex mid-turn, `system.quit`, restart: the startup posts nothing,
+#                                  the turn is still open and its idle is a stop (+1); an idle tab
+#                                  stays silent
 #   agent_hands_the_terminal_to_a_child
 #                                  an agent stub gives the terminal to a child (`fgchild`): claude, with
 #                                  a live record, keeps its mark; pi, which reports nothing, loses it
@@ -870,6 +871,8 @@ case_relaunch_mid_turn() {
   wait_agent "$pane_a" codex 15
   wait_status "$sess_a" running 10
   stepn "after the relaunch: A mid-turn" "$sess_a"
+  # The new app starts with an empty `posted` list: whatever it holds now, its seed made.
+  expect_posted 0 0 "the relaunch's own startup (no report was typed)"
   # Tab B is selected: it attaches and its host record (idle) seeds no status.
   ctl tab select "$(tab_index_of "$pane_b")" >/dev/null
   wait_agent "$pane_b" codex 15
@@ -1189,6 +1192,8 @@ case_opencode_after_relaunch() {
   wait_agent "$PANE" opencode 15
   sleep 2
   stepn "opencode after the relaunch: the mark" "$SESS"
+  # The new app starts with an empty `posted` list: whatever it holds now, its seed made.
+  expect_posted 0 0 "the relaunch's own startup (the service said nothing new)"
   oc "busy ses_r"
   wait_status "$SESS" running 5
   sleep 1.3
