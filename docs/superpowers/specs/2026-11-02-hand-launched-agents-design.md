@@ -225,9 +225,9 @@ Per pane, from strongest to weakest:
 **Below 7501, nothing changes.** Hooks and titles keep today's mapping, where the end of
 a turn shows *waiting for you* (amber, F13). They still produce a stop and its
 notification. The three states are told apart only where the agent reports: 7501, or
-OpenCode's server. *[my call]* Pi is checked first (§7). If pi sends no reports, pi is
-the one agent where *finished* and *waiting* are not told apart, and the PR records this
-as a known gap.
+OpenCode's server. *[my call]* Pi 1.4.0 reports once its probe is answered (F7), so it is
+told apart too; an agent that sends no reports (an older release) is the one where *finished*
+and *waiting* are not told apart, and the PR records this as a known gap.
 
 Ownership keeps its current meaning
 (`docs/agents/architecture/activity-detection.md`). A pane recognised through §3.1 or
@@ -285,9 +285,14 @@ Sirio:
   follows that rename. So until then a pane links to the one session in its cwd that was
   created after the pane's `opencode` started, provided **it is the only pane running
   `opencode` in that cwd**; and a pane that is linked keeps its session when its `OC | <t>`
-  title arrives before the rename does, while no titled session in the folder matches it, and
-  while the held session is in the folder and has the pane's title even if an older session
-  of the folder has the same one (the held one wins).
+  title arrives before the rename does (the held session has no title yet, even if an older
+  session of the folder has the pane's title; the next relink after the rename decides by
+  title), and while the held session is in the folder and has the pane's title even if an older
+  session has the same one (the held one wins). A pane that links to a session it did not hold
+  never takes news from a finish: a Done or Error state of that session is reported as idle,
+  whatever its time, because the turn predates the pane (a resumed session) or belongs to
+  another pane (a sibling TUI in the folder that ran a turn and quit). Its next turns report
+  normally.
   Otherwise it waits for the title. If two panes match, or none, the pane shows the
   OpenCode mark and **no status**: no guessing (anti-goal). A reconnect or a relaunch
   restores Busy and Waiting from REST, but not a finished or failed result: the seed does
@@ -431,7 +436,7 @@ notification. Record the result in the PR.
 - OpenCode v2's event API: paths, authentication, event names and payloads, how to
   read the service port. Found by the live test before the code that depends on it.
 - The exact bytes of the probe answer, from herdr-core's ghostty and the live CLIs.
-- What pi reports, if anything, once answered.
+- What pi reports, if anything, once answered. Answered: `app=pi`, once the probe is answered (F7).
 - Whether the foreground changes while an agent runs a tool (§3.1), and so how much of
   the "no flicker" rule is needed. Answered: it did not change in any live run (§3.1).
 - Where the 1 s threshold lives, or a cleaner turn signal (§3.3).
@@ -465,8 +470,8 @@ from §3, these win.
    run, and ignores proxy variables.
 7. **Startup titles are silent.** On a program-owned pane, title and screen content set
    no status for 2 s after the agent is recognised, and none while a record is live.
-   After that an agent that never reports (pi, an older Claude) gets today's title
-   mapping. Clearing a record also clears the title status under it.
+   After that an agent that never reports (an older Claude or Codex, any CLI with no 7501)
+   gets today's title mapping. Clearing a record also clears the title status under it.
 8. **Layer D stops for a pane once its session has named a program.** Tabs without job
    control (a `--cmd` tab, a Sirio-spawned `$SHELL -lc`) never name one and keep it.
 9. **The probe is answered at most once per second per session,** in byte order with the
@@ -548,6 +553,9 @@ marked *[my call]* and is open to the user.
      its title once the host answers its probe, and an older app cannot read 7501.
    - Under `ssh` the first remote `app=` names the tab for the whole connection, and a remote
      crash mid-turn stays running until ssh exits.
+   - On Windows, and on any pane Layer D owns, a Layer D read that misses the agent once
+     settles a running turn, which is a stop; the same holds for an identity a report gave
+     (the Windows clear decided earlier). The next read names the agent again.
    - Two agents run back to back, faster than Layer D's 500 ms tick can see the gap between
      them (`--cmd 'codex; claude'`), can leave the second with the first's record: the first
      `app=` named the pane, and the second's reports land in that tracker under that mark.
@@ -575,8 +583,9 @@ marked *[my call]* and is open to the user.
 11. **Layer D losing an agent takes its record with it.** It settles a turn that was mid-way
     (a stop), drains it, drops the record and only then clears the identity, the order of an
     exit, so the next agent named in that session starts with no record. A `Program(None)`
-    settles and clears only for a session that named a program: a reconnect's re-seed sends
-    one for a session that never did and must end nothing. *[my call]*
+    settles and clears only when the pane's last `Program` event named a program (and the flag
+    ends with the session): a reconnect's re-seed sends one for a session that never named
+    one, or whose last event was already a `None`, and must end nothing. *[my call]*
 12. **OpenCode's explicit end is a finish.** `session.execution.succeeded` and `.interrupted`
     are Done, so the one-second floor does not hide a short turn; `.failed` is Error. A
     session the list reports as not running stays Idle. The watch follows no redirect, and a
