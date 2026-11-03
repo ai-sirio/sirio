@@ -10272,7 +10272,7 @@ impl SirioWorkspace {
                         workspace.request_close_terminal_at(tab_id, pane_id, None, cx);
                     }
                     Some(TerminalContextCommand::Restart) => {
-                        terminal_entity.update(cx, |terminal, cx| terminal.restart(cx));
+                        workspace.restart_terminal(&terminal_entity, cx);
                     }
                     None => {}
                 }
@@ -10336,6 +10336,32 @@ impl SirioWorkspace {
                 workspace.apply_activity_event(&activity_pane_id, event, Some(&terminal), cx);
             },
         )
+    }
+
+    /// Restarts a terminal whose session is alive (the context menu, the debug control: the
+    /// overlay offers Restart only for a lost session). The old session's end is rightly not
+    /// the listener's (the restarting view is its pane's route) and the attached route never
+    /// sees it, so nothing would drop the old session's record, and the turn tracker would drop
+    /// the new session's reports (a small `at_ms`) as replays. The pane is cleared the way a
+    /// moved pane is: nothing is posted and no status stays, and the tab's own agent is
+    /// registered again. A view that shows a session it did not create is not restarted.
+    fn restart_terminal(&mut self, terminal: &Entity<TerminalView>, cx: &mut Context<Self>) {
+        if terminal.read(cx).attached() {
+            return;
+        }
+        if let Some((tab_index, pane_id)) = self.terminal_pane_of(terminal) {
+            let pane_key = format!("pane-{pane_id}");
+            let tab = &self.tabs[tab_index];
+            let agent_id = (tab_primary_pane_id(tab) == Some(pane_id))
+                .then(|| tab.agent_id.clone())
+                .flatten();
+            self.forget_pane_activity(&pane_key);
+            register_restored_agent(&mut self.activity, pane_id, agent_id.as_deref());
+            self.refresh_running_after_clear(&pane_key);
+            self.mark_activity_dirty();
+        }
+        terminal.update(cx, |terminal, cx| terminal.restart(cx));
+        cx.notify();
     }
 
     /// What a terminal's activity event does to the workspace, and the one handler of the two
@@ -10657,11 +10683,10 @@ impl SirioWorkspace {
     }
 
     /// What the listener may tell the activity model about `pane_key`: its program, status and
-    /// title, while the pane is a known tab's, no link runs for it and the app is not closing it.
+    /// title, while the pane is a known tab's and no link runs for it (the caller has checked that the
+    /// app is not closing it).
     fn host_programs_feeds(&self, pane_key: &str, cx: &App) -> bool {
-        !self.host_programs.closing.contains(pane_key)
-            && !Self::host_pane_is_linked(pane_key, cx)
-            && self.session_for_pane(pane_key).is_some()
+        !Self::host_pane_is_linked(pane_key, cx) && self.session_for_pane(pane_key).is_some()
     }
 
     /// What the listener may end for `pane_key`: the same, or a pane it fed whose tab is gone, so
@@ -10672,6 +10697,24 @@ impl SirioWorkspace {
                 || self.host_programs.fed.contains(pane_key))
     }
 
+    /// Whether the app is closing `pane_key`, whose session ends by its own doing: the listener
+    /// gives such a pane nothing, and its end is swallowed. A live tab (mounted, parked or
+    /// retained) that holds the key again, a reopened worktree's, is not closing: the entry goes.
+    /// An entry for a session that never ends is harmless.
+    fn pane_is_closing(&mut self, pane_key: &str) -> bool {
+        if !self.host_programs.closing.contains(pane_key) {
+            return false;
+        }
+        let live = self
+            .live_sessions()
+            .iter()
+            .any(|session| session.pane_keys.iter().any(|key| key == pane_key));
+        if live {
+            self.host_programs.closing.remove(pane_key);
+        }
+        !live
+    }
+
     /// Applies one activity event the listener sent, when the gate allows it, and remembers that
     /// the pane was fed.
     fn feed_host_program(
@@ -10680,7 +10723,7 @@ impl SirioWorkspace {
         event: &TerminalActivityEvent,
         cx: &mut Context<Self>,
     ) {
-        if !self.host_programs_feeds(pane_key, cx) {
+        if self.pane_is_closing(pane_key) || !self.host_programs_feeds(pane_key, cx) {
             return;
         }
         self.host_programs.fed.insert(pane_key.to_owned());
@@ -10698,7 +10741,8 @@ impl SirioWorkspace {
         event: &TerminalActivityEvent,
         cx: &mut Context<Self>,
     ) {
-        if self.host_programs.closing.remove(pane_key) {
+        if self.pane_is_closing(pane_key) {
+            self.host_programs.closing.remove(pane_key);
             self.host_programs.fed.remove(pane_key);
             return;
         }
@@ -10798,9 +10842,6 @@ impl SirioWorkspace {
                     // A pane the listener fed whose session is not listed any more is over.
                     let listed: HashSet<&str> = listed.iter().map(String::as_str).collect();
                     self.lose_fed_host_panes(Some(&listed), cx);
-                    self.host_programs
-                        .closing
-                        .retain(|pane| listed.contains(pane.as_str()));
                 }
                 host_programs::Message::Event {
                     session_id, note, ..
@@ -15034,6 +15075,32 @@ impl SirioWorkspace {
             && paths_name_the_same_document(&self.tab_worktree_path(tab.id), &self.working_directory)
     }
 
+    /// The sessions of known tabs that the attached (Show-session) views of `tab` show.
+    fn shown_owner_sessions(&self, tab: &OpenTab, cx: &App) -> Vec<SessionRef> {
+        let mut owners = Vec::new();
+        tab.panes.for_each(&mut |_, content| {
+            if let Some(terminal) = content.terminal() {
+                let terminal = terminal.read(cx);
+                if terminal.attached()
+                    && let Some(owner) = self.session_for_pane(terminal.identity().pane_id())
+                {
+                    owners.push(owner);
+                }
+            }
+        });
+        owners
+    }
+
+    /// Whether a tab that is on screen shows `session` through an attached view: a Show-session
+    /// tab of it.
+    fn session_shown_on_screen(&self, session: &SessionRef, cx: &App) -> bool {
+        self.tabs.iter().filter(|tab| self.session_on_screen(tab)).any(|tab| {
+            self.shown_owner_sessions(tab, cx)
+                .iter()
+                .any(|owner| owner.persistence_id == session.persistence_id)
+        })
+    }
+
     /// Whether `pane_key` is bound to an attached (Show-session) view whose session is a known
     /// tab's.
     fn shows_a_session_another_tab_owns(&self, pane_key: &str, cx: &App) -> bool {
@@ -15170,8 +15237,11 @@ impl SirioWorkspace {
                 .remove(&session.persistence_id);
         }
         let first = self.first_status_for(&session.persistence_id, session.chat);
+        // A Show-session tab on screen watches this session's turn: it is on screen in that tab,
+        // though its own tab is not.
+        let on_screen = session.on_screen || self.session_shown_on_screen(&session, cx);
         let decision =
-            StopPolicy::decide(transition.old, transition.new, first, session.on_screen);
+            StopPolicy::decide(transition.old, transition.new, first, on_screen);
         let running = session
             .pane_keys
             .iter()
@@ -15214,12 +15284,17 @@ impl SirioWorkspace {
         if !self.session_attention.values().any(|record| record.unread) {
             return;
         }
-        let shown: Vec<String> = self
-            .tabs
-            .iter()
-            .filter(|tab| self.session_on_screen(tab))
-            .map(|tab| tab.persistence_id.clone())
-            .collect();
+        // A Show-session tab on screen also marks the session it shows as seen.
+        let mut shown: Vec<String> = Vec::new();
+        for tab in self.tabs.iter().filter(|tab| self.session_on_screen(tab)) {
+            shown.push(tab.persistence_id.clone());
+            shown.extend(
+                self.shown_owner_sessions(tab, cx)
+                    .into_iter()
+                    .map(|owner| owner.persistence_id),
+            );
+        }
+        shown.dedup();
         let mut cleared = false;
         for id in shown {
             let seen = match self.session_attention.get_mut(&id) {
@@ -22262,7 +22337,7 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let view = self.control_terminal_view(pane)?;
-        view.update(cx, |terminal, cx| terminal.restart(cx));
+        self.restart_terminal(&view, cx);
         Ok(Vec::new())
     }
 
