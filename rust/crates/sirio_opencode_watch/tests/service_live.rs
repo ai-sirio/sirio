@@ -19,8 +19,10 @@
 //!
 //!     cargo nextest run -p sirio_opencode_watch --test service_live --run-ignored only
 //!
-//! The scratch root is under `std::env::temp_dir()`: set `TMPDIR` to a directory on disk and
-//! outside your home.
+//! The scratch root is under `std::env::temp_dir()`, which must be on disk and OUTSIDE your
+//! home: the test panics otherwise, before the CLI starts. A failed test keeps its scratch root
+//! and prints its path. A binary that is a script mentioning `mise`, or in `~/.local/bin`, is
+//! refused.
 
 #![cfg(unix)]
 
@@ -44,18 +46,30 @@ const FAKE_CHAT: &str = concat!(
 #[test]
 #[ignore = "live: runs the real CLI against a local fake model API; run with --run-ignored only"]
 fn service_events_match_task_2() {
-    let Some(opencode) = find_cli() else {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        println!("SKIP: HOME unset");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let base = scratch_base(&real_home);
+    let Some(opencode) = find_cli(&home) else {
         println!("SKIP: opencode not found (set SIRIO_LIVE_OPENCODE to its path)");
         return;
     };
-    if Command::new("python3").arg("--version").output().is_err() {
+    refuse_wrapper(&opencode, &real_home);
+    if python().arg("--version").output().is_err() {
         println!("SKIP: python3 not found");
         return;
     }
-    let mut live = Live::new(&opencode);
-    if !live.is_v2() {
-        println!("SKIP: {} is not OpenCode v2", opencode.display());
-        return;
+    println!("opencode: {}", opencode.display());
+    let mut live = Live::new(&base, &opencode);
+    match live.version_is_v2() {
+        Some(true) => {}
+        Some(false) => {
+            println!("SKIP: {} is not OpenCode v2", opencode.display());
+            return;
+        }
+        None => panic!("`opencode --version` crashed or exited non-zero: {}", opencode.display()),
     }
     live.configure();
     live.start_fake_model();
@@ -130,6 +144,70 @@ fn service_events_match_task_2() {
     live.finish();
 }
 
+/// The scratch parent: `TMPDIR`, which must be outside the user's home (agents read
+/// instruction files from every ancestor of the directory they run in).
+fn scratch_base(real_home: &Path) -> PathBuf {
+    let base = std::env::temp_dir().canonicalize().expect("a TMPDIR that exists");
+    assert!(
+        !base.starts_with(real_home),
+        "set TMPDIR to an on-disk directory outside your home, e.g. /var/tmp/sirio-live \
+         (TMPDIR is {}, inside {})",
+        base.display(),
+        real_home.display()
+    );
+    base
+}
+
+/// Panics before anything runs when `path` is a script that mentions `mise` in its first
+/// 4 KiB (a wrapper that would edit the user's mise config) or lives in `~/.local/bin`.
+fn refuse_wrapper(path: &Path, real_home: &Path) {
+    use std::io::Read;
+    let mut head = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(4096).read_to_end(&mut head);
+    }
+    let mentions_mise = head.windows(4).any(|window| window == b"mise");
+    let local_bin = real_home.join(".local/bin");
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let wrapper = (head.starts_with(b"#!") && mentions_mise)
+        || path.starts_with(&local_bin)
+        || target.starts_with(&local_bin);
+    assert!(!wrapper, "refusing a mise wrapper: {}", path.display());
+}
+
+/// python3 with nothing of the user's environment: the fake API needs none.
+fn python() -> Command {
+    let mut command = Command::new("python3");
+    command.env_clear().env("PATH", "/usr/bin:/bin");
+    command
+}
+
+/// `kill`, by absolute path, with an empty environment.
+fn kill_command() -> Command {
+    let path = ["/usr/bin/kill", "/bin/kill"].into_iter().find(|p| Path::new(p).exists()).unwrap_or("/bin/kill");
+    let mut command = Command::new(path);
+    command.env_clear().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command
+}
+
+/// The pids whose environment has exactly `HOME=<home>` (Linux, where `/proc` shows them).
+/// `None` when `/proc` is not there.
+fn processes_with_home(home: &Path) -> Option<Vec<u32>> {
+    let needle = format!("HOME={}", home.display());
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        if let Ok(environ) = std::fs::read(entry.path().join("environ"))
+            && environ.split(|b| *b == 0).any(|var| var == needle.as_bytes())
+        {
+            found.push(pid);
+        }
+    }
+    Some(found)
+}
+
 /// The states the watch reported for `session`, one per change, in order.
 fn states_of(events: &[WatchEvent], session: &str) -> Vec<OcState> {
     let mut states: Vec<OcState> = Vec::new();
@@ -159,19 +237,22 @@ fn wait_for(what: &str, events: &Arc<Mutex<Vec<WatchEvent>>>, done: impl Fn(&[Wa
     }
 }
 
-fn find_cli() -> Option<PathBuf> {
+fn find_cli(home: &Path) -> Option<PathBuf> {
     let path = match std::env::var_os("SIRIO_LIVE_OPENCODE") {
         Some(path) => PathBuf::from(path),
-        None => PathBuf::from(std::env::var_os("HOME")?).join(".opencode/bin/opencode"),
+        None => home.join(".opencode/bin/opencode"),
     };
     path.is_file().then_some(path)
 }
 
-fn free_port() -> u16 {
+/// Two different free ports: both listeners are held until both are chosen.
+fn free_ports() -> (u16, u16) {
     loop {
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        if port != REAL_SERVICE_PORT {
-            return port;
+        let first = TcpListener::bind("127.0.0.1:0").unwrap();
+        let second = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (a, b) = (first.local_addr().unwrap().port(), second.local_addr().unwrap().port());
+        if a != REAL_SERVICE_PORT && b != REAL_SERVICE_PORT {
+            return (a, b);
         }
     }
 }
@@ -193,10 +274,10 @@ struct Live {
 }
 
 impl Live {
-    fn new(opencode: &Path) -> Self {
-        let root = std::env::temp_dir().join(format!("sirio-live-oc-{}", std::process::id()));
+    fn new(base: &Path, opencode: &Path) -> Self {
+        let root = base.join(format!("sirio-live-oc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for dir in ["home", "bin", "work", "xdg/config", "xdg/data", "xdg/state", "xdg/cache", "xdg/runtime"] {
+        for dir in ["home", "bin", "work", "tmp", "xdg/config", "xdg/data", "xdg/state", "xdg/cache", "xdg/runtime"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
         // The path is the symlink's own: OpenCode may start itself again by it.
@@ -207,10 +288,11 @@ impl Live {
             .timeout_global(Some(Duration::from_secs(20)))
             .build()
             .new_agent();
+        let (port, chat_port) = free_ports();
         Self {
             root,
-            port: free_port(),
-            chat_port: free_port(),
+            port,
+            chat_port,
             fake: None,
             service_started: false,
             agent,
@@ -241,16 +323,28 @@ impl Live {
             .env("XDG_RUNTIME_DIR", self.root.join("xdg/runtime"))
             .env("PATH", format!("{}:/usr/bin:/bin", self.root.join("bin").display()))
             .env("LANG", "C.UTF-8")
+            .env("TMPDIR", self.root.join("tmp"))
+            // No self-update and no model catalogue fetch; a dead proxy keeps anything else
+            // off the network (the fake model and the service itself are on 127.0.0.1).
+            .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
+            .env("OPENCODE_DISABLE_MODELS_FETCH", "1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("NO_PROXY", "127.0.0.1,localhost")
             .current_dir(self.work())
             .stdin(Stdio::null());
         command
     }
 
-    fn is_v2(&self) -> bool {
-        self.command().arg("--version").output().is_ok_and(|output| {
-            let text = String::from_utf8_lossy(&output.stdout);
-            text.contains(" v2.") || text.trim_start().starts_with("2.")
-        })
+    /// `Some(true)` for a clean `--version` run naming 2.x, `Some(false)` for a clean run
+    /// naming something else, `None` for a crash or a non-zero exit.
+    fn version_is_v2(&self) -> Option<bool> {
+        let output = self.command().arg("--version").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Some(text.contains(" v2.") || text.trim_start().starts_with("2."))
     }
 
     /// The provider config and, before the service ever starts, its private port.
@@ -285,8 +379,9 @@ impl Live {
 
     fn start_fake_model(&mut self) {
         self.fake = Some(
-            Command::new("python3")
+            python()
                 .args(["-I", FAKE_CHAT, &self.chat_port.to_string(), "2"])
+                .current_dir(&self.root)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -376,28 +471,54 @@ impl Live {
 
     /// Stops what the run started and checks nothing is left on the private port.
     fn finish(&mut self) {
-        self.cleanup();
+        if let Err(problem) = self.cleanup() {
+            panic!("{problem}");
+        }
         assert!(!listening(self.port), "something still listens on the private port {}", self.port);
         assert!(!listening(self.chat_port), "the fake model is still up");
         println!("private service stopped, ports {} and {} free", self.port, self.chat_port);
     }
 
-    fn cleanup(&mut self) {
+    /// Kills the fake model, stops the private service by the pid of its own registration
+    /// (after checking that process carries the private HOME), then everything else that
+    /// carries the private HOME, so the service's workers do not outlive the run.
+    fn cleanup(&mut self) -> Result<(), String> {
+        let mut problem = None;
         if let Some(mut fake) = self.fake.take() {
             let _ = fake.kill();
             let _ = fake.wait();
         }
         if self.service_started {
             self.service_started = false;
-            // The pid in the private registration file, and only if it names the private port.
-            if let Some(pid) = self.registered_pid() {
-                let _ = Command::new("kill").arg(pid.to_string()).status();
+            match self.registered_pid() {
+                Some(pid) if pid <= 1 => problem = Some(format!("refusing to signal registered pid {pid}")),
+                Some(pid) => match processes_with_home(&self.home()) {
+                    Some(owned) if !owned.contains(&pid) => {
+                        problem = Some(format!(
+                            "registered pid {pid} does not carry the private HOME; not signalling it"
+                        ));
+                    }
+                    // Without /proc the registration's private port is the only evidence.
+                    _ => {
+                        let _ = kill_command().arg(pid.to_string()).status();
+                    }
+                },
+                None => {}
             }
             let deadline = Instant::now() + Duration::from_secs(10);
             while listening(self.port) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
+        for _ in 0..2 {
+            for pid in processes_with_home(&self.home()).unwrap_or_default() {
+                if pid > 1 {
+                    let _ = kill_command().args(["-KILL", &pid.to_string()]).status();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        problem.map_or(Ok(()), Err)
     }
 
     fn registered_pid(&self) -> Option<u32> {
@@ -411,8 +532,14 @@ impl Live {
 
 impl Drop for Live {
     fn drop(&mut self) {
-        self.cleanup();
-        let _ = std::fs::remove_dir_all(&self.root);
+        if let Err(problem) = self.cleanup() {
+            eprintln!("{problem}");
+        }
+        if std::thread::panicking() {
+            eprintln!("the scratch root is kept for inspection: {}", self.root.display());
+        } else {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 }
 

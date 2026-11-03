@@ -15,13 +15,15 @@
 //!
 //! | CLI        | variable                  | default                                          |
 //! |------------|---------------------------|--------------------------------------------------|
-//! | `claude`   | `SIRIO_LIVE_CLAUDE`       | `~/.local/share/mise/installs/claude/2.1.316/claude` |
+//! | `claude`   | `SIRIO_LIVE_CLAUDE`       | newest `~/.local/share/mise/installs/claude/<version>/claude` |
 //! | `codex`    | `SIRIO_LIVE_CODEX`        | `~/.codex/packages/standalone/current/bin/codex` |
 //! | `omp`      | `SIRIO_LIVE_OMP`          | `~/.local/bin/omp`                               |
-//! | `pi`       | `SIRIO_LIVE_PI`           | `~/.local/share/mise/installs/pi/1.4.0/pi/pi`    |
+//! | `pi`       | `SIRIO_LIVE_PI`           | newest `~/.local/share/mise/installs/pi/<version>/pi/pi` |
 //!
 //! The defaults are the real binaries, not the `~/.local/bin/claude` and `~/.local/bin/pi`
-//! wrappers: those run `mise use -g`, which edits the user's global mise config. A CLI that
+//! wrappers: those run `mise use -g`, which edits the user's global mise config. A chosen file
+//! that starts with `#!` and mentions `mise` in its first 4 KiB, or lives in `~/.local/bin`
+//! (omp's ELF excepted), makes the test panic, whatever chose it. A CLI that
 //! is not there prints `SKIP:` and the test passes. A binary is only executed: its user
 //! configuration directory (`~/.claude`, `~/.codex`, ...) is never read or written.
 //!
@@ -29,9 +31,10 @@
 //!
 //!     cargo nextest run -p sirio_term_session --test program_status_live --run-ignored only
 //!
-//! The scratch root is under `std::env::temp_dir()`; set `TMPDIR` to a directory on disk and
-//! outside your home: several agents read instruction files (`CLAUDE.md`, `AGENTS.md`) from
-//! every ancestor of the directory they run in, and Claude's are switched off here too.
+//! The scratch root is under `std::env::temp_dir()`, which must be on disk and OUTSIDE your
+//! home (a test panics otherwise, before any CLI starts): several agents read instruction
+//! files (`CLAUDE.md`, `AGENTS.md`) from every ancestor of the directory they run in. Claude's
+//! are switched off here too. A failed test keeps its scratch root and prints its path.
 //! After a run the test kills every process still holding the private HOME in its
 //! environment (a CLI's background helper), on Linux, where `/proc` shows them.
 
@@ -63,8 +66,7 @@ const HOLD: &str = "3";
 #[test]
 #[ignore = "live: runs the real CLI against a local fake model API; run with --run-ignored only"]
 fn claude_reports_once_answered() {
-    let Some(mut rig) = Rig::new("claude", "SIRIO_LIVE_CLAUDE", ".local/share/mise/installs/claude/2.1.316/claude")
-    else {
+    let Some(mut rig) = Rig::new("claude", "SIRIO_LIVE_CLAUDE", &CLAUDE) else {
         return;
     };
     let api = rig.fake(FAKE_MESSAGES);
@@ -96,7 +98,7 @@ fn claude_reports_once_answered() {
 #[test]
 #[ignore = "live: runs the real CLI against a local fake model API; run with --run-ignored only"]
 fn codex_reports_unprompted() {
-    let Some(mut rig) = Rig::new("codex", "SIRIO_LIVE_CODEX", ".codex/packages/standalone/current/bin/codex") else {
+    let Some(mut rig) = Rig::new("codex", "SIRIO_LIVE_CODEX", &CODEX) else {
         return;
     };
     let api = rig.fake(FAKE_RESPONSES);
@@ -126,7 +128,7 @@ fn codex_reports_unprompted() {
 #[test]
 #[ignore = "live: runs the real CLI against a local fake model API; run with --run-ignored only"]
 fn omp_reports_idle() {
-    let Some(mut rig) = Rig::new("omp", "SIRIO_LIVE_OMP", ".local/bin/omp") else {
+    let Some(mut rig) = Rig::new("omp", "SIRIO_LIVE_OMP", &OMP) else {
         return;
     };
     let api = rig.fake(FAKE_CHAT);
@@ -146,7 +148,7 @@ fn omp_reports_idle() {
 #[test]
 #[ignore = "live: runs the real CLI against a local fake model API; run with --run-ignored only"]
 fn pi_reports_what_task_2_found() {
-    let Some(mut rig) = Rig::new("pi", "SIRIO_LIVE_PI", ".local/share/mise/installs/pi/1.4.0/pi/pi") else {
+    let Some(mut rig) = Rig::new("pi", "SIRIO_LIVE_PI", &PI) else {
         return;
     };
     let api = rig.fake(FAKE_CHAT);
@@ -167,7 +169,7 @@ fn pi_reports_what_task_2_found() {
 #[ignore = "live: runs the real CLI against a local fake model API; run with --run-ignored only"]
 fn program_is_the_agent_during_a_tool_run() {
     // Claude: a Bash tool that takes 3 s, allowed without a dialog.
-    if let Some(mut rig) = Rig::new("claude-tool", "SIRIO_LIVE_CLAUDE", ".local/share/mise/installs/claude/2.1.316/claude") {
+    if let Some(mut rig) = Rig::new("claude-tool", "SIRIO_LIVE_CLAUDE", &CLAUDE) {
         let api = rig.fake(FAKE_MESSAGES);
         rig.claude_config(api, ClaudePermissions::AllowBash);
         let mut run = rig.start("claude", "claude");
@@ -176,7 +178,7 @@ fn program_is_the_agent_during_a_tool_run() {
         run.finish();
     }
     // Codex: a shell command that takes 3 s, inside its sandbox, no approval.
-    if let Some(mut rig) = Rig::new("codex-tool", "SIRIO_LIVE_CODEX", ".codex/packages/standalone/current/bin/codex") {
+    if let Some(mut rig) = Rig::new("codex-tool", "SIRIO_LIVE_CODEX", &CODEX) {
         let api = rig.fake(FAKE_RESPONSES);
         rig.codex_config(api);
         let mut run = rig.start("codex", "codex");
@@ -187,10 +189,12 @@ fn program_is_the_agent_during_a_tool_run() {
     }
 }
 
-/// Sends a prompt that makes the agent run a 3 s shell command, and checks the foreground
-/// program stays the agent while it runs. If the foreground group does change, the status
-/// record must survive it (the host keeps the record when the terminal returns to the
-/// agent's group): no clear, and a last report of `done`.
+/// Sends a prompt that makes the agent run a 3 s shell command and records which foreground
+/// programs the engine named while it ran (it prints them). It asserts that the tool really
+/// ran (`probe-file` exists once `done` arrives) and, only if the foreground group did change,
+/// that the status record survived it (the host keeps the record when the terminal returns to
+/// the agent's group): no clear, and a last report of `done`. When the program stays the agent,
+/// as it did in every run so far, nothing else is asserted.
 fn tool_run_keeps_the_agent(agent: &str, run: &mut Run, rig: &Rig, prompt: &str, done: &str) {
     let probe = rig.work().join("probe-file");
     let _ = std::fs::remove_file(&probe);
@@ -224,24 +228,40 @@ struct Rig {
 }
 
 impl Rig {
-    /// `None` after printing `SKIP:` when the CLI (or python3) is not there.
-    fn new(name: &str, var: &str, default: &str) -> Option<Self> {
+    /// `None` after printing `SKIP:` when the CLI (or python3, or HOME) is not there. Panics
+    /// when the scratch directory is inside the user's home, or the chosen file is a wrapper.
+    fn new(name: &str, var: &str, resolve: &Resolve) -> Option<Self> {
         let cli = name.split('-').next().unwrap().to_string();
-        let path = match std::env::var_os(var) {
-            Some(path) => PathBuf::from(path),
-            None => PathBuf::from(std::env::var_os("HOME")?).join(default),
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            println!("SKIP: HOME unset");
+            return None;
         };
-        if !path.is_file() {
+        let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+        let base = std::env::temp_dir().canonicalize().expect("a TMPDIR that exists");
+        assert!(
+            !base.starts_with(&real_home),
+            "set TMPDIR to an on-disk directory outside your home, e.g. /var/tmp/sirio-live \
+             (TMPDIR is {}, inside {})",
+            base.display(),
+            real_home.display()
+        );
+        let path = match std::env::var_os(var) {
+            Some(path) => Some(PathBuf::from(path)),
+            None => resolve.path(&home),
+        };
+        let Some(path) = path.filter(|path| path.is_file()) else {
             println!("SKIP: {cli} not found (set {var} to its path)");
             return None;
-        }
-        if Command::new("python3").arg("--version").output().is_err() {
+        };
+        refuse_wrapper(&cli, &path, &real_home);
+        if python().arg("--version").output().is_err() {
             println!("SKIP: python3 not found");
             return None;
         }
-        let root = std::env::temp_dir().join(format!("sirio-live-{name}-{}", std::process::id()));
+        println!("{cli}: {}", path.display());
+        let root = base.join(format!("sirio-live-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for dir in ["home", "bin", "work", "xdg/config", "xdg/data", "xdg/state", "xdg/cache", "xdg/runtime"] {
+        for dir in ["home", "bin", "work", "tmp", "xdg/config", "xdg/data", "xdg/state", "xdg/cache", "xdg/runtime"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
         let root = root.canonicalize().unwrap();
@@ -261,8 +281,9 @@ impl Rig {
     fn fake(&mut self, script: &str) -> u16 {
         let port = free_port();
         let log = std::fs::File::create(self.root.join(format!("fake-{port}.log"))).unwrap();
-        let child = Command::new("python3")
+        let child = python()
             .args(["-I", script, &port.to_string(), HOLD])
+            .current_dir(&self.root)
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log)
@@ -305,6 +326,7 @@ impl Rig {
             ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1".into()),
             ("CLAUDE_CONFIG_DIR", config_dir),
         ]);
+        self.offline();
     }
 
     fn codex_config(&mut self, port: u16) {
@@ -341,8 +363,9 @@ trust_level = "trusted"
         self.offline();
     }
 
-    /// omp looks for a newer release and Codex syncs its plugins from GitHub on startup: a
-    /// dead proxy keeps that off the network, and the fake API on 127.0.0.1 is exempt.
+    /// omp looks for a newer release, Codex syncs its plugins from GitHub and Claude may reach
+    /// out on startup: a dead proxy keeps that off the network, and the fake API on 127.0.0.1
+    /// is exempt.
     fn offline(&mut self) {
         self.env_extra(&[
             ("HTTPS_PROXY", "http://127.0.0.1:9".into()),
@@ -394,6 +417,7 @@ trust_level = "trusted"
         env.insert("PATH".into(), format!("{}:/usr/bin:/bin", self.root.join("bin").display()));
         env.insert("LANG".into(), "C.UTF-8".into());
         env.insert("SHELL".into(), "/bin/sh".into());
+        env.insert("TMPDIR".into(), self.root.join("tmp").display().to_string());
         env.extend(self.extra.clone());
         env
     }
@@ -435,7 +459,11 @@ impl Drop for Rig {
             let _ = child.wait();
         }
         kill_holders_of(&self.home());
-        let _ = std::fs::remove_dir_all(&self.root);
+        if std::thread::panicking() {
+            eprintln!("the scratch root is kept for inspection: {}", self.root.display());
+        } else {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 }
 
@@ -459,6 +487,69 @@ impl ClaudePermissions {
 
 /// A dummy key for the fake API; Claude wants one that looks like a key.
 const FAKE_KEY: &str = "sk-ant-api03-fake-key-for-local-live-test-0000000000";
+
+/// Where a CLI is found when its variable is not set.
+enum Resolve {
+    /// A fixed path under the user's home.
+    Home(&'static str),
+    /// `~/.local/share/mise/installs/<tool>/<newest version>/<binary>`: the real binary of the
+    /// newest installed version, never the `latest` link or the wrapper in `~/.local/bin`.
+    Mise { tool: &'static str, binary: &'static str },
+}
+
+const CLAUDE: Resolve = Resolve::Mise { tool: "claude", binary: "claude" };
+const PI: Resolve = Resolve::Mise { tool: "pi", binary: "pi/pi" };
+const CODEX: Resolve = Resolve::Home(".codex/packages/standalone/current/bin/codex");
+const OMP: Resolve = Resolve::Home(".local/bin/omp");
+
+impl Resolve {
+    fn path(&self, home: &Path) -> Option<PathBuf> {
+        match self {
+            Self::Home(relative) => Some(home.join(relative)),
+            Self::Mise { tool, binary } => {
+                let installs = home.join(".local/share/mise/installs").join(tool);
+                let mut versions: Vec<(Vec<u64>, PathBuf)> = std::fs::read_dir(installs)
+                    .ok()?
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir() && !kind.is_symlink()))
+                    .filter_map(|entry| {
+                        let numbers: Option<Vec<u64>> =
+                            entry.file_name().to_str()?.split('.').map(|part| part.parse().ok()).collect();
+                        Some((numbers?, entry.path().join(binary)))
+                    })
+                    .filter(|(_, path)| path.is_file())
+                    .collect();
+                versions.sort();
+                versions.pop().map(|(_, path)| path)
+            }
+        }
+    }
+}
+
+/// Panics before anything runs when `path` is a wrapper that would edit the user's mise
+/// config (a script that mentions `mise`), or lives in `~/.local/bin` (omp's ELF excepted).
+fn refuse_wrapper(cli: &str, path: &Path, real_home: &Path) {
+    use std::io::Read;
+    let mut head = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(4096).read_to_end(&mut head);
+    }
+    let script = head.starts_with(b"#!");
+    let mentions_mise = head.windows(4).any(|window| window == b"mise");
+    let local_bin = real_home.join(".local/bin");
+    let in_local_bin = |p: &Path| p.starts_with(&local_bin);
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let wrapper = (script && (mentions_mise || cli == "omp"))
+        || ((in_local_bin(path) || in_local_bin(&target)) && !(cli == "omp" && !script));
+    assert!(!wrapper, "refusing a mise wrapper: {}", path.display());
+}
+
+/// python3 with nothing of the user's environment: the fake APIs need none.
+fn python() -> Command {
+    let mut command = Command::new("python3");
+    command.env_clear().env("PATH", "/usr/bin:/bin");
+    command
+}
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
