@@ -239,7 +239,10 @@ fn cap_argv(argv: Vec<String>) -> Vec<String> {
                 end -= 1;
             }
             arg.truncate(end);
-            kept.push(arg);
+            // Not even one character fits: no empty entry for the cut one.
+            if !arg.is_empty() {
+                kept.push(arg);
+            }
             break;
         }
         left -= arg.len();
