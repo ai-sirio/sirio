@@ -2,9 +2,10 @@
 //!
 //! One thread, three jobs: write command lines to its stdin, fold its
 //! stdout into events, and make sure that when it dies the user is told
-//! why. The stderr drain, the exit probe and the tail report are the ACP
-//! client's own helpers, shared rather than re-derived — a death report
-//! that names one cause here and another there would be worse than none.
+//! why. The stderr drain, the exit probe and the tail report are the
+//! `sirio_chat_child` helpers the ACP client uses too, shared rather than
+//! re-derived — a death report that names one cause here and another there
+//! would be worse than none.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -15,6 +16,11 @@ use async_process::{Command as AsyncCommand, Stdio};
 use futures::StreamExt as _;
 use futures::executor::block_on;
 use futures::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use sirio_chat_child::{
+    ActivityClock, ChildHandle, ExitStatusSlot, MAX_MCP_WARNINGS, StderrTail, child_exit_report,
+    idle_for, push_stderr_tail, record_exit_status, record_timeout, stderr_tail_report,
+    terminate_and_reap_blocking, touch_activity, wait_for_stderr_drain,
+};
 use sirio_claude::{
     Catalog, ChatSession, CliMessage, ContextBreakdown, ContextUsageReport, ControlEnvelope,
     ControlRequest, EFFORT_DEFAULT, FastMode, LaunchLine, McpAuthStart, McpServer,
@@ -25,10 +31,9 @@ use super::ClaudeLaunch;
 use super::events::{Fold, ResultSummary};
 use super::permission;
 use super::trace::TraceFold;
-use crate::{
-    AcpError, AcpEvent, AgentMode, ChildHandle, ContextCost, ContextUsage, EffortChoice,
-    EffortOption, ExitStatusSlot, ModeCatalog, ModelCatalog, ModelOption, StderrTail,
-    TimeoutOperation, TraceEvent,
+use sirio_chat_vocab::{
+    AgentMode, ChatError, ChatEvent, ContextCost, ContextUsage, EffortChoice, EffortOption,
+    ModeCatalog, ModelCatalog, ModelOption, TimeoutOperation, TraceEvent,
 };
 
 /// What the client asks the worker to do.
@@ -107,7 +112,7 @@ struct PendingContextUsage {
     /// What the turn's `result` reported, the fallback when no answer comes.
     summary: ResultSummary,
     /// The `TurnEnded` event, held back until the meter is emitted.
-    held: Option<AcpEvent>,
+    held: Option<ChatEvent>,
     /// When the ask went out, for the grace.
     asked_at: std::time::Instant,
 }
@@ -126,7 +131,7 @@ pub(super) enum Startup {
     /// The handshake succeeded and the catalogues are readable.
     Ready,
     /// It did not.
-    Failed(AcpError),
+    Failed(ChatError),
 }
 
 /// State the client reads while the worker writes it.
@@ -137,9 +142,9 @@ pub(super) struct Shared {
     model_catalog: Mutex<Option<ModelCatalog>>,
     mode_catalog: Mutex<Option<ModeCatalog>>,
     fast_mode: Mutex<Option<FastMode>>,
-    thinking_display: Mutex<crate::ThinkingDisplay>,
+    thinking_display: Mutex<sirio_chat_vocab::ThinkingDisplay>,
     mcp_warnings: Mutex<Vec<String>>,
-    notices: Mutex<Vec<crate::SessionNotice>>,
+    notices: Mutex<Vec<sirio_chat_vocab::SessionNotice>>,
     background_tasks: AtomicUsize,
     last_user_message_id: Mutex<Option<String>>,
     resumed_session_refused: AtomicBool,
@@ -175,7 +180,7 @@ impl Shared {
         self.fast_mode.lock().ok().and_then(|f| f.clone())
     }
 
-    pub(super) fn thinking_display(&self) -> crate::ThinkingDisplay {
+    pub(super) fn thinking_display(&self) -> sirio_chat_vocab::ThinkingDisplay {
         self.thinking_display
             .lock()
             .map(|d| d.clone())
@@ -191,7 +196,7 @@ impl Shared {
 
     /// The notices posted since the last read, draining them. The surface
     /// puts each one into the transcript once, in this order.
-    pub(super) fn take_notices(&self) -> Vec<crate::SessionNotice> {
+    pub(super) fn take_notices(&self) -> Vec<sirio_chat_vocab::SessionNotice> {
         self.notices
             .lock()
             .map(|mut held| std::mem::take(&mut *held))
@@ -203,7 +208,7 @@ impl Shared {
         self.background_tasks.load(Ordering::Acquire)
     }
 
-    fn push_notices(&self, notices: Vec<crate::SessionNotice>) {
+    fn push_notices(&self, notices: Vec<sirio_chat_vocab::SessionNotice>) {
         if notices.is_empty() {
             return;
         }
@@ -269,7 +274,7 @@ impl Shared {
         }
         if let Ok(mut held) = self.mcp_warnings.lock() {
             for warning in warnings {
-                if held.len() >= crate::MAX_MCP_WARNINGS {
+                if held.len() >= MAX_MCP_WARNINGS {
                     held.remove(0);
                 }
                 held.push(warning);
@@ -283,7 +288,7 @@ pub(super) struct Config {
     pub launch: ClaudeLaunch,
     pub cwd: std::path::PathBuf,
     pub command_rx: async_channel::Receiver<Command>,
-    pub event_tx: async_channel::Sender<AcpEvent>,
+    pub event_tx: async_channel::Sender<ChatEvent>,
     pub startup_tx: mpsc::SyncSender<Startup>,
     pub shared: Arc<Shared>,
     pub prompt_timeout: Duration,
@@ -350,7 +355,7 @@ struct Attempt {
     launch: ClaudeLaunch,
     cwd: std::path::PathBuf,
     command_rx: async_channel::Receiver<Command>,
-    event_tx: async_channel::Sender<AcpEvent>,
+    event_tx: async_channel::Sender<ChatEvent>,
     startup_tx: mpsc::SyncSender<Startup>,
     shared: Arc<Shared>,
     prompt_timeout: Duration,
@@ -428,7 +433,7 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let _ = startup_tx.send(Startup::Failed(AcpError::Transport(format!(
+            let _ = startup_tx.send(Startup::Failed(ChatError::Transport(format!(
                 "could not launch `{}`: {error}",
                 launch.program.display()
             ))));
@@ -443,14 +448,14 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
         .send(Startup::Process(Arc::clone(&child)))
         .is_err()
     {
-        crate::terminate_and_reap_blocking(&child);
+        terminate_and_reap_blocking(&child);
         return AttemptOutcome::Finished;
     }
 
     let stderr_tail: StderrTail = Arc::new(Mutex::new(std::collections::VecDeque::new()));
     let stderr_drained = Arc::new(AtomicBool::new(false));
     let exit_status: ExitStatusSlot = Arc::new(Mutex::new(None));
-    let activity: crate::ActivityClock = Arc::new(Mutex::new(std::time::Instant::now()));
+    let activity: ActivityClock = Arc::new(Mutex::new(std::time::Instant::now()));
     let drain_tail = Arc::clone(&stderr_tail);
     let drain_done = Arc::clone(&stderr_drained);
     let drain_shared = Arc::clone(&shared);
@@ -475,7 +480,7 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
         resumed: launch.resume.is_some(),
     }));
 
-    crate::record_exit_status(&exit_status, crate::terminate_and_reap_blocking(&child));
+    record_exit_status(&exit_status, terminate_and_reap_blocking(&child));
     match outcome {
         SessionOutcome::CleanShutdown(ack) => {
             let _ = ack.send(());
@@ -486,7 +491,7 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
             if retryable {
                 return AttemptOutcome::RetryWithoutResume;
             }
-            let _ = startup_tx.send(Startup::Failed(AcpError::Transport(error)));
+            let _ = startup_tx.send(Startup::Failed(ChatError::Transport(error)));
             AttemptOutcome::Finished
         }
         SessionOutcome::Died(detail) => {
@@ -494,10 +499,10 @@ fn run_attempt(attempt: Attempt) -> AttemptOutcome {
             // it: the command channel is gone, so any later answer fails,
             // and this report tells the surface to close the cards — the
             // native equivalent of `cancel_permissions`.
-            block_on(crate::wait_for_stderr_drain(&stderr_drained));
-            let report = crate::stderr_tail_report(&stderr_tail);
-            let exit = block_on(crate::child_exit_report(&child, &exit_status));
-            let _ = event_tx.send_blocking(AcpEvent::TransportError(format!(
+            block_on(wait_for_stderr_drain(&stderr_drained));
+            let report = stderr_tail_report(&stderr_tail);
+            let exit = block_on(child_exit_report(&child, &exit_status));
+            let _ = event_tx.send_blocking(ChatEvent::TransportError(format!(
                 "the Claude agent stopped{detail}{exit}{report}"
             )));
             AttemptOutcome::Finished
@@ -524,11 +529,11 @@ struct SessionContext {
     stdin: async_process::ChildStdin,
     stdout: async_process::ChildStdout,
     command_rx: async_channel::Receiver<Command>,
-    event_tx: async_channel::Sender<AcpEvent>,
+    event_tx: async_channel::Sender<ChatEvent>,
     startup_tx: mpsc::SyncSender<Startup>,
     shared: Arc<Shared>,
     child: ChildHandle,
-    activity: crate::ActivityClock,
+    activity: ActivityClock,
     prompt_timeout: Duration,
     permission_timeout: Duration,
     /// Whether this process was started with `--resume`: its cost counter
@@ -564,7 +569,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let mut pending_effort: HashMap<String, String> = HashMap::new();
     let mut pending_rewinds: HashMap<String, mpsc::SyncSender<Result<RewindOutcome, String>>> =
         HashMap::new();
-    let timeout_reason: Arc<Mutex<Option<AcpError>>> = Arc::new(Mutex::new(None));
+    let timeout_reason: Arc<Mutex<Option<ChatError>>> = Arc::new(Mutex::new(None));
     let permission_counter = AtomicU64::new(1);
     let mut pending_permissions: HashMap<u64, PendingPermission> = HashMap::new();
     let mut open_permissions: usize = 0;
@@ -595,7 +600,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 "the Claude agent closed its output before answering the handshake".into(),
             );
         };
-        crate::touch_activity(&activity);
+        touch_activity(&activity);
         let at = std::time::Instant::now();
         let Some(message) = CliMessage::parse(&line) else {
             // Not JSON. A CLI that prints a banner or a warning before its
@@ -626,7 +631,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
     if catalog.is_logged_out() {
         // The same error the ACP path raises, so the surface's existing
         // auth card and its CLI-login guidance apply unchanged (F-CHAT-02).
-        let _ = startup_tx.send(Startup::Failed(AcpError::AuthRequired {
+        let _ = startup_tx.send(Startup::Failed(ChatError::AuthRequired {
             methods: Vec::new(),
         }));
         return SessionOutcome::NeverStarted;
@@ -682,7 +687,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
             futures::future::Either::Left((futures::future::Either::Left((line, _)), _)) => {
                 match line {
                     Some(Ok(line)) => {
-                        crate::touch_activity(&activity);
+                        touch_activity(&activity);
                         // Stamped here, as the line leaves the pipe: the
                         // trace's every edge is this instant, and the GPUI
                         // thread can be behind by the time it hears of it.
@@ -707,7 +712,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     }
                                 }
                                 let _ = event_tx
-                                    .send(AcpEvent::OtherSessionUpdate {
+                                    .send(ChatEvent::OtherSessionUpdate {
                                         kind: match (&envelope.error, &display) {
                                             (Some(_), _) => {
                                                 "ThinkingDisplayUpdate(unsupported)".to_string()
@@ -743,7 +748,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     }
                                 }
                                 let _ = event_tx
-                                    .send(AcpEvent::OtherSessionUpdate {
+                                    .send(ChatEvent::OtherSessionUpdate {
                                         kind: match (&envelope.error, enabled) {
                                             (Some(_), _) => "FastModeUpdate(blocked)".to_string(),
                                             (None, true) => "FastModeUpdate(on)".to_string(),
@@ -791,7 +796,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                             apply_selected_model(&shared, &model)
                                         {
                                             let _ = event_tx
-                                                .send(AcpEvent::ModelCatalog(catalogue))
+                                                .send(ChatEvent::ModelCatalog(catalogue))
                                                 .await;
                                         }
                                         // A model carries its own effort
@@ -811,7 +816,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     }
                                     Some(error) => {
                                         let _ = event_tx
-                                            .send(AcpEvent::TransportError(format!(
+                                            .send(ChatEvent::TransportError(format!(
                                                 "model selection failed: {error}"
                                             )))
                                             .await;
@@ -961,7 +966,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 let _ = event_tx.send(event).await;
                             }
                             let question = permission::is_question(&request)
-                                .then(|| crate::parse_permission_question(&request.input))
+                                .then(|| {
+                                    sirio_chat_vocab::parse_permission_question(&request.input)
+                                })
                                 .flatten()
                                 .map(permission::with_free_text);
                             let options = if permission::is_question(&request) {
@@ -970,7 +977,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                 permission::options_for(&request)
                             };
                             let _ = event_tx
-                                .send(AcpEvent::PermissionRequest {
+                                .send(ChatEvent::PermissionRequest {
                                     request_id,
                                     session_id: shared.session_id().unwrap_or_default(),
                                     title: sirio_claude::tools::describe(
@@ -1015,7 +1022,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         {
                             catalog.replace_commands(commands);
                             let _ = event_tx
-                                .send(AcpEvent::AvailableCommands(command_list(&catalog)))
+                                .send(ChatEvent::AvailableCommands(command_list(&catalog)))
                                 .await;
                         }
                         // Ahead of the line's transcript events, and not held with
@@ -1052,7 +1059,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             if let Some(pending) = pending_context_usage.take() {
                                 resolve_context_usage(&event_tx, pending, None).await;
                             }
-                            let held = matches!(events.last(), Some(AcpEvent::TurnEnded { .. }))
+                            let held = matches!(events.last(), Some(ChatEvent::TurnEnded { .. }))
                                 .then(|| events.pop())
                                 .flatten();
                             let request_id = next_request_id();
@@ -1097,7 +1104,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         }
                         // The watchdog measures silence from here. A turn that
                         // reports is a turn that lives, however long it takes.
-                        crate::touch_activity(&activity);
+                        touch_activity(&activity);
                         turn_in_flight = true;
                         let at = std::time::Instant::now();
                         if write_line(&mut stdin, &line).await.is_err() {
@@ -1197,7 +1204,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         // The card closing is fresh evidence about the agent:
                         // the idle window starts from the answer, not the
                         // question.
-                        crate::touch_activity(&activity);
+                        touch_activity(&activity);
                         let answer = match choice {
                             PermissionChoice::Selected(option_id)
                                 if permission::is_question(&pending.request) =>
@@ -1350,9 +1357,9 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 continue;
             };
             open_permissions = open_permissions.saturating_sub(1);
-            crate::record_timeout(
+            record_timeout(
                 &timeout_reason,
-                AcpError::Timeout {
+                ChatError::Timeout {
                     operation: TimeoutOperation::Permission,
                     duration: permission_timeout,
                 },
@@ -1377,24 +1384,24 @@ async fn session(context: SessionContext) -> SessionOutcome {
         {
             resolve_context_usage(&event_tx, pending, None).await;
         }
-        if turn_in_flight && open_permissions == 0 && crate::idle_for(&activity) >= prompt_timeout {
+        if turn_in_flight && open_permissions == 0 && idle_for(&activity) >= prompt_timeout {
             // An unanswered permission card is the client's silence, not
             // the agent's: the agent asked and is doing exactly what it
             // should, which is nothing.
-            crate::record_timeout(
+            record_timeout(
                 &timeout_reason,
-                AcpError::Timeout {
+                ChatError::Timeout {
                     operation: TimeoutOperation::Prompt,
                     duration: prompt_timeout,
                 },
             );
             let _ = event_tx
-                .send(AcpEvent::Timeout {
+                .send(ChatEvent::Timeout {
                     operation: TimeoutOperation::Prompt,
                     duration: prompt_timeout,
                 })
                 .await;
-            crate::terminate_and_reap_blocking(&child);
+            terminate_and_reap_blocking(&child);
             end_held_turn(&event_tx, &mut pending_context_usage).await;
             return SessionOutcome::NeverStarted;
         }
@@ -1413,9 +1420,9 @@ fn is_subagent_permission(fold: &Fold, request: &sirio_claude::CanUseTool) -> bo
 }
 
 /// Forwards the trace events one line, command or answer produced, in order.
-async fn send_trace(event_tx: &async_channel::Sender<AcpEvent>, events: Vec<TraceEvent>) {
+async fn send_trace(event_tx: &async_channel::Sender<ChatEvent>, events: Vec<TraceEvent>) {
     for event in events {
-        let _ = event_tx.send(AcpEvent::Trace(event)).await;
+        let _ = event_tx.send(ChatEvent::Trace(event)).await;
     }
 }
 
@@ -1425,7 +1432,7 @@ async fn send_trace(event_tx: &async_channel::Sender<AcpEvent>, events: Vec<Trac
 fn context_usage_event(
     report: Option<ContextUsageReport>,
     summary: &ResultSummary,
-) -> Option<AcpEvent> {
+) -> Option<ChatEvent> {
     let (used, size) = match report {
         Some(report) => (report.total_tokens, report.raw_max_tokens),
         None => {
@@ -1439,7 +1446,7 @@ fn context_usage_event(
             (used, size)
         }
     };
-    Some(AcpEvent::ContextUsage(ContextUsage {
+    Some(ChatEvent::ContextUsage(ContextUsage {
         used,
         size,
         cost: summary.total_cost_usd.map(|amount| ContextCost {
@@ -1462,8 +1469,8 @@ const MCP_SERVERS: &str = "McpServers";
 /// A re-read signal: the event vocabulary has no variant for the session
 /// panel's data, so the surface is told *that* something changed and reads it
 /// back through the client, the way it does for a mode change.
-fn other_update(kind: &str) -> AcpEvent {
-    AcpEvent::OtherSessionUpdate { kind: kind.into() }
+fn other_update(kind: &str) -> ChatEvent {
+    ChatEvent::OtherSessionUpdate { kind: kind.into() }
 }
 
 /// The meter's event for a breakdown asked for outside a turn. The last
@@ -1472,11 +1479,11 @@ fn other_update(kind: &str) -> AcpEvent {
 fn refreshed_usage_event(
     report: Option<&ContextUsageReport>,
     last_result: Option<&ResultSummary>,
-) -> Option<AcpEvent> {
+) -> Option<ChatEvent> {
     let report = report?;
     match last_result {
         Some(summary) => context_usage_event(Some(report.clone()), summary),
-        None => Some(AcpEvent::ContextUsage(ContextUsage {
+        None => Some(ChatEvent::ContextUsage(ContextUsage {
             used: report.total_tokens,
             size: report.raw_max_tokens,
             ..ContextUsage::default()
@@ -1487,7 +1494,7 @@ fn refreshed_usage_event(
 /// Ends a held turn: the meter first, then the turn's own end. A refusal or
 /// an unreadable answer is not an error — the result's numbers stand in.
 async fn resolve_context_usage(
-    event_tx: &async_channel::Sender<AcpEvent>,
+    event_tx: &async_channel::Sender<ChatEvent>,
     pending: PendingContextUsage,
     report: Option<ContextUsageReport>,
 ) {
@@ -1502,7 +1509,7 @@ async fn resolve_context_usage(
 /// The same, for a held turn the reader will never get an answer for — the
 /// CLI went away with the request still in its stdin.
 async fn end_held_turn(
-    event_tx: &async_channel::Sender<AcpEvent>,
+    event_tx: &async_channel::Sender<ChatEvent>,
     pending: &mut Option<PendingContextUsage>,
 ) {
     if let Some(pending) = pending.take() {
@@ -1566,11 +1573,11 @@ fn catalogue_events(
     catalog: &Catalog,
     model_id: &str,
     selected_effort: &mut String,
-) -> Vec<AcpEvent> {
+) -> Vec<ChatEvent> {
     let mut events = Vec::new();
     let commands = command_list(catalog);
     if !commands.is_empty() {
-        events.push(AcpEvent::AvailableCommands(commands));
+        events.push(ChatEvent::AvailableCommands(commands));
     }
     events.push(effort_event(catalog, model_id, selected_effort));
     events
@@ -1578,11 +1585,11 @@ fn catalogue_events(
 
 /// The command list as the surface takes it. Two callers: the handshake,
 /// and a `commands_changed` line later in the session.
-fn command_list(catalog: &Catalog) -> Vec<crate::AvailableCommandInfo> {
+fn command_list(catalog: &Catalog) -> Vec<sirio_chat_vocab::AvailableCommandInfo> {
     catalog
         .commands()
         .into_iter()
-        .map(|command| crate::AvailableCommandInfo {
+        .map(|command| sirio_chat_vocab::AvailableCommandInfo {
             name: command.name,
             description: command.description,
             argument_hint: command.argument_hint,
@@ -1599,7 +1606,7 @@ fn command_list(catalog: &Catalog) -> Vec<crate::AvailableCommandInfo> {
 /// Empty choices are how a model with no effort at all says so — Haiku sends
 /// neither effort field — and the surface reads that as "no selector" rather
 /// than as an empty one.
-fn effort_event(catalog: &Catalog, model_id: &str, selected: &mut String) -> AcpEvent {
+fn effort_event(catalog: &Catalog, model_id: &str, selected: &mut String) -> ChatEvent {
     let effort = catalog.effort_for(model_id);
     let choices: Vec<EffortChoice> = effort
         .map(|effort| {
@@ -1616,7 +1623,7 @@ fn effort_event(catalog: &Catalog, model_id: &str, selected: &mut String) -> Acp
     if !choices.iter().any(|choice| choice.value == *selected) {
         *selected = EFFORT_DEFAULT.to_string();
     }
-    AcpEvent::Effort(EffortOption {
+    ChatEvent::Effort(EffortOption {
         option_id: "effort".into(),
         name: Some("Effort".into()),
         current_value: Some(selected.clone()),
@@ -1655,7 +1662,7 @@ async fn drain_stderr(stderr: async_process::ChildStderr, tail: StderrTail, _sha
                 // MCP stderr lines are intentionally not surfaced as warnings
                 // on the native path (see `Fold::apply_system`): a broken
                 // user server must not banner the chat.
-                crate::push_stderr_tail(&tail, trimmed.to_string());
+                push_stderr_tail(&tail, trimmed.to_string());
             }
         }
     }
@@ -1679,8 +1686,8 @@ mod tests {
         }
     }
 
-    fn context_usage(event: Option<AcpEvent>) -> ContextUsage {
-        let Some(AcpEvent::ContextUsage(usage)) = event else {
+    fn context_usage(event: Option<ChatEvent>) -> ContextUsage {
+        let Some(ChatEvent::ContextUsage(usage)) = event else {
             panic!("expected a context usage event, got {event:?}");
         };
         usage
@@ -1691,8 +1698,8 @@ mod tests {
         Catalog::from_initialize(&serde_json::json!({ "models": models }))
     }
 
-    fn selector(event: AcpEvent) -> EffortOption {
-        let AcpEvent::Effort(option) = event else {
+    fn selector(event: ChatEvent) -> EffortOption {
+        let ChatEvent::Effort(option) = event else {
             panic!("expected an effort event, got {event:?}");
         };
         option

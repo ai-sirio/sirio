@@ -239,7 +239,7 @@ and `bezel-gpui-platform =0.3.8`, the same packages Sirio pins.
 cargo build -p sirio --bin sirio -p sirio_control --bin sirioctl
 cargo build -p sirio_persistence --example ely_chat_seed
 cargo test -p sirio_ui --lib chat::                      # 205 passed
-cargo test -p sirio_acp --test chat_integration          # 7 passed
+cargo test -p sirio_chat --test chat_integration         # 7 passed
 cargo test -p sirio_control --test control_integration   # 44 passed
 cargo test -p sirio --bin sirio restored_chat            # 2 passed
 cargo test -p ely-gpui-component --features test-support # 79 passed

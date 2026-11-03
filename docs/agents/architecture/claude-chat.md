@@ -4,8 +4,8 @@ A chat tab for Claude Code drives the `claude` already on the user's PATH
 over the stdio protocol the Claude Agent SDK uses internally
 (`claude -p --output-format stream-json --input-format stream-json`), not
 the `claude-acp` registry wrapper. `sirio_claude` is that protocol as types
-and pure functions; `sirio_acp::claude` owns the process and emits the same
-`AcpEvent`s the ACP client does, so `sirio_ui::chat` cannot tell which
+and pure functions; `sirio_chat::claude` owns the process and emits the same
+`ChatEvent`s the ACP client does, so `sirio_ui::chat` cannot tell which
 transport a tab uses. The resolution lives in `sirio`'s `claude_transport`:
 native when `claude` is on PATH at or above `sirio_claude::MIN_CLAUDE_VERSION`
 (2.1.257, the version the official wrapper's SDK bundles and therefore
@@ -31,7 +31,7 @@ starts folded, and which cards are folded does not survive a relaunch. Its cards
 (project, the chat's own directory, the branch read live), Context (what fills the window,
 folded by origin, from `get_context_usage` through `sirio_claude::context`; asked once on open
 when no report exists yet), Connectors (the session's MCP servers by origin, with Sign in and
-Reconnect, from `sirio_claude::mcp` and `sirio_acp::McpControl`, whose calls wait for the CLI
+Reconnect, from `sirio_claude::mcp` and `sirio_chat::McpControl`, whose calls wait for the CLI
 and so run off the GPUI thread), Trace (below) and Change request (the branch's pull or merge
 request through the forge source, sharing the right panel's per-host rate-limit pause, and read
 only once the card is unfolded and a frame paints the column, so a chat in a background tab asks
@@ -61,7 +61,7 @@ line (`Live · 34s`, `Waiting for you · 46s`, `Done · 14s · $0.31`, `Interrup
 `Failed · 1m 02s`); unfolded it adds six numbers, one lane per agent on a shared axis with the
 permission it waits on beneath it, and a row that opens the tab. A lane or a wait scrolls the
 transcript to its row (`Chat::reveal_span`, `reveal_wait`); consecutive tool rows are one box,
-drawn at the run's last row, so a reveal of any of them lands there. `sirio_acp::claude::trace`
+drawn at the run's last row, so a reveal of any of them lands there. `sirio_chat::claude::trace`
 folds the CLI's lines into `TraceEvent`s, stamped with the instant the worker read them because
 no line carries a time (the CLI's own durations win where it sends one); a main-thread model call
 runs from the CLI's `status: requesting` line (the request going out) to `message_stop`, and

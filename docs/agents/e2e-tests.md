@@ -85,8 +85,8 @@ Scripts/Tests/test-project-identity-e2e.sh   # -> prints "PROJECT IDENTITY E2E O
 Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "PROMPTS E2E OK"
 
 # The chat's session panel column in a real, isolated Sirio: a stub `claude`
-# (Scripts/Tests/stubs/session-panel/claude over claude_fixture.py's session_panel
-# mode) and the fake forge, asserted on `surface.chat.read`'s `sessionPanel`:
+# (Scripts/Tests/stubs/session-panel/claude over sirio_chat's claude_fixture.py in
+# session_panel mode) and the fake forge, asserted on `surface.chat.read`'s `sessionPanel`:
 # Environment, the Context fold (asked on open, a plugin node, the CLAUDE.md row
 # opening a file tab), Connectors (reconnect, sign in), the Change request card, the
 # shared rate-limit pause and the open state across a relaunch. The trace scenarios

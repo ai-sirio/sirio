@@ -144,14 +144,20 @@ async fn ely_row_identity_changes_only_when_transcript_is_replaced(cx: &mut Test
     let (chat, cx) = super::tests::offline_chat_view(cx);
     let (before, after_chunk, before_replace, after_replace) = chat.update(cx, |v, cx| {
         v.streaming = true;
-        v.handle_event(AcpEvent::AgentMessageChunk("ciao 🌙".into()), cx);
+        v.handle_event(
+            sirio_chat::ChatEvent::AgentMessageChunk("ciao 🌙".into()),
+            cx,
+        );
         let before = v.row_id(0, cx);
-        v.handle_event(AcpEvent::AgentMessageChunk(" ancora".into()), cx);
+        v.handle_event(
+            sirio_chat::ChatEvent::AgentMessageChunk(" ancora".into()),
+            cx,
+        );
         let after_chunk = v.row_id(0, cx);
         v.push_entry(unicode_tool());
         let before_replace = v.row_id(1, cx);
         v.new_conversation(cx);
-        v.handle_event(AcpEvent::AgentMessageChunk("nuova".into()), cx);
+        v.handle_event(sirio_chat::ChatEvent::AgentMessageChunk("nuova".into()), cx);
         v.push_entry(unicode_tool());
         (before, after_chunk, before_replace, v.row_id(1, cx))
     });
@@ -333,9 +339,12 @@ async fn ely_tool_and_thought_expansion_survives_virtualization(cx: &mut TestApp
     refresh_frame(cx);
     assert!(cx.debug_bounds("thought-body-0").is_none());
     chat.update(cx, |v, cx| {
-        v.handle_event(AcpEvent::AgentMessageChunk("final chunk".into()), cx);
         v.handle_event(
-            AcpEvent::TurnEnded {
+            sirio_chat::ChatEvent::AgentMessageChunk("final chunk".into()),
+            cx,
+        );
+        v.handle_event(
+            sirio_chat::ChatEvent::TurnEnded {
                 stop_reason: "EndTurn".into(),
             },
             cx,

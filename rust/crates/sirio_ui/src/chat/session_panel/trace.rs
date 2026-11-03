@@ -824,17 +824,17 @@ mod tests {
         lay_out_short, offline_chat_view, open_question_with_free_text, pump_chat_until,
         push_answers, refresh_frame, top_entry,
     };
-    use crate::chat::{AcpEvent, Chat, ChatEvent, Entry, LaunchSpec};
+    use crate::chat::{Chat, ChatEvent, Entry, LaunchSpec};
     use gpui::{TestAppContext, VisualTestContext, px, size};
     use gpui::Entity;
-    use sirio_acp::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
+    use sirio_chat::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
     use std::cell::Cell;
     use std::rc::Rc;
     use std::time::{Duration, Instant};
 
     const CLAUDE_FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../sirio_acp/tests/fixtures/claude_fixture.py"
+        "/../sirio_chat/tests/fixtures/claude_fixture.py"
     );
 
     #[test]
@@ -889,8 +889,8 @@ mod tests {
         base + Duration::from_secs_f64(seconds)
     }
 
-    fn started(at: Instant) -> AcpEvent {
-        AcpEvent::Trace(TraceEvent::TurnStarted { at })
+    fn started(at: Instant) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Trace(TraceEvent::TurnStarted { at })
     }
 
     fn span(
@@ -901,8 +901,8 @@ mod tests {
         detail: &str,
         model: Option<&str>,
         at: Instant,
-    ) -> AcpEvent {
-        AcpEvent::Trace(TraceEvent::SpanStarted {
+    ) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Trace(TraceEvent::SpanStarted {
             id: id.into(),
             parent: parent.map(str::to_string),
             kind,
@@ -913,8 +913,8 @@ mod tests {
         })
     }
 
-    fn span_ended(id: &str, at: Instant) -> AcpEvent {
-        AcpEvent::Trace(TraceEvent::SpanEnded {
+    fn span_ended(id: &str, at: Instant) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Trace(TraceEvent::SpanEnded {
             id: id.into(),
             outcome: SpanOutcome::Done,
             at,
@@ -922,8 +922,8 @@ mod tests {
         })
     }
 
-    fn span_failed(id: &str, at: Instant) -> AcpEvent {
-        AcpEvent::Trace(TraceEvent::SpanEnded {
+    fn span_failed(id: &str, at: Instant) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Trace(TraceEvent::SpanEnded {
             id: id.into(),
             outcome: SpanOutcome::Failed {
                 note: "boom".into(),
@@ -933,8 +933,8 @@ mod tests {
         })
     }
 
-    fn wait(span: &str, request_id: u64, at: Instant) -> AcpEvent {
-        AcpEvent::Trace(TraceEvent::WaitStarted {
+    fn wait(span: &str, request_id: u64, at: Instant) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Trace(TraceEvent::WaitStarted {
             span: Some(span.into()),
             request_id,
             at,
@@ -946,8 +946,8 @@ mod tests {
         measured_ms: Option<u64>,
         cost_usd: Option<f64>,
         tokens: Option<TokenCount>,
-    ) -> AcpEvent {
-        AcpEvent::Trace(TraceEvent::TurnEnded {
+    ) -> sirio_chat::ChatEvent {
+        sirio_chat::ChatEvent::Trace(TraceEvent::TurnEnded {
             at,
             outcome: TurnOutcome::Done,
             measured_ms,
@@ -1021,7 +1021,7 @@ mod tests {
         let source = FakeSource::ready(testing::github_client(forge), Some("feat/y"));
         cx.update(|cx| crate::forge_source::set_source(source, cx));
         let (chat, cx) = cx.add_window_view(|_, cx| {
-            let launch = sirio_acp::ClaudeLaunch::fixture(
+            let launch = sirio_chat::ClaudeLaunch::fixture(
                 "python3",
                 vec![CLAUDE_FIXTURE.to_string(), "session_panel".to_string()],
             );

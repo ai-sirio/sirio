@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""A deterministic fake `claude` speaking stream-json, for sirio_acp tests.
+"""A deterministic fake `claude` speaking stream-json, for sirio_chat's and
+sirio_ui's tests and the E2E stubs.
 
 It is the native twin of `acp_fixture.py`: same shape, same argv contract
 (mode first, optional pid file second), different protocol. Nothing here

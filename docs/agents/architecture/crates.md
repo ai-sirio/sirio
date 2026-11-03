@@ -14,8 +14,8 @@ sirio_env        (below everything, beside sirio_perf — no dependencies. It is
                     directory first on `PATH`, the per-pane names stripped
                     (`SIRIO_WORKTREE_ID`, `SIRIO_PANE_ID`, `TILLER_PANE_ID`), and
                     `for_child()` for a site that cannot spawn through `command`.
-                    Its dependents are sirio_acp, sirio_control, sirio_diagram,
-                    sirio_forge, sirio_git, sirio_lsp, sirio_project,
+                    Its dependents are sirio_acp, sirio_chat, sirio_control,
+                    sirio_diagram, sirio_forge, sirio_git, sirio_lsp, sirio_project,
                     sirio_registry, sirio_terminal, sirio_ui, sirio_usage and sirio.
                     With the host's `term.env_exact` (`sirio_host_protocol::term`)
                     a session's environment is exactly the client's map; a host
@@ -30,7 +30,7 @@ sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_activity, sirio_markdown, sirio_registry, sirio_release,
 sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram,
 sirio_forge, sirio_privacy, sirio_ipc, sirio_host_protocol,
-sirio_term_session
+sirio_term_session, sirio_chat_vocab
                                 (leaves — no local deps beyond sirio_perf and sirio_env;
                                  sirio_theme takes `bezel-theme` (pinned
                                  `=0.1.4`) and the vendored `ely-palette`;
@@ -41,7 +41,7 @@ sirio_term_session
                                  carry; sirio_claude is Claude Code's own
                                  stdio protocol as types and pure functions —
                                  no process, no channels — which is what lets
-                                 sirio_agents, sirio_acp and sirio_usage all
+                                 sirio_agents, sirio_chat and sirio_usage all
                                  take it without inverting the graph;
                                  sirio_forge is GitHub and GitLab change
                                  requests over GraphQL, with the token
@@ -60,19 +60,29 @@ sirio_term_session
                                  engine — PTYs, one resident `libghostty-vt`
                                  terminal per session, the journal a resume
                                  reads — with no GPUI; it takes `sirio_perf`,
-                                 `libghostty-vt` and `portable-pty`)
+                                 `libghostty-vt` and `portable-pty`;
+                                 sirio_chat_vocab is the chat vocabulary every
+                                 transport emits — `ChatEvent`, `ChatError`,
+                                 the trace and permission types — with only
+                                 `async-channel` and `serde_json` behind it)
     ^
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)
-sirio_acp        (-> sirio_persistence, sirio_claude)
+sirio_chat_child (-> sirio_chat_vocab; the supervision every transport's child
+                      process shares — activity clock, stderr tail, timeouts, exit reports)
+sirio_acp        (-> sirio_chat_vocab, sirio_chat_child; the ACP client and nothing else)
+sirio_chat       (-> sirio_acp, sirio_chat_vocab, sirio_chat_child, sirio_claude,
+                      sirio_persistence; `ChatClient`, `LaunchSpec`, `ChatSession` and
+                      Claude's native transport, re-exporting the chat vocabulary; `sirio`'s
+                      `claude_transport` decides which transport a chat launches)
 sirio_terminal    (-> sirio_project, sirio_theme, sirio_ui, sirio_host_client, sirio_host_protocol, sirio_term_session, and `bezel-theme` directly for its scrollbar's colour)
-sirio_control    (-> sirio_acp, sirio_persistence, sirio_ipc, sirio_host_client, sirio_host_protocol)
+sirio_control    (-> sirio_chat, sirio_persistence, sirio_ipc, sirio_host_client, sirio_host_protocol)
 sirio_host       (-> sirio_ipc, sirio_host_protocol, sirio_term_session; the `sirio-host` binary)
 sirio_host_client (-> sirio_ipc, sirio_host_protocol)
 sirio_update     (-> sirio_control, sirio_registry, sirio_release)
 sirio_apply      (-> sirio_update)
     ^
-sirio_ui         (-> sirio_acp, sirio_agents, sirio_diagram, sirio_forge, sirio_git,
+sirio_ui         (-> sirio_agents, sirio_chat, sirio_diagram, sirio_forge, sirio_git,
                       sirio_lsp, sirio_markdown, sirio_persistence, sirio_privacy,
                       sirio_project, sirio_registry, sirio_syntax, sirio_theme,
                       sirio_usage)

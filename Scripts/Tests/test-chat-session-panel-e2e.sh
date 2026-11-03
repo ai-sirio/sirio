@@ -4,7 +4,7 @@ set -euo pipefail
 # End-to-end test of the chat's session panel (spec
 # 2026-10-20-chat-session-panel-design.md §9): a real, isolated debug Sirio, its
 # Claude chat talking to a stub `claude` (Scripts/Tests/stubs/session-panel/claude,
-# which runs rust/crates/sirio_acp/tests/fixtures/claude_fixture.py in its
+# which runs rust/crates/sirio_chat/tests/fixtures/claude_fixture.py in its
 # session_panel mode) and its change request card reading the loopback fake forge
 # (Scripts/Tests/fake_forge.py). Everything is asserted on the `sessionPanel` JSON
 # of `surface.chat.read` -- the column's sections, rows, details and actions --

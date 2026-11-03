@@ -2,7 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sirio_acp::{AcpClient, AcpEvent, AgentCommand};
+use sirio_acp::{AcpClient, AgentCommand};
+use sirio_chat_vocab::ChatEvent;
 
 fn main() {
     if let Err(error) = run() {
@@ -39,8 +40,8 @@ fn run() -> anyhow::Result<()> {
             .map_err(|error| anyhow::anyhow!("event stream closed: {error}"))?;
         println!("event: {event:?}");
         match event {
-            AcpEvent::AgentMessageChunk(text) => assistant_text.push_str(&text),
-            AcpEvent::PermissionRequest {
+            ChatEvent::AgentMessageChunk(text) => assistant_text.push_str(&text),
+            ChatEvent::PermissionRequest {
                 request_id,
                 options,
                 ..
@@ -50,8 +51,8 @@ fn run() -> anyhow::Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("permission request had no options"))?;
                 client.respond_permission(request_id, &option.id)?;
             }
-            AcpEvent::TurnEnded { .. } => break,
-            AcpEvent::TransportError(error) => return Err(anyhow::anyhow!(error)),
+            ChatEvent::TurnEnded { .. } => break,
+            ChatEvent::TransportError(error) => return Err(anyhow::anyhow!(error)),
             _ => {}
         }
     }

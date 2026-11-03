@@ -13,7 +13,7 @@ use gpui::{
     ParentElement, StatefulInteractiveElement, Styled, div, pattern_slash,
     prelude::FluentBuilder as _, px, relative,
 };
-use sirio_acp::SpanKind;
+use sirio_chat::SpanKind;
 use sirio_theme::Theme;
 
 use super::{TraceTab, has_children};

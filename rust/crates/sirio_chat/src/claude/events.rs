@@ -1,4 +1,4 @@
-//! Protocol lines in, `AcpEvent`s out.
+//! Protocol lines in, `ChatEvent`s out.
 //!
 //! Everything here is pure. The worker owns the process and the channels;
 //! this owns the little state a stream needs — which tool calls are open,
@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use sirio_claude::message::{CliMessage, Delta, ResultPayload, SystemPayload};
 use sirio_claude::tools::{self, ToolContent, ToolInfo};
 
-use crate::{
-    AcpEvent, PlanEntryInfo, SessionNotice, ToolCallContentInfo, ToolCallDiff,
+use sirio_chat_vocab::{
+    ChatEvent, PlanEntryInfo, SessionNotice, ToolCallContentInfo, ToolCallDiff,
     ToolCallLocationInfo,
 };
 
@@ -143,7 +143,7 @@ impl Fold {
     }
 
     /// Folds one line.
-    pub(crate) fn apply(&mut self, message: CliMessage) -> Vec<AcpEvent> {
+    pub(crate) fn apply(&mut self, message: CliMessage) -> Vec<ChatEvent> {
         match message {
             CliMessage::StreamEvent(event) => {
                 // A subagent's deltas carry a parent id. They are not the
@@ -152,7 +152,7 @@ impl Fold {
                     return Vec::new();
                 }
                 match event.delta() {
-                    Some(Delta::Text(text)) => vec![AcpEvent::AgentMessageChunk(text)],
+                    Some(Delta::Text(text)) => vec![ChatEvent::AgentMessageChunk(text)],
                     // A thought with no text is not a thought. Every model
                     // that does not expose its reasoning still sends the
                     // block -- one `thinking_delta` carrying `""`, then the
@@ -164,7 +164,7 @@ impl Fold {
                     // between them, and dropping it would glue them
                     // together.
                     Some(Delta::Thinking(text)) if text.is_empty() => Vec::new(),
-                    Some(Delta::Thinking(text)) => vec![AcpEvent::ThoughtChunk(text)],
+                    Some(Delta::Thinking(text)) => vec![ChatEvent::ThoughtChunk(text)],
                     None => Vec::new(),
                 }
             }
@@ -189,7 +189,7 @@ impl Fold {
                     let info = tools::describe(tool_use);
                     events.push(started_event(&tool_use.id, &info, "InProgress"));
                     if let Some(entries) = plan_entries(&tool_use.name, &tool_use.input) {
-                        events.push(AcpEvent::PlanUpdate { entries });
+                        events.push(ChatEvent::PlanUpdate { entries });
                     }
                     self.open_calls.insert(
                         tool_use.id.clone(),
@@ -210,13 +210,13 @@ impl Fold {
                     let Some(open) = self.open_calls.remove(&result.tool_use_id) else {
                         // A result for a call nobody opened: report the
                         // traffic rather than inventing a row for it.
-                        events.push(AcpEvent::OtherSessionUpdate {
+                        events.push(ChatEvent::OtherSessionUpdate {
                             kind: "tool_result(unmatched)".into(),
                         });
                         continue;
                     };
                     let content = completion_content(&open, &result, user.tool_use_result.as_ref());
-                    events.push(AcpEvent::ToolCallCompleted {
+                    events.push(ChatEvent::ToolCallCompleted {
                         id: result.tool_use_id,
                         status: if result.is_error {
                             "Failed".into()
@@ -257,12 +257,12 @@ impl Fold {
                     window: limit.rate_limit_type.clone(),
                     resets_at: limit.resets_at,
                 });
-                vec![AcpEvent::OtherSessionUpdate {
+                vec![ChatEvent::OtherSessionUpdate {
                     kind: "SessionNotice".into(),
                 }]
             }
             CliMessage::Other { kind, subtype } => {
-                vec![AcpEvent::OtherSessionUpdate {
+                vec![ChatEvent::OtherSessionUpdate {
                     kind: match subtype {
                         Some(subtype) => format!("{kind}/{subtype}"),
                         None => kind,
@@ -273,20 +273,20 @@ impl Fold {
     }
 
     /// Marks an open call as waiting on the user's decision.
-    pub(crate) fn mark_pending(&mut self, tool_use_id: &str) -> Vec<AcpEvent> {
+    pub(crate) fn mark_pending(&mut self, tool_use_id: &str) -> Vec<ChatEvent> {
         self.status_update(tool_use_id, "Pending")
     }
 
     /// Marks it running again once the decision was "allow".
-    pub(crate) fn mark_running(&mut self, tool_use_id: &str) -> Vec<AcpEvent> {
+    pub(crate) fn mark_running(&mut self, tool_use_id: &str) -> Vec<ChatEvent> {
         self.status_update(tool_use_id, "InProgress")
     }
 
-    fn status_update(&mut self, tool_use_id: &str, status: &str) -> Vec<AcpEvent> {
+    fn status_update(&mut self, tool_use_id: &str, status: &str) -> Vec<ChatEvent> {
         if self.is_subagent_call(tool_use_id) || !self.open_calls.contains_key(tool_use_id) {
             return Vec::new();
         }
-        vec![AcpEvent::ToolCallUpdated {
+        vec![ChatEvent::ToolCallUpdated {
             id: tool_use_id.to_string(),
             title: None,
             status: Some(status.to_string()),
@@ -307,7 +307,7 @@ impl Fold {
         tool_name: &str,
         tool_use_id: &str,
         input: &serde_json::Value,
-    ) -> Vec<AcpEvent> {
+    ) -> Vec<ChatEvent> {
         if self.is_subagent_call(tool_use_id) {
             return Vec::new();
         }
@@ -331,13 +331,13 @@ impl Fold {
         vec![event]
     }
 
-    fn apply_system(&mut self, system: SystemPayload) -> Vec<AcpEvent> {
+    fn apply_system(&mut self, system: SystemPayload) -> Vec<ChatEvent> {
         let mut events = Vec::new();
         if let Some(mode) = system.permission_mode.clone() {
             let changed = self.current_mode.as_deref() != Some(mode.as_str());
             self.current_mode = Some(mode.clone());
             if changed {
-                events.push(AcpEvent::OtherSessionUpdate {
+                events.push(ChatEvent::OtherSessionUpdate {
                     kind: format!("CurrentModeUpdate({mode})"),
                 });
             }
@@ -355,10 +355,10 @@ impl Fold {
                     self.session_id = Some(session_id);
                     if first {
                         // The id is read back through the client, the way a
-                        // mode change is: `AcpEvent` must not grow a variant
+                        // mode change is: `ChatEvent` must not grow a variant
                         // that every consumer in the workspace would have to
                         // match.
-                        events.push(AcpEvent::OtherSessionUpdate {
+                        events.push(ChatEvent::OtherSessionUpdate {
                             kind: "SessionIdentified".into(),
                         });
                     }
@@ -378,7 +378,7 @@ impl Fold {
                     pre_tokens: metadata.pre_tokens,
                     post_tokens: metadata.post_tokens,
                 });
-                events.push(AcpEvent::OtherSessionUpdate {
+                events.push(ChatEvent::OtherSessionUpdate {
                     kind: "SessionNotice".into(),
                 });
             }
@@ -398,7 +398,7 @@ impl Fold {
                 {
                     self.notices
                         .push(SessionNotice::BackgroundTaskEnded { summary });
-                    events.push(AcpEvent::OtherSessionUpdate {
+                    events.push(ChatEvent::OtherSessionUpdate {
                         kind: "SessionNotice".into(),
                     });
                 }
@@ -407,19 +407,19 @@ impl Fold {
                 let count = system.tasks.as_ref().map_or(0, Vec::len);
                 if count != self.background_tasks {
                     self.background_tasks = count;
-                    events.push(AcpEvent::OtherSessionUpdate {
+                    events.push(ChatEvent::OtherSessionUpdate {
                         kind: format!("BackgroundTasksUpdate({count})"),
                     });
                 }
             }
-            other => events.push(AcpEvent::OtherSessionUpdate {
+            other => events.push(ChatEvent::OtherSessionUpdate {
                 kind: format!("system/{other}"),
             }),
         }
         events
     }
 
-    fn apply_result(&mut self, result: ResultPayload) -> Vec<AcpEvent> {
+    fn apply_result(&mut self, result: ResultPayload) -> Vec<ChatEvent> {
         let mut events = Vec::new();
         if result.is_error
             && let Some(text) = result.result.clone().filter(|text| !text.is_empty())
@@ -427,7 +427,7 @@ impl Fold {
             // The user must see why a turn failed. The alternative — a bare
             // footer saying "ended" — is the exact silent failure this
             // transcript is responsible for not producing.
-            events.push(AcpEvent::AgentMessageChunk(text));
+            events.push(ChatEvent::AgentMessageChunk(text));
         }
         let mut input_tokens = 0;
         let mut output_tokens = 0;
@@ -444,7 +444,7 @@ impl Fold {
             }
         }
         if !result.model_usage.is_empty() {
-            events.push(AcpEvent::TokenUsageBreakdown {
+            events.push(ChatEvent::TokenUsageBreakdown {
                 input_tokens,
                 output_tokens,
                 cached_read_tokens: Some(cached_read_tokens),
@@ -466,7 +466,7 @@ impl Fold {
         // surface must not keep spinners running for work nobody will
         // report on.
         self.open_calls.clear();
-        events.push(AcpEvent::TurnEnded { stop_reason });
+        events.push(ChatEvent::TurnEnded { stop_reason });
         events
     }
 }
@@ -491,8 +491,8 @@ fn stop_reason_label(result: &ResultPayload) -> String {
     .to_string()
 }
 
-fn started_event(id: &str, info: &ToolInfo, status: &str) -> AcpEvent {
-    AcpEvent::ToolCallStarted {
+fn started_event(id: &str, info: &ToolInfo, status: &str) -> ChatEvent {
+    ChatEvent::ToolCallStarted {
         id: id.to_string(),
         title: info.title.clone(),
         status: status.to_string(),
@@ -598,7 +598,7 @@ mod tests {
                 "event": {"type": "content_block_delta",
                           "delta": {"type": "text_delta", "text": "Hel"}}
             }))),
-            vec![AcpEvent::AgentMessageChunk("Hel".into())]
+            vec![ChatEvent::AgentMessageChunk("Hel".into())]
         );
         assert_eq!(
             fold.apply(parse(json!({
@@ -606,7 +606,7 @@ mod tests {
                 "event": {"type": "content_block_delta",
                           "delta": {"type": "thinking_delta", "thinking": "weighing"}}
             }))),
-            vec![AcpEvent::ThoughtChunk("weighing".into())]
+            vec![ChatEvent::ThoughtChunk("weighing".into())]
         );
     }
 
@@ -648,7 +648,7 @@ mod tests {
             1,
             "the text block must not be re-emitted: {events:?}"
         );
-        let AcpEvent::ToolCallStarted {
+        let ChatEvent::ToolCallStarted {
             id,
             title,
             status,
@@ -677,13 +677,13 @@ mod tests {
         let pending = fold.mark_pending("toolu_1");
         assert!(matches!(
             pending.as_slice(),
-            [AcpEvent::ToolCallUpdated { id, status: Some(status), .. }]
+            [ChatEvent::ToolCallUpdated { id, status: Some(status), .. }]
                 if id == "toolu_1" && status == "Pending"
         ));
         let running = fold.mark_running("toolu_1");
         assert!(matches!(
             running.as_slice(),
-            [AcpEvent::ToolCallUpdated { id, status: Some(status), .. }]
+            [ChatEvent::ToolCallUpdated { id, status: Some(status), .. }]
                 if id == "toolu_1" && status == "InProgress"
         ));
     }
@@ -694,7 +694,7 @@ mod tests {
         let started = fold.start_from_permission("Bash", "toolu_9", &json!({"command": "ls"}));
         assert!(matches!(
             started.as_slice(),
-            [AcpEvent::ToolCallStarted { id, status, .. }]
+            [ChatEvent::ToolCallStarted { id, status, .. }]
                 if id == "toolu_9" && status == "Pending"
         ));
         // The assistant block for the same id arrives afterwards and must
@@ -727,7 +727,7 @@ mod tests {
             }
         })));
         let [
-            AcpEvent::ToolCallCompleted {
+            ChatEvent::ToolCallCompleted {
                 id,
                 status,
                 content,
@@ -764,7 +764,7 @@ mod tests {
                                      "is_error": true, "content": "exit status 1"}]}
         })));
         let [
-            AcpEvent::ToolCallCompleted {
+            ChatEvent::ToolCallCompleted {
                 status, content, ..
             },
         ] = events.as_slice()
@@ -790,7 +790,7 @@ mod tests {
                 ]}}]}
         })));
         let plan = events.iter().find_map(|event| match event {
-            AcpEvent::PlanUpdate { entries } => Some(entries),
+            ChatEvent::PlanUpdate { entries } => Some(entries),
             _ => None,
         });
         assert_eq!(
@@ -821,12 +821,12 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                AcpEvent::TokenUsageBreakdown {
+                ChatEvent::TokenUsageBreakdown {
                     input_tokens: 1200,
                     output_tokens: 340,
                     cached_read_tokens: Some(8000),
                 },
-                AcpEvent::TurnEnded {
+                ChatEvent::TurnEnded {
                     stop_reason: "EndTurn".into()
                 },
             ]
@@ -848,9 +848,9 @@ mod tests {
         })));
         assert_eq!(
             events[0],
-            AcpEvent::AgentMessageChunk("Reached the turn limit".into())
+            ChatEvent::AgentMessageChunk("Reached the turn limit".into())
         );
-        assert!(matches!(events.last(), Some(AcpEvent::TurnEnded { .. })));
+        assert!(matches!(events.last(), Some(ChatEvent::TurnEnded { .. })));
     }
 
     #[test]
@@ -880,7 +880,7 @@ mod tests {
         });
         assert_eq!(
             fold.apply(parse(line.clone())),
-            vec![AcpEvent::OtherSessionUpdate {
+            vec![ChatEvent::OtherSessionUpdate {
                 kind: "SessionNotice".into()
             }]
         );
@@ -952,19 +952,19 @@ mod tests {
         let started = fold.start_from_permission("Bash", "toolu_main", &json!({"command": "ls"}));
         assert!(matches!(
             started.as_slice(),
-            [AcpEvent::ToolCallStarted { id, status, .. }]
+            [ChatEvent::ToolCallStarted { id, status, .. }]
                 if id == "toolu_main" && status == "Pending"
         ));
         let running = fold.mark_running("toolu_main");
         assert!(matches!(
             running.as_slice(),
-            [AcpEvent::ToolCallUpdated { id, status: Some(status), .. }]
+            [ChatEvent::ToolCallUpdated { id, status: Some(status), .. }]
                 if id == "toolu_main" && status == "InProgress"
         ));
         let pending = fold.mark_pending("toolu_main");
         assert!(matches!(
             pending.as_slice(),
-            [AcpEvent::ToolCallUpdated { id, status: Some(status), .. }]
+            [ChatEvent::ToolCallUpdated { id, status: Some(status), .. }]
                 if id == "toolu_main" && status == "Pending"
         ));
     }

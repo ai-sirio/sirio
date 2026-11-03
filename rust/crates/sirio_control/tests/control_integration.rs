@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use sirio_acp::{AgentCommand, ChatSession, ChatSessionConfig, ChatSnapshot, LaunchSpec};
+use sirio_chat::{AgentCommand, ChatSession, ChatSessionConfig, ChatSnapshot, LaunchSpec};
 use sirio_control::protocol::rows;
 use sirio_control::{
     ControlHandler, ControlRequest, ControlResponse, ControlServer, PaneError, PaneExitStatus,

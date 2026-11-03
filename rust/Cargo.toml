@@ -16,7 +16,10 @@ members = [
     "crates/sirio_ui",
     "crates/sirio_term_session",
     "crates/sirio_terminal",
+    "crates/sirio_chat_vocab",
+    "crates/sirio_chat_child",
     "crates/sirio_acp",
+    "crates/sirio_chat",
     "crates/sirio_claude",
     "crates/sirio_lsp",
     "crates/sirio_project",
@@ -99,6 +102,7 @@ sirio_theme = { path = "crates/sirio_theme" }
 sirio_ui = { path = "crates/sirio_ui" }
 sirio_terminal = { path = "crates/sirio_terminal" }
 sirio_acp = { path = "crates/sirio_acp" }
+sirio_chat = { path = "crates/sirio_chat" }
 sirio_project = { path = "crates/sirio_project" }
 sirio_icons = { path = "crates/sirio_icons" }
 sirio_git = { path = "crates/sirio_git" }

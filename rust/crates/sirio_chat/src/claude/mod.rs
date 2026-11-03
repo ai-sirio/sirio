@@ -3,9 +3,9 @@
 //!
 //! The shape mirrors the ACP client next door — one worker thread, a
 //! command channel in, an unbounded event channel out, four bounded waits —
-//! and, crucially, emits the same [`AcpEvent`](crate::AcpEvent) values. The
-//! chat surface is written against that vocabulary, so which transport a
-//! tab uses is invisible above this line.
+//! and, crucially, emits the same [`ChatEvent`](sirio_chat_vocab::ChatEvent)
+//! values. The chat surface is written against that vocabulary, so which
+//! transport a tab uses is invisible above this line.
 
 mod events;
 mod permission;
@@ -19,12 +19,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
+use sirio_chat_child::{
+    ChildHandle, PERMISSION_TIMEOUT, PROMPT_TIMEOUT, SHUTDOWN_TIMEOUT, detach_worker,
+    terminate_and_reap_blocking,
+};
 use sirio_claude::{ContextBreakdown, McpAuthStart, McpServer, RewindOutcome};
 
-use crate::{
-    AcpError, ChildHandle, EventStream, ModeCatalog, ModelCatalog, SHUTDOWN_TIMEOUT,
-    TimeoutOperation, terminate_and_reap_blocking,
-};
+use sirio_chat_vocab::{ChatError, EventStream, ModeCatalog, ModelCatalog, TimeoutOperation};
 
 /// ACP's startup budget is 120 s because `npx` may have to download a
 /// package before the first protocol byte exists. Nothing is downloaded
@@ -78,7 +79,7 @@ impl ClaudeLaunch {
 /// A live connection to one `claude` subprocess.
 pub struct ClaudeClient {
     command_tx: async_channel::Sender<worker::Command>,
-    event_tx: Option<async_channel::Sender<crate::AcpEvent>>,
+    event_tx: Option<async_channel::Sender<sirio_chat_vocab::ChatEvent>>,
     child: ChildHandle,
     shared: Arc<worker::Shared>,
     worker: Option<JoinHandle<()>>,
@@ -100,8 +101,8 @@ impl ClaudeClient {
             launch,
             cwd,
             STARTUP_TIMEOUT,
-            crate::PROMPT_TIMEOUT,
-            crate::PERMISSION_TIMEOUT,
+            PROMPT_TIMEOUT,
+            PERMISSION_TIMEOUT,
         )
     }
 
@@ -148,15 +149,15 @@ impl ClaudeClient {
                     if let Some(child) = child.take() {
                         terminate_and_reap_blocking(&child);
                     }
-                    crate::detach_worker(worker);
+                    detach_worker(worker);
                     return Err(anyhow::Error::new(error));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if let Some(child) = child.take() {
                         terminate_and_reap_blocking(&child);
                     }
-                    crate::detach_worker(worker);
-                    return Err(anyhow::Error::new(AcpError::Timeout {
+                    detach_worker(worker);
+                    return Err(anyhow::Error::new(ChatError::Timeout {
                         operation: TimeoutOperation::Startup,
                         duration: startup_timeout,
                     }));
@@ -165,8 +166,8 @@ impl ClaudeClient {
                     if let Some(child) = child.take() {
                         terminate_and_reap_blocking(&child);
                     }
-                    crate::detach_worker(worker);
-                    return Err(anyhow::Error::new(AcpError::Transport(
+                    detach_worker(worker);
+                    return Err(anyhow::Error::new(ChatError::Transport(
                         "the Claude worker exited before its handshake".into(),
                     )));
                 }
@@ -236,7 +237,7 @@ impl ClaudeClient {
 
     /// What this session chose for the reasoning it receives.
     #[must_use]
-    pub fn thinking_display(&self) -> crate::ThinkingDisplay {
+    pub fn thinking_display(&self) -> sirio_chat_vocab::ThinkingDisplay {
         self.shared.thinking_display()
     }
 
@@ -271,7 +272,7 @@ impl ClaudeClient {
     /// The notices posted since the last read, draining them. Read when an
     /// `OtherSessionUpdate` named `SessionNotice` arrives: the queue is
     /// what keeps them in step with the rows around them.
-    pub fn take_notices(&self) -> Vec<crate::SessionNotice> {
+    pub fn take_notices(&self) -> Vec<sirio_chat_vocab::SessionNotice> {
         self.shared.take_notices()
     }
 
@@ -305,14 +306,14 @@ impl ClaudeClient {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 terminate_and_reap_blocking(&self.child);
                 let _ = worker.join();
-                Err(anyhow::Error::new(AcpError::Timeout {
+                Err(anyhow::Error::new(ChatError::Timeout {
                     operation: TimeoutOperation::Shutdown,
                     duration: SHUTDOWN_TIMEOUT,
                 }))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = worker.join();
-                Err(anyhow::Error::new(AcpError::Transport(
+                Err(anyhow::Error::new(ChatError::Transport(
                     "the Claude worker exited during shutdown".into(),
                 )))
             }
@@ -326,7 +327,7 @@ impl ClaudeClient {
         &self,
         text: impl Into<String>,
         mention_paths: Vec<String>,
-        images: Vec<crate::ImageAttachment>,
+        images: Vec<sirio_chat_vocab::ImageAttachment>,
         cwd: impl AsRef<Path>,
     ) -> Result<()> {
         let uuid = new_uuid();

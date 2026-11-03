@@ -193,7 +193,7 @@ pub(crate) fn effort_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sirio_acp::AgentMode;
+    use sirio_chat::AgentMode;
 
     fn catalog(current: &str) -> ModeCatalog {
         ModeCatalog {
@@ -385,7 +385,7 @@ mod tests {
 }
 
 use gpui::{AnyElement, Context, SharedString, canvas, div, px};
-use sirio_acp::{EffortChoice, ModeCatalog};
+use sirio_chat::{EffortChoice, ModeCatalog};
 
 use super::prompt_history::{self, Direction, PromptRecord, Step};
 use super::{Chat, CycleMode, Entry, PopupAccept, PopupNext, PopupPrevious, mode_cycle};
