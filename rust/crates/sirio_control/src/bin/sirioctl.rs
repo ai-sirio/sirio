@@ -171,7 +171,7 @@ fn usage() {
            \x20 surface change-request thread --reveal ID|--toggle ID|--compose PATH:SIDE:LINE[-LAST]|--suggest|--cancel\n\
            \x20 surface change-request act <action> [--key value ...]   (debug builds only) close|reopen|ready|draft|compose|send|edit|edit-comment|reply|resolve|unresolve|line-comment|edit-thread-comment|review-add|review-open-submit|review-submit|review-discard|review-discard-confirm|draft-edit|draft-delete|rerun-job|rerun-failed\n\
          \x20 panel show <id>                   show a session in a tab (app only)\n\
-         \x20 surface tabs read                 every tab's kind, snapshot flag and title\n\
+         \x20 surface tabs read                 every tab's kind, snapshot flag and title, and `dirty`: the tabs whose close asks first, every tab with a live terminal among them\n\
          \x20 surface layout read               whether the right pane is drawn, each half's tabs, the right panel's view\n\
          \x20 surface chat panel <surfaceId> open|close|toggle <key>|activate <key>  (debug builds) drive a chat's session panel\n\
          \x20 surface trace read <surfaceId>     whether the chat has a Trace tab, and the turn and spans it shows\n\
@@ -181,6 +181,7 @@ fn usage() {
          \x20 surface project-add --kind path|clone|create --value <path|url|name> [--submit] [--answer 0|1|2]  (debug builds) start an add without the folder chooser; --answer 0|1|2 (path only) answers the not-a-git prompt: Initialize Git, Add without Git, Cancel\n\
          \x20 surface project-identity read     (debug builds) the Project added dialog's state, one key=value per line\n\
          \x20 surface project-identity act <action> [<value>]  (debug builds) press save|skip in the dialog, or drive its picker with mode|open-emoji-grid|pick-glyph\n\
+         \x20 surface prompts read             (debug builds) the saved prompts view, its cards and their window bounds, one key=value per line\n\
          \x20 surface tabs select <N>|close <N>  the Nth tab of that list, in either half\n\
          \x20 surface file read                 the active file tab's path, origin and text\n\
          \x20 surface editor open --path p      (debug builds) open a file as a tab; prints its editor state\n\
@@ -1194,6 +1195,10 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
             socket,
             &sirio_control::protocol::request::project_identity_read(),
         ),
+        ("prompts", "read") => require_ok(
+            socket,
+            &sirio_control::protocol::request::prompts_read(),
+        ),
         ("project-identity", "act") => {
             let act = parsed.positional.get(2).ok_or_else(|| {
                 "Missing action: save, skip, mode, open-emoji-grid or pick-glyph".to_string()
@@ -1461,7 +1466,7 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ),
         _ => return Err(format!("unknown surface action '{surface} {action}'")),
     };
-    if matches!(surface.as_str(), "editor" | "project-add" | "project-identity") {
+    if matches!(surface.as_str(), "editor" | "project-add" | "project-identity" | "prompts") {
         print_editor_result(&response, parsed.flag("json"));
         return Ok(());
     }

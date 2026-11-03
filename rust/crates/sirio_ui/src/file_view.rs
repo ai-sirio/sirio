@@ -63,6 +63,7 @@ mod breadcrumb;
 mod code_surface;
 mod find;
 mod git_marks;
+mod prompt;
 mod status_actions;
 mod status_row;
 mod sync;
@@ -361,6 +362,9 @@ pub struct FileView {
     /// Bumped whenever the settings change. A render scheduled under older
     /// settings lands stale and is discarded, never stored.
     diagram_generation: u64,
+    /// `Some` when the file is a saved prompt (`file_view/prompt.rs`): a title
+    /// field, Code only, and a save of its own after each pause in typing.
+    prompt: Option<prompt::PromptMode>,
 }
 
 /// The scroll handle of the Markdown preview, plus the state its horizontal
@@ -526,7 +530,10 @@ impl FileView {
                 .background_spawn(async move { Editor::open(&path_for_task) })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                view.markdown_mode = if std::mem::take(&mut view.code_on_load) {
+                // A prompt is edited, never previewed.
+                view.markdown_mode = if std::mem::take(&mut view.code_on_load)
+                    || view.prompt.is_some()
+                {
                     MarkdownMode::Code
                 } else {
                     Self::initial_markdown_mode(&editor)
@@ -563,6 +570,7 @@ impl FileView {
         view.load_task = Some(load_task);
         view.file_monitor = file_monitor;
         view._file_monitor_task = file_monitor_task;
+        view.detect_prompt(cx);
         view
     }
 
@@ -624,6 +632,7 @@ impl FileView {
             diagrams: Diagrams::default(),
             diagram_settings: None,
             diagram_generation: 0,
+            prompt: None,
         }
     }
 
@@ -1047,6 +1056,13 @@ impl FileView {
             .is_some_and(|editor| editor.language() == Language::Markdown)
     }
 
+    /// Whether the Markdown row and Preview (its switch, the menu's entry, a
+    /// large file's offer) are offered: a Markdown file, unless it is a
+    /// prompt, which is only ever edited.
+    fn offers_preview(&self) -> bool {
+        self.is_markdown() && self.prompt.is_none()
+    }
+
     /// Whether the file has been read: a view still loading, or one that
     /// failed, is not.
     pub fn is_loaded(&self) -> bool {
@@ -1061,7 +1077,7 @@ impl FileView {
     pub fn formatting_controls_shown(&self) -> bool {
         self.editor()
             .is_some_and(|editor| editor.status() == &LoadStatus::Loaded)
-            && self.is_markdown()
+            && self.offers_preview()
             && formatting_controls_drawn(self.effective_mode(), !self.is_snapshot())
     }
 
@@ -1072,7 +1088,7 @@ impl FileView {
             .is_some_and(|selection| !selection.is_collapsed());
         FileContextFacts {
             has_selection,
-            is_markdown: self.is_markdown(),
+            is_markdown: self.offers_preview(),
             is_snapshot: self.is_snapshot(),
             ..self.shell_facts.clone()
         }
@@ -1242,8 +1258,15 @@ impl FileView {
             return false;
         }
         let before = self.buffer_and_conflict();
+        let prompt = self.prompt.is_some();
         if let Some(editor) = self.editor_mut() {
             editor.check_external();
+            // A prompt's last write wins: text still to save is kept, with no
+            // banner, and the next autosave overwrites the file. A deleted
+            // prompt keeps its conflict, which shows the missing-file state.
+            if prompt && editor.conflict() == Conflict::ChangedOnDisk {
+                editor.keep();
+            }
             cx.notify();
         }
         // A silent adoption of the disk's text lands in the code editor too.
@@ -1320,6 +1343,11 @@ impl FileView {
             let reason = "Read-only: open the local copy to edit".to_string();
             self.set_message(reason.clone(), cx);
             return Err(reason);
+        }
+        // A deleted prompt stays deleted, whoever asks for the save.
+        if let Some(reason) = self.prompt_save_refusal() {
+            self.set_message(format!("Save failed: {reason}"), cx);
+            return Err(reason.to_string());
         }
         let result = match self.editor_mut() {
             Some(editor) => editor.save(),
@@ -1438,6 +1466,9 @@ impl FileView {
     /// happens — the switcher highlights this effective mode so the mark
     /// never lies about what is on screen.
     pub fn effective_mode(&self) -> MarkdownMode {
+        if self.prompt.is_some() {
+            return MarkdownMode::Code;
+        }
         match self.editor() {
             Some(editor)
                 if editor.language() == Language::Markdown
@@ -1635,10 +1666,17 @@ impl FileView {
                 .child("Loading file…")
                 .into_any_element(),
             ViewState::Ready(editor) => match editor.status() {
+                // Never recreated, so there is nothing left to edit.
+                LoadStatus::Loaded if self.prompt_deleted() => self.render_prompt_missing(theme),
                 LoadStatus::Loaded => {
-                    let conflict = editor.conflict();
+                    // A prompt shows no conflict: its last write wins.
+                    let conflict = if self.is_prompt() {
+                        Conflict::None
+                    } else {
+                        editor.conflict()
+                    };
                     let mode = self.effective_mode();
-                    let is_markdown = self.is_markdown();
+                    let offers_preview = self.offers_preview();
                     let formatting_shown = self.formatting_controls_shown();
                     let editor_entity = entity.clone();
                     let editor_focus = self.editor_focus.clone();
@@ -1679,14 +1717,19 @@ impl FileView {
                         .size_full()
                         .flex()
                         .flex_col()
+                        // A prompt's title field takes the breadcrumb's place.
                         .when_some(
-                            self.render_breadcrumb(theme, entity.clone()),
+                            if self.is_prompt() {
+                                self.render_prompt_title(theme, entity.clone())
+                            } else {
+                                self.render_breadcrumb(theme, entity.clone())
+                            },
                             |this, row| this.child(row),
                         )
                         .when(conflict != Conflict::None, |this| {
                             this.child(render_conflict_banner(conflict, theme, entity.clone()))
                         })
-                        .when(is_markdown, |this| {
+                        .when(offers_preview, |this| {
                             this.child(render_markdown_bar(
                                 mode,
                                 formatting_shown,
@@ -1697,6 +1740,7 @@ impl FileView {
                         .child(render_content(
                             editor,
                             mode,
+                            offers_preview,
                             theme,
                             entity.clone(),
                             self.code_editor.as_ref(),
@@ -1791,6 +1835,7 @@ impl Render for FileView {
         self.span_cache.borrow_mut().rotate();
         let step = sirio_perf::span("FileView.ensure_code_editor", id);
         self.ensure_code_editor(window, cx);
+        self.ensure_prompt_title(window, cx);
         drop(step);
         let step = sirio_perf::span("FileView.sync_code_prefs", id);
         self.sync_code_prefs(cx);
@@ -1803,6 +1848,7 @@ impl Render for FileView {
         drop(step);
         let step = sirio_perf::span("FileView.hand_over_focus", id);
         self.hand_over_focus(window, cx);
+        self.settle_prompt_focus(window, cx);
         drop(step);
         let context_menu = self.context_menu.map(|position| {
             let entity = cx.entity();
@@ -2293,9 +2339,12 @@ fn render_format_button(
         .child(label)
 }
 
+/// `offers_preview` is `FileView::offers_preview`: a large Markdown file in Code
+/// offers its preview only when the file has one to offer.
 fn render_content(
     editor: &Editor,
     mode: MarkdownMode,
+    offers_preview: bool,
     theme: Theme,
     entity: gpui::Entity<FileView>,
     code: Option<&gpui::Entity<CodeEditor>>,
@@ -2303,7 +2352,6 @@ fn render_content(
     scroll: &SurfaceScroll,
     preview: Option<PreviewFrame>,
 ) -> AnyElement {
-    let is_markdown = editor.language() == Language::Markdown;
     // Preview renders the parsed document; a locked preview (large file,
     // F-EDIT-03) or Code mode renders the source. The two modes are
     // behaviour — each shows the *right* content — while the rendering
@@ -2380,7 +2428,7 @@ fn render_content(
     }
 
     let mut source = div().size_full().flex().flex_col();
-    if is_markdown && mode == MarkdownMode::Code && editor.preview_locked() {
+    if offers_preview && mode == MarkdownMode::Code && editor.preview_locked() {
         let preview_entity = entity.clone();
         source = source.child(
             div()

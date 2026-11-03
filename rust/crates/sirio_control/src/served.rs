@@ -67,7 +67,7 @@ pub const BROWSER_NOT_SUPPORTED: &[&str] = &[
 
 /// Served by debug builds only. A release build leaves these out of
 /// `system.capabilities`, and answers them with "unknown method".
-const DEBUG_METHODS: [&str; 39] = [
+const DEBUG_METHODS: [&str; 40] = [
     "surface.chat.panel",
     "surface.chat.effort",
     "surface.change_request.act",
@@ -100,6 +100,7 @@ const DEBUG_METHODS: [&str; 39] = [
     "surface.project_add",
     "surface.project_identity.read",
     "surface.project_identity.act",
+    "surface.prompts.read",
     "surface.settings.act",
     "surface.terminal.open",
     "surface.terminal.restart",
@@ -235,14 +236,16 @@ mod tests {
 
     /// `surface.project_add`, `surface.project_identity.read` and
     /// `surface.project_identity.act` start an add without the native folder
-    /// chooser and drive the "Project added" dialog from the socket. Only a
-    /// debug build serves them; a release build neither lists nor answers them.
+    /// chooser and drive the "Project added" dialog from the socket;
+    /// `surface.prompts.read` reports the saved prompts view. Only a debug
+    /// build serves them; a release build neither lists nor answers them.
     #[test]
     fn project_identity_verbs_are_served_by_debug_builds_only() {
         for method in [
             "surface.project_add",
             "surface.project_identity.read",
             "surface.project_identity.act",
+            "surface.prompts.read",
         ] {
             assert!(served_methods(true).contains(&method), "{method}");
             assert!(!served_methods(false).contains(&method), "{method}");

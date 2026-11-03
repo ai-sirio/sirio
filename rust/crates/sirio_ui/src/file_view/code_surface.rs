@@ -460,6 +460,10 @@ impl FileView {
                 );
             }
         }
+        // A prompt saves itself once typing pauses.
+        if self.is_dirty() {
+            self.schedule_prompt_save(cx);
+        }
         self.find_text_changed(cx);
         cx.notify();
     }

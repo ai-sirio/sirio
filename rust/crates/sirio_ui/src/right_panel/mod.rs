@@ -12,6 +12,7 @@ mod files;
 mod history;
 mod history_toolbar;
 mod open_list;
+mod prompts;
 mod references;
 
 use gpui::{
@@ -29,6 +30,7 @@ use history::{GitHistory, GitHistoryEvent};
 pub use change_requests::{filter_word, parse_filter};
 pub(crate) use change_requests::error_text;
 pub use open_list::{OpenListFacts, OpenSurface};
+pub use prompts::{PromptCardFacts, PromptsFacts};
 pub use references::{GroupedRow, ReferenceRow, ReferencesState, group_by_file, summary};
 use references::{ReferencesEvent, ReferencesList};
 
@@ -74,6 +76,14 @@ pub enum RightPanelActionEvent {
     /// A row of the Open list (spec 2026-10-15 §2): open this surface in
     /// the Secondary pane. The host owns every surface it names.
     OpenSurface(OpenSurface),
+    /// Open this saved prompt in an editor tab. New prompt creates the file
+    /// first, then raises this.
+    OpenPrompt(PathBuf),
+    /// This saved prompt's file is gone: close its tabs.
+    PromptDeleted(PathBuf),
+    /// A Copy, New prompt or Delete failed; the host shows this sentence in
+    /// its toast. The list itself stays as it was.
+    PromptFailed(String),
 }
 
 /// Which view the right panel is showing.
@@ -86,6 +96,8 @@ pub enum PanelView {
     References,
     ChangeRequests,
     Open,
+    /// The saved prompts, the same in every worktree.
+    Prompts,
 }
 
 /// A settled Files tree, handed to the host on the way out of a worktree so
@@ -179,13 +191,14 @@ impl ShowHiddenFilesSetting {
 
 impl PanelView {
     /// Rail order, left to right.
-    const ORDER: [PanelView; 6] = [
+    const ORDER: [PanelView; 7] = [
         PanelView::Files,
         PanelView::Diff,
         PanelView::History,
         PanelView::References,
         PanelView::ChangeRequests,
         PanelView::Open,
+        PanelView::Prompts,
     ];
 
     fn icon(self) -> Icon {
@@ -196,6 +209,7 @@ impl PanelView {
             PanelView::References => Icon::MagnifyingGlass,
             PanelView::ChangeRequests => Icon::PullRequest,
             PanelView::Open => Icon::SquarePlus,
+            PanelView::Prompts => Icon::TextSnippet,
         }
     }
 
@@ -208,6 +222,7 @@ impl PanelView {
             PanelView::References => "references",
             PanelView::ChangeRequests => "change_requests",
             PanelView::Open => "open",
+            PanelView::Prompts => "prompts",
         }
     }
 
@@ -219,6 +234,7 @@ impl PanelView {
             PanelView::References => "right-panel-tab-references",
             PanelView::ChangeRequests => "right-panel-tab-change-requests",
             PanelView::Open => "right-panel-tab-open",
+            PanelView::Prompts => "right-panel-tab-prompts",
         }
     }
 
@@ -325,6 +341,8 @@ pub struct RightPanel {
     /// Whether the Open view's Chat row shows its agents. Lost on a
     /// worktree switch with the rest of the entity, by design.
     open_list_chat_expanded: bool,
+    /// The Prompts view's cards and the bounds it records; see `prompts.rs`.
+    prompts: prompts::PromptsView,
     is_stale: bool,
     updating: bool,
 }
@@ -369,6 +387,7 @@ impl RightPanel {
             panel_width: 320.0,
             open_list_facts: open_list::OpenListFacts::default(),
             open_list_chat_expanded: false,
+            prompts: prompts::PromptsView::default(),
             is_stale: false,
             updating: false,
         }
@@ -597,6 +616,9 @@ impl RightPanel {
                     .rounded(px(4.0))
                     .when(is_active, |this| this.bg(theme.ely.hover))
                     .hover(|style| style.bg(theme.ely.hover))
+                    .when(view == PanelView::Prompts, |this| {
+                        this.relative().child(prompts::bounds_probe(self.prompts.rail_cell()))
+                    })
                     .child(IconElement::new(view.icon(), IconSize::Small).text_color(
                         if is_active {
                             theme.ely.fg
@@ -873,10 +895,13 @@ impl Render for RightPanel {
         // later, which stopped being true once the refresh became
         // Files-only. Guarded by the change, so it costs one extra frame
         // per switch and cannot re-arm itself.
-        if self.last_panel_view != Some(view) {
+        let entered = self.last_panel_view != Some(view);
+        if entered {
             self.last_panel_view = Some(view);
             cx.notify();
         }
+        // The frame being built records again the bounds it draws.
+        self.prompts.clear_bounds();
         if self.worktree_selected {
             let showing_files = view == PanelView::Files;
             if showing_files {
@@ -891,7 +916,8 @@ impl Render for RightPanel {
             self.file_focus = Some(cx.focus_handle().tab_stop(true));
         }
         let entity = cx.entity();
-        let body = if !self.worktree_selected {
+        // Prompts is global, so it alone renders without a worktree (spec §5).
+        let body = if !self.worktree_selected && view != PanelView::Prompts {
             self.render_no_worktree(theme).into_any_element()
         } else {
             match PanelView::get(cx) {
@@ -902,6 +928,7 @@ impl Render for RightPanel {
                 PanelView::History => self.render_history(theme, cx).into_any_element(),
                 PanelView::References => self.render_references(theme, cx).into_any_element(),
                 PanelView::Open => self.render_open_list(entity.clone(), theme),
+                PanelView::Prompts => self.render_prompts(entered, entity.clone(), theme, cx),
                 PanelView::ChangeRequests if self.project_is_git => {
                     self.render_change_requests(cx).into_any_element()
                 }

@@ -1,0 +1,286 @@
+<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Prompt list mockups</title>
+<style>
+body{background:#161618;color:#e6e6e6;font:14px/1.5 system-ui,sans-serif;margin:0;padding:24px}
+.wrap{max-width:1240px;margin:0 auto}.subtitle{color:#999}h2{color:#eee;margin-top:40px}h3{color:#ddd}
+.cards{display:flex;gap:16px;flex-wrap:wrap}.card{background:#232326;border:1px solid #424245;border-radius:12px;overflow:hidden;flex:1;min-width:330px}
+.card-body{padding:12px 16px}.card-body p{color:#aaa;margin:4px 0 0}
+.card[data-choice="b-schede"],.pick[data-choice="1-scheda-centrale"]{outline:2px solid #0a84ff;outline-offset:2px;border-radius:12px}
+.chosen{background:#10243d;border:1px solid #0a84ff;border-radius:8px;padding:10px 14px;margin:0 0 8px}
+</style><script>function toggleSelect(){}</script></head><body><div class="wrap">
+<p class="chosen">Brainstorm 2026-11-01. Scelte dell'utente: <b>lista B</b> (schede con anteprima) con la matita accanto alla copia; <b>editor 1</b> (una scheda nell'area centrale). Le opzioni scelte sono contornate in blu. Spec: <code>2026-11-01-prompt-list-design.md</code>.</p>
+<style>
+  .sx-row { display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start; }
+  .sx-col { display:flex; flex-direction:column; gap:10px; }
+  .sx-col h3 { margin:0; }
+  .sx-col p.note { margin:0; max-width:300px; font-size:13px; opacity:.8; }
+  .sx { width:300px; height:560px; background:#131313; color:#E6E6E6; border:1px solid #2A2A2A; border-radius:8px;
+        font:13px/1.4 -apple-system, "Inter", "Segoe UI", system-ui, sans-serif; display:flex; flex-direction:column; overflow:hidden; text-align:left; }
+  .sx-tabs { height:40px; display:flex; align-items:center; justify-content:center; gap:4px; border-bottom:1px solid #262626; flex:none; }
+  .sx-tab { width:28px; height:28px; border-radius:4px; display:flex; align-items:center; justify-content:center; color:#8A8A8A; }
+  .sx-tab.on { background:#292929; color:#E6E6E6; }
+  .sx-tab svg, .sx-ic svg { width:15px; height:15px; }
+  .sx-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px 6px; flex:none; }
+  .sx-title { font-weight:600; font-size:12px; letter-spacing:.02em; color:#BDBDBD; }
+  .sx-title span { color:#6E6E6E; font-weight:400; margin-left:6px; }
+  .sx-new { display:flex; align-items:center; gap:4px; font-size:12px; color:#E6E6E6; background:#242424; border:1px solid #303030; border-radius:5px; padding:3px 8px; cursor:pointer; }
+  .sx-new:hover { background:#2E2E2E; }
+  .sx-list { overflow:auto; flex:1; padding:2px 6px 10px; scrollbar-color:#3A3A3A transparent; scrollbar-width:thin; }
+  .sx-list::-webkit-scrollbar, .c-text::-webkit-scrollbar { width:8px; }
+  .sx-list::-webkit-scrollbar-track, .c-text::-webkit-scrollbar-track { background:transparent; }
+  .sx-list::-webkit-scrollbar-thumb, .c-text::-webkit-scrollbar-thumb { background:#3A3A3A; border-radius:4px; }
+  .sx-list::-webkit-scrollbar-button, .c-text::-webkit-scrollbar-button { display:none; }
+  .sx-ic { width:24px; height:24px; border-radius:4px; display:flex; align-items:center; justify-content:center; color:#9A9A9A; cursor:pointer; flex:none; }
+  .sx-ic:hover { background:#333; color:#fff; }
+  .sx-ic.done { color:#3FB950; }
+  /* A: compact rows */
+  .a-row { display:flex; align-items:center; gap:6px; height:30px; padding:0 4px 0 8px; border-radius:5px; cursor:pointer; }
+  .a-row:hover { background:#292929; }
+  .a-row .t { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .a-row .edit { visibility:hidden; }
+  .a-row:hover .edit { visibility:visible; }
+  /* B: cards with preview */
+  .b-card { background:#1A1A1A; border:1px solid #242424; border-radius:6px; padding:8px 6px 8px 10px; margin:0 0 6px; display:flex; gap:6px; cursor:pointer; }
+  .b-card:hover { border-color:#3A3A3A; }
+  .b-card .body { flex:1; min-width:0; }
+  .b-card .t { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .b-card .p { color:#8F8F8F; font-size:12px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; margin-top:2px; }
+  /* C: expandable */
+  .c-item { border-radius:5px; }
+  .c-row { display:flex; align-items:center; gap:4px; height:30px; padding:0 4px 0 4px; border-radius:5px; cursor:pointer; }
+  .c-row:hover { background:#292929; }
+  .c-row .t { flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .c-chev { width:16px; color:#7A7A7A; transition:transform .12s; display:flex; }
+  .c-item.open .c-chev { transform:rotate(90deg); }
+  .c-body { display:none; margin:2px 4px 8px 22px; }
+  .c-item.open .c-body { display:block; }
+  .c-text { background:#1A1A1A; border:1px solid #262626; border-radius:5px; padding:8px; color:#CFCFCF; font-size:12px; max-height:130px; overflow:auto; white-space:pre-wrap; }
+  .c-actions { display:flex; gap:6px; margin-top:6px; }
+  .c-btn { font-size:12px; border:1px solid #303030; background:#242424; color:#E6E6E6; border-radius:5px; padding:2px 8px; cursor:pointer; display:flex; align-items:center; gap:4px; }
+  .c-btn:hover { background:#2E2E2E; }
+  .c-btn.done { color:#3FB950; }
+  .sx-toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#1F2B22; color:#9BE6A8; border:1px solid #2F5A38; padding:6px 12px; border-radius:6px; font:12px system-ui; display:none; z-index:99; }
+</style>
+
+<h2>La sezione Prompts nella sidebar destra: quale lista ti torna di più?</h2>
+<p class="subtitle">Tre modi di mostrare gli stessi prompt. Nell'intestazione c'è una nuova icona (l'ultima, evidenziata) accanto a Files, Diff, History, References, Change requests e Open. I pulsanti di copia funzionano davvero: prova a copiare e incollare dove vuoi. Clicca il riquadro dell'opzione per sceglierla.</p>
+
+<div class="cards">
+  <div class="card" data-choice="a-compatta" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0E0E0E;padding:14px;display:flex;justify-content:center"><div class="sx" id="mockA"></div></div>
+    <div class="card-body"><h3>A · Righe compatte</h3><p>Solo il titolo, una riga ciascuno: ne vedi una quindicina senza scorrere, su una finestra alta quasi tutti e venti. La copia è sempre visibile; la matita compare passando sopra. Clic sulla riga = apri nell'editor.</p></div>
+  </div>
+  <div class="card" data-choice="b-schede" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0E0E0E;padding:14px;display:flex;justify-content:center"><div class="sx" id="mockB"></div></div>
+    <div class="card-body"><h3>B · Schede con anteprima</h3><p>Titolo più le prime due righe del testo: li riconosci anche senza un titolo perfetto, ma ne vedi sei o sette alla volta e si scorre di più.</p></div>
+  </div>
+  <div class="card" data-choice="c-espandibili" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#0E0E0E;padding:14px;display:flex;justify-content:center"><div class="sx" id="mockC"></div></div>
+    <div class="card-body"><h3>C · Righe che si aprono</h3><p>Compatte come A, ma la freccia apre il testo completo lì sotto, per rileggerlo prima di copiarlo senza aprire l'editor.</p></div>
+  </div>
+</div>
+
+<div class="sx-toast" id="sxToast">Copiato negli appunti</div>
+
+<script>
+(function(){
+  const P = [
+    ["Coordinatore herdr", "Sei il coordinatore. Gestisci la comprensione del progetto, la pianificazione, la scomposizione dei compiti, l'integrazione e la revisione finale. Quando un compito richiede un'implementazione sostanziale, delega a Claude Code attraverso herdr-desktop."],
+    ["Revisione Codex 1–10", "Rivedi il diff di questo ramo. Valuta ogni bug da 1 a 10 su quanto spesso accadrebbe e quanto sarebbe grave. Se il prodotto dei due punteggi è sotto 5, segnalalo solo come issue e lascia il codice com'è."],
+    ["Brainstorming prima del codice", "Prima di scrivere codice fammi domande, una alla volta, finché non hai capito cosa voglio e perché. Poi descrivimi il progetto e aspetta la mia approvazione."],
+    ["Debug sistematico", "Riproduci il bug prima di toccare il codice. Scrivi tutte le ipotesi, scarta quelle che i fatti smentiscono e correggi solo la causa che hai dimostrato."],
+    ["Commit convenzionale", "Scrivi il messaggio di commit in Conventional Commits: soggetto minuscolo all'imperativo, corpo che spiega il perché, nessuna attribuzione."],
+    ["Note di rilascio", "Leggi tutti i commit dall'ultimo tag e scrivi docs/release-notes/<version>.md: cosa cambia per chi usa Sirio, non per chi lo sviluppa."],
+    ["Handoff di sessione", "Scrivi HANDOFF.md alla radice del checkout: obiettivo, cosa è fatto, cosa resta, file chiave e domande aperte, abbastanza per ripartire da quel file soltanto."],
+    ["E2E dell'area cambiata", "Esegui il test end to end dell'area che hai cambiato (vedi docs/agents/e2e-tests.md) e mostrami la riga di successo e l'artefatto prodotto."],
+    ["Verifica prima di dire fatto", "Non dire che è finito finché non hai eseguito i comandi di verifica e letto l'output. Mostrami l'evidenza, non il riassunto."],
+    ["Spiegami questo modulo", "Leggi questo modulo e spiegami a cosa serve, chi lo chiama e quali regole non si possono rompere, con riferimenti file:riga."],
+    ["Semplifica senza cambiare comportamento", "Semplifica il codice appena scritto senza cambiarne il comportamento: rimuovi duplicazioni e astrazioni che non servono a nessuno oggi."],
+    ["PR body", "Scrivi il corpo della PR: cosa cambia, perché, come l'hai verificato e cosa resta da controllare a mano su macOS e Windows."],
+    ["Piano di implementazione", "Dal design approvato scrivi un piano a task piccoli, ognuno con file, passi e verifica. Niente codice finché non approvo il piano."],
+    ["Cattura visiva light + dark", "Avvia Sirio isolato, cattura la finestra in tema chiaro e scuro e mettimi le immagini una accanto all'altra."],
+    ["Trova chi lo chiama", "Trova ogni chiamante di questa funzione nel workspace e dimmi quali si romperebbero cambiandone la firma."],
+    ["Riassunto della giornata", "Riassumi cosa è stato fatto oggi in questo worktree: commit, PR aperte, cose rimaste a metà."],
+    ["Controllo macOS a mano", "Elenca i controlli a mano che servono su macOS per questa modifica, con i passi esatti da fare."],
+    ["Rebase dopo squash", "La base di questa PR è stata squashata su main: ricostruisci il ramo sopra main senza force-push, conservando i commit."],
+    ["Domande prima di iniziare", "Prima di iniziare dimmi cosa non è chiaro nel compito e cosa assumeresti se non rispondo."],
+    ["Revisione del testo UI", "Rileggi tutte le stringhe visibili che hai aggiunto: brevi, coerenti con il resto di Sirio, senza gergo interno."]
+  ];
+  const ic = {
+    copy:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/></svg>',
+    check:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8.5l3 3 7-7"/></svg>',
+    edit:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10.5 2.5l3 3-8 8H2.5v-3z"/></svg>',
+    plus:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12"><path d="M8 3v10M3 8h10"/></svg>',
+    chev:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12"><path d="M6 3.5l4.5 4.5L6 12.5"/></svg>'
+  };
+  const tabIcons = [
+    '<path d="M3 3h4v3H3zM9 10h4v3H9zM5 6v5.5h4"/>',
+    '<path d="M4 3v6M1 6h6M9 12h6"/>',
+    '<circle cx="4" cy="4" r="1.5"/><circle cx="4" cy="12" r="1.5"/><circle cx="12" cy="7" r="1.5"/><path d="M4 5.5v5M4 9c0-2 8-0.5 8-0.5"/>',
+    '<circle cx="7" cy="7" r="4"/><path d="M10 10l3.5 3.5"/>',
+    '<circle cx="4" cy="4" r="1.5"/><circle cx="4" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><path d="M4 5.5v5M12 10.5V6a2 2 0 0 0-2-2H8"/>',
+    '<rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M8 5v6M5 8h6"/>',
+    '<path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/><path d="M5 6h6M5 8h4"/>'
+  ];
+  const tabs = '<div class="sx-tabs">' + tabIcons.map((p,i)=>'<div class="sx-tab'+(i===6?' on':'')+'" title="'+(i===6?'Prompts':'')+'"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">'+p+'</svg></div>').join('') + '</div>';
+  const head = '<div class="sx-head"><div class="sx-title">PROMPTS<span>'+P.length+'</span></div><div class="sx-new" onclick="event.stopPropagation()">'+ic.plus+'New prompt</div></div>';
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+
+  document.getElementById('mockA').innerHTML = tabs + head + '<div class="sx-list">' + P.map((p,i)=>
+    '<div class="a-row" onclick="event.stopPropagation()"><div class="t">'+esc(p[0])+'</div><div class="sx-ic edit" title="Edit">'+ic.edit+'</div><div class="sx-ic" title="Copy" data-i="'+i+'">'+ic.copy+'</div></div>').join('') + '</div>';
+
+  document.getElementById('mockB').innerHTML = tabs + head + '<div class="sx-list">' + P.map((p,i)=>
+    '<div class="b-card" onclick="event.stopPropagation()"><div class="body"><div class="t">'+esc(p[0])+'</div><div class="p">'+esc(p[1])+'</div></div><div class="sx-ic" title="Copy" data-i="'+i+'">'+ic.copy+'</div></div>').join('') + '</div>';
+
+  document.getElementById('mockC').innerHTML = tabs + head + '<div class="sx-list">' + P.map((p,i)=>
+    '<div class="c-item'+(i===0?' open':'')+'"><div class="c-row" data-toggle="1"><div class="c-chev">'+ic.chev+'</div><div class="t">'+esc(p[0])+'</div><div class="sx-ic" title="Copy" data-i="'+i+'">'+ic.copy+'</div></div>'+
+    '<div class="c-body"><div class="c-text">'+esc(p[1])+'</div><div class="c-actions"><div class="c-btn" data-i="'+i+'">'+ic.copy+' Copy</div><div class="c-btn">'+ic.edit+' Edit</div></div></div></div>').join('') + '</div>';
+
+  function copyText(t){
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(t);
+    const ta=document.createElement('textarea'); ta.value=t; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(e){} ta.remove(); return Promise.resolve();
+  }
+  document.addEventListener('click', e => {
+    const tog = e.target.closest('[data-toggle]');
+    const cp = e.target.closest('[data-i]');
+    if (cp) {
+      e.stopPropagation();
+      copyText(P[+cp.dataset.i][1]).then(()=>{
+        const old = cp.innerHTML; const isBtn = cp.classList.contains('c-btn');
+        cp.classList.add('done'); cp.innerHTML = isBtn ? ic.check+' Copied' : ic.check;
+        const t=document.getElementById('sxToast'); t.style.display='block';
+        setTimeout(()=>{ cp.classList.remove('done'); cp.innerHTML=old; t.style.display='none'; }, 1300);
+      });
+      return;
+    }
+    if (tog) { e.stopPropagation(); tog.parentElement.classList.toggle('open'); }
+  }, true);
+})();
+</script>
+<style>
+  .w { width:100%; max-width:1180px; height:440px; background:#0E0E0E; border:1px solid #2A2A2A; border-radius:8px; display:flex; overflow:hidden; position:relative;
+       font:13px/1.4 -apple-system, "Inter", "Segoe UI", system-ui, sans-serif; color:#E6E6E6; text-align:left; }
+  .w-left { width:170px; background:#131313; border-right:1px solid #262626; padding:10px 8px; flex:none; }
+  .w-left .proj { font-weight:600; color:#CFCFCF; font-size:12px; margin:4px 4px 6px; }
+  .w-left .wt { padding:4px 8px; border-radius:5px; color:#9A9A9A; font-size:12px; }
+  .w-left .wt.on { background:#292929; color:#E6E6E6; }
+  .w-center { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .w-strip { height:34px; border-bottom:1px solid #262626; display:flex; align-items:flex-end; gap:2px; padding:0 8px; background:#0E0E0E; flex:none; }
+  .w-tab { padding:6px 12px; font-size:12px; color:#8A8A8A; border-radius:6px 6px 0 0; white-space:nowrap; }
+  .w-tab.on { background:#1A1A1A; color:#E6E6E6; }
+  .w-term { flex:1; background:#0E0E0E; padding:12px 14px; font:12px/1.55 "JetBrains Mono", ui-monospace, monospace; color:#9FD39F; overflow:hidden; }
+  .w-term .dim { color:#6E6E6E; }
+  .w-right { width:300px; background:#131313; border-left:1px solid #262626; display:flex; flex-direction:column; flex:none; }
+  .r-tabs { height:40px; display:flex; align-items:center; justify-content:center; gap:4px; border-bottom:1px solid #262626; flex:none; }
+  .r-tab { width:28px; height:28px; border-radius:4px; display:flex; align-items:center; justify-content:center; color:#8A8A8A; }
+  .r-tab.on { background:#292929; color:#E6E6E6; }
+  .r-tab svg, .ic svg { width:15px; height:15px; }
+  .r-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px 6px; flex:none; }
+  .r-title { font-weight:600; font-size:12px; color:#BDBDBD; }
+  .r-title span { color:#6E6E6E; font-weight:400; margin-left:6px; }
+  .r-new { display:flex; align-items:center; gap:4px; font-size:12px; background:#242424; border:1px solid #303030; border-radius:5px; padding:3px 8px; }
+  .r-list { flex:1; overflow:hidden; padding:2px 6px; }
+  .card2 { background:#1A1A1A; border:1px solid #242424; border-radius:6px; padding:8px 6px 8px 10px; margin:0 0 6px; display:flex; gap:4px; }
+  .card2.sel { border-color:#4A6FA5; }
+  .card2 .body { flex:1; min-width:0; }
+  .card2 .t { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card2 .p { color:#8F8F8F; font-size:12px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; margin-top:2px; }
+  .ic { width:24px; height:24px; border-radius:4px; display:flex; align-items:center; justify-content:center; color:#9A9A9A; flex:none; }
+  .acts { display:flex; gap:0; align-items:flex-start; }
+  /* editor tab */
+  .ed { flex:1; display:flex; flex-direction:column; background:#0E0E0E; min-width:0; }
+  .ed-title { margin:12px 16px 8px; background:#1A1A1A; border:1px solid #303030; border-radius:5px; padding:6px 10px; font-size:14px; font-weight:600; color:#E6E6E6; }
+  .ed-code { flex:1; display:flex; font:12.5px/1.6 "JetBrains Mono", ui-monospace, monospace; margin:0 16px; border:1px solid #242424; border-radius:5px; overflow:hidden; }
+  .ed-gutter { color:#4E4E4E; padding:8px 8px; text-align:right; background:#111; user-select:none; }
+  .ed-text { padding:8px 10px; color:#D6D6D6; white-space:pre-wrap; flex:1; }
+  .caret { display:inline-block; width:1.5px; height:14px; background:#E6E6E6; vertical-align:-2px; animation:blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity:0; } }
+  .ed-foot { display:flex; justify-content:space-between; padding:8px 16px; color:#6E6E6E; font-size:11.5px; }
+  /* inline edit */
+  .inl { background:#1A1A1A; border:1px solid #4A6FA5; border-radius:6px; padding:8px; margin:0 0 6px; }
+  .inl input, .inl .ta { width:100%; box-sizing:border-box; background:#242424; border:1px solid #333; border-radius:4px; color:#E6E6E6; font:inherit; padding:5px 7px; }
+  .inl input { font-weight:600; margin-bottom:6px; }
+  .inl .ta { height:170px; font-size:12px; color:#D6D6D6; overflow:hidden; white-space:pre-wrap; }
+  .btns { display:flex; justify-content:flex-end; gap:6px; margin-top:6px; }
+  .btn { font-size:12px; border:1px solid #303030; background:#242424; color:#E6E6E6; border-radius:5px; padding:3px 10px; }
+  .btn.pri { background:#E6E6E6; color:#111; border-color:#E6E6E6; }
+  /* modal */
+  .scrim { position:absolute; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; }
+  .dlg { width:560px; background:#1A1A1A; border:1px solid #333; border-radius:10px; padding:16px; box-shadow:0 10px 40px rgba(0,0,0,.6); }
+  .dlg h4 { margin:0 0 10px; font-size:14px; }
+  .dlg input, .dlg .ta { width:100%; box-sizing:border-box; background:#242424; border:1px solid #333; border-radius:5px; color:#E6E6E6; font:inherit; padding:6px 9px; }
+  .dlg input { font-weight:600; margin-bottom:8px; }
+  .dlg .ta { height:200px; font-size:12.5px; color:#D6D6D6; white-space:pre-wrap; overflow:hidden; }
+  .opt { margin:0 0 34px; }
+  .opt h3 { margin:0 0 4px; }
+  .opt p.note { margin:0 0 10px; max-width:900px; opacity:.85; }
+  .pick { cursor:pointer; border-radius:10px; padding:10px; border:2px solid transparent; }
+  .pick.selected { border-color:#4A9EFF; }
+</style>
+
+<h2>Dove scrivi il prompt quando premi New prompt o la matita?</h2>
+<p class="subtitle">La lista è la B che hai scelto, ora con la matita accanto alla copia. Sotto, tre posti diversi per l'editor. Il prompt in modifica è "Coordinatore herdr". Clicca l'opzione che preferisci.</p>
+
+<div class="opt pick" data-choice="1-scheda-centrale" onclick="toggleSelect(this)">
+  <h3>1 · Una scheda nell'area centrale, accanto ai terminali</h3>
+  <p class="note">Si apre come un file: tutto lo spazio della finestra, lo stesso editor dei file di Sirio (numeri di riga, ricerca, annulla). Puoi tenerlo aperto mentre guardi il terminale dell'agente in un'altra scheda. Si salva da solo.</p>
+  <div class="w" id="w1"></div>
+</div>
+
+<div class="opt pick" data-choice="2-dentro-sidebar" onclick="toggleSelect(this)">
+  <h3>2 · Dentro la sidebar, al posto della scheda</h3>
+  <p class="note">La scheda diventa modificabile lì dov'è: non perdi di vista niente, ma lo spazio è largo 300 pixel, stretto per un prompt lungo come quello da coordinatore. Salva / Annulla espliciti.</p>
+  <div class="w" id="w2"></div>
+</div>
+
+<div class="opt pick" data-choice="3-finestra-sopra" onclick="toggleSelect(this)">
+  <h3>3 · Una finestra sopra tutto</h3>
+  <p class="note">Una finestra al centro, più larga della sidebar: scrivi, salvi o annulli e torni dov'eri. Mentre è aperta copre il terminale.</p>
+  <div class="w" id="w3"></div>
+</div>
+
+<script>
+(function(){
+  const P = [
+    ["Coordinatore herdr", "Sei il coordinatore. Gestisci la comprensione del progetto, la pianificazione, la scomposizione dei compiti, l'integrazione e la revisione finale."],
+    ["Revisione Codex 1–10", "Rivedi il diff di questo ramo. Valuta ogni bug da 1 a 10 su quanto spesso accadrebbe e quanto sarebbe grave."],
+    ["Brainstorming prima del codice", "Prima di scrivere codice fammi domande, una alla volta, finché non hai capito cosa voglio e perché."],
+    ["Debug sistematico", "Riproduci il bug prima di toccare il codice. Scrivi tutte le ipotesi, scarta quelle che i fatti smentiscono."],
+    ["Commit convenzionale", "Scrivi il messaggio di commit in Conventional Commits: soggetto minuscolo all'imperativo."],
+    ["Note di rilascio", "Leggi tutti i commit dall'ultimo tag e scrivi docs/release-notes/<version>.md."]
+  ];
+  const FULL = "Sei il coordinatore.\n\n→ Gestisci la comprensione del progetto, la pianificazione,\n  la scomposizione dei compiti, l'integrazione e la revisione\n  finale.\n\n→ Quando un compito richiede un'implementazione sostanziale,\n  debug, correzioni di test o cambiamenti multi-file, delega a\n  Claude Code attraverso herdr-desktop.\n\nUsa Opus 5.5 per i lavoratori Claude Code e GPT-6.1-Sol per\ni lavoratori Codex, entrambi con sforzo xhigh.";
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const ic = {
+    copy:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/></svg>',
+    edit:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M10.5 2.5l3 3-8 8H2.5v-3z"/></svg>',
+    plus:'<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" width="12" height="12"><path d="M8 3v10M3 8h10"/></svg>'
+  };
+  const tabIcons = ['<path d="M3 3h4v3H3zM9 10h4v3H9zM5 6v5.5h4"/>','<path d="M4 3v6M1 6h6M9 12h6"/>','<circle cx="4" cy="4" r="1.5"/><circle cx="4" cy="12" r="1.5"/><circle cx="12" cy="7" r="1.5"/><path d="M4 5.5v5M4 9c0-2 8-0.5 8-0.5"/>','<circle cx="7" cy="7" r="4"/><path d="M10 10l3.5 3.5"/>','<circle cx="4" cy="4" r="1.5"/><circle cx="4" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><path d="M4 5.5v5M12 10.5V6a2 2 0 0 0-2-2H8"/>','<rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M8 5v6M5 8h6"/>','<path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/><path d="M5 6h6M5 8h4"/>'];
+  const rtabs = '<div class="r-tabs">'+tabIcons.map((p,i)=>'<div class="r-tab'+(i===6?' on':'')+'"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">'+p+'</svg></div>').join('')+'</div>';
+  const rhead = '<div class="r-head"><div class="r-title">PROMPTS<span>20</span></div><div class="r-new">'+ic.plus+'New prompt</div></div>';
+  const card = (p, sel) => '<div class="card2'+(sel?' sel':'')+'"><div class="body"><div class="t">'+esc(p[0])+'</div><div class="p">'+esc(p[1])+'</div></div><div class="acts"><div class="ic" title="Edit">'+ic.edit+'</div><div class="ic" title="Copy">'+ic.copy+'</div></div></div>';
+  const left = '<div class="w-left"><div class="proj">sirio</div><div class="wt on">feature-prompt-list</div><div class="wt">main</div><div class="wt">fix/opaque-dialogs</div><div class="proj" style="margin-top:14px">sirioai.app</div><div class="wt">main</div></div>';
+  const term = '<div class="w-term"><span class="dim">~/sirio/feature-prompt-list ❯</span> claude<br><br><span style="color:#D6D6D6">✻ Welcome to Claude Code</span><br><br><span class="dim">&gt;</span> <span class="caret"></span></div>';
+  const lines = n => Array.from({length:n},(_,i)=>i+1).join('\n');
+
+  // 1: center tab
+  document.getElementById('w1').innerHTML = left +
+    '<div class="w-center"><div class="w-strip"><div class="w-tab">claude</div><div class="w-tab">zsh</div><div class="w-tab on">✎ Coordinatore herdr</div></div>' +
+    '<div class="ed"><div class="ed-title">Coordinatore herdr</div><div class="ed-code"><div class="ed-gutter"><pre style="margin:0;font:inherit">'+lines(14)+'</pre></div><div class="ed-text">'+esc(FULL)+'<span class="caret"></span></div></div>' +
+    '<div class="ed-foot"><span>Prompt · salvato automaticamente</span><span>Ln 14, Col 41</span></div></div></div>' +
+    '<div class="w-right">'+rtabs+rhead+'<div class="r-list">'+P.map((p,i)=>card(p,i===0)).join('')+'</div></div>';
+
+  // 2: inline in sidebar
+  document.getElementById('w2').innerHTML = left +
+    '<div class="w-center"><div class="w-strip"><div class="w-tab on">claude</div><div class="w-tab">zsh</div></div>'+term+'</div>' +
+    '<div class="w-right">'+rtabs+rhead+'<div class="r-list"><div class="inl"><input value="Coordinatore herdr"><div class="ta">'+esc(FULL)+'</div><div class="btns"><span class="btn">Cancel</span><span class="btn pri">Save</span></div></div>'+P.slice(1).map(p=>card(p,false)).join('')+'</div></div>';
+
+  // 3: modal
+  document.getElementById('w3').innerHTML = left +
+    '<div class="w-center"><div class="w-strip"><div class="w-tab on">claude</div><div class="w-tab">zsh</div></div>'+term+'</div>' +
+    '<div class="w-right">'+rtabs+rhead+'<div class="r-list">'+P.map((p,i)=>card(p,i===0)).join('')+'</div></div>' +
+    '<div class="scrim"><div class="dlg"><h4>Edit prompt</h4><input value="Coordinatore herdr"><div class="ta">'+esc(FULL)+'</div><div class="btns"><span class="btn">Cancel</span><span class="btn pri">Save</span></div></div></div>';
+})();
+</script>
+</div></body></html>

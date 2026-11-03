@@ -9,7 +9,7 @@ use ely_gpui_component::{
     data_display::{Badge, Tone},
     forms::TextInput,
     primitives::{Icon, IconName, Severity},
-    theme::IconSize,
+    theme::{ControlSize, IconSize},
 };
 use gpui::{AnyElement, App, Context, ElementId, Entity, IntoElement, Window, div, prelude::*, px};
 use sirio_forge::ChangeState;
@@ -85,12 +85,36 @@ pub(crate) fn icon_button(
     enabled: bool,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    sized_icon_button(id, icon, tooltip, enabled, ControlSize::Md, on_click)
+}
+
+/// [`icon_button`] at Ely's small control size, for a row of icons inside a
+/// card or a list row.
+pub(crate) fn small_icon_button(
+    id: &'static str,
+    icon: IconName,
+    tooltip: &'static str,
+    enabled: bool,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    sized_icon_button(id, icon, tooltip, enabled, ControlSize::Sm, on_click)
+}
+
+fn sized_icon_button(
+    id: &'static str,
+    icon: IconName,
+    tooltip: &'static str,
+    enabled: bool,
+    size: ControlSize,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
         .flex_none()
         .child(
             IconButton::new(id, icon)
+                .size(size)
                 .tooltip(tooltip)
                 .disabled(!enabled)
                 .on_click(move |_, window, cx| on_click(window, cx)),

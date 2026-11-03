@@ -1471,6 +1471,11 @@ enum ControlAction {
     ProjectIdentityRead {
         reply: ControlReply,
     },
+    /// Debug-only `surface.prompts.read`: the saved prompts view, its cards
+    /// and the window bounds of its controls.
+    PromptsRead {
+        reply: ControlReply,
+    },
     /// Debug-only `surface.project_identity.act {action, value?}`: runs the
     /// open dialog's button handler or drives its picker.
     ProjectIdentityAct {
@@ -1545,6 +1550,21 @@ struct OpenTab {
     /// user-driven rename (`commit_tab_rename`) turns it off, which is the
     /// only thing that permanently opts a tab out of automatic renaming.
     title_is_auto_named: bool,
+}
+
+impl OpenTab {
+    /// A file tab whose last file leaf has closed with only terminals left
+    /// beside it is a terminal tab from then on, so the strip's dirty mark,
+    /// Ctrl+S and restore treat it as one: restore keeps a file tab only with
+    /// its file. It stays in its half, and a title the user did not choose
+    /// becomes the one a new terminal tab gets.
+    fn become_terminal_tab(&mut self) {
+        self.kind = TabKind::Terminal;
+        self.agent_icon = None;
+        if self.title_is_auto_named {
+            self.title = "Terminal".to_string();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3629,6 +3649,9 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.project_identity.read" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::ProjectIdentityRead { reply })
+            }
+            "surface.prompts.read" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::PromptsRead { reply })
             }
             "surface.project_identity.act" if cfg!(debug_assertions) => {
                 let Some(action) = request.params.get("action").cloned() else {
@@ -6502,6 +6525,9 @@ impl SirioWorkspace {
                                 ControlAction::ProjectIdentityRead { reply } => {
                                     let _ = reply.send(Ok(workspace.control_project_identity_read(window, cx)));
                                 }
+                                ControlAction::PromptsRead { reply } => {
+                                    let _ = reply.send(Ok(workspace.control_prompts_read(cx)));
+                                }
                                 ControlAction::ProjectIdentityAct { action, value, reply } => {
                                     let result = workspace.control_project_identity_act(
                                         &action,
@@ -8651,6 +8677,11 @@ impl SirioWorkspace {
                 RightPanelActionEvent::OpenSurface(surface) => {
                     workspace.queue_workspace_action(WorkspaceAction::OpenSurface(*surface))
                 }
+                RightPanelActionEvent::OpenPrompt(path) => workspace.open_prompt(path.clone(), cx),
+                RightPanelActionEvent::PromptDeleted(path) => workspace.close_prompt_tabs(path, cx),
+                RightPanelActionEvent::PromptFailed(message) => {
+                    workspace.show_toast(message.clone(), cx);
+                }
             },
         )
         .detach();
@@ -8728,6 +8759,7 @@ impl SirioWorkspace {
             let path = view.read(cx).path().to_path_buf();
             workspace.note_dirty_state(&view, cx);
             workspace.sync_document_with_server(&path, &view, cx);
+            workspace.sync_prompt_tab_title(&view, cx);
         })
         .detach();
         cx.subscribe(
@@ -8767,6 +8799,8 @@ impl SirioWorkspace {
                     }
                     FileViewEvent::Saved(path) => {
                         workspace.refresh_symbols_now(path, cx);
+                        // A title-only save of a prompt notifies nothing else.
+                        workspace.sync_prompt_tab_title(&view, cx);
                     }
                     FileViewEvent::RevealInFileManager(path) => {
                         if let Some(mut command) = reveal_command(path) {
@@ -12559,6 +12593,12 @@ impl SirioWorkspace {
             // Tab ids restart with the incoming worktree's tabs: a peek left
             // open would name one of them (spec 2026-11-01-primary-rail §5).
             self.primary_peek.close();
+            // The outgoing file views are dropped below, and a prompt's
+            // pending autosave with its view: a prompt typed less than the
+            // delay ago is written now. Only written, not closed: its tab
+            // comes back with the worktree. The flush updates the prompt
+            // views, never this workspace.
+            sirio_ui::prompts::flush_all(cx);
             let outgoing_tab_ids: Vec<usize> = self.tabs.iter().map(|tab| tab.id).collect();
             for tab_id in outgoing_tab_ids {
                 self.track_terminal_panes_in_cache(tab_id);
@@ -14497,6 +14537,7 @@ impl SirioWorkspace {
         let mut terminals = Vec::new();
         let mut terminal_pane_ids = Vec::new();
         let mut browsers = Vec::new();
+        let mut prompts = Vec::new();
         let mut closed_panes = Vec::new();
         self.tabs[index].panes.for_each(&mut |pane_id, content| {
             closed_panes.push(pane_id);
@@ -14507,7 +14548,17 @@ impl SirioWorkspace {
             if let TabContent::Browser(surface) = content {
                 browsers.push(surface.clone());
             }
+            if let TabContent::File { view } = content
+                && view.read(cx).is_prompt()
+            {
+                prompts.push(view.clone());
+            }
         });
+        for prompt in prompts {
+            // A prompt writes what is still pending, and one left untitled
+            // and empty is removed: New, then close, leaves nothing behind.
+            prompt.update(cx, |prompt, cx| prompt.close_prompt(cx));
+        }
         for terminal in terminals {
             // Closing a tab ends its sessions (SP2 spec §4.2), except an
             // attached one, which only detaches (spec §5): `end_session`.
@@ -14625,6 +14676,9 @@ impl SirioWorkspace {
     fn request_close_ids(&mut self, ids: Vec<usize>, window: &mut Window, cx: &mut Context<Self>) {
         if ids.is_empty() {
             return;
+        }
+        for id in &ids {
+            self.flush_tab_prompts(*id, cx);
         }
         let dirty = ids.iter().any(|id| {
             self.tabs
@@ -17351,6 +17405,8 @@ impl SirioWorkspace {
         );
         let facts = self.file_context_facts(&path);
         let view = cx.new(|cx| FileView::new(path.clone(), cx));
+        // A saved prompt is labelled with its title, not its generated name.
+        let title = view.read(cx).prompt_title(cx).unwrap_or(title);
         let location = self.repo_relative(&path);
         Self::subscribe_file_view(&view, cx);
         let worktree = self.working_directory.clone();
@@ -17390,6 +17446,76 @@ impl SirioWorkspace {
         self.schedule_save(cx);
         self.mark_activity_dirty();
         cx.notify();
+    }
+
+    /// Opens a saved prompt from the right panel (Edit, a card, New) in its
+    /// editor tab, the one already open when there is one, and gives it the
+    /// keyboard: an explicit open is the only time a prompt takes focus.
+    fn open_prompt(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.add_file_tab(path, cx);
+        if let Some(view) = self.active_file_view() {
+            view.update(cx, |view, cx| view.focus_prompt_on_open(cx));
+        }
+    }
+
+    /// The prompt at `path` was deleted: its editors in this worktree go.
+    /// Nothing is saved, because the delete already forgot their views. In a
+    /// tab that holds something else too (a terminal split beside the
+    /// prompt), only the prompt's leaf is removed and nothing else ends; a tab
+    /// that holds only the prompt closes.
+    fn close_prompt_tabs(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let mut whole_tabs = Vec::new();
+        let mut leaves = Vec::new();
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let mut prompt_leaves = Vec::new();
+            tab.panes.for_each(&mut |pane_id, content| {
+                if let TabContent::File { view } = content
+                    && paths_name_the_same_document(view.read(cx).path(), path)
+                {
+                    prompt_leaves.push(pane_id);
+                }
+            });
+            if prompt_leaves.is_empty() {
+                continue;
+            }
+            if prompt_leaves.len() == tab.panes.leaf_ids().len() {
+                whole_tabs.push(index);
+            } else {
+                leaves.extend(prompt_leaves.into_iter().map(|pane_id| (tab.id, pane_id)));
+            }
+        }
+        for (tab_id, pane_id) in leaves {
+            self.close_terminal_at(tab_id, pane_id, None, cx);
+        }
+        // From the last, so every index still names its tab.
+        for index in whole_tabs.into_iter().rev() {
+            self.close_tab(index, None, cx);
+        }
+    }
+
+    /// A prompt's tab is labelled with the prompt's title, which follows the
+    /// title field as it is typed. A tab the user renamed keeps its name.
+    fn sync_prompt_tab_title(&mut self, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        let Some(title) = view.read(cx).prompt_title(cx) else {
+            return;
+        };
+        let mut relabelled = false;
+        for tab in &mut self.tabs {
+            let mut hosts = false;
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view: hosted } = content {
+                    hosts |= hosted.entity_id() == view.entity_id();
+                }
+            });
+            if hosts && tab.title_is_auto_named && tab.title != title {
+                tab.title = title.clone();
+                relabelled = true;
+            }
+        }
+        if relabelled {
+            self.schedule_save(cx);
+            cx.notify();
+        }
     }
 
     fn add_changes_tab(&mut self, focus_path: Option<PathBuf>, cx: &mut Context<Self>) {
@@ -20420,6 +20546,50 @@ impl SirioWorkspace {
         pairs
     }
 
+    /// Debug-only `surface.prompts.read`: the right panel's saved prompts
+    /// view. Bounds are `x,y,w,h` in window pixels, empty while the control is
+    /// not drawn; a card's preview escapes its line breaks as `\n`, so every
+    /// value stays on its own line.
+    fn control_prompts_read(&self, cx: &App) -> Vec<(String, String)> {
+        let bounds = |bounds: Option<Bounds<gpui::Pixels>>| match bounds {
+            Some(b) => format!(
+                "{:.0},{:.0},{:.0},{:.0}",
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+                f32::from(b.size.width),
+                f32::from(b.size.height)
+            ),
+            None => String::new(),
+        };
+        let flag = |on: bool| if on { "1" } else { "0" }.to_string();
+        let facts = self.right_panel.read(cx).prompts_facts();
+        let mut pairs = vec![
+            (
+                "rightPanelView".to_string(),
+                sirio_ui::right_panel::PanelView::get(cx).name().to_string(),
+            ),
+            ("shown".to_string(), flag(facts.shown)),
+            ("canEdit".to_string(), flag(facts.can_edit)),
+            ("count".to_string(), facts.cards.len().to_string()),
+            ("railBounds".to_string(), bounds(facts.rail_button)),
+            ("newBounds".to_string(), bounds(facts.new_button)),
+            ("menuDeleteBounds".to_string(), bounds(facts.menu_delete)),
+            ("confirmDeleteBounds".to_string(), bounds(facts.confirm_delete)),
+        ];
+        for (index, card) in facts.cards.iter().enumerate() {
+            pairs.extend([
+                (format!("card{index}Path"), card.path.display().to_string()),
+                (format!("card{index}Title"), Self::escaped_field(&card.title)),
+                (format!("card{index}Preview"), Self::escaped_field(&card.preview)),
+                (format!("card{index}Bounds"), bounds(card.card)),
+                (format!("card{index}EditBounds"), bounds(card.edit)),
+                (format!("card{index}CopyBounds"), bounds(card.copy)),
+                (format!("card{index}Copied"), flag(card.copied)),
+            ]);
+        }
+        pairs
+    }
+
     /// Debug-only `surface.project_identity.act`: the open dialog's own
     /// `control_act`, or an error when none is open.
     fn control_project_identity_act(
@@ -20455,6 +20625,17 @@ impl SirioWorkspace {
                 format!("{}|{}|{}", session::persisted_kind(tab.kind), if snapshot { "yes" } else { "no" }, tab.title),
             ));
         }
+        // `tab_is_dirty`'s positions: the tabs whose close asks first. Every
+        // tab with a live terminal is among them; the strip marks no
+        // terminal tab (`tab_shows_dirty_mark`).
+        let dirty: Vec<String> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| self.tab_is_dirty(tab, cx))
+            .map(|(index, _)| (index + 1).to_string())
+            .collect();
+        report.push(("dirty".to_string(), dirty.join(",")));
         report
     }
 
@@ -22173,6 +22354,23 @@ impl SirioWorkspace {
             tab.session_state
                 .pane_events
                 .push(PaneEvent::Close { id: focused_pane });
+            if tab.kind == TabKind::Editor {
+                let mut only_terminals = true;
+                tab.panes.for_each(&mut |_, content| {
+                    only_terminals &= matches!(content, TabContent::Terminal { .. });
+                });
+                if only_terminals {
+                    tab.become_terminal_tab();
+                }
+            }
+            if let TabContent::File { view } = &removed
+                && view.read(cx).is_prompt()
+            {
+                // As in `close_tab`: the prompt writes what is still pending,
+                // and one left untitled and empty is removed. A deleted
+                // prompt's view writes nothing.
+                view.update(cx, |prompt, cx| prompt.close_prompt(cx));
+            }
             if let Some(terminal) = removed.terminal() {
                 // Closing a pane in a split ends its session (SP2 spec §4.2).
                 terminal.update(cx, |terminal, _| terminal.end_session());
@@ -23315,7 +23513,17 @@ impl SirioWorkspace {
         let mut dirty = false;
         tab.panes.for_each(&mut |_, content| {
             dirty |= match content {
-                TabContent::File { view } => view.read(cx).is_dirty(),
+                // A prompt saves itself, on a pause and on close, so it asks
+                // before closing only when its last save failed and typing is
+                // still not on disk.
+                TabContent::File { view } => {
+                    let view = view.read(cx);
+                    if view.is_prompt() {
+                        view.prompt_unsaved(cx)
+                    } else {
+                        view.is_dirty()
+                    }
+                }
                 // A live terminal owns a process whose input/output would be
                 // lost on close. Failed and already-exited panes are clean.
                 TabContent::Terminal { view } => self
@@ -23336,10 +23544,30 @@ impl SirioWorkspace {
         dirty
     }
 
+    /// Writes what the prompts in tab `id` still hold, before a close reads
+    /// whether the tab is dirty: a write that fails here marks it so, and the
+    /// close asks instead of losing the typing in its own failed write.
+    fn flush_tab_prompts(&mut self, id: usize, cx: &mut Context<Self>) {
+        let mut prompts = Vec::new();
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) {
+            tab.panes.for_each(&mut |_, content| {
+                if let TabContent::File { view } = content
+                    && view.read(cx).is_prompt()
+                {
+                    prompts.push(view.clone());
+                }
+            });
+        }
+        for prompt in prompts {
+            prompt.update(cx, |prompt, cx| prompt.flush_prompt(cx));
+        }
+    }
+
     fn request_close_tab_by_id(&mut self, id: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        self.flush_tab_prompts(id, cx);
         let dirty = self.tab_is_dirty(&self.tabs[index], cx);
         if !dirty {
             self.close_tab(index, Some(window), cx);
@@ -25221,6 +25449,12 @@ impl SirioWorkspace {
             })
             .unwrap_or_default();
         for view in views {
+            if view.read(cx).is_prompt() {
+                // A prompt writes its pending text and title now, as its
+                // pause would; a failure is raised by the view.
+                view.update(cx, |view, cx| view.flush_prompt(cx));
+                continue;
+            }
             // `FileView::save` raises its own failure (the card and the bell),
             // so this only logs it.
             if let Err(error) = view.update(cx, |view, cx| view.save(cx)) {
@@ -29747,6 +29981,13 @@ fn main() {
         // database logs and falls back to the default layout — the app must
         // never refuse to open because of its own state file.
         let database_path = session::database_path();
+        // Saved prompts (prompt list spec §4): the folder follows the
+        // database's scoping, and both globals exist before the first right
+        // panel or file view is built.
+        cx.set_global(sirio_ui::prompts::PromptsDir(session::prompts_dir(
+            &database_path,
+        )));
+        cx.set_global(sirio_ui::prompts::PromptsRevision(0));
         // #125 (spec R6.1): the browser profile follows the database's own
         // scoping -- override, then the checkout holding the running binary,
         // then the stable installed location. Handed to `sirio_ui` here,
@@ -30332,6 +30573,10 @@ fn main() {
         let session_store_for_quit = session_store.clone();
         let panes_for_quit = panes.clone();
         cx.on_app_quit(move |cx| {
+            // A prompt typed less than the autosave delay ago is written
+            // now. Outside any workspace update: the flush updates every
+            // open prompt view.
+            sirio_ui::prompts::flush_all(cx);
             if let Some(workspace) = workspace_for_quit
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -45845,6 +46090,7 @@ done
             | ControlAction::SettingsAct { reply, .. }
             | ControlAction::ProjectAddDebug { reply, .. }
             | ControlAction::ProjectIdentityRead { reply }
+            | ControlAction::PromptsRead { reply }
             | ControlAction::ProjectIdentityAct { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
@@ -46036,6 +46282,7 @@ done
                 request::surface_project_add("path", VERBATIM_PATH, false, None)
             }
             "surface.project_identity.read" => request::project_identity_read(),
+            "surface.prompts.read" => request::prompts_read(),
             "surface.project_identity.act" => request::project_identity_act("skip", None),
             "browser.open" | "browser.navigate" | "browser.act" | "browser.get"
             | "browser.wait" | "browser.eval" | "browser.console" | "browser.snapshot"
