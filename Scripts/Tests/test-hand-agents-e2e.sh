@@ -75,6 +75,10 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  a turn ends, the TUI quits, a new `opencode` in the tab links to
 #                                  that session by title: no status, no notification; its next
 #                                  turn then shows and posts
+#   opencode_sibling_finish_is_not_replayed
+#                                  two TUIs in one folder, B runs a turn and quits: A, now alone,
+#                                  links to B's finished session by the first-turn rule and shows
+#                                  no status, no unread mark and posts nothing
 #   two_opencode_panes_one_folder  two panes in one folder, one then two sessions: no status on
 #                                  either; with titles `OC | a`, `OC | b`: each follows its own
 #   opencode_failed_turn_is_error  a failed turn -> error; the service's error text and its
@@ -1185,6 +1189,36 @@ case_opencode_resumed_finish_is_not_replayed() {
   leave_opencode "$keeper"
 }
 
+case_opencode_sibling_finish_is_not_replayed() {
+  # Two TUIs in one folder, each in a new tab: B runs a turn and quits. A, still at its start
+  # screen, is now alone, and the session B created after A started is the one the first-turn
+  # rule links it to: a turn A never ran. It shows no finished status and posts nothing.
+  local pane_a sess_a pane_b sess_b base
+  start_agent opencode
+  pane_a="$PANE"; sess_a="$SESS"
+  start_agent opencode
+  pane_b="$PANE"; sess_b="$SESS"
+  oc "create ses_sib $OC_DIR"
+  oc "rename ses_sib sibling"
+  type_line "$pane_b" "title OC | sibling"
+  sleep 2
+  oc "busy ses_sib"
+  wait_status "$sess_b" running 4
+  sleep 1.3
+  oc "idle ses_sib"
+  wait_status "$sess_b" done 4
+  leave_opencode "$pane_b"
+  wait_status "$sess_b" null 4
+  sleep 1.5
+  base="$(posted_count)"
+  sleep 3
+  stepn "opencode: A alone, linked to a session B finished" "$sess_a"
+  expect_attention "$sess_a" status null "a session another pane finished"
+  expect_attention "$sess_a" unread false "a session another pane finished"
+  expect_posted "$base" 0 "A linking to a session B finished"
+  leave_opencode "$pane_a"
+}
+
 case_two_opencode_panes_one_folder() {
   local pane_a sess_a pane_b sess_b base
   start_agent opencode
@@ -1363,6 +1397,7 @@ run_case opencode_first_turn_links
 run_case opencode_duplicate_title_keeps_link
 run_case opencode_short_turn_is_finished
 run_case opencode_resumed_finish_is_not_replayed
+run_case opencode_sibling_finish_is_not_replayed
 run_case two_opencode_panes_one_folder
 run_case opencode_failed_turn_is_error
 run_case opencode_after_relaunch
