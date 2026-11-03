@@ -647,7 +647,8 @@ marked *[my call]* and is open to the user.
 
       A running link stays the only route for its pane (the rule is per pane: with a Show tab
       open, the same session is applied under two panes, its owner's and the Show tab's, which
-      makes no stop), so one event is never applied twice. A session with no tab, such as a control session, gets no state.
+      makes no stop), so one event is never applied twice to one pane, and one turn makes one
+      stop. A session with no tab, such as a control session, gets no state.
     - **A Show-session tab makes no stop for a session another tab owns.** *[my call]*
       Its link applies the shown session's events under the Show tab's own pane, so its
       transitions are no stop when the shown session is a known tab's: that tab's own route
