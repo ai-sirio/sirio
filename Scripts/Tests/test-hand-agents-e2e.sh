@@ -71,6 +71,10 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  next turn shows running, then done (+1)
 #   opencode_short_turn_is_finished
 #                                  a turn the service ends under a second after it began: done, +1
+#   opencode_resumed_finish_is_not_replayed
+#                                  a turn ends, the TUI quits, a new `opencode` in the tab links to
+#                                  that session by title: no status, no notification; its next
+#                                  turn then shows and posts
 #   two_opencode_panes_one_folder  two panes in one folder, one then two sessions: no status on
 #                                  either; with titles `OC | a`, `OC | b`: each follows its own
 #   opencode_failed_turn_is_error  a failed turn -> error; the service's error text and its
@@ -1134,6 +1138,49 @@ case_opencode_short_turn_is_finished() {
   leave_opencode "$PANE"
 }
 
+case_opencode_resumed_finish_is_not_replayed() {
+  # A turn ends, the TUI quits, and a new `opencode` in the same tab links to that session by
+  # its title: the session's last turn ended before this pane's `opencode` started, so it is
+  # no news: no finished status and no notification.
+  local base keeper
+  # Another OpenCode pane in the folder keeps the watch (and what it saw) alive while the
+  # tab's TUI is away: with none, the watch stops and reads the list again, which has no outcome.
+  start_agent opencode
+  keeper="$PANE"
+  oc "create ses_p $OC_DIR"
+  oc "rename ses_p resumed"
+  start_agent opencode
+  type_line "$PANE" "title OC | resumed"
+  sleep 2
+  oc "busy ses_p"
+  wait_status "$SESS" running 4
+  sleep 1.3
+  oc "idle ses_p"
+  wait_status "$SESS" done 4
+  leave_opencode "$PANE"
+  wait_status "$SESS" null 4
+  sleep 1.5
+  base="$(posted_count)"
+  type_line "$PANE" opencode
+  wait_agent "$PANE" opencode 3
+  sleep 2.5
+  type_line "$PANE" "title OC | resumed"
+  sleep 3
+  stepn "opencode: resumed a session whose turn ended before this pane started" "$SESS"
+  expect_attention "$SESS" status null "a resumed session whose last turn is older than the pane"
+  expect_posted "$base" 0 "linking to a session whose turn ended before the pane started"
+  # The link is real: the session's next turn shows.
+  oc "busy ses_p"
+  wait_status "$SESS" running 4
+  sleep 1.3
+  base="$(posted_count)"
+  oc "idle ses_p"
+  wait_status "$SESS" done 4
+  expect_posted "$base" 1 "the end of the next turn"
+  leave_opencode "$PANE"
+  leave_opencode "$keeper"
+}
+
 case_two_opencode_panes_one_folder() {
   local pane_a sess_a pane_b sess_b base
   start_agent opencode
@@ -1311,6 +1358,7 @@ run_case opencode_three_states
 run_case opencode_first_turn_links
 run_case opencode_duplicate_title_keeps_link
 run_case opencode_short_turn_is_finished
+run_case opencode_resumed_finish_is_not_replayed
 run_case two_opencode_panes_one_folder
 run_case opencode_failed_turn_is_error
 run_case opencode_after_relaunch

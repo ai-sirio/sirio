@@ -266,6 +266,27 @@ impl OpenCodeStatus {
                 continue;
             };
             let held = (session_id, session.state, session.at_ms);
+            // A pane that newly links to a session whose last turn ended before the pane's
+            // `opencode` started (a resumed session) takes no news from that finish: it
+            // starts at Idle, and a turn that ended after the pane started (one too short
+            // to be seen before the link formed) is still a finish. Both clocks are wall
+            // milliseconds of this machine.
+            let newly = self
+                .reported
+                .get(&pane_id)
+                .is_none_or(|(old_session, ..)| *old_session != held.0);
+            let older_than_pane = self
+                .panes
+                .get(&pane_id)
+                .is_some_and(|running| session.at_ms < running.started_ms);
+            let shown = if newly
+                && older_than_pane
+                && matches!(session.state, OcState::Done | OcState::Error)
+            {
+                OcState::Idle
+            } else {
+                session.state
+            };
             match self.reported.get(&pane_id) {
                 Some(already) if *already == held => continue,
                 // Another session: its times are not comparable with the old one's, and
@@ -275,7 +296,7 @@ impl OpenCodeStatus {
                 }
                 _ => {}
             }
-            activity.program_report(&pane_id, Some(reported(session.state)), session.at_ms, now);
+            activity.program_report(&pane_id, Some(reported(shown)), session.at_ms, now);
             self.reported.insert(pane_id, held);
             changed = true;
         }
