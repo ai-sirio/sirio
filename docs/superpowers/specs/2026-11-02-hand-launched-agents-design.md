@@ -390,7 +390,7 @@ is the same path and adds nothing to attribute.
 
 **End to end, with an artifact** (the shape of `Scripts/Tests/test-host-sessions-e2e.sh`):
 `Scripts/Tests/test-hand-agents-e2e.sh` drives a real `sirio`, `sirio-host` and `sirioctl`
-under Xvfb with an isolated root, and prints `HAND AGENTS E2E OK (48 cases, <s>s)`. One stub,
+under Xvfb with an isolated root, and prints `HAND AGENTS E2E OK (50 cases, <s>s)`. One stub,
 `Scripts/Tests/stubs/hand-agents/agent.py`, plays `claude`, `codex`, `omp` and `pi` on
 `PATH`, and behaves like the measured CLIs: the stub `claude` sends the probe and reports
 only when answered, the stub `codex` reports unprompted, including the 10 ms startup blip.
@@ -552,10 +552,19 @@ marked *[my call]* and is open to the user.
      program, so a `Program(None)` caught in that window leaves the pane's last program shown
      until the next command the shell runs. The window runs from the open to the link's first
      seed.
-   - After a Restart mid-turn the tab still reads running (seen in the E2E). The listener does
-     not feed it, since the restarted view is its pane's route; the likely cause is the turn
-     tracker of the old session, whose last report is newer than the new session's (a small
-     `at_ms`), so they are dropped as replays. Not established, and not changed here.
+   - Attaching a Show tab into the current terminal (`attach_tab_to_current_terminal`) rewrites
+     its identity to its own pane (a pre-existing clobber). After that the Show-tab rule no
+     longer recognises it, and one turn makes two stops.
+   - `agentsWorking` (`running_pane_count`, the update card's count) counts a turn twice while
+     a Show tab of it is open. The same was already true with an attached owner.
+   - A tab of a worktree never mounted has no bound view when its session ends, so the exit's
+     shell evidence is not kept: at the first mount the status reads null where an attached tab
+     reads `error`. With several views bound under one key the one chosen is arbitrary.
+   - A project close with a Show tab of one of its sessions: the catalog is already updated, so
+     the Show tab's link makes a stop for the app's own close. This predates the listener, and
+     `sirioctl` cannot reach it.
+   - A Restart whose reopen fails at once (`Taken`, a spawn failure) leaves the view `Failed`,
+     so the old session's `Closed` reaches the listener as an end.
    - Another OpenCode client's session created in the same folder after the pane started can
      link to that pane by the first-turn rule, which counts only Sirio's panes.
    - Ctrl+Z on a working agent reads *finished* (the shell has the terminal), and after `fg`
@@ -632,11 +641,13 @@ marked *[my call]* and is open to the user.
         route. `detach` and `shutdown` release a view; `restart` and `retry` clear that just
         before they open again, so a Restart's old session, whose `Closed` the listener sees,
         is gated by the view that is already reopening (and a Restart is the user's own act,
-        which posts nothing). `restart` leaves the view `Connecting` or `Running` at once;
-        `Pending` only for a view that was abandoned or is an empty prompt.
+        which posts nothing). `restart` leaves the view `Connecting` or `Running` at once, or
+        `Failed` when the reopen fails at once (see the limits); `Pending` only for a view
+        that was abandoned or is an empty prompt.
 
-      A running link stays the only route for its pane, so one event is never applied
-      twice. A session with no tab, such as a control session, gets no state.
+      A running link stays the only route for its pane (the rule is per pane: with a Show tab
+      open, the same session is applied under two panes, its owner's and the Show tab's, which
+      makes no stop), so one event is never applied twice. A session with no tab, such as a control session, gets no state.
     - **A Show-session tab makes no stop for a session another tab owns.** *[my call]*
       Its link applies the shown session's events under the Show tab's own pane, so its
       transitions are no stop when the shown session is a known tab's: that tab's own route
@@ -673,11 +684,28 @@ marked *[my call]* and is open to the user.
       what a closed tab's pane gets (`activity.pane_closed` and the OpenCode link's forget),
       so a Running pane is not counted forever.
     - **Closing panes.** A pane in the closing set gets nothing from the listener, not even a
-      re-seed, until its end arrives (swallowed), a seed no longer lists it, or an orphan
-      adoption gives its session a tab.
-    - **No released terminal.** No terminal is released today: `TerminalBindings` holds every
-      bound terminal for the app's life (a pre-existing leak), so an evicted worktree's tabs
-      keep their links and notify through them. If that changes, the pane of a released
-      terminal needs the listener's last state of its session.
+      re-seed, until its end arrives (swallowed) or an orphan adoption gives its session a
+      tab. One helper decides membership for the feed and the swallow: a live tab (mounted,
+      parked or retained) that holds the key again, as a reopened worktree's does, removes the
+      entry, so the tab is fed and its real end is not swallowed. Seeds leave the set alone;
+      an entry for a session that never ends is harmless.
+    - **A Show tab on screen watches its owner's turn.** A turn ends in a tab the app shows
+      through an attached view: the stop is decided as on screen for the session that view
+      shows (no notification, no unread mark), and showing a Show tab marks that session seen.
+    - **A Restart of a live session clears the pane.** The restart is the user's own act and
+      the restarting view is already its pane's route, so the old session's end is not the
+      listener's, and the attached route never sees it; nothing would drop the old session's
+      record, and the turn tracker would drop the new session's reports (a small `at_ms`) as
+      replays. Both callers (the context menu and the debug control) go through one helper
+      that clears the pane as a moved pane is cleared (`forget_pane_activity`, the tab's own
+      agent registered again, the running flag refreshed) before `restart`, so nothing is
+      posted and no status stays. A view that shows another's session is not restarted.
+    - **Never dropped, and released.** Two different things. No `TerminalView` entity is
+      dropped today: `TerminalBindings` holds a strong handle to every bound terminal for the
+      app's life (a pre-existing leak), so an evicted worktree's tabs keep their links and
+      notify through them. A view is *released* when it gave its session up (`detach`,
+      `shutdown`, until a `restart` or `retry` opens one again): that is the flag the gate
+      reads. If views start to be dropped, the pane of a dropped terminal needs the listener's
+      last state of its session.
     - **One handler.** Both routes go through the handler terminals already use, so the order
       settle → drain → drop → clear is the same on both.

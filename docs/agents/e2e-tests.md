@@ -117,7 +117,7 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # same notification); a session that exited while the app was down posts nothing at the relaunch; closing
 # a worktree nobody selected, mid-turn, posts nothing and leaves nothing running; and a Show-session tab
 # of a hidden tab's session makes one stop for one turn, the hidden tab's own, and closing it leaves the
-# hidden tab fed; a Restart of an agent tab mid-turn posts nothing; a session's end is sent once even when
+# hidden tab fed; a Show tab on screen with the window active makes its owner's turn no news; a Restart of an agent tab mid-turn (launched or typed) posts nothing, leaves no status, and the launched one's next turn is one stop; a session's end is sent once even when
 # the host publishes a title after the exit and then closes it. --out-dir DIR
 # keeps transcript.log, steps.log (each step's `panel list` and `surface attention read`, and the
 # session's status, unread, running and posted count), frames/ and the
