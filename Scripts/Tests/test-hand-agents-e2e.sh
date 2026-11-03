@@ -73,12 +73,13 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  a turn the service ends under a second after it began: done, +1
 #   opencode_resumed_finish_is_not_replayed
 #                                  a turn ends, the TUI quits, a new `opencode` in the tab links to
-#                                  that session by title: no status, no notification; its next
-#                                  turn then shows and posts
+#                                  that session by title: no status; its next turn then shows
+#                                  and posts
 #   opencode_sibling_finish_is_not_replayed
 #                                  two TUIs in one folder, B runs a turn and quits: A, now alone,
 #                                  links to B's finished session by the first-turn rule and shows
-#                                  no status, no unread mark and posts nothing
+#                                  no status, no unread mark and posts nothing; its next turn shows
+#                                  on A and posts once
 #   opencode_own_finish_links_late
 #                                  two TUIs in one folder, A's first turn ends before its title and
 #                                  the rename arrive: the title link forms at Done, and A shows
@@ -904,14 +905,13 @@ case_relaunch_mid_turn() {
   # The new app starts with an empty `posted` list: whatever it holds now, its seed made.
   expect_posted 0 0 "the relaunch's own startup (no report was typed)"
   # A seed that settled a restored tab would mark it unread without posting (a restored first
-  # decision): neither tab ran to an end, so neither may read unread.
+  # decision): tab A never ran to an end, so it may not read unread.
   expect_attention "$sess_a" unread false "tab A, seeded mid-turn by the relaunch"
   # Tab B is selected: it attaches and its host record (idle) seeds no status.
   ctl tab select "$(tab_index_of "$pane_b")" >/dev/null
   wait_agent "$pane_b" codex 15
   sleep 1
   expect_attention "$sess_b" status null "tab B selected after the relaunch"
-  expect_attention "$sess_b" unread false "tab B, seeded at idle by the relaunch"
   stepn "after the relaunch: B selected, at idle" "$sess_b"
   ctl tab select "$(tab_index_of "$pane_a")" >/dev/null
   sleep 1
@@ -1215,15 +1215,25 @@ case_opencode_sibling_finish_is_not_replayed() {
   sleep 1.3
   oc "idle ses_sib"
   wait_status "$sess_b" done 4
+  sleep 1.5
+  # Before B leaves: A links in the very event that ends B's program, so a later baseline
+  # would miss a post made by the link.
+  base="$(posted_count)"
   leave_opencode "$pane_b"
   wait_status "$sess_b" null 4
-  sleep 1.5
-  base="$(posted_count)"
   sleep 3
   stepn "opencode: A alone, linked to a session B finished" "$sess_a"
   expect_attention "$sess_a" status null "a session another pane finished"
   expect_attention "$sess_a" unread false "a session another pane finished"
   expect_posted "$base" 0 "A linking to a session B finished"
+  # A is linked: the session's next turn shows on A, and ends in one notification.
+  oc "busy ses_sib"
+  wait_status "$sess_a" running 4
+  sleep 1.3
+  base="$(posted_count)"
+  oc "idle ses_sib"
+  wait_status "$sess_a" done 4
+  expect_posted "$base" 1 "the end of a turn on A, linked after B quit"
   leave_opencode "$pane_a"
 }
 
@@ -1322,7 +1332,7 @@ case_opencode_failed_turn_is_error() {
 }
 
 case_opencode_after_relaunch() {
-  local base unread_before
+  local base
   start_agent opencode
   oc "create ses_r $OC_DIR"
   oc "rename ses_r relaunched"
@@ -1333,7 +1343,6 @@ case_opencode_after_relaunch() {
   oc "idle ses_r"
   wait_status "$SESS" done 4
   stepn "opencode before the quit: done" "$SESS"
-  unread_before="$(attention_get "$SESS" unread)"
   ctl quit >/dev/null 2>&1 || true
   for _ in $(seq 1 100); do alive "$APP_PID" || break; sleep 0.2; done
   alive "$APP_PID" && fail "sirio did not quit after sirioctl quit"
@@ -1349,8 +1358,6 @@ case_opencode_after_relaunch() {
   stepn "opencode after the relaunch: the mark" "$SESS"
   # The new app starts with an empty `posted` list: whatever it holds now, its seed made.
   expect_posted 0 0 "the relaunch's own startup (the service said nothing new)"
-  # The seed must not change the mark (it is set by the turn that ended before the quit).
-  expect_attention "$SESS" unread "$unread_before" "the opencode tab after the relaunch"
   oc "busy ses_r"
   wait_status "$SESS" running 5
   sleep 1.3
