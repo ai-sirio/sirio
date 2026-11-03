@@ -279,7 +279,7 @@
       "description": "The program in the foreground of a session's terminal, read by the host from\nthe process itself. Never the shell.",
       "properties": {
         "argv": {
-          "description": "At most 32 entries of at most 1024 bytes each.",
+          "description": "At most 32 entries of at most 1024 bytes each, and 4096 bytes in all.",
           "items": {
             "type": "string"
           },

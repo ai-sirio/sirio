@@ -13,6 +13,10 @@ pub(crate) const MAX_ARGS: usize = 32;
 /// dropped, since a cut path names another directory.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) const MAX_ARG_BYTES: usize = 1024;
+/// The whole argv is kept to this many bytes: every `term.list` carries one per session, and a
+/// reply over the protocol's payload limit fails every list.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) const MAX_ARGV_BYTES: usize = 4096;
 /// A group that has not yet been read twice with the same result is read again this often.
 pub(crate) const PROGRAM_REREAD: Duration = Duration::from_millis(250);
 /// A group whose last two reads agree is still read this often while it stays the foreground:
@@ -219,6 +223,31 @@ fn cap_text(mut text: String) -> String {
     text
 }
 
+/// Keep the first entries of `argv` that fit [`MAX_ARGV_BYTES`] in all: the entry that crosses
+/// the budget is cut on a char boundary, and nothing follows it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn cap_argv(argv: Vec<String>) -> Vec<String> {
+    let mut left = MAX_ARGV_BYTES;
+    let mut kept = Vec::with_capacity(argv.len());
+    for mut arg in argv {
+        if left == 0 {
+            break;
+        }
+        if arg.len() > left {
+            let mut end = left;
+            while !arg.is_char_boundary(end) {
+                end -= 1;
+            }
+            arg.truncate(end);
+            kept.push(arg);
+            break;
+        }
+        left -= arg.len();
+        kept.push(arg);
+    }
+    kept
+}
+
 /// A working directory is kept whole or not at all: a cut path names another directory.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn keep_cwd(path: String) -> Option<String> {
@@ -250,6 +279,7 @@ pub(crate) fn read_program(pid: u32) -> Option<ForegroundProgram> {
         argv.pop();
     }
     argv.truncate(MAX_ARGS);
+    let argv = cap_argv(argv);
 
     let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
         .ok()
@@ -343,12 +373,12 @@ fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
     let rest = buf.get(4..)?;
     let after_path = rest.get(rest.iter().position(|byte| *byte == 0)?..)?;
     let args = after_path.get(after_path.iter().position(|byte| *byte != 0)?..)?;
-    Some(
+    Some(cap_argv(
         args.split(|byte| *byte == 0)
             .take(argc.min(MAX_ARGS))
             .map(|arg| cap_text(String::from_utf8_lossy(arg).into_owned()))
             .collect(),
-    )
+    ))
 }
 
 #[cfg(target_os = "macos")]

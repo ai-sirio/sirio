@@ -154,7 +154,7 @@ pub struct SessionSummary {
 pub struct ForegroundProgram {
     pub pid: u32,
     pub name: String,
-    /// At most 32 entries of at most 1024 bytes each.
+    /// At most 32 entries of at most 1024 bytes each, and 4096 bytes in all.
     pub argv: Vec<String>,
     /// Absent when the host could not read it or it is longer than 1024 bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]

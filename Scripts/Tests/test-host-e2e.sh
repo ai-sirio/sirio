@@ -80,10 +80,13 @@ set -eEuo pipefail
 #                         a live program hands the terminal to a child in its own
 #                         process group and takes it back: its record stays, with the
 #                         same `at_ms`, and no event clears it before the program ends
+#   28. argv_is_bounded   a program started with 40 arguments of 1000 bytes is
+#                         listed with at most 4096 bytes of argv in all, and the
+#                         entries it keeps are the first ones, cut at the budget
 # Cases 10 and 11 are unix-only and print SKIP on Windows; case 13 runs on
-# Linux only; cases 16 to 27 run on Linux and macOS and print SKIP on Windows.
+# Linux only; cases 16 to 28 run on Linux and macOS and print SKIP on Windows.
 # The systemd scope arm of case 3 runs only on Linux with a user manager.
-# Cases 16 to 27 need python3 on PATH (they read `term.list`'s JSON, and the
+# Cases 16 to 28 need python3 on PATH (they read `term.list`'s JSON, and the
 # probe stub is a python3 script).
 #
 # Each case force-shuts every host in its own root and retires the root
@@ -1282,6 +1285,32 @@ PY
   pass
 }
 
+# The whole argv of a listed program is bounded: `term.list` answers every list() of every
+# tab open, and a reply over the protocol's 1 MiB payload fails them all.
+case_argv_is_bounded() {
+  if [ "$OS" = windows ]; then skip "no foreground process group to read on Windows"; return 0; fi
+  interactive_shell pane-28
+  # A typed line is capped by the terminal (4096 bytes), so a script starts the program.
+  python3 -c '
+import sys
+pad = "x" * 1000
+print("exec python3 -c \"import time; time.sleep(60)\" " + " ".join([pad] * 40))' > "$WORKDIR/long-argv.sh"
+  probe term-write pane-28 $'sh long-argv.sh\r'
+  wait_until 5 argv_has pane-28 'time.sleep(60)' \
+    || fail "the program with 40 long arguments is not named within 5 s: $SESSION_DOC"
+  local total
+  total="$(printf '%s' "$(doc_field program.argv)" | python3 -c '
+import json, sys
+argv = json.load(sys.stdin)
+print(sum(len(word.encode()) for word in argv))')"
+  [ "$total" -le 4096 ] || fail "the listed argv holds $total bytes, over the 4096 bound"
+  # The bound cuts the tail: the interpreter and its script stay.
+  [ "$(printf '%s' "$(doc_field program.argv)" | python3 -c 'import json, sys; print(json.load(sys.stdin)[0])')" = python3 ] \
+    || fail "the first argv entry is not the program: $SESSION_DOC"
+  NOTE="$total bytes of argv"
+  pass
+}
+
 run_case start-and-adopt   case_start_and_adopt
 run_case concurrent-start  case_concurrent_start
 run_case client-killed     case_client_killed
@@ -1300,7 +1329,7 @@ run_case isolation         case_isolation 15
 # The program cases read `term.list`'s JSON and run a python3 stub. A missing
 # python3 is a failure of the machine, not a reason to skip them.
 if [ "$OS" != windows ] && ! command -v python3 >/dev/null 2>&1; then
-  echo "FAIL: python3 is required by the program cases (16 to 27) and is not on PATH" >&2
+  echo "FAIL: python3 is required by the program cases (16 to 28) and is not on PATH" >&2
   exit 1
 fi
 run_case program_is_named                  case_program_is_named
@@ -1315,5 +1344,6 @@ run_case record_ends_with_its_program      case_record_ends_with_its_program
 run_case report_after_exec_is_kept         case_report_after_exec_is_kept
 run_case events_carry_program_and_status   case_events_carry_program_and_status
 run_case record_survives_a_child_group     case_record_survives_a_child_group
+run_case argv_is_bounded                   case_argv_is_bounded
 
 echo "HOST E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"
