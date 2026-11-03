@@ -51,7 +51,10 @@ The files are upstream's bytes, unedited:
   rename upstream consumers need is not needed here.
 
 `claude-color.svg` is the one file with a colour baked in (`fill="#D97757"`).
-It still rides the tinted path rather than the full-colour raster, because
+Its consumer is `Icon::ClaudeAccount`, the starburst of the Claude account
+(provider card, status bar's usage segment); the agent's own mark is Clawd,
+`Icon::ClaudeCode`, from `rust/assets/icons/chat/claude-code.svg`. It still
+rides the tinted path rather than the full-colour raster, because
 that hex *is* `AgentBrandColor::Claude`: same pixels, one less cache entry.
 See `rust/crates/sirio_ui/src/icons.rs`.
 

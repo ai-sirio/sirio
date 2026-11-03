@@ -19,9 +19,11 @@
 //! Two of them paint themselves and must never be recoloured by a theme:
 //! omp's three-stop gradient, and Gemini's blue base under three gradient
 //! overlays. The rest are single `currentColor` paths on the tinted path.
-//! Claude is the seam between the two: its asset bakes `#D97757`, but it
-//! rides the tinted path anyway, because the tint it is handed is that
-//! same hex (see [`Icon::agent_mark_color`]).
+//! Claude is the seam between the two. [`Icon::ClaudeCode`] is Clawd, a
+//! `currentColor` path tinted with `#D97757`; [`Icon::ClaudeAccount`] is the
+//! starburst, whose asset bakes that same `#D97757` yet rides the tinted path
+//! anyway, because the tint it is handed is that hex (see
+//! [`Icon::agent_mark_color`]).
 //!
 //! Gemini and Grok are vendored without an adapter behind them. Nothing in
 //! `sirio_agents::ALL` produces those ids; [`Icon::for_agent_id`] maps them

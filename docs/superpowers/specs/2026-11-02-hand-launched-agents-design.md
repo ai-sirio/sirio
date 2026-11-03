@@ -53,9 +53,9 @@ scripts are throwaway and not in the repo; §6 asks for their equivalent as a te
 | F2 | Claude 2.1.316's working title is `◐ Claude Code` / `◑ Claude Code`; idle is `✳ Claude Code`. `title.rs::detect_claude` knows only `✳`, `. ` and braille, so a pane whose identity rests on the title loses identity and icon on every working turn and gets them back at idle. | [run] reproduced in Sirio with comm forced to `2.1.316`; [read] `sirio_activity/src/title.rs` |
 | F3 | On the Mac: `sirio-host → zsh → claude`, the process name is `claude`, `TMUX` empty, no `DISABLE_TERMINAL_TITLE`, yet `sirioctl panel list --json` reports `agent:""`. Both the process walk and the title fail there. Cause unknown. | [run] the user's output from the Mac |
 | F4 | **OSC 7501, the program status protocol** (herdr): `ESC ] 7501 ; state=<idle\|working\|done\|blocked\|error\|clear> : id= : kind=<permission\|question\|auth> : progress=0..100 : app= : title=<b64> : msg=<b64> ST`. A probe `ESC]7501;?ST` asks the terminal whether it listens; the answer is an OSC 7501 whose data starts with `?`. A record with an `id` is a sub-record; the root record has none. herdr counts a turn as ended when the root record leaves `working` for anything. | [read] herdr-core `status.rs`, `tests/m3.rs` |
-| F5 | Claude Code 2.1.316 sends the probe at startup. Only when it is answered does it report `idle`, `working` and `blocked` (`msg` "dialog open"), with `app=claude-code`. No `done` was seen: a turn ends working → idle. Once answered, its title becomes plain `Claude Code`. | [run] |
-| F6 | **Codex 0.166 reports OSC 7501 without any probe:** `idle` at start, `working` on a prompt, `blocked kind=permission` on an approval (its title becomes `[ ! ] Action Required \| <dir>`), `done` at the end of a turn, and `idle` after Esc. At startup it also sends `working` then `idle` about 10 ms apart. It sends OSC 21337 too. | [run] |
-| F7 | omp reports `state=idle app=omp` without a probe. Its title is `π > <cwd>`; Sirio's title rule looks for `π:`, so it takes omp for pi. Pi sends the probe; no report was seen in 8 s. | [run]; [read] `title.rs:93-96` |
+| F5 | Claude Code 2.1.316 sends the probe at startup. Only when it is answered does it report, with `app=claude-code`: `idle` at once, `working` on a prompt, and `done` at the end of a turn. No `idle` follows the `done`. A tool run adds a second `working` with a `msg` (the tool's description). A permission ask reports `blocked kind=permission`, seen live with a permission rule that asks before Bash; a startup dialog reports `blocked` with no `kind`. Once answered, its title becomes plain `Claude Code`. (The first version of this row said no `done` was seen and a turn ends working → idle; corrected by the build's live run.) | [run] |
+| F6 | **Codex 0.166 reports OSC 7501 without any probe:** `idle` at start, `working` on a prompt, `blocked kind=permission` on an approval (its title becomes `[ ! ] Action Required \| <dir>`), `done` at the end of a turn followed by an `idle`, and `idle` after Esc. The `blocked kind=permission` on an approval was seen again in the live run. At startup it also sends `working` then `idle` about 10 ms apart, in most runs and not in a warm start. It sends OSC 21337 too. | [run] |
+| F7 | Pi 1.4.0 sends the probe, and once it is answered reports `idle`, `working` on a prompt and `done`, with `app=pi`; its title is `π - <dir>`. omp reports `app=omp` without a probe: `idle` at start, `idle` again at Enter, `working`, `done`. Its idle title is `π > <cwd>` and its working title is `π ⠋ <dir>`, a spinner after the glyph; Sirio's title rule looked for `π:`, so it took omp for pi. (The first version of this row said Pi reported nothing in 8 s; corrected by the build's live run.) | [run]; [read] `sirio_activity/src/title.rs` |
 | F8 | **OpenCode 2.0.29 reports nothing:** no 7501, no OSC 9;4 progress, no OSC 99 notification even when its notification query is answered. Its title is `OpenCode`, then `OC \| <session title>` after the first turn. | [run] |
 | F9 | **OpenCode v2's terminal UI is a client.** The work runs in one managed background server per user (`opencode serve --service`, default port 49374, set with `opencode service set port`), started once and then detached (parent pid 1). Plugins run in that server, so they never see the pane's environment: today's `SIRIO_PANE_ID` hooks cannot tell panes apart. Its root URL serves a web UI; the event API paths were not found yet. | [run] |
 | F10 | All five CLIs are native binaries whose process name equals the command (`claude`, `codex`, `opencode`, `pi`, `omp`). Claude's native install is `~/.local/bin/claude` → `~/.local/share/claude/versions/<version>`. | [run] Linux and the Mac |
@@ -67,6 +67,8 @@ scripts are throwaway and not in the repo; §6 asks for their equivalent as a te
 | F18 | Windows' own ConPTY swallows the answers a terminal writes to a program, the 7501 probe answer included; herdr ships Microsoft's newer ConPTY for this reason. | [read] herdr-core `scripts/fetch-conpty.ps1` |
 | F16 | herdr-app and herdr-core are Apache-2.0; Sirio is MIT. | [read] their `LICENSE` files |
 | F17 | herdr names a program from the foreground process **argv**, unwrapping shell wrappers (`zsh -ic '"$@"'`), PowerShell `& 'cmd'` and interpreters (node, bun, npx, uv…, by the script). It shows no status for programs that do not speak 7501 ("do not guess status from screen text"). | [read] herdr-app `src/programs.rs`, herdr-core `SKILL.md` |
+| F19 | **Not read on a Mac.** The user skipped the reading on the Mac (2026-11-02). Two things were measured on Linux only: the foreground group equals the terminal's group (pgid == tpgid) for a hand-typed agent, and Claude's probe reaching the host. On macOS they rest on `macos-check.yml` (the host E2E on `macos-15`) alone. Three readings are owed before the release that ships this: (1) the "command running" pill lights; (2) `ps -A -o pid,ppid,pgid,tpgid,tty,comm \| grep -E 'zsh\|claude' \| grep -v grep` shows the `claude` row with pgid == tpgid; (3) `script -q ~/c.typescript claude`, then `/exit`, then `grep -c $'\e]7501;?' ~/c.typescript; rm ~/c.typescript` prints ≥ 1. | The user's call; [run] the Linux half |
+| F20 | **Wrapper scripts.** On the dev machine `~/.local/bin/claude` and `~/.local/bin/pi` are bash wrappers that run `mise use -g` and then `exec mise x <cli> -- <cli>`. A hand-typed agent can therefore have a wrapper as its group leader for a moment. An identity from a report's `app=` covers it, and so does the resolver's `mise x … --` form. Running such a wrapper edits the user's global mise config, so no test ever runs one. | [read] |
 
 ## §2 Goals, non-goals, anti-goals
 
@@ -148,7 +150,9 @@ resolver misses. *[my call]*
 principle, become one of its children. The pane keeps the agent identity while the agent
 process that was recognised is still alive and a descendant chain links the new
 foreground to it, or while the agent's 7501 status is live. The builder verifies with the
-real CLIs which of these is needed. *[my call]*
+real CLIs which of these is needed. *[my call]* **Measured:** in every live run of Claude
+and Codex running a 3 s shell tool, the foreground group never changed and the program
+stayed the agent. [run] The rule is kept for the case where it does (§8, 5).
 
 ### §3.2 What it is doing: OSC 7501 in the session engine
 
@@ -249,7 +253,7 @@ Sirio:
   from the Dock finds it too) and its watch thread confirms the service with
   `GET <url>/api/info` (Basic `opencode:<password>`), accepting it only when the reply's
   `pid` is the file's. The file is read again on every reconnect: a restarted service has a
-  new port, password and pid. *[measured, Task 2 L12, L13]*
+  new port, password and pid. [run]
 - reads the state before the stream from REST (`GET /api/session?directory=`, an exact
   match on the pane's canonical cwd; `GET /api/session/active`; `GET
   /api/session/{id}/permission` and `/form`) and subscribes to `GET /api/event` (SSE,
@@ -258,13 +262,13 @@ Sirio:
   waiting on `permission.asked` and `form.created`, busy again on `permission.replied`,
   `permission.rejected`, `form.replied` and `form.cancelled`. `session.execution.*` carry
   no `location`, so they map through `data.sessionID`; the title comes from
-  `session.renamed`. *[measured, Task 2 L14 to L16; `session.status` and `session.idle` are
-  not emitted by v2]*
+  `session.renamed`. [run] (`session.status` and `session.idle` are
+  not emitted by v2.)
 - links a server session to a pane only when it is sure. The pane's foreground is
   `opencode` (§3.1), the session's directory is the pane's cwd, and the session's title
   equals the pane title after `OC | `. A session has no title when it is created (at the
   first prompt): the service names it with a separate `session.renamed` a moment later,
-  sometimes after the first turn ended and sometimes during it (L17), and the TUI's title
+  sometimes after the first turn ended and sometimes during it [run], and the TUI's title
   follows that rename. So until then a pane links to the one session in its cwd that was
   created after the pane's `opencode` started, provided **it is the only pane running
   `opencode` in that cwd**; and a pane that is linked keeps its session when its `OC | <t>`
@@ -345,49 +349,60 @@ is the same path and adds nothing to attribute.
   kept per session.
 - `protocol/host-v1/`: capability ledger, schema, conformance case.
 - `docs/agents/e2e-tests.md`: the new E2E (§6).
-- The release notes of the version that ships it: agents typed by hand are recognised
-  once every terminal open at update time has been closed, or after **End all sessions**
-  (decision 9).
+- The release notes of the version that ships it carry three lines:
+  - agents typed by hand are recognised once every terminal open at update time has been
+    closed, or after **End all sessions** (decision 9);
+  - in a terminal tab whose session has named a program, an agent title that arrives before
+    the program is named gives the tab its agent mark only, and the first 2 seconds set no
+    status from titles or screen (§9, 5);
+  - OpenCode's status needs OpenCode v2's background service; with 1.x, or with no service
+    running, the mark shows without a status (§3.6).
 
 ## §6 How it is proven
 
 **End to end, with an artifact** (the shape of `Scripts/Tests/test-host-sessions-e2e.sh`):
-a new script drives a real `sirio`, `sirio-host` and `sirioctl` under Xvfb with an
-isolated root. Stub agents on `PATH`, named `claude`, `codex`, `omp` and `opencode`,
-behave like the measured CLIs: the stub `claude` sends the probe and reports only when
-answered, the stub `codex` reports unprompted, including the 10 ms startup blip. One
-stub is launched through `node`/`npx`-style wrappers. The script types them into plain
+`Scripts/Tests/test-hand-agents-e2e.sh` drives a real `sirio`, `sirio-host` and `sirioctl`
+under Xvfb with an isolated root, and prints `HAND AGENTS E2E OK (25 cases, <s>s)`. One stub,
+`Scripts/Tests/stubs/hand-agents/agent.py`, plays `claude`, `codex`, `omp` and `pi` on
+`PATH`, and behaves like the measured CLIs: the stub `claude` sends the probe and reports
+only when answered, the stub `codex` reports unprompted, including the 10 ms startup blip.
+One stub is launched through a `node`-style wrapper. The script types them into plain
 terminal tabs, records `sirioctl panel list --json` at each state, captures PID-matched
 window frames (the Clawd mark, the three rings), checks the notification and unread
-mark, and checks that leaving the agent clears the mark. It prints one success line
-(for example `HAND AGENTS E2E OK`). For OpenCode, a stub server speaking the events of
-§3.6.
+mark, and checks that leaving the agent clears the mark. OpenCode reports nothing in the
+terminal, so its stub is a server: `Scripts/Tests/stubs/opencode-server.py` speaks the
+real v2 endpoints and the events of §3.6. The host side is cases 16 to 27 of
+`Scripts/Tests/test-host-e2e.sh`, the script `macos-check.yml` runs on `macos-15`.
 
-**Opt-in live test** (like `sirio_agents`' `hooks_live`): the real CLIs against local
-fake model APIs, recording the 7501 sequences and OpenCode's events. This is where F5–F9
-are re-proven when an agent updates, and where pi's reports (F7) and OpenCode's event
-names and paths are first pinned down.
+**Opt-in live tests** (like `sirio_agents`' `hooks_live`): the real CLIs against local fake
+model APIs, recording the 7501 sequences and OpenCode's events. They are `program_status_live`
+in `sirio_term_session` (the real `claude`, `codex`, `omp` and `pi`, typed into a session of the
+engine) and `service_live` in `sirio_opencode_watch` (the real OpenCode v2 service), and the run
+lines are in `CLAUDE.md`. This is where F5–F9 are re-proven when an agent updates. They refuse
+to run with `TMPDIR` inside the user's home (agents read instruction files from every ancestor
+directory), resolve `claude` and `pi` to the newest real mise install, refuse a mise wrapper,
+and stop the private OpenCode service only after checking that the process carries the private
+`HOME`.
 
 **Unit tests, failure modes first**, only for the two units that stand alone: the 7501
 scanner (split reads, BEL/ST, over-long, malformed fields, a probe inside other output,
 a probe answered once) and the argv resolver (each wrapper of §3.1, a symlinked native
 install, a renamed binary). Write the failure list before the code.
 
-**Mac, before building.** The design's two bases, `tcgetpgrp` in the host and Claude's
-probe reaching the host, were run only on Linux, and on the Mac the title also failed
-(F3). The plan's first task is therefore a reading on the user's Mac, with `claude`
-running in a plain tab: the session's `foreground` from the host, and whether the PTY
-output contains `ESC]7501;?` (for example a `script` capture). If either is missing, the
-plan starts with a diagnosis. *[my call]*
+**Mac, before building.** The plan's first task was a reading on the user's Mac: `claude`
+running in a plain tab, the session's `foreground` from the host, and whether the PTY
+output contains `ESC]7501;?`. The user skipped it (2026-11-02), so the readings were not
+made before building. They became the three readings of F19, owed before the release that
+ships this, and until then the host side on macOS rests on the CI case below.
 
 **Mac in CI.** The host conformance case for the new capability (the probe answered, a
 report kept, the foreground program named) runs in the host E2E, which
 `macos-check.yml` already runs on `macos-15`. That proves the host side on macOS for
 every PR.
 
-**Owed by hand:** on the user's Mac with an installed build, type `claude`, `codex` and
-`opencode` into a plain tab: mark, three states, notification. Record the result in the
-PR.
+**Owed by hand:** the three readings of F19, and then, on the user's Mac with an installed
+build, type `claude`, `codex` and `opencode` into a plain tab: mark, three states,
+notification. Record the result in the PR.
 
 ## §7 Left to the builder
 
@@ -396,7 +411,7 @@ PR.
 - The exact bytes of the probe answer, from herdr-core's ghostty and the live CLIs.
 - What pi reports, if anything, once answered.
 - Whether the foreground changes while an agent runs a tool (§3.1), and so how much of
-  the "no flicker" rule is needed.
+  the "no flicker" rule is needed. Answered: it did not change in any live run (§3.1).
 - Where the 1 s threshold lives, or a cleaner turn signal (§3.3).
 - The exact names of the capability, events and fields.
 - How the host reads argv on macOS without new permissions (libproc and `sysctl` need
@@ -421,7 +436,8 @@ from §3, these win.
    cwd travels with it, for OpenCode's linking (§3.6). Neither is ever logged.
 5. **No flicker** (§3.1) is one rule: a program-owned pane keeps its agent while a 7501
    record or an OpenCode link is live. The descendant-chain rule is built only if the
-   live facts show the foreground group changing during a tool run.
+   live facts show the foreground group changing during a tool run; they did not, so it
+   is not built.
 6. **The OpenCode watch** runs only while some pane's foreground program is `opencode`.
    It reconnects with back-off (2 s doubling to 60 s), logs each failure kind once per
    run, and ignores proxy variables.
@@ -437,8 +453,72 @@ from §3, these win.
     output and skips events, so conformance pins only the Welcome capability array.
 11. **The resolver tries the process name after argv** (node's `process.title`). No
     executable path is carried; a native install's file name is its version (F10).
-12. **The host re-reads the foreground program** every 250 ms until two reads agree:
-    the child takes the terminal before it `exec`s. When the shell is back in the
-    foreground for two polls, the host sends "no program", clears the record, and drops
-    late reports until the foreground changes again. On the shell's exit the record is
-    dropped from the summary, and the app settles a turn that was mid-way.
+12. **The host re-reads the foreground program** after a program group changes, every 250 ms
+    until two reads agree (the child takes the terminal before it `exec`s), then every 2 s
+    while it stays in the foreground, and names it again only when a read differs.
+    - When the shell is back in the foreground for two polls, the host sends "no program"
+      and clears the record, then drops reports for 1 s. It does not drop them until the
+      foreground changes again: a report that late is bytes written just before the exit,
+      and an `exec claude` that keeps the shell's group must be heard.
+    - When a named leader has died and another group takes the terminal, the host first ends
+      the old program (no program, no record), then names the new one.
+    - When a child group took the terminal from a live program and gives it back, it is the
+      same program: the record is kept.
+    - On the shell's exit the record is dropped from the summary, and the app settles a turn
+      that was mid-way (§9, 3).
+
+## §9 Decided while building
+
+Approved by nobody yet: these are Claude's calls, made during execution. Each one is
+marked *[my call]* and is open to the user.
+
+1. **Stale reports.** The app ignores a report older than the one it holds, by the host's
+   clock. A "no record" always applies. After a reconnect the app is re-seeded from the
+   host's summary, and the events queued while the connection was down replay after the
+   seed. The user sees no tab flip back to *working* after a turn ended. Without this, a
+   replayed `working` would reopen a finished turn and notify twice. *[my call]*
+2. **Hooks yield only to a record that shows.** A record on a pane with no agent identity
+   does not swallow that pane's hooks. A report's `app=` names the agent in any tab whose
+   program the resolver misses (a wrapper, F20), not only where no program is named. The
+   user sees the mark and the status in a tab started through a launcher the resolver does
+   not know, and a hook is never dropped for a record nobody can see. A stray `app=` from a
+   program that is no agent can name a tab until the program ends. *[my call]*
+3. **A record lives as long as its session.** When the session's child exits or the host is
+   lost, a turn that was mid-way settles to Done, which is a stop, and then the record goes.
+   A spawned tab's exit code then shows. A failed exit of a Sirio-spawned agent tab mid-turn
+   is one stop (Error), not Done and then Error. A lost host also clears a hand-typed
+   agent's mark. A new session starts its clock again near zero, so a kept record would
+   treat every report of it as a replay. *[my call]*
+4. **Windows.** An identity that came from `app=` clears when its record clears, on exit, or
+   when Layer D, having seen the agent's process in that tab, sees none. Layer D cannot see
+   Node-hosted agents, so for those only the first two apply. This is untested on Windows
+   (below). *[my call]*
+5. **The first title of a program session.** In a tab whose session has named a program, an
+   agent title that arrives before the program event naming the agent gives the identity
+   only, and the 2 s startup grace starts. Otherwise a startup title would make a startup
+   notification, which the anti-goals forbid. This is a change to the title layer for such
+   tabs, and it needs a release-notes line (§5). *[my call]*
+6. **Titles never clear an identity a record shows.** A title that stops looking like the
+   agent's, while the agent still reports, does not take its mark away. *[my call]*
+7. **OpenCode.** *[my call]*
+   - A tab whose agent is OpenCode ignores the host's report record, which is always empty
+     and would wipe the status the server gave it.
+   - After a relaunch, the host's last title of the session reaches the link without passing
+     through the title layer, so a running TUI is linked again and no tab is renamed or
+     notified by it.
+   - A first-turn link survives the moment when the TUI's `OC | <title>` arrives a few
+     milliseconds before the service's rename, so the first turn's result is not wiped.
+   - A failed per-session permission or question lookup means "not waiting", so one missing
+     endpoint cannot keep a stream open and leak a thread per retry.
+   - Each failure kind is logged once per app run, by name and never with content.
+8. **Known limits, left as they are.**
+   - A crash mid-turn reads "finished", per §3.3.
+   - A later `idle` clears Done or Error: omp sends one at the next prompt (measured: a
+     second `idle` at Enter).
+   - After a reconnect or relaunch OpenCode restores busy and waiting, but not a finished or
+     failed result.
+   - A subagent's child session can keep OpenCode's first-turn link from forming until the
+     session has a title.
+   - An OpenCode tab whose cwd the host cannot read is not counted by the "only tab in that
+     folder" rule.
+   - The Windows paths compile on Linux and are not run.
