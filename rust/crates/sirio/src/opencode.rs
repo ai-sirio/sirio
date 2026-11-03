@@ -218,36 +218,9 @@ impl OpenCodeStatus {
                 held: self.reported.get(pane_id).map(|(held, ..)| held.clone()),
             })
             .collect();
-        let mut links = link(&panes, &self.sessions);
-        // The TUI's title can reach the app milliseconds before the service's rename does
-        // (the title is set from it): a pane that was linked keeps its session while its
-        // `OC | <t>` names no titled session in its folder and its own session has no title
-        // yet. `link` stays pure; this is the one state it cannot see.
-        for pane in &panes {
-            if links.iter().any(|(linked, _)| *linked == pane.pane_id) {
-                continue;
-            }
-            let (Some((held, ..)), Some(title)) = (
-                self.reported.get(&pane.pane_id),
-                pane.title.strip_prefix(TITLED),
-            ) else {
-                continue;
-            };
-            let in_folder = |session: &&OcSession| session.directory == pane.cwd;
-            let untitled = self
-                .sessions
-                .iter()
-                .filter(in_folder)
-                .any(|session| session.id == *held && session.title.is_empty());
-            let named = self
-                .sessions
-                .iter()
-                .filter(in_folder)
-                .any(|session| session.title == title);
-            if untitled && !named {
-                links.push((pane.pane_id.clone(), held.clone()));
-            }
-        }
+        // One keep rule, in `link`: a held session keeps its pane while it has no title yet
+        // (the TUI's title can land before the service's rename) or has the pane's title.
+        let links = link(&panes, &self.sessions);
         let mut changed = false;
         let lost: Vec<String> = self
             .reported
