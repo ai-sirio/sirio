@@ -2205,9 +2205,6 @@ pub struct TerminalView {
     /// Whether this pane's session survives the app, and why not when it is
     /// the in-process fallback. Set when the link opens.
     view_mode: TerminalViewMode,
-    /// Whether the open session names its foreground program (see
-    /// [`TerminalView::host_names_programs`]). Set when the link opens.
-    names_programs: bool,
     /// Why the in-process fallback was used, when it was: drawn as a
     /// one-line banner above the grid. `None` on a host session — and on a
     /// local session opened with no factory installed, which is the normal
@@ -2436,7 +2433,6 @@ impl TerminalView {
             terminal: TerminalState::Pending,
             spawn,
             view_mode: TerminalViewMode::default(),
-            names_programs: false,
             fallback_reason: None,
             pending_prelude: Vec::new(),
             pending_recreate: false,
@@ -2479,7 +2475,6 @@ impl TerminalView {
                 shell: TerminalShell::System,
             },
             view_mode: TerminalViewMode::default(),
-            names_programs: false,
             fallback_reason: None,
             pending_prelude: Vec::new(),
             pending_recreate: false,
@@ -2544,7 +2539,6 @@ impl TerminalView {
                 shell,
             },
             view_mode: TerminalViewMode::default(),
-            names_programs: false,
             fallback_reason: None,
             pending_prelude: Vec::new(),
             pending_recreate: false,
@@ -2695,14 +2689,6 @@ impl TerminalView {
     /// Whether this pane's session outlives the app (a host session does).
     pub fn survives_app(&self) -> bool {
         self.view_mode.survives
-    }
-
-    /// Whether this pane's session names the program holding the terminal:
-    /// a local session on Unix, or a host session on Unix whose host has
-    /// `term.program`. Where it is false, status reports still flow; only the
-    /// program naming is absent. False until a session is open.
-    pub fn host_names_programs(&self) -> bool {
-        self.names_programs && matches!(self.terminal, TerminalState::Running(_))
     }
 
     /// F-TERM-03: whether the pane's status pill should show "Running" right
@@ -2935,7 +2921,6 @@ impl TerminalView {
         match outcome {
             OpenOutcome::Linked(link) => {
                 let survives = link.survives_app();
-                let names_programs = link.names_programs();
                 let (handle, wakeup_rx) = TerminalHandle::new_with_link(link);
                 Self::pump_terminal_events(
                     handle.clone(),
@@ -2944,7 +2929,6 @@ impl TerminalView {
                     cx,
                 );
                 self.view_mode.survives = survives;
-                self.names_programs = names_programs;
                 self.fallback_reason = None;
                 self.pending_prelude.clear();
                 self.pending_recreate = false;
@@ -3014,7 +2998,6 @@ impl TerminalView {
                             cx,
                         );
                         self.view_mode.survives = false;
-                        self.names_programs = cfg!(unix);
                         self.fallback_reason = Some(reason);
                         self.pending_prelude.clear();
                         self.pending_recreate = false;

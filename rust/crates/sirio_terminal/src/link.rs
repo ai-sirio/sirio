@@ -44,12 +44,6 @@ pub trait SessionLink: Send + 'static {
     /// `LocalLink` this ends it too: an in-process session cannot outlive the app.
     fn detach(&self);
     fn survives_app(&self) -> bool;
-    /// Whether this session names the program holding the terminal. `Status`
-    /// chunks flow either way; only the naming depends on the platform and on
-    /// the host's `term.program` capability. A link that does not say names none.
-    fn names_programs(&self) -> bool {
-        false
-    }
 }
 
 pub enum LinkChunk {
@@ -406,10 +400,6 @@ impl SessionLink for LocalLink {
     fn survives_app(&self) -> bool {
         false
     }
-
-    fn names_programs(&self) -> bool {
-        cfg!(unix)
-    }
 }
 
 impl Drop for LocalLink {
@@ -435,8 +425,6 @@ pub struct HostLink {
     #[allow(dead_code)]
     reconnect: ReconnectFn,
     done: Arc<AtomicBool>,
-    /// The host reports `term.program` and this platform reads programs.
-    names_programs: bool,
 }
 
 type ReconnectFn = Arc<dyn Fn() -> Option<TermClient> + Send + Sync>;
@@ -632,7 +620,6 @@ impl HostLink {
             OpenPlan::Attach => listed_summary.map(seed_chunks).unwrap_or_default(),
             OpenPlan::Create | OpenPlan::Duplicate | OpenPlan::Lost => Vec::new(),
         };
-        let names_programs = client.names_programs() && cfg!(unix);
         let stream = attached.stream;
         let (chunks_tx, chunks_rx) = mpsc::channel();
         let done = Arc::new(AtomicBool::new(false));
@@ -680,7 +667,6 @@ impl HostLink {
             latest_size,
             reconnect,
             done,
-            names_programs,
         })
     }
 }
@@ -1189,10 +1175,6 @@ impl SessionLink for HostLink {
 
     fn survives_app(&self) -> bool {
         true
-    }
-
-    fn names_programs(&self) -> bool {
-        self.names_programs
     }
 }
 
