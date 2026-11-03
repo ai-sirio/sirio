@@ -45,6 +45,31 @@ from the first frame, even empty; the keyboard toggle hides it per worktree.
 Despite the name it is not a [pane](#pane); see
 [primary pane role](#primary-pane-role).
 
+## Chat
+
+### Session panel
+
+The column beside a chat's transcript and composer that shows what the agent's
+session is made of and doing: its environment, what fills its context window,
+its connectors, the trace of its turns and the branch's change request. It
+belongs to one chat.
+
+_Avoid_: sidebar, context sidebar — "sidebar" is kept for the columns that
+flank the work area.
+
+### Transport
+
+How a chat tab talks to its agent. A **native transport** speaks the agent's
+own machine protocol, the one its own binary serves for programs rather than
+people (Claude Code's stdio stream-json, for one). The **ACP transport** speaks
+the Agent Client Protocol, through the agent's `acp` subcommand or a wrapper
+package. It is the transport of an agent that has no native one, and the
+fallback of an agent whose native one is not available.
+A terminal pane has no transport: it runs the agent's own interface.
+
+_Avoid_: adapter — an agent's adapter is what prepares its worktree and builds
+the command line a terminal pane runs, whichever transport its chat uses.
+
 ## Control socket
 
 ### Panel
