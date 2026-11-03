@@ -507,4 +507,23 @@ Scripts/Tests/test-capture-diff.sh   # -> prints "CAPTURE DIFF CONTRACT OK"
 # [--allow TSV] [--tolerance N] compares two sets (Scripts/capture-masks.tsv names the regions a clock drives)
 # and prints CAPTURE DIFF IDENTICAL, CAPTURE DIFF OK (...) or CAPTURE DIFF FAILED (...).
 Scripts/bezel-off-captures.sh --out-dir DIR --xvfb   # -> prints "CAPTURES OK: DIR (<n> frames)"
+
+# The opt-in live tests of program status (hand-launched agents), never in Scripts/ci.sh: the
+# real CLIs against local fake model APIs (tests/live/*.py, 127.0.0.1, a free port), each under a
+# private HOME and XDG_*, with the child's environment built from nothing and each CLI resolved
+# through a private bin/ of symlinks (override: SIRIO_LIVE_CLAUDE, SIRIO_LIVE_CODEX, SIRIO_LIVE_OMP,
+# SIRIO_LIVE_PI, SIRIO_LIVE_OPENCODE; a missing CLI prints "SKIP: <cli> not found" and passes).
+# program_status_live types the command into an engine shell session and prints the
+# Event::Program / Event::Status sequence it saw: claude (idle once the probe is answered,
+# working, done, and blocked kind=permission on a Bash ask), codex (idle unprompted, done,
+# blocked on an escalation), omp (idle at start), pi (idle once answered, working, done) and
+# the foreground program staying the agent while Claude and Codex run a 3 s shell tool.
+# service_live starts a private OpenCode v2 service (`opencode service set port` before its first
+# start, never the default 49374), drives one session over its REST API and expects the watch to
+# say Busy, Waiting (the permission ask, answered once), Busy, Idle; it stops the service by the
+# pid in its registration and checks the port is free. The binaries must be the real ones, not
+# the mise wrappers of ~/.local/bin/claude and ~/.local/bin/pi. TMPDIR must be on disk and
+# outside your home (/var/tmp/...).
+cd rust && cargo nextest run -p sirio_term_session --test program_status_live --run-ignored only
+cd rust && cargo nextest run -p sirio_opencode_watch --test service_live --run-ignored only
 ```

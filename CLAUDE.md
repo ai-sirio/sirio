@@ -54,6 +54,13 @@ cd rust && cargo build -p sirio_control --bin sirioctl
 # The opt-in live hook test: each CLI spends one real turn, so it runs by hand only.
 cd rust && cargo nextest run -p sirio_agents --test hooks_live --run-ignored only
 
+# The opt-in live tests of program status: the real claude, codex, omp and pi typed into a
+# session of the engine, and the real OpenCode v2 service under the watch, each against a local
+# fake model API. By hand only; a CLI that is missing prints SKIP. Use an on-disk TMPDIR outside
+# your home (agents read instruction files from a directory's ancestors).
+cd rust && cargo nextest run -p sirio_term_session --test program_status_live --run-ignored only
+cd rust && cargo nextest run -p sirio_opencode_watch --test service_live --run-ignored only
+
 # Dev build+launch loop: cargo build -> kill any running instance -> relaunch.
 Scripts/build-dev.sh
 ```
