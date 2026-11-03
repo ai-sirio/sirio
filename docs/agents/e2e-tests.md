@@ -112,11 +112,13 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # OpenCode) or into a worktree never selected makes one stop and an unread mark, showing the tab adds
 # none, a finished claude turn read before the quit stays silent, and a `panel create` session that
 # belongs to no tab gets no state. The end of a hidden agent tab's session
-# (a Sirio-launched tab with exit 0 and exit 3, a hand-typed `exec codex`), a host killed under a tab on
-# screen and a hidden one, and End all sessions end both the way they end the tab on screen (one stop, the
+# (a Sirio-launched tab with exit 0 and exit 3, a hand-typed `exec codex`), a host killed under an attached tab
+# and a hidden one, and End all sessions end both the way they end the attached tab (one stop, the
 # same notification); a session that exited while the app was down posts nothing at the relaunch; closing
 # a worktree nobody selected, mid-turn, posts nothing and leaves nothing running; and a Show-session tab
-# of a hidden tab's session makes one stop for one turn. --out-dir DIR
+# of a hidden tab's session makes one stop for one turn, the hidden tab's own, and closing it leaves the
+# hidden tab fed; a Restart of an agent tab mid-turn posts nothing; a session's end is sent once even when
+# the host publishes a title after the exit and then closes it. --out-dir DIR
 # keeps transcript.log, steps.log (each step's `panel list` and `surface attention read`, and the
 # session's status, unread, running and posted count), frames/ and the
 # logs (default ~/.cache/st/hand-agents-e2e-<time>; TMPDIR defaults to ~/.cache/st/hand-agents-tmp,
