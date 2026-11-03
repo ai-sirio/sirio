@@ -9818,26 +9818,20 @@ impl SirioWorkspace {
                 format!("terminal-{pane_id}"),
             ));
         });
-        let pane_key = format!("pane-{pane_id}");
-        let entity_id = terminal.entity_id();
-        // The registry the host listener reads: this terminal's link is now the one route
-        // for this pane. A rebind drops the entry of the pane it left.
+        // The registry the host listener reads: every bound terminal, dead ones pruned.
         if !cx.has_global::<BoundTerminalPanes>() {
             cx.set_global(BoundTerminalPanes::default());
         }
         {
             let bound = &mut cx.global_mut::<BoundTerminalPanes>().0;
-            bound.retain(|_, (held, _)| *held != entity_id);
-            bound.insert(pane_key.clone(), (entity_id, terminal.downgrade()));
+            bound.retain(|_, held| held.upgrade().is_some());
+            bound.insert(terminal.entity_id(), terminal.downgrade());
         }
         let subscriptions = vec![
             Self::subscribe_terminal(terminal, tab_id, pane_id, cx),
             Self::subscribe_terminal_link(terminal, pane_id, cx),
             Self::subscribe_terminal_activity(terminal, pane_id, cx),
             Self::subscribe_terminal_drop(terminal, cx),
-            cx.observe_release(terminal, move |workspace, _, cx| {
-                workspace.terminal_released(&pane_key, entity_id, cx);
-            }),
         ];
         if !cx.has_global::<TerminalBindings>() {
             cx.set_global(TerminalBindings::default());
@@ -9993,8 +9987,7 @@ impl SirioWorkspace {
             host_sessions::rename_pane_in_session_state(&mut tab.session_state, from, to);
             (tab.id, tab.agent_id.clone(), was_root)
         };
-        self.activity.pane_closed(&format!("pane-{from}"));
-        self.opencode.forget(&format!("pane-{from}"));
+        self.forget_pane_activity(&format!("pane-{from}"));
         register_restored_agent(&mut self.activity, to, agent_id.as_deref());
         if let Some(terminal) = terminal {
             Self::bind_terminal(terminal, tab_id, to, cx);
@@ -10474,14 +10467,15 @@ impl SirioWorkspace {
                     failed: false,
                     exit_status: Some(*status),
                 };
-                // `sync_entity_evidence` walks only the mounted tabs, so a
-                // terminal in a worktree that is not selected is told here.
+                // The evidence is kept by the terminal's entity; a pane the host listener
+                // ends has none. `sync_entity_evidence` walks only the mounted tabs, so a
+                // pane in a worktree that is not selected is told here, by either route.
                 if let Some(terminal) = terminal {
                     self.terminal_shell_evidence
                         .insert(terminal.entity_id().as_u64(), evidence);
-                    self.activity
-                        .set_entity_status(&activity_pane_id, evidence.status());
                 }
+                self.activity
+                    .set_entity_status(&activity_pane_id, evidence.status());
             }
             TerminalActivityEvent::LifecycleChanged {
                 failed,
@@ -10559,38 +10553,6 @@ impl SirioWorkspace {
         }
     }
 
-    /// A terminal bound to `pane_key` is gone. Its pane has no link now, so the host listener's
-    /// last state of the session is applied once, in the re-seed's form: an event the link
-    /// received and never delivered is not lost, and the turn tracker drops a report older than,
-    /// or equal to, the last, so a replay makes no second stop.
-    fn terminal_released(
-        &mut self,
-        pane_key: &str,
-        entity_id: gpui::EntityId,
-        cx: &mut Context<Self>,
-    ) {
-        let held = cx
-            .try_global::<BoundTerminalPanes>()
-            .is_some_and(|bound| bound.0.get(pane_key).is_some_and(|(held, _)| *held == entity_id));
-        if !held {
-            return;
-        }
-        cx.global_mut::<BoundTerminalPanes>().0.remove(pane_key);
-        if self.session_for_pane(pane_key).is_none() {
-            return;
-        }
-        let state = self.host_programs.cache.as_ref().and_then(|cache| {
-            cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(pane_key)
-                .cloned()
-        });
-        for event in state.iter().flat_map(|state| state.reseed_events()) {
-            self.apply_activity_event(pane_key, &event, None, cx);
-        }
-    }
-
     /// Starts (or restarts) the listener on the host's `term.sessions` topic. Every adoption of a
     /// host reaches it on the GPUI thread; a listener of an earlier adoption ends by itself. It
     /// uses the host client and the reconnect closure the adoption installed and never ensures a
@@ -10610,20 +10572,17 @@ impl SirioWorkspace {
             .current
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
             + 1;
-        let cache: host_programs::SessionCache = Arc::default();
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<host_programs::Message>();
         if let Err(error) = host_programs::spawn(
             client,
             host.reconnect_fn(),
             generation,
             Arc::clone(&self.host_programs.current),
-            Arc::clone(&cache),
             tx,
         ) {
             eprintln!("[sirio] host programs listener not started: {}", error.kind());
             return;
         }
-        self.host_programs.cache = Some(cache);
         cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
             while let Some(first) = rx.next().await {
@@ -10646,17 +10605,93 @@ impl SirioWorkspace {
         .detach();
     }
 
-    /// Whether the host listener may feed `pane_key`: the pane is a known tab's, and no terminal
-    /// bound to it has a running link (that link is the only route for its pane). A restored
-    /// tab's terminal is bound at once and opens its link on its first render: until then the
-    /// listener is the route.
-    fn host_programs_feed(&self, pane_key: &str, cx: &Context<Self>) -> bool {
-        let linked = cx
-            .try_global::<BoundTerminalPanes>()
-            .and_then(|bound| bound.0.get(pane_key))
-            .and_then(|(_, terminal)| terminal.upgrade())
-            .is_some_and(|terminal| terminal.read(cx).has_link());
-        !linked && self.session_for_pane(pane_key).is_some()
+    /// Whether a bound terminal's link follows `session_id` and runs: that link is then the only
+    /// route for the session's program and status. The session a link follows is the view's
+    /// identity (a Show-session tab follows another pane's session), and a restored tab's view
+    /// opens its link on its first render, so until then the listener is the route.
+    fn host_session_is_linked(session_id: &str, cx: &App) -> bool {
+        cx.try_global::<BoundTerminalPanes>().is_some_and(|bound| {
+            bound.0.values().any(|terminal| {
+                terminal.upgrade().is_some_and(|terminal| {
+                    let terminal = terminal.read(cx);
+                    terminal.has_link() && terminal.identity().pane_id() == session_id
+                })
+            })
+        })
+    }
+
+    /// What the listener may tell the activity model about `pane_key`: its program, status and
+    /// title, while the pane is a known tab's and no link runs for it.
+    fn host_programs_feeds(&self, pane_key: &str, cx: &App) -> bool {
+        !Self::host_session_is_linked(pane_key, cx) && self.session_for_pane(pane_key).is_some()
+    }
+
+    /// What the listener may end for `pane_key`: the same, or a pane it fed whose tab is gone, so
+    /// that what it fed does not outlive the tab.
+    fn host_programs_ends(&self, pane_key: &str, cx: &App) -> bool {
+        !Self::host_session_is_linked(pane_key, cx)
+            && (self.session_for_pane(pane_key).is_some()
+                || self.host_programs.fed.contains(pane_key))
+    }
+
+    /// Applies one activity event the listener sent, when the gate allows it, and remembers that
+    /// the pane was fed.
+    fn feed_host_program(
+        &mut self,
+        pane_key: &str,
+        event: &TerminalActivityEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.host_programs_feeds(pane_key, cx) {
+            return;
+        }
+        // A session that speaks is not the one that was being closed.
+        self.host_programs.closing.remove(pane_key);
+        self.host_programs.fed.insert(pane_key.to_owned());
+        self.apply_activity_event(pane_key, event, None, cx);
+    }
+
+    /// Ends a pane the listener is told is over: its session exited, was closed, vanished, or the
+    /// host was lost. The end is the one an attached terminal's link sends (`ChildExited` with the
+    /// exit status, `SessionLost` for a loss), so the order is the same: settle, drain, drop the
+    /// record, then the owner's own handling. A pane whose tab is gone gets what a closed tab's
+    /// pane gets, and nothing of it stays.
+    fn end_host_pane(
+        &mut self,
+        pane_key: &str,
+        event: &TerminalActivityEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if self.host_programs.closing.remove(pane_key) {
+            self.host_programs.fed.remove(pane_key);
+            return;
+        }
+        if !self.host_programs_ends(pane_key, cx) {
+            return;
+        }
+        self.apply_activity_event(pane_key, event, None, cx);
+        self.host_programs.fed.remove(pane_key);
+        if self.session_for_pane(pane_key).is_none() {
+            self.forget_pane_activity(pane_key);
+            self.mark_activity_dirty();
+            cx.notify();
+        }
+    }
+
+    /// Ends every pane the listener fed that is not in `listed` (all of them when `listed` is
+    /// `None`) as lost: no link will end them.
+    fn lose_fed_host_panes(&mut self, listed: Option<&HashSet<&str>>, cx: &mut Context<Self>) {
+        let gone: Vec<String> = self
+            .host_programs
+            .fed
+            .iter()
+            .filter(|pane| listed.is_none_or(|listed| !listed.contains(pane.as_str())))
+            .cloned()
+            .collect();
+        for pane in gone {
+            self.end_host_pane(&pane, &TerminalActivityEvent::SessionLost, cx);
+            self.host_programs.fed.remove(&pane);
+        }
     }
 
     /// Applies what the host listener sent since the last wake. Titles are coalesced: only the
@@ -10701,44 +10736,65 @@ impl SirioWorkspace {
             }
             match message {
                 host_programs::Message::Seed { sessions, .. } => {
-                    for (session_id, events) in sessions {
-                        if !self.host_programs_feed(&session_id, cx) {
-                            continue;
+                    let listed: HashSet<String> = sessions
+                        .iter()
+                        .map(|session| session.session_id.clone())
+                        .collect();
+                    for session in sessions {
+                        for event in &session.events {
+                            self.feed_host_program(&session.session_id, event, cx);
                         }
-                        for event in &events {
-                            self.apply_activity_event(&session_id, event, None, cx);
+                        // After the re-seed, as a link's attach sends the exit after the snapshot.
+                        if let Some(status) = session.exit {
+                            self.end_host_pane(
+                                &session.session_id,
+                                &TerminalActivityEvent::ChildExited { status },
+                                cx,
+                            );
                         }
                     }
+                    // A pane the listener fed whose session is not listed any more is over.
+                    let listed: HashSet<&str> = listed.iter().map(String::as_str).collect();
+                    self.lose_fed_host_panes(Some(&listed), cx);
+                    self.host_programs
+                        .closing
+                        .retain(|pane| listed.contains(pane.as_str()));
                 }
                 host_programs::Message::Event {
                     session_id, note, ..
-                } => {
-                    if !self.host_programs_feed(&session_id, cx) {
-                        continue;
+                } => match note {
+                    HostSessionNote::Activity(event) => {
+                        self.feed_host_program(&session_id, &event, cx);
                     }
-                    match note {
-                        HostSessionNote::Activity(event) => {
-                            self.apply_activity_event(&session_id, &event, None, cx);
-                        }
-                        HostSessionNote::Ended => self.end_host_session(&session_id, cx),
-                    }
-                }
+                    HostSessionNote::Ended(status) => self.end_host_pane(
+                        &session_id,
+                        &TerminalActivityEvent::ChildExited { status },
+                        cx,
+                    ),
+                },
+                host_programs::Message::Lost { .. } => self.lose_fed_host_panes(None, cx),
             }
         }
     }
 
-    /// A session of a tab no terminal holds ended (its child exited, or the host closed it): the
-    /// program ends the way a `Program(None)` ends it (a turn that was mid-way settles to Done
-    /// and its stop is drained while the pane is still an agent's), then the record goes, the
-    /// tail an attached terminal's `ChildExited` gets. There is no exit result and no shell
-    /// evidence: the exit code is the attached terminal's business.
-    fn end_host_session(&mut self, pane_key: &str, cx: &mut Context<Self>) {
-        self.apply_activity_event(pane_key, &TerminalActivityEvent::Program(None), None, cx);
-        self.activity.drop_report(pane_key, Instant::now());
-        self.activity.note_program_ended(pane_key);
-        self.drain_activity_transitions(cx);
-        self.mark_activity_dirty();
-        cx.notify();
+    /// A close the app itself causes (a worktree, a project) forgets what the listener fed to
+    /// the panes the layouts name, before their sessions end: the host's `Closed` that follows
+    /// is then no stop and no evidence, whether the layout rows are still there when it arrives or
+    /// not.
+    fn forget_layout_panes(&mut self, session_ids: &HashSet<String>) {
+        for session_id in session_ids {
+            self.forget_pane_activity(session_id);
+            self.host_programs.closing.insert(session_id.clone());
+        }
+    }
+
+    /// What a closed tab's pane gets, so that its id, free for reuse, does not inherit the entry
+    /// (`close_tab`, `close_focused_pane`, a moved pane, a forgotten worktree's parked panes) and
+    /// the listener no longer owes it an end.
+    fn forget_pane_activity(&mut self, pane_key: &str) {
+        self.activity.pane_closed(pane_key);
+        self.opencode.forget(pane_key);
+        self.host_programs.fed.remove(pane_key);
     }
 
     /// Layer C off the UI thread: takes the cheap agent-id lookup
@@ -11722,6 +11778,7 @@ impl SirioWorkspace {
             self.sync_control_state(cx);
             self.refresh_sidebar(cx);
             // Closing a project ends its sessions (SP2 spec §4.2).
+            self.forget_layout_panes(&layout_ids);
             self.end_app_sessions(removed_paths.clone(), known_before, layout_ids, cx);
             for path in &removed_paths {
                 let worktrees = self.known_worktree_paths();
@@ -13213,17 +13270,22 @@ impl SirioWorkspace {
             .filter(|tab| !paths_name_the_same_document(&self.tab_worktree_path(tab.id), forgotten))
             .flat_map(|tab| tab.panes.leaf_ids())
             .collect();
-        if let Some(parked) = self.parked_worktree_tabs.get(worktree_id) {
-            for pane_id in parked
-                .terminal_panes_by_tab
-                .iter()
-                .chain(&parked.chat_panes_by_tab)
-                .flatten()
-                .filter(|pane_id| !mounted.contains(pane_id))
-            {
-                self.activity.pane_closed(&format!("pane-{pane_id}"));
-                self.opencode.forget(&format!("pane-{pane_id}"));
-            }
+        let forgotten_panes: Vec<usize> = self
+            .parked_worktree_tabs
+            .get(worktree_id)
+            .into_iter()
+            .flat_map(|parked| {
+                parked
+                    .terminal_panes_by_tab
+                    .iter()
+                    .chain(&parked.chat_panes_by_tab)
+                    .flatten()
+                    .copied()
+            })
+            .filter(|pane_id| !mounted.contains(pane_id))
+            .collect();
+        for pane_id in forgotten_panes {
+            self.forget_pane_activity(&format!("pane-{pane_id}"));
         }
         if let Some(chats) = self.retained_worktree_chats.get(worktree_id) {
             for tab in chats.values() {
@@ -13883,6 +13945,7 @@ impl SirioWorkspace {
                 path.display()
             ),
         }
+        self.forget_layout_panes(&layout_ids);
         self.end_app_sessions(vec![path.clone()], worktrees, layout_ids, cx);
         let worktree_id = path.to_string_lossy().into_owned();
         // Closing a worktree ends its sessions (SP2 spec §4.2): shut down
@@ -16314,8 +16377,7 @@ impl SirioWorkspace {
         // worktree switch keeps its entries on purpose (the rows of
         // unselected worktrees read their status from the model).
         for pane_id in closed_panes {
-            self.activity.pane_closed(&format!("pane-{pane_id}"));
-            self.opencode.forget(&format!("pane-{pane_id}"));
+            self.forget_pane_activity(&format!("pane-{pane_id}"));
         }
         if self.tab_menu_tab == Some(tab_id) {
             self.tab_menu_tab = None;
@@ -24135,8 +24197,7 @@ impl SirioWorkspace {
             }
             // Same reason as `close_tab`: the id is free for reuse the moment
             // the leaf is gone, and its model entry must not outlive it.
-            self.activity.pane_closed(&format!("pane-{focused_pane}"));
-            self.opencode.forget(&format!("pane-{focused_pane}"));
+            self.forget_pane_activity(&format!("pane-{focused_pane}"));
             self.mark_activity_dirty();
             self.schedule_save(cx);
             cx.notify();
@@ -30786,12 +30847,13 @@ struct NewAgentLaunch {
 struct TerminalBindings(HashMap<gpui::EntityId, Vec<gpui::Subscription>>);
 impl gpui::Global for TerminalBindings {}
 
-/// The pane each bound terminal is bound to, by activity key (`pane-N`). Once such a terminal's
-/// link runs (`TerminalView::has_link`: a restored tab's view opens it on its first render) it
-/// feeds the pane, and the host listener (`host_programs`) must leave the pane alone. A pane
-/// given a fresh id moves its entry; a released terminal removes its own.
+/// Every terminal `bind_terminal` has bound. The host listener (`host_programs`) leaves a session
+/// alone while a bound terminal whose link follows it runs (`TerminalView::has_link`): a restored
+/// tab's view is bound at once and opens its link on its first render. The session a link follows
+/// is the view's identity, which is not always its pane's key (a Show-session tab is bound under
+/// its own pane and follows another's session), so the gate reads the identity of each.
 #[derive(Default)]
-struct BoundTerminalPanes(HashMap<String, (gpui::EntityId, gpui::WeakEntity<TerminalView>)>);
+struct BoundTerminalPanes(HashMap<gpui::EntityId, gpui::WeakEntity<TerminalView>>);
 impl gpui::Global for BoundTerminalPanes {}
 
 /// What the workspace keeps of the host listener (`host_programs`).
@@ -30799,8 +30861,12 @@ impl gpui::Global for BoundTerminalPanes {}
 struct HostPrograms {
     /// The generation of the listener that runs; a thread of another generation ends.
     current: Arc<std::sync::atomic::AtomicU64>,
-    /// What the running listener last heard of each session.
-    cache: Option<host_programs::SessionCache>,
+    /// The panes the listener applied anything to: the ones it must end when their session
+    /// disappears or the host is lost, since no link will.
+    fed: HashSet<String>,
+    /// The panes of a worktree or project the app is closing: their sessions end by the app's own
+    /// doing, so the end that follows is no news and sets no evidence.
+    closing: HashSet<String>,
 }
 
 /// Keeps the app's route to its host for the app's lifetime. The host counts

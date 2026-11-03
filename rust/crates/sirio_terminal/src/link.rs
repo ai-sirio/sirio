@@ -969,18 +969,20 @@ pub enum HostSessionNote {
     /// The session's title (as the seed's title, which only OpenCode's link reads), program or
     /// report changed.
     Activity(TerminalActivityEvent),
-    /// The session exited or was closed.
-    Ended,
+    /// The session exited, with that status, or was closed (`Unknown`, as a link reports it).
+    Ended(TerminalExitStatus),
 }
 
 /// The session a `term.sessions` event names and what it is to the app, mapped as a terminal's
 /// link maps it. `None` for what a link sends no activity for (the foreground flag, a state
-/// this build does not know, an event that names no session).
+/// this build does not know, an event that names no session). A `Closed` after an `Exited` is
+/// another end: the caller sends one end per session, as a link's `exited` flag does.
 pub fn host_session_note(event: &SessionEvent) -> Option<(&str, HostSessionNote)> {
     let (id, mapped) = mapped_event(event)?;
     let note = match mapped {
         MappedEvent::Chunk(chunk) => HostSessionNote::Activity(activity_of_chunk(chunk)?),
-        MappedEvent::Exited(_) | MappedEvent::Closed => HostSessionNote::Ended,
+        MappedEvent::Exited(status) => HostSessionNote::Ended(status),
+        MappedEvent::Closed => HostSessionNote::Ended(TerminalExitStatus::Unknown),
     };
     Some((id, note))
 }
@@ -999,60 +1001,22 @@ fn activity_of_chunk(chunk: LinkChunk) -> Option<TerminalActivityEvent> {
     }
 }
 
-/// What the host last said about a session's title, program and report: the state a terminal
-/// released from its pane hands back, kept up to date from the listing and the events.
-#[derive(Clone, Debug, Default)]
-pub struct HostSessionState {
-    title: String,
-    program: Option<HostProgram>,
-    status: Option<ProgramStatus>,
-}
-
-impl HostSessionState {
-    /// The state a listing holds.
-    pub fn from_summary(summary: &sirio_host_protocol::term::SessionSummary) -> Self {
-        Self {
-            title: summary.title.clone(),
-            program: summary.program.clone(),
-            status: summary.status.clone(),
-        }
-    }
-
-    /// Folds in one event. An end clears the program and the report, as a listing of an
-    /// ended session would.
-    pub fn apply(&mut self, event: &SessionEvent) {
-        match event {
-            SessionEvent::Title { title, .. } => self.title = title.clone(),
-            SessionEvent::Program { program, .. } => self.program = program.clone(),
-            SessionEvent::Status { status, at_ms, .. } => {
-                self.status = status.clone().map(|mut status| {
-                    status.at_ms = *at_ms;
-                    status
-                });
-            }
-            SessionEvent::Exited { .. } | SessionEvent::Closed { .. } => {
-                self.program = None;
-                self.status = None;
-            }
-            _ => {}
-        }
-    }
-
-    /// The whole state, in the re-seed's form: the program and the report are sent even when
-    /// absent, so one that ended is ended in the app.
-    pub fn reseed_events(&self) -> Vec<TerminalActivityEvent> {
-        reseed_parts(&self.title, self.program.as_ref(), self.status.as_ref())
-            .into_iter()
-            .filter_map(activity_of_chunk)
-            .collect()
-    }
-}
-
-/// A listed session's state in the re-seed's form ([`HostSessionState::reseed_events`]).
+/// A listed session's title, program and report, in the re-seed's form: the program and the
+/// report are sent even when absent, so one that ended is ended in the app.
 pub fn summary_reseed_events(
     summary: &sirio_host_protocol::term::SessionSummary,
 ) -> Vec<TerminalActivityEvent> {
-    HostSessionState::from_summary(summary).reseed_events()
+    reseed_chunks(summary)
+        .into_iter()
+        .filter_map(activity_of_chunk)
+        .collect()
+}
+
+/// How a listed session ended, if it has: what a link's attach reports after the snapshot.
+pub fn summary_exit(
+    summary: &sirio_host_protocol::term::SessionSummary,
+) -> Option<TerminalExitStatus> {
+    summary.exit.as_ref().map(host_exit_status)
 }
 
 /// How long a dropped connection is retried before a link reports `Lost`, and how often a
@@ -1110,20 +1074,14 @@ fn seed_chunks(summary: &sirio_host_protocol::term::SessionSummary) -> Vec<LinkC
 /// not know). Unlike [`seed_chunks`], absent fields are sent, because a view
 /// that was already running may hold what the host has since dropped.
 fn reseed_chunks(summary: &sirio_host_protocol::term::SessionSummary) -> Vec<LinkChunk> {
-    reseed_parts(&summary.title, summary.program.as_ref(), summary.status.as_ref())
-}
-
-fn reseed_parts(
-    title: &str,
-    program: Option<&HostProgram>,
-    status: Option<&ProgramStatus>,
-) -> Vec<LinkChunk> {
     let mut chunks = Vec::new();
-    if !title.is_empty() {
-        chunks.push(LinkChunk::SeededTitle(title.to_string()));
+    if !summary.title.is_empty() {
+        chunks.push(LinkChunk::SeededTitle(summary.title.clone()));
     }
-    chunks.push(LinkChunk::Program(program.map(engine_program)));
-    match status {
+    chunks.push(LinkChunk::Program(
+        summary.program.as_ref().map(engine_program),
+    ));
+    match &summary.status {
         None => chunks.push(LinkChunk::Status(None, 0)),
         Some(status) => {
             if let Some(record) = engine_status(status) {
