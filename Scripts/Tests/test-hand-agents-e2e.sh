@@ -899,11 +899,15 @@ case_relaunch_mid_turn() {
   stepn "after the relaunch: A mid-turn" "$sess_a"
   # The new app starts with an empty `posted` list: whatever it holds now, its seed made.
   expect_posted 0 0 "the relaunch's own startup (no report was typed)"
+  # A seed that settled a restored tab would mark it unread without posting (a restored first
+  # decision): neither tab ran to an end, so neither may read unread.
+  expect_attention "$sess_a" unread false "tab A, seeded mid-turn by the relaunch"
   # Tab B is selected: it attaches and its host record (idle) seeds no status.
   ctl tab select "$(tab_index_of "$pane_b")" >/dev/null
   wait_agent "$pane_b" codex 15
   sleep 1
   expect_attention "$sess_b" status null "tab B selected after the relaunch"
+  expect_attention "$sess_b" unread false "tab B, seeded at idle by the relaunch"
   stepn "after the relaunch: B selected, at idle" "$sess_b"
   ctl tab select "$(tab_index_of "$pane_a")" >/dev/null
   sleep 1
@@ -1149,7 +1153,8 @@ case_opencode_short_turn_is_finished() {
 case_opencode_resumed_finish_is_not_replayed() {
   # A turn ends, the TUI quits, and a new `opencode` in the same tab links to that session by
   # its title: the session's last turn ended before this pane's `opencode` started, so it is
-  # no news: no finished status and no notification.
+  # no news: no finished status. (The tab already ran a turn, so a stop could not be seen here:
+  # the notification is checked by the sibling case, in a tab that never did.)
   local base keeper
   # Another OpenCode pane in the folder keeps the watch (and what it saw) alive while the
   # tab's TUI is away: with none, the watch stops and reads the list again, which has no outcome.
@@ -1176,7 +1181,6 @@ case_opencode_resumed_finish_is_not_replayed() {
   sleep 3
   stepn "opencode: resumed a session whose turn ended before this pane started" "$SESS"
   expect_attention "$SESS" status null "a resumed session whose last turn is older than the pane"
-  expect_posted "$base" 0 "linking to a session whose turn ended before the pane started"
   # The link is real: the session's next turn shows.
   oc "busy ses_p"
   wait_status "$SESS" running 4
@@ -1287,7 +1291,7 @@ case_opencode_failed_turn_is_error() {
 }
 
 case_opencode_after_relaunch() {
-  local base
+  local base unread_before
   start_agent opencode
   oc "create ses_r $OC_DIR"
   oc "rename ses_r relaunched"
@@ -1298,6 +1302,7 @@ case_opencode_after_relaunch() {
   oc "idle ses_r"
   wait_status "$SESS" done 4
   stepn "opencode before the quit: done" "$SESS"
+  unread_before="$(attention_get "$SESS" unread)"
   ctl quit >/dev/null 2>&1 || true
   for _ in $(seq 1 100); do alive "$APP_PID" || break; sleep 0.2; done
   alive "$APP_PID" && fail "sirio did not quit after sirioctl quit"
@@ -1313,6 +1318,8 @@ case_opencode_after_relaunch() {
   stepn "opencode after the relaunch: the mark" "$SESS"
   # The new app starts with an empty `posted` list: whatever it holds now, its seed made.
   expect_posted 0 0 "the relaunch's own startup (the service said nothing new)"
+  # The seed must not change the mark (it is set by the turn that ended before the quit).
+  expect_attention "$SESS" unread "$unread_before" "the opencode tab after the relaunch"
   oc "busy ses_r"
   wait_status "$SESS" running 5
   sleep 1.3
