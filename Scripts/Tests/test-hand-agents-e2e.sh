@@ -125,7 +125,7 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  the same Show tab selected, the window active: the turn is watched, so
 #                                  nothing is posted and the hidden tab is not unread
 #   restart_agent_tab_mid_turn_is_silent / restart_hand_typed_agent_tab_mid_turn_is_silent
-#                                  `surface terminal restart` of an attached agent tab (Sirio-launched, or
+#                                  `surface terminal restart` of a shown agent tab (Sirio-launched, or
 #                                  typed) mid-turn: nothing posted, no status, not running, no agent on a
 #                                  typed one; the restarted launched tab's next full turn is one stop
 #   one_end_per_session            a hidden agent tab exits, the host publishes a title after the exit and

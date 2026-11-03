@@ -565,6 +565,27 @@ marked *[my call]* and is open to the user.
      `sirioctl` cannot reach it.
    - A Restart whose reopen fails at once (`Taken`, a spawn failure) leaves the view `Failed`,
      so the old session's `Closed` reaches the listener as an end.
+   - A Show tab on screen counts its whole owner tab as on screen, not just the pane it shows.
+     A Show tab of a split's shell pane (`sirioctl panel show pane-N`; the palette offers only
+     control sessions) therefore silences the agent pane's stop and clears the tab's unread
+     mark.
+   - A Show tab that reads *Session lost* still counts its owner as on screen: after the owner
+     restarts on a new host, the owner's turns are taken as watched.
+   - Removing the project of the selected worktree leaves its tabs in the strip until the
+     switch, and the closing check takes them for a reopened worktree. The `Closed` of a tab
+     never shown since the relaunch then lands as an `Unknown` end, so the tab reads `error`
+     like its attached siblings. No stop is posted, since the close already forgot the pane's
+     identity, unless a report gives it back in the milliseconds before the host closes the
+     session.
+   - Two worktrees that both started from the default layout share the `default-terminal` and
+     `default-chat` persistence ids. A Show tab on screen of one of them then also silences the
+     other. That collision of `session_attention` predates this branch.
+   - Cost: while any session is unread and a Show tab is on screen, `mark_shown_sessions_seen`
+     rebuilds `live_sessions()` once per attached view on every frame it runs.
+   - Not covered by the E2E: a Show tab going on screen clears an unread mark the owner already
+     had; Restart from the context menu (only the debug `surface.terminal.restart` is driven);
+     `ended` across a reconnect of the listener; a project close (no `sirioctl` route removes a
+     project); G5's stale layout id.
    - Another OpenCode client's session created in the same folder after the pane started can
      link to that pane by the first-turn rule, which counts only Sirio's panes.
    - Ctrl+Z on a working agent reads *finished* (the shell has the terminal), and after `fg`
