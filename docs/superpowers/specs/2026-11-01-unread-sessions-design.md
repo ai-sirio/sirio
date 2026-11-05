@@ -91,7 +91,19 @@ after ending its turn) are not stops: the session already stopped once.
   stops while Sirio is in the background has not been seen]
 - its worktree is the selected one (`has_current_worktree()` and the tab belongs to it);
 - its tab is the one shown in the primary centre pane, or in the secondary one while
-  `secondary_pane_visible()` (`main.rs:23165`, `tab_machinery.rs:127-160`).
+  `secondary_pane_visible()` (`main.rs:23165`, `tab_machinery.rs:127-160`);
+- **Addition made at the rebase onto the Primary rail (#711):** while the Primary half is
+  drawn as the 40 px rail (`primary_rail_drawn()`), a Primary tab is shown only when it is
+  the open peek's tab (`primary_peek` open on it; a closing peek does not count). The
+  rail keeps naming an active Primary tab, the highlighted icon, but nothing draws it, so a
+  collapsed, unpeeked Primary tab is off screen and a stop in it is unread and notifies.
+  The rail icon carries the mark exactly as the sidebar pill does (§4), and `surface layout
+  read` reports it as `railUnread`. [my call, as the primary-rail spec §3 and §8 leave to
+  whichever branch lands second]
+
+While a peek is open, the Secondary's active tab still counts as on screen, though the
+opaque card covers part of it. [limit, deviation made at the rebase onto #711: the card is
+a part of the window, not the whole of the half, and a tab drawn partly is not unseen.]
 
 **Rule.**
 - When a session stops and is not on screen, it becomes unread.

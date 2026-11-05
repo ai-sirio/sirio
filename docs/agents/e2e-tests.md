@@ -307,16 +307,20 @@ Scripts/Tests/test-open-list-e2e.sh   # -> prints "OPEN LIST E2E OK"
 # peeked chat's turn;
 # click outside, the same icon twice, the rail's + -> New Terminal, the pin;
 # the collapsed flag across relaunches, cleared by the last Secondary tab and
-# by Ctrl+Shift+B; a peeked tab's status change posting no notification
-# (Scripts/Tests/stubs/notify-send logs what would be posted, against a
-# positive control on the same tab unpeeked); a Browser tab blank under the
+# by Ctrl+Shift+B; a collapsed, unpeeked tab being off screen (its needs-input
+# posts, it reads unread in `surface attention read` and in `railUnread`, and
+# still reads unread 3 s later with the window active), then peeked it reads
+# seen and its next status change posts nothing (the posts are read from the
+# attention read's `posted` list: on Linux a post never reaches the notify-send
+# stub, whose notify.log stays empty); a Browser tab blank under the
 # peek and back after it; the peeked tab closed over the socket, a worktree
 # switch, the last Primary tab closed while peeked. Each failure names its
 # step. --display :N is a private Xvfb of at least 1600x1000 with Mesa's
 # lavapipe; --state-only takes no display, runs step 1's reads only, prints
 # SKIP for steps 2-15 and ends with "PRIMARY RAIL E2E OK (state only)";
-# --out-dir DIR keeps the transcript, the app log, notify.log, stub.log and
-# PID-matched captures; --appearance light|dark.
+# --out-dir DIR keeps the transcript, the app log, notify.log, stub.log, the
+# step 10 attention reads (step10-*.json) and PID-matched captures;
+# --appearance light|dark.
 Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 
 # Acting on a change request: every write of sirio_forge on the wire (the token
