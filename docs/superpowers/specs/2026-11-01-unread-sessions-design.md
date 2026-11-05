@@ -98,8 +98,8 @@ after ending its turn) are not stops: the session already stopped once.
   rail keeps naming an active Primary tab, the highlighted icon, but nothing draws it, so a
   collapsed, unpeeked Primary tab is off screen and a stop in it is unread and notifies.
   The rail icon carries the mark exactly as the sidebar pill does (§4), and `surface layout
-  read` reports it as `railUnread`. [my call, as the primary-rail spec §3 and §8 leave to
-  whichever branch lands second]
+  read` reports it as `railUnread`. [the primary-rail spec §5 gives both to whichever
+  branch lands second; this one did]
 
 While a peek is open, the Secondary's active tab still counts as on screen, though the
 opaque card covers part of it. [limit, deviation made at the rebase onto #711: the card is

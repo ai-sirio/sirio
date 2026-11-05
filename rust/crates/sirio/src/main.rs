@@ -42188,8 +42188,8 @@ done
     /// `Window::is_window_active`, not stay pinned to its own `true`
     /// starting value -- that pinned value is exactly what the production
     /// call site hardcoded before this fix (`main.rs`, the
-    /// `StopPolicy::decide` call
-    /// `post_activity_notification` makes), silently making the
+    /// `StopPolicy::decide` call that
+    /// `on_pane_transition` makes), silently making the
     /// desktop-focus half of that clause unable to vary. `gpui`'s own test
     /// platform makes this a real, non-tautological assertion: a freshly
     /// opened `TestWindow` reports `is_active() == false` unconditionally
