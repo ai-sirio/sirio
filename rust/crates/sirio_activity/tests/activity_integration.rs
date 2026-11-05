@@ -223,6 +223,25 @@ fn bare_braille_spinner_assigns_no_identity() {
 }
 
 #[test]
+fn claude_working_on_a_session_about_codex_stays_claude() {
+    // Claude Code 2.1.317 idles as `✳ <session title>` and works as
+    // `◐`/`◑ <session title>`, alternating every 960 ms.
+    let t0 = now();
+    let mut model = AgentActivityModel::new();
+    let titles = [
+        ("◐ Fix codex detection", AgentStatus::Running),
+        ("◑ Fix codex detection", AgentStatus::Running),
+        ("✳ Fix codex detection", AgentStatus::NeedsInput),
+        ("◐ Fix codex detection", AgentStatus::Running),
+    ];
+    for (step, (title, status)) in titles.into_iter().enumerate() {
+        model.handle_title_change(P1, title, t0 + Duration::from_secs(step as u64));
+        assert_eq!(model.agent_id(P1), Some("claude"), "after {title:?}");
+        assert_eq!(model.status(P1), Some(status), "after {title:?}");
+    }
+}
+
+#[test]
 fn content_match_overrides_stale_title_even_inside_debounce_window() {
     let mut model = AgentActivityModel::new();
     let t0 = now();

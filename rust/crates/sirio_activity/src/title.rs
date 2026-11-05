@@ -12,6 +12,11 @@
 //! **A bare braille spinner is therefore ambiguous between Claude and Codex
 //! and must NOT be used to assign identity** — both are native binaries
 //! that Layer D's foreground-process scan recognizes instead.
+//!
+//! Claude Code 2.1.x works as `◐ …`/`◑ …`. What follows an agent's own
+//! prefix is often a session title written by the agent or a model, free to
+//! name any agent, so a name identifies its agent only as the title's
+//! leading word (`leading_word`).
 
 use std::time::{Duration, Instant};
 
@@ -28,6 +33,19 @@ const BRAILLE_SPINNER_RANGE: std::ops::RangeInclusive<char> = '\u{2800}'..='\u{2
 /// Claude's idle glyph.
 const CLAUDE_IDLE_GLYPH: &str = "\u{2733}"; // ✳
 
+/// Claude's working glyphs on a build whose title spinner is the half-circle
+/// pair (◐ ◑) rather than a braille frame.
+const CLAUDE_WORKING_GLYPHS: [&str; 2] = ["\u{25D0}", "\u{25D1}"];
+
+/// True when `title` starts with one of Claude's working glyphs and a space.
+fn has_claude_working_glyph(title: &str) -> bool {
+    CLAUDE_WORKING_GLYPHS.iter().any(|glyph| {
+        title
+            .strip_prefix(glyph)
+            .is_some_and(|rest| rest.starts_with(' '))
+    })
+}
+
 /// True if `title` contains any braille block character (a spinner frame).
 pub fn contains_braille_spinner(title: &str) -> bool {
     strip_ansi(title)
@@ -35,9 +53,9 @@ pub fn contains_braille_spinner(title: &str) -> bool {
         .any(|c| BRAILLE_SPINNER_RANGE.contains(&c))
 }
 
-/// Word-boundary-safe substring containment, shared by the status keyword
-/// matcher and the identity name matcher so both agree on what counts as a
-/// word boundary. Ported from `AgentNameBoundaryMatch.containsWord`:
+/// Word-boundary-safe substring containment for the status keyword matcher;
+/// `leading_word` uses the same word characters. Ported from
+/// `AgentNameBoundaryMatch.containsWord`:
 /// `word` must appear with a non-word character (or the string edge) on
 /// both sides — so "ready" doesn't match inside "already", and "codex"
 /// doesn't match inside "opencodex" or "codex-notes" (hyphen counts as a
@@ -65,6 +83,23 @@ fn is_word_char(c: char) -> bool {
     c.is_alphabetic() || c.is_numeric() || c == '-' || c == '_'
 }
 
+/// The first word of a title, lowercased: after leading whitespace, one
+/// optional braille spinner frame and the whitespace after it, the longest
+/// run of word characters (empty when the title starts with anything else).
+/// An agent names itself only at the start of its title; what follows is a
+/// session title the agent or a model wrote, free to name any agent.
+fn leading_word(title: &str) -> String {
+    let rest = title.trim_start();
+    let rest = match rest.chars().next() {
+        Some(c) if BRAILLE_SPINNER_RANGE.contains(&c) => rest[c.len_utf8()..].trim_start(),
+        _ => rest,
+    };
+    rest.chars()
+        .take_while(|&c| is_word_char(c))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 /// Determines which catalog agent (if any) a terminal title belongs to,
 /// with no prior registration required — the identity-detection half of
 /// Layer B, used to recognize an agent the user launched by hand.
@@ -85,6 +120,7 @@ pub fn identify_agent_from_title(title: &str) -> Option<&'static str> {
         .strip_prefix(CLAUDE_IDLE_GLYPH)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
         || title.starts_with(". ")
+        || has_claude_working_glyph(&title)
     {
         return Some("claude");
     }
@@ -100,21 +136,23 @@ pub fn identify_agent_from_title(title: &str) -> Option<&'static str> {
         return Some("pi");
     }
 
-    // 3. Codex/OpenCode/omp announce their own name as literal text.
-    //    Word-boundary match (not substring) so a bare cwd/branch title
-    //    like "opencode-experiment" or "~/codex-notes" doesn't identify.
-    let lower = title.to_lowercase();
+    // 3. Codex/OpenCode/omp announce their own name as literal text, but
+    //    only as the title's leading word. Anything after it is session text
+    //    that names other agents freely ("OC | Review the codex adapter"), and the
+    //    whole-word rule keeps "opencode-experiment" or "~/codex-notes" from
+    //    identifying.
+    let leading = leading_word(&title);
     for id in ["codex", "opencode", "omp"] {
-        if contains_word(id, &lower) {
+        if leading == id {
             return Some(id);
         }
     }
 
-    // 4. A braille spinner plus the literal word "pi" is Pi. The spinner
-    //    ALONE identifies nothing: Claude and Codex 0.144+ both write the
-    //    same "dots" cycle (⠋⠙⠹…) into their working titles, so it carries
-    //    no identity.
-    if contains_braille_spinner(&title) && contains_word("pi", &lower) {
+    // 4. A braille spinner plus the literal word "pi" leading the title is
+    //    Pi. The spinner ALONE identifies nothing: Claude and Codex 0.144+
+    //    both write the same "dots" cycle (⠋⠙⠹…) into their working titles,
+    //    so it carries no identity.
+    if contains_braille_spinner(&title) && leading == "pi" {
         return Some("pi");
     }
 
@@ -139,8 +177,9 @@ pub fn detect_status_from_title(title: &str, agent_id: &str) -> Option<AgentStat
     }
 }
 
-/// Claude Code sets its own title to "✳ <task>" when idle and either
-/// ". <task>" or a braille spinner frame when actively thinking.
+/// Claude Code sets its own title to "✳ <task>" when idle and "◐ <task>" /
+/// "◑ <task>" (2.1.x), ". <task>" or a braille spinner frame when actively
+/// thinking.
 fn detect_claude(title: &str) -> Option<AgentStatus> {
     if title
         .strip_prefix(CLAUDE_IDLE_GLYPH)
@@ -148,7 +187,8 @@ fn detect_claude(title: &str) -> Option<AgentStatus> {
     {
         return Some(AgentStatus::NeedsInput);
     }
-    if title.starts_with(". ") || contains_braille_spinner(title) {
+    if title.starts_with(". ") || has_claude_working_glyph(title) || contains_braille_spinner(title)
+    {
         return Some(AgentStatus::Running);
     }
     None
@@ -275,6 +315,33 @@ mod tests {
         assert_eq!(identify_agent_from_title("opencode-experiment"), None);
         assert_eq!(identify_agent_from_title("~/codex-notes"), None);
         assert_eq!(identify_agent_from_title("pi-notes"), None);
+    }
+
+    /// The text after an agent's own prefix is a session title an agent or a
+    /// model wrote about the work; another agent's name in it names nothing.
+    #[test]
+    fn another_agent_named_in_a_session_title_is_not_identified() {
+        // Claude Code 2.1.317: `<glyph> <session title>`, and only the
+        // session title when it sets no prefix.
+        for title in ["✳ Fix codex detection", "◐ Fix codex detection", "◑ Fix codex detection"] {
+            assert_eq!(identify_agent_from_title(title), Some("claude"), "{title}");
+        }
+        assert_eq!(
+            identify_agent_from_title("◐ Port the OpenCode transport"),
+            Some("claude")
+        );
+        assert_eq!(identify_agent_from_title("Fix codex detection"), None);
+        // OpenCode: `OC | <session title>`.
+        assert_eq!(identify_agent_from_title("OC | Review the codex adapter"), None);
+        // A spinner frame, then a thread title.
+        assert_eq!(
+            identify_agent_from_title(&format!("{} Fix the pi transport", spinner())),
+            None
+        );
+        assert_eq!(
+            identify_agent_from_title(&format!("{} Review omp titles", spinner())),
+            None
+        );
     }
 
     // ------------------------------------------------------------------
