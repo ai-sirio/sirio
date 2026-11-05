@@ -94,16 +94,18 @@ after ending its turn) are not stops: the session already stopped once.
   `secondary_pane_visible()` (`main.rs:23165`, `tab_machinery.rs:127-160`);
 - **Addition made at the rebase onto the Primary rail (#711):** while the Primary half is
   drawn as the 40 px rail (`primary_rail_drawn()`), a Primary tab is shown only when it is
-  the open peek's tab (`primary_peek` open on it; a closing peek does not count). The
+  the open peek's tab (`primary_peek` open on it, and `active_tab` that tab). The
   rail keeps naming an active Primary tab, the highlighted icon, but nothing draws it, so a
   collapsed, unpeeked Primary tab is off screen and a stop in it is unread and notifies.
   The rail icon carries the mark exactly as the sidebar pill does (§4), and `surface layout
   read` reports it as `railUnread`. [the primary-rail spec §5 gives both to whichever
   branch lands second; this one did]
 
-While a peek is open, the Secondary's active tab still counts as on screen, though the
-opaque card covers part of it. [limit, deviation made at the rebase onto #711: the card is
-a part of the window, not the whole of the half, and a tab drawn partly is not unseen.]
+While a peek is open, the peeked tab is the only one on screen: the Secondary's active tab
+is off screen under the card, which covers most of the half and all of it in a narrow
+window (`primary_rail.rs`, `width = min(peek + 2, room)`). This is the answer `active_tab`
+gave before this branch, when it alone decided which tab was being looked at. [my call, at
+the rebase onto #711; a stop in the Secondary while you work in a peek therefore notifies]
 
 **Rule.**
 - When a session stops and is not on screen, it becomes unread.

@@ -14458,26 +14458,41 @@ impl SirioWorkspace {
     /// a worktree is selected, Settings is not covering the window, and the
     /// tab is drawn:
     ///
-    /// - the Secondary half's active tab, while that half is drawn (it stays on
-    ///   screen under an open peek, though the card covers part of it);
-    /// - the Primary half's active tab, while the Primary half is a full pane;
-    /// - while the Primary half is the 40 px rail (`primary_rail_drawn`), only
-    ///   the tab the open peek shows. The rail keeps naming an active Primary
-    ///   tab (the highlighted icon), but nothing draws it; a closing peek does
-    ///   not count.
+    /// - with the Primary half a full pane: the Primary half's active tab, and
+    ///   the Secondary half's active tab while that half is drawn;
+    /// - with the Primary half the 40 px rail (`primary_rail_drawn`) and a peek
+    ///   open: only the peeked tab, which is also `active_tab`. The card covers
+    ///   most of the Secondary, all of it in a narrow window, so the Secondary's
+    ///   tab is not being looked at (the answer `active_tab` gave before);
+    /// - with the rail and no peek: the Secondary half's active tab. The rail
+    ///   keeps naming an active Primary tab (the highlighted icon), but nothing
+    ///   draws it.
     ///
     /// A retained, parked or unmounted session is never on screen.
     fn session_on_screen(&self, tab: &OpenTab) -> bool {
         // The split's own answer first: it is cheap, and it leaves the path
         // comparison below to at most the two tabs a half shows.
-        let primary_shown = if self.primary_rail_drawn() {
-            self.primary_peek.is_open() && self.primary_peek.get() == Some(&tab.id)
+        let secondary = self.center_split.active(PaneRole::Secondary) == Some(tab.id)
+            && self.secondary_pane_visible();
+        let peeked = self
+            .primary_peek
+            .get()
+            .copied()
+            .filter(|_| self.primary_peek.is_open());
+        let shown = if !self.primary_rail_drawn() {
+            self.center_split.active(PaneRole::Primary) == Some(tab.id) || secondary
+        } else if let Some(peeked) = peeked {
+            // A selection moves `active_tab` at once, and `settle_primary_peek`
+            // closes the peek it left only at the next render: until then
+            // neither tab counts.
+            peeked == tab.id
+                && self
+                    .tabs
+                    .get(self.active_tab)
+                    .is_some_and(|active| active.id == peeked)
         } else {
-            self.center_split.active(PaneRole::Primary) == Some(tab.id)
+            secondary
         };
-        let shown = primary_shown
-            || (self.center_split.active(PaneRole::Secondary) == Some(tab.id)
-                && self.secondary_pane_visible());
         // Settings replaces the whole window: the tab is still the active one, but
         // nothing shows it, so a stop under Settings is a stop off screen.
         shown
@@ -21930,8 +21945,9 @@ impl SirioWorkspace {
     /// the drawn widths and, in debug builds, `railRects`) are spec
     /// 2026-11-01-primary-rail §8; `railTabs` positions are 1-based the same way.
     /// `railUnread` (unread sessions spec §3, added at the rebase onto the rail)
-    /// lists the 1-based positions of the rail tabs whose icon carries the unread
-    /// ring, comma separated, empty when none.
+    /// lists the 1-based positions of the Primary tabs whose session is unread,
+    /// comma separated, empty when none: the icons that draw the unread ring
+    /// while the rail is drawn. Like `railTabs`, it is filled when it is not.
     fn control_read_layout(&self, cx: &Context<Self>) -> Vec<(String, String)> {
         let secondary: Vec<(usize, &OpenTab)> = self
             .tabs
@@ -22011,8 +22027,8 @@ impl SirioWorkspace {
                         .collect(),
                 ),
             ),
-            // The 1-based positions of the rail's unread tabs, in rail order
-            // (the tabs whose icon carries the unread ring); empty when none.
+            // The 1-based positions of the Primary's unread tabs, in rail order
+            // (the icons that draw the unread ring); empty when none.
             (
                 "railUnread".into(),
                 join(

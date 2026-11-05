@@ -54,9 +54,9 @@ set -eEuo pipefail
 #     and a fresh agent terminal's would never be known as an agent's (the step
 #     says why). What the app posts is read from `surface attention
 #     read` (its `posted` list, plus each session's unread and onScreen and the
-#     window's activity), not from the notify-send stub: on Linux a post goes to
-#     the desktop's own notification service and returns before notify-send, so
-#     notify.log stays empty. The step first proves, on the same tab collapsed
+#     window's activity), not from the notify-send stub: on Linux a post goes
+#     through gpui's notification route once one is installed and returns before
+#     notify-send, so notify.log stays empty (this run has no session bus at all). The step first proves, on the same tab collapsed
 #     and not peeked, that the change does post (the control), then that the tab
 #     is unread and still unread 3 s later with the window active (a hidden tab
 #     is not on screen), then that peeking it reads it seen and its next change
@@ -1040,8 +1040,8 @@ click_rect collapse
 wait_layout "the Primary is collapsed, nothing peeked" 'L["primaryCollapsed"] == "true" and L["peekTab"] == ""'
 # The control: the tab collapsed and not peeked is off screen, so its change posts a
 # notification. What the app decided to post is read from `surface attention read`'s
-# `posted` list, not from the notify-send stub: on Linux a post goes to the desktop's own
-# notification service and never reaches that command.
+# `posted` list, not from the notify-send stub: on Linux a post takes gpui's notification
+# route once one is installed and never reaches that command.
 wait_attention "the window is active, as the checks below need" 'window_active'
 stub_status "$T2PANE" "$T2POS" running
 posts=$(attention_get "posted($T2POS)")
