@@ -110,6 +110,10 @@ impl SirioWorkspace {
             let glyph_color = tab_glyph_color(tab.kind, icon, agent, file.is_some(), theme);
             // Idle is drawn too: a tab with no status counts as Idle.
             let status = self.tab_status(tab, cx).unwrap_or(ActivityStatus::Idle);
+            // The sidebar pill's rule (`render_pills`): an unread session's ring
+            // and dot are the news colour. The rail has no keyboard cursor, so
+            // the ring has no exception.
+            let unread = self.is_unread(&tab.persistence_id);
             let tab_rects = rects.clone();
             tab_list = tab_list.child(
                 div()
@@ -125,6 +129,7 @@ impl SirioWorkspace {
                     .rounded(theme.radii.control)
                     .hover(|style| style.bg(theme.ely.hover))
                     .when(active_id == Some(id), |this| this.bg(theme.ely.active))
+                    .when(unread, |this| this.border_1().border_color(theme.ely.info))
                     .on_click({
                         let entity = entity.clone();
                         move |_, window, cx| {
@@ -151,7 +156,11 @@ impl SirioWorkspace {
                             .w(px(6.0))
                             .h(px(6.0))
                             .rounded_full()
-                            .bg(sirio_ui::status::status_color(status, theme)),
+                            .bg(if unread {
+                                theme.ely.info
+                            } else {
+                                sirio_ui::status::status_color(status, theme)
+                            }),
                     )
                     .child(
                         canvas(

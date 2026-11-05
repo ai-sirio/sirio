@@ -14455,14 +14455,27 @@ impl SirioWorkspace {
     }
 
     /// Whether the user is looking at this tab right now: the window is active,
-    /// a worktree is selected, and the tab is the one shown in the Primary half
-    /// or in the Secondary half while that half is drawn, and Settings is not
-    /// covering the window. A retained, parked or unmounted session is never on
-    /// screen.
+    /// a worktree is selected, Settings is not covering the window, and the
+    /// tab is drawn:
+    ///
+    /// - the Secondary half's active tab, while that half is drawn (it stays on
+    ///   screen under an open peek, though the card covers part of it);
+    /// - the Primary half's active tab, while the Primary half is a full pane;
+    /// - while the Primary half is the 40 px rail (`primary_rail_drawn`), only
+    ///   the tab the open peek shows. The rail keeps naming an active Primary
+    ///   tab (the highlighted icon), but nothing draws it; a closing peek does
+    ///   not count.
+    ///
+    /// A retained, parked or unmounted session is never on screen.
     fn session_on_screen(&self, tab: &OpenTab) -> bool {
         // The split's own answer first: it is cheap, and it leaves the path
         // comparison below to at most the two tabs a half shows.
-        let shown = self.center_split.active(PaneRole::Primary) == Some(tab.id)
+        let primary_shown = if self.primary_rail_drawn() {
+            self.primary_peek.is_open() && self.primary_peek.get() == Some(&tab.id)
+        } else {
+            self.center_split.active(PaneRole::Primary) == Some(tab.id)
+        };
+        let shown = primary_shown
             || (self.center_split.active(PaneRole::Secondary) == Some(tab.id)
                 && self.secondary_pane_visible());
         // Settings replaces the whole window: the tab is still the active one, but
@@ -21916,6 +21929,9 @@ impl SirioWorkspace {
     /// The Primary rail's reads (`primaryCollapsed`, `peekTab`, `railTabs`,
     /// the drawn widths and, in debug builds, `railRects`) are spec
     /// 2026-11-01-primary-rail §8; `railTabs` positions are 1-based the same way.
+    /// `railUnread` (unread sessions spec §3, added at the rebase onto the rail)
+    /// lists the 1-based positions of the rail tabs whose icon carries the unread
+    /// ring, comma separated, empty when none.
     fn control_read_layout(&self, cx: &Context<Self>) -> Vec<(String, String)> {
         let secondary: Vec<(usize, &OpenTab)> = self
             .tabs
@@ -21992,6 +22008,20 @@ impl SirioWorkspace {
                                 .unwrap_or(ActivityStatus::Idle);
                             format!("{}:{}", index + 1, tab_status_name(status))
                         })
+                        .collect(),
+                ),
+            ),
+            // The 1-based positions of the rail's unread tabs, in rail order
+            // (the tabs whose icon carries the unread ring); empty when none.
+            (
+                "railUnread".into(),
+                join(
+                    self.center_split
+                        .tabs_for(PaneRole::Primary, &self.tabs)
+                        .into_iter()
+                        .filter_map(|id| self.tabs.iter().position(|tab| tab.id == id))
+                        .filter(|index| self.is_unread(&self.tabs[*index].persistence_id))
+                        .map(|index| (index + 1).to_string())
                         .collect(),
                 ),
             ),
