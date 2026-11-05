@@ -2484,17 +2484,17 @@ fn an_archived_tab_has_no_worktree() {
     assert_eq!(db.worktree_path_of_tab("chat").expect("lookup"), None);
 }
 
-/// A tab saved before v25 has NULL in both attention columns. Opening the file
+/// A tab saved before v26 has NULL in both attention columns. Opening the file
 /// migrates it, and the tab must read as seen and idle, not fail to decode (a
 /// decode failure would quarantine and delete the row).
 #[test]
-fn a_tab_saved_before_v25_reads_as_seen_and_idle() {
+fn a_tab_saved_before_v26_reads_as_seen_and_idle() {
     let dir = TempDir::new();
-    let path = dir.db_path("v24-tab");
+    let path = dir.db_path("v25-tab");
     {
         let mut conn = rusqlite::Connection::open(&path).expect("open raw database");
         conn.execute("PRAGMA foreign_keys = ON", []).expect("pragmas");
-        migrate_up_to(&mut conn, 24).expect("migrate to v24");
+        migrate_up_to(&mut conn, 25).expect("migrate to v25");
         conn.execute_batch(
             "INSERT INTO project (id, name, root_path, icon_kind, order_idx)
                  VALUES ('proj', 'Proj', '/repo', 'icon', 0);
@@ -2503,10 +2503,10 @@ fn a_tab_saved_before_v25_reads_as_seen_and_idle() {
              INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
                  VALUES ('tab-old', 'wt', 'Chat', 'chat', 0, 1);",
         )
-        .expect("plant a v24 tab");
+        .expect("plant a v25 tab");
     }
 
-    let db = AppDatabase::open(&path).expect("upgrade the v24 database");
+    let db = AppDatabase::open(&path).expect("upgrade the v25 database");
 
     assert_eq!(
         db.tab_attention().expect("read attention"),
