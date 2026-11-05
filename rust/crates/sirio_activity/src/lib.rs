@@ -45,6 +45,7 @@ pub mod process;
 mod session;
 mod sort;
 mod status;
+mod stop;
 mod title;
 
 pub use activity::ActivityStatus;
@@ -53,13 +54,14 @@ pub use bootstrap::{BootstrapRestoreOrder, BootstrapRestoreResult};
 pub use content::detect_content_status;
 pub use model::{AgentActivityModel, CATALOG_IDS, identify_agent_from_process_names};
 pub use mount::WorktreeMountPolicy;
-pub use notification::{NotificationPayload, NotificationPolicy};
+pub use notification::NotificationPayload;
 pub use process::{inspect_foreground_agent, inspect_process_names};
 pub use session::{
     AgentSessionRef, AgentSessionRestorePlan, AgentSessionRestoreResult, TerminalContentId,
 };
 pub use sort::AttentionSort;
 pub use status::{AgentStatus, Transition};
+pub use stop::{FirstStatus, StopDecision, StopPolicy};
 pub use title::{
     TITLE_DEBOUNCE, contains_braille_spinner, detect_status_from_title, identify_agent_from_title,
     should_apply_title_signal,

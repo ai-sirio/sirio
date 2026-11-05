@@ -131,6 +131,17 @@ impl WorktreeRecord {
     }
 }
 
+/// A tab's unread mark and whether its session was running, as persisted (v26).
+/// Written only by `AppDatabase::set_tab_attention`; a tab that never had one
+/// reads as the default (seen, idle).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TabAttention {
+    /// The session stopped while it was not on screen and has not been seen.
+    pub unread: bool,
+    /// The session was running when the record was last written.
+    pub running: bool,
+}
+
 /// One open tab inside a worktree, as persisted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabRecord {

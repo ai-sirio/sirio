@@ -2462,6 +2462,13 @@ impl Chat {
         self.agent_name = display_name;
     }
 
+    /// The agent's display name, `None` when the chat's agent is unknowable (a
+    /// restored chat whose banner says so). A notification names the agent
+    /// with this and falls back to the tab's title.
+    pub fn agent_display_name(&self) -> Option<&str> {
+        self.agent_name.as_deref()
+    }
+
     /// What the composer's agent badge shows (#206).
     ///
     /// It names the *agent*, so it reads `agent_name` -- not
@@ -6901,6 +6908,13 @@ impl Chat {
     /// Whether at least one turn has completed.
     pub fn has_completed_turn(&self) -> bool {
         self.has_completed_turn
+    }
+
+    /// Whether the transcript holds a question nobody has answered: the one the
+    /// dock draws. A turn that asks stays streaming until the answer comes, so
+    /// this is what tells a chat waiting on the user from one that is working.
+    pub fn awaits_user(&self) -> bool {
+        self.entries.iter().any(question_dock::is_open)
     }
 }
 

@@ -153,6 +153,9 @@ fn usage() {
          \x20 surface changes view [--mode unified|split] [--expand path] [--refresh]\n\
          \x20 surface changes dialog --discard path|--discard-all|--close\n\
          \x20 surface changes confirm           (debug builds) confirm the open Discard\n\
+         \x20 surface attention read            (debug builds) every session's unread mark, running flag and status\n\
+         \x20 surface attention act --focus active|inactive|os  (debug builds) force the window's focus, or leave it to the OS\n\
+         \x20 surface attention act --click <tag>  (debug builds) click the notification with this tag (sirio-tab-<session id>)\n\
          \x20 surface update read               (debug builds) read the update card\n\
          \x20 surface update act --action later|restart|install|retry|hide|open  (debug builds) press a card action\n\
          \x20 surface update inject --status available|ready|downloading|installing|installed|failed|refused [--version V] [--notes N] [--message M]  (debug builds) set the update status; failed reads back as apply-failed\n\
@@ -985,6 +988,22 @@ fn cmd_surface(socket: PathBuf, parsed: &ParsedArgs) -> Result<(), String> {
         ),
         ("changes", "confirm") => {
             require_ok(socket, &sirio_control::protocol::request::changes_confirm())
+        }
+        ("attention", "read") => {
+            require_ok(socket, &sirio_control::protocol::request::attention_read())
+        }
+        ("attention", "act") => {
+            let params = match (parsed.value("focus"), parsed.value("click")) {
+                (_, Some(tag)) => BTreeMap::from([("click".to_string(), tag.to_string())]),
+                (Some(focus), None) => BTreeMap::from([("focus".to_string(), focus.to_string())]),
+                (None, None) => {
+                    return Err("Missing --focus active|inactive|os or --click <tag>".to_string());
+                }
+            };
+            require_ok(
+                socket,
+                &sirio_control::protocol::request::attention_act(params),
+            )
         }
         ("update", "read") => require_ok(socket, &sirio_control::protocol::request::update_read()),
         ("update", "act") => {

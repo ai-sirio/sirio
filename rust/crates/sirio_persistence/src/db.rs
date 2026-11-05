@@ -23,7 +23,7 @@ use crate::model::{
     ChatSessionSummary, EditorCursorShape, EditorDrawerRecord, EditorLineNumbers,
     HandoffChoiceRecord, ChatTranscript,
     ChatTurn, ClosedChatSummary, MAX_CHAT_TRANSCRIPT_BYTES, ProjectRecord, QuarantinedRecord,
-    SidebarState, SidebarView, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
+    SidebarState, SidebarView, TabAttention, TabRecord, TabStateRecord, WorktreeRecord, settings_keys,
 };
 
 /// Durable storage for what Sirio must remember across launches.
@@ -341,6 +341,20 @@ impl AppDatabase {
     // ------------------------------------------------------------------
     // Tabs
     // ------------------------------------------------------------------
+
+    /// The path of the worktree an open tab belongs to. `None` for an id no
+    /// tab has, and for an archived tab: it is not part of any strip.
+    pub fn worktree_path_of_tab(&self, id: &str) -> Result<Option<String>, PersistenceError> {
+        self.conn
+            .query_row(
+                "SELECT w.path FROM tab t JOIN worktree w ON w.id = t.worktree_id
+                 WHERE t.id = ?1 AND t.closed_at IS NULL",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(PersistenceError::from)
+    }
 
     /// All tabs, ordered by worktree then position.
     pub fn tabs(&self) -> Result<Vec<TabRecord>, PersistenceError> {
@@ -755,6 +769,49 @@ impl AppDatabase {
         )?;
         let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Every open tab's attention record, for seeding the app's in-memory map.
+    /// A NULL column reads false, so a tab that never had a record reads as the
+    /// default. The columns decode as `Option<i64>` so no row can fail to read.
+    pub fn tab_attention(&self) -> Result<Vec<(String, TabAttention)>, PersistenceError> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, unread, last_running FROM tab WHERE closed_at IS NULL ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let unread: Option<i64> = row.get(1)?;
+            let running: Option<i64> = row.get(2)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                TabAttention {
+                    unread: unread.unwrap_or(0) != 0,
+                    running: running.unwrap_or(0) != 0,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Writes both attention columns of each `(id, record)`. Returns the ids
+    /// that matched no row — a tab created less than one save-debounce ago — so
+    /// the caller can retry them.
+    pub fn set_tab_attention(
+        &self,
+        writes: &[(String, TabAttention)],
+    ) -> Result<Vec<String>, PersistenceError> {
+        let transaction = write_transaction(&self.conn)?;
+        let mut unmatched = Vec::new();
+        for (id, attention) in writes {
+            let changed = transaction.execute(
+                "UPDATE tab SET unread = ?2, last_running = ?3 WHERE id = ?1",
+                params![id, attention.unread as i64, attention.running as i64],
+            )?;
+            if changed == 0 {
+                unmatched.push(id.clone());
+            }
+        }
+        transaction.commit()?;
+        Ok(unmatched)
     }
 
     /// The sidebar's chosen view; `Projects` when unset or unrecognised.

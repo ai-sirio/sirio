@@ -23,8 +23,10 @@ set -eEuo pipefail
 #    8  the pin expands the half with that tab active
 #    9  collapsed survives a relaunch; closing the last Secondary tab expands,
 #       and a relaunch keeps it expanded
-#   10  selecting a Primary tab while collapsed peeks it, and a status change
-#       on the peeked tab posts no desktop notification
+#   10  a Primary tab collapsed and not peeked is off screen: its needs-input
+#       posts a notification, marks it unread (attention read and the rail's
+#       railUnread) and stays unread while the window is active; selecting it
+#       peeks it, it reads seen, and its status change then posts nothing
 #   11  captures: the rail, a peeked chat, a peeked terminal, and a peek over a
 #       Browser tab (the page blank while the peek is open, back after)
 #   12  closing the peeked tab over the socket closes the peek
@@ -37,21 +39,28 @@ set -eEuo pipefail
 # What the app must report (`surface layout read`, all values strings):
 # primaryCollapsed, peekTab (a 1-based position of `surface tabs read`, or
 # empty), railTabs (`position:status`, comma separated, in rail order),
-# primaryWidth, secondaryWidth, and, in debug builds, railRects, a JSON object
-# of window-pixel [x, y, w, h] rects or nulls: collapse, expand, new, peek,
-# pin, menuTerminal (the New menu's New Terminal row while that menu is open)
-# and tabs (position -> rect).
+# railUnread (the 1-based positions of the rail's unread tabs, comma separated,
+# empty when none), primaryWidth, secondaryWidth, and, in debug builds,
+# railRects, a JSON object of window-pixel [x, y, w, h] rects or nulls:
+# collapse, expand, new, peek, pin, menuTerminal (the New menu's New Terminal
+# row while that menu is open) and tabs (position -> rect). Step 10 also reads
+# `surface attention read`: windowActive, each session's unread and onScreen,
+# and `posted`.
 #
 # Two routes are not the ones §8 names, and say so where they run:
 #   - step 10 selects the tab with `surface tabs select`, a route §5 lists:
 #     the socket reports no rect for a sidebar pill to click. Its status change
-#     is a codex stub's run from a shell, not a chat's: a chat's status never
-#     posts a desktop notification (it reaches the activity model through
-#     set_entity_status, which never calls post_activity_notification), so
-#     "no line" would prove nothing for it. Nor would a fresh agent terminal's
-#     (the step says why).
-#     The step first proves, on the same tab collapsed and not peeked, that the
-#     change does post a line.
+#     is a codex stub's run from a shell: its stops are the script's to time,
+#     and a fresh agent terminal's would never be known as an agent's (the step
+#     says why). What the app posts is read from `surface attention
+#     read` (its `posted` list, plus each session's unread and onScreen and the
+#     window's activity), not from the notify-send stub: on Linux a post goes
+#     through gpui's notification route once one is installed and returns before
+#     notify-send, so notify.log stays empty (this run has no session bus at all). The step first proves, on the same tab collapsed
+#     and not peeked, that the change does post (the control), then that the tab
+#     is unread and still unread 3 s later with the window active (a hidden tab
+#     is not on screen), then that peeking it reads it seen and its next change
+#     posts nothing. The window is active throughout (the script focuses it).
 #   - the status-changing terminal is not stubs/hook-agents/claude: `claude`
 #     on this run's PATH is the native chat's shim (stubs/trace/claude). It is
 #     a `codex` this script writes into the run's bin: it answers --version,
@@ -83,7 +92,7 @@ set -eEuo pipefail
 # window is moved to 0,0 and sized 1600x1000.
 #
 # The artifact: --out-dir DIR (default artifacts/primary-rail-e2e-<stamp>-<pid>)
-# keeps transcript.log, app.log, notify.log, stub.log and -- unless
+# keeps transcript.log, app.log, notify.log (the notify-send stub's, empty on Linux), stub.log, step10-*.json (the attention reads) and -- unless
 # --state-only -- PID-matched window captures in frames/. Run once with
 # --appearance light and once with --appearance dark for both sets.
 #
@@ -337,6 +346,25 @@ def tabs():
             "kinds": [t[f"tab.{i}"].split("|")[0] for i in range(1, count + 1)]}
 
 
+def attention():
+    """`surface.attention.read`: the window's activity, every session row and the
+    notifications the app decided to post (`posted`, newest last)."""
+    A = rpc("surface.attention.read")
+    return {"windowActive": A["windowActive"] == "true", "sessions": json.loads(A["sessions"]),
+            "posted": json.loads(A["posted"]), "raw": A}
+
+
+def session_at(A, position):
+    """The attention row of the tab at 1-based POSITION: the one session whose kind and
+    title are the tab's. Two rows alike, or none, raise (not yet, never a match)."""
+    t = rpc("surface.tabs.read")
+    kind, _, title = t[f"tab.{position}"].split("|", 2)
+    rows = [r for r in A["sessions"] if r["title"] == title and r["kind"] == ("chat" if kind == "chat" else "terminal")]
+    if len(rows) != 1:
+        raise RuntimeError(f"{len(rows)} sessions read as tab {position}")
+    return rows[0]
+
+
 def namespace(L, R, rail):
     def num(key):
         return float(L[key])
@@ -353,8 +381,24 @@ def namespace(L, R, rail):
     def peek():
         return int(L["peekTab"]) if L["peekTab"] else None
 
+    def unread():
+        return [int(p) for p in L["railUnread"].split(",") if p]
+
     return {"L": L, "R": R, "rail": rail, "num": num, "secondary": secondary,
-            "primary": primary, "status": status, "peek": peek, "tabs": tabs}
+            "primary": primary, "status": status, "peek": peek, "tabs": tabs, "unread": unread}
+
+
+def attention_namespace(A):
+    L, R, rail = layout()
+
+    def posted(position):
+        row = session_at(A, position)
+        return sum(1 for entry in A["posted"] if entry["sessionId"] == row["id"])
+
+    namespace_ = namespace(L, R, rail)
+    namespace_.update({"A": A, "window_active": A["windowActive"], "sess": lambda position: session_at(A, position),
+                       "posted": posted, "posted_total": lambda: len(A["posted"])})
+    return namespace_
 
 
 def chat(surface):
@@ -401,6 +445,12 @@ def layout_value(expr):
     return eval(expr, namespace(L, R, rail))
 
 
+def attention_value(expr):
+    A = attention()
+    LAST["read"] = json.dumps(A["raw"])
+    return eval(expr, attention_namespace(A))
+
+
 def chat_value(surface, expr):
     c = chat(surface)
     LAST["read"] = json.dumps({k: v for k, v in c.items() if k != "transcript"} | {"tools": tool_ids(c), "pending": pending(c)})
@@ -417,6 +467,25 @@ if command == "wait":
         return bool(value), value
     until(seconds, attempt, f"{desc}: {expr}")
     print(f"OK: {desc}")
+elif command == "attn-wait":
+    # attn-wait DESC SECONDS EXPR: poll `surface.attention.read` (with the layout) until EXPR
+    # is truthy. EXPR sees window_active, sess(position) (that tab's session row), posted(position)
+    # (the notifications posted for it), posted_total() and the layout's names (unread() is
+    # `railUnread`, peek(), rail ...).
+    desc, seconds, expr = sys.argv[2], float(sys.argv[3]), sys.argv[4]
+
+    def attempt():
+        value = attention_value(expr)
+        return bool(value), value
+    until(seconds, attempt, f"{desc}: {expr}")
+    print(f"OK: {desc}")
+elif command == "attn-get":
+    print(until(15, lambda: (True, attention_value(sys.argv[2])), f"get {sys.argv[2]}"))
+elif command == "attn-save":
+    # attn-save FILE: the attention read as JSON (sessions and posted decoded), an artifact.
+    A = attention()
+    json.dump({"windowActive": A["windowActive"], "sessions": A["sessions"], "posted": A["posted"]},
+              open(sys.argv[2], "w"), indent=2)
 elif command == "get":
     # get EXPR: the value EXPR takes over the first layout read that answers.
     print(until(15, lambda: (True, layout_value(sys.argv[2])), f"get {sys.argv[2]}"))
@@ -486,6 +555,13 @@ layout_get() { # expr
 }
 wait_chat() { # desc expr [seconds]
   RAIL chat-wait "$SURFACE" "$1" "${3:-30}" "$2" || fail "$1"
+}
+# Polls `surface attention read` (with the layout) until EXPR holds; see rail.py's attn-wait.
+wait_attention() { # desc expr [seconds]
+  RAIL attn-wait "$1" "${3:-30}" "$2" || fail "$1"
+}
+attention_get() { # expr
+  RAIL attn-get "$1" || fail "could not read $1 from the attention read"
 }
 tab_count() { local t; t=$(RAIL tabs) || fail "could not read the tabs"; echo "${t% *}"; }
 tab_active() { local t; t=$(RAIL tabs) || fail "could not read the tabs"; echo "${t#* }"; }
@@ -719,7 +795,6 @@ stub_status() { # pane position status
     || fail "sirioctl notify --status $3 in $1 did not succeed: $(tail -n 1 "$STUB_DIR/stub.log")"
   wait_layout "the rail shows tab $2 as $3" "status($2) == '$3'"
 }
-notify_lines() { wc -l <"$NOTIFY_LOG" | tr -d ' '; }
 # Fails unless the pane's scrollback holds the end of the stub's output: its
 # last filler line, rail-line-01..12 and its end marker.
 check_stub_output() { # pane when
@@ -779,7 +854,7 @@ fi
 
 step 1 "with no Secondary tab, no collapse button"
 wait_layout "the layout reports the rail's keys, not collapsed, no peek, no Secondary tab" \
-  'L["primaryCollapsed"] == "false" and L["peekTab"] == "" and L["secondaryTabs"] == "0" and "railTabs" in L and "railRects" in L'
+  'L["primaryCollapsed"] == "false" and L["peekTab"] == "" and L["secondaryTabs"] == "0" and "railTabs" in L and L["railUnread"] == "" and "railRects" in L'
 if [ "$STATE_ONLY" -eq 0 ]; then
   wait_layout "a painted strip has its + and no collapse button" \
     'num("primaryWidth") > 0 and num("secondaryWidth") == 0 and R["new"] is not None and R["collapse"] is None'
@@ -944,7 +1019,7 @@ ctl surface editor open --path "$WT/README.md" >/dev/null || fail "the file did 
 wait_layout "a new file shows both halves, not a rail: the flag was cleared" \
   'L["secondaryVisible"] == "true" and L["primaryCollapsed"] == "false" and R["collapse"] is not None'
 
-step 10 "a tab selected while collapsed is peeked, and its status change posts nothing"
+step 10 "a tab off screen behind the rail is unread and notifies; peeked, it is seen and posts nothing"
 # Only the chat and a fresh stub terminal stay in the Primary.
 CPOS=$(RAIL positions chat)
 [ -n "$CPOS" ] && [ "${CPOS#* }" = "$CPOS" ] || fail "the chat did not come back as one tab after the relaunches: '$CPOS'"
@@ -963,27 +1038,41 @@ FILEPOS=$(layout_get 'L["secondaryPositions"]')
 ctl surface tabs select "$FILEPOS" >/dev/null
 click_rect collapse
 wait_layout "the Primary is collapsed, nothing peeked" 'L["primaryCollapsed"] == "true" and L["peekTab"] == ""'
-# The control: the tab collapsed and not peeked is off screen, so its change posts a line.
+# The control: the tab collapsed and not peeked is off screen, so its change posts a
+# notification. What the app decided to post is read from `surface attention read`'s
+# `posted` list, not from the notify-send stub: on Linux a post takes gpui's notification
+# route once one is installed and never reaches that command.
+wait_attention "the window is active, as the checks below need" 'window_active'
 stub_status "$T2PANE" "$T2POS" running
-lines=$(notify_lines)
+posts=$(attention_get "posted($T2POS)")
 stub_status "$T2PANE" "$T2POS" needs-input
-for _ in $(seq 1 50); do
-  [ "$(notify_lines)" -gt "$lines" ] && break
-  sleep 0.2
-done
-[ "$(notify_lines)" -gt "$lines" ] \
-  || fail "needs-input on the collapsed, unpeeked tab posted no notification: the check below would prove nothing (notify.log: $(cat "$NOTIFY_LOG"))"
-echo "OK: off screen, needs-input posted: $(tail -n 1 "$NOTIFY_LOG")"
+wait_attention "needs-input on the collapsed, unpeeked tab posted a notification: the zero check below would prove nothing" \
+  "posted($T2POS) > $posts" 15
+posts=$(attention_get "posted($T2POS)")
+echo "OK: off screen, needs-input posted ($posts for tab $T2POS)"
+# Its mark is on the session and on the rail's icon, and it is not on screen...
+wait_attention "the collapsed tab is unread in the attention read and on the rail" \
+  "sess($T2POS)['unread'] and not sess($T2POS)['onScreen'] and $T2POS in unread()"
+# ...and it stays so while the window is active and nothing is peeked: nobody has seen it, and
+# the per-frame clear (`mark_shown_sessions_seen`) must not count the rail's highlighted tab.
+sleep 3
+wait_attention "still unread 3 s later, window active, no peek" \
+  "window_active and peek() is None and sess($T2POS)['unread'] and not sess($T2POS)['onScreen'] and $T2POS in unread()" 5
+RAIL attn-save "$OUT_DIR/step10-unread.json" || fail "could not save the attention read"
+capture rail-unread
 # The sidebar pill reports no rect, so the tab is selected the way the socket does it
 # (select_tab, the hook the pill's activate_tab also ends in).
 ctl surface tabs select "$T2POS" >/dev/null
 wait_layout "selecting the collapsed tab peeked it" "peek() == $T2POS"
-lines=$(notify_lines)
+wait_attention "peeking the tab marked it seen: it is on screen, not unread, off the rail's marks" \
+  "sess($T2POS)['onScreen'] and not sess($T2POS)['unread'] and $T2POS not in unread()"
+posts=$(attention_get "posted($T2POS)")
 stub_status "$T2PANE" "$T2POS" running
 stub_status "$T2PANE" "$T2POS" done
 sleep 3
-[ "$(notify_lines)" = "$lines" ] \
-  || fail "done on the peeked tab posted a notification (is the window active? should_notify posts whenever it is not): $(tail -n 1 "$NOTIFY_LOG")"
+wait_attention "done on the peeked tab posted nothing and left it seen" \
+  "posted($T2POS) == $posts and not sess($T2POS)['unread'] and window_active" 5
+RAIL attn-save "$OUT_DIR/step10-peeked.json" || fail "could not save the attention read"
 echo "OK: the peeked tab's change to done posted nothing"
 
 step 11 "captures: the rail, a peeked chat, a peeked terminal, a peek over a Browser tab"

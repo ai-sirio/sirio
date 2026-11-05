@@ -17,6 +17,7 @@ pub(super) fn render_section(
 ) -> impl IntoElement {
     let row_id = row.id;
     let expanded = row.expanded;
+    let unread_count = row.unread_count;
     let group = SharedString::from(format!("sidebar-section-group-{row_id}"));
     let collapse_entity = entity.clone();
     let chevron_entity = entity.clone();
@@ -161,6 +162,29 @@ pub(super) fn render_section(
                     });
                 }),
         )
+        // A folded project hides its worktree rows, and with them every unread
+        // mark: the count of unread sessions under it stands in for them, just
+        // before the chevron that would open it. `unread_count` is filled only
+        // for a folded section (`visible_rows`), so the guard is its value.
+        .when(!expanded && unread_count > 0, |this| {
+            this.child(
+                div()
+                    .debug_selector(move || format!("sidebar-section-unread-{row_id}"))
+                    .flex_none()
+                    .min_w(px(16.0))
+                    .h(px(14.0))
+                    .px(px(4.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(theme.ely.info)
+                    .text_color(theme.ely.on_accent)
+                    .text_size(theme.typography.scaled(10.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(unread_count.to_string()),
+            )
+        })
         // The disclosure, last in the row and after the overflow menu.
         // Collapsing a project has always been possible — a click anywhere
         // on the header does it, and that still works — but nothing on
@@ -242,6 +266,7 @@ mod tests {
                     persistence_id: "test-tab-0".into(),
                     status: None,
                     last_event_at: None,
+                    unread: false,
                 },
                 SidebarTab {
                     tab: SidebarTabRef::Open(1),
@@ -252,6 +277,7 @@ mod tests {
                     persistence_id: "test-tab-1".into(),
                     status: None,
                     last_event_at: None,
+                    unread: false,
                 },
             ],
             cx,

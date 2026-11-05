@@ -37,15 +37,46 @@ Scripts/Tests/test-term-e2e.sh      # -> prints "TERM E2E OK (<n> cases, <s>s)"
 # probe. --out-dir DIR keeps logs, state and PID-matched captures; --state-only takes
 # no captures (macOS runs that way); --xvfb or --display :N picks the display (Linux);
 # --only N[,N...] runs some cases and prints "HOST SESSIONS E2E PARTIAL" instead.
+# Case 33 (unread across a restart) has a codex stub that leaves, exit 0, when a file
+# appears: the agent stops while the app is closed, and the relaunched app marks it unread
+# and posts nothing. The mark survives a second restart and goes with the closed tab. A
+# restored terminal opens its session when first drawn, so the agent tab is the active one
+# and the window is forced inactive from the first frame (the debug-only launch knob
+# SIRIO_DEBUG_WINDOW_ACTIVE=inactive). It needs a display on Linux (--xvfb or --display :N) and
+# SKIPs under --state-only; macOS runs it, since its state-only run still draws a window. It
+# leaves case33-restored.json, case33-saved.json and case33-closed.json (the
+# `surface attention read` of each start) and case33-db.json (the saved `unread, last_running`
+# row, read from the world's database between the quits).
+# Case 34 (unread in an unmounted worktree) needs no display, so it runs under --state-only on
+# every platform: a second worktree B holds a codex agent tab whose record saved running, the
+# primary worktree is selected, the app quits and starts again (B is neither mounted nor parked),
+# and a bare needs-input hook (Codex sends no Running first) reaches B's pane. B's session reads
+# unread, the tray lists B with a leading dot though nothing of B was ever drawn, and `posted`
+# holds exactly one entry for it (its tag, its body naming B's branch); selecting B and looking
+# clears the mark, the session is listed once, and no second notification is posted. It leaves
+# case34-restored.json and case34-shown.json (the `surface attention read` of each moment).
 Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> cases, <s>s)"
 # The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
 # socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
 # mount kept out of a pane, quit and relaunch, every stub agent's hooks, the skill,
-# SIRIO_WORKTREE_ID and the flags sirioctl offers, `project add --display-name` (case 14: the
-# label, no dialog, a duplicate). Linux runs it with --xvfb or
-# --display :N; --state-only skips cases 4, 4c, 5, 6 and 10 and is what macOS runs.
-# --out-dir DIR keeps the transcript, logs and env dumps; --only N[,N...] prints
-# "SIRIOCTL E2E PARTIAL"; --mutate claude-prompt-hook is case 6's mutation check.
+# SIRIO_WORKTREE_ID and the flags sirioctl offers, `project add --display-name` (case 14:
+# the label, no dialog, a duplicate). Case 15 (unread sessions) drives a claude stub
+# through `surface attention read` and `act --focus`: a stop off screen marks the session
+# until it is shown, a stop in a split pane marks the tab beside the other pane's running,
+# and an inactive window keeps the mark. The same case counts the notifications the app
+# decided to post (`posted`): one per stop, built from the session's own worktree, none for
+# the agent's exit afterwards, and `act --click <tag>` opens the session the way a click on
+# the notification does (the app's D-Bus is dead, so the E2E never reaches a desktop). Its
+# step 15.7c (`parked_terminal_exit_reaches_status`) is the parked twin of a plain shell's
+# exit: the shell exits 3 while its worktree is not selected, and its session reads error
+# and is not unread. Its step 15.8a (`settings_cover_is_not_on_screen`) opens Settings with
+# `surface settings open`: a stop of the shown agent tab under it marks the session and
+# posts one notification, a look does not clear it, and Escape (a real key, pressed in the
+# app's window: no verb closes Settings) shows the tab again, which clears the mark. Linux
+# runs it with --xvfb or --display :N; --state-only skips cases 4, 4c, 5, 6, 10 and 15 and
+# is what macOS runs. --out-dir DIR keeps the transcript, logs and env dumps (and case 15's
+# case15-attention.json); --only N[,N...] prints "SIRIOCTL E2E PARTIAL"; --mutate
+# claude-prompt-hook is case 6's mutation check.
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 
 # The "Project added" dialog after every add from the UI, in a real debug Sirio per scenario (a
@@ -137,7 +168,55 @@ Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "
 # mode is drawn as the danger shield, and typing still reaches the composer, so no dialog holds the
 # keyboard. It needs --display :N --window-size 2200x1000 and captures
 # frames/composer-keys-*.png.
+# The four unread scenarios run in the default set and need no display: `unread_parked_chat` (a
+# turn that ends while its worktree is not selected marks the chat unread, posts one notification
+# naming its branch, and showing the worktree clears the mark), `unread_question` (a permission
+# the turn asks while the worktree is not selected reads needs-input and unread, still open when
+# the worktree is shown), and `unread_secondary_seen` (a chat in the shown Secondary half, beside a
+# terminal in the Primary, stops with no mark and no notification), and `unread_restored_chat_quiet`
+# (the chat side of a restart: two chats that ran a turn on screen come back with no mark and no
+# notification, a chat whose turn ended off screen before the quit comes back unread, again with no
+# notification, and looking at it clears the mark for good). Each leaves
+# attention-<scenario>.json (so attention-unread_restored_chat_quiet.json), the last
+# `surface attention read`, in the out dir.
+# In every mode, a no-display --state-only run included, `unread_parked_chat` asserts the tray's
+# roster through the debug-only `surface attention read` key `tray` (one object per roster entry,
+# with the label the menu would show): the worktree is listed with `unread: true` and a label led
+# by "● " while the chat is unread, and has no unread flag (or no entry) after it is shown. No
+# frame maintains it, because a minimized window paints nothing and the tray is for exactly then.
+# With --display :N (a window that paints, or --state-only --display :N) it also asserts what the
+# sidebar holds, through two more keys: `rows` (each worktree row's number of unread pills, from
+# `Sidebar::unread_marks`) names the chat's worktree with 1 while it is unread and with 0 once it is
+# shown; `projects` (one object per project header as the tree draws it: `expanded` and the
+# `unreadCount` the folded badge is drawn from) reads open with 0 before the fold. In a window that
+# paints it also clicks the Sessions segment, the project's chevron and the chevron again, and
+# asserts `projects` reads `expanded: false` with `unreadCount: 1`, then `expanded: true` with 0,
+# so a click that misses fails. The socket reports no position for the chevron, so that click is
+# at a fixed window pixel. It captures
+# frames/unread_parked_chat-unread.png (dot, bold title, ring), unread-sessions-view.png (the same
+# dot and weight on the Sessions card), unread-collapsed-project.png (the count badge on the folded
+# project header) and unread_parked_chat-after.png. The pills' mark is refreshed by the reconcile a
+# frame drives, so a --state-only run with no display prints a SKIP line for the `rows` and
+# `projects` assertions and keeps the rest.
+# The opt-in scenario `notification_click` (never in the default set; name it with --only, with
+# --state-only) proves the Linux notification route against a real D-Bus server. It needs
+# `dbus-daemon` and python3-gi with Gio 2.0, and the script refuses it without them. It starts a
+# private session bus (an empty XDG_DATA_DIRS, so nothing can be activated on it) and, on it,
+# Scripts/Tests/fake_notifications.py, a recording org.freedesktop.Notifications server (Notify,
+# GetCapabilities, GetServerInformation and CloseNotification as the Desktop Notifications
+# Specification 1.2 defines them, plus an InvokeDefault of its own that emits
+# ActionInvoked(id, "default") as a desktop does for a body click). It is the only launch that
+# gets a bus address: every other launch gets one that does not exist. A turn ends in a parked
+# worktree; the scenario waits for one Notify whose app name is `Sirio`, whose body names
+# feat/login and whose actions hold `default`, sends the click, and asserts that the selected
+# worktree becomes the chat's, the chat is the shown tab and, after the focus act that stands in
+# for the frame a --state-only run does not paint, the chat is no longer unread and no second
+# notification was posted. It leaves notifications.jsonl (the recorder's log: id, app_name,
+# summary, body, actions of every Notify) and attention-notification_click.json in the out dir.
+# Whether a real daemon (mako) invokes `default` on a body click is a hand check.
+# The script seeds only light or dark: the Onice base colour is a hand check.
 Scripts/Tests/test-chat-session-panel-e2e.sh --state-only   # -> prints "CHAT SESSION PANEL E2E OK (<n> scenarios, <k> skipped, appearance <a>, state-only <0|1>, window <w>)"
+Scripts/Tests/test-chat-session-panel-e2e.sh --state-only --only notification_click   # -> prints "CHAT SESSION PANEL E2E PARTIAL (1 of <n> scenarios: notification_click)"
 
 # The native Ely agent chat in a real, isolated Sirio against the Python agent fixture, over the
 # control socket (docs/testing/ely-agent-chat.md). The effort and effort_light scenarios (dark and
@@ -228,16 +307,20 @@ Scripts/Tests/test-open-list-e2e.sh   # -> prints "OPEN LIST E2E OK"
 # peeked chat's turn;
 # click outside, the same icon twice, the rail's + -> New Terminal, the pin;
 # the collapsed flag across relaunches, cleared by the last Secondary tab and
-# by Ctrl+Shift+B; a peeked tab's status change posting no notification
-# (Scripts/Tests/stubs/notify-send logs what would be posted, against a
-# positive control on the same tab unpeeked); a Browser tab blank under the
+# by Ctrl+Shift+B; a collapsed, unpeeked tab being off screen (its needs-input
+# posts, it reads unread in `surface attention read` and in `railUnread`, and
+# still reads unread 3 s later with the window active), then peeked it reads
+# seen and its next status change posts nothing (the posts are read from the
+# attention read's `posted` list: on Linux a post never reaches the notify-send
+# stub, whose notify.log stays empty); a Browser tab blank under the
 # peek and back after it; the peeked tab closed over the socket, a worktree
 # switch, the last Primary tab closed while peeked. Each failure names its
 # step. --display :N is a private Xvfb of at least 1600x1000 with Mesa's
 # lavapipe; --state-only takes no display, runs step 1's reads only, prints
 # SKIP for steps 2-15 and ends with "PRIMARY RAIL E2E OK (state only)";
-# --out-dir DIR keeps the transcript, the app log, notify.log, stub.log and
-# PID-matched captures; --appearance light|dark.
+# --out-dir DIR keeps the transcript, the app log, notify.log, stub.log, the
+# step 10 attention reads (step10-*.json) and PID-matched captures;
+# --appearance light|dark.
 Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 
 # Acting on a change request: every write of sirio_forge on the wire (the token

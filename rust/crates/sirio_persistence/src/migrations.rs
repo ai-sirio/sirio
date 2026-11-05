@@ -569,6 +569,21 @@ fn migrate_v25(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v26 — whether a tab's session has stopped unseen, and whether it was
+/// running when the app last wrote.
+///
+/// `unread` is the mark the sidebar shows until the user looks at the session;
+/// `last_running` lets a restart tell that an agent stopped while the app was
+/// closed. Both are nullable and never backfilled (a NULL reads as false), and
+/// both are written only by `AppDatabase::set_tab_attention`: `save_tab` and
+/// `save_tabs` do not list them, so a layout save keeps them.
+fn migrate_v26(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "ALTER TABLE tab ADD COLUMN unread INTEGER;
+         ALTER TABLE tab ADD COLUMN last_running INTEGER;",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -597,6 +612,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v23,
     migrate_v24,
     migrate_v25,
+    migrate_v26,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already

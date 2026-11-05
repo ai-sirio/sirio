@@ -329,6 +329,9 @@ class Instance:
             SIRIO_CREDENTIALS=str(scenario.dir / "credentials.json"),
             PATH=f"{scenario.agent.parent}{os.pathsep}{os.environ.get('PATH', '')}",
             GPUI_X11_SCALE_FACTOR="1",
+            # The app never reaches the user's real session bus: zbus falls back to
+            # $XDG_RUNTIME_DIR/bus when this is unset, and a relaunch restores chats.
+            DBUS_SESSION_BUS_ADDRESS=f"unix:path={scenario.dir}/no-bus",
         )
         env.pop("SIRIO_ACP_PROGRAM", None)
         # The scenario's own variables last: a value of None removes the variable, such as the

@@ -12,7 +12,7 @@ use sirio_persistence::{
     ChatPermissionOutcome, ChatToolLocation, ChatTranscript, ChatTurn, ClosedChatSummary,
     EditorCursorShape, EditorLineNumbers,
     MAX_DATABASE_BYTES, PersistenceError, ProjectRecord, SidebarState, SidebarView, TabRecord,
-    TabStateRecord, WorktreeRecord, migrate_up_to,
+    TabAttention, TabStateRecord, WorktreeRecord, migrate_up_to,
 };
 
 /// A throwaway directory, removed on drop. Canonicalized so paths match what
@@ -2442,4 +2442,190 @@ fn a_projects_handoff_choice_survives_a_relaunch_and_is_replaced_whole() {
     let db = AppDatabase::open(&path).expect("reopen");
     assert_eq!(db.handoff_choice("p1").expect("read"), Some(choice("p1", "", "terminal")));
     assert_eq!(db.handoff_choice("p2").expect("read"), None);
+}
+
+#[test]
+fn the_worktree_of_a_tab_is_found_by_its_id() {
+    let (_dir, db) = archive_fixture("tab-worktree");
+    db.save_worktree(&sample_worktree("other", "project", "feature"))
+        .expect("second worktree");
+    db.save_tab(&sample_tab("term", "worktree", "Terminal", "terminal"))
+        .expect("terminal");
+    db.save_tab(&sample_tab("chat", "other", "Chat", "chat"))
+        .expect("chat");
+
+    assert_eq!(
+        db.worktree_path_of_tab("term").expect("lookup"),
+        Some("/Users/me/main".to_string())
+    );
+    assert_eq!(
+        db.worktree_path_of_tab("chat").expect("lookup"),
+        Some("/Users/me/feature".to_string()),
+        "a tab answers with its own worktree, not the first one"
+    );
+}
+
+#[test]
+fn an_unknown_tab_has_no_worktree() {
+    let (_dir, db) = archive_fixture("tab-worktree-unknown");
+    db.save_tab(&sample_tab("term", "worktree", "Terminal", "terminal"))
+        .expect("terminal");
+
+    assert_eq!(db.worktree_path_of_tab("nope").expect("lookup"), None);
+}
+
+#[test]
+fn an_archived_tab_has_no_worktree() {
+    let (_dir, db) = archive_fixture("tab-worktree-archived");
+    db.save_tab(&sample_tab("chat", "worktree", "Chat", "chat"))
+        .expect("chat");
+    assert!(db.archive_tab("chat", 1_000).expect("archive"));
+
+    assert_eq!(db.worktree_path_of_tab("chat").expect("lookup"), None);
+}
+
+/// A tab saved before v26 has NULL in both attention columns. Opening the file
+/// migrates it, and the tab must read as seen and idle, not fail to decode (a
+/// decode failure would quarantine and delete the row).
+#[test]
+fn a_tab_saved_before_v26_reads_as_seen_and_idle() {
+    let dir = TempDir::new();
+    let path = dir.db_path("v25-tab");
+    {
+        let mut conn = rusqlite::Connection::open(&path).expect("open raw database");
+        conn.execute("PRAGMA foreign_keys = ON", []).expect("pragmas");
+        migrate_up_to(&mut conn, 25).expect("migrate to v25");
+        conn.execute_batch(
+            "INSERT INTO project (id, name, root_path, icon_kind, order_idx)
+                 VALUES ('proj', 'Proj', '/repo', 'icon', 0);
+             INSERT INTO worktree (id, project_id, branch, path, order_idx)
+                 VALUES ('wt', 'proj', 'main', '/repo', 0);
+             INSERT INTO tab (id, worktree_id, title, kind, order_idx, is_active)
+                 VALUES ('tab-old', 'wt', 'Chat', 'chat', 0, 1);",
+        )
+        .expect("plant a v25 tab");
+    }
+
+    let db = AppDatabase::open(&path).expect("upgrade the v25 database");
+
+    assert_eq!(
+        db.tab_attention().expect("read attention"),
+        vec![("tab-old".to_owned(), TabAttention::default())]
+    );
+    assert_eq!(db.tabs().expect("tabs").len(), 1, "the row survives the read");
+}
+
+/// A layout save upserts the tab rows. If it listed the attention columns, it
+/// would write the in-memory defaults over a record the user has not seen yet.
+#[test]
+fn attention_survives_a_tab_save_and_a_reopen() {
+    let dir = TempDir::new();
+    let path = dir.db_path("attention-save");
+    let marked = TabAttention {
+        unread: true,
+        running: true,
+    };
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        db.save_project(&sample_project("project", "Project"))
+            .expect("project");
+        db.save_worktree(&sample_worktree("worktree", "project", "main"))
+            .expect("worktree");
+        let tab = sample_tab("t", "worktree", "Chat", "chat");
+        db.save_tabs("worktree", &[tab.clone()]).expect("first save");
+
+        let unmatched = db
+            .set_tab_attention(&[("t".to_owned(), marked)])
+            .expect("write attention");
+        assert!(unmatched.is_empty());
+
+        let mut renamed = tab;
+        renamed.title = "Renamed".to_owned();
+        db.save_tabs("worktree", &[renamed]).expect("layout save");
+        db.save_tab(&sample_tab("t", "worktree", "Renamed again", "chat"))
+            .expect("single save");
+    }
+
+    let db = AppDatabase::open(&path).expect("reopen");
+    assert_eq!(
+        db.tab_attention().expect("read attention"),
+        vec![("t".to_owned(), marked)]
+    );
+}
+
+/// The caller keeps an id pending only when no row matched, so the answer must
+/// name exactly those ids and must not insert a row for them.
+#[test]
+fn attention_for_a_missing_tab_is_returned_unmatched() {
+    let dir = TempDir::new();
+    let db = AppDatabase::open(&dir.db_path("attention-missing")).expect("open");
+    db.save_project(&sample_project("project", "Project"))
+        .expect("project");
+    db.save_worktree(&sample_worktree("worktree", "project", "main"))
+        .expect("worktree");
+    db.save_tabs("worktree", &[sample_tab("t", "worktree", "Chat", "chat")])
+        .expect("tabs");
+
+    let unmatched = db
+        .set_tab_attention(&[
+            (
+                "nope".to_owned(),
+                TabAttention {
+                    unread: true,
+                    running: false,
+                },
+            ),
+            (
+                "t".to_owned(),
+                TabAttention {
+                    unread: true,
+                    running: false,
+                },
+            ),
+        ])
+        .expect("write attention");
+
+    assert_eq!(unmatched, vec!["nope".to_owned()]);
+    let rows = db.tab_attention().expect("read attention");
+    assert_eq!(rows.len(), 1, "no row is created for an unknown id");
+    assert_eq!(rows[0].0, "t");
+}
+
+/// An archived chat is not an open tab: a restart must not seed a record for
+/// it, or a stale mark would be kept for a tab nobody can see. A tab that never
+/// had a record (a NULL column) reads as the default, not as a decode failure.
+#[test]
+fn an_archived_tab_has_no_attention() {
+    let dir = TempDir::new();
+    let db = AppDatabase::open(&dir.db_path("attention-archived")).expect("open");
+    db.save_project(&sample_project("project", "Project"))
+        .expect("project");
+    db.save_worktree(&sample_worktree("worktree", "project", "main"))
+        .expect("worktree");
+    db.save_tabs(
+        "worktree",
+        &[
+            sample_tab("t", "worktree", "Chat", "chat"),
+            sample_tab("u", "worktree", "Other", "chat"),
+            sample_tab("v", "worktree", "Never written", "chat"),
+        ],
+    )
+    .expect("tabs");
+    let marked = TabAttention {
+        unread: true,
+        running: false,
+    };
+    db.set_tab_attention(&[("t".to_owned(), marked), ("u".to_owned(), marked)])
+        .expect("write attention");
+
+    assert!(db.archive_tab("t", 123).expect("archive"));
+
+    assert_eq!(
+        db.tab_attention().expect("read attention"),
+        vec![
+            ("u".to_owned(), marked),
+            ("v".to_owned(), TabAttention::default()),
+        ],
+        "an open tab never written reads seen and idle; the archived one is absent"
+    );
 }

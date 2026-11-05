@@ -13,8 +13,8 @@ use notify::{
 };
 use sirio_activity::{
     AgentActivityModel, AgentSessionRef, AgentSessionRestorePlan, AgentStatus,
-    BootstrapRestoreOrder, NotificationPayload, NotificationPolicy, TerminalContentId, Transition,
-    WorktreeMountPolicy,
+    BootstrapRestoreOrder, FirstStatus, NotificationPayload, StopPolicy, TerminalContentId,
+    Transition, WorktreeMountPolicy,
 };
 use sirio_agents::{ALL as AGENT_CATALOG, AgentAdapter};
 use sirio_chat::{AgentCommand, ClaudeLaunch, LaunchSpec};
@@ -28,7 +28,7 @@ use sirio_git::{
 };
 use sirio_persistence::{
     AgentRef, AppDatabase, AppSettings, AppearanceMode, BaseColor, ClosedChatSummary,
-    stable_worktree_id,
+    TabAttention, stable_worktree_id,
 };
 use sirio_project::{
     OnceGate, PaneRole, TabKind, display_absolute_path, display_path, is_git_repository,
@@ -288,8 +288,8 @@ mod login_path;
 mod host_sessions;
 mod lsp;
 mod lsp_install;
-// Compiled everywhere so every platform checks it; only macOS routes to it.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// Compiled everywhere so every platform checks it; macOS and Linux route to it.
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 mod native_notification;
 #[cfg(feature = "perf-native")]
 mod native_perf;
@@ -1483,6 +1483,12 @@ enum ControlAction {
         value: Option<String>,
         reply: ControlReply,
     },
+    /// Debug-only `surface.attention.read` and `surface.attention.act`: every
+    /// session's unread mark, and the window-focus override the E2E drives.
+    Attention {
+        act: AttentionAct,
+        reply: ControlReply,
+    },
 }
 
 enum ChatControlAction {
@@ -1615,6 +1621,60 @@ struct ParkedWorktreeTabs {
     attached_panes: HashSet<usize>,
 }
 
+/// A chat or terminal tab as the attention funnel sees it, wherever it is
+/// held: mounted, retained across a worktree switch, parked, or only in the
+/// layout the database holds for a worktree nothing is mounted for.
+#[derive(Clone)]
+struct SessionRef {
+    /// The tab's stable database identity, which every record is keyed by.
+    persistence_id: String,
+    worktree: PathBuf,
+    chat: bool,
+    /// In front of the user right now: see `SirioWorkspace::session_on_screen`.
+    on_screen: bool,
+    title: String,
+    /// The `pane-N` activity keys of the tab's panes.
+    pane_keys: Vec<String>,
+}
+
+/// The sessions of the worktrees this process holds no tab for, read from the
+/// layouts the database keeps for them: after a relaunch only the selected
+/// worktree is mounted, and a host-kept agent in any other keeps sending hooks.
+/// Built by `SirioWorkspace::unmounted_sessions`, never one database read per
+/// transition or per frame.
+#[derive(Default)]
+struct UnmountedSessions {
+    sessions: Vec<SessionRef>,
+    /// `pane-N` key to the index in `sessions` of the tab holding that pane.
+    by_pane: HashMap<String, usize>,
+}
+
+/// The window focus a debug build starts with, from `SIRIO_DEBUG_WINDOW_ACTIVE`
+/// (`active` or `inactive`): the same override `surface.attention.act --focus`
+/// sets, but in force from the first frame, which an E2E that restarts the app
+/// needs, because the first decision about a restored session can come before
+/// any control call. Anything else, and every release build, leaves the OS in charge.
+#[cfg(debug_assertions)]
+fn debug_window_active_from_env() -> Option<bool> {
+    match std::env::var("SIRIO_DEBUG_WINDOW_ACTIVE").as_deref() {
+        Ok("active") => Some(true),
+        Ok("inactive") => Some(false),
+        _ => None,
+    }
+}
+
+/// What a debug `surface.attention.act` does.
+enum AttentionAct {
+    /// `surface.attention.read`: report, change nothing.
+    Read,
+    /// Force the window's focus: `Some(true)` active, `Some(false)` inactive,
+    /// `None` the OS's own answer again.
+    Focus(Option<bool>),
+    /// A click on the notification of the session with this persistence id:
+    /// the path a real click takes, for a platform where CI cannot click.
+    Click(String),
+}
+
 /// A Trace tab kept while its worktree is parked. It holds no state of its
 /// own besides which turn is shown and what is folded, which the view keeps;
 /// its title is the chat tab's, read again when it comes back.
@@ -1703,6 +1763,9 @@ enum WorkspaceAction {
     OpenSurface(sirio_ui::right_panel::OpenSurface),
     /// The Primary strip's collapse button (spec 2026-11-01-primary-rail §3).
     CollapsePrimary,
+    /// A click on a desktop notification, carrying the persistence id its tag
+    /// names. Queued because the click's callback has an `App` and no window.
+    OpenNotifiedSession(String),
     /// A hand-off's agent, started in `path` (the worktree it was checked out
     /// to). `asked` is the tab that asked, which reports the outcome.
     StartHandoffAgent {
@@ -2557,7 +2620,7 @@ impl AppControlHandler {
         });
         drop(notifications);
         (self.notification_poster)(&NotificationPayload {
-            pane_id: String::new(),
+            session_id: String::new(),
             worktree_id: String::new(),
             title: title.to_string(),
             body: body.to_string(),
@@ -3347,6 +3410,42 @@ impl ControlHandler for AppControlHandler {
             "surface.terminal.state" if cfg!(debug_assertions) => {
                 let pane = request.params.get("pane").cloned().unwrap_or_default();
                 self.queue_action(request, move |reply| ControlAction::TerminalState { pane, reply })
+            }
+            "surface.attention.read" if cfg!(debug_assertions) => self.queue_action(request, |reply| {
+                ControlAction::Attention {
+                    act: AttentionAct::Read,
+                    reply,
+                }
+            }),
+            "surface.attention.act" if cfg!(debug_assertions) => {
+                if let Some(tag) = request.params.get("click") {
+                    let Some(id) = native_notification::session_id_of_tag(tag) else {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.attention.act --click requires a sirio-tab-<id> tag",
+                        );
+                    };
+                    let id = id.to_string();
+                    return self.queue_action(request, move |reply| ControlAction::Attention {
+                        act: AttentionAct::Click(id),
+                        reply,
+                    });
+                }
+                let focus = match request.params.get("focus").map(String::as_str) {
+                    Some("active") => Some(true),
+                    Some("inactive") => Some(false),
+                    Some("os") => None,
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.attention.act requires focus active, inactive or os, or click <tag>",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::Attention {
+                    act: AttentionAct::Focus(focus),
+                    reply,
+                })
             }
             "surface.settings.act" if cfg!(debug_assertions) => {
                 let action = request.params.get("action").cloned().unwrap_or_default();
@@ -4299,11 +4398,18 @@ fn post_desktop_notification(payload: &NotificationPayload) {
     };
 
     #[cfg(target_os = "linux")]
-    let result = sirio_env::command("notify-send")
-        .arg("--app-name=Sirio")
-        .arg(&payload.title)
-        .arg(&payload.body)
-        .spawn();
+    let result = {
+        // gpui's own route first: it is the one a click on the notification
+        // comes back through. `notify-send` only when none was installed.
+        if native_notification::post(payload) {
+            return;
+        }
+        sirio_env::command("notify-send")
+            .arg("--app-name=Sirio")
+            .arg(&payload.title)
+            .arg(&payload.body)
+            .spawn()
+    };
 
     #[cfg(target_os = "windows")]
     let result = {
@@ -5744,6 +5850,11 @@ struct SirioWorkspace {
     /// pane id because pane ids are reused when another worktree is mounted.
     /// Content repaint notifications must never invalidate this workspace.
     terminal_shell_evidence: BTreeMap<u64, TerminalShellEvidence>,
+    /// What each chat last claimed about itself, keyed by the chat entity, as
+    /// `push_chat_evidence` pushed it into `activity`. A chat notifies on every
+    /// streamed token; this is what lets the observer return at one hash lookup
+    /// when the claim has not changed. Forgotten with the chat's pane.
+    chat_evidence: HashMap<gpui::EntityId, Option<AgentStatus>>,
     /// Set when a change can affect what the activity reconciliation reads.
     /// Render consumes it at most once per frame.
     activity_dirty: bool,
@@ -5791,14 +5902,64 @@ struct SirioWorkspace {
     /// (backed uniformly by every platform's own window, no linux-specific
     /// code needed here). Polled once per frame in `render` (the same
     /// "Layer E is polled, not pushed" pattern that function already uses
-    /// for streaming/exit state), because `NotificationPolicy::should_notify`
-    /// is decided from `post_activity_notification`, which fires from
-    /// Layer B/C/D activity-transition callbacks that carry no `Window` of
-    /// their own -- only `render` and the control-socket dispatch loop do.
+    /// for streaming/exit state), because `on_pane_transition` decides each
+    /// stop with `StopPolicy::decide` from Layer B/C/D activity-transition
+    /// callbacks that carry no `Window` of their own -- only `render`, the
+    /// control-socket dispatch loop and the activation callback do.
     /// Starts `true` (matching this argument's previous hardcoded value)
     /// so the very first transition, before any frame has painted, keeps
     /// today's behaviour rather than guessing unfocused.
     window_active: bool,
+    /// The value `render` last polled, kept apart from `window_active` because
+    /// the activation callback writes that one between frames: the branch
+    /// refresh (#114) fires on the false→true edge of what a frame polled, and
+    /// would never see it once the callback had already set `true`.
+    last_polled_window_active: bool,
+    /// Per session, by persistence id: the unread mark and the running flag.
+    /// Seeded at boot from the database, and kept there by
+    /// `pending_attention_writes`; a record stays until its tab is closed.
+    session_attention: HashMap<String, TabAttention>,
+    /// The worktrees with at least one unread tab: live, parked and unmounted
+    /// alike. The tray roster lists such a worktree even when it has no status to
+    /// show. No frame writes it: `refresh_worktree_unread` runs wherever
+    /// `session_attention`'s unread marks change, because a minimized window
+    /// paints nothing and the tray is for exactly then.
+    worktree_unread: HashSet<PathBuf>,
+    /// The `pane-N` keys each parked worktree's strip names; worktrees with none
+    /// are absent. Kept by `refresh_parked_tray_panes` where a strip is parked or
+    /// dropped and where the catalog changes. Both this and `worktree_unread` are
+    /// keyed by the catalog's spelling of the checkout, which is
+    /// `ControlWorkspace::path`'s, so the tray's 40 ms tick does exact gets and no
+    /// path scan.
+    worktree_parked_panes: HashMap<PathBuf, Vec<String>>,
+    /// The sessions whose record an earlier run left: each leaves the set at its
+    /// first status decision, which reads the record as a restore
+    /// (`first_status_for`).
+    attention_from_previous_run: HashSet<String>,
+    /// The sessions of worktrees no tab is held for, as the layouts persisted for
+    /// them name them (see `unmounted_sessions`). Rebuilt on the next read after
+    /// `invalidate_unmounted_sessions` marks it stale: the mounted, retained and
+    /// parked sessions are read first, so this holds only what they do not.
+    unmounted_sessions: std::cell::RefCell<UnmountedSessions>,
+    unmounted_sessions_stale: std::cell::Cell<bool>,
+    /// Attention records not yet written: every change goes in, and
+    /// `flush_attention_writes` writes them, keeping those whose tab has no row
+    /// yet while the tab is still held.
+    pending_attention_writes: BTreeMap<String, TabAttention>,
+    /// The pending records whose tab had no row when last written, with the count of
+    /// layout saves at that answer: such a record is tried again only after a newer
+    /// save (`flush_attention_writes`), and a new record for the id clears the entry.
+    attention_unmatched: HashMap<String, usize>,
+    /// Debug-only override of the window's focus, driven by
+    /// `surface.attention.act --focus`: under Xvfb with no window manager, and
+    /// on macOS `--state-only`, nobody controls what the OS reports.
+    #[cfg(debug_assertions)]
+    debug_window_active: Option<bool>,
+    /// Debug-only: every notification `on_pane_transition` decided to post, the
+    /// newest last, whether or not the desktop took it. `surface.attention.read`
+    /// reports it as `posted`; the last 50 are kept.
+    #[cfg(debug_assertions)]
+    posted_notifications: std::collections::VecDeque<NotificationPayload>,
     browser_origins: BTreeSet<String>,
     /// F-TERM-08: an interactive pane close (Cmd-W, right-click "Close
     /// Terminal…") that would kill a pane whose `ActivityStatus` reports
@@ -6253,6 +6414,13 @@ impl SirioWorkspace {
                                         workspace.focus_after_peek(window, cx);
                                     }
                                 }
+                                WorkspaceAction::OpenNotifiedSession(id) => {
+                                    // A session that is gone leaves the
+                                    // selection alone; the window still comes
+                                    // forward, because the click was Sirio's.
+                                    workspace.open_session(&id, window, cx);
+                                    window.activate_window();
+                                }
                                 WorkspaceAction::StartHandoffAgent {
                                     path,
                                     agent,
@@ -6331,7 +6499,7 @@ impl SirioWorkspace {
                                 ControlAction::Notify { pane_id, status } => {
                                     let transition =
                                         workspace.activity.notify(&pane_id, status, Instant::now());
-                                    workspace.post_activity_notification(&transition);
+                                    workspace.drain_activity_transitions(cx);
                                     workspace.request_auto_rename(&transition, cx);
                                     workspace.mark_activity_dirty();
                                     cx.notify();
@@ -6536,6 +6704,9 @@ impl SirioWorkspace {
                                         cx,
                                     );
                                     let _ = reply.send(result);
+                                }
+                                ControlAction::Attention { act, reply } => {
+                                    let _ = reply.send(workspace.control_attention(act, cx));
                                 }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
@@ -6960,6 +7131,8 @@ impl SirioWorkspace {
             },
         )
         .detach();
+        // Read before the literal moves `session`: the records an earlier run left.
+        let previous_attention = session.tab_attention();
         let mut workspace = Self {
             titlebar,
             sidebar,
@@ -7047,6 +7220,7 @@ impl SirioWorkspace {
             },
             activity,
             terminal_shell_evidence,
+            chat_evidence: HashMap::new(),
             activity_dirty: true,
             last_seen_has_worktree: None,
             reconciles: 0,
@@ -7054,6 +7228,19 @@ impl SirioWorkspace {
             cache_child_views: !cfg!(test),
             restored_scrollback_scheduled: OnceGate::default(),
             window_active: true,
+            last_polled_window_active: true,
+            attention_from_previous_run: previous_attention.keys().cloned().collect(),
+            session_attention: previous_attention,
+            worktree_unread: HashSet::new(),
+            worktree_parked_panes: HashMap::new(),
+            unmounted_sessions: std::cell::RefCell::new(UnmountedSessions::default()),
+            unmounted_sessions_stale: std::cell::Cell::new(true),
+            pending_attention_writes: BTreeMap::new(),
+            attention_unmatched: HashMap::new(),
+            #[cfg(debug_assertions)]
+            debug_window_active: debug_window_active_from_env(),
+            #[cfg(debug_assertions)]
+            posted_notifications: std::collections::VecDeque::new(),
             browser_origins,
             show_settings: false,
             restore_focus_pending: false,
@@ -7165,6 +7352,9 @@ impl SirioWorkspace {
         // so the first render reconciles the panel's selection state against
         // `has_current_worktree()` without a separate one-off pass here.
         workspace.bind_settings(cx);
+        // The tray reads these with no frame behind them: seeded now from the saved
+        // marks, which name worktrees nothing is mounted for.
+        workspace.refresh_tray_flags();
         workspace.mark_activity_dirty();
         cx.notify();
         workspace.recompute_launch_sources(cx);
@@ -7919,6 +8109,9 @@ impl SirioWorkspace {
     }
 
     fn refresh_sidebar(&mut self, cx: &mut Context<Self>) {
+        // The catalog just changed: which worktrees exist, and where.
+        self.invalidate_unmounted_sessions();
+        self.refresh_tray_flags();
         let projects = self.sidebar_projects();
         let catalog = &self.project_catalog;
         // F-PRJ-17/F-PRJ-18/F-CORE-DOM-01: pushed the same way after
@@ -9505,21 +9698,7 @@ impl SirioWorkspace {
                 }
                 ChatEvent::TurnEnded => {
                     let chat_id = chat_entity.entity_id();
-                    let mut pane_id = None;
-                    for tab in &workspace.tabs {
-                        if pane_id.is_some() {
-                            break;
-                        }
-                        tab.panes.for_each(&mut |leaf_id, content| {
-                            if pane_id.is_none()
-                                && let TabContent::Chat(candidate) = content
-                                && candidate.entity_id() == chat_id
-                            {
-                                pane_id = Some(leaf_id);
-                            }
-                        });
-                    }
-                    if let Some(pane_id) = pane_id {
+                    if let Some(pane_id) = Self::pane_of_chat_in(workspace.tabs.iter(), chat_id) {
                         let transition = Transition {
                             pane_id: format!("pane-{pane_id}"),
                             old: Some(AgentStatus::Running),
@@ -9531,6 +9710,76 @@ impl SirioWorkspace {
             },
         )
         .detach();
+        // The chat's own state is evidence, and only a mounted chat is walked each
+        // frame: this is what reaches one that is retained or parked. A detached
+        // observer lives exactly as long as the chat, like the subscription above.
+        cx.observe(chat, |workspace, chat, cx| {
+            workspace.push_chat_evidence(&chat, cx)
+        })
+        .detach();
+    }
+
+    /// The pane the chat `chat_id` lives in, among `tabs`. A chat is never in
+    /// two panes.
+    fn pane_of_chat_in<'a>(
+        tabs: impl Iterator<Item = &'a OpenTab>,
+        chat_id: gpui::EntityId,
+    ) -> Option<usize> {
+        let mut pane_id = None;
+        for tab in tabs {
+            if pane_id.is_some() {
+                break;
+            }
+            tab.panes.for_each(&mut |leaf_id, content| {
+                if pane_id.is_none()
+                    && let TabContent::Chat(candidate) = content
+                    && candidate.entity_id() == chat_id
+                {
+                    pane_id = Some(leaf_id);
+                }
+            });
+        }
+        pane_id
+    }
+
+    /// The pane a chat lives in, among the mounted tabs and then the chats
+    /// retained across a worktree switch.
+    fn chat_pane_id(&self, chat_id: gpui::EntityId) -> Option<usize> {
+        Self::pane_of_chat_in(self.tabs.iter(), chat_id).or_else(|| {
+            Self::pane_of_chat_in(
+                self.retained_worktree_chats.values().flat_map(BTreeMap::values),
+                chat_id,
+            )
+        })
+    }
+
+    /// Pushes a chat's status claim into the activity model the moment the chat
+    /// notifies, wherever the chat is held, so that a stop in a worktree that is
+    /// not selected reaches `on_pane_transition` like any other. A claim that
+    /// has not changed returns at the lookup, before any pane search.
+    fn push_chat_evidence(&mut self, chat: &Entity<Chat>, cx: &mut Context<Self>) {
+        let status = Self::chat_status_evidence(chat.read(cx));
+        let chat_id = chat.entity_id();
+        if self.chat_evidence.get(&chat_id) == Some(&status) {
+            return;
+        }
+        // A chat bound before its tab is inserted has no pane yet: nothing is
+        // recorded, so its next notification asks again.
+        let Some(pane_id) = self.chat_pane_id(chat_id) else {
+            return;
+        };
+        self.chat_evidence.insert(chat_id, status);
+        // The observer runs before render, so render's own sync no longer sees this
+        // change: a clear (no Transition) must still arm the reconcile, and a parked
+        // chat's notify repaints nothing, so the sidebar is asked to.
+        if self
+            .activity
+            .set_entity_status(&format!("pane-{pane_id}"), status)
+        {
+            self.mark_activity_dirty();
+            cx.notify();
+        }
+        self.drain_activity_transitions(cx);
     }
 
     /// Gives a terminal the identity of `pane_id` and routes its events to the
@@ -9663,6 +9912,8 @@ impl SirioWorkspace {
             }
         }
         self.next_pane_id = self.next_pane_id.max(floor + moves.len());
+        // Other worktrees' persisted layouts were rewritten under new ids.
+        self.invalidate_unmounted_sessions();
         self.sync_control_panes(cx);
         self.schedule_save(cx);
     }
@@ -10087,25 +10338,33 @@ impl SirioWorkspace {
                 );
                 match event {
                     TerminalActivityEvent::ChildExited { status } => {
-                        workspace.terminal_shell_evidence.insert(
-                            terminal.entity_id().as_u64(),
-                            TerminalShellEvidence {
-                                failed: false,
-                                exit_status: Some(*status),
-                            },
-                        );
+                        let evidence = TerminalShellEvidence {
+                            failed: false,
+                            exit_status: Some(*status),
+                        };
+                        workspace
+                            .terminal_shell_evidence
+                            .insert(terminal.entity_id().as_u64(), evidence);
+                        // `sync_entity_evidence` walks only the mounted tabs, so a
+                        // terminal in a worktree that is not selected is told here.
+                        workspace
+                            .activity
+                            .set_entity_status(&activity_pane_id, evidence.status());
                     }
                     TerminalActivityEvent::LifecycleChanged {
                         failed,
                         exit_status,
                     } => {
-                        workspace.terminal_shell_evidence.insert(
-                            terminal.entity_id().as_u64(),
-                            TerminalShellEvidence {
-                                failed: *failed,
-                                exit_status: *exit_status,
-                            },
-                        );
+                        let evidence = TerminalShellEvidence {
+                            failed: *failed,
+                            exit_status: *exit_status,
+                        };
+                        workspace
+                            .terminal_shell_evidence
+                            .insert(terminal.entity_id().as_u64(), evidence);
+                        workspace
+                            .activity
+                            .set_entity_status(&activity_pane_id, evidence.status());
                     }
                     TerminalActivityEvent::OscTitle(_)
                     | TerminalActivityEvent::OutputSettled { .. } => {}
@@ -10120,8 +10379,8 @@ impl SirioWorkspace {
                         cx.notify();
                     }
                 }
+                workspace.drain_activity_transitions(cx);
                 if let Some(transition) = transition.as_ref() {
-                    workspace.post_activity_notification(transition);
                     workspace.request_auto_rename(transition, cx);
                 }
                 // Lifecycle changes must repaint even without a model
@@ -10186,8 +10445,8 @@ impl SirioWorkspace {
                     workspace
                         .activity
                         .apply_content_signal(&activity_pane_id, status, now);
+                workspace.drain_activity_transitions(cx);
                 if let Some(transition) = transition.as_ref() {
-                    workspace.post_activity_notification(transition);
                     workspace.request_auto_rename(transition, cx);
                     workspace.mark_activity_dirty();
                     cx.notify();
@@ -10297,7 +10556,7 @@ impl SirioWorkspace {
                             {
                                 Ok(Some(transition)) => {
                                     any_transition = true;
-                                    workspace.post_activity_notification(&transition);
+                                    workspace.drain_activity_transitions(cx);
                                     workspace.request_auto_rename(&transition, cx);
                                 }
                                 Ok(None) => {
@@ -10310,6 +10569,9 @@ impl SirioWorkspace {
                                     {
                                         any_transition = true;
                                     }
+                                    // `process_gone` can unmask a Layer E
+                                    // claim, which queues a change.
+                                    workspace.drain_activity_transitions(cx);
                                 }
                                 Err(error) => eprintln!(
                                     "[activity] process refresh failed for pane-{pane_id}: {error}"
@@ -10341,15 +10603,39 @@ impl SirioWorkspace {
     ///
     /// Chat, Changes, Browser and Editor panes are deliberately absent: only a
     /// terminal has a shell pid to walk.
-    fn terminals_to_poll(&self) -> Vec<(usize, usize, Entity<TerminalView>)> {
+    ///
+    /// A terminal of a worktree that is not selected is in no tab: the pane
+    /// cache holds it, so it is walked too, with no tab id. Its shell keeps
+    /// running, and so does the agent in it.
+    fn terminals_to_poll(&self) -> Vec<(Option<usize>, usize, Entity<TerminalView>)> {
         let mut found = Vec::new();
         for tab in &self.tabs {
             let tab_id = tab.id;
             tab.panes.for_each(&mut |pane_id, content| {
                 if let Some(view) = content.terminal() {
-                    found.push((tab_id, pane_id, view));
+                    found.push((Some(tab_id), pane_id, view));
                 }
             });
+        }
+        let mounted = found.len();
+        // A pane moved to a fresh id keeps its cache entry under the old one: the
+        // same terminal must not be polled twice, once under an id nothing holds.
+        let mounted_views: HashSet<gpui::EntityId> =
+            found.iter().map(|(_, _, view)| view.entity_id()).collect();
+        for cached in self.terminal_pane_cache.iter() {
+            // `track_terminal_panes_in_cache` addresses a pane as `terminal-{id}`.
+            let Some(pane_id) = cached
+                .content_id
+                .strip_prefix("terminal-")
+                .and_then(|id| id.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            if !found[..mounted].iter().any(|(_, mounted_id, _)| *mounted_id == pane_id)
+                && !mounted_views.contains(&cached.controller.entity_id())
+            {
+                found.push((None, pane_id, cached.controller.clone()));
+            }
         }
         found
     }
@@ -10722,6 +11008,7 @@ impl SirioWorkspace {
             SidebarEvent::ReopenClosedChat(id) => self.reopen_closed_chat(id, cx),
             SidebarEvent::DeleteClosedChat(id) => {
                 self.session.delete_tab(id);
+                self.invalidate_unmounted_sessions();
                 self.refresh_closed_sessions(cx);
             }
         }
@@ -11043,10 +11330,14 @@ impl SirioWorkspace {
                     controller.update(cx, |terminal, _| terminal.end_session());
                 }
                 self.terminal_pane_cache.remove_worktree(&worktree_id);
+                self.forget_worktree_attention(path);
+                self.forget_parked_panes(&worktree_id);
                 self.parked_worktree_tabs.remove(&worktree_id);
                 self.retained_worktree_chats.remove(&worktree_id);
                 self.parked_trace_tabs.remove(&worktree_id);
+                self.invalidate_unmounted_sessions();
             }
+            self.refresh_tray_flags();
             // A settings tab of a removed project has no project left to show.
             let doomed: Vec<usize> = self
                 .tabs
@@ -11722,6 +12013,24 @@ impl SirioWorkspace {
         }
     }
 
+    /// What a chat claims about itself: waiting on the user while its turn
+    /// streams and holds an open question, running while the turn streams, done
+    /// once a turn has completed, and nothing before that. Both the per-frame
+    /// sync and the chat's own observer read it, so the two cannot disagree.
+    fn chat_status_evidence(chat: &Chat) -> Option<AgentStatus> {
+        if chat.is_streaming() {
+            Some(if chat.awaits_user() {
+                AgentStatus::NeedsInput
+            } else {
+                AgentStatus::Running
+            })
+        } else if chat.has_completed_turn() {
+            Some(AgentStatus::Done)
+        } else {
+            None
+        }
+    }
+
     /// What a live surface claims about itself — the evidence
     /// `AgentActivityModel`'s four layers cannot see. Chat evidence is still
     /// read from its entity; terminal lifecycle evidence is pushed into the
@@ -11736,16 +12045,7 @@ impl SirioWorkspace {
         cx: &App,
     ) -> Option<AgentStatus> {
         match content {
-            TabContent::Chat(chat) => {
-                let chat = chat.read(cx);
-                if chat.is_streaming() {
-                    Some(AgentStatus::Running)
-                } else if chat.has_completed_turn() {
-                    Some(AgentStatus::Done)
-                } else {
-                    None
-                }
-            }
+            TabContent::Chat(chat) => Self::chat_status_evidence(chat.read(cx)),
             TabContent::Terminal { view } => terminal_shell_evidence
                 .get(&view.entity_id().as_u64())
                 .and_then(TerminalShellEvidence::status),
@@ -12085,23 +12385,37 @@ impl SirioWorkspace {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut entries = Vec::new();
         for workspace in &state.workspaces {
-            let Ok(panes) = self.panes.list_for(Path::new(&workspace.path)) else {
-                continue;
-            };
-            let pane_ids: Vec<String> = panes.into_iter().map(|pane| pane.id).collect();
+            let path = Path::new(&workspace.path);
+            let mut pane_ids: Vec<String> = self
+                .panes
+                .list_for(path)
+                .map(|panes| panes.into_iter().map(|pane| pane.id).collect())
+                .unwrap_or_default();
+            // A worktree the control snapshot holds no panes for is one parked behind
+            // another selection: its panes live on, and its strip names them.
+            if pane_ids.is_empty()
+                && let Some(parked) = self.worktree_parked_panes.get(path)
+            {
+                pane_ids.clone_from(parked);
+            }
             let refs: Vec<&str> = pane_ids.iter().map(String::as_str).collect();
-            let Some(status) = self.activity.status_for_panes(&refs) else {
+            let status = self.activity.status_for_panes(&refs);
+            let unread = self.worktree_unread.contains(path);
+            // A worktree with nothing to say, neither a live status nor an unread
+            // session, is not listed.
+            if status.is_none() && !unread {
                 continue;
-            };
+            }
             entries.push(tray::TrayRosterEntry {
                 path: PathBuf::from(&workspace.path),
                 branch: workspace.branch.clone(),
                 project_name: workspace.project.clone(),
                 status,
+                unread,
                 status_changed_at: self.activity.status_changed_at_for_panes(&refs),
             });
         }
-        sirio_activity::AttentionSort::sorted(&entries, |entry| Some(entry.status))
+        sirio_activity::AttentionSort::sorted(&entries, |entry| entry.status)
     }
 
     /// F-USE-05: the tab a tray roster click jumps to once its worktree is
@@ -12164,6 +12478,7 @@ impl SirioWorkspace {
         // same ids (the reconcile the selection armed has not run yet — this
         // is the "reads immediately afterwards" exception to the gate).
         self.sync_entity_evidence(cx);
+        self.drain_activity_transitions(cx);
         let Some(id) = self.worst_status_tab_id(cx) else {
             return Ok(None);
         };
@@ -12241,6 +12556,7 @@ impl SirioWorkspace {
                 agent: self.tab_agent_mark(tab),
                 status: None,
                 last_event_at: None,
+                unread: false,
             })
             .collect()
     }
@@ -12301,6 +12617,7 @@ impl SirioWorkspace {
                     .and_then(AgentMark::for_agent_id),
                 status: None,
                 last_event_at: None,
+                unread: false,
             })
             .collect();
         self.parked_sidebar_tabs
@@ -12469,6 +12786,45 @@ impl SirioWorkspace {
             })
     }
 
+    /// Forgets what the panes of a worktree's parked strip left in the activity
+    /// model, and what its retained chats left in `chat_evidence`. It runs just
+    /// before the worktree's strip is dropped for good (evicted, or closed with
+    /// its project or on its own): the model is keyed by pane id, and an id
+    /// still holding a status would be inherited by the next pane to take it.
+    /// A pane that is a leaf of a mounted tab of another worktree is left alone,
+    /// and a selection change never forgets one. A tab of this worktree does not
+    /// protect its panes: when the outgoing worktree is itself evicted,
+    /// `self.tabs` still holds its tabs, since the switch replaces them later.
+    fn forget_parked_panes(&mut self, worktree_id: &str) {
+        let forgotten = Path::new(worktree_id);
+        let mounted: HashSet<usize> = self
+            .tabs
+            .iter()
+            .filter(|tab| !paths_name_the_same_document(&self.tab_worktree_path(tab.id), forgotten))
+            .flat_map(|tab| tab.panes.leaf_ids())
+            .collect();
+        if let Some(parked) = self.parked_worktree_tabs.get(worktree_id) {
+            for pane_id in parked
+                .terminal_panes_by_tab
+                .iter()
+                .chain(&parked.chat_panes_by_tab)
+                .flatten()
+                .filter(|pane_id| !mounted.contains(pane_id))
+            {
+                self.activity.pane_closed(&format!("pane-{pane_id}"));
+            }
+        }
+        if let Some(chats) = self.retained_worktree_chats.get(worktree_id) {
+            for tab in chats.values() {
+                tab.panes.for_each(&mut |_, content| {
+                    if let TabContent::Chat(chat) = content {
+                        self.chat_evidence.remove(&chat.entity_id());
+                    }
+                });
+            }
+        }
+    }
+
     /// F-CORE-ACT-26: caps how many worktrees stay mounted once the newly
     /// selected one joins them. `WorktreeMountPolicy::ids_to_evict` never
     /// touches the selected worktree, and skips any worktree with a running
@@ -12524,9 +12880,12 @@ impl SirioWorkspace {
             // session instead of leaving a shell behind in the cache (a host
             // session lives on; a local one ends with its link).
             self.terminal_pane_cache.remove_worktree(&id);
+            self.forget_parked_panes(&id);
             self.parked_worktree_tabs.remove(&id);
             self.retained_worktree_chats.remove(&id);
             self.parked_trace_tabs.remove(&id);
+            // The evicted worktree is unmounted now: its layout names its sessions.
+            self.invalidate_unmounted_sessions();
         }
     }
 
@@ -12705,7 +13064,25 @@ impl SirioWorkspace {
             // `new_tabs`; a running chat whose tab the database no longer
             // names is dropped rather than resurrected, so the DB stays the
             // source of *which* tabs exist.
-            self.retained_worktree_chats.remove(&selected_worktree_id);
+            if let Some(dropped) = self.retained_worktree_chats.remove(&selected_worktree_id) {
+                let mut kept = HashSet::new();
+                for tab in &new_tabs {
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::Chat(chat) = content {
+                            kept.insert(chat.entity_id());
+                        }
+                    });
+                }
+                for tab in dropped.values() {
+                    tab.panes.for_each(&mut |_, content| {
+                        if let TabContent::Chat(chat) = content
+                            && !kept.contains(&chat.entity_id())
+                        {
+                            self.chat_evidence.remove(&chat.entity_id());
+                        }
+                    });
+                }
+            }
             let keep_content_ids: HashSet<String> = reused_terminal_panes
                 .iter()
                 .map(|pane_id| format!("terminal-{pane_id}"))
@@ -12773,6 +13150,10 @@ impl SirioWorkspace {
 
         let context = worktree_context(&self.project_catalog, &selected_path);
         self.working_directory = selected_path.clone();
+        // The switch is done: the selected worktree is mounted, the outgoing one
+        // parked, whatever an eviction dropped is unmounted.
+        self.invalidate_unmounted_sessions();
+        self.refresh_tray_flags();
         // Both ends of the switch are rebuilt from the database on the next
         // `sync_activity`: the outgoing worktree's parked rows from the
         // layout the safe branch above just saved, the incoming one's on
@@ -13103,9 +13484,13 @@ impl SirioWorkspace {
             controller.update(cx, |terminal, _| terminal.end_session());
         }
         self.terminal_pane_cache.remove_worktree(&worktree_id);
+        self.forget_worktree_attention(&path);
+        self.forget_parked_panes(&worktree_id);
         self.parked_worktree_tabs.remove(&worktree_id);
         self.retained_worktree_chats.remove(&worktree_id);
         self.parked_trace_tabs.remove(&worktree_id);
+        self.invalidate_unmounted_sessions();
+        self.refresh_tray_flags();
         if was_current {
             for index in (0..self.tabs.len()).rev() {
                 self.close_tab(index, None, cx);
@@ -13403,6 +13788,9 @@ impl SirioWorkspace {
             .collect();
         let mut sidebar_updates: Vec<(usize, Vec<SidebarTab>)> =
             Vec::with_capacity(worktree_rows.len());
+        // Resolved once for the whole reconcile: a lookup per tab or per row would
+        // canonicalize against every parked strip each time it missed.
+        let parked_keys = self.parked_keys_by_catalog_path();
         for (worktree_id, path) in worktree_rows {
             let mut tabs = self.sidebar_tabs_for_worktree(&path);
             // A worktree with no live tabs keeps listing its persisted strip
@@ -13431,14 +13819,20 @@ impl SirioWorkspace {
                         .iter()
                         .find(|open| open.id == id)
                         .and_then(|open| self.tab_status(open, cx)),
-                    SidebarTabRef::Parked(_) => {
-                        self.parked_tab_status(&path, &tab.persistence_id)
-                    }
+                    SidebarTabRef::Parked(_) => parked_keys
+                        .get(&path)
+                        .and_then(|key| self.parked_worktree_tabs.get(key))
+                        .and_then(|parked| {
+                            self.parked_strip_tab_status(parked, &tab.persistence_id)
+                        }),
                 };
                 if let Some(status) = tab.status {
                     self.note_session_status(&tab.persistence_id, status, now_ms);
                 }
                 tab.last_event_at = self.session_event_at.get(&tab.persistence_id).copied();
+                // The record is seeded at boot for every open tab, so this is right for
+                // a live, a parked and a database-only row alike.
+                tab.unread = self.is_unread(&tab.persistence_id);
             }
             sidebar_updates.push((worktree_id, tabs));
         }
@@ -13475,26 +13869,142 @@ impl SirioWorkspace {
         }
     }
 
+    /// The strip parked for `worktree_path`: the exact key first, then by path
+    /// identity, which survives a catalog refresh spelling the checkout another way.
+    fn parked_strip_of(&self, worktree_path: &Path) -> Option<&ParkedWorktreeTabs> {
+        self.parked_worktree_tabs
+            .get(worktree_path.to_string_lossy().as_ref())
+            .or_else(|| {
+                self.parked_worktree_tabs
+                    .iter()
+                    .find(|(path, _)| paths_name_the_same_document(Path::new(path), worktree_path))
+                    .map(|(_, parked)| parked)
+            })
+    }
+
+    /// The `parked_worktree_tabs` key of the strip each catalog worktree holds, by
+    /// the catalog's spelling of its path. The exact spelling is tried for every
+    /// worktree first; only a strip no worktree claimed that way is matched by path
+    /// identity (a catalog refresh can spell a checkout another way), and only
+    /// against the worktrees left over, so the usual case canonicalizes nothing.
+    fn parked_keys_by_catalog_path(&self) -> HashMap<PathBuf, String> {
+        let catalog: Vec<&Path> = self
+            .project_catalog
+            .projects()
+            .iter()
+            .flat_map(|project| project.worktrees.iter())
+            .map(|worktree| worktree.path.as_path())
+            .collect();
+        let mut keys: HashMap<PathBuf, String> = HashMap::new();
+        let mut claimed: HashSet<&str> = HashSet::new();
+        for path in &catalog {
+            let key = path.to_string_lossy();
+            if let Some((held, _)) = self.parked_worktree_tabs.get_key_value(key.as_ref()) {
+                keys.insert(path.to_path_buf(), held.clone());
+                claimed.insert(held.as_str());
+            }
+        }
+        if claimed.len() < self.parked_worktree_tabs.len() {
+            for key in self.parked_worktree_tabs.keys() {
+                if claimed.contains(key.as_str()) {
+                    continue;
+                }
+                if let Some(path) = catalog.iter().find(|path| {
+                    !keys.contains_key(**path) && paths_name_the_same_document(Path::new(key), path)
+                }) {
+                    keys.insert(path.to_path_buf(), key.clone());
+                }
+            }
+        }
+        keys
+    }
+
+    /// Recomputes what the tray reads that no frame maintains: the worktrees that
+    /// hold an unread session and the pane keys of each parked strip. Run where a
+    /// strip is parked or dropped, a worktree is mounted or closed, the catalog
+    /// changes, and at launch.
+    fn refresh_tray_flags(&mut self) {
+        self.refresh_worktree_unread();
+        self.refresh_parked_tray_panes();
+    }
+
+    /// `worktree_unread` from `session_attention` and the sessions Sirio can reach,
+    /// by the catalog's spelling of each session's worktree. Run wherever an unread
+    /// mark appears or goes (the funnel, the seen path, a closed tab), with no frame
+    /// involved. Does nothing but clear while nothing is unread.
+    fn refresh_worktree_unread(&mut self) {
+        if !self.session_attention.values().any(|record| record.unread) {
+            self.worktree_unread.clear();
+            return;
+        }
+        let catalog: Vec<PathBuf> = self
+            .project_catalog
+            .projects()
+            .iter()
+            .flat_map(|project| project.worktrees.iter())
+            .map(|worktree| worktree.path.clone())
+            .collect();
+        let mut unread = HashSet::new();
+        for session in self.held_sessions() {
+            if !self.is_unread(&session.persistence_id) {
+                continue;
+            }
+            let spelled = catalog
+                .iter()
+                .find(|path| **path == session.worktree)
+                .or_else(|| {
+                    catalog
+                        .iter()
+                        .find(|path| paths_name_the_same_document(path, &session.worktree))
+                });
+            if let Some(path) = spelled {
+                unread.insert(path.clone());
+            }
+        }
+        self.worktree_unread = unread;
+    }
+
+    /// `worktree_parked_panes` from the strips parked now.
+    fn refresh_parked_tray_panes(&mut self) {
+        let mut parked_panes: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        for (path, key) in self.parked_keys_by_catalog_path() {
+            let Some(parked) = self.parked_worktree_tabs.get(&key) else {
+                continue;
+            };
+            let keys: Vec<String> = parked
+                .terminal_panes_by_tab
+                .iter()
+                .chain(&parked.chat_panes_by_tab)
+                .flatten()
+                .map(|pane_id| format!("pane-{pane_id}"))
+                .collect();
+            if !keys.is_empty() {
+                parked_panes.insert(path, keys);
+            }
+        }
+        self.worktree_parked_panes = parked_panes;
+    }
+
     /// A tab of a mounted, parked strip: the most urgent status among its
     /// panes, found by persistence id (the sidebar's parked index counts
     /// only sidebar tabs, the layout counts all). `None` when the worktree is
     /// not mounted.
+    #[cfg(test)]
     fn parked_tab_status(
         &self,
         worktree_path: &Path,
         persistence_id: &str,
     ) -> Option<ActivityStatus> {
-        let parked = self
-            .parked_worktree_tabs
-            .get(worktree_path.to_string_lossy().as_ref())
-            .or_else(|| {
-                self.parked_worktree_tabs
-                    .iter()
-                    .find(|(path, _)| {
-                        paths_name_the_same_document(Path::new(path), worktree_path)
-                    })
-                    .map(|(_, parked)| parked)
-            })?;
+        let parked = self.parked_strip_of(worktree_path)?;
+        self.parked_strip_tab_status(parked, persistence_id)
+    }
+
+    /// `parked_tab_status` for a strip already found.
+    fn parked_strip_tab_status(
+        &self,
+        parked: &ParkedWorktreeTabs,
+        persistence_id: &str,
+    ) -> Option<ActivityStatus> {
         let index = parked
             .layout
             .tabs
@@ -13650,38 +14160,38 @@ impl SirioWorkspace {
         });
     }
 
-    fn post_activity_notification(&self, transition: &Transition) {
-        let Some(agent_id) = self.activity.agent_id(&transition.pane_id) else {
-            return;
-        };
-        let visible = self.tabs.get(self.active_tab).is_some_and(|tab| {
-            let pane_id = transition.pane_id.strip_prefix("pane-");
-            pane_id.is_some_and(|pane_id| {
-                pane_id
-                    .parse::<usize>()
-                    .is_ok_and(|pane_id| tab.panes.contains(pane_id))
+    /// Builds and posts the desktop notification for one stop of `session`; the
+    /// caller has decided that it is one (`on_pane_transition`), so nothing here
+    /// gates on focus. Everything it names is the session's own: its worktree,
+    /// never the one the user happens to have selected. Returns what it posted.
+    ///
+    /// The title is `<agent> — <project>/<branch>` and the body
+    /// `<branch> · <project>`. The agent is the catalog's display name for the
+    /// pane's identified agent, then the chat's own, then the tab's title: a
+    /// pane that only an agent's hook has identified has no agent id.
+    fn post_session_notification(
+        &self,
+        session: &SessionRef,
+        pane_key: &str,
+        cx: &App,
+    ) -> NotificationPayload {
+        let agent_name = if session.chat {
+            self.chat_agent_display_name(&session.persistence_id, cx)
+        } else {
+            self.activity.agent_id(pane_key).map(|agent_id| {
+                AGENT_CATALOG
+                    .iter()
+                    .find(|adapter| adapter.id() == agent_id)
+                    .map_or(agent_id, |adapter| adapter.display_name())
+                    .to_string()
             })
-        });
-        // F-CORE-ACT-20: real window-focus, not a hardcoded `true` -- see
-        // `window_active`'s own doc comment for why this reads a
-        // once-per-frame cache instead of a live `Window` query.
-        if !NotificationPolicy::should_notify(
-            transition.old,
-            transition.new,
-            self.window_active,
-            visible,
-        ) {
-            return;
         }
-        let agent_display_name = AGENT_CATALOG
-            .iter()
-            .find(|adapter| adapter.id() == agent_id)
-            .map_or(agent_id, |adapter| adapter.display_name());
-        let context = worktree_context(&self.project_catalog, &self.working_directory);
+        .unwrap_or_else(|| session.title.clone());
+        let context = worktree_context(&self.project_catalog, &session.worktree);
         let worktree_id = self
-            .sidebar_worktree_id(&self.working_directory)
+            .sidebar_worktree_id(&session.worktree)
             .map_or_else(
-                || self.working_directory.to_string_lossy().into_owned(),
+                || session.worktree.to_string_lossy().into_owned(),
                 |id| id.to_string(),
             );
         let project_name = self
@@ -13690,31 +14200,769 @@ impl SirioWorkspace {
             .iter()
             .find(|project| {
                 project.worktrees.iter().any(|worktree| {
-                    paths_name_the_same_document(&worktree.path, &self.working_directory)
+                    paths_name_the_same_document(&worktree.path, &session.worktree)
                 })
             })
             .map(|project| project.name.as_str());
-        let Some(mut payload) = self.activity.build_payload(
-            &transition.pane_id,
-            transition.new,
-            agent_display_name,
-            &worktree_id,
-            &context.branch,
-            project_name,
-            None,
-        ) else {
+        let mut body = context.branch.clone();
+        if let Some(project_name) = project_name {
+            body.push_str(" · ");
+            body.push_str(project_name);
+        }
+        let payload = NotificationPayload {
+            session_id: session.persistence_id.clone(),
+            worktree_id,
+            title: format!("{agent_name} — {}", context.activity_label),
+            body,
+        };
+        post_desktop_notification(&payload);
+        payload
+    }
+
+    /// The display name the chat tab `persistence_id` shows for its agent, in
+    /// the tabs mounted or retained across a worktree switch. `None` for a
+    /// parked strip, which holds no chat, and for a chat whose agent is not
+    /// known.
+    fn chat_agent_display_name(&self, persistence_id: &str, cx: &App) -> Option<String> {
+        let tab = self
+            .tabs
+            .iter()
+            .chain(self.retained_worktree_chats.values().flat_map(BTreeMap::values))
+            .find(|tab| tab.persistence_id == persistence_id)?;
+        let mut name = None;
+        tab.panes.for_each(&mut |_, content| {
+            if name.is_none()
+                && let TabContent::Chat(chat) = content
+            {
+                name = chat.read(cx).agent_display_name().map(str::to_string);
+            }
+        });
+        name
+    }
+
+    /// The window's focus as the funnel reads it: the debug override when one is
+    /// set, else what the last frame polled.
+    fn effective_window_active(&self) -> bool {
+        #[cfg(debug_assertions)]
+        if let Some(forced) = self.debug_window_active {
+            return forced;
+        }
+        self.window_active
+    }
+
+    /// Every chat and terminal tab Sirio holds, once each, in the order
+    /// `session_for_pane` looks: the mounted tabs, then the chats retained across
+    /// a worktree switch, then the strips of parked worktrees, then the tabs only
+    /// the database names (a worktree not mounted since launch).
+    ///
+    /// The one-key-one-session rule `live_sessions` states holds for the last group
+    /// too: it is built from the worktrees none of the first three hold, and the
+    /// pane ids are unique database-wide (`db_pane_id_floor`,
+    /// `dedup_pane_ids_at_first_answer`).
+    fn held_sessions(&self) -> Vec<SessionRef> {
+        let mut sessions = self.live_sessions();
+        let live: HashSet<(String, PathBuf)> = sessions
+            .iter()
+            .map(|session| (session.persistence_id.clone(), session.worktree.clone()))
+            .collect();
+        sessions.extend(
+            self.unmounted_sessions()
+                .sessions
+                .iter()
+                .filter(|session| {
+                    !live.contains(&(session.persistence_id.clone(), session.worktree.clone()))
+                })
+                .cloned(),
+        );
+        sessions
+    }
+
+    /// The first three groups of `held_sessions`: what this process has entities
+    /// or a parked layout for.
+    ///
+    /// A `pane-N` key names one surface across all three: new panes take
+    /// `next_pane_id`, which only grows above the database floor, and
+    /// `select_worktree` renames a restored id another parked strip holds
+    /// (`reassign_taken_restored_pane_ids`, against `parked_pane_ids_outside`).
+    /// `park_current_worktree_tabs` inserts its strip unconditionally, so a
+    /// worktree with only chat tabs is covered too. If that insert ever becomes
+    /// conditional, this lookup loses those chats.
+    fn live_sessions(&self) -> Vec<SessionRef> {
+        // The pair names a session: the default tabs of a fresh worktree all
+        // carry the same ids (`default-chat`, `default-terminal`).
+        fn push(sessions: &mut Vec<SessionRef>, session: SessionRef) {
+            if !sessions.iter().any(|held| {
+                held.persistence_id == session.persistence_id
+                    && paths_name_the_same_document(&held.worktree, &session.worktree)
+            }) {
+                sessions.push(session);
+            }
+        }
+        let pane_keys = |tab: &OpenTab| -> Vec<String> {
+            tab.panes
+                .leaf_ids()
+                .into_iter()
+                .map(|id| format!("pane-{id}"))
+                .collect()
+        };
+        let mut sessions = Vec::new();
+        for tab in &self.tabs {
+            if !matches!(tab.kind, TabKind::Terminal | TabKind::AgentChat) {
+                continue;
+            }
+            push(
+                &mut sessions,
+                SessionRef {
+                    persistence_id: tab.persistence_id.clone(),
+                    worktree: self.tab_worktree_path(tab.id),
+                    chat: tab.kind == TabKind::AgentChat,
+                    on_screen: self.session_on_screen(tab),
+                    title: tab.title.clone(),
+                    pane_keys: pane_keys(tab),
+                },
+            );
+        }
+        for (worktree, chats) in &self.retained_worktree_chats {
+            for tab in chats.values() {
+                push(
+                    &mut sessions,
+                    SessionRef {
+                        persistence_id: tab.persistence_id.clone(),
+                        worktree: PathBuf::from(worktree),
+                        chat: true,
+                        on_screen: false,
+                        title: tab.title.clone(),
+                        pane_keys: pane_keys(tab),
+                    },
+                );
+            }
+        }
+        for (worktree, parked) in &self.parked_worktree_tabs {
+            for (index, tab) in parked.layout.tabs.iter().enumerate() {
+                let chat = tab.kind == "chat";
+                if !chat && tab.kind != "terminal" {
+                    continue;
+                }
+                let panes = |by_tab: &Vec<HashSet<usize>>| -> Vec<usize> {
+                    by_tab
+                        .get(index)
+                        .map(|panes| panes.iter().copied().collect())
+                        .unwrap_or_default()
+                };
+                let mut ids = panes(&parked.terminal_panes_by_tab);
+                ids.extend(panes(&parked.chat_panes_by_tab));
+                ids.sort_unstable();
+                ids.dedup();
+                push(
+                    &mut sessions,
+                    SessionRef {
+                        persistence_id: tab.id.clone(),
+                        worktree: PathBuf::from(worktree),
+                        chat,
+                        on_screen: false,
+                        title: tab.title.clone(),
+                        pane_keys: ids.into_iter().map(|id| format!("pane-{id}")).collect(),
+                    },
+                );
+            }
+        }
+        sessions
+    }
+
+    /// The session that owns a pane's activity key, or `None` when no tab Sirio
+    /// holds, nor a layout the database keeps, names it. A mounted, retained or
+    /// parked session wins over the persisted layout of an unmounted worktree.
+    fn session_for_pane(&self, pane_key: &str) -> Option<SessionRef> {
+        self.live_sessions()
+            .into_iter()
+            .find(|session| session.pane_keys.iter().any(|key| key == pane_key))
+            .or_else(|| {
+                let unmounted = self.unmounted_sessions();
+                unmounted
+                    .by_pane
+                    .get(pane_key)
+                    .and_then(|index| unmounted.sessions.get(*index))
+                    .cloned()
+            })
+    }
+
+    /// Marks the index of unmounted sessions stale: the next read rebuilds it.
+    /// Called wherever its inputs change. They are the catalog, which worktrees
+    /// are mounted, retained or parked (a switch, an eviction, a close), and the
+    /// layouts persisted for the others (the pane-id dedup, an adopted terminal,
+    /// a deleted chat). Cheap, so a call that changes nothing is harmless.
+    fn invalidate_unmounted_sessions(&self) {
+        self.unmounted_sessions_stale.set(true);
+    }
+
+    /// The sessions of the catalog's worktrees that are neither mounted nor
+    /// retained nor parked, as the database's layouts name them, rebuilt from the
+    /// database only when `invalidate_unmounted_sessions` made it stale.
+    fn unmounted_sessions(&self) -> std::cell::Ref<'_, UnmountedSessions> {
+        if self.unmounted_sessions_stale.replace(false) {
+            let built = self.build_unmounted_sessions();
+            *self.unmounted_sessions.borrow_mut() = built;
+        }
+        self.unmounted_sessions.borrow()
+    }
+
+    fn build_unmounted_sessions(&self) -> UnmountedSessions {
+        let mut mounted: Vec<PathBuf> = vec![self.working_directory.clone()];
+        for tab in &self.tabs {
+            let path = self.tab_worktree_path(tab.id);
+            if !mounted.contains(&path) {
+                mounted.push(path);
+            }
+        }
+        let mut built = UnmountedSessions::default();
+        for project in self.project_catalog.projects() {
+            for worktree in &project.worktrees {
+                let path = &worktree.path;
+                if mounted
+                    .iter()
+                    .any(|held| paths_name_the_same_document(held, path))
+                    || self.parked_strip_of(path).is_some()
+                    || self
+                        .retained_worktree_chats
+                        .keys()
+                        .any(|key| paths_name_the_same_document(Path::new(key), path))
+                {
+                    continue;
+                }
+                for (tab, ids) in self.session.persisted_tab_panes_for(path) {
+                    let chat = tab.kind == "chat";
+                    if !chat && tab.kind != "terminal" {
+                        continue;
+                    }
+                    let index = built.sessions.len();
+                    let pane_keys: Vec<String> =
+                        ids.iter().map(|id| format!("pane-{id}")).collect();
+                    for key in &pane_keys {
+                        built.by_pane.entry(key.clone()).or_insert(index);
+                    }
+                    built.sessions.push(SessionRef {
+                        persistence_id: tab.id,
+                        worktree: path.clone(),
+                        chat,
+                        on_screen: false,
+                        title: tab.title,
+                        pane_keys,
+                    });
+                }
+            }
+        }
+        built
+    }
+
+    /// Whether the user is looking at this tab right now: the window is active,
+    /// a worktree is selected, Settings is not covering the window, and the
+    /// tab is drawn:
+    ///
+    /// - with the Primary half a full pane: the Primary half's active tab, and
+    ///   the Secondary half's active tab while that half is drawn;
+    /// - with the Primary half the 40 px rail (`primary_rail_drawn`) and a peek
+    ///   open: only the peeked tab, which is also `active_tab`. The card covers
+    ///   most of the Secondary, all of it in a narrow window, so the Secondary's
+    ///   tab is not being looked at (the answer `active_tab` gave before);
+    /// - with the rail and no peek: the Secondary half's active tab. The rail
+    ///   keeps naming an active Primary tab (the highlighted icon), but nothing
+    ///   draws it.
+    ///
+    /// A retained, parked or unmounted session is never on screen.
+    fn session_on_screen(&self, tab: &OpenTab) -> bool {
+        // The split's own answer first: it is cheap, and it leaves the path
+        // comparison below to at most the two tabs a half shows.
+        let secondary = self.center_split.active(PaneRole::Secondary) == Some(tab.id)
+            && self.secondary_pane_visible();
+        let peeked = self
+            .primary_peek
+            .get()
+            .copied()
+            .filter(|_| self.primary_peek.is_open());
+        let shown = if !self.primary_rail_drawn() {
+            self.center_split.active(PaneRole::Primary) == Some(tab.id) || secondary
+        } else if let Some(peeked) = peeked {
+            // A selection moves `active_tab` at once, and `settle_primary_peek`
+            // closes the peek it left only at the next render: until then
+            // neither tab counts.
+            peeked == tab.id
+                && self
+                    .tabs
+                    .get(self.active_tab)
+                    .is_some_and(|active| active.id == peeked)
+        } else {
+            secondary
+        };
+        // Settings replaces the whole window: the tab is still the active one, but
+        // nothing shows it, so a stop under Settings is a stop off screen.
+        shown
+            && !self.show_settings
+            && self.effective_window_active()
+            && self.has_current_worktree()
+            && self.tabs.iter().any(|held| held.id == tab.id)
+            && paths_name_the_same_document(&self.tab_worktree_path(tab.id), &self.working_directory)
+    }
+
+    /// Only an agent's stop is news: a chat, a terminal pane whose agent is
+    /// identified, or one an agent's hooks have already pushed to. A hook can
+    /// arrive before the title or the process sweep names the agent, which is
+    /// why a push counts.
+    fn pane_is_agent(&self, pane_key: &str, session: &SessionRef) -> bool {
+        session.chat
+            || self.activity.agent_id(pane_key).is_some()
+            || self.activity.has_hook_evidence(pane_key)
+    }
+
+    /// What is known of a session's status record when a pane's status goes from
+    /// nothing to something: the record an earlier run saved
+    /// (`attention_from_previous_run`), else this run's own `session_attention`.
+    ///
+    /// Two limits, both because an earlier run's record says what the app last
+    /// saw, not what happened while it was closed:
+    ///
+    /// - A CLI agent whose turn ended while Sirio was closed, and which is still
+    ///   open, cannot be detected: `sirioctl` drops the hook when the app's
+    ///   socket is not there to answer, so nothing reaches the app, and the
+    ///   agent is still running as far as any layer can tell.
+    /// - A chat's mark after a restart is only the one saved before quitting:
+    ///   a restored chat never gains a mark, because its first settled status is
+    ///   a transcript (`has_completed_turn`), not a stop.
+    ///
+    /// A chat with no record reads as recorded and idle: in this run a chat
+    /// reaches a stop through Running to settled, so the line only guards a
+    /// first settled status from a transcript the seed did not cover.
+    fn first_status_for(&self, persistence_id: &str, chat: bool) -> FirstStatus {
+        let record = self.session_attention.get(persistence_id);
+        if self.attention_from_previous_run.contains(persistence_id) {
+            return FirstStatus::Restored {
+                was_running: record.is_some_and(|record| record.running),
+                chat,
+            };
+        }
+        match record {
+            Some(record) => FirstStatus::Recorded {
+                was_running: record.running,
+            },
+            None if chat => FirstStatus::Recorded { was_running: false },
+            None => FirstStatus::Unrecorded,
+        }
+    }
+
+    fn is_unread(&self, persistence_id: &str) -> bool {
+        self.session_attention
+            .get(persistence_id)
+            .is_some_and(|record| record.unread)
+    }
+
+    /// Hands every resolved status change since the last drain to
+    /// `on_pane_transition`. Every path that can change a status reaches one.
+    fn drain_activity_transitions(&mut self, cx: &mut Context<Self>) {
+        for transition in self.activity.take_resolved_transitions() {
+            self.on_pane_transition(&transition, cx);
+        }
+        self.flush_attention_writes(cx);
+    }
+
+    /// The one place a status change becomes a stop: the unread mark, the running
+    /// flag and the desktop notification.
+    fn on_pane_transition(&mut self, transition: &Transition, cx: &mut Context<Self>) {
+        let Some(session) = self.session_for_pane(&transition.pane_id) else {
             return;
         };
-        // F-CORE-ACT-19: the title is `<agent> — <human worktree label>`,
-        // not `<agent> — <status>` — the pane's transition status already
-        // drives which notification fires at all (`NotificationPolicy`
-        // above); it does not belong in the title text a second time.
-        // `AgentActivityModel::build_payload` (sirio_activity, not owned by
-        // this file) still emits the status-suffixed title, so it is
-        // corrected here rather than left for the desktop notifier to show
-        // verbatim.
-        payload.title = format!("{agent_display_name} — {}", context.activity_label);
-        post_desktop_notification(&payload);
+        if !self.pane_is_agent(&transition.pane_id, &session) {
+            return;
+        }
+        // A hook this run pushed to the pane proves its agent is alive now: `sirioctl`
+        // drops a hook while the app is down, so a push cannot be a turn that ended
+        // while Sirio was closed, and the record an earlier run left is evidence for
+        // a stop found at launch only. A restore stop found through the process
+        // sweep, which sets no hook evidence, stays quiet. A chat has no hooks.
+        if !session.chat && self.activity.has_hook_evidence(&transition.pane_id) {
+            self.attention_from_previous_run
+                .remove(&session.persistence_id);
+        }
+        let first = self.first_status_for(&session.persistence_id, session.chat);
+        let decision =
+            StopPolicy::decide(transition.old, transition.new, first, session.on_screen);
+        let running = session
+            .pane_keys
+            .iter()
+            .any(|key| self.activity.status(key) == Some(AgentStatus::Running));
+        // The first decision of a restored session has been made.
+        self.attention_from_previous_run
+            .remove(&session.persistence_id);
+        let record = self
+            .session_attention
+            .entry(session.persistence_id.clone())
+            .or_default();
+        let before = *record;
+        record.running = running;
+        record.unread |= decision.unread;
+        let after = *record;
+        if after != before {
+            self.queue_attention_write(session.persistence_id.clone(), after);
+        }
+        if after.unread != before.unread {
+            self.refresh_worktree_unread();
+        }
+        self.mark_activity_dirty();
+        if decision.notify {
+            let payload = self.post_session_notification(&session, &transition.pane_id, cx);
+            #[cfg(debug_assertions)]
+            {
+                self.posted_notifications.push_back(payload);
+                while self.posted_notifications.len() > 50 {
+                    self.posted_notifications.pop_front();
+                }
+            }
+            #[cfg(not(debug_assertions))]
+            let _ = payload;
+        }
+    }
+
+    /// Clears the mark of every session on screen: at most one tab per half.
+    /// Does nothing while nothing is unread.
+    fn mark_shown_sessions_seen(&mut self, cx: &mut Context<Self>) {
+        if !self.session_attention.values().any(|record| record.unread) {
+            return;
+        }
+        let shown: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|tab| self.session_on_screen(tab))
+            .map(|tab| tab.persistence_id.clone())
+            .collect();
+        let mut cleared = false;
+        for id in shown {
+            let seen = match self.session_attention.get_mut(&id) {
+                Some(record) if record.unread => {
+                    record.unread = false;
+                    Some(*record)
+                }
+                _ => None,
+            };
+            if let Some(record) = seen {
+                self.queue_attention_write(id.clone(), record);
+                cleared = true;
+                // A seen session's notification has nothing left to say.
+                #[cfg(target_os = "macos")]
+                native_notification::dismiss(&id);
+            }
+        }
+        if cleared {
+            self.refresh_worktree_unread();
+            self.mark_activity_dirty();
+        }
+        self.flush_attention_writes(cx);
+    }
+
+    /// Queues a record for the database, and forgets that the id once came back
+    /// unmatched: a new record is written at the next flush.
+    fn queue_attention_write(&mut self, persistence_id: String, record: TabAttention) {
+        self.attention_unmatched.remove(&persistence_id);
+        self.pending_attention_writes.insert(persistence_id, record);
+    }
+
+    /// Writes the pending attention records. A record whose tab has no row yet (a
+    /// tab younger than one save debounce) stays pending while the tab is still
+    /// held, and is tried again only after the next layout save: a row can only
+    /// appear with one, so retrying on every flush is a transaction and a rebuild of
+    /// the held sessions per frame. The tab of a Show session never gets a row (its
+    /// save excludes it), so its record is dropped at the first answer. Does
+    /// nothing while nothing is eligible, so the per-frame call is a field read.
+    fn flush_attention_writes(&mut self, cx: &App) {
+        if self.pending_attention_writes.is_empty() {
+            return;
+        }
+        let saves = self.session.layout_saves();
+        let writes: Vec<(String, TabAttention)> = self
+            .pending_attention_writes
+            .iter()
+            .filter(|(id, _)| {
+                self.attention_unmatched
+                    .get(*id)
+                    .is_none_or(|answered_at| *answered_at < saves)
+            })
+            .map(|(id, record)| (id.clone(), *record))
+            .collect();
+        if writes.is_empty() {
+            return;
+        }
+        let unmatched: HashSet<String> =
+            self.session.set_tab_attention(&writes).into_iter().collect();
+        for (id, _) in &writes {
+            if unmatched.contains(id) {
+                self.attention_unmatched.insert(id.clone(), saves);
+            } else {
+                self.pending_attention_writes.remove(id);
+                self.attention_unmatched.remove(id);
+            }
+        }
+        if unmatched.is_empty() {
+            return;
+        }
+        let held: HashSet<String> = self
+            .held_sessions()
+            .into_iter()
+            .map(|session| session.persistence_id)
+            .collect();
+        let excluded_from_saves: HashSet<&str> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab_shows_attached_session(tab, cx))
+            .map(|tab| tab.persistence_id.as_str())
+            .collect();
+        self.pending_attention_writes.retain(|id, _| {
+            !unmatched.contains(id) || (held.contains(id) && !excluded_from_saves.contains(id.as_str()))
+        });
+        let pending = &self.pending_attention_writes;
+        self.attention_unmatched.retain(|id, _| pending.contains_key(id));
+    }
+
+    /// A closed or archived tab has no session left: its record is written seen
+    /// and idle (a row an archive keeps must not come back unread) and leaves
+    /// memory. A worktree switch or an eviction never calls this: those sessions
+    /// live on.
+    fn forget_session_attention(&mut self, persistence_id: &str) {
+        self.attention_from_previous_run.remove(persistence_id);
+        if let Some(record) = self.session_attention.remove(persistence_id) {
+            self.queue_attention_write(persistence_id.to_owned(), TabAttention::default());
+            // The session is gone: so is whatever its notification said.
+            #[cfg(target_os = "macos")]
+            native_notification::dismiss(persistence_id);
+            if record.unread {
+                self.refresh_worktree_unread();
+            }
+            self.mark_activity_dirty();
+        }
+    }
+
+    /// `forget_session_attention` for every session of a worktree that is closing:
+    /// the ones Sirio holds, and the ones only the database knows (a worktree this
+    /// run never mounted). Read before the worktree's parked strip is dropped.
+    fn forget_worktree_attention(&mut self, worktree: &Path) {
+        let mut ids: Vec<String> = self
+            .held_sessions()
+            .into_iter()
+            .filter(|session| paths_name_the_same_document(&session.worktree, worktree))
+            .map(|session| session.persistence_id)
+            .collect();
+        ids.extend(
+            self.session
+                .persisted_tabs_for(worktree)
+                .into_iter()
+                .map(|tab| tab.id),
+        );
+        for id in ids {
+            self.forget_session_attention(&id);
+        }
+    }
+
+    /// Debug-only `surface.attention.read` and `surface.attention.act`.
+    fn control_attention(
+        &mut self,
+        act: AttentionAct,
+        cx: &mut Context<Self>,
+    ) -> Result<Vec<(String, String)>, String> {
+        match act {
+            AttentionAct::Read => Ok(self.control_attention_read(cx)),
+            AttentionAct::Focus(focus) => {
+                #[cfg(debug_assertions)]
+                {
+                    self.debug_window_active = focus;
+                }
+                #[cfg(not(debug_assertions))]
+                let _ = focus;
+                self.mark_shown_sessions_seen(cx);
+                cx.notify();
+                Ok(Vec::new())
+            }
+            AttentionAct::Click(id) => {
+                self.queue_workspace_action(WorkspaceAction::OpenNotifiedSession(id));
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// `windowActive` and `sessions`: a JSON array with one object per session
+    /// Sirio can reach, plus one per record whose session it no longer holds. `rows`
+    /// is a second JSON array: each worktree row of the sidebar with its count of
+    /// unread pills, as the sidebar holds them (see `Sidebar::unread_marks`).
+    /// `projects` is one object per project header as the tree draws it (name,
+    /// `expanded`, and the `unreadCount` its folded badge is drawn from), and `tray`
+    /// one per roster entry with the label the tray menu would show.
+    fn control_attention_read(&self, cx: &App) -> Vec<(String, String)> {
+        let status_word = |status: Option<AgentStatus>| match status {
+            Some(_) => serde_json::json!(agent_status_word(status)),
+            None => serde_json::Value::Null,
+        };
+        let held = self.held_sessions();
+        let mut rows: Vec<serde_json::Value> = held
+            .iter()
+            .map(|session| {
+                let record = self
+                    .session_attention
+                    .get(&session.persistence_id)
+                    .copied()
+                    .unwrap_or_default();
+                let keys: Vec<&str> = session.pane_keys.iter().map(String::as_str).collect();
+                serde_json::json!({
+                    "id": session.persistence_id,
+                    "worktree": session.worktree.to_string_lossy(),
+                    "title": session.title,
+                    "kind": if session.chat { "chat" } else { "terminal" },
+                    "unread": self.is_unread(&session.persistence_id),
+                    "running": record.running,
+                    "status": status_word(self.activity.status_for_panes(&keys)),
+                    "onScreen": session.on_screen,
+                })
+            })
+            .collect();
+        for (id, record) in &self.session_attention {
+            if held.iter().any(|session| &session.persistence_id == id) {
+                continue;
+            }
+            rows.push(serde_json::json!({
+                "id": id,
+                "worktree": serde_json::Value::Null,
+                "title": serde_json::Value::Null,
+                "kind": serde_json::Value::Null,
+                "unread": record.unread,
+                "running": record.running,
+                "status": serde_json::Value::Null,
+                "onScreen": false,
+            }));
+        }
+        // What the sidebar holds, not what the host would compute: it is refreshed by the
+        // reconcile a frame drives, so this read never runs one.
+        let sidebar_rows: Vec<serde_json::Value> = self
+            .sidebar
+            .read(cx)
+            .unread_marks()
+            .into_iter()
+            .map(|(worktree, unread)| {
+                serde_json::json!({
+                    "worktree": worktree.to_string_lossy(),
+                    "unread": unread,
+                })
+            })
+            .collect();
+        let projects: Vec<serde_json::Value> = self
+            .sidebar
+            .read(cx)
+            .project_marks()
+            .into_iter()
+            .map(|(name, expanded, unread_count)| {
+                serde_json::json!({
+                    "name": name,
+                    "expanded": expanded,
+                    "unreadCount": unread_count,
+                })
+            })
+            .collect();
+        let now = Instant::now();
+        let tray: Vec<serde_json::Value> = self
+            .tray_roster_snapshot()
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "worktree": entry.path.to_string_lossy(),
+                    "status": status_word(entry.status),
+                    "unread": entry.unread,
+                    "label": tray::roster_menu_label(entry, now),
+                })
+            })
+            .collect();
+        #[cfg(debug_assertions)]
+        let posted: Vec<serde_json::Value> = self
+            .posted_notifications
+            .iter()
+            .map(|payload| {
+                serde_json::json!({
+                    "tag": if payload.session_id.is_empty() {
+                        String::new()
+                    } else {
+                        native_notification::tab_tag(&payload.session_id)
+                    },
+                    "sessionId": payload.session_id,
+                    "worktreeId": payload.worktree_id,
+                    "title": payload.title,
+                    "body": payload.body,
+                })
+            })
+            .collect();
+        #[cfg(not(debug_assertions))]
+        let posted: Vec<serde_json::Value> = Vec::new();
+        vec![
+            (
+                "windowActive".to_string(),
+                self.effective_window_active().to_string(),
+            ),
+            (
+                "sessions".to_string(),
+                serde_json::Value::Array(rows).to_string(),
+            ),
+            (
+                "posted".to_string(),
+                serde_json::Value::Array(posted).to_string(),
+            ),
+            (
+                "rows".to_string(),
+                serde_json::Value::Array(sidebar_rows).to_string(),
+            ),
+            (
+                "projects".to_string(),
+                serde_json::Value::Array(projects).to_string(),
+            ),
+            (
+                "tray".to_string(),
+                serde_json::Value::Array(tray).to_string(),
+            ),
+        ]
+    }
+
+    /// Opens the session with this persistence id: selects its worktree and
+    /// its tab. Being seen then follows from `mark_shown_sessions_seen`. Returns
+    /// `false`, and selects nothing, when no such tab exists any more.
+    ///
+    /// The worktree is looked up in the tabs mounted, the chats retained across
+    /// a worktree switch and the parked strips (`held_sessions`), then in the
+    /// database, whose open tabs also name worktrees not yet mounted.
+    fn open_session(
+        &mut self,
+        persistence_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let worktree = self
+            .held_sessions()
+            .into_iter()
+            .find(|session| session.persistence_id == persistence_id)
+            .map(|session| session.worktree)
+            .or_else(|| self.session.worktree_path_of_tab(persistence_id));
+        let Some(worktree) = worktree else {
+            return false;
+        };
+        if !paths_name_the_same_document(&worktree, &self.working_directory)
+            && self
+                .select_worktree(worktree.clone(), Some(window), cx)
+                .is_err()
+        {
+            return false;
+        }
+        let Some(tab_id) = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.persistence_id == persistence_id
+                    && paths_name_the_same_document(&self.tab_worktree_path(tab.id), &worktree)
+            })
+            .map(|tab| tab.id)
+        else {
+            return false;
+        };
+        self.select_tab(tab_id, Some(window), cx);
+        true
     }
 
     /// F-CORE-DOM-07: on a running→done/needs-input transition, throttled
@@ -14163,6 +15411,7 @@ impl SirioWorkspace {
         } else {
             self.retained_worktree_chats.insert(worktree_id, retained);
         }
+        self.invalidate_unmounted_sessions();
     }
 
     /// The Trace tabs on screen, each with the chat tab it shows.
@@ -14229,6 +15478,7 @@ impl SirioWorkspace {
                 attached_panes,
             },
         );
+        self.invalidate_unmounted_sessions();
         // The outgoing worktree is saved now, and that save never names an
         // attached tab; the parked copy above keeps it.
         self.saved_layout(cx)
@@ -14530,6 +15780,8 @@ impl SirioWorkspace {
         let archived = (self.tabs[index].kind == TabKind::AgentChat)
             .then(|| self.tabs[index].persistence_id.clone())
             .filter(|id| self.session.archive_tab(id, unix_now_ms()));
+        // Archived or deleted, the tab's session is over: its record leaves with it.
+        let closing_persistence_id = self.tabs[index].persistence_id.clone();
         // Read while the tab is still here: only a tab that held a change
         // request's refs can be the last one holding them (spec §6.4).
         let held_revision_refs = tab_holds_revision_refs(&self.tabs[index], cx);
@@ -14541,6 +15793,9 @@ impl SirioWorkspace {
         let mut closed_panes = Vec::new();
         self.tabs[index].panes.for_each(&mut |pane_id, content| {
             closed_panes.push(pane_id);
+            if let TabContent::Chat(chat) = content {
+                self.chat_evidence.remove(&chat.entity_id());
+            }
             if let Some(terminal) = content.terminal() {
                 terminals.push(terminal);
                 terminal_pane_ids.push(pane_id);
@@ -14605,6 +15860,7 @@ impl SirioWorkspace {
         }
         self.tabs.remove(index);
         self.tab_worktree_paths.remove(&tab_id);
+        self.forget_session_attention(&closing_persistence_id);
         let worktree_id = worktree_path.to_string_lossy().into_owned();
         for pane_id in terminal_pane_ids {
             self.terminal_pane_cache
@@ -14967,7 +16223,10 @@ impl SirioWorkspace {
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "Terminal".to_owned());
-                if !self.session.append_terminal_tab(&tab_dir, leaf, &title) {
+                if self.session.append_terminal_tab(&tab_dir, leaf, &title) {
+                    // A layout the index of unmounted sessions reads has a tab more.
+                    self.invalidate_unmounted_sessions();
+                } else {
                     let active = self.working_directory.clone();
                     self.insert_orphan_terminal_tab(leaf, active, true, cx);
                 }
@@ -20685,6 +21944,10 @@ impl SirioWorkspace {
     /// The Primary rail's reads (`primaryCollapsed`, `peekTab`, `railTabs`,
     /// the drawn widths and, in debug builds, `railRects`) are spec
     /// 2026-11-01-primary-rail §8; `railTabs` positions are 1-based the same way.
+    /// `railUnread` (unread sessions spec §3, added at the rebase onto the rail)
+    /// lists the 1-based positions of the Primary tabs whose session is unread,
+    /// comma separated, empty when none: the icons that draw the unread ring
+    /// while the rail is drawn. Like `railTabs`, it is filled when it is not.
     fn control_read_layout(&self, cx: &Context<Self>) -> Vec<(String, String)> {
         let secondary: Vec<(usize, &OpenTab)> = self
             .tabs
@@ -20761,6 +22024,20 @@ impl SirioWorkspace {
                                 .unwrap_or(ActivityStatus::Idle);
                             format!("{}:{}", index + 1, tab_status_name(status))
                         })
+                        .collect(),
+                ),
+            ),
+            // The 1-based positions of the Primary's unread tabs, in rail order
+            // (the icons that draw the unread ring); empty when none.
+            (
+                "railUnread".into(),
+                join(
+                    self.center_split
+                        .tabs_for(PaneRole::Primary, &self.tabs)
+                        .into_iter()
+                        .filter_map(|id| self.tabs.iter().position(|tab| tab.id == id))
+                        .filter(|index| self.is_unread(&self.tabs[*index].persistence_id))
+                        .map(|index| (index + 1).to_string())
                         .collect(),
                 ),
             ),
@@ -22383,6 +23660,9 @@ impl SirioWorkspace {
                 // in `close_tab` for why `Drop` does not suffice.
                 surface.update(cx, |surface, _| surface.close_native());
             }
+            if let TabContent::Chat(chat) = &removed {
+                self.chat_evidence.remove(&chat.entity_id());
+            }
             let replacement = tab.panes.first_id().unwrap_or(focused_pane);
             tab.focused_pane = replacement;
             if let Some(window) = window {
@@ -23909,7 +25189,10 @@ impl SirioWorkspace {
         let moved_terminal = moved.terminal();
         if source_will_be_empty {
             self.tab_worktree_paths.remove(&source_tab_id);
+            // The tab is gone, its pane lives on in another one: the mark does not follow.
+            let dropped_persistence_id = self.tabs[source_index].persistence_id.clone();
             self.tabs.remove(source_index);
+            self.forget_session_attention(&dropped_persistence_id);
         } else {
             self.tabs[source_index]
                 .session_state
@@ -26574,6 +27857,7 @@ impl Render for SirioWorkspace {
         if self.sync_entity_evidence(cx) {
             self.mark_activity_dirty();
         }
+        self.drain_activity_transitions(cx);
         // F-CHG-02: worktree currency can change passively (the catalog
         // re-matching `working_directory` with no `select_worktree` call),
         // so no mutation site arms the gate for it. One bool compare per
@@ -26586,10 +27870,10 @@ impl Render for SirioWorkspace {
         // F-CORE-ACT-20: same "polled, not pushed" reasoning as the comment
         // above -- `Window::is_window_active` is a real, portable GPUI call
         // (every platform's own window backs it; nothing linux-specific is
-        // needed to read it), but the callbacks that actually decide
-        // whether to notify (`post_activity_notification`, off Layer B/C/D
-        // activity transitions) carry no `Window`. `render` does, every
-        // frame, so the value is cached here for those to read.
+        // needed to read it), but `on_pane_transition`, which decides each
+        // stop from every layer's status changes, is reached from callbacks
+        // that carry no `Window`. `render` does, every frame, so the value
+        // is cached here for it to read.
         //
         // #114 rides the same poll for free: on the false→true focus
         // transition only -- the user came back from doing git work in
@@ -26597,8 +27881,10 @@ impl Render for SirioWorkspace {
         // retells each branch label truthfully. Every other frame this is
         // a field comparison; a call here at any wider cadence would both
         // burn reads the Pi can't spare and notify-loop forever.
-        let was_window_active = self.window_active;
+        let was_window_active = self.last_polled_window_active;
         self.window_active = window.is_window_active();
+        self.last_polled_window_active = self.window_active;
+        self.mark_shown_sessions_seen(cx);
         self.keep_active_tab_visible(window, *Theme::get(cx));
         if !was_window_active && self.window_active {
             let working_directory = self.working_directory.clone();
@@ -30229,12 +31515,28 @@ fn main() {
         // read once now, off the UI thread. A read never shows a prompt.
         #[cfg(target_os = "macos")]
         {
-            native_notification::install(cx);
             cx.background_executor()
                 .spawn(async {
                     sirio_privacy::probe::status(sirio_privacy::PermissionKind::Notifications);
                 })
                 .detach();
+        }
+        // The name and id a Linux notification daemon shows the app under.
+        #[cfg(target_os = "linux")]
+        cx.set_app_identity("app.sirioai.sirio", "Sirio");
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            native_notification::install(cx);
+            // A click on a notification only queues the session to open: this
+            // callback has an `App` and neither a window nor the workspace.
+            let pending = pending_actions.clone();
+            cx.on_system_notification_response(move |response, _cx| {
+                if let Some(id) = native_notification::session_id_of_tag(&response.tag)
+                    && let Ok(mut actions) = pending.lock()
+                {
+                    actions.push(WorkspaceAction::OpenNotifiedSession(id.to_string()));
+                }
+            });
         }
 
         let panes_for_host_link = panes.clone();
@@ -30509,6 +31811,11 @@ fn main() {
                     // back is the only moment Sirio can notice: an open
                     // Permissions page re-reads macOS then.
                     cx.observe_window_activation(window, |workspace, window, cx| {
+                        // A stop never reads a focus older than the last
+                        // activation change, and a session already on screen
+                        // is seen the moment the window is active.
+                        workspace.window_active = window.is_window_active();
+                        workspace.mark_shown_sessions_seen(cx);
                         if window.is_window_active() {
                             workspace.refresh_permissions_on_screen(cx);
                         }
@@ -40897,8 +42204,8 @@ done
     /// `Window::is_window_active`, not stay pinned to its own `true`
     /// starting value -- that pinned value is exactly what the production
     /// call site hardcoded before this fix (`main.rs`, the
-    /// `NotificationPolicy::should_notify` call
-    /// `post_activity_notification` makes), silently making the
+    /// `StopPolicy::decide` call that
+    /// `on_pane_transition` makes), silently making the
     /// desktop-focus half of that clause unable to vary. `gpui`'s own test
     /// platform makes this a real, non-tautological assertion: a freshly
     /// opened `TestWindow` reports `is_active() == false` unconditionally
@@ -46092,6 +47399,7 @@ done
             | ControlAction::ProjectIdentityRead { reply }
             | ControlAction::PromptsRead { reply }
             | ControlAction::ProjectIdentityAct { reply, .. }
+            | ControlAction::Attention { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -46222,6 +47530,8 @@ done
             "surface.host.end_all" => request_with_params(method, &[]),
             "surface.terminal.open" => request_with_params(method, &[]),
             "surface.settings.act" => request_with_params(method, &[("action", "install-hooks")]),
+            "surface.attention.read" => request::attention_read(),
+            "surface.attention.act" => request_with_params(method, &[("focus", "active")]),
             "surface.terminal.restart" | "surface.terminal.state" => {
                 request_with_params(method, &[("pane", "pane-1")])
             }
@@ -50703,7 +52013,12 @@ browser  profile  "
             let roster = workspace.tray_roster_snapshot();
             let summary: Vec<(String, AgentStatus)> = roster
                 .iter()
-                .map(|entry| (entry.branch.clone(), entry.status))
+                .map(|entry| {
+                    (
+                        entry.branch.clone(),
+                        entry.status.expect("every listed entry has a status here"),
+                    )
+                })
                 .collect();
             assert_eq!(
                 summary,

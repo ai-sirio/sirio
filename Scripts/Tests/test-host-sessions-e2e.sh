@@ -44,6 +44,13 @@ set -eEuo pipefail
 #                       held: its codex notify names that fresh id, not the held one (I1)
 #   32. restored-agent-rebind-resumes-under-its-id  a restored agent whose id is held by
 #                       another worktree resumes its saved session under the fresh id (I1)
+#   33. unread-across-restart  an agent that stopped while the app was closed comes back
+#                       unread and posts nothing; the mark survives a second restart and
+#                       leaves with its tab
+#   34. unread-unmounted-after-restart  after a relaunch, an agent of a worktree this run has not
+#                       mounted stops (a needs-input hook, no Running first, the Codex shape): its
+#                       session is marked unread and posts one notification naming its branch;
+#                       selecting its worktree and looking clears the mark, once
 #
 # Prints `CASE <n> <name> PASS|FAIL` per case, `HOST SESSIONS E2E OK (<n> cases,
 # <s>s)` at the end.
@@ -226,14 +233,17 @@ new_world() { # name
 }
 
 # Starts the app of the current world. Extra NAME=value arguments go to its
-# environment. Waits for its control socket.
+# environment. Waits for its control socket. The app posts notifications over
+# D-Bus on Linux: its bus is a path that holds nothing, never the user's own.
 app_start() {
   local extra=("$@")
   rm -f "$SIRIO_SOCKET"
   if [ "$STATE_ONLY" -eq 1 ] || [ -z "$DISPLAY_TARGET" ]; then
-    (cd "$W/repo" && exec env -u DISPLAY -u WAYLAND_DISPLAY ${extra[@]+"${extra[@]}"} "$APP_EXE" >>"$W/app.log" 2>&1) &
+    (cd "$W/repo" && exec env -u DISPLAY -u WAYLAND_DISPLAY "DBUS_SESSION_BUS_ADDRESS=unix:path=$W/no-bus" \
+      ${extra[@]+"${extra[@]}"} "$APP_EXE" >>"$W/app.log" 2>&1) &
   else
     (cd "$W/repo" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 \
+      "DBUS_SESSION_BUS_ADDRESS=unix:path=$W/no-bus" \
       ${VULKAN_ENV[@]+"${VULKAN_ENV[@]}"} ${extra[@]+"${extra[@]}"} "$APP_EXE" >>"$W/app.log" 2>&1) &
   fi
   APP_PID=$!
@@ -1510,6 +1520,12 @@ notify = json.loads(args[1][len("notify="):])
 subprocess.run(notify + ["--agent-session", "e2e-" + pane], check=False)
 with open(base + ".env", "w") as f:
     f.write(pane)
+# E2E_STUB_EXIT_ON names a file: the stub leaves, exit 0, once it exists.
+door = os.environ.get("E2E_STUB_EXIT_ON")
+if door:
+    while not os.path.exists(door):
+        time.sleep(0.1)
+    sys.exit(0)
 time.sleep(300)
 STUB
   chmod +x "$W/bin/codex"
@@ -1632,6 +1648,279 @@ case_restored_agent_rebind_resumes_under_its_id() {
   [ "$(session_pid "$pane_a")" = "$control_pid" ] || fail "B's session $pane_a changed pid"
   pid_alive "$control_pid" || fail "B's session pid $control_pid is not alive"
   NOTE="B's $pane_a (pid $control_pid) untouched; A's restored agent took $pane_new and resumed $ref under it"
+}
+
+# ---------------------------------------------------------------- unread across a restart
+
+# `surface attention read` as JSON, one reply object.
+attention_json() { ctl_json surface attention read; }
+# The id of every session the read lists, one per line, sorted.
+attention_ids() {
+  attention_json | python3 -c 'import json, sys
+reply = json.load(sys.stdin)[0]
+print("\n".join(sorted(row["id"] for row in json.loads(reply["sessions"]))))'
+}
+# One field of the session with id $1 ("" when the read does not list it): strings as they
+# are, everything else as JSON.
+attention_field() { # id field
+  attention_json | python3 -c 'import json, sys
+reply = json.load(sys.stdin)[0]
+for row in json.loads(reply["sessions"]):
+    if row["id"] == sys.argv[1]:
+        value = row[sys.argv[2]]
+        print(value if isinstance(value, str) else json.dumps(value))
+        break' "$1" "$2"
+}
+attention_field_is() { [ "$(attention_field "$1" "$2")" = "$3" ]; }
+# The notifications the app decided to post since it started, as a count.
+posted_total() {
+  attention_json | python3 -c 'import json, sys
+print(len(json.loads(json.load(sys.stdin)[0]["posted"])))'
+}
+# The saved read, as this case's artifact: <prefix>-NAME.json under the out dir (case33 unless
+# a case sets ATTENTION_ARTIFACT).
+save_attention_read() { # name
+  local file="$OUT_DIR/${ATTENTION_ARTIFACT:-case33}-$1.json"
+  attention_json | python3 -c 'import json, sys
+reply = json.load(sys.stdin)[0]
+reply["sessions"] = json.loads(reply["sessions"])
+reply["posted"] = json.loads(reply["posted"])
+json.dump(reply, open(sys.argv[1], "w"), indent=2)' "$file"
+  [ -s "$file" ] || fail "no ${file##*/} was written"
+}
+# The position (1-based) of the tab whose title is the title of session $1.
+tab_position_of_session() { # id
+  local title
+  title=$(attention_field "$1" title)
+  ctl_json surface tabs read | python3 -c 'import json, sys
+tabs = json.load(sys.stdin)[0]
+for key, value in tabs.items():
+    if key.startswith("tab.") and value.split("|", 2)[2] == sys.argv[1]:
+        print(key.split(".")[1])
+        break' "$title"
+}
+
+# A restart keeps what the sidebar marked (the unread mark is saved before the quit), and
+# an agent that stopped while Sirio was closed is marked unread without a notification.
+# The stub is the agent: it leaves, exit 0, when a file appears. The app is down at that
+# moment, so only the pane's own exit reaches the relaunched app (Layer E's Done).
+#
+# A restored terminal opens its session when it is first drawn, so the agent tab is the
+# active one at every start here, and the window is forced inactive from the first frame
+# (SIRIO_DEBUG_WINDOW_ACTIVE, a debug-only launch knob; no OS focus is relied on): the tab
+# is drawn and the stop it reads is off screen. A session that was not drawn yet reads no
+# exit at all, so a run that draws nothing skips the case on Linux. macOS draws a window
+# even in its state-only run.
+# The saved row is read from the world's own database between the quits.
+saved_attention() { # id: "unread last_running" of the tab's row, read-only; empty when no row
+  python3 -I - "$W/s.sqlite" "$1" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+row = conn.execute("SELECT unread, last_running FROM tab WHERE id = ?", (sys.argv[2],)).fetchone()
+print("%s %s" % row if row else "")
+PY
+}
+saved_attention_is() { [ "$(saved_attention "$1")" = "$2" ]; }
+case_unread_across_restart() {
+  if [ "$OS" = linux ] && { [ "$STATE_ONLY" -eq 1 ] || [ -z "$DISPLAY_TARGET" ]; }; then
+    SKIPPED=1
+    NOTE="SKIP: a restored terminal opens its session only when it is drawn; pass --xvfb or --display :N"
+    return 0
+  fi
+  new_world c33
+  install_codex_stub
+  local exit_file="$W/stub/exit"
+  local -a agent_env=("PATH=$W/bin:$PATH" "SHELL=$W/bin/guard-shell" "E2E_STUB_DIR=$W/stub" "E2E_STUB_EXIT_ON=$exit_file" "SIRIO_DEBUG_WINDOW_ACTIVE=inactive")
+  app_start "${agent_env[@]}"
+  select_repo "$W/repo"
+  local before agent_id pane_a stub_pid
+  before=$(attention_ids)
+  ctl surface terminal open --agent codex >/dev/null || fail "the agent terminal was refused"
+  wait_until 60 codex_launched || fail "the codex agent never started"
+  pane_a=$(cat "$(newest_codex env)")
+  stub_pid=$(basename "$(newest_codex env)" .env)
+  stub_pid=${stub_pid#codex-}
+  agent_id=$(comm -13 <(printf '%s\n' "$before") <(attention_ids) | head -n 1)
+  [ -n "$agent_id" ] || fail "the attention read lists no new session for the agent tab"
+  echo "step: the agent tab is $agent_id ($pane_a), its stub pid $stub_pid"
+  attention_field_is "$agent_id" onScreen false || fail "the agent tab is on screen under an inactive window: its stop would not be off screen"
+  # The stub reports one finished turn as it starts (its notify), which is a stop off screen:
+  # the tab is looked at, so the mark it left is gone before the case begins.
+  wait_until 10 attention_field_is "$agent_id" unread true || fail "the stub's own notify marked nothing (unread '$(attention_field "$agent_id" unread)')"
+  ctl surface attention act --focus active >/dev/null || fail "surface attention act --focus active was refused"
+  wait_until 10 attention_field_is "$agent_id" unread false || fail "looking at the agent tab did not clear its mark"
+  ctl surface attention act --focus inactive >/dev/null || fail "surface attention act --focus inactive was refused"
+  ctl notify --session "$pane_a" --status running >/dev/null || fail "notify running for $pane_a was refused"
+  wait_until 10 attention_field_is "$agent_id" status running || fail "the agent tab never read running (status '$(attention_field "$agent_id" status)')"
+  attention_field_is "$agent_id" unread false || fail "the agent tab reads unread while it runs"
+  # A moment for the running record to reach the database, then the app goes away.
+  sleep 1
+  app_quit
+  : >"$exit_file"
+  wait_until 10 pid_dead "$stub_pid" || fail "the agent's pid $stub_pid did not leave after the exit file appeared"
+  echo "step: the agent stopped while the app was closed; Sirio starts again"
+  app_start "${agent_env[@]}"
+  wait_until 30 attention_field_is "$agent_id" unread true \
+    || fail "the agent that stopped while Sirio was closed is not unread (unread '$(attention_field "$agent_id" unread)'; read: $(attention_json | tr '\n' ' '))"
+  [ "$(posted_total)" = 0 ] || fail "a restore stop posted a notification: $(attention_json | tr '\n' ' ')"
+  save_attention_read restored
+  echo "OK: the agent that stopped while closed is unread, and the new process posted nothing"
+  # The mark is on disk before the next quit: a lost write would still pass the second start,
+  # which finds the stop again by itself.
+  wait_until 10 saved_attention_is "$agent_id" "1 0" \
+    || fail "the database holds '$(saved_attention "$agent_id")' (unread last_running) for the agent tab, not '1 0'"
+  python3 -I -c 'import json, sys; u, r = sys.argv[1:3]; json.dump({"id": sys.argv[3], "unread": int(u), "last_running": int(r)}, open(sys.argv[4], "w"), indent=2)' \
+    $(saved_attention "$agent_id") "$agent_id" "$OUT_DIR/case33-db.json"
+  [ -s "$OUT_DIR/case33-db.json" ] || fail "no case33-db.json was written"
+
+  echo "step: the saved mark survives another restart"
+  app_quit
+  app_start "${agent_env[@]}"
+  wait_until 30 attention_field_is "$agent_id" unread true \
+    || fail "the saved unread mark did not survive a second restart (unread '$(attention_field "$agent_id" unread)'; read: $(attention_json | tr '\n' ' '))"
+  sleep 2
+  attention_field_is "$agent_id" unread true || fail "the saved mark was cleared by the second start"
+  [ "$(posted_total)" = 0 ] || fail "a saved mark posted a notification: $(attention_json | tr '\n' ' ')"
+  save_attention_read saved
+
+  echo "step: closing the agent tab forgets its mark"
+  local position tabs_before
+  tabs_before=$(tab_count)
+  position=$(tab_position_of_session "$agent_id")
+  [ -n "$position" ] || fail "no tab carries the agent's title '$(attention_field "$agent_id" title)'"
+  ctl surface tabs close "$position" --confirm >/dev/null || fail "closing the agent tab was refused"
+  wait_until 10 tab_count_is $((tabs_before - 1)) || fail "the agent tab did not close (tabs: $(tab_count), were $tabs_before)"
+  [ -z "$(attention_field "$agent_id" id)" ] || [ "$(attention_field "$agent_id" unread)" = false ] \
+    || fail "the closed agent tab still reads unread"
+  sleep 1
+  app_quit
+  app_start "${agent_env[@]}"
+  attention_ids | grep -qx "$agent_id" && fail "the closed agent tab $agent_id is still listed after a restart"
+  save_attention_read closed
+  NOTE="the agent $agent_id came back unread without a notification, kept its mark over a second restart, and left with its tab"
+}
+
+# ---------------------------------------------------------------- unread in an unmounted worktree
+
+# The `posted` entries naming session $1, as a count.
+posted_for() { # id
+  attention_json | python3 -c 'import json, sys
+posted = json.loads(json.load(sys.stdin)[0]["posted"])
+print(sum(1 for entry in posted if entry["sessionId"] == sys.argv[1]))' "$1"
+}
+posted_for_session() { [ "$(posted_for "$1")" -ge 1 ]; }
+# One field of the first `posted` entry naming session $1 ("" when none).
+posted_field() { # id field
+  attention_json | python3 -c 'import json, sys
+for entry in json.loads(json.load(sys.stdin)[0]["posted"]):
+    if entry["sessionId"] == sys.argv[1]:
+        print(entry[sys.argv[2]])
+        break' "$1" "$2"
+}
+# One field of the tray roster entry for the worktree at $1 ("" when the roster lists none): the
+# read's `tray`, which no frame writes (strings as they are, everything else as JSON).
+tray_field() { # path field
+  attention_json | python3 -c 'import json, os, sys
+for row in json.loads(json.load(sys.stdin)[0]["tray"]):
+    if os.path.realpath(row["worktree"]) == os.path.realpath(sys.argv[1]):
+        value = row[sys.argv[2]]
+        print(value if isinstance(value, str) else json.dumps(value))
+        break' "$1" "$2"
+}
+# How many times the attention read lists session $1.
+attention_listed() { # id
+  attention_ids | grep -cx "$1" || true
+}
+# The id the control socket names the worktree at $1 by.
+worktree_id_of() { # path
+  ctl_json project list | python3 -c '
+import json, os, sys
+target = os.path.realpath(sys.argv[1])
+for project in json.load(sys.stdin):
+    for wt in json.loads(project["worktrees"]):
+        if os.path.realpath(wt["path"]) == target:
+            print(wt["id"])
+            raise SystemExit' "$1"
+}
+
+# The restart story for a worktree the new process has not mounted: the agent in B kept
+# running on the host, and B is neither mounted nor parked after the relaunch (the primary
+# worktree was the selected one). Its hooks still reach the app, so the stop must be found
+# through the layout the database holds for B (the first fix), and it is a live stop: a hook
+# push in this run proves the agent is alive now, so it is not read as a stop found at launch
+# (the second fix). Codex's hook sends only needs-input, never Running first, which is the
+# shape that read as a restore. B is never on screen until it is mounted, so the stop marks
+# and posts at once; no display is needed, and the knob forces the window inactive so the
+# first stop of the run is the one the case looks at.
+case_unread_unmounted_after_restart() {
+  new_world c34
+  git -C "$W/repo" worktree add -q "$W/wt-b" -b feature-b
+  install_codex_stub
+  local -a agent_env=("PATH=$W/bin:$PATH" "SHELL=$W/bin/guard-shell" "E2E_STUB_DIR=$W/stub" "SIRIO_DEBUG_WINDOW_ACTIVE=inactive")
+  ATTENTION_ARTIFACT=case34
+  app_start "${agent_env[@]}"
+  select_repo "$W/repo"
+  local primary_id="$WT_ID" b_id before agent_id pane_b
+  b_id=$(worktree_id_of "$W/wt-b")
+  [ -n "$b_id" ] || fail "sirioctl does not list the worktree $W/wt-b"
+  echo "step: worktree B ($b_id) gets a codex agent tab and is selected"
+  ctl select-workspace --workspace "$b_id" >/dev/null || fail "selecting B was refused"
+  sleep 2
+  before=$(attention_ids)
+  ctl surface terminal open --agent codex >/dev/null || fail "the agent terminal was refused"
+  wait_until 60 codex_launched || fail "the codex agent never started"
+  pane_b=$(cat "$(newest_codex env)")
+  agent_id=$(comm -13 <(printf '%s\n' "$before") <(attention_ids) | head -n 1)
+  [ -n "$agent_id" ] || fail "the attention read lists no new session for B's agent tab"
+  echo "step: B's agent tab is $agent_id ($pane_b)"
+  # The stub reports one finished turn as it starts; looking at the tab clears that mark, and
+  # the window is inactive again for the rest of the case.
+  wait_until 10 attention_field_is "$agent_id" unread true || fail "the stub's own notify marked nothing (unread '$(attention_field "$agent_id" unread)')"
+  ctl surface attention act --focus active >/dev/null || fail "surface attention act --focus active was refused"
+  wait_until 10 attention_field_is "$agent_id" unread false || fail "looking at B's agent tab did not clear its mark"
+  ctl surface attention act --focus inactive >/dev/null || fail "surface attention act --focus inactive was refused"
+  ctl notify --session "$pane_b" --status running >/dev/null || fail "notify running for $pane_b was refused"
+  wait_until 10 attention_field_is "$agent_id" status running || fail "B's agent never read running (status '$(attention_field "$agent_id" status)')"
+  # The running flag reaches the database, then the primary worktree is selected and the app goes away.
+  wait_until 10 saved_attention_is "$agent_id" "0 1" \
+    || fail "the database holds '$(saved_attention "$agent_id")' (unread last_running) for B's agent tab, not '0 1'"
+  ctl select-workspace --workspace "$primary_id" >/dev/null || fail "selecting the primary worktree was refused"
+  sleep 1
+  app_quit
+  echo "step: the app starts again with the primary worktree selected: B is not mounted"
+  app_start "${agent_env[@]}"
+  wait_until 30 attention_field_is "$agent_id" running true \
+    || fail "B's agent does not read running after the restart (read: $(attention_json | tr '\n' ' '))"
+  attention_field_is "$agent_id" unread false || fail "B's agent reads unread before it stopped"
+  [ "$(posted_total)" = 0 ] || fail "the restart posted a notification before any stop: $(attention_json | tr '\n' ' ')"
+  echo "step: B's agent reports a turn that needs input (needs-input only, as codex does)"
+  ctl notify --session "$pane_b" --status needs-input >/dev/null || fail "notify needs-input for $pane_b was refused"
+  wait_until 10 attention_field_is "$agent_id" unread true \
+    || fail "the stop of an agent in an unmounted worktree marked nothing (unread '$(attention_field "$agent_id" unread)'; read: $(attention_json | tr '\n' ' '))"
+  wait_until 10 posted_for_session "$agent_id" \
+    || fail "the stop of an agent in an unmounted worktree posted nothing (posted: $(attention_json | tr '\n' ' '))"
+  sleep 1
+  [ "$(posted_total)" = 1 ] || fail "the stop posted $(posted_total) notification(s), not one: $(attention_json | tr '\n' ' ')"
+  [ "$(posted_for "$agent_id")" = 1 ] || fail "the one notification is not B's: $(attention_json | tr '\n' ' ')"
+  [ "$(posted_field "$agent_id" tag)" = "sirio-tab-$agent_id" ] || fail "the notification's tag is '$(posted_field "$agent_id" tag)', not sirio-tab-$agent_id"
+  case "$(posted_field "$agent_id" body)" in *feature-b*) ;; *) fail "the notification's body does not name feature-b: '$(posted_field "$agent_id" body)'" ;; esac
+  echo "OK: B's stop is unread and posted once: '$(posted_field "$agent_id" body)'"
+  # The tray is for the user who is away and follows the marks with no frame, so it lists B,
+  # marked, though no tab of B was ever drawn.
+  [ "$(tray_field "$W/wt-b" unread)" = true ] || fail "the tray does not list B as unread (entry: '$(tray_field "$W/wt-b" unread)'; read: $(attention_json | tr '\n' ' '))"
+  case "$(tray_field "$W/wt-b" label)" in "● "*) ;; *) fail "the tray label of B does not lead with the unread dot: '$(tray_field "$W/wt-b" label)'" ;; esac
+  echo "OK: the tray lists B with its unread dot: '$(tray_field "$W/wt-b" label)'"
+  save_attention_read restored
+  echo "step: selecting B and looking at it clears the mark"
+  ctl select-workspace --workspace "$b_id" >/dev/null || fail "selecting B was refused"
+  ctl surface attention act --focus active >/dev/null || fail "surface attention act --focus active was refused"
+  wait_until 10 attention_field_is "$agent_id" unread false \
+    || fail "showing B did not clear the mark of its agent (unread '$(attention_field "$agent_id" unread)')"
+  [ "$(attention_listed "$agent_id")" = 1 ] || fail "B's agent is listed $(attention_listed "$agent_id") times once B is mounted"
+  [ "$(posted_total)" = 1 ] || fail "mounting B posted another notification: $(attention_json | tr '\n' ' ')"
+  save_attention_read shown
+  ATTENTION_ARTIFACT=
+  NOTE="B's agent $agent_id stopped in a worktree the new process never mounted: unread, one notification, cleared once shown"
 }
 
 # ---------------------------------------------------------------- the run
@@ -1837,6 +2126,8 @@ run_case 29 nested-app-own-host case_nested_app_own_host
 run_case 30 ensure-storm case_ensure_storm
 run_case 31 agent-rebind-reports-under-its-id case_agent_rebind_reports_under_its_id
 run_case 32 restored-agent-rebind-resumes-under-its-id case_restored_agent_rebind_resumes_under_its_id
+run_case 33 unread-across-restart case_unread_across_restart
+run_case 34 unread-unmounted-after-restart case_unread_unmounted_after_restart
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED cases passed)"

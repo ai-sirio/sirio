@@ -553,6 +553,19 @@ pub mod request {
         request("surface.settings.read", BTreeMap::new())
     }
 
+    /// Debug-only `surface.attention.read`: `windowActive` and `sessions`, a JSON
+    /// array of every session's unread mark, running flag and status.
+    pub fn attention_read() -> ControlRequest {
+        request("surface.attention.read", BTreeMap::new())
+    }
+
+    /// Debug-only `surface.attention.act {focus}`: forces the window's focus to
+    /// `active` or `inactive`, or back to the OS's with `os`. With `{click}`
+    /// instead, a click on the notification with that tag.
+    pub fn attention_act(params: BTreeMap<String, String>) -> ControlRequest {
+        request("surface.attention.act", params)
+    }
+
     /// Debug-only `surface.settings.act {action}`: runs the install a Settings
     /// button runs, and replies with the card's words under `report`.
     pub fn settings_act(action: &str) -> ControlRequest {
