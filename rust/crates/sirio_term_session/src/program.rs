@@ -373,8 +373,8 @@ fn read_argv(pid: libc::c_int) -> Option<Vec<String>> {
 /// XNU's `exec_extract_strings` pads after the path until the string space is a multiple of the
 /// pointer size (8 for a 64-bit image), so argv[0] starts at `(path_len + 1)` rounded up to 8,
 /// counted from the path's first byte. Skipping every NUL after the path is wrong: an empty
-/// argv[0] is a single NUL, and it would be taken for padding, shifting argv left by one and
-/// and can pull the first environment string into argv. When the bytes up to that offset
+/// argv[0] is a single NUL, and it would be taken for padding, shifting argv left by one, which
+/// can pull the first environment string into argv. When the bytes up to that offset
 /// are not all NULs (a layout this rule does not describe, such as a 32-bit image padded to 4),
 /// every NUL is skipped as a fallback.
 #[cfg(target_os = "macos")]
