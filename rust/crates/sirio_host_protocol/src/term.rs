@@ -138,6 +138,54 @@ pub struct SessionSummary {
     pub clients: u32,
     /// Seconds since the Unix epoch.
     pub created_at: u64,
+    /// The program holding the terminal, when it is not the shell
+    /// (`term.program`, minor 3). Absent from a host without the capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<ForegroundProgram>,
+    /// The program's last OSC 7501 report (`term.program`, minor 3). It ends
+    /// with the program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProgramStatus>,
+}
+
+/// The program in the foreground of a session's terminal, read by the host from
+/// the process itself. Never the shell.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct ForegroundProgram {
+    pub pid: u32,
+    pub name: String,
+    /// At most 32 entries of at most 1024 bytes each, and 4096 bytes in all.
+    pub argv: Vec<String>,
+    /// Absent when the host could not read it or it is longer than 1024 bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// What a program reports about itself with OSC 7501.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Done,
+    Blocked,
+    Error,
+    /// A state a newer host sent. This host never produces it.
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct ProgramStatus {
+    pub state: ProgramState,
+    /// Only `permission`, `question` or `auth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Only 1 to 64 bytes of `[A-Za-z0-9._-]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    /// Milliseconds since the session started, when this state was first seen.
+    pub at_ms: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -151,6 +199,21 @@ pub enum SessionEvent {
     Exited { session_id: String, status: ExitStatus },
     Title { session_id: String, title: String },
     Foreground { session_id: String, running: bool },
+    /// The program holding the terminal changed; `None` is the shell again
+    /// (`term.program`).
+    Program {
+        session_id: String,
+        #[serde(default)]
+        program: Option<ForegroundProgram>,
+    },
+    /// The program's report changed; `None` clears it. `at_ms` is the stamp of
+    /// the state (`term.program`).
+    Status {
+        session_id: String,
+        #[serde(default)]
+        status: Option<ProgramStatus>,
+        at_ms: u64,
+    },
     Closed { session_id: String },
     /// Sent on the stream's own connection: the host detached `stream`
     /// because its queue filled; re-attach for a snapshot.

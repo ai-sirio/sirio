@@ -285,6 +285,7 @@ mod display_backend;
 mod forge;
 #[cfg(not(windows))]
 mod login_path;
+mod host_programs;
 mod host_sessions;
 mod lsp;
 mod lsp_install;
@@ -293,6 +294,7 @@ mod lsp_install;
 mod native_notification;
 #[cfg(feature = "perf-native")]
 mod native_perf;
+mod opencode;
 mod panel_layout;
 mod panes;
 mod primary_rail;
@@ -2282,6 +2284,11 @@ impl HostTerminal {
             .ok()?
             .as_ref()
             .map(|link| link.client.clone())
+    }
+
+    /// The factory's reconnect closure itself, for a thread that keeps no client here.
+    fn reconnect_fn(&self) -> Option<host_programs::Reconnect> {
+        self.link.lock().ok()?.as_ref()?.reconnect.clone()
     }
 
     /// Rebuilds the client through the factory's reconnect and keeps it.
@@ -5846,6 +5853,9 @@ struct SirioWorkspace {
     /// pane, through `Chat`'s own state) —
     /// never a second, independently-tracked flag.
     activity: AgentActivityModel,
+    /// OpenCode sends no status in the terminal: the panes that run it and the watch
+    /// that reads their sessions from OpenCode's own service (`opencode.rs`).
+    opencode: opencode::OpenCodeStatus,
     /// Shell-only terminal facts, keyed by the terminal entity rather than
     /// pane id because pane ids are reused when another worktree is mounted.
     /// Content repaint notifications must never invalidate this workspace.
@@ -6074,6 +6084,9 @@ struct SirioWorkspace {
     /// a mounted worktree uses this snapshot when its DB row is empty or
     /// belongs to another worktree.
     parked_worktree_tabs: BTreeMap<String, ParkedWorktreeTabs>,
+    /// The app's listener on the host's `term.sessions` topic, for the tabs no terminal holds
+    /// (`host_programs`): the generation of the one that runs, and what it last heard.
+    host_programs: HostPrograms,
     /// How each new agent tab's terminal was launched (fix batch 7, I1). A pane
     /// that moves to a fresh id launches again from it, under that id.
     new_agent_launches: Vec<NewAgentLaunch>,
@@ -6304,6 +6317,9 @@ impl SirioWorkspace {
         let terminal_font_size = settings.read(cx).snapshot().terminal_font_size;
         panes::bind_keys(cx);
         Self::start_process_signal_polling(cx);
+        let (opencode_events, opencode_inbox) =
+            futures::channel::mpsc::unbounded::<(u64, sirio_opencode_watch::WatchEvent)>();
+        Self::start_opencode_delivery(opencode_inbox, cx);
         cx.bind_keys([
             // cmd-w is the macOS close convention, not a readline key, so it
             // stays unguarded.
@@ -7219,6 +7235,10 @@ impl SirioWorkspace {
                 sink
             },
             activity,
+            opencode: opencode::OpenCodeStatus::new(
+                opencode_events,
+                user_home_dir().unwrap_or_default(),
+            ),
             terminal_shell_evidence,
             chat_evidence: HashMap::new(),
             activity_dirty: true,
@@ -7273,6 +7293,7 @@ impl SirioWorkspace {
             worktree_picker,
             terminal_pane_cache: TerminalPaneCache::new(),
             parked_worktree_tabs: BTreeMap::new(),
+            host_programs: HostPrograms::default(),
             new_agent_launches: Vec::new(),
             retained_worktree_chats: BTreeMap::new(),
             parked_trace_tabs: BTreeMap::new(),
@@ -9797,6 +9818,31 @@ impl SirioWorkspace {
                 format!("terminal-{pane_id}"),
             ));
         });
+        // The registry the host listener reads: every bound terminal, dead ones pruned.
+        if !cx.has_global::<BoundTerminalPanes>() {
+            cx.set_global(BoundTerminalPanes::default());
+        }
+        // A view that is gone or gave its session up is no route for anything.
+        let dead: Vec<gpui::EntityId> = cx
+            .global::<BoundTerminalPanes>()
+            .0
+            .iter()
+            .filter(|(_, (_, held))| {
+                held.upgrade()
+                    .is_none_or(|view| view.read(cx).is_released())
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        {
+            let bound = &mut cx.global_mut::<BoundTerminalPanes>().0;
+            for id in dead {
+                bound.remove(&id);
+            }
+            bound.insert(
+                terminal.entity_id(),
+                (format!("pane-{pane_id}"), terminal.downgrade()),
+            );
+        }
         let subscriptions = vec![
             Self::subscribe_terminal(terminal, tab_id, pane_id, cx),
             Self::subscribe_terminal_link(terminal, pane_id, cx),
@@ -9957,7 +10003,7 @@ impl SirioWorkspace {
             host_sessions::rename_pane_in_session_state(&mut tab.session_state, from, to);
             (tab.id, tab.agent_id.clone(), was_root)
         };
-        self.activity.pane_closed(&format!("pane-{from}"));
+        self.forget_pane_activity(&format!("pane-{from}"));
         register_restored_agent(&mut self.activity, to, agent_id.as_deref());
         if let Some(terminal) = terminal {
             Self::bind_terminal(terminal, tab_id, to, cx);
@@ -10226,7 +10272,7 @@ impl SirioWorkspace {
                         workspace.request_close_terminal_at(tab_id, pane_id, None, cx);
                     }
                     Some(TerminalContextCommand::Restart) => {
-                        terminal_entity.update(cx, |terminal, cx| terminal.restart(cx));
+                        workspace.restart_terminal(&terminal_entity, cx);
                     }
                     None => {}
                 }
@@ -10287,131 +10333,563 @@ impl SirioWorkspace {
         cx.subscribe(
             terminal,
             move |workspace, terminal, event: &TerminalActivityEvent, cx| {
-                // The open was refused because the id is held: the pane takes
-                // a fresh one and opens again (SP2 fix batch 5).
-                if matches!(event, TerminalActivityEvent::IdTaken) {
-                    workspace.rebind_taken_terminal(&terminal, cx);
-                    return;
-                }
-                sirio_perf::event(
-                    match event {
-                        TerminalActivityEvent::OscTitle(_) => "activity_event.osc_title",
-                        TerminalActivityEvent::OutputSettled { .. } => {
-                            "activity_event.output_settled"
-                        }
-                        TerminalActivityEvent::ChildExited { .. } => "activity_event.child_exited",
-                        TerminalActivityEvent::LifecycleChanged { .. } => {
-                            "activity_event.lifecycle_changed"
-                        }
-                        TerminalActivityEvent::SessionLost => "activity_event.session_lost",
-                        TerminalActivityEvent::IdTaken => "activity_event.id_taken",
-                    },
-                    pane_id as u64,
-                );
-                // Layer C's content scan (`detect_content_status`) strips
-                // ANSI, lowercases and substring-scans the whole scrollback
-                // tail -- real work, unlike the other two arms below. Doing
-                // that synchronously here means several panes settling in
-                // the same debounce window serialise on this one UI-thread
-                // callback back-to-back. The scan is a pure `&str ->
-                // Option<AgentStatus>` function (no gpui types), so it moves
-                // to the background executor; only the resulting status
-                // re-enters on the UI thread to mutate the activity model --
-                // same split as `start_process_signal_polling`'s shared
-                // snapshot (#248).
-                if let TerminalActivityEvent::OutputSettled { scrollback } = event {
-                    workspace.spawn_content_signal_scan(
-                        activity_pane_id.clone(),
-                        scrollback.clone(),
-                        Instant::now(),
-                        cx,
-                    );
-                    return;
-                }
-
-                let title_owned_before = workspace.activity.is_title_owned(&activity_pane_id);
-                let transition = panes::apply_terminal_activity_event(
-                    &mut workspace.activity,
-                    &activity_pane_id,
-                    event,
-                    Instant::now(),
-                );
-                match event {
-                    TerminalActivityEvent::ChildExited { status } => {
-                        let evidence = TerminalShellEvidence {
-                            failed: false,
-                            exit_status: Some(*status),
-                        };
-                        workspace
-                            .terminal_shell_evidence
-                            .insert(terminal.entity_id().as_u64(), evidence);
-                        // `sync_entity_evidence` walks only the mounted tabs, so a
-                        // terminal in a worktree that is not selected is told here.
-                        workspace
-                            .activity
-                            .set_entity_status(&activity_pane_id, evidence.status());
-                    }
-                    TerminalActivityEvent::LifecycleChanged {
-                        failed,
-                        exit_status,
-                    } => {
-                        let evidence = TerminalShellEvidence {
-                            failed: *failed,
-                            exit_status: *exit_status,
-                        };
-                        workspace
-                            .terminal_shell_evidence
-                            .insert(terminal.entity_id().as_u64(), evidence);
-                        workspace
-                            .activity
-                            .set_entity_status(&activity_pane_id, evidence.status());
-                    }
-                    TerminalActivityEvent::OscTitle(_)
-                    | TerminalActivityEvent::OutputSettled { .. } => {}
-                    // The host is gone: the pane keeps its scrollback and the
-                    // view draws `Session lost` with `Restart`
-                    // (`TerminalView::restart`, prelude replay). Mark and
-                    // repaint like an exit; Layer D keeps polling `shell_pid()`,
-                    // which now comes from the link.
-                    TerminalActivityEvent::IdTaken => {}
-                    TerminalActivityEvent::SessionLost => {
-                        workspace.mark_activity_dirty();
-                        cx.notify();
-                    }
-                }
-                workspace.drain_activity_transitions(cx);
-                if let Some(transition) = transition.as_ref() {
-                    workspace.request_auto_rename(transition, cx);
-                }
-                // Lifecycle changes must repaint even without a model
-                // transition because the tab's exit/dirty presentation reads
-                // the shell cache. An OscTitle or OutputSettled with no
-                // transition (and no title-owned clear) changes nothing the
-                // workspace draws; the terminal repaints itself through its
-                // own notify.
-                let title_owned_clear =
-                    title_owned_before && !workspace.activity.is_title_owned(&activity_pane_id);
-                if transition.is_some()
-                    || title_owned_clear
-                    || matches!(
-                        event,
-                        TerminalActivityEvent::ChildExited { .. }
-                            | TerminalActivityEvent::LifecycleChanged { .. }
-                    )
-                {
-                    if matches!(event, TerminalActivityEvent::ChildExited { .. }) {
-                        let worktree = workspace.working_directory.clone();
-                        workspace.mark_files_snapshot_dirty(&worktree, cx);
-                    }
-                    workspace.mark_activity_dirty();
-                    sirio_perf::event(
-                        "notify.Workspace.terminal_activity",
-                        cx.entity_id().as_u64(),
-                    );
-                    cx.notify();
-                }
+                workspace.apply_activity_event(&activity_pane_id, event, Some(&terminal), cx);
             },
         )
+    }
+
+    /// Restarts a terminal whose session is alive (the context menu, the debug control: the
+    /// overlay offers Restart only for a lost session). The old session's end is rightly not
+    /// the listener's (the restarting view is its pane's route) and the attached route never
+    /// sees it, so nothing would drop the old session's record, and the turn tracker would drop
+    /// the new session's reports (a small `at_ms`) as replays. The pane is cleared the way a
+    /// moved pane is: nothing is posted and no status stays, and the tab's own agent is
+    /// registered again. A view that shows a session it did not create is not restarted.
+    fn restart_terminal(&mut self, terminal: &Entity<TerminalView>, cx: &mut Context<Self>) {
+        if terminal.read(cx).attached() {
+            return;
+        }
+        if let Some((tab_index, pane_id)) = self.terminal_pane_of(terminal) {
+            let pane_key = format!("pane-{pane_id}");
+            let tab = &self.tabs[tab_index];
+            let agent_id = (tab_primary_pane_id(tab) == Some(pane_id))
+                .then(|| tab.agent_id.clone())
+                .flatten();
+            self.forget_pane_activity(&pane_key);
+            register_restored_agent(&mut self.activity, pane_id, agent_id.as_deref());
+            self.refresh_running_after_clear(&pane_key);
+            self.mark_activity_dirty();
+        }
+        terminal.update(cx, |terminal, cx| terminal.restart(cx));
+        cx.notify();
+    }
+
+    /// What a terminal's activity event does to the workspace, and the one handler of the two
+    /// routes that carry it: a bound terminal's link (`subscribe_terminal_activity`,
+    /// `terminal` is the entity) and the app's listener for the tabs no terminal holds
+    /// (`host_programs`, `terminal: None`, which skips what needs the entity: a refused id and
+    /// the shell's own evidence). `pane_key` is the activity key, `pane-N`.
+    fn apply_activity_event(
+        &mut self,
+        pane_key: &str,
+        event: &TerminalActivityEvent,
+        terminal: Option<&Entity<TerminalView>>,
+        cx: &mut Context<Self>,
+    ) {
+        let activity_pane_id = pane_key.to_owned();
+        let pane_number = pane_key
+            .strip_prefix("pane-")
+            .and_then(|number| number.parse::<u64>().ok())
+            .unwrap_or(0);
+        // The open was refused because the id is held: the pane takes
+        // a fresh one and opens again (SP2 fix batch 5).
+        if matches!(event, TerminalActivityEvent::IdTaken) {
+            if let Some(terminal) = terminal {
+                self.rebind_taken_terminal(terminal, cx);
+            }
+            return;
+        }
+        sirio_perf::event(
+            match event {
+                TerminalActivityEvent::OscTitle(_) => "activity_event.osc_title",
+                TerminalActivityEvent::OutputSettled { .. } => {
+                    "activity_event.output_settled"
+                }
+                TerminalActivityEvent::ChildExited { .. } => "activity_event.child_exited",
+                TerminalActivityEvent::LifecycleChanged { .. } => {
+                    "activity_event.lifecycle_changed"
+                }
+                TerminalActivityEvent::SessionLost => "activity_event.session_lost",
+                TerminalActivityEvent::IdTaken => "activity_event.id_taken",
+                TerminalActivityEvent::Program(_) => "activity_event.program",
+                TerminalActivityEvent::SeededTitle(_) => "activity_event.seeded_title",
+                TerminalActivityEvent::ProgramStatus { .. } => {
+                    "activity_event.program_status"
+                }
+            },
+            pane_number,
+        );
+        // Layer C's content scan (`detect_content_status`) strips
+        // ANSI, lowercases and substring-scans the whole scrollback
+        // tail -- real work, unlike the other two arms below. Doing
+        // that synchronously here means several panes settling in
+        // the same debounce window serialise on this one UI-thread
+        // callback back-to-back. The scan is a pure `&str ->
+        // Option<AgentStatus>` function (no gpui types), so it moves
+        // to the background executor; only the resulting status
+        // re-enters on the UI thread to mutate the activity model --
+        // same split as `start_process_signal_polling`'s shared
+        // snapshot (#248).
+        if let TerminalActivityEvent::OutputSettled { scrollback } = event {
+            self.spawn_content_signal_scan(
+                activity_pane_id.clone(),
+                scrollback.clone(),
+                Instant::now(),
+                cx,
+            );
+            return;
+        }
+
+        // The program left (the shell is the foreground again, or the session
+        // ended or was lost): a turn that was mid-way settles to Done first, and that stop
+        // is drained while the pane is still an agent's. Only then does
+        // `apply_terminal_activity_event` clear the identity.
+        //
+        // A `Program(None)` ends something only when the pane's last `Program` event
+        // named a program: a reconnect's re-seed sends one for a session that never
+        // named one, or whose last event was already a `None` (a spawned agent's, an
+        // agent that took the shell's group with `exec` after an earlier job, every
+        // Windows pane), and that is no exit.
+        let program_none_ends_one = matches!(event, TerminalActivityEvent::Program(None))
+            && self.activity.is_program_running(&activity_pane_id);
+        if program_none_ends_one
+            || matches!(
+                event,
+                TerminalActivityEvent::ChildExited { .. }
+                    | TerminalActivityEvent::SessionLost
+            )
+        {
+            // A failed exit of a spawn-owned pane (none of program-, title- and
+            // process-owned) is Running -> Error in one stop (`apply_exit_result`,
+            // after the record drops below and hands its Running down): settling it
+            // to Done first would make two. The other owners get no
+            // `apply_exit_result`, so they keep the settle.
+            let spawn_owned = !self.activity.is_program_owned(&activity_pane_id)
+                && !self.activity.is_title_owned(&activity_pane_id)
+                && !self.activity.is_process_owned(&activity_pane_id);
+            let fails_unowned = spawn_owned
+                && matches!(
+                    event,
+                    TerminalActivityEvent::ChildExited { status }
+                        if panes::terminal_exit_code(*status) != 0
+                );
+            if !fails_unowned {
+                self.activity
+                    .program_exited(&activity_pane_id, Instant::now());
+            }
+            self.drain_activity_transitions(cx);
+        }
+        // A record lives as long as its session: when the child exits or the
+        // host is lost it goes, whoever owns the pane, and the owner's own
+        // handling follows (a program-owned pane clears, a spawn-owned one
+        // shows its exit code). A new session restarts its clock at zero.
+        if matches!(
+            event,
+            TerminalActivityEvent::ChildExited { .. } | TerminalActivityEvent::SessionLost
+        ) {
+            self.activity
+                .drop_report(&activity_pane_id, Instant::now());
+            // The session ended, so no program of it runs: a Restart under the same
+            // pane id starts a session that has named none, and a `Program(None)`
+            // re-seed of it must end nothing.
+            self.activity.note_program_ended(&activity_pane_id);
+        }
+        let title_owned_before = self.activity.is_title_owned(&activity_pane_id);
+        let identity_before = (
+            self.activity.agent_id(&activity_pane_id).map(str::to_owned),
+            self.activity.is_program_owned(&activity_pane_id),
+        );
+        let transition = panes::apply_terminal_activity_event(
+            &mut self.activity,
+            &activity_pane_id,
+            event,
+            Instant::now(),
+        );
+        // OpenCode's panes: where they run, their titles, and the link to a session.
+        let opencode_changed = self.opencode.note_event(
+            &mut self.activity,
+            &activity_pane_id,
+            event,
+            identity_before.0.as_deref() == Some("opencode"),
+            Instant::now(),
+        );
+        match event {
+            TerminalActivityEvent::ChildExited { status } => {
+                let evidence = TerminalShellEvidence {
+                    failed: false,
+                    exit_status: Some(*status),
+                };
+                // The evidence is kept by the terminal's entity; a pane the host listener
+                // ends has none. `sync_entity_evidence` walks only the mounted tabs, so a
+                // pane in a worktree that is not selected is told here, by either route.
+                if let Some(terminal) = terminal {
+                    self.terminal_shell_evidence
+                        .insert(terminal.entity_id().as_u64(), evidence);
+                }
+                self.activity
+                    .set_entity_status(&activity_pane_id, evidence.status());
+            }
+            TerminalActivityEvent::LifecycleChanged {
+                failed,
+                exit_status,
+            } => {
+                let evidence = TerminalShellEvidence {
+                    failed: *failed,
+                    exit_status: *exit_status,
+                };
+                if let Some(terminal) = terminal {
+                    self.terminal_shell_evidence
+                        .insert(terminal.entity_id().as_u64(), evidence);
+                    self.activity
+                        .set_entity_status(&activity_pane_id, evidence.status());
+                }
+            }
+            TerminalActivityEvent::OscTitle(_)
+            | TerminalActivityEvent::OutputSettled { .. } => {}
+            // The host is gone: the pane keeps its scrollback and the
+            // view draws `Session lost` with `Restart`
+            // (`TerminalView::restart`, prelude replay). Mark and
+            // repaint like an exit; Layer D keeps polling `shell_pid()`,
+            // which now comes from the link.
+            TerminalActivityEvent::IdTaken => {}
+            // The program's identity and its reports were applied above.
+            TerminalActivityEvent::Program(_)
+            | TerminalActivityEvent::ProgramStatus { .. }
+            | TerminalActivityEvent::SeededTitle(_) => {}
+            TerminalActivityEvent::SessionLost => {
+                self.mark_activity_dirty();
+                cx.notify();
+            }
+        }
+        self.drain_activity_transitions(cx);
+        if let Some(transition) = transition.as_ref() {
+            self.request_auto_rename(transition, cx);
+        }
+        // Lifecycle changes must repaint even without a model
+        // transition because the tab's exit/dirty presentation reads
+        // the shell cache. An OscTitle or OutputSettled with no
+        // transition (and no title-owned clear) changes nothing the
+        // workspace draws; the terminal repaints itself through its
+        // own notify.
+        let title_owned_clear =
+            title_owned_before && !self.activity.is_title_owned(&activity_pane_id);
+        // An identity (or who owns it) can change with no status
+        // transition at all: a program names an agent that has no status
+        // yet, or the shell is back and the identity clears.
+        let identity_changed = identity_before
+            != (
+                self.activity.agent_id(&activity_pane_id).map(str::to_owned),
+                self.activity.is_program_owned(&activity_pane_id),
+            );
+        if transition.is_some()
+            || title_owned_clear
+            || identity_changed
+            || opencode_changed
+            || matches!(
+                event,
+                TerminalActivityEvent::ChildExited { .. }
+                    | TerminalActivityEvent::LifecycleChanged { .. }
+                    | TerminalActivityEvent::ProgramStatus { .. }
+            )
+        {
+            if matches!(event, TerminalActivityEvent::ChildExited { .. }) {
+                let worktree = self.working_directory.clone();
+                self.mark_files_snapshot_dirty(&worktree, cx);
+            }
+            self.mark_activity_dirty();
+            sirio_perf::event(
+                "notify.Workspace.terminal_activity",
+                cx.entity_id().as_u64(),
+            );
+            cx.notify();
+        }
+    }
+
+    /// Starts (or restarts) the listener on the host's `term.sessions` topic. Every adoption of a
+    /// host reaches it on the GPUI thread; a listener of an earlier adoption ends by itself. It
+    /// uses the host client and the reconnect closure the adoption installed and never ensures a
+    /// host.
+    fn start_host_programs(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = cx
+            .try_global::<HostTerminalGlobal>()
+            .map(|global| global.0.clone())
+        else {
+            return;
+        };
+        let Some(client) = host.client() else {
+            return;
+        };
+        let generation = self
+            .host_programs
+            .current
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            + 1;
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<host_programs::Message>();
+        if let Err(error) = host_programs::spawn(
+            client,
+            host.reconnect_fn(),
+            generation,
+            Arc::clone(&self.host_programs.current),
+            tx,
+        ) {
+            eprintln!("[sirio] host programs listener not started: {}", error.kind());
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(first) = rx.next().await {
+                // Everything queued is one wake: a spinner title in a background tab is not
+                // one update per frame.
+                let mut batch = vec![first];
+                while let Ok(more) = rx.try_recv() {
+                    batch.push(more);
+                }
+                if this
+                    .update(cx, |workspace, cx| {
+                        workspace.apply_host_program_messages(batch, generation, cx);
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Whether a view bound under `pane_key` is its session's route (`TerminalView::has_link`):
+    /// its link then applies the pane's program and status, and the listener leaves the pane
+    /// alone. The key is the one the view's events are applied under, not the session it
+    /// follows: a Show-session tab's events land under its own pane, so while it is open the pane
+    /// it shows is still fed by its own route, and once it closes (its view lives on) it gates
+    /// nothing. A restored tab's view opens its link on its first render, so until then the
+    /// listener is the route.
+    fn host_pane_is_linked(pane_key: &str, cx: &App) -> bool {
+        cx.try_global::<BoundTerminalPanes>().is_some_and(|bound| {
+            bound.0.values().any(|(key, terminal)| {
+                key == pane_key
+                    && terminal
+                        .upgrade()
+                        .is_some_and(|terminal| terminal.read(cx).has_link())
+            })
+        })
+    }
+
+    /// The live view bound under `pane_key`, in any state: the one a listener end puts its shell
+    /// evidence under. The one whose link runs wins.
+    fn bound_view_of_pane(pane_key: &str, cx: &App) -> Option<Entity<TerminalView>> {
+        let bound = cx.try_global::<BoundTerminalPanes>()?;
+        let views: Vec<Entity<TerminalView>> = bound
+            .0
+            .values()
+            .filter(|(key, _)| key == pane_key)
+            .filter_map(|(_, terminal)| terminal.upgrade())
+            .collect();
+        views
+            .iter()
+            .find(|view| view.read(cx).has_link())
+            .or_else(|| views.first())
+            .cloned()
+    }
+
+    /// What the listener may tell the activity model about `pane_key`: its program, status and
+    /// title, while the pane is a known tab's and no link runs for it (the caller has checked that the
+    /// app is not closing it).
+    fn host_programs_feeds(&self, pane_key: &str, cx: &App) -> bool {
+        !Self::host_pane_is_linked(pane_key, cx) && self.session_for_pane(pane_key).is_some()
+    }
+
+    /// What the listener may end for `pane_key`: the same, or a pane it fed whose tab is gone, so
+    /// that what it fed does not outlive the tab.
+    fn host_programs_ends(&self, pane_key: &str, cx: &App) -> bool {
+        !Self::host_pane_is_linked(pane_key, cx)
+            && (self.session_for_pane(pane_key).is_some()
+                || self.host_programs.fed.contains(pane_key))
+    }
+
+    /// Whether the app is closing `pane_key`, whose session ends by its own doing: the listener
+    /// gives such a pane nothing, and its end is swallowed. A live tab (mounted, parked or
+    /// retained) that holds the key again, a reopened worktree's, is not closing: the entry goes.
+    /// An entry for a session that never ends is harmless.
+    fn pane_is_closing(&mut self, pane_key: &str) -> bool {
+        if !self.host_programs.closing.contains(pane_key) {
+            return false;
+        }
+        let live = self
+            .live_sessions()
+            .iter()
+            .any(|session| session.pane_keys.iter().any(|key| key == pane_key));
+        if live {
+            self.host_programs.closing.remove(pane_key);
+        }
+        !live
+    }
+
+    /// Applies one activity event the listener sent, when the gate allows it, and remembers that
+    /// the pane was fed.
+    fn feed_host_program(
+        &mut self,
+        pane_key: &str,
+        event: &TerminalActivityEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane_is_closing(pane_key) || !self.host_programs_feeds(pane_key, cx) {
+            return;
+        }
+        self.host_programs.fed.insert(pane_key.to_owned());
+        self.apply_activity_event(pane_key, event, None, cx);
+    }
+
+    /// Ends a pane the listener is told is over: its session exited, was closed, vanished, or the
+    /// host was lost. The end is the one an attached terminal's link sends (`ChildExited` with the
+    /// exit status, `SessionLost` for a loss), so the order is the same: settle, drain, drop the
+    /// record, then the owner's own handling. A pane whose tab is gone gets what a closed tab's
+    /// pane gets, and nothing of it stays.
+    fn end_host_pane(
+        &mut self,
+        pane_key: &str,
+        event: &TerminalActivityEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane_is_closing(pane_key) {
+            self.host_programs.closing.remove(pane_key);
+            self.host_programs.fed.remove(pane_key);
+            return;
+        }
+        if !self.host_programs_ends(pane_key, cx) {
+            return;
+        }
+        // An exit keeps the shell evidence of the view bound to the pane, as an attached
+        // terminal's does: `sync_entity_evidence` would otherwise wipe the status it sets.
+        let view = match event {
+            TerminalActivityEvent::ChildExited { .. } => Self::bound_view_of_pane(pane_key, cx),
+            _ => None,
+        };
+        self.apply_activity_event(pane_key, event, view.as_ref(), cx);
+        self.host_programs.fed.remove(pane_key);
+        if self.session_for_pane(pane_key).is_none() {
+            self.forget_pane_activity(pane_key);
+            self.mark_activity_dirty();
+            cx.notify();
+        }
+    }
+
+    /// Ends every pane the listener fed that is not in `listed` (all of them when `listed` is
+    /// `None`) as lost: no link will end them.
+    fn lose_fed_host_panes(&mut self, listed: Option<&HashSet<&str>>, cx: &mut Context<Self>) {
+        let gone: Vec<String> = self
+            .host_programs
+            .fed
+            .iter()
+            .filter(|pane| listed.is_none_or(|listed| !listed.contains(pane.as_str())))
+            .cloned()
+            .collect();
+        for pane in gone {
+            self.end_host_pane(&pane, &TerminalActivityEvent::SessionLost, cx);
+            self.host_programs.fed.remove(&pane);
+        }
+    }
+
+    /// Applies what the host listener sent since the last wake. Titles are coalesced: only the
+    /// last of a session in the batch is applied.
+    fn apply_host_program_messages(
+        &mut self,
+        messages: Vec<host_programs::Message>,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        use sirio_terminal::HostSessionNote;
+        let mut last_title: HashMap<&str, usize> = HashMap::new();
+        for (index, message) in messages.iter().enumerate() {
+            if let host_programs::Message::Event {
+                session_id,
+                note: HostSessionNote::Activity(TerminalActivityEvent::SeededTitle(_)),
+                ..
+            } = message
+            {
+                last_title.insert(session_id.as_str(), index);
+            }
+        }
+        let superseded_titles: Vec<bool> = messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| match message {
+                host_programs::Message::Event {
+                    session_id,
+                    note: HostSessionNote::Activity(TerminalActivityEvent::SeededTitle(_)),
+                    ..
+                } => last_title.get(session_id.as_str()) != Some(&index),
+                _ => false,
+            })
+            .collect();
+        for (message, superseded_title) in messages.into_iter().zip(superseded_titles) {
+            if message.generation() != generation
+                || self.host_programs.current.load(std::sync::atomic::Ordering::Acquire)
+                    != generation
+                || superseded_title
+            {
+                continue;
+            }
+            match message {
+                host_programs::Message::Seed { sessions, .. } => {
+                    let listed: HashSet<String> = sessions
+                        .iter()
+                        .map(|session| session.session_id.clone())
+                        .collect();
+                    for session in sessions {
+                        for event in &session.events {
+                            self.feed_host_program(&session.session_id, event, cx);
+                        }
+                        // After the re-seed, as a link's attach sends the exit after the snapshot.
+                        if let Some(status) = session.exit {
+                            self.end_host_pane(
+                                &session.session_id,
+                                &TerminalActivityEvent::ChildExited { status },
+                                cx,
+                            );
+                        }
+                    }
+                    // A pane the listener fed whose session is not listed any more is over.
+                    let listed: HashSet<&str> = listed.iter().map(String::as_str).collect();
+                    self.lose_fed_host_panes(Some(&listed), cx);
+                }
+                host_programs::Message::Event {
+                    session_id, note, ..
+                } => match note {
+                    HostSessionNote::Activity(event) => {
+                        self.feed_host_program(&session_id, &event, cx);
+                    }
+                    HostSessionNote::Ended(status) => self.end_host_pane(
+                        &session_id,
+                        &TerminalActivityEvent::ChildExited { status },
+                        cx,
+                    ),
+                },
+                host_programs::Message::Lost { .. } => self.lose_fed_host_panes(None, cx),
+            }
+        }
+    }
+
+    /// A close the app itself causes (a worktree, a project) forgets what the listener fed to
+    /// the panes the layouts name, before their sessions end: the host's `Closed` that follows
+    /// is then no stop and no evidence, whether the layout rows are still there when it arrives or
+    /// not.
+    ///
+    /// Only the closing worktrees' panes: a layout id that resolves to a tab of another worktree
+    /// (live, parked or persisted) names a session `app_sessions_to_end` leaves alone, since pane
+    /// ids are not unique across layouts.
+    fn forget_layout_panes(&mut self, session_ids: &HashSet<String>, closing: &[PathBuf]) {
+        for session_id in session_ids {
+            let elsewhere = self.session_for_pane(session_id).is_some_and(|session| {
+                !closing
+                    .iter()
+                    .any(|path| paths_name_the_same_document(&session.worktree, path))
+            });
+            if elsewhere {
+                continue;
+            }
+            self.forget_pane_activity(session_id);
+            self.host_programs.closing.insert(session_id.clone());
+        }
+    }
+
+    /// What a closed tab's pane gets, so that its id, free for reuse, does not inherit the entry
+    /// (`close_tab`, `close_focused_pane`, a moved pane, a forgotten worktree's parked panes) and
+    /// the listener no longer owes it an end.
+    fn forget_pane_activity(&mut self, pane_key: &str) {
+        self.activity.pane_closed(pane_key);
+        self.opencode.forget(pane_key);
+        self.host_programs.fed.remove(pane_key);
     }
 
     /// Layer C off the UI thread: takes the cheap agent-id lookup
@@ -10452,6 +10930,40 @@ impl SirioWorkspace {
                     cx.notify();
                 }
             });
+        })
+        .detach();
+    }
+
+    /// What OpenCode's watch says, onto the UI thread. The watch lives on a thread of its
+    /// own and wakes this loop through the channel (the way `install_host_sessions` wakes
+    /// its views), so nothing polls: the loop sleeps until the watch has something to say.
+    fn start_opencode_delivery(
+        mut events: futures::channel::mpsc::UnboundedReceiver<(
+            u64,
+            sirio_opencode_watch::WatchEvent,
+        )>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some((generation, event)) = events.next().await {
+                let delivered = this.update(cx, |workspace, cx| {
+                    if workspace.opencode.on_watch(
+                        &mut workspace.activity,
+                        generation,
+                        event,
+                        Instant::now(),
+                    )
+                    {
+                        workspace.drain_activity_transitions(cx);
+                        workspace.mark_activity_dirty();
+                        cx.notify();
+                    }
+                });
+                if delivered.is_err() {
+                    return;
+                }
+            }
         })
         .detach();
     }
@@ -10549,7 +11061,48 @@ impl SirioWorkspace {
                             }
                             let activity_pane_id = format!("pane-{pane_id}");
                             let process_owned_before =
-                                workspace.activity.is_process_owned(&activity_pane_id);
+                                workspace.activity.is_process_owned(&activity_pane_id)
+                                    || workspace.activity.is_program_owned(&activity_pane_id);
+                            // Windows names no foreground program: an identity a report
+                            // gave lives until Layer D, having seen the agent's process
+                            // there, sees none. A turn that was mid-way settles first.
+                            if cfg!(windows) {
+                                let seen = matches!(observation, Ok(Some(_)));
+                                let none = match &observation {
+                                    Ok(found) => found.is_none(),
+                                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                                };
+                                if seen {
+                                    workspace.activity.note_process_seen(&activity_pane_id);
+                                } else if none && workspace.activity.process_lost(&activity_pane_id)
+                                {
+                                    workspace
+                                        .activity
+                                        .program_exited(&activity_pane_id, Instant::now());
+                                    workspace.drain_activity_transitions(cx);
+                                    workspace.activity.program_gone(&activity_pane_id);
+                                }
+                            }
+                            // Layer D loses the agent it named: what a program's exit does, in
+                            // the same order. A turn that was mid-way settles to Done and its
+                            // stop is drained while the pane is still the agent's, then the
+                            // record goes, and only then does `apply_process_signal` clear
+                            // the identity. The next agent Layer D names here starts with no
+                            // record, so its startup `idle` closes no turn of the last one's.
+                            let layer_d_lost = match &observation {
+                                Ok(found) => found.is_none(),
+                                Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+                            };
+                            if layer_d_lost && workspace.activity.is_process_owned(&activity_pane_id)
+                            {
+                                workspace
+                                    .activity
+                                    .program_exited(&activity_pane_id, Instant::now());
+                                workspace.drain_activity_transitions(cx);
+                                workspace
+                                    .activity
+                                    .drop_report(&activity_pane_id, Instant::now());
+                            }
                             match workspace
                                 .activity
                                 .apply_process_signal(&activity_pane_id, observation)
@@ -10566,6 +11119,7 @@ impl SirioWorkspace {
                                     // removal explicitly for the render gate.
                                     if process_owned_before
                                         && !workspace.activity.is_process_owned(&activity_pane_id)
+                                        && !workspace.activity.is_program_owned(&activity_pane_id)
                                     {
                                         any_transition = true;
                                     }
@@ -10602,7 +11156,8 @@ impl SirioWorkspace {
     /// inlined into the loop body is not.
     ///
     /// Chat, Changes, Browser and Editor panes are deliberately absent: only a
-    /// terminal has a shell pid to walk.
+    /// terminal has a shell pid to walk, and one whose session has named a
+    /// program (`is_program_session`) is absent too.
     ///
     /// A terminal of a worktree that is not selected is in no tab: the pane
     /// cache holds it, so it is walked too, with no tab id. Its shell keeps
@@ -10637,6 +11192,12 @@ impl SirioWorkspace {
                 found.push((None, pane_id, cached.controller.clone()));
             }
         }
+        // Refinement 9: Layer D stops for a pane once its session has named a
+        // program. The host tells what runs there; a tab without job control
+        // never names one and stays in the list.
+        found.retain(|(_, pane_id, _)| {
+            !self.activity.is_program_session(&format!("pane-{pane_id}"))
+        });
         found
     }
 
@@ -11312,6 +11873,7 @@ impl SirioWorkspace {
             self.sync_control_state(cx);
             self.refresh_sidebar(cx);
             // Closing a project ends its sessions (SP2 spec §4.2).
+            self.forget_layout_panes(&layout_ids, &removed_paths);
             self.end_app_sessions(removed_paths.clone(), known_before, layout_ids, cx);
             for path in &removed_paths {
                 let worktrees = self.known_worktree_paths();
@@ -12803,16 +13365,22 @@ impl SirioWorkspace {
             .filter(|tab| !paths_name_the_same_document(&self.tab_worktree_path(tab.id), forgotten))
             .flat_map(|tab| tab.panes.leaf_ids())
             .collect();
-        if let Some(parked) = self.parked_worktree_tabs.get(worktree_id) {
-            for pane_id in parked
-                .terminal_panes_by_tab
-                .iter()
-                .chain(&parked.chat_panes_by_tab)
-                .flatten()
-                .filter(|pane_id| !mounted.contains(pane_id))
-            {
-                self.activity.pane_closed(&format!("pane-{pane_id}"));
-            }
+        let forgotten_panes: Vec<usize> = self
+            .parked_worktree_tabs
+            .get(worktree_id)
+            .into_iter()
+            .flat_map(|parked| {
+                parked
+                    .terminal_panes_by_tab
+                    .iter()
+                    .chain(&parked.chat_panes_by_tab)
+                    .flatten()
+                    .copied()
+            })
+            .filter(|pane_id| !mounted.contains(pane_id))
+            .collect();
+        for pane_id in forgotten_panes {
+            self.forget_pane_activity(&format!("pane-{pane_id}"));
         }
         if let Some(chats) = self.retained_worktree_chats.get(worktree_id) {
             for tab in chats.values() {
@@ -12876,9 +13444,12 @@ impl SirioWorkspace {
         };
         for id in evicted {
             // An evicted worktree is no longer mounted, so release the strong
-            // entity references here. TerminalView::drop then detaches its
-            // session instead of leaving a shell behind in the cache (a host
-            // session lives on; a local one ends with its link).
+            // entity references here. TerminalView::drop is meant to detach
+            // its session then, instead of leaving a shell behind in the cache
+            // (a host session lives on; a local one ends with its link). Today
+            // no view is dropped: `TerminalBindings` holds a strong handle to
+            // every bound terminal for the app's life, so an evicted worktree's
+            // views keep their links.
             self.terminal_pane_cache.remove_worktree(&id);
             self.forget_parked_panes(&id);
             self.parked_worktree_tabs.remove(&id);
@@ -13472,6 +14043,7 @@ impl SirioWorkspace {
                 path.display()
             ),
         }
+        self.forget_layout_panes(&layout_ids, std::slice::from_ref(&path));
         self.end_app_sessions(vec![path.clone()], worktrees, layout_ids, cx);
         let worktree_id = path.to_string_lossy().into_owned();
         // Closing a worktree ends its sessions (SP2 spec §4.2): shut down
@@ -14503,6 +15075,51 @@ impl SirioWorkspace {
             && paths_name_the_same_document(&self.tab_worktree_path(tab.id), &self.working_directory)
     }
 
+    /// The sessions of known tabs that the attached (Show-session) views of `tab` show.
+    fn shown_owner_sessions(&self, tab: &OpenTab, cx: &App) -> Vec<SessionRef> {
+        let mut owners = Vec::new();
+        tab.panes.for_each(&mut |_, content| {
+            if let Some(terminal) = content.terminal() {
+                let terminal = terminal.read(cx);
+                if terminal.attached()
+                    && let Some(owner) = self.session_for_pane(terminal.identity().pane_id())
+                {
+                    owners.push(owner);
+                }
+            }
+        });
+        owners
+    }
+
+    /// Whether a tab that is on screen shows `session` through an attached view: a Show-session
+    /// tab of it.
+    fn session_shown_on_screen(&self, session: &SessionRef, cx: &App) -> bool {
+        self.tabs.iter().filter(|tab| self.session_on_screen(tab)).any(|tab| {
+            self.shown_owner_sessions(tab, cx)
+                .iter()
+                .any(|owner| owner.persistence_id == session.persistence_id)
+        })
+    }
+
+    /// Whether `pane_key` is bound to an attached (Show-session) view whose session is a known
+    /// tab's.
+    fn shows_a_session_another_tab_owns(&self, pane_key: &str, cx: &App) -> bool {
+        let Some(bound) = cx.try_global::<BoundTerminalPanes>() else {
+            return false;
+        };
+        bound
+            .0
+            .values()
+            .filter(|(key, _)| key == pane_key)
+            .filter_map(|(_, terminal)| terminal.upgrade())
+            .any(|terminal| {
+                let terminal = terminal.read(cx);
+                terminal.attached()
+                    && terminal.identity().pane_id() != pane_key
+                    && self.session_for_pane(terminal.identity().pane_id()).is_some()
+            })
+    }
+
     /// Only an agent's stop is news: a chat, a terminal pane whose agent is
     /// identified, or one an agent's hooks have already pushed to. A hook can
     /// arrive before the title or the process sweep names the agent, which is
@@ -14557,10 +15174,41 @@ impl SirioWorkspace {
     /// Hands every resolved status change since the last drain to
     /// `on_pane_transition`. Every path that can change a status reaches one.
     fn drain_activity_transitions(&mut self, cx: &mut Context<Self>) {
+        // A closed pane loses its identity: OpenCode's panes and watch follow it here.
+        if self.opencode.sync(&mut self.activity, Instant::now()) {
+            self.mark_activity_dirty();
+        }
         for transition in self.activity.take_resolved_transitions() {
             self.on_pane_transition(&transition, cx);
         }
+        for pane_id in self.activity.take_cleared_panes() {
+            self.refresh_running_after_clear(&pane_id);
+        }
         self.flush_attention_writes(cx);
+    }
+
+    /// A pane's status went to nothing: no transition carries that, yet a session
+    /// whose pane was Running must stop reading as running (a turn too short to
+    /// count, a report cleared). Refreshes the running flag the way
+    /// `on_pane_transition` does for a change, and only for a session that has one.
+    fn refresh_running_after_clear(&mut self, pane_id: &str) {
+        let Some(session) = self.session_for_pane(pane_id) else {
+            return;
+        };
+        let running = session
+            .pane_keys
+            .iter()
+            .any(|key| self.activity.status(key) == Some(AgentStatus::Running));
+        let Some(record) = self.session_attention.get_mut(&session.persistence_id) else {
+            return;
+        };
+        if record.running == running {
+            return;
+        }
+        record.running = running;
+        let after = *record;
+        self.queue_attention_write(session.persistence_id.clone(), after);
+        self.mark_activity_dirty();
     }
 
     /// The one place a status change becomes a stop: the unread mark, the running
@@ -14569,6 +15217,13 @@ impl SirioWorkspace {
         let Some(session) = self.session_for_pane(&transition.pane_id) else {
             return;
         };
+        // A Show-session tab applies its link's events under its own pane, but the session it
+        // shows belongs to another tab, whose own route (link or listener) makes the stop: this
+        // one would be a second stop, or the same one marked on the wrong tab. A tab that shows
+        // a session no tab owns (a control session) is the only one to report it.
+        if self.shows_a_session_another_tab_owns(&transition.pane_id, cx) {
+            return;
+        }
         if !self.pane_is_agent(&transition.pane_id, &session) {
             return;
         }
@@ -14582,8 +15237,11 @@ impl SirioWorkspace {
                 .remove(&session.persistence_id);
         }
         let first = self.first_status_for(&session.persistence_id, session.chat);
+        // A Show-session tab on screen watches this session's turn: it is on screen in that tab,
+        // though its own tab is not.
+        let on_screen = session.on_screen || self.session_shown_on_screen(&session, cx);
         let decision =
-            StopPolicy::decide(transition.old, transition.new, first, session.on_screen);
+            StopPolicy::decide(transition.old, transition.new, first, on_screen);
         let running = session
             .pane_keys
             .iter()
@@ -14626,12 +15284,17 @@ impl SirioWorkspace {
         if !self.session_attention.values().any(|record| record.unread) {
             return;
         }
-        let shown: Vec<String> = self
-            .tabs
-            .iter()
-            .filter(|tab| self.session_on_screen(tab))
-            .map(|tab| tab.persistence_id.clone())
-            .collect();
+        // A Show-session tab on screen also marks the session it shows as seen.
+        let mut shown: Vec<String> = Vec::new();
+        for tab in self.tabs.iter().filter(|tab| self.session_on_screen(tab)) {
+            shown.push(tab.persistence_id.clone());
+            shown.extend(
+                self.shown_owner_sessions(tab, cx)
+                    .into_iter()
+                    .map(|owner| owner.persistence_id),
+            );
+        }
+        shown.dedup();
         let mut cleared = false;
         for id in shown {
             let seen = match self.session_attention.get_mut(&id) {
@@ -15872,7 +16535,7 @@ impl SirioWorkspace {
         // worktree switch keeps its entries on purpose (the rows of
         // unselected worktrees read their status from the model).
         for pane_id in closed_panes {
-            self.activity.pane_closed(&format!("pane-{pane_id}"));
+            self.forget_pane_activity(&format!("pane-{pane_id}"));
         }
         if self.tab_menu_tab == Some(tab_id) {
             self.tab_menu_tab = None;
@@ -16232,7 +16895,12 @@ impl SirioWorkspace {
                 }
             }
             leaves.insert(leaf);
+            // A session that has a tab again is no longer one being closed.
+            self.host_programs.closing.remove(&summary.session_id);
         }
+        // Every adoption of a host ends here: the listener for the tabs no terminal holds
+        // follows the host this adoption installed.
+        self.start_host_programs(cx);
     }
 
     /// Shows a host session (spec §5): selects its tab if one shows it,
@@ -21669,7 +22337,7 @@ impl SirioWorkspace {
         cx: &mut Context<Self>,
     ) -> Result<Vec<(String, String)>, String> {
         let view = self.control_terminal_view(pane)?;
-        view.update(cx, |terminal, cx| terminal.restart(cx));
+        self.restart_terminal(&view, cx);
         Ok(Vec::new())
     }
 
@@ -23689,7 +24357,7 @@ impl SirioWorkspace {
             }
             // Same reason as `close_tab`: the id is free for reuse the moment
             // the leaf is gone, and its model entry must not outlive it.
-            self.activity.pane_closed(&format!("pane-{focused_pane}"));
+            self.forget_pane_activity(&format!("pane-{focused_pane}"));
             self.mark_activity_dirty();
             self.schedule_save(cx);
             cx.notify();
@@ -30338,6 +31006,29 @@ struct NewAgentLaunch {
 #[derive(Default)]
 struct TerminalBindings(HashMap<gpui::EntityId, Vec<gpui::Subscription>>);
 impl gpui::Global for TerminalBindings {}
+
+/// Every terminal `bind_terminal` has bound, with the pane key (`pane-N`) its events are applied
+/// under. The host listener (`host_programs`) leaves a pane alone while a view bound under its
+/// key is its route (`TerminalView::has_link`): a restored tab's view is bound at once and opens
+/// its link on its first render. A Show-session tab's view is bound under its own pane and its
+/// events are applied there, whatever session it shows, so the key is the bind key and not the
+/// view's identity.
+#[derive(Default)]
+struct BoundTerminalPanes(HashMap<gpui::EntityId, (String, gpui::WeakEntity<TerminalView>)>);
+impl gpui::Global for BoundTerminalPanes {}
+
+/// What the workspace keeps of the host listener (`host_programs`).
+#[derive(Default)]
+struct HostPrograms {
+    /// The generation of the listener that runs; a thread of another generation ends.
+    current: Arc<std::sync::atomic::AtomicU64>,
+    /// The panes the listener applied anything to: the ones it must end when their session
+    /// disappears or the host is lost, since no link will.
+    fed: HashSet<String>,
+    /// The panes of a worktree or project the app is closing: their sessions end by the app's own
+    /// doing, so the end that follows is no news and sets no evidence.
+    closing: HashSet<String>,
+}
 
 /// Keeps the app's route to its host for the app's lifetime. The host counts
 /// the route's connection as a client, so it does not idle out under a running

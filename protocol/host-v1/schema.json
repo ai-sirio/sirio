@@ -275,6 +275,39 @@
       ],
       "type": "object"
     },
+    "ForegroundProgram": {
+      "description": "The program in the foreground of a session's terminal, read by the host from\nthe process itself. Never the shell.",
+      "properties": {
+        "argv": {
+          "description": "At most 32 entries of at most 1024 bytes each, and 4096 bytes in all.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cwd": {
+          "description": "Absent when the host could not read it or it is longer than 1024 bytes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pid",
+        "name",
+        "argv"
+      ],
+      "type": "object"
+    },
     "Hello": {
       "properties": {
         "client_version": {
@@ -493,6 +526,58 @@
         "other"
       ],
       "type": "string"
+    },
+    "ProgramState": {
+      "description": "What a program reports about itself with OSC 7501.",
+      "oneOf": [
+        {
+          "enum": [
+            "idle",
+            "working",
+            "done",
+            "blocked",
+            "error"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "other",
+          "description": "A state a newer host sent. This host never produces it.",
+          "type": "string"
+        }
+      ]
+    },
+    "ProgramStatus": {
+      "properties": {
+        "app": {
+          "description": "Only 1 to 64 bytes of `[A-Za-z0-9._-]`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "at_ms": {
+          "description": "Milliseconds since the session started, when this state was first seen.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "description": "Only `permission`, `question` or `auth`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/ProgramState"
+        }
+      },
+      "required": [
+        "state",
+        "at_ms"
+      ],
+      "type": "object"
     },
     "ProtocolVersion": {
       "properties": {
@@ -750,6 +835,68 @@
           "type": "object"
         },
         {
+          "description": "The program holding the terminal changed; `None` is the shell again\n(`term.program`).",
+          "properties": {
+            "program": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ForegroundProgram"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "program",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The program's report changed; `None` clears it. `at_ms` is the stamp of\nthe state (`term.program`).",
+          "properties": {
+            "at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_id": {
+              "type": "string"
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProgramStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "type": {
+              "const": "status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "session_id",
+            "at_ms"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "session_id": {
               "type": "string"
@@ -888,11 +1035,33 @@
           "minimum": 0,
           "type": "integer"
         },
+        "program": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ForegroundProgram"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The program holding the terminal, when it is not the shell\n(`term.program`, minor 3). Absent from a host without the capability."
+        },
         "session_id": {
           "type": "string"
         },
         "size": {
           "$ref": "#/$defs/TermSize"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgramStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The program's last OSC 7501 report (`term.program`, minor 3). It ends\nwith the program."
         },
         "title": {
           "type": "string"
@@ -1074,6 +1243,6 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "major": 1,
-  "minor": 2,
+  "minor": 3,
   "protocol": "sirio-host"
 }

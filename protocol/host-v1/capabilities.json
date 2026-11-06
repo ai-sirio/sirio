@@ -32,6 +32,12 @@
       "since_minor": 2,
       "methods": ["term.create"],
       "topics": []
+    },
+    {
+      "name": "term.program",
+      "since_minor": 3,
+      "methods": ["term.list"],
+      "topics": ["term.sessions"]
     }
   ]
 }

@@ -32,6 +32,12 @@ impl TermClient {
         self.mux.has_env_exact()
     }
 
+    /// Whether the host behind this client names the foreground program of a
+    /// session and reports its status (`term.program`).
+    pub fn names_programs(&self) -> bool {
+        self.mux.has_term_program()
+    }
+
     /// Whether the connection behind this client has closed (the host went
     /// away, or ended the connection). A closed client never answers again.
     pub fn closed(&self) -> bool {

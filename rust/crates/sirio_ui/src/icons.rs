@@ -19,9 +19,11 @@
 //! Two of them paint themselves and must never be recoloured by a theme:
 //! omp's three-stop gradient, and Gemini's blue base under three gradient
 //! overlays. The rest are single `currentColor` paths on the tinted path.
-//! Claude is the seam between the two: its asset bakes `#D97757`, but it
-//! rides the tinted path anyway, because the tint it is handed is that
-//! same hex (see [`Icon::agent_mark_color`]).
+//! Claude is the seam between the two. [`Icon::ClaudeCode`] is Clawd, a
+//! `currentColor` path tinted with `#D97757`; [`Icon::ClaudeAccount`] is the
+//! starburst, whose asset bakes that same `#D97757` yet rides the tinted path
+//! anyway, because the tint it is handed is that hex (see
+//! [`Icon::agent_mark_color`]).
 //!
 //! Gemini and Grok are vendored without an adapter behind them. Nothing in
 //! `sirio_agents::ALL` produces those ids; [`Icon::for_agent_id`] maps them
@@ -97,9 +99,14 @@ pub enum Icon {
     Browser,
     /// A generic globe/cloud stand-in (`zed/public.svg`).
     Globe,
-    /// Anthropic's Claude starburst (`lobehub/claude-color.svg`), the one
-    /// mark whose asset bakes its colour and is tinted all the same.
+    /// Claude Code's pixel mark, Clawd (`chat/claude-code.svg`), monochrome
+    /// and tinted with the Claude orange by [`Icon::agent_mark_color`].
     ClaudeCode,
+    /// Anthropic's Claude starburst (`lobehub/claude-color.svg`), the mark of
+    /// the account rather than of the agent: provider cards and the status
+    /// bar's usage segment. Its asset bakes `#D97757` and is tinted with that
+    /// same hex all the same. Not an agent mark: no agent id resolves to it.
+    ClaudeAccount,
     /// Codex's own mark, monochrome (`lobehub/codex.svg`). Not the colour
     /// variant: that one paints a white plate behind a gradient, which is
     /// illegible in dark mode and muddy at a sidebar's 15px.
@@ -253,7 +260,8 @@ impl Icon {
             Icon::SunMoon => "icons/zed/screen.svg",
             Icon::Browser => "icons/zed/screen.svg",
             Icon::Globe => "icons/zed/public.svg",
-            Icon::ClaudeCode => "icons/lobehub/claude-color.svg",
+            Icon::ClaudeCode => "icons/chat/claude-code.svg",
+            Icon::ClaudeAccount => "icons/lobehub/claude-color.svg",
             Icon::Codex => "icons/lobehub/codex.svg",
             Icon::OpenCode => "icons/lobehub/opencode.svg",
             Icon::Pi => "icons/lobehub/pi.svg",
@@ -323,7 +331,8 @@ impl Icon {
             Icon::SunMoon => include_bytes!("../../../assets/icons/zed/screen.svg"),
             Icon::Browser => include_bytes!("../../../assets/icons/zed/screen.svg"),
             Icon::Globe => include_bytes!("../../../assets/icons/zed/public.svg"),
-            Icon::ClaudeCode => include_bytes!("../../../assets/icons/lobehub/claude-color.svg"),
+            Icon::ClaudeCode => include_bytes!("../../../assets/icons/chat/claude-code.svg"),
+            Icon::ClaudeAccount => include_bytes!("../../../assets/icons/lobehub/claude-color.svg"),
             Icon::Codex => include_bytes!("../../../assets/icons/lobehub/codex.svg"),
             Icon::OpenCode => include_bytes!("../../../assets/icons/lobehub/opencode.svg"),
             Icon::Pi => include_bytes!("../../../assets/icons/lobehub/pi.svg"),
@@ -402,10 +411,11 @@ impl Icon {
     /// theme; the remaining marks are monochrome by design and follow the
     /// tinted path, exactly as the Swift app renders them with `.primary`.
     ///
-    /// `ClaudeCode` is the exception that looks like a bug: its asset bakes
-    /// `#D97757`, yet it stays on the tinted path, because that hex is the
-    /// tint it is given. Same pixels, one fewer raster cache entry per
-    /// size — and a test keeps the two from drifting apart.
+    /// `ClaudeAccount` is the exception that looks like a bug: its asset
+    /// bakes `#D97757`, yet it stays on the tinted path, because that hex is
+    /// the tint it is given. Same pixels, one fewer raster cache entry per
+    /// size. It is not an agent mark, so the test that walks the marks does
+    /// not see it.
     ///
     /// GitLab's forge mark is the fourth: its tanuki is four oranges.
     pub fn has_own_colours(self) -> bool {
@@ -470,7 +480,7 @@ impl Icon {
     pub fn agent_mark_color(self, theme_title: Hsla) -> Option<Hsla> {
         match self {
             Icon::OhMyPi | Icon::Gemini => None,
-            Icon::ClaudeCode => Some(AgentBrandColor::Claude.color().into()),
+            Icon::ClaudeCode | Icon::ClaudeAccount => Some(AgentBrandColor::Claude.color().into()),
             Icon::Codex | Icon::OpenCode | Icon::Pi | Icon::Grok => Some(theme_title),
             _ => None,
         }
@@ -655,7 +665,7 @@ impl AssetSource for SirioAssets {
 }
 
 /// Every icon, used by [`SirioAssets::list`] and by tests.
-pub const ALL_ICONS: [Icon; 58] = [
+pub const ALL_ICONS: [Icon; 59] = [
     Icon::FolderFill,
     Icon::FolderOpen,
     Icon::GitBranch,
@@ -676,6 +686,7 @@ pub const ALL_ICONS: [Icon; 58] = [
     Icon::Browser,
     Icon::Globe,
     Icon::ClaudeCode,
+    Icon::ClaudeAccount,
     Icon::Codex,
     Icon::OpenCode,
     Icon::Pi,
@@ -884,8 +895,7 @@ mod tests {
     /// the wrong choice fails silently: a chromatic asset on the tinted
     /// path renders as a flat silhouette, which looks like an icon and is
     /// not the brand. So for a brand mark the flag and the bytes must
-    /// agree — with Claude the one documented exception, pinned by its own
-    /// test above.
+    /// agree.
     ///
     /// Only marks are walked. The Zed catalog is the other convention
     /// entirely: eight of its glyphs carry design-time greys (`#DCE0E5`,
@@ -894,7 +904,7 @@ mod tests {
     #[test]
     fn every_chromatic_mark_declares_its_own_colours() {
         for icon in ALL_ICONS {
-            if !icon.is_agent_mark() || icon == Icon::ClaudeCode {
+            if !icon.is_agent_mark() {
                 continue;
             }
             let svg = std::str::from_utf8(icon.svg()).expect("svg is utf-8");

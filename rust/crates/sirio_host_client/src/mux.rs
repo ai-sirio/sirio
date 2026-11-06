@@ -87,6 +87,7 @@ struct Shared {
     generation: String,
     terminal: bool,
     env_exact: bool,
+    term_program: bool,
     closed: AtomicBool,
     next_id: Arc<AtomicU64>,
     discarded_data_frames: AtomicU64,
@@ -148,6 +149,7 @@ impl Mux {
             generation: welcome.generation.clone(),
             terminal: has_terminal_capability(&welcome.capabilities),
             env_exact: has_env_exact_capability(&welcome.capabilities),
+            term_program: has_term_program_capability(&welcome.capabilities),
             closed: AtomicBool::new(false),
             next_id: Arc::clone(&next_id),
             discarded_data_frames: AtomicU64::new(0),
@@ -280,6 +282,10 @@ impl Mux {
 
     pub(crate) fn has_env_exact(&self) -> bool {
         self.inner.shared.env_exact
+    }
+
+    pub(crate) fn has_term_program(&self) -> bool {
+        self.inner.shared.term_program
     }
 
     pub fn discarded_data_frames(&self) -> u64 {
@@ -567,6 +573,12 @@ fn has_env_exact_capability(capabilities: &[String]) -> bool {
         .any(|name| name == capability::TERM_ENV_EXACT)
 }
 
+fn has_term_program_capability(capabilities: &[String]) -> bool {
+    capabilities
+        .iter()
+        .any(|name| name == capability::TERM_PROGRAM)
+}
+
 fn response_value(response: Response) -> Result<Value, CallError> {
     match (response.result, response.error) {
         (_, Some(error)) => Err(CallError::Remote(error)),
@@ -813,6 +825,7 @@ mod tests {
                 generation: "generation".to_string(),
                 terminal: true,
                 env_exact: false,
+                term_program: false,
                 closed: AtomicBool::new(false),
                 next_id: Arc::new(AtomicU64::new(2)),
                 discarded_data_frames: AtomicU64::new(0),
@@ -834,6 +847,7 @@ mod tests {
             generation: "generation".to_string(),
             terminal: false,
             env_exact: false,
+            term_program: false,
             closed: AtomicBool::new(false),
             next_id: Arc::new(AtomicU64::new(2)),
             discarded_data_frames: AtomicU64::new(0),
@@ -967,6 +981,7 @@ mod tests {
             generation: "generation".to_string(),
             terminal: true,
             env_exact: false,
+            term_program: false,
             closed: AtomicBool::new(false),
             next_id: Arc::new(AtomicU64::new(2)),
             pending: Mutex::new(HashMap::new()),

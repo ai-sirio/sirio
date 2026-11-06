@@ -134,6 +134,7 @@ impl Router {
         if self.env_exact {
             names.push(capability::TERM_ENV_EXACT.into());
         }
+        names.push(capability::TERM_PROGRAM.into());
         names
     }
 

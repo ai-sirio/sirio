@@ -3,7 +3,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libghostty_vt::alloc::{Allocator, Bytes};
 use libghostty_vt::kitty::graphics::{DecodePng, DecodedImage};
@@ -13,6 +13,8 @@ use portable_pty::{Child, MasterPty, PtySize};
 
 use crate::fanout::{self, AttachmentId, Chunk};
 use crate::journal::Journal;
+use crate::program::{ForegroundTracker, PROBE_ANSWER_GAP, Update};
+use crate::program_status::{OscScanner, Scanned, probe_answer};
 use crate::{Attach, Event, Exit, Format, Info, JOURNAL_BYTES, STREAM_QUEUE_BYTES};
 
 /// #301 R1.3: the owner states the Kitty APC and image-store ceilings
@@ -160,6 +162,8 @@ fn run(inputs: Inputs) {
 
     let mut terminal = crate::initialize_terminal(cols, rows);
     let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    // The probe answer travels this way too, so it queues after the emulator's own replies.
+    let probe_tx = reply_tx.clone();
     terminal
         .on_pty_write(move |_terminal, bytes: &[u8]| {
             let _ = reply_tx.send(bytes.to_vec());
@@ -183,6 +187,11 @@ fn run(inputs: Inputs) {
     let mut last_title = cached.title.clone();
     let mut last_foreground = cached.foreground;
     let mut was_alternate = terminal.active_screen().ok() == Some(Screen::Alternate);
+    let started = Instant::now();
+    let mut scanner = OscScanner::new();
+    let mut scanned = Vec::new();
+    let mut last_probe_answer: Option<Instant> = None;
+    let mut tracker = ForegroundTracker::new();
 
     if !prelude.is_empty() {
         feed(&mut terminal, &mut journal, &mut fanout, prelude);
@@ -196,7 +205,48 @@ fn run(inputs: Inputs) {
         // 1. Drain PTY bytes into the resident VT, journal, and every stream.
         while let Ok(bytes) = bytes_rx.try_recv() {
             let offset = journal.head();
-            terminal.vt_write(&bytes);
+            scanned.clear();
+            scanner.scan(&bytes, &mut scanned);
+            // Write the chunk to the VT in segments cut after each probe, and queue the
+            // answer after each cut: it then leaves behind the emulator's replies to
+            // everything that came before the probe.
+            let mut written = 0;
+            for item in scanned.drain(..) {
+                match item {
+                    Scanned::Probe { end, bel } => {
+                        let end = end.clamp(written, bytes.len());
+                        terminal.vt_write(&bytes[written..end]);
+                        written = end;
+                        let due = last_probe_answer
+                            .is_none_or(|at| at.elapsed() >= PROBE_ANSWER_GAP);
+                        if due {
+                            last_probe_answer = Some(Instant::now());
+                            let _ = probe_tx.send(probe_answer(bel).to_vec());
+                        }
+                    }
+                    Scanned::Root(record) => {
+                        if cached.exit.is_some() || !tracker.accepts_reports(Instant::now()) {
+                            continue;
+                        }
+                        // The stamp is when the state was first seen: a program repeats
+                        // the state it is already in (Claude sends `working` per tool).
+                        let at_ms = match (&record, &cached.status) {
+                            (Some(new), Some((kept, at))) if kept.state == new.state => *at,
+                            _ => elapsed_ms(started),
+                        };
+                        // One event per change: the same record at the same stamp (a program
+                        // repeating the state it is in, or a log full of reports) is no news,
+                        // and every event is a frame to each subscriber and a repaint.
+                        let new = record.clone().map(|record| (record, at_ms));
+                        if new == cached.status {
+                            continue;
+                        }
+                        cached.status = new;
+                        let _ = events.send(Event::Status(record, at_ms));
+                    }
+                }
+            }
+            terminal.vt_write(&bytes[written..]);
             journal.push(&bytes);
             fanout.broadcast_output(offset, &bytes);
         }
@@ -335,16 +385,46 @@ fn run(inputs: Inputs) {
         }
 
         #[cfg(unix)]
-        let foreground = master_fd.is_some_and(|fd| {
-            let foreground_pgid = unsafe { libc::tcgetpgrp(fd) };
-            foreground_pgid > 0 && foreground_pgid as u32 != cached.pid
+        let foreground_pgid = master_fd.and_then(|fd| {
+            let pgid = unsafe { libc::tcgetpgrp(fd) };
+            (pgid > 0).then_some(pgid as u32)
         });
         #[cfg(windows)]
-        let foreground = false;
+        let foreground_pgid: Option<u32> = None;
+        let foreground = foreground_pgid.is_some_and(|pgid| pgid != cached.pid);
         if foreground != last_foreground {
             last_foreground = foreground;
             cached.foreground = foreground;
             let _ = events.send(Event::Foreground(foreground));
+        }
+
+        // Name the program that holds the terminal, and drop its status report when the
+        // shell takes the terminal back.
+        if cached.exit.is_none() {
+            match tracker.poll(foreground_pgid, cached.pid, Instant::now()) {
+                Update::Nothing => {}
+                Update::Named(program) => {
+                    cached.program = Some(program.clone());
+                    let _ = events.send(Event::Program(Some(program)));
+                }
+                Update::Replaced(program) => {
+                    // The old program is over: end it as `ShellAgain` does, then name
+                    // the new one.
+                    let _ = events.send(Event::Program(None));
+                    if cached.status.take().is_some() {
+                        let _ = events.send(Event::Status(None, elapsed_ms(started)));
+                    }
+                    cached.program = Some(program.clone());
+                    let _ = events.send(Event::Program(Some(program)));
+                }
+                Update::ShellAgain => {
+                    cached.program = None;
+                    let _ = events.send(Event::Program(None));
+                    if cached.status.take().is_some() {
+                        let _ = events.send(Event::Status(None, elapsed_ms(started)));
+                    }
+                }
+            }
         }
 
         if cached.exit.is_none() {
@@ -356,6 +436,10 @@ fn run(inputs: Inputs) {
             };
             if let Some(exit) = exit {
                 cached.exit = Some(exit.clone());
+                // No event: the app settles a turn that was mid-way from `Exited`, and a
+                // `Status(None)` ahead of it would erase the state that settling needs.
+                cached.status = None;
+                cached.program = None;
                 let _ = events.send(Event::Exited(exit.clone()));
                 let (exit_lock, changed) = &*wait_state;
                 *exit_lock
@@ -398,6 +482,10 @@ fn run(inputs: Inputs) {
             }
         }
     }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn feed(

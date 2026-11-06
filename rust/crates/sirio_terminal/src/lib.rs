@@ -62,7 +62,10 @@ pub use link::{
     HostOpenError,
     Abandon, HostLink, LinkChunk, LocalLink, OpenOutcome, OpenRequest, SessionFactory,
     SessionFactoryGlobal, SessionLink,
+    HOST_RECONNECT_GRACE, HOST_RECONNECT_INTERVAL, HostSessionNote, host_session_note,
+    summary_exit, summary_reseed_events,
 };
+pub use sirio_term_session::{ForegroundProgram, ReportState, StatusRecord};
 pub use link_router::{opens_terminal_link, resolve_click_cell, url_at_column};
 
 const FONT_SIZE: Pixels = px(13.0);
@@ -190,6 +193,19 @@ pub enum TerminalActivityEvent {
     /// on the host. The pane stays failed until its owner gives it a fresh
     /// identity and reopens it (fix batch 5, N5 and #11).
     IdTaken,
+    /// The title the host's engine held when the session was attached or re-listed.
+    /// Not an `OscTitle`: it is no change, so Layer B and tab names never see it. Only
+    /// OpenCode's link reads it (the pane's title after a relaunch).
+    SeededTitle(String),
+    /// The program holding the terminal changed; `None` is the shell again.
+    /// Never coalesced: every change is emitted, in arrival order.
+    Program(Option<ForegroundProgram>),
+    /// The program's OSC 7501 report changed, stamped `at_ms`; `None` clears
+    /// it. Never coalesced: a `working` then `idle` arrive as two events.
+    ProgramStatus {
+        status: Option<StatusRecord>,
+        at_ms: u64,
+    },
 }
 
 /// The renderer-owned state that persistence and headless verification can
@@ -277,10 +293,16 @@ enum TerminalEvent {
     ViewportChanged,
     /// The OSC title changed. An empty string is an OSC title reset.
     Title(String),
+    /// The title the host held when the session was listed (not a change).
+    SeededTitle(String),
     /// The session exited after its final output was drained.
     ChildExit(TerminalExitStatus),
     /// The host is gone or the stream could not be re-established.
     SessionLost,
+    /// The program holding the terminal changed.
+    Program(Option<ForegroundProgram>),
+    /// The program's report changed.
+    Status(Option<StatusRecord>, u64),
 }
 
 /// Codepoints kept inline in one [`SnapshotCell`] before truncation. Flags
@@ -1329,8 +1351,17 @@ fn spawn_terminal_thread(inputs: TerminalThreadInputs) {
                     LinkChunk::Title(title) => {
                         let _ = event_tx.unbounded_send(TerminalEvent::Title(title));
                     }
+                    LinkChunk::SeededTitle(title) => {
+                        let _ = event_tx.unbounded_send(TerminalEvent::SeededTitle(title));
+                    }
                     LinkChunk::Foreground(running) => {
                         foreground_running.store(running, Ordering::Relaxed);
+                    }
+                    LinkChunk::Program(program) => {
+                        let _ = event_tx.unbounded_send(TerminalEvent::Program(program));
+                    }
+                    LinkChunk::Status(status, at_ms) => {
+                        let _ = event_tx.unbounded_send(TerminalEvent::Status(status, at_ms));
                     }
                     LinkChunk::Exited(status) => {
                         let _ = event_tx.unbounded_send(TerminalEvent::ChildExit(status));
@@ -2191,6 +2222,9 @@ pub struct TerminalView {
     pending_recreate: bool,
     /// The link reported `Lost` and no new session has opened since.
     session_lost: bool,
+    /// The view gave its session up (`detach`, `shutdown`) and has not opened one since
+    /// (`restart`, `retry`): its link is no route for anything.
+    released: std::cell::Cell<bool>,
     /// The factory-global observer, registered once while Connecting.
     /// Replaced, never stacked: assigning drops the previous subscription,
     /// which unsubscribes it.
@@ -2408,6 +2442,7 @@ impl TerminalView {
             pending_prelude: Vec::new(),
             pending_recreate: false,
             session_lost: false,
+            released: std::cell::Cell::new(false),
             factory_observer: None,
             connecting_factory: None,
             abandoned: std::cell::Cell::new(None),
@@ -2450,6 +2485,7 @@ impl TerminalView {
             pending_prelude: Vec::new(),
             pending_recreate: false,
             session_lost: false,
+            released: std::cell::Cell::new(false),
             factory_observer: None,
             connecting_factory: None,
             abandoned: std::cell::Cell::new(None),
@@ -2514,6 +2550,7 @@ impl TerminalView {
             pending_prelude: Vec::new(),
             pending_recreate: false,
             session_lost: false,
+            released: std::cell::Cell::new(false),
             factory_observer: None,
             connecting_factory: None,
             abandoned: std::cell::Cell::new(None),
@@ -2630,6 +2667,26 @@ impl TerminalView {
     /// pane offers Restart. Read by the debug-only `surface.terminal.state`.
     pub fn session_lost(&self) -> bool {
         self.session_lost
+    }
+
+    /// Whether the view gave its session up (`detach`, `shutdown`) and has not opened one since.
+    pub fn is_released(&self) -> bool {
+        self.released.get()
+    }
+
+    /// Whether this view is its session's route: it has opened its link or is opening it (the
+    /// factory has not answered yet), the session was not lost, and the view has not given its
+    /// session up. Its program and status then reach the app through the view. A restored tab's
+    /// view is created with its tab but opens its link on its first render, so a tab not shown
+    /// since a relaunch has none; so has a view with no open attempted yet, one whose last open
+    /// failed, one whose session was lost and one that was detached or shut down (until a
+    /// `restart` or `retry` opens a session again).
+    pub fn has_link(&self) -> bool {
+        matches!(
+            self.terminal,
+            TerminalState::Running(_) | TerminalState::Connecting
+        ) && !self.session_lost
+            && !self.released.get()
     }
 
     /// Whether this pane is in the failed state (no session link could be
@@ -3004,6 +3061,7 @@ impl TerminalView {
         self.terminal = TerminalState::Pending;
         self.exit_status = None;
         self.session_lost = false;
+        self.released.set(false);
         self.ensure_started(cx);
         cx.notify();
     }
@@ -3054,6 +3112,7 @@ impl TerminalView {
         self.terminal = TerminalState::Pending;
         self.exit_status = None;
         self.session_lost = false;
+        self.released.set(false);
         self.ensure_started(cx);
         cx.notify();
     }
@@ -3128,6 +3187,9 @@ impl TerminalView {
                 since_repaint = since_repaint.saturating_add(poll_interval);
                 let mut exit_status = None;
                 let mut osc_title = None;
+                // Program and status changes are never coalesced: each is
+                // kept, in arrival order.
+                let mut program_events: Vec<TerminalActivityEvent> = Vec::new();
                 let mut session_lost = false;
                 let mut viewport_changed = false;
                 let mut output_seen = false;
@@ -3143,6 +3205,18 @@ impl TerminalView {
                             }
                             if let Some(title) = Self::osc_title_from_event(&event) {
                                 osc_title = Some(title);
+                            }
+                            match &event {
+                                TerminalEvent::Program(program) => program_events
+                                    .push(TerminalActivityEvent::Program(program.clone())),
+                                TerminalEvent::Status(status, at_ms) => program_events
+                                    .push(TerminalActivityEvent::ProgramStatus {
+                                        status: status.clone(),
+                                        at_ms: *at_ms,
+                                    }),
+                                TerminalEvent::SeededTitle(title) => program_events
+                                    .push(TerminalActivityEvent::SeededTitle(title.clone())),
+                                _ => {}
                             }
                             session_lost |=
                                 matches!(event, TerminalEvent::SessionLost);
@@ -3175,6 +3249,12 @@ impl TerminalView {
                                 // is from a session the view has already moved
                                 // past.
                                 return;
+                            }
+                            // Before the exit and the title: a program that
+                            // ended or reported does so before its session
+                            // does.
+                            for event in program_events {
+                                cx.emit(event);
                             }
                             if let Some(exit_status) = exit_status {
                                 view.exit_status = Some(exit_status);
@@ -3305,6 +3385,7 @@ impl TerminalView {
     /// GPUI entity is still alive, avoiding background-test scheduler
     /// activity during drop.
     pub fn shutdown(&self) {
+        self.released.set(true);
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.shutdown(),
             TerminalState::Pending | TerminalState::Connecting => {
@@ -3318,6 +3399,7 @@ impl TerminalView {
     /// close). Dropping a view must never end a host session, so `Drop`
     /// calls this, not `shutdown()`.
     pub fn detach(&self) {
+        self.released.set(true);
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.detach(),
             TerminalState::Pending | TerminalState::Connecting => {

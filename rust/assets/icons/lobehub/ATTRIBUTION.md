@@ -24,10 +24,10 @@ this directory carries none.
 
 - `codex.svg`, **not** `codex-color.svg`: the colour variant paints a white
   plate behind a gradient mark — illegible in dark mode and muddy at 15px.
-- `claude-color.svg`, **not** `claudecode-color.svg`: both are LobeHub's and
-  both are `#D97757`, but the starburst is the shape Sirio has always shown
-  for this agent, so the swap changes the source without changing the
-  picture. The alternative is Claude Code's own pixel mark.
+- `claude-color.svg`, **not** `claudecode-color.svg`: the starburst stands for
+  the Claude account (`Icon::ClaudeAccount`: provider cards, the status bar's
+  usage segment). The agent itself is drawn with Claude Code's own pixel mark,
+  Clawd, vendored in `../chat/claude-code.svg` (`Icon::ClaudeCode`).
 - No Oh My Pi mark exists in any library, so omp keeps Sirio's own
   `../agent-omp.svg` and its baked gradient.
 - Gemini and Grok have no adapter behind them in `sirio_agents::ALL`.
@@ -51,7 +51,10 @@ The files are upstream's bytes, unedited:
   rename upstream consumers need is not needed here.
 
 `claude-color.svg` is the one file with a colour baked in (`fill="#D97757"`).
-It still rides the tinted path rather than the full-colour raster, because
+Its consumer is `Icon::ClaudeAccount`, the starburst of the Claude account
+(provider card, status bar's usage segment); the agent's own mark is Clawd,
+`Icon::ClaudeCode`, from `rust/assets/icons/chat/claude-code.svg`. It still
+rides the tinted path rather than the full-colour raster, because
 that hex *is* `AgentBrandColor::Claude`: same pixels, one less cache entry.
 See `rust/crates/sirio_ui/src/icons.rs`.
 
