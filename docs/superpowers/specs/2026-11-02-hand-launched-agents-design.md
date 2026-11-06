@@ -110,7 +110,7 @@ scripts are throwaway and not in the repo; §6 asks for their equivalent as a te
 The session engine already knows when a foreground process group is not the shell
 (F11). It also reports **which program** that is: the group leader's pid, process name
 and argv. It reads them only when the foreground group changes, not every loop, using
-`/proc` on Linux and libproc (`proc_name`, `KERN_PROCARGS2`) on macOS. *[my call]*
+`/proc` on Linux and libproc (`proc_name`, `KERN_PROCARGS2`) on macOS. The `KERN_PROCARGS2` reply pads the exec path to a multiple of 8 bytes before argv, so argv[0] is found at that offset, not by skipping NULs (an empty argv[0] is one NUL). *[my call]*
 This goes over the host protocol as a new capability (for example `term.program`, the
 next minor), with the `foreground` event and `SessionSummary.foreground` carrying the
 program when there is one. It follows the ledger rules of
