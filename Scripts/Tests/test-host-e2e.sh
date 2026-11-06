@@ -1211,9 +1211,13 @@ for line in open(path):
         if event.get("session_id") == session:
             events.append(event)
 
+# The wrapper is known by its argv, not its name: macOS's /bin/sh is a trampoline that
+# execs the shell it is set to (bash on the runners), so its name reads `sh` or `bash`
+# depending on when it is read, while its argv stays `sh -c …`.
 steps = [
-    ("a program event naming sh",
-     lambda e: e["type"] == "program" and (e.get("program") or {}).get("name") == "sh"),
+    ("a program event for the sh -c wrapper",
+     lambda e: e["type"] == "program"
+     and ((e.get("program") or {}).get("argv") or [])[:2] == ["sh", "-c"]),
     ("a status event: working, with an at_ms",
      lambda e: e["type"] == "status" and (e.get("status") or {}).get("state") == "working"
      and isinstance(e.get("at_ms"), int)),
