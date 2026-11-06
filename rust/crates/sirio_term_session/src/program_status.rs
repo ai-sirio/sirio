@@ -98,6 +98,14 @@ impl OscScanner {
     /// Feed one read of PTY output; completed reports and probes are appended to `out`.
     /// A probe's `end` counts from the start of `bytes`.
     pub(crate) fn scan(&mut self, bytes: &[u8], out: &mut Vec<Scanned>) {
+        // Outside a sequence, a read with no ESC leaves the scanner where it is. `contains`
+        // runs core's memchr, optimized even in a debug build, so such a read is skipped
+        // almost for free. Stepping every byte of a plain-text flood made the owner slower
+        // than the PTY, and it then served no request until the flood ended. A read with an
+        // ESC is still stepped byte by byte.
+        if matches!(self.state, State::Ground) && !bytes.contains(&ESC) {
+            return;
+        }
         for (index, &byte) in bytes.iter().enumerate() {
             self.step(byte, index + 1, out);
         }
