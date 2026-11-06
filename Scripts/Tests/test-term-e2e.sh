@@ -583,6 +583,7 @@ case_lagged() {
 }
 
 case_lagged_dense() {
+  if [ "$OS" = windows ]; then skip "ConPTY repaints the program's output, so the owner never parses the program's ESC density"; return 0; fi
   fresh_root
   start_held_host
   # Each line is 7 bytes with one ESC (an SGR, a visible pair, a newline): the
@@ -597,7 +598,7 @@ case_lagged_dense() {
     || fail "the flood never finished: the session blocked on its stalled client"
   wait "$stalled" || fail "the stalled attach failed"
   grep -q '^lagged=1$' "$ROOT/stalled.out" \
-    || fail "the attach was served only after the flood ended, so it never lagged: $(cat "$ROOT/stalled.out" "$ROOT/stalled.err" 2>/dev/null | head -c 600)"
+    || fail "the attach was not served while the flood ran (late or timed out), so it never lagged: $(cat "$ROOT/stalled.out" "$ROOT/stalled.err" 2>/dev/null | head -c 600)"
   { echo "--- stalled attach.out"; cat "$ROOT/stalled.out"; } >>"$TRANSCRIPT"
   NOTE="the attach was served during an ESC-dense flood"
   pass
