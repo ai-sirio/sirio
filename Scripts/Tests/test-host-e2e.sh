@@ -1370,7 +1370,8 @@ print(sum(len(word.encode()) for word in argv))')"
 # the exec path to a multiple of 8, so the reader must not take the empty argv[0] (one NUL)
 # for padding; the two cases use a path with no padding and a path with 7 bytes of it.
 # perl's exec with an indirect object is the portable way to start a program with argv[0] "".
-# The program is bash, which ignores its argv[0]: a multicall coreutils (Ubuntu 26.04's
+# The program is bash, which runs as plain bash with an empty argv[0] (only a leading `-`
+# or the name `sh` changes its mode): a multicall coreutils (Ubuntu 26.04's
 # uutils) picks `sleep` from argv[0] and would fail with "". The `; :` stops bash from
 # exec'ing sleep in its place, so the group leader stays bash.
 empty_argv0_case() {

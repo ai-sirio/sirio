@@ -388,7 +388,8 @@ fn run(inputs: Inputs) {
 
         cached.attachments = fanout.len();
 
-        // 5. Publish changes to observable process and VT state once per tick.
+        // 5. Publish changes to observable process and VT state once per tick (the foreground,
+        // the program and the exit only after a pass that emptied the byte channel, below).
         if let Ok(title) = terminal.title()
             && title != last_title
         {
