@@ -7282,6 +7282,7 @@ dependencies = [
  "sirio_host_client",
  "sirio_host_protocol",
  "sirio_lsp",
+ "sirio_opencode_watch",
  "sirio_perf",
  "sirio_persistence",
  "sirio_privacy",
@@ -7510,6 +7511,15 @@ dependencies = [
  "libc",
  "pulldown-cmark",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sirio_opencode_watch"
+version = "0.40.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

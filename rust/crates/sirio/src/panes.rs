@@ -8,8 +8,11 @@
 use std::time::{Duration, Instant};
 
 use gpui::{App, Entity, KeyBinding, actions};
-use sirio_activity::{AgentActivityModel, Transition, detect_content_status};
-use sirio_terminal::{TerminalActivityEvent, TerminalExitStatus, TerminalView};
+use sirio_activity::{
+    AgentActivityModel, ReportedState, Transition, agent_for_app, agent_for_program,
+    detect_content_status,
+};
+use sirio_terminal::{ReportState, TerminalActivityEvent, TerminalExitStatus, TerminalView};
 use sirio_ui::sidebar::project_settings::ProjectSettingsView;
 use sirio_ui::{browser::BrowserSurface, changes::ChangesTab, chat::Chat, file_view::FileView};
 
@@ -41,24 +44,129 @@ pub(crate) fn apply_terminal_activity_event(
             activity.apply_content_signal(pane_id, status, now)
         }
         TerminalActivityEvent::ChildExited { status } => {
-            // Process- and title-owned identities have independent clearing
-            // paths. A PTY child-exit notification is the spawn-owned path;
-            // never let it clear or rewrite either of the other two kinds.
+            // The session ended: a program-owned pane's agent went with it. The
+            // caller has settled a turn that was mid-way (`program_exited`) and
+            // drained its stop before this runs.
+            if activity.is_program_owned(pane_id) {
+                activity.program_gone(pane_id);
+                return None;
+            }
+            // Process- and title-owned identities have independent clearing paths.
+            // A PTY child-exit notification is the spawn-owned path; never let it
+            // clear or rewrite either of the other kinds.
             if activity.is_process_owned(pane_id) || activity.is_title_owned(pane_id) {
                 return None;
             }
             activity.apply_exit_result(pane_id, terminal_exit_code(*status), now)
         }
         TerminalActivityEvent::LifecycleChanged { .. } => None,
-        // A lost session keeps its scrollback and offers a Restart; it
-        // changes no agent identity or status on its own.
-        TerminalActivityEvent::SessionLost => None,
+        // A lost session keeps its scrollback and offers a Restart. The host is gone,
+        // and a program-owned pane's agent with it (the caller has settled a turn
+        // that was mid-way and dropped the record); the other owners change nothing.
+        TerminalActivityEvent::SessionLost => {
+            if activity.is_program_owned(pane_id) {
+                activity.program_gone(pane_id);
+            }
+            None
+        }
         // A refused open changes no agent identity; the pane is rebound.
         TerminalActivityEvent::IdTaken => None,
+        // The title the host held at an attach: no change of title, so Layer B never
+        // sees it. Only OpenCode's link reads it (`opencode.rs`).
+        TerminalActivityEvent::SeededTitle(_) => None,
+        // The host names the program holding the terminal: identity only, no
+        // status. Idempotent, so a seed or a reconnect that repeats what the
+        // pane has changes nothing. Never logged: the argv and cwd are content.
+        TerminalActivityEvent::Program(program) => {
+            match program.as_ref() {
+                Some(program) => {
+                    // Per pane, from the first program the session names: Layer D
+                    // stops polling it, whether or not this one is an agent.
+                    activity.note_program_session(pane_id);
+                    match agent_for_program(&program.argv, &program.name) {
+                        Some(agent_id) => activity.program_identified(pane_id, agent_id),
+                        // A transient (the shell's pre-exec copy, a wrapper) or a
+                        // program that is no agent. A pane keeps its agent while
+                        // its record is live: the agent runs a tool, and the
+                        // foreground is that tool's.
+                        None => {
+                            if !activity.has_live_report(pane_id) {
+                                activity.program_gone(pane_id);
+                            }
+                        }
+                    }
+                }
+                // The shell is the foreground again: no agent process holds the
+                // terminal, so neither a program's nor Layer D's claim stands. The
+                // caller has settled a turn that was mid-way and drained its stop.
+                // Only a pane whose last `Program` event named a program has one to end:
+                // a session that never named one (a spawn's, an agent that took the shell's
+                // group with `exec`) or one already ended keeps its identity, which a
+                // reconnect's re-seed (a `Program(None)` for it) must not clear.
+                None => {
+                    if activity.is_program_running(pane_id) {
+                        activity.program_gone(pane_id);
+                        activity.process_gone(pane_id);
+                    }
+                    activity.note_program_ended(pane_id);
+                }
+            }
+            None
+        }
+        // What the program reports: the record the turn tracker reads. The report
+        // is kept for the pane whether or not the pane is an agent yet; one that
+        // arrives before the program is named shows once it is. A pane with no agent
+        // yet takes it from the report's `app=` (a pane no program names, or a
+        // launcher the resolver misses); a `Program` that names an agent decides
+        // later. Never logged: `kind` and `app` are content.
+        TerminalActivityEvent::ProgramStatus { status, at_ms } => {
+            // OpenCode sends no 7501, so every host status for it is a none (a reconnect's
+            // re-seed included): the watch's link is the only writer of such a pane's record.
+            if activity.agent_id(pane_id) == Some("opencode") {
+                return None;
+            }
+            match status {
+                Some(record) => {
+                    if activity.agent_id(pane_id).is_none()
+                        && let Some(agent_id) = record.app.as_deref().and_then(agent_for_app)
+                    {
+                        activity.program_identified(pane_id, agent_id);
+                    }
+                    activity.program_report(
+                        pane_id,
+                        Some(reported_state(record.state)),
+                        *at_ms,
+                        now,
+                    );
+                }
+                None => {
+                    activity.program_report(pane_id, None, *at_ms, now);
+                    // Windows names no program, so a cleared record is also what says
+                    // an identity a report gave is over. A clear is not a stop.
+                    if cfg!(windows)
+                        && activity.is_program_owned(pane_id)
+                        && !activity.is_program_session(pane_id)
+                    {
+                        activity.program_gone(pane_id);
+                    }
+                }
+            }
+            None
+        }
     }
 }
 
-fn terminal_exit_code(status: TerminalExitStatus) -> i32 {
+fn reported_state(state: ReportState) -> ReportedState {
+    match state {
+        ReportState::Idle => ReportedState::Idle,
+        ReportState::Working => ReportedState::Working,
+        ReportState::Done => ReportedState::Done,
+        ReportState::Blocked => ReportedState::Blocked,
+        ReportState::Error => ReportedState::Error,
+    }
+}
+
+pub(crate) fn terminal_exit_code(status: TerminalExitStatus) -> i32 {
     match status {
         TerminalExitStatus::Success => 0,
         TerminalExitStatus::Code(code) => code,

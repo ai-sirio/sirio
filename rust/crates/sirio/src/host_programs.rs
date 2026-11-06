@@ -1,0 +1,255 @@
+//! The app's one listener on the host's `term.sessions` topic, for the tabs no terminal holds.
+//!
+//! A hand-typed agent's program and status reach the app through its terminal's link
+//! (`sirio_terminal`'s `HostLink`). After a relaunch only the tab shown has a running link (the
+//! others open theirs when they are shown), and a worktree not selected since the relaunch has no
+//! terminal at all, so their turns would make no stop and no unread mark. This thread reads the
+//! same events from one subscription of its own and hands them to the GPUI thread, which applies
+//! a session's only when its pane is a known tab's, the app is not closing it and no view bound
+//! under its key is its route (`SirioWorkspace::apply_host_program_messages`,
+//! `TerminalView::has_link`): a running link is the only route for its pane.
+//!
+//! The thread subscribes, then lists (so a change between the two arrives as an event), sends
+//! every listed session in the re-seed's form (a listed session that already exited also sends
+//! its end, after the re-seed, as a link's attach does), and forwards the events. It sends at
+//! most one end per session, as a link's `exited` flag does: a `Closed` after an `Exited` is the
+//! same end, and only the host's `Created`, or a listing that shows the session alive, lets the
+//! id end again. It lists again after a `Lagged` or `Resync`, which a subscription of this topic is
+//! not known to deliver. When the subscription is lost it retries through the reconnect closure
+//! the terminals' links use, at their interval and within their grace; that closure reaches the
+//! same endpoint and never starts a host. After the grace it sends `Lost` and ends, and the next
+//! adoption of a host starts a new one. It never ensures a host and never retries on a timer of
+//! its own.
+//!
+//! Nothing here is logged: a title, a program and a report are content.
+
+use std::collections::HashSet;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+    mpsc,
+};
+use std::time::{Duration, Instant};
+
+use futures::channel::mpsc::UnboundedSender;
+use sirio_host_client::term::TermClient;
+use sirio_host_protocol::term::SessionEvent;
+use sirio_terminal::{
+    HOST_RECONNECT_GRACE, HOST_RECONNECT_INTERVAL, HostSessionNote, TerminalActivityEvent,
+    TerminalExitStatus, host_session_note, summary_exit, summary_reseed_events,
+};
+
+/// How a lost connection is replaced: the reconnect closure of the host's client.
+pub(crate) type Reconnect = Arc<dyn Fn() -> Option<TermClient> + Send + Sync>;
+
+/// One listed session: its id, its state in the re-seed's form, and its end when it has one.
+pub(crate) struct ListedSession {
+    pub(crate) session_id: String,
+    pub(crate) events: Vec<TerminalActivityEvent>,
+    pub(crate) exit: Option<TerminalExitStatus>,
+}
+
+/// What the listener sends to the GPUI thread. Each message names its listener's generation:
+/// a superseded listener's messages are ignored.
+pub(crate) enum Message {
+    /// Every listed session.
+    Seed {
+        generation: u64,
+        sessions: Vec<ListedSession>,
+    },
+    /// One event of one session.
+    Event {
+        generation: u64,
+        session_id: String,
+        note: HostSessionNote,
+    },
+    /// The subscription is lost for good: no host answered within the grace.
+    Lost { generation: u64 },
+}
+
+impl Message {
+    pub(crate) fn generation(&self) -> u64 {
+        match self {
+            Message::Seed { generation, .. }
+            | Message::Event { generation, .. }
+            | Message::Lost { generation } => *generation,
+        }
+    }
+}
+
+/// How often a waiting listener looks at whether a later one has superseded it.
+const POLL: Duration = Duration::from_millis(250);
+
+/// Starts the listener of `generation` on a thread of its own. It ends when `current` names
+/// another generation, when the receiver is gone, or when the subscription is lost for longer
+/// than the grace (it then sends `Lost`).
+pub(crate) fn spawn(
+    client: TermClient,
+    reconnect: Option<Reconnect>,
+    generation: u64,
+    current: Arc<AtomicU64>,
+    tx: UnboundedSender<Message>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("sirio-host-programs".into())
+        .spawn(move || {
+            run(client, reconnect, generation, &current, &tx);
+        })
+        .map(|_| ())
+}
+
+fn superseded(generation: u64, current: &AtomicU64) -> bool {
+    current.load(Ordering::Acquire) != generation
+}
+
+/// Why one subscription ended.
+enum Ended {
+    /// Superseded, or nobody is listening any more.
+    Stop,
+    /// The connection is gone. `established` says whether the subscription ever delivered its
+    /// seed, which is what restarts the grace.
+    Lost { established: bool },
+}
+
+fn run(
+    mut client: TermClient,
+    reconnect: Option<Reconnect>,
+    generation: u64,
+    current: &AtomicU64,
+    tx: &UnboundedSender<Message>,
+) {
+    let mut deadline: Option<Instant> = None;
+    // The sessions whose end has been sent: one end per session for the life of this listener,
+    // across the reconnects of its subscription.
+    let mut ended: HashSet<String> = HashSet::new();
+    loop {
+        match subscribed(&client, generation, current, &mut ended, tx) {
+            Ended::Stop => return,
+            Ended::Lost { established } => {
+                if established {
+                    deadline = None;
+                }
+            }
+        }
+        let until = *deadline.get_or_insert_with(|| Instant::now() + HOST_RECONNECT_GRACE);
+        client = loop {
+            if superseded(generation, current) || tx.is_closed() {
+                return;
+            }
+            if Instant::now() >= until {
+                let _ = tx.unbounded_send(Message::Lost { generation });
+                return;
+            }
+            let mut waited = Duration::ZERO;
+            while waited < HOST_RECONNECT_INTERVAL {
+                let step = POLL.min(HOST_RECONNECT_INTERVAL - waited);
+                std::thread::sleep(step);
+                waited += step;
+                if superseded(generation, current) || tx.is_closed() {
+                    return;
+                }
+            }
+            if let Some(fresh) = reconnect.as_ref().and_then(|reconnect| reconnect()) {
+                break fresh;
+            }
+        };
+    }
+}
+
+/// One subscription: subscribe, list, seed, then forward events until the connection is lost.
+fn subscribed(
+    client: &TermClient,
+    generation: u64,
+    current: &AtomicU64,
+    ended: &mut HashSet<String>,
+    tx: &UnboundedSender<Message>,
+) -> Ended {
+    let Ok(events) = client.events() else {
+        return Ended::Lost { established: false };
+    };
+    if let Err(why) = seed(client, generation, ended, tx) {
+        return why;
+    }
+    loop {
+        if superseded(generation, current) || tx.is_closed() {
+            return Ended::Stop;
+        }
+        let event = match events.recv_timeout(POLL) {
+            Ok(event) => event,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Ended::Lost { established: true };
+            }
+        };
+        if matches!(
+            event,
+            SessionEvent::Lagged { .. } | SessionEvent::Resync { .. }
+        ) {
+            match seed(client, generation, ended, tx) {
+                Ok(()) => {}
+                Err(Ended::Stop) => return Ended::Stop,
+                Err(Ended::Lost { .. }) => return Ended::Lost { established: true },
+            }
+            continue;
+        }
+        // A new session under an id that ended: only the host's `Created` says so. What a
+        // session publishes after its exit (a title) does not make it a new one.
+        if let SessionEvent::Created { session_id } = &event {
+            ended.remove(session_id);
+            continue;
+        }
+        let Some((session_id, note)) = host_session_note(&event) else {
+            continue;
+        };
+        if matches!(note, HostSessionNote::Ended(_)) && !ended.insert(session_id.to_owned()) {
+            continue;
+        }
+        let message = Message::Event {
+            generation,
+            session_id: session_id.to_owned(),
+            note,
+        };
+        if tx.unbounded_send(message).is_err() {
+            return Ended::Stop;
+        }
+    }
+}
+
+/// Lists the host's sessions and sends each in the re-seed's form, then the end of each that has
+/// exited and has not been sent yet. `Err(Stop)` when nobody is listening, `Err(Lost)` when the
+/// listing failed.
+fn seed(
+    client: &TermClient,
+    generation: u64,
+    ended: &mut HashSet<String>,
+    tx: &UnboundedSender<Message>,
+) -> Result<(), Ended> {
+    let Ok(listed) = client.list() else {
+        return Err(Ended::Lost { established: false });
+    };
+    let sessions = listed
+        .sessions
+        .iter()
+        .map(|summary| {
+            // A listed session without an exit is alive: any earlier end of that id was another
+            // session's.
+            let exit = match summary_exit(summary) {
+                Some(exit) => ended.insert(summary.session_id.clone()).then_some(exit),
+                None => {
+                    ended.remove(&summary.session_id);
+                    None
+                }
+            };
+            ListedSession {
+                session_id: summary.session_id.clone(),
+                events: summary_reseed_events(summary),
+                exit,
+            }
+        })
+        .collect();
+    tx.unbounded_send(Message::Seed {
+        generation,
+        sessions,
+    })
+    .map_err(|_| Ended::Stop)
+}

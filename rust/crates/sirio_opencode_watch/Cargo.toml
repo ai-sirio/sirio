@@ -1,0 +1,15 @@
+[package]
+name = "sirio_opencode_watch"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# OpenCode's own status, read from the background service its TUI is a client of: its
+# registration file, one HTTP/SSE connection and a pure function that links its sessions
+# to terminal panes (design: docs/superpowers/specs/2026-11-02-hand-launched-agents-design.md
+# section 3.6). A leaf: no gpui, no local crates.
+[dependencies]
+# Loopback HTTP only; the agent ignores proxy variables.
+ureq = "3.4"
+serde.workspace = true
+serde_json.workspace = true

@@ -20,11 +20,15 @@ pub mod journal;
 pub mod terminate;
 mod keys;
 mod owner;
+mod program;
+mod program_status;
 
 pub use owner::{
     KITTY_APC_MAX_BYTES, KITTY_DECOMPRESSED_MAX_BYTES, KITTY_IMAGE_STORAGE_LIMIT,
     KittyPngDecoder, apply_kitty_ingest_limits,
 };
+pub use program::ForegroundProgram;
+pub use program_status::{ReportState, StatusRecord};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const JOURNAL_BYTES: usize = 4 << 20;
@@ -94,6 +98,11 @@ pub enum Event {
     Title(String),
     Foreground(bool),
     Exited(Exit),
+    /// The foreground program changed; `None` means the shell is the foreground again.
+    Program(Option<ForegroundProgram>),
+    /// A program's status report, and when it arrived (milliseconds since the session
+    /// started); `None` clears the record.
+    Status(Option<StatusRecord>, u64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +121,11 @@ pub struct Info {
     pub exit: Option<Exit>,
     pub foreground: bool,
     pub attachments: usize,
+    /// The program in the foreground, when it is not the shell. Always `None` on Windows.
+    pub program: Option<ForegroundProgram>,
+    /// The kept status report and when it arrived (milliseconds since the session started).
+    /// Dropped when the session exits, so a summary never shows a dead session's record.
+    pub status: Option<(StatusRecord, u64)>,
     /// Windows job-adoption error kind; the host logs it as
     /// `session.no_job <kind>` (Task 6). A missing process handle reports
     /// `Unsupported`.
@@ -224,6 +238,8 @@ impl Session {
             exit: None,
             foreground: false,
             attachments: 0,
+            program: None,
+            status: None,
             tree_kill_error,
         }));
         let wait_state = Arc::new((Mutex::new(None), Condvar::new()));

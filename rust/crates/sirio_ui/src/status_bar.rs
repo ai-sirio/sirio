@@ -688,7 +688,7 @@ impl Render for StatusBar {
         {
             left = left.child(provider_segment(
                 "Claude",
-                Icon::ClaudeCode,
+                Icon::ClaudeAccount,
                 claude_color,
                 claude_dimmed,
                 Self::segment_meter(&self.claude),

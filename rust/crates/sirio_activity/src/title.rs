@@ -5,8 +5,8 @@
 //!
 //! Every CLI has its own title format, captured empirically, not guessed:
 //! Claude idles as `✳ …` and works as `. …` or a braille spinner; Pi titles
-//! `π - <cwd>`; its omp fork titles `π: <cwd>` — the colon is the only
-//! distinguishing mark; Codex 0.144+ also writes a braille "dots" spinner
+//! `π - <cwd>`; its omp fork titles `π: <cwd>`, `π > <cwd>` when idle and
+//! `π <spinner> <cwd>` while working; Codex 0.144+ also writes a braille "dots" spinner
 //! into its title while working.
 //!
 //! **A bare braille spinner is therefore ambiguous between Claude and Codex
@@ -43,6 +43,22 @@ fn has_claude_working_glyph(title: &str) -> bool {
         title
             .strip_prefix(glyph)
             .is_some_and(|rest| rest.starts_with(' '))
+    })
+}
+
+/// True when a `π` is followed by omp's own marker: `π:` (older builds),
+/// `π > <cwd>` (idle) or `π <spinner> <cwd>` (working). Pi's titles put its
+/// separator as `π - <cwd>` and a working spinner before the glyph.
+fn has_omp_marker(title: &str) -> bool {
+    title.match_indices('π').any(|(at, glyph)| {
+        let rest = &title[at + glyph.len()..];
+        rest.starts_with(':')
+            || rest.starts_with(" > ")
+            || rest == " >"
+            || rest
+                .strip_prefix(' ')
+                .and_then(|after| after.chars().next())
+                .is_some_and(|c| BRAILLE_SPINNER_RANGE.contains(&c))
     })
 }
 
@@ -129,7 +145,7 @@ pub fn identify_agent_from_title(title: &str) -> Option<&'static str> {
     //    distinguishes them: pi = "π - <cwd>", omp = "π: <cwd>" (captured
     //    live from both CLIs). Checked before the braille fallback so a
     //    working "⠋ π: …" title isn't misread as Claude's spinner.
-    if title.contains("π:") {
+    if has_omp_marker(&title) {
         return Some("omp");
     }
     if title.contains('π') {
@@ -293,6 +309,38 @@ mod tests {
             identify_agent_from_title(&format!("{} π: sirio", spinner())),
             Some("omp")
         );
+    }
+
+    #[test]
+    fn claude_working_glyphs_identify_claude_and_run() {
+        for glyph in ["\u{25D0}", "\u{25D1}"] {
+            let title = format!("{glyph} Claude Code");
+            assert_eq!(identify_agent_from_title(&title), Some("claude"), "{title}");
+            assert_eq!(
+                detect_status_from_title(&title, "claude"),
+                Some(AgentStatus::Running),
+                "{title}"
+            );
+        }
+    }
+
+    #[test]
+    fn omp_titles_with_a_prompt_or_a_trailing_spinner_identify_omp() {
+        // omp 18.x idles as "π > <cwd>" and works as "π <spinner> <cwd>".
+        assert_eq!(identify_agent_from_title("π > ~/src"), Some("omp"));
+        let working = format!("π {} ~/src", spinner());
+        assert_eq!(identify_agent_from_title(&working), Some("omp"));
+        assert_eq!(
+            detect_status_from_title(&working, "omp"),
+            Some(AgentStatus::Running)
+        );
+        assert_eq!(
+            detect_status_from_title("π > ~/src", "omp"),
+            Some(AgentStatus::NeedsInput)
+        );
+        // Pi keeps its own shapes.
+        assert_eq!(identify_agent_from_title("π"), Some("pi"));
+        assert_eq!(identify_agent_from_title("π - ~/src"), Some("pi"));
     }
 
     #[test]

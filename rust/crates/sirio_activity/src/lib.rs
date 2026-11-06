@@ -38,10 +38,12 @@ mod content;
 mod model;
 mod mount;
 mod notification;
+mod program;
 /// #248: public so the app can take one process snapshot per Layer D tick
 /// and walk every pane against it, instead of each pane enumerating the
 /// machine's processes for itself.
 pub mod process;
+mod report;
 mod session;
 mod sort;
 mod status;
@@ -56,6 +58,8 @@ pub use model::{AgentActivityModel, CATALOG_IDS, identify_agent_from_process_nam
 pub use mount::WorktreeMountPolicy;
 pub use notification::NotificationPayload;
 pub use process::{inspect_foreground_agent, inspect_process_names};
+pub use program::{agent_for_app, agent_for_program};
+pub use report::{MIN_TURN_MS, ReportedState, TITLE_GRACE};
 pub use session::{
     AgentSessionRef, AgentSessionRestorePlan, AgentSessionRestoreResult, TerminalContentId,
 };

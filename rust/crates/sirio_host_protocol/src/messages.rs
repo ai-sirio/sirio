@@ -223,6 +223,9 @@ pub mod capability {
     pub const TERMINAL: &str = "terminal";
     /// `term.create` honours `env_exact` (minor 2).
     pub const TERM_ENV_EXACT: &str = "term.env_exact";
+    /// `term.list` carries each session's foreground program and its status,
+    /// and `term.sessions` sends them as `program` and `status` events (minor 3).
+    pub const TERM_PROGRAM: &str = "term.program";
 }
 
 #[cfg(test)]

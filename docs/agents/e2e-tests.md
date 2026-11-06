@@ -22,7 +22,13 @@ Scripts/Tests/test-update-ui-e2e.sh   # -> prints "UPDATE UI E2E OK"
 
 # The host foundation: a real sirio-host started detached, adopted, killed
 # around, idled out and drained across a protocol major; --out-dir DIR keeps
-# every host's log and state; SIRIO_HOST_E2E_VERBOSE=1 prints each probe line.
+# every host's log and state; SIRIO_HOST_E2E_VERBOSE=1 prints each probe line. Cases
+# program_is_named .. repeated_report_is_one_event (Linux and macOS; they need python3) type
+# real commands into a /bin/sh -i the host owns and read `term.list`'s program and status,
+# the OSC 7501 probe answer (at most one a second, and before a DA1 reply), that bytes from
+# `term.feed` or the prelude are never scanned, that no argv, script or cwd reaches host.log,
+# the `program` and `status` events a `host_probe term-events <ms>` subscriber receives (a report
+# repeated five times is one event), and that a program's argv is bounded to 4096 bytes in all.
 Scripts/Tests/test-host-e2e.sh      # -> prints "HOST E2E OK (<n> cases, <s>s)"
 # Whether a detached process survives its parent's world, row by row.
 Scripts/Tests/probe-host-detach.sh  # -> prints "DETACH PROBE OK"
@@ -78,6 +84,46 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # case15-attention.json); --only N[,N...] prints "SIRIOCTL E2E PARTIAL"; --mutate
 # claude-prompt-hook is case 6's mutation check.
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
+
+# An agent typed by hand into a terminal shows its mark: a debug sirio on a private Xvfb (or
+# --display :N), in an `env -i` world (its own HOME, XDG directories, SIRIO_DB, SIRIO_HOST_HOME and
+# OpenCode service config) whose PATH holds only stubs. A stub (stubs/hand-agents/agent.py) plays
+# claude, codex, omp and pi; `node` is python3 and `$RUN/bg/codex` a copy of it. Each case opens a
+# terminal with `surface terminal open` (no --cmd: the host names its foreground program), types
+# through `host_probe term-write`, and reads the pane's `agent` in `panel list --json`: the four
+# agents typed by name (a frame of each), a package script run by `node`, leaving it, a background
+# `codex` that Layer D would name but is not the foreground, and an omp title. It then types the
+# stub's OSC 7501 reports (work, idle, done, block, error, clear) and `hook <status>` lines and
+# asserts the status the tab shows, its unread mark, running flag and the notifications the app
+# posted (a baseline per step): a silent startup, claude's, pi's and codex's turns (codex's `idle`
+# right after its `done` keeps the finish) (a frame at running,
+# needs-input and done), a first `block`, a short turn, an exit or a clear mid-turn, hooks that
+# yield to a live report and rule without one, a Sirio-spawned `--agent claude` tab, a
+# `system.quit` and relaunch mid-turn (the startup posts nothing on its own), and the argv kept out of the app's stderr. OpenCode, which
+# reports nothing in the terminal, is read from its service: a stub (stubs/opencode-server.py: the
+# real v2 endpoints, Basic auth, an SSE stream; driven by lines in $RUN/oc.cmd) registers itself
+# in the world's own $XDG_STATE_HOME/opencode/service.json, and the cases cover a session linked
+# by its title and one linked by being the first in its folder (a frame at running and at done), a
+# permission ask, a link kept through a title an older session also has, a turn under a second
+# (finished, +1), two panes in one folder (no guess, then each by its title), a failed turn (the
+# service's error text and password stay out of the app's stderr), a relaunch, and a service that
+# goes away (the mark stays, no status, one `[opencode-watch] <kind>` line). Tabs no terminal
+# holds are covered too: after a relaunch a turn typed into a tab never shown (codex, an exit mid-turn,
+# OpenCode) or into a worktree never selected makes one stop and an unread mark, showing the tab adds
+# none, a finished claude turn read before the quit stays silent, and a `panel create` session that
+# belongs to no tab gets no state. The end of a hidden agent tab's session
+# (a Sirio-launched tab with exit 0 and exit 3, a hand-typed `exec codex`), a host killed under an attached tab
+# and a hidden one, and End all sessions end both the way they end the attached tab (one stop, the
+# same notification); a session that exited while the app was down posts nothing at the relaunch; closing
+# a worktree nobody selected, mid-turn, posts nothing and leaves nothing running; and a Show-session tab
+# of a hidden tab's session makes one stop for one turn, the hidden tab's own, and closing it leaves the
+# hidden tab fed; a Show tab on screen with the window active makes its owner's turn no news; a Restart of an agent tab mid-turn (launched or typed) posts nothing, leaves no status, and the launched one's next turn is one stop; a session's end is sent once even when
+# the host publishes a title after the exit and then closes it. --out-dir DIR
+# keeps transcript.log, steps.log (each step's `panel list` and `surface attention read`, and the
+# session's status, unread, running and posted count), frames/ and the
+# logs (default ~/.cache/st/hand-agents-e2e-<time>; TMPDIR defaults to ~/.cache/st/hand-agents-tmp,
+# on disk); --only NAME[,NAME...] prints "HAND AGENTS E2E PARTIAL"; --no-build reuses the binaries.
+Scripts/Tests/test-hand-agents-e2e.sh   # -> prints "HAND AGENTS E2E OK (<n> cases, <s>s)"
 
 # The "Project added" dialog after every add from the UI, in a real debug Sirio per scenario (a
 # fresh SIRIO_DB, private HOME and SIRIO_PROJECTS_DIR), driven by real X keys and clicks and
@@ -475,4 +521,23 @@ Scripts/Tests/test-capture-diff.sh   # -> prints "CAPTURE DIFF CONTRACT OK"
 # [--allow TSV] [--tolerance N] compares two sets (Scripts/capture-masks.tsv names the regions a clock drives)
 # and prints CAPTURE DIFF IDENTICAL, CAPTURE DIFF OK (...) or CAPTURE DIFF FAILED (...).
 Scripts/bezel-off-captures.sh --out-dir DIR --xvfb   # -> prints "CAPTURES OK: DIR (<n> frames)"
+
+# The opt-in live tests of program status (hand-launched agents), never in Scripts/ci.sh: the
+# real CLIs against local fake model APIs (tests/live/*.py, 127.0.0.1, a free port), each under a
+# private HOME and XDG_*, with the child's environment built from nothing and each CLI resolved
+# through a private bin/ of symlinks (override: SIRIO_LIVE_CLAUDE, SIRIO_LIVE_CODEX, SIRIO_LIVE_OMP,
+# SIRIO_LIVE_PI, SIRIO_LIVE_OPENCODE; a missing CLI prints "SKIP: <cli> not found" and passes).
+# program_status_live types the command into an engine shell session and prints the
+# Event::Program / Event::Status sequence it saw: claude (idle once the probe is answered,
+# working, done, and blocked kind=permission on a Bash ask), codex (idle unprompted, done,
+# blocked on an escalation), omp (idle at start), pi (idle once answered, working, done) and
+# the foreground program staying the agent while Claude and Codex run a 3 s shell tool.
+# service_live starts a private OpenCode v2 service (`opencode service set port` before its first
+# start, never the default 49374), drives one session over its REST API and expects the watch to
+# say Busy, Waiting (the permission ask, answered once), Busy, Idle; it stops the service by the
+# pid in its registration and checks the port is free. The binaries must be the real ones, not
+# the mise wrappers of ~/.local/bin/claude and ~/.local/bin/pi. TMPDIR must be on disk and
+# outside your home (/var/tmp/...).
+cd rust && cargo nextest run -p sirio_term_session --test program_status_live --run-ignored only
+cd rust && cargo nextest run -p sirio_opencode_watch --test service_live --run-ignored only
 ```

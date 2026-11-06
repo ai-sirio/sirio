@@ -19,14 +19,15 @@ use sirio_host_client::term::TermClient;
 use sirio_host_client::{StreamItem, StreamReceiver};
 use sirio_host_protocol::messages::ErrorCode;
 use sirio_host_protocol::term::{
-    CreateParams, ExitStatus, Origin, SessionEvent, TermCommand, TermSize, b64_encode,
+    CreateParams, ExitStatus, ForegroundProgram as HostProgram, Origin, ProgramState,
+    ProgramStatus, SessionEvent, TermCommand, TermSize, b64_encode,
 };
 use sirio_term_session::{
-    Event, Exit, Session, SpawnSpec,
+    Event, Exit, ForegroundProgram, ReportState, Session, SpawnSpec, StatusRecord,
     fanout::{Attachment, Chunk},
 };
 
-use crate::{TerminalExitStatus, TerminalShell};
+use crate::{TerminalActivityEvent, TerminalExitStatus, TerminalShell};
 
 /// What a terminal pane's owner thread talks to instead of a PTY.
 pub trait SessionLink: Send + 'static {
@@ -49,7 +50,15 @@ pub enum LinkChunk {
     Snapshot { cols: u16, rows: u16, bytes: Vec<u8> },
     Output(Vec<u8>),
     Title(String),
+    /// The title the host's engine held when the session was listed (an attach, a
+    /// reconnect's re-seed): not a change of title, so nothing that reads titles for
+    /// their own sake (Layer B, the tab's name) may see it.
+    SeededTitle(String),
     Foreground(bool),
+    /// The program holding the terminal changed; `None` is the shell again.
+    Program(Option<ForegroundProgram>),
+    /// The program's report changed, stamped with `at_ms`; `None` clears it.
+    Status(Option<StatusRecord>, u64),
     Exited(TerminalExitStatus),
     /// The host is gone or the stream could not be re-established.
     Lost,
@@ -343,6 +352,8 @@ fn forward_local(
                 Event::Title(title) => LinkChunk::Title(title),
                 Event::Foreground(running) => LinkChunk::Foreground(running),
                 Event::Exited(exit) => LinkChunk::Exited(session_exit_status(&exit)),
+                Event::Program(program) => LinkChunk::Program(program),
+                Event::Status(status, at_ms) => LinkChunk::Status(status, at_ms),
             };
             if chunks_tx.send(chunk).is_err() {
                 return;
@@ -603,6 +614,12 @@ impl HostLink {
             OpenPlan::Attach => listed_exit,
             OpenPlan::Create | OpenPlan::Duplicate | OpenPlan::Lost => None,
         };
+        // The program and status the listing found are sent first, before any
+        // live event of this attach. A session created here has none to seed.
+        let seed = match plan {
+            OpenPlan::Attach => listed_summary.map(seed_chunks).unwrap_or_default(),
+            OpenPlan::Create | OpenPlan::Duplicate | OpenPlan::Lost => Vec::new(),
+        };
         let stream = attached.stream;
         let (chunks_tx, chunks_rx) = mpsc::channel();
         let done = Arc::new(AtomicBool::new(false));
@@ -627,6 +644,7 @@ impl HostLink {
                         size,
                         done,
                         exit_at_attach,
+                        seed,
                     );
                 }
             })
@@ -653,11 +671,6 @@ impl HostLink {
     }
 }
 
-/// How long a dropped connection is retried before the link reports `Lost`,
-/// and how often a fresh client is attempted in between.
-const HOST_RECONNECT_GRACE: Duration = Duration::from_secs(10);
-const HOST_RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
-
 /// Reads one stream and the session events into [`LinkChunk`]s, remembering
 /// the next offset so a re-attach can resume where the bytes stopped.
 ///
@@ -679,7 +692,13 @@ fn forward_host(
     mut size: TermSize,
     done: Arc<AtomicBool>,
     exit_at_attach: Option<ExitStatus>,
+    seed: Vec<LinkChunk>,
 ) {
+    for chunk in seed {
+        if chunks_tx.send(chunk).is_err() {
+            return;
+        }
+    }
     let mut next_offset = 0u64;
     // Whether this session's exit has been sent: once, from whichever of the
     // listing, an `Exited` event or a `Closed` event comes first (finding 9).
@@ -862,43 +881,215 @@ fn forward_session_events(
             Err(mpsc::TryRecvError::Empty) => return Events::Open,
             Err(mpsc::TryRecvError::Disconnected) => return Events::Disconnected,
         };
-        let chunk = match event {
-            SessionEvent::Title {
-                session_id: id,
-                title,
-            } if id == session_id => LinkChunk::Title(title),
-            SessionEvent::Foreground {
-                session_id: id,
-                running,
-            } if id == session_id => LinkChunk::Foreground(running),
-            SessionEvent::Exited {
-                session_id: id,
-                status,
-            } if id == session_id => {
-                if *exited {
-                    continue;
-                }
-                *exited = true;
-                LinkChunk::Exited(host_exit_status(&status))
-            }
-            SessionEvent::Closed { session_id: id } if id == session_id => {
-                if !*exited {
-                    *exited = true;
-                    if chunks_tx
-                        .send(LinkChunk::Exited(TerminalExitStatus::Unknown))
-                        .is_err()
-                    {
-                        return Events::ViewGone;
+        let chunk = match mapped_event(&event) {
+            Some((id, mapped)) if id == session_id => match mapped {
+                MappedEvent::Chunk(chunk) => chunk,
+                MappedEvent::Exited(status) => {
+                    if *exited {
+                        continue;
                     }
+                    *exited = true;
+                    LinkChunk::Exited(status)
                 }
-                return Events::Ended;
-            }
+                MappedEvent::Closed => {
+                    if !*exited {
+                        *exited = true;
+                        if chunks_tx
+                            .send(LinkChunk::Exited(TerminalExitStatus::Unknown))
+                            .is_err()
+                        {
+                            return Events::ViewGone;
+                        }
+                    }
+                    return Events::Ended;
+                }
+            },
             _ => continue,
         };
         if chunks_tx.send(chunk).is_err() {
             return Events::ViewGone;
         }
     }
+}
+
+/// What one `term.sessions` event is to a session's link.
+enum MappedEvent {
+    Chunk(LinkChunk),
+    Exited(TerminalExitStatus),
+    Closed,
+}
+
+/// The session an event names and what it is to that session's link: the one mapping the
+/// terminals' links and the app's listener ([`HostSessionNote`]) share. `None` for an event
+/// that names no session, one this build does not know, and a state a newer host sent (the
+/// engine has none, so nothing is sent in its place).
+fn mapped_event(event: &SessionEvent) -> Option<(&str, MappedEvent)> {
+    let mapped = match event {
+        SessionEvent::Title { session_id, title } => (
+            session_id.as_str(),
+            MappedEvent::Chunk(LinkChunk::Title(title.clone())),
+        ),
+        SessionEvent::Foreground {
+            session_id,
+            running,
+        } => (
+            session_id.as_str(),
+            MappedEvent::Chunk(LinkChunk::Foreground(*running)),
+        ),
+        SessionEvent::Program {
+            session_id,
+            program,
+        } => (
+            session_id.as_str(),
+            MappedEvent::Chunk(LinkChunk::Program(program.as_ref().map(engine_program))),
+        ),
+        SessionEvent::Status {
+            session_id,
+            status,
+            at_ms,
+        } => {
+            let chunk = match status {
+                None => LinkChunk::Status(None, *at_ms),
+                Some(status) => LinkChunk::Status(Some(engine_status(status)?), *at_ms),
+            };
+            (session_id.as_str(), MappedEvent::Chunk(chunk))
+        }
+        SessionEvent::Exited { session_id, status } => (
+            session_id.as_str(),
+            MappedEvent::Exited(host_exit_status(status)),
+        ),
+        SessionEvent::Closed { session_id } => (session_id.as_str(), MappedEvent::Closed),
+        _ => return None,
+    };
+    Some(mapped)
+}
+
+/// What the host says about a session, in the activity events a terminal's link makes of it.
+pub enum HostSessionNote {
+    /// The session's title (as the seed's title, which only OpenCode's link reads), program or
+    /// report changed.
+    Activity(TerminalActivityEvent),
+    /// The session exited, with that status, or was closed (`Unknown`, as a link reports it).
+    Ended(TerminalExitStatus),
+}
+
+/// The session a `term.sessions` event names and what it is to the app, mapped as a terminal's
+/// link maps it. `None` for what a link sends no activity for (the foreground flag, a state
+/// this build does not know, an event that names no session). A `Closed` after an `Exited` is
+/// another end: the caller sends one end per session, as a link's `exited` flag does.
+pub fn host_session_note(event: &SessionEvent) -> Option<(&str, HostSessionNote)> {
+    let (id, mapped) = mapped_event(event)?;
+    let note = match mapped {
+        MappedEvent::Chunk(chunk) => HostSessionNote::Activity(activity_of_chunk(chunk)?),
+        MappedEvent::Exited(status) => HostSessionNote::Ended(status),
+        MappedEvent::Closed => HostSessionNote::Ended(TerminalExitStatus::Unknown),
+    };
+    Some((id, note))
+}
+
+/// The activity event a link chunk is, for the chunks that carry program state.
+fn activity_of_chunk(chunk: LinkChunk) -> Option<TerminalActivityEvent> {
+    match chunk {
+        LinkChunk::Title(title) | LinkChunk::SeededTitle(title) => {
+            Some(TerminalActivityEvent::SeededTitle(title))
+        }
+        LinkChunk::Program(program) => Some(TerminalActivityEvent::Program(program)),
+        LinkChunk::Status(status, at_ms) => {
+            Some(TerminalActivityEvent::ProgramStatus { status, at_ms })
+        }
+        _ => None,
+    }
+}
+
+/// A listed session's title, program and report, in the re-seed's form: the program and the
+/// report are sent even when absent, so one that ended is ended in the app.
+pub fn summary_reseed_events(
+    summary: &sirio_host_protocol::term::SessionSummary,
+) -> Vec<TerminalActivityEvent> {
+    reseed_chunks(summary)
+        .into_iter()
+        .filter_map(activity_of_chunk)
+        .collect()
+}
+
+/// How a listed session ended, if it has: what a link's attach reports after the snapshot.
+pub fn summary_exit(
+    summary: &sirio_host_protocol::term::SessionSummary,
+) -> Option<TerminalExitStatus> {
+    summary.exit.as_ref().map(host_exit_status)
+}
+
+/// How long a dropped connection is retried before a link reports `Lost`, and how often a
+/// fresh client is attempted in between.
+pub const HOST_RECONNECT_GRACE: Duration = Duration::from_secs(10);
+pub const HOST_RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
+
+fn engine_program(program: &HostProgram) -> ForegroundProgram {
+    ForegroundProgram {
+        pid: program.pid,
+        name: program.name.clone(),
+        argv: program.argv.clone(),
+        cwd: program.cwd.clone(),
+    }
+}
+
+/// `None` for a state the engine does not have (a newer host's).
+fn engine_status(status: &ProgramStatus) -> Option<StatusRecord> {
+    let state = match status.state {
+        ProgramState::Idle => ReportState::Idle,
+        ProgramState::Working => ReportState::Working,
+        ProgramState::Done => ReportState::Done,
+        ProgramState::Blocked => ReportState::Blocked,
+        ProgramState::Error => ReportState::Error,
+        ProgramState::Other => return None,
+    };
+    Some(StatusRecord {
+        state,
+        kind: status.kind.clone(),
+        app: status.app.clone(),
+    })
+}
+
+/// The program, then the status, a listed session already has. Nothing for an
+/// absent field or a state this build does not know.
+fn seed_chunks(summary: &sirio_host_protocol::term::SessionSummary) -> Vec<LinkChunk> {
+    let mut chunks = Vec::new();
+    if !summary.title.is_empty() {
+        chunks.push(LinkChunk::SeededTitle(summary.title.clone()));
+    }
+    if let Some(program) = &summary.program {
+        chunks.push(LinkChunk::Program(Some(engine_program(program))));
+    }
+    if let Some(status) = &summary.status
+        && let Some(record) = engine_status(status)
+    {
+        chunks.push(LinkChunk::Status(Some(record), status.at_ms));
+    }
+    chunks
+}
+
+/// The session's whole program state after a reconnect: the program (`None`
+/// when there is none, so one that ended is ended in the app), then the status
+/// (`None` with stamp 0 when there is none; nothing for a state this build does
+/// not know). Unlike [`seed_chunks`], absent fields are sent, because a view
+/// that was already running may hold what the host has since dropped.
+fn reseed_chunks(summary: &sirio_host_protocol::term::SessionSummary) -> Vec<LinkChunk> {
+    let mut chunks = Vec::new();
+    if !summary.title.is_empty() {
+        chunks.push(LinkChunk::SeededTitle(summary.title.clone()));
+    }
+    chunks.push(LinkChunk::Program(
+        summary.program.as_ref().map(engine_program),
+    ));
+    match &summary.status {
+        None => chunks.push(LinkChunk::Status(None, 0)),
+        Some(status) => {
+            if let Some(record) = engine_status(status) {
+                chunks.push(LinkChunk::Status(Some(record), status.at_ms));
+            }
+        }
+    }
+    chunks
 }
 
 /// Whether the session's queued events end it: its close or its exit has
@@ -918,7 +1109,15 @@ fn session_ended(
 /// Re-establish the stream against a fresh client after the connection
 /// dropped. Every 500 ms for 10 s: no fresh client, or a host that no longer
 /// lists the id, ends in `Lost` (sent exactly once); `true` means the stream,
-/// events and size were replaced and the loop continues.
+/// events and size were replaced and the loop continues. Just before that
+/// `true`, the session's full program state from the fresh listing is sent
+/// ([`reseed_chunks`]): a program or a report that ended while the connection
+/// was down is cleared in the app instead of staying until the next event.
+/// The events subscription is made before the listing, the way the open does
+/// it: an event emitted after the listing is then queued behind the re-seed
+/// rather than lost between the two. On an early return the fresh subscription
+/// is dropped; its relay thread ends on its next event or when the dropped
+/// client's connection closes, as a failed attach's did before.
 #[allow(clippy::too_many_arguments)]
 fn reconnect_until_attached(
     session_id: &str,
@@ -954,47 +1153,61 @@ fn reconnect_until_attached(
         let Some(fresh) = reconnect() else {
             continue;
         };
-        match fresh.list() {
+        let Ok(fresh_events) = fresh.events() else {
+            continue;
+        };
+        let listed = match fresh.list() {
             Ok(listed)
                 if !listed
                     .sessions
                     .iter()
                     .any(|summary| summary.session_id == session_id) =>
             {
-                if session_ended(session_id, events_rx, chunks_tx, exited) {
+                // A `Closed` queued on either subscription makes it an exit.
+                if session_ended(session_id, events_rx, chunks_tx, exited)
+                    || session_ended(session_id, &fresh_events, chunks_tx, exited)
+                {
                     return false;
                 }
                 let _ = chunks_tx.send(LinkChunk::Lost);
                 return false;
             }
-            Ok(_) => {}
+            Ok(listed) => listed,
             Err(_) => continue,
-        }
+        };
         let attached = fresh.attach(session_id, resume_from);
         match attached {
-            Ok((attached, fresh_rx)) => match fresh.events() {
-                Ok(fresh_events) => {
-                    if done.load(Ordering::Acquire) {
-                        let _ = fresh.detach(attached.stream);
-                        return false;
-                    }
-                    {
-                        // The new client owns the re-established stream from
-                        // here: every later input, resize, end and detach must
-                        // travel on its connection.
-                        let mut control = control
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        control.stream = attached.stream;
-                        control.client = fresh;
-                    }
-                    *stream_rx = fresh_rx;
-                    *events_rx = fresh_events;
-                    *size = attached.size;
-                    return true;
+            Ok((attached, fresh_rx)) => {
+                if done.load(Ordering::Acquire) {
+                    let _ = fresh.detach(attached.stream);
+                    return false;
                 }
-                Err(_) => continue,
-            },
+                {
+                    // The new client owns the re-established stream from
+                    // here: every later input, resize, end and detach must
+                    // travel on its connection.
+                    let mut control = control
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    control.stream = attached.stream;
+                    control.client = fresh;
+                }
+                *stream_rx = fresh_rx;
+                *events_rx = fresh_events;
+                *size = attached.size;
+                if let Some(summary) = listed
+                    .sessions
+                    .iter()
+                    .find(|summary| summary.session_id == session_id)
+                {
+                    for chunk in reseed_chunks(summary) {
+                        if chunks_tx.send(chunk).is_err() {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
             Err(_) => continue,
         }
     }
@@ -1297,7 +1510,10 @@ mod tests {
             LinkChunk::Snapshot { .. } => "Snapshot",
             LinkChunk::Output(_) => "Output",
             LinkChunk::Title(_) => "Title",
+            LinkChunk::SeededTitle(_) => "SeededTitle",
             LinkChunk::Foreground(_) => "Foreground",
+            LinkChunk::Program(_) => "Program",
+            LinkChunk::Status(..) => "Status",
             LinkChunk::Exited(_) => "Exited",
             LinkChunk::Lost => "Lost",
         }

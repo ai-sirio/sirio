@@ -30,6 +30,7 @@ members = [
     "crates/sirio_control",
     "crates/sirio_ipc",
     "crates/sirio_activity",
+    "crates/sirio_opencode_watch",
     "crates/sirio_markdown",
     "crates/sirio_diagram",
     "crates/sirio_usage",
