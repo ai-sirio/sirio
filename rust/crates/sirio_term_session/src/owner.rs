@@ -289,7 +289,7 @@ fn run(inputs: Inputs) {
         let mut close_reply = None;
 
         // 4. Commands run between PTY drains, making attach/snapshot atomic
-        // with respect to output already read from the master.
+        // with respect to output already fed to the VT and journal.
         while let Some(command) = carried.take().or_else(|| command_rx.try_recv().ok()) {
             match command {
                 Command::Input(bytes, reply) => {
@@ -397,70 +397,76 @@ fn run(inputs: Inputs) {
             let _ = events.send(Event::Title(last_title.clone()));
         }
 
-        #[cfg(unix)]
-        let foreground_pgid = master_fd.and_then(|fd| {
-            let pgid = unsafe { libc::tcgetpgrp(fd) };
-            (pgid > 0).then_some(pgid as u32)
-        });
-        #[cfg(windows)]
-        let foreground_pgid: Option<u32> = None;
-        let foreground = foreground_pgid.is_some_and(|pgid| pgid != cached.pid);
-        if foreground != last_foreground {
-            last_foreground = foreground;
-            cached.foreground = foreground;
-            let _ = events.send(Event::Foreground(foreground));
-        }
+        // The foreground, the program and the exit are read only after a pass that emptied
+        // the byte channel, as before the slice: none is seen ahead of the output (or the
+        // status reports) still queued in it.
+        if !backlog {
+            #[cfg(unix)]
+            let foreground_pgid = master_fd.and_then(|fd| {
+                let pgid = unsafe { libc::tcgetpgrp(fd) };
+                (pgid > 0).then_some(pgid as u32)
+            });
+            #[cfg(windows)]
+            let foreground_pgid: Option<u32> = None;
+            let foreground = foreground_pgid.is_some_and(|pgid| pgid != cached.pid);
+            if foreground != last_foreground {
+                last_foreground = foreground;
+                cached.foreground = foreground;
+                let _ = events.send(Event::Foreground(foreground));
+            }
 
-        // Name the program that holds the terminal, and drop its status report when the
-        // shell takes the terminal back.
-        if cached.exit.is_none() {
-            match tracker.poll(foreground_pgid, cached.pid, Instant::now()) {
-                Update::Nothing => {}
-                Update::Named(program) => {
-                    cached.program = Some(program.clone());
-                    let _ = events.send(Event::Program(Some(program)));
-                }
-                Update::Replaced(program) => {
-                    // The old program is over: end it as `ShellAgain` does, then name
-                    // the new one.
-                    let _ = events.send(Event::Program(None));
-                    if cached.status.take().is_some() {
-                        let _ = events.send(Event::Status(None, elapsed_ms(started)));
+            // Name the program that holds the terminal, and drop its status report when the
+            // shell takes the terminal back.
+            if cached.exit.is_none() {
+                match tracker.poll(foreground_pgid, cached.pid, Instant::now()) {
+                    Update::Nothing => {}
+                    Update::Named(program) => {
+                        cached.program = Some(program.clone());
+                        let _ = events.send(Event::Program(Some(program)));
                     }
-                    cached.program = Some(program.clone());
-                    let _ = events.send(Event::Program(Some(program)));
+                    Update::Replaced(program) => {
+                        // The old program is over: end it as `ShellAgain` does, then name
+                        // the new one.
+                        let _ = events.send(Event::Program(None));
+                        if cached.status.take().is_some() {
+                            let _ = events.send(Event::Status(None, elapsed_ms(started)));
+                        }
+                        cached.program = Some(program.clone());
+                        let _ = events.send(Event::Program(Some(program)));
+                    }
+                    Update::ShellAgain => {
+                        cached.program = None;
+                        let _ = events.send(Event::Program(None));
+                        if cached.status.take().is_some() {
+                            let _ = events.send(Event::Status(None, elapsed_ms(started)));
+                        }
+                    }
                 }
-                Update::ShellAgain => {
+            }
+
+            if cached.exit.is_none() {
+                let exit = match child.try_wait() {
+                    Ok(Some(status)) if status.success() => Some(Exit::Success),
+                    Ok(Some(status)) => Some(Exit::Code(status.exit_code() as i32)),
+                    Ok(None) => None,
+                    Err(_) => Some(Exit::Unknown),
+                };
+                if let Some(exit) = exit {
+                    cached.exit = Some(exit.clone());
+                    // No event: the app settles a turn that was mid-way from `Exited`, and a
+                    // `Status(None)` ahead of it would erase the state that settling needs.
+                    cached.status = None;
                     cached.program = None;
-                    let _ = events.send(Event::Program(None));
-                    if cached.status.take().is_some() {
-                        let _ = events.send(Event::Status(None, elapsed_ms(started)));
-                    }
+                    let _ = events.send(Event::Exited(exit.clone()));
+                    let (exit_lock, changed) = &*wait_state;
+                    *exit_lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(exit.clone());
+                    changed.notify_all();
                 }
             }
         }
 
-        if cached.exit.is_none() {
-            let exit = match child.try_wait() {
-                Ok(Some(status)) if status.success() => Some(Exit::Success),
-                Ok(Some(status)) => Some(Exit::Code(status.exit_code() as i32)),
-                Ok(None) => None,
-                Err(_) => Some(Exit::Unknown),
-            };
-            if let Some(exit) = exit {
-                cached.exit = Some(exit.clone());
-                // No event: the app settles a turn that was mid-way from `Exited`, and a
-                // `Status(None)` ahead of it would erase the state that settling needs.
-                cached.status = None;
-                cached.program = None;
-                let _ = events.send(Event::Exited(exit.clone()));
-                let (exit_lock, changed) = &*wait_state;
-                *exit_lock
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(exit.clone());
-                changed.notify_all();
-            }
-        }
         publish_info(&shared_info, &cached);
 
         if should_close {
