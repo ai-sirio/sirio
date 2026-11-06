@@ -24,6 +24,11 @@ pub const KITTY_IMAGE_STORAGE_LIMIT: u64 = 64 * 1024 * 1024;
 /// #303 R2.4: cap PNG decoder allocations, including decompressed RGBA output.
 pub const KITTY_DECOMPRESSED_MAX_BYTES: u64 = KITTY_IMAGE_STORAGE_LIMIT;
 
+/// How long one pass of the owner loop drains PTY bytes before it serves commands: a
+/// flood that outpaces the VT keeps the byte channel non-empty, and without a bound
+/// attach, input, resize, snapshot and close would wait until it ends.
+const DRAIN_SLICE: Duration = Duration::from_millis(8);
+
 /// #301: PNG decoding is registered by each terminal owner so Kitty f=100
 /// transmits are stored while the optional libghostty PNG feature stays off.
 pub struct KittyPngDecoder {
@@ -202,7 +207,11 @@ fn run(inputs: Inputs) {
 
     let mut carried = None;
     loop {
-        // 1. Drain PTY bytes into the resident VT, journal, and every stream.
+        // 1. Drain PTY bytes into the resident VT, journal, and every stream, for at most
+        // one slice: the commands below are served between slices, so a flood cannot hold
+        // them. A slice ends only after a whole chunk, never inside one.
+        let deadline = Instant::now() + DRAIN_SLICE;
+        let mut backlog = false;
         while let Ok(bytes) = bytes_rx.try_recv() {
             let offset = journal.head();
             scanned.clear();
@@ -249,6 +258,10 @@ fn run(inputs: Inputs) {
             terminal.vt_write(&bytes[written..]);
             journal.push(&bytes);
             fanout.broadcast_output(offset, &bytes);
+            if Instant::now() >= deadline {
+                backlog = true;
+                break;
+            }
         }
 
         // 2. This VT alone answers queries and writes those replies to the PTY.
@@ -465,8 +478,15 @@ fn run(inputs: Inputs) {
             return;
         }
 
+        // With a backlog left in the byte channel, do not idle: poll the commands and go
+        // straight back to draining.
+        let idle = if backlog {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(4)
+        };
         // A disconnected handle means no caller can use the session anymore.
-        match command_rx.recv_timeout(Duration::from_millis(4)) {
+        match command_rx.recv_timeout(idle) {
             Ok(command) => carried = Some(command),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
