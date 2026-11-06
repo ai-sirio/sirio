@@ -87,9 +87,9 @@ set -eEuo pipefail
 #                         the same report written five times is one `status`
 #                         event of `term.sessions`, not five
 #   30. empty_argv0_is_kept
-#                         a program started with an EMPTY argv[0] and an exec path
+#                         bash started with an EMPTY argv[0] and an exec path
 #                         that needs no padding in the kernel's argument block is
-#                         listed with argv `["", "61"]`, not shifted left
+#                         listed with argv `["", "-c", "sleep 61; :"]`, not shifted left
 #   31. empty_argv0_is_kept_padded
 #                         the same with an exec path that needs 7 bytes of padding
 # Cases 10 and 11 are unix-only and print SKIP on Windows; case 13 runs on
@@ -1370,12 +1370,15 @@ print(sum(len(word.encode()) for word in argv))')"
 # the exec path to a multiple of 8, so the reader must not take the empty argv[0] (one NUL)
 # for padding; the two cases use a path with no padding and a path with 7 bytes of it.
 # perl's exec with an indirect object is the portable way to start a program with argv[0] "".
+# The program is bash, which ignores its argv[0]: a multicall coreutils (Ubuntu 26.04's
+# uutils) picks `sleep` from argv[0] and would fail with "". The `; :` stops bash from
+# exec'ing sleep in its place, so the group leader stays bash.
 empty_argv0_case() {
   local pane="$1" arg="$2" shape="$3" s L zero
   if [ "$OS" = windows ]; then skip "no foreground process group to read on Windows"; return 0; fi
   command -v perl >/dev/null 2>&1 || fail "perl is required by the empty argv[0] cases and is not on PATH"
-  s="$(command -v sleep)"
-  case "$s" in /*) ;; *) fail "sleep is not an absolute path: $s" ;; esac
+  s="$(command -v bash)"
+  case "$s" in /*) ;; *) fail "bash is not an absolute path: $s" ;; esac
   L=${#s}
   zero="$(printf '%*s' $(( (7 - L % 8 + 8) % 8 )) '' | tr ' ' /)$s"
   case "$shape" in
@@ -1383,9 +1386,9 @@ empty_argv0_case() {
     padded) s="/$zero" ;;
   esac
   interactive_shell "$pane"
-  probe term-write "$pane" "$(printf "perl -e 'exec { \$ARGV[0] } \"\", \$ARGV[1]' %s %s\r" "$s" "$arg")"
-  wait_until 5 field_is "$pane" program.argv "[\"\",\"$arg\"]" \
-    || fail "argv is not [\"\", \"$arg\"] within 5 s: $SESSION_DOC"
+  probe term-write "$pane" "$(printf "perl -e 'exec { \$ARGV[0] } \"\", \"-c\", \$ARGV[1]' %s 'sleep %s; :'\r" "$s" "$arg")"
+  wait_until 5 field_is "$pane" program.argv "[\"\",\"-c\",\"sleep $arg; :\"]" \
+    || fail "argv is not [\"\", \"-c\", \"sleep $arg; :\"] within 5 s: $SESSION_DOC"
   NOTE="exec path of ${#s} bytes ($shape)"
   pass
 }
