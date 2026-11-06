@@ -1351,9 +1351,11 @@ import json, sys
 argv = json.load(sys.stdin)
 print(sum(len(word.encode()) for word in argv))')"
   [ "$total" -le 4096 ] || fail "the listed argv holds $total bytes, over the 4096 bound"
-  # The bound cuts the tail: the interpreter and its script stay.
-  [ "$(printf '%s' "$(doc_field program.argv)" | python3 -c 'import json, sys; print(json.load(sys.stdin)[0])')" = python3 ] \
-    || fail "the first argv entry is not the program: $SESSION_DOC"
+  # The bound cuts the tail: the interpreter and its script stay. The interpreter is
+  # checked by its script, not its name: macOS's framework python3 re-execs itself, so
+  # argv[0] there is the full path of Python.app's binary.
+  [ "$(printf '%s' "$(doc_field program.argv)" | python3 -c 'import json, os, sys; argv = json.load(sys.stdin); print(os.path.basename(argv[0]).lower().startswith("python") and argv[1:3] == ["-c", "import time; time.sleep(60)"])')" = True ] \
+    || fail "the interpreter and its script are not the head of argv: $SESSION_DOC"
   NOTE="$total bytes of argv"
   pass
 }
