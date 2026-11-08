@@ -344,13 +344,15 @@ pub struct RightPanel {
     open_list_chat_expanded: bool,
     /// The Prompts view's cards and the bounds it records; see `prompts.rs`.
     prompts: prompts::PromptsView,
-    /// Where each drawn Files row sits in the window, by node path. The
+    /// The Files rows the last frame drew, with their window bounds. The
     /// debug verb `surface.files.read` reads it; debug builds fill it.
     file_row_bounds: files::RowBounds,
     /// The hidden-files toggle's window bounds, for the same verb.
     hidden_switch_bounds: files::BoundsCell,
     /// How many Files refreshes have landed, whatever their result.
     refreshes_landed: u64,
+    /// `refreshes_landed` as of the last frame that drew the Files rows.
+    drawn_refreshes: std::cell::Cell<u64>,
     /// Every row label a rows rebuild produced since the last facts read.
     #[cfg(debug_assertions)]
     built_labels: std::cell::RefCell<std::collections::BTreeSet<String>>,
@@ -402,6 +404,7 @@ impl RightPanel {
             file_row_bounds: Default::default(),
             hidden_switch_bounds: Default::default(),
             refreshes_landed: 0,
+            drawn_refreshes: Default::default(),
             #[cfg(debug_assertions)]
             built_labels: Default::default(),
             is_stale: false,

@@ -22556,6 +22556,7 @@ impl SirioWorkspace {
             ("stale".to_string(), flag(facts.stale)),
             ("showHidden".to_string(), flag(facts.show_hidden)),
             ("refreshes".to_string(), facts.refreshes.to_string()),
+            ("drawnRefreshes".to_string(), facts.drawn_refreshes.to_string()),
             ("hiddenSwitchBounds".to_string(), bounds(facts.hidden_switch_bounds)),
             ("seenCount".to_string(), facts.seen.len().to_string()),
         ];

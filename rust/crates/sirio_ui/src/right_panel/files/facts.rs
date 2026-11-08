@@ -4,8 +4,7 @@
 //! the row builder behind it can change without the verb's shape changing.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 
 use gpui::{App, Bounds, Pixels};
@@ -15,7 +14,10 @@ use gpui::{canvas, prelude::*};
 use super::super::{PanelView, RightPanel, ShowHiddenFilesSetting};
 
 pub(in super::super) type BoundsCell = Rc<Cell<Option<Bounds<Pixels>>>>;
-pub(in super::super) type RowBounds = Rc<RefCell<HashMap<PathBuf, Bounds<Pixels>>>>;
+/// The rows the frame being drawn built, in drawn order. Each is recorded
+/// when it is drawn, with its bounds set at prepaint, so a row's label and
+/// its coordinates always come from one frame.
+pub(in super::super) type RowBounds = Rc<RefCell<Vec<FileRowFacts>>>;
 
 /// What the debug verb `surface.files.read` reports. A bounds field is
 /// `None` while that element is not drawn.
@@ -27,11 +29,14 @@ pub struct FilesFacts {
     pub settled: bool,
     /// The first walk is still running.
     pub updating: bool,
-    /// The tree on screen is older than the last failed walk.
+    /// The tree on screen may be older than the disk (a change was seen, or
+    /// the last walk failed).
     pub stale: bool,
     pub show_hidden: bool,
     /// How many refreshes have landed, whatever their result.
     pub refreshes: u64,
+    /// The `refreshes` count the last frame that drew the rows had seen.
+    pub drawn_refreshes: u64,
     /// The clickable hidden-files toggle, not its footer container.
     pub hidden_switch_bounds: Option<Bounds<Pixels>>,
     /// Every row label built since the previous read.
@@ -54,7 +59,7 @@ pub struct FileRowFacts {
 }
 
 /// A row's own absolute path, spelled relative to the worktree with `/`.
-fn relative_slash(root: &Path, path: &Path) -> String {
+pub(super) fn relative_slash(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
@@ -73,24 +78,8 @@ impl RightPanel {
             .collect();
         #[cfg(not(debug_assertions))]
         let seen = Vec::new();
-        let drawn = self.file_row_bounds.borrow();
         let rows = if shown {
-            self.file_rows(show_hidden)
-                .into_iter()
-                .filter_map(|row| {
-                    let bounds = drawn.get(&row.node.path).copied()?;
-                    Some(FileRowFacts {
-                        label: row.node.name.clone(),
-                        path: relative_slash(&self.repo_root, &row.node.path),
-                        depth: row.depth,
-                        is_dir: row.node.is_dir,
-                        expanded: row.node.expanded,
-                        selected: self.selected_path.as_deref() == Some(row.node.path.as_path()),
-                        status: row.node.git_status.map(|status| status.slug()),
-                        bounds: Some(bounds),
-                    })
-                })
-                .collect()
+            self.file_row_bounds.borrow().clone()
         } else {
             Vec::new()
         };
@@ -101,6 +90,7 @@ impl RightPanel {
             stale: self.is_stale,
             show_hidden,
             refreshes: self.refreshes_landed,
+            drawn_refreshes: self.drawn_refreshes.get(),
             hidden_switch_bounds: if shown {
                 self.hidden_switch_bounds.get()
             } else {
@@ -123,17 +113,23 @@ impl RightPanel {
     }
 }
 
-/// Covers its `relative` parent and records the parent's window bounds under
-/// `path` at prepaint. Debug builds only.
-pub(super) fn row_probe(rows: &RowBounds, path: &Path) -> Option<impl gpui::IntoElement> {
+/// Records `facts` as drawn this frame and returns a probe that sets its
+/// bounds at prepaint. Debug builds only.
+pub(super) fn row_probe(rows: &RowBounds, facts: FileRowFacts) -> Option<impl gpui::IntoElement> {
     #[cfg(debug_assertions)]
     {
+        let index = {
+            let mut drawn = rows.borrow_mut();
+            drawn.push(facts);
+            drawn.len() - 1
+        };
         let rows = rows.clone();
-        let path = path.to_path_buf();
         Some(
             canvas(
                 move |bounds, _, _| {
-                    rows.borrow_mut().insert(path.clone(), bounds);
+                    if let Some(row) = rows.borrow_mut().get_mut(index) {
+                        row.bounds = Some(bounds);
+                    }
                 },
                 |_, _, _, _| {},
             )
@@ -146,7 +142,7 @@ pub(super) fn row_probe(rows: &RowBounds, path: &Path) -> Option<impl gpui::Into
     }
     #[cfg(not(debug_assertions))]
     {
-        let _ = (rows, path);
+        let _ = (rows, facts);
         None::<gpui::Empty>
     }
 }

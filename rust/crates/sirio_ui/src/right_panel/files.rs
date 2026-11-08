@@ -562,7 +562,19 @@ impl RightPanel {
         row_bounds: facts::RowBounds,
     ) -> impl IntoElement {
         let path = row.node.path.clone();
-        let probe = facts::row_probe(&row_bounds, &path);
+        let probe = facts::row_probe(
+            &row_bounds,
+            FileRowFacts {
+                label: row.node.name.clone(),
+                path: facts::relative_slash(&repo_root, &path),
+                depth: row.depth,
+                is_dir: row.node.is_dir,
+                expanded: row.node.expanded,
+                selected,
+                status: row.node.git_status.map(|status| status.slug()),
+                bounds: None,
+            },
+        );
         let is_dir = row.node.is_dir;
         let name = row.node.name.clone();
         let git_status = row.node.git_status;
@@ -800,6 +812,7 @@ impl RightPanel {
         let processor_focus = file_focus.clone();
         let repo_root = self.repo_root.clone();
         let row_bounds = self.file_row_bounds.clone();
+        self.drawn_refreshes.set(self.refreshes_landed);
         let hidden_switch_bounds = self.hidden_switch_bounds.clone();
         // The Files view has no toolbar of its own. The row it used to
         // hold showed the checkout path — which the sidebar already
