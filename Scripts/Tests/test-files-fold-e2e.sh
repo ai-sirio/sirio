@@ -19,10 +19,12 @@ set -eEuo pipefail
 #   7 a worktree switch keeps the rows     away and back, the opened rows are as they were
 #
 # `seen.log` is the union of every label the app built since the previous read (a destructive
-# read the script drains on every poll); `never_built` asks it. The artifact: --out-dir DIR
-# (default artifacts/files-fold-e2e-<stamp>-<pid>) keeps transcript.log (every sirioctl call and
-# its reply), captures/light-<n>.png (PID-matched window captures), seen-<n>.log snapshots,
-# git-status-<n>.txt, light-app.log and xvfb.log. Rerunning the script reproduces it.
+# read the script drains on every poll); `never_built` and `ever_built` ask it. The artifact:
+# --out-dir DIR (default artifacts/files-fold-e2e-<stamp>-<pid>) keeps transcript.log (the
+# script's notes and every logged sirioctl call with its reply; the polled `surface files read`
+# calls are not logged), captures/light-<n>.png (PID-matched window captures), seen-<n>.log
+# snapshots, git-status-<n>.txt, light-app.log and xvfb.log, and from any run seen.log and
+# last-state.txt (the last Files read), written on exit. Rerunning the script reproduces it.
 #
 # Usage: Scripts/Tests/test-files-fold-e2e.sh --xvfb [--out-dir DIR]
 #
@@ -132,6 +134,9 @@ cleanup() {
   set +e
   trap - ERR
   [ -z "$APP_PID" ] || terminate "$APP_PID"
+  # What a failed run needs to be diagnosed, before $WORK goes.
+  [ ! -f "$WORK/seen.log" ] || cp "$WORK/seen.log" "$OUT_DIR/seen.log"
+  printf '%s\n' "$STATE" >"$OUT_DIR/last-state.txt"
   collect_logs
   stop_hosts
   [ -z "$XVFB_PID" ] || terminate "$XVFB_PID"
@@ -351,6 +356,20 @@ never_built() { # label...
   done
   note "OK: never built: $*"
 }
+# Fails unless a row with exactly this label was built since the last seen_reset: the positive
+# control of never_built, which would also pass if the record were empty.
+ever_built() { # label...
+  local label
+  for label in "$@"; do
+    grep -Fxq -- "$label" "$WORK/seen.log" \
+      || fail "$SCENARIO: no row labelled '$label' was ever built -- seen.log: $(tr '\n' '|' <"$WORK/seen.log" | cut -c1-600)"
+  done
+  note "OK: built: $*"
+}
+refreshes_are() { # n
+  STATE="$(read_verb files 2>&1)" || return 1
+  [ "$(value refreshes)" = "$1" ]
+}
 drawn_refreshes_over() { # n
   STATE="$(read_verb files 2>&1)" || return 1
   [ "$(value drawnRefreshes)" -gt "$1" ]
@@ -500,7 +519,11 @@ select_repo() {
 both_listed() { [ -n "$(worktree_id)" ] && [ -n "$(worktree_id_of "$OTHER_REPO")" ]; }
 worktree_id() { worktree_id_of "$REPO"; }
 worktree_id_of() { # repository
-  ctlq list-workspaces 2>/dev/null | awk -F '\t' -v repo="$1" '$4 == repo {print $1; exit}'
+  # The whole listing first: awk quitting early would break sirioctl's pipe (a panic, and with
+  # pipefail a failed call).
+  local listing
+  listing="$(ctlq list-workspaces 2>/dev/null)" || return 0
+  awk -F '\t' -v repo="$1" '$4 == repo {print $1; exit}' <<<"$listing"
 }
 
 # ---------------------------------------------------------------- checks
@@ -517,10 +540,13 @@ SCENARIO="nested_listings"
 open_dir source
 open_dir src
 open_dir main
+# main's own listing has landed once its children show.
+wait_on files 'row:resources:Depth=3'
 printf 'notes\n' >"$REPO/source/src/main/NOTES.md"
 wait_on files 'row:NOTES.md:Depth=3'
 rm "$REPO/source/src/main/NOTES.md"
-wait_on files 'norow:NOTES.md'
+# Paired with rows that must still be there, so an empty read cannot satisfy norow.
+wait_on files shown=1 'row:resources:Depth=3' 'norow:NOTES.md'
 snapshot 1
 ok 1 "nested listings stay current"
 
@@ -528,6 +554,8 @@ SCENARIO="chains_joined"
 wait_on files "row:$JAVA:Depth=3" \
   'row:test / java / it / acme / app / v2:Depth=2' \
   'row:docs / adr:Depth=1' 'row:config / pmd:Depth=1' 'row:tools / pkg:Depth=1'
+wait_on files "row:$JAVA:Path=source/src/main/java/it/acme/app/v2"
+ever_built "$JAVA" 'docs / adr' 'test / java / it / acme / app / v2'
 never_built java docs config tools test
 snapshot 2
 ok 2 "chains are joined and never built unfolded"
@@ -544,6 +572,7 @@ read_state files
 click_row "$JAVA"
 wait_on files "row:$JAVA:Expanded=1" "row:$JAVA:Selected=1" \
   'row:domain / model:Depth=4' 'row:domain / model:Dir=1' 'row:App.java:Depth=4'
+ever_built 'domain / model'
 never_built domain
 snapshot 4
 ok 4 "opening a joined row shows its children joined"
@@ -554,14 +583,20 @@ wait_on files 'row:java / it:Depth=3' 'row:java / it:Expanded=1' \
   'row:acme / app / v2:Depth=4' 'row:acme / app / v2:Expanded=1' 'row:acme / app / v2:Selected=1' \
   'row:New.java:Depth=4' 'after:acme / app / v2:New.java'
 xkey Up
-wait_on files 'row:java / it:Selected=1'
+wait_on files 'row:java / it:Selected=1' 'row:java / it:Path=source/src/main/java/it' \
+  'row:acme / app / v2:Selected=0'
 rm "$REPO/source/src/main/java/it/New.java"
 # Spec §6 #14: the selected path `it` is now a middle link of the rejoined row.
-wait_on files "row:$JAVA:Expanded=1" "row:$JAVA:Selected=1"
+wait_on files "row:$JAVA:Expanded=1" "row:$JAVA:Selected=1" 'row:App.java:Selected=0'
 snapshot 5
 ok 5 "the row splits and rejoins with the disk"
 
 SCENARIO="hidden_files"
+# A precache walk of this worktree can still land after check 5 and refresh once more: let the
+# count settle before taking it as the baseline.
+wait_on files stale=0 updating=0
+read_state files
+hold_until 2 "no refresh is still landing" refreshes_are "$(value refreshes)"
 read_state files
 before="$(value drawnRefreshes)"
 touch "$REPO/source/src/main/java/it/.DS_Store"
@@ -580,8 +615,17 @@ SCENARIO="worktree_switch"
 wait_on files stale=0 updating=0
 ctl select-workspace --workspace "$(worktree_id_of "$OTHER_REPO")" >/dev/null
 wait_on files 'row:README:Depth=0'
+# Spec 3.6: while the repository is not shown, its watcher marks its cached snapshot dirty (a
+# 300 ms poll, main.rs start_files_watcher_poll -> mark_files_snapshot_dirty) and the precache
+# rebuilds it with build_files_snapshot, which knows no open directory. Only that rebuilt snapshot
+# is restored by the switch back. No verb signals the precache, so the wait is a bounded pause: a
+# short one only weakens the check (the switch back then finds the dirty snapshot), never flakes it.
+printf 'late\n' >"$REPO/source/src/main/Precache.md"
+sleep 3
+seen_reset
 ctl select-workspace --workspace "$(worktree_id)" >/dev/null
-wait_on files "row:$JAVA:Expanded=1" 'row:domain / model:Depth=4'
+wait_on files "row:$JAVA:Expanded=1" 'row:domain / model:Depth=4' 'row:Precache.md:Depth=3'
+never_built java domain
 snapshot 7
 ok 7 "a worktree switch keeps the rows"
 app_quit

@@ -169,9 +169,11 @@ Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "
 # record, which the script drains on every read into seen.log), the joined row carries the
 # outermost link's git status, opening it shows its children joined, a sibling file splits it and
 # removing the file rejoins it with the selection kept, hidden files decide the chain until they
-# are shown, and a worktree switch away and back keeps the rows. Linux only: --xvfb is required;
-# --out-dir DIR keeps transcript.log, captures/light-<n>.png (and failure.png on a failed run),
-# seen-<n>.log snapshots, git-status-<n>.txt, light-app.log and xvfb.log.
+# are shown, and a worktree switch away and back keeps the rows, even when the repository's snapshot was rebuilt
+# by the precache meanwhile. Linux only: --xvfb is required;
+# --out-dir DIR keeps transcript.log (the script's notes and its logged sirioctl calls, not the polled
+# reads), captures/light-<n>.png (and failure.png on a failed run), seen-<n>.log snapshots,
+# git-status-<n>.txt, light-app.log, xvfb.log, and seen.log and last-state.txt (the last Files read).
 Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 7", then "FILES FOLD E2E OK"
 
 # The chat's session panel column in a real, isolated Sirio: a stub `claude`
