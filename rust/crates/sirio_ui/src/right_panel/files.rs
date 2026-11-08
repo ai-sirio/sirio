@@ -562,7 +562,8 @@ impl RightPanel {
         row_bounds: facts::RowBounds,
     ) -> impl IntoElement {
         let path = row.node.path.clone();
-        let probe = facts::row_probe(
+        #[cfg(debug_assertions)]
+        let probe = Some(facts::row_probe(
             &row_bounds,
             FileRowFacts {
                 label: row.node.name.clone(),
@@ -574,7 +575,12 @@ impl RightPanel {
                 status: row.node.git_status.map(|status| status.slug()),
                 bounds: None,
             },
-        );
+        ));
+        #[cfg(not(debug_assertions))]
+        let probe = {
+            let _ = &row_bounds;
+            None::<gpui::Empty>
+        };
         let is_dir = row.node.is_dir;
         let name = row.node.name.clone();
         let git_status = row.node.git_status;

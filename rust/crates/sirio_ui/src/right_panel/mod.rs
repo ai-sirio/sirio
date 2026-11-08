@@ -344,7 +344,7 @@ pub struct RightPanel {
     open_list_chat_expanded: bool,
     /// The Prompts view's cards and the bounds it records; see `prompts.rs`.
     prompts: prompts::PromptsView,
-    /// The Files rows the last frame drew, with their window bounds. The
+    /// The Files rows the last frame prepainted, with their window bounds. The
     /// debug verb `surface.files.read` reads it; debug builds fill it.
     file_row_bounds: files::RowBounds,
     /// The hidden-files toggle's window bounds, for the same verb.

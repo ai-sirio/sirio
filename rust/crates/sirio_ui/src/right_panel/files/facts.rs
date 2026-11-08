@@ -4,6 +4,7 @@
 //! the row builder behind it can change without the verb's shape changing.
 
 use std::cell::{Cell, RefCell};
+#[cfg(debug_assertions)]
 use std::path::Path;
 use std::rc::Rc;
 
@@ -14,9 +15,9 @@ use gpui::{canvas, prelude::*};
 use super::super::{PanelView, RightPanel, ShowHiddenFilesSetting};
 
 pub(in super::super) type BoundsCell = Rc<Cell<Option<Bounds<Pixels>>>>;
-/// The rows the frame being drawn built, in drawn order. Each is recorded
-/// when it is drawn, with its bounds set at prepaint, so a row's label and
-/// its coordinates always come from one frame.
+/// The rows the last frame prepainted, in drawn order, each with the bounds
+/// it was prepainted at, so a row's label and its coordinates always come
+/// from one frame.
 pub(in super::super) type RowBounds = Rc<RefCell<Vec<FileRowFacts>>>;
 
 /// What the debug verb `surface.files.read` reports. A bounds field is
@@ -59,6 +60,7 @@ pub struct FileRowFacts {
 }
 
 /// A row's own absolute path, spelled relative to the worktree with `/`.
+#[cfg(debug_assertions)]
 pub(super) fn relative_slash(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -113,38 +115,24 @@ impl RightPanel {
     }
 }
 
-/// Records `facts` as drawn this frame and returns a probe that sets its
-/// bounds at prepaint. Debug builds only.
-pub(super) fn row_probe(rows: &RowBounds, facts: FileRowFacts) -> Option<impl gpui::IntoElement> {
-    #[cfg(debug_assertions)]
-    {
-        let index = {
-            let mut drawn = rows.borrow_mut();
-            drawn.push(facts);
-            drawn.len() - 1
-        };
-        let rows = rows.clone();
-        Some(
-            canvas(
-                move |bounds, _, _| {
-                    if let Some(row) = rows.borrow_mut().get_mut(index) {
-                        row.bounds = Some(bounds);
-                    }
-                },
-                |_, _, _, _| {},
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .into_any_element(),
-        )
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = (rows, facts);
-        None::<gpui::Empty>
-    }
+/// A probe that, at prepaint, records `facts` with its bounds. Only rows
+/// that are really drawn reach prepaint (the list builds row 0 extra times
+/// just to measure it), so the record holds exactly the drawn rows, top to
+/// bottom. Debug builds only.
+#[cfg(debug_assertions)]
+pub(super) fn row_probe(rows: &RowBounds, mut facts: FileRowFacts) -> impl gpui::IntoElement {
+    let rows = rows.clone();
+    canvas(
+        move |bounds, _, _| {
+            facts.bounds = Some(bounds);
+            rows.borrow_mut().push(facts);
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// The same, into one cell. Debug builds only.
