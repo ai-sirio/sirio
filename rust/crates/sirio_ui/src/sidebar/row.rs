@@ -535,11 +535,11 @@ impl Sidebar {
         let hover_group = format!("sidebar-project-{row_id}");
         let tab_id = row.tab_id;
         let parked_tab = row.parked_tab;
-        let mark_size = theme.typography.headline;
+        let mark_size = theme.typography.scaled(14.0);
         let icon_size = IconSize::Small;
         let project_mark = match project_icon.as_ref().map(|icon| &icon.value) {
             Some(ProjectIconValue::Emoji(emoji)) => div()
-                .text_size(theme.typography.scaled(15.0))
+                .text_size(theme.typography.scaled(14.0))
                 .child(emoji.clone())
                 .into_any_element(),
             // A locally chosen PNG is real file content already on disk — no
@@ -827,7 +827,7 @@ impl Sidebar {
                         .debug_selector(move || format!("sidebar-tab-close-{row_id}"))
                         .w(px(16.0))
                         .flex_none()
-                        .text_size(theme.typography.scaled(14.0))
+                        .text_size(theme.typography.scaled(13.0))
                         .text_color(theme.ely.fg_muted)
                         .rounded(theme.radii.chip)
                         .hover(|style| style.bg(theme.ely.hover))

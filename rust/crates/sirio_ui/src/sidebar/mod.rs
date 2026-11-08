@@ -199,7 +199,7 @@ pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
 /// size in this file is written in. It is drawn through
 /// [`Typography::scaled`], never as a bare `px`, so Settings -> Appearance ->
 /// Interface font size carries the worktree names with the rest of the shell.
-pub(crate) const ROW_TITLE_FONT_SIZE: f32 = 13.5;
+pub(crate) const ROW_TITLE_FONT_SIZE: f32 = 13.0;
 /// Two-line card context line height (11.5px).
 pub(crate) const ROW_SUB_LINE_HEIGHT: f32 = 15.0;
 /// Gap between a card's title and context lines.
@@ -4019,7 +4019,7 @@ impl Render for Sidebar {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(theme.typography.scaled(13.5))
+                            .text_size(theme.typography.scaled(13.0))
                             .text_color(theme.ely.fg_muted)
                             .child("Closed"),
                     )
@@ -4128,7 +4128,7 @@ impl Render for Sidebar {
             .flex_col()
             .w(px(panel_width))
             .h_full()
-            .text_size(theme.typography.scaled(16.0))
+            .text_size(theme.typography.scaled(13.0))
             .overflow_hidden()
             .bg(theme.ely.bg)
             .border_r_1()

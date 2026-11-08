@@ -942,7 +942,7 @@ impl Render for RightPanel {
             .flex_col()
             .w_full()
             .h_full()
-            .text_size(theme.typography.scaled(16.0))
+            .text_size(theme.typography.scaled(13.0))
             .overflow_hidden()
             .bg(theme.ely.bg)
             .child(self.render_header(entity.clone(), theme, cx))

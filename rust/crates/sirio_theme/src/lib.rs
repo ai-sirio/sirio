@@ -1514,28 +1514,27 @@ impl Theme {
         cx.set_global(theme);
     }
 
-    /// A local theme for the two sidebars: every text size and line height
-    /// is one pixel smaller, including explicit sizes resolved by `scaled`.
+    /// A local theme for the two sidebars: named text sizes are capped at the
+    /// interface size (`ui_size`), so no label there draws larger than the
+    /// tab titles. `base_size` and the line heights are the global ones, so
+    /// `scaled` draws exactly what it draws anywhere else and nothing shifts
+    /// by a pixel. `scaled` itself is not capped, because it also produces
+    /// line heights; call sites cap their own text sizes.
     /// Derive it once from the global theme at each sidebar view's render
-    /// entry so children inherit the same scale without shrinking it twice.
+    /// entry so children inherit the same scale.
     pub fn with_sidebar_typography(mut self) -> Self {
-        let smaller = |size: Pixels| px((f32::from(size) - 1.0).max(6.0));
         let typography = self.typography;
+        let cap = |size: Pixels| size.min(typography.ui_size);
         self.typography = Typography {
-            base_size: smaller(typography.base_size),
-            code_size: smaller(typography.code_size),
-            code_line_height: smaller(typography.code_line_height),
-            large_title: smaller(typography.large_title),
-            title: smaller(typography.title),
-            title2: smaller(typography.title2),
-            title3: smaller(typography.title3),
-            headline: smaller(typography.headline),
-            callout: smaller(typography.callout),
-            footnote: smaller(typography.footnote),
-            caption2: smaller(typography.caption2),
-            ui_size: smaller(typography.ui_size),
-            body_line_height: smaller(typography.body_line_height),
-            ui_line_height: smaller(typography.ui_line_height),
+            code_size: cap(typography.code_size),
+            large_title: cap(typography.large_title),
+            title: cap(typography.title),
+            title2: cap(typography.title2),
+            title3: cap(typography.title3),
+            headline: cap(typography.headline),
+            callout: cap(typography.callout),
+            footnote: cap(typography.footnote),
+            caption2: cap(typography.caption2),
             ..typography
         };
         self
@@ -2218,6 +2217,38 @@ mod tests {
         assert_eq!(typography.body_line_height, px(25.0));
         assert_eq!(typography.ui_line_height, px(20.0));
         assert_eq!(typography.scaled(12.0), px(15.0));
+    }
+
+    #[test]
+    fn sidebar_typography_caps_text_at_the_interface_size_and_shifts_nothing() {
+        for interface in 12..=18 {
+            let global = Typography::for_interface_size(interface as f32);
+            let mut theme = Theme::dark();
+            theme.typography = global;
+            let side = theme.with_sidebar_typography().typography;
+            let cap = global.ui_size;
+
+            assert_eq!(side.base_size, global.base_size, "base_size at {interface}");
+            assert_eq!(side.ui_size, global.ui_size, "ui_size at {interface}");
+            assert_eq!(side.code_line_height, global.code_line_height);
+            assert_eq!(side.body_line_height, global.body_line_height);
+            assert_eq!(side.ui_line_height, global.ui_line_height);
+            for (name, got, want) in [
+                ("large_title", side.large_title, global.large_title),
+                ("title", side.title, global.title),
+                ("title2", side.title2, global.title2),
+                ("title3", side.title3, global.title3),
+                ("headline", side.headline, global.headline),
+                ("callout", side.callout, global.callout),
+                ("footnote", side.footnote, global.footnote),
+                ("caption2", side.caption2, global.caption2),
+                ("code_size", side.code_size, global.code_size),
+            ] {
+                assert_eq!(got, want.min(cap), "{name} at {interface}");
+            }
+            assert_eq!(side.scaled(12.5), global.scaled(12.5));
+            assert_eq!(side.scaled(18.0), global.scaled(18.0));
+        }
     }
 
     /// Composites `over` (which may be translucent) onto `under`, so a wash

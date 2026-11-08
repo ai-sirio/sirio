@@ -605,7 +605,7 @@ impl RightPanel {
             .flex()
             .items_center()
             .gap(theme.spacing.titlebar_control_spacing)
-            .text_size(theme.typography.scaled(13.5))
+            .text_size(theme.typography.scaled(13.0))
             // Names are neutral text; the status dot carries the git state
             // (three distinguishable colours, not one "modified" amber),
             // and unreadable directories and git-ignored paths dim rather

@@ -312,7 +312,7 @@ impl Render for CloneForm {
 
         div()
             .id("clone-form")
-            .text_size(theme.typography.scaled(16.0))
+            .text_size(theme.typography.scaled(13.0))
             .w_full()
             .p(px(16.0))
             .flex()
@@ -595,7 +595,7 @@ impl Render for CreateForm {
 
         div()
             .id("create-form")
-            .text_size(theme.typography.scaled(16.0))
+            .text_size(theme.typography.scaled(13.0))
             .w_full()
             .p(px(16.0))
             .flex()
