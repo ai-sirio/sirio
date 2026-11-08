@@ -1180,6 +1180,12 @@ pub mod request {
         request("surface.prompts.read", BTreeMap::new())
     }
 
+    /// Debug-only `surface.files.read`: the right panel's Files tree rows,
+    /// their flags and the window bounds of each drawn row.
+    pub fn files_read() -> ControlRequest {
+        request("surface.files.read", BTreeMap::new())
+    }
+
     /// Debug-only `surface.project_identity.act {action, value?}`: runs a
     /// dialog button's handler (`save`, `skip`) or drives its picker (`mode`,
     /// `open-emoji-grid`, `pick-glyph`).

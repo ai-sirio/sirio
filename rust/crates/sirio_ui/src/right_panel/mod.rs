@@ -30,6 +30,7 @@ use history::{GitHistory, GitHistoryEvent};
 pub use change_requests::{filter_word, parse_filter};
 pub(crate) use change_requests::error_text;
 pub use open_list::{OpenListFacts, OpenSurface};
+pub use files::{FileRowFacts, FilesFacts};
 pub use prompts::{PromptCardFacts, PromptsFacts};
 pub use references::{GroupedRow, ReferenceRow, ReferencesState, group_by_file, summary};
 use references::{ReferencesEvent, ReferencesList};
@@ -343,6 +344,16 @@ pub struct RightPanel {
     open_list_chat_expanded: bool,
     /// The Prompts view's cards and the bounds it records; see `prompts.rs`.
     prompts: prompts::PromptsView,
+    /// Where each drawn Files row sits in the window, by node path. The
+    /// debug verb `surface.files.read` reads it; debug builds fill it.
+    file_row_bounds: files::RowBounds,
+    /// The hidden-files toggle's window bounds, for the same verb.
+    hidden_switch_bounds: files::BoundsCell,
+    /// How many Files refreshes have landed, whatever their result.
+    refreshes_landed: u64,
+    /// Every row label a rows rebuild produced since the last facts read.
+    #[cfg(debug_assertions)]
+    built_labels: std::cell::RefCell<std::collections::BTreeSet<String>>,
     is_stale: bool,
     updating: bool,
 }
@@ -388,6 +399,11 @@ impl RightPanel {
             open_list_facts: open_list::OpenListFacts::default(),
             open_list_chat_expanded: false,
             prompts: prompts::PromptsView::default(),
+            file_row_bounds: Default::default(),
+            hidden_switch_bounds: Default::default(),
+            refreshes_landed: 0,
+            #[cfg(debug_assertions)]
+            built_labels: Default::default(),
             is_stale: false,
             updating: false,
         }
@@ -902,6 +918,8 @@ impl Render for RightPanel {
         }
         // The frame being built records again the bounds it draws.
         self.prompts.clear_bounds();
+        self.file_row_bounds.borrow_mut().clear();
+        self.hidden_switch_bounds.set(None);
         if self.worktree_selected {
             let showing_files = view == PanelView::Files;
             if showing_files {

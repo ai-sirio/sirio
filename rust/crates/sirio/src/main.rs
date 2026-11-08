@@ -1478,6 +1478,11 @@ enum ControlAction {
     PromptsRead {
         reply: ControlReply,
     },
+    /// Debug-only `surface.files.read`: the Files tree rows, their flags and
+    /// the window bounds of each drawn row.
+    FilesRead {
+        reply: ControlReply,
+    },
     /// Debug-only `surface.project_identity.act {action, value?}`: runs the
     /// open dialog's button handler or drives its picker.
     ProjectIdentityAct {
@@ -3758,6 +3763,9 @@ impl ControlHandler for AppControlHandler {
             }
             "surface.prompts.read" if cfg!(debug_assertions) => {
                 self.queue_action(request, |reply| ControlAction::PromptsRead { reply })
+            }
+            "surface.files.read" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::FilesRead { reply })
             }
             "surface.project_identity.act" if cfg!(debug_assertions) => {
                 let Some(action) = request.params.get("action").cloned() else {
@@ -6711,6 +6719,9 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::PromptsRead { reply } => {
                                     let _ = reply.send(Ok(workspace.control_prompts_read(cx)));
+                                }
+                                ControlAction::FilesRead { reply } => {
+                                    let _ = reply.send(Ok(workspace.control_files_read(cx)));
                                 }
                                 ControlAction::ProjectIdentityAct { action, value, reply } => {
                                     let result = workspace.control_project_identity_act(
@@ -22512,6 +22523,56 @@ impl SirioWorkspace {
                 (format!("card{index}EditBounds"), bounds(card.edit)),
                 (format!("card{index}CopyBounds"), bounds(card.copy)),
                 (format!("card{index}Copied"), flag(card.copied)),
+            ]);
+        }
+        pairs
+    }
+
+    /// Debug-only `surface.files.read`: the Files tree rows on screen. Bounds
+    /// are `x,y,w,h` in window pixels, empty while not drawn. `seen*` is every
+    /// row label built since the previous read, so a row drawn for one frame
+    /// is still caught.
+    fn control_files_read(&self, cx: &App) -> Vec<(String, String)> {
+        let bounds = |bounds: Option<Bounds<gpui::Pixels>>| match bounds {
+            Some(b) => format!(
+                "{:.0},{:.0},{:.0},{:.0}",
+                f32::from(b.origin.x),
+                f32::from(b.origin.y),
+                f32::from(b.size.width),
+                f32::from(b.size.height)
+            ),
+            None => String::new(),
+        };
+        let flag = |on: bool| if on { "1" } else { "0" }.to_string();
+        let facts = self.right_panel.read(cx).files_facts(cx);
+        let mut pairs = vec![
+            (
+                "rightPanelView".to_string(),
+                sirio_ui::right_panel::PanelView::get(cx).name().to_string(),
+            ),
+            ("shown".to_string(), flag(facts.shown)),
+            ("settled".to_string(), flag(facts.settled)),
+            ("updating".to_string(), flag(facts.updating)),
+            ("stale".to_string(), flag(facts.stale)),
+            ("showHidden".to_string(), flag(facts.show_hidden)),
+            ("refreshes".to_string(), facts.refreshes.to_string()),
+            ("hiddenSwitchBounds".to_string(), bounds(facts.hidden_switch_bounds)),
+            ("seenCount".to_string(), facts.seen.len().to_string()),
+        ];
+        for (index, label) in facts.seen.iter().enumerate() {
+            pairs.push((format!("seen{index}"), Self::escaped_field(label)));
+        }
+        pairs.push(("count".to_string(), facts.rows.len().to_string()));
+        for (index, row) in facts.rows.iter().enumerate() {
+            pairs.extend([
+                (format!("row{index}Label"), Self::escaped_field(&row.label)),
+                (format!("row{index}Path"), Self::escaped_field(&row.path)),
+                (format!("row{index}Depth"), row.depth.to_string()),
+                (format!("row{index}Dir"), flag(row.is_dir)),
+                (format!("row{index}Expanded"), flag(row.expanded)),
+                (format!("row{index}Selected"), flag(row.selected)),
+                (format!("row{index}Status"), row.status.unwrap_or("").to_string()),
+                (format!("row{index}Bounds"), bounds(row.bounds)),
             ]);
         }
         pairs
@@ -48089,6 +48150,7 @@ done
             | ControlAction::ProjectAddDebug { reply, .. }
             | ControlAction::ProjectIdentityRead { reply }
             | ControlAction::PromptsRead { reply }
+            | ControlAction::FilesRead { reply }
             | ControlAction::ProjectIdentityAct { reply, .. }
             | ControlAction::Attention { reply, .. }
             | ControlAction::CycleTab { reply, .. }
@@ -48284,6 +48346,7 @@ done
             }
             "surface.project_identity.read" => request::project_identity_read(),
             "surface.prompts.read" => request::prompts_read(),
+            "surface.files.read" => request::files_read(),
             "surface.project_identity.act" => request::project_identity_act("skip", None),
             "browser.open" | "browser.navigate" | "browser.act" | "browser.get"
             | "browser.wait" | "browser.eval" | "browser.console" | "browser.snapshot"

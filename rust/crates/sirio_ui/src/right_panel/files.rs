@@ -12,6 +12,10 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
+mod facts;
+pub use facts::{FileRowFacts, FilesFacts};
+pub(super) use facts::{BoundsCell, RowBounds};
+
 use crate::editor::fs_actions;
 use crate::loading;
 use crate::popup::{menu_card, menu_label, menu_row};
@@ -228,6 +232,7 @@ impl RightPanel {
                 // has something truthful to show — a tree, an empty tree, or
                 // an error — and must never fall back to "Loading files…".
                 panel.settled = true;
+                panel.refreshes_landed += 1;
                 match result {
                     Ok((markers, tree)) => {
                         panel.git_markers = markers;
@@ -544,6 +549,7 @@ impl RightPanel {
     fn rebuild_file_rows(&mut self) {
         self.flattened_file_rows.clear();
         flatten_files(&self.file_tree, 0, &mut self.flattened_file_rows);
+        self.record_built_labels();
     }
 
     fn render_file_row(
@@ -553,8 +559,10 @@ impl RightPanel {
         selected: bool,
         file_focus: FocusHandle,
         repo_root: PathBuf,
+        row_bounds: facts::RowBounds,
     ) -> impl IntoElement {
         let path = row.node.path.clone();
+        let probe = facts::row_probe(&row_bounds, &path);
         let is_dir = row.node.is_dir;
         let name = row.node.name.clone();
         let git_status = row.node.git_status;
@@ -598,6 +606,7 @@ impl RightPanel {
                     "file-row".to_owned()
                 }
             })
+            .relative()
             .h(px(ROW_HEIGHT))
             .w_full()
             .pl(px(8.0 + indent))
@@ -716,6 +725,7 @@ impl RightPanel {
                     },
                 ))
             })
+            .children(probe)
     }
 
     fn select_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -789,6 +799,8 @@ impl RightPanel {
         let selected_path = self.selected_path.clone();
         let processor_focus = file_focus.clone();
         let repo_root = self.repo_root.clone();
+        let row_bounds = self.file_row_bounds.clone();
+        let hidden_switch_bounds = self.hidden_switch_bounds.clone();
         // The Files view has no toolbar of its own. The row it used to
         // hold showed the checkout path — which the sidebar already
         // names — and its bottom border stacked a second hairline
@@ -875,6 +887,7 @@ impl RightPanel {
                                 selected_path.as_ref() == Some(&row.node.path),
                                 processor_focus.clone(),
                                 repo_root.clone(),
+                                row_bounds.clone(),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -919,7 +932,7 @@ impl RightPanel {
                 this.child(files_refresh_indicator(window, cx))
             })
             .child(body)
-            .child(hidden_files_switch(show_hidden, entity, theme))
+            .child(hidden_files_switch(show_hidden, entity, theme, &hidden_switch_bounds))
             .into_any_element()
     }
 }
@@ -928,6 +941,7 @@ fn hidden_files_switch(
     show_hidden: bool,
     entity: gpui::Entity<RightPanel>,
     theme: Theme,
+    switch_bounds: &facts::BoundsCell,
 ) -> impl IntoElement {
     // Singola icona toggle: mostra Eye (mostra nascosti) quando sono nascosti,
     // EyeOff (nascondi nascosti) quando sono visibili. L'icona rappresenta
@@ -956,6 +970,7 @@ fn hidden_files_switch(
             !show_hidden,
             entity,
             theme,
+            facts::cell_probe(switch_bounds),
         ))
 }
 
@@ -967,10 +982,12 @@ fn hidden_files_option(
     show_hidden: bool,
     entity: gpui::Entity<RightPanel>,
     theme: Theme,
+    probe: Option<impl IntoElement>,
 ) -> impl IntoElement {
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
+        .relative()
         .w(px(28.0))
         .h(px(24.0))
         .flex()
@@ -986,6 +1003,7 @@ fn hidden_files_option(
             entity.update(cx, |_, cx| cx.notify());
         })
         .child(IconElement::new(icon, IconSize::Small))
+        .children(probe)
 }
 
 fn files_refresh_indicator(window: &mut Window, cx: &mut App) -> AnyElement {
