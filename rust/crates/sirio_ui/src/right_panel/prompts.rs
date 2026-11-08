@@ -411,7 +411,7 @@ impl RightPanel {
         let (border, border_hover) = (theme.ely.border, theme.ely.border_strong);
         let title = div()
             .truncate()
-            .text_size(theme.typography.scaled(14.0))
+            .text_size(theme.typography.scaled(13.0))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(if card.title.is_empty() { theme.ely.fg_muted } else { theme.ely.fg })
             .child(card.shown_title().to_owned());

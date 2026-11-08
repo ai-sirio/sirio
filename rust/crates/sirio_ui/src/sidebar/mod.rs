@@ -193,7 +193,7 @@ const HEADER_ICON_SIZE: IconSize = IconSize::Medium;
 const VIEW_TAB_PAD_X: f32 = 10.0;
 
 pub(crate) const ROW_HEIGHT: f32 = 32.0;
-/// Single-line row title line height (13.5px at waku's row ratio).
+/// Single-line row title line height (13px at waku's row ratio).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
 /// Single-line row title size, in the same points every other explicit UI
 /// size in this file is written in. It is drawn through

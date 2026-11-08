@@ -62,10 +62,11 @@
 //!   webview, "not part of Sirio's UI"). No waku measurement exists. The
 //!   width stopped being a frozen constant when the panel became
 //!   user-resizable; 240 is Zed's factory project-panel width, not the geometry.
-//! - **Sidebar text is 1px smaller than the interface scale**: both panels
-//!   derive a local theme with `with_sidebar_typography`, including their
-//!   nested views, menus and explicit text sizes. The persisted interface
-//!   size still shifts them, and the centre uses the regular scale.
+//! - **Sidebar text is capped at the interface size**: both panels derive
+//!   a local theme with `with_sidebar_typography`, which caps named text
+//!   sizes at `ui_size` (13 by default) and shifts nothing by 1px. The
+//!   persisted interface size still moves them, and the centre uses the
+//!   regular scale.
 //! - **`caption2` is 13.0, off the measured scale**: waku's smallest
 //!   step is 10.5, and Sirio first sized its dense strips there for fit
 //!   — the status bar (three provider segments + worktree context), tab

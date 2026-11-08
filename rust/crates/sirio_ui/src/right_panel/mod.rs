@@ -653,7 +653,7 @@ impl RightPanel {
             .child(
                 IconElement::new(
                     Icon::PanelRight,
-                    IconSize::Custom(theme.typography.large_title),
+                    IconSize::Custom(theme.typography.scaled(20.0)),
                 )
                 .text_color(theme.ely.fg),
             )
