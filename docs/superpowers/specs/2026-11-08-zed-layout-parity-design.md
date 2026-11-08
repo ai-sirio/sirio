@@ -1,7 +1,7 @@
 # Divide the main window like Zed
 
 **Date:** 2026-11-08
-**Status:** draft, awaiting Enzo's review
+**Status:** approved by Enzo, 2026-11-08
 **Builds on:** `2026-09-22-center-panes-design.md` (the centre split),
 `2026-10-15-secondary-on-demand-design.md` (the Secondary exists only while it
 holds tabs), `2026-11-01-primary-rail-design.md` (the rail and its peek).
