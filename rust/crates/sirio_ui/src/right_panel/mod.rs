@@ -384,7 +384,7 @@ impl RightPanel {
             references_subscription: None,
             change_requests: None,
             change_requests_subscription: None,
-            panel_width: 320.0,
+            panel_width: 240.0,
             open_list_facts: open_list::OpenListFacts::default(),
             open_list_chat_expanded: false,
             prompts: prompts::PromptsView::default(),

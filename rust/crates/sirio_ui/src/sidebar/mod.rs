@@ -184,7 +184,7 @@ pub struct SidebarTab {
 /// same number as `AppSettings::sidebar_width`'s default. Every fixture in
 /// this file's tests, and the demo sidebar, keep it: only the running shell
 /// pushes a different one, through [`Sidebar::set_panel_width`].
-const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
+const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
 /// The one size of the icons under the view switch: expand all, collapse
 /// all and the `+`.

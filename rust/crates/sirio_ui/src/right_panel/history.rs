@@ -175,7 +175,7 @@ impl GitHistory {
             path_draft: String::new(),
             path_blink: crate::caret::Blink::new(),
             path_caret_visible: false,
-            panel_width: 320.0,
+            panel_width: 240.0,
             search_task: None,
             search_generation: 0,
             search_focus: None,
