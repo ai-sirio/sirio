@@ -8280,11 +8280,16 @@ impl SirioWorkspace {
                 continue;
             }
             self.files_snapshot_in_flight.insert(path.clone());
+            let keep_open = self
+                .files_snapshots
+                .get(&path)
+                .map(FilesSnapshot::expanded_paths)
+                .unwrap_or_default();
             cx.spawn(async move |this, cx| {
                 let result = cx
                     .background_spawn({
                         let path = path.clone();
-                        async move { right_panel::build_files_snapshot(path) }
+                        async move { right_panel::build_files_snapshot(path, keep_open) }
                     })
                     .await;
                 let _ = this.update(cx, |workspace, cx| {
@@ -50470,8 +50475,8 @@ done
         git_test(&repo, &["commit", "-q", "-m", "ignore build output"]);
         std::fs::create_dir_all(repo.join("target/debug")).expect("seed build output");
         std::fs::write(repo.join("target/debug/app.exe"), "binary").expect("seed build artefact");
-        let snapshot =
-            right_panel::build_files_snapshot(repo.clone()).expect("walk the ignore fixture");
+        let snapshot = right_panel::build_files_snapshot(repo.clone(), Vec::new())
+            .expect("walk the ignore fixture");
         let snapshot = Some(&snapshot);
 
         assert!(
@@ -50547,7 +50552,7 @@ done
             .read_with(&cx.cx, |workspace, _| workspace.working_directory.clone())
             .join("worktree-removed-from-disk");
         std::fs::create_dir_all(&missing).expect("create the worktree to be removed");
-        let cached = right_panel::build_files_snapshot(missing.clone())
+        let cached = right_panel::build_files_snapshot(missing.clone(), Vec::new())
             .expect("walk the worktree while it still exists");
         std::fs::remove_dir_all(&missing).expect("remove the cached worktree");
         assert!(!missing.exists(), "the cached worktree must now be gone");

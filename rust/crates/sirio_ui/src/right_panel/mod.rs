@@ -159,11 +159,23 @@ impl FilesSnapshot {
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
+
+    /// The directories that were open when this snapshot was taken, to hand
+    /// to [`build_files_snapshot`] so a rebuild keeps them listed.
+    #[must_use]
+    pub fn expanded_paths(&self) -> Vec<PathBuf> {
+        self.expanded.clone()
+    }
 }
 
 /// Builds a settled Files snapshot without creating a visible panel.
-pub fn build_files_snapshot(repo_root: impl Into<PathBuf>) -> Result<FilesSnapshot, String> {
-    files::build_snapshot(&repo_root.into())
+/// `keep_open` names the directories to list as open, so a rebuild of a
+/// snapshot does not lose what the user had expanded.
+pub fn build_files_snapshot(
+    repo_root: impl Into<PathBuf>,
+    keep_open: Vec<PathBuf>,
+) -> Result<FilesSnapshot, String> {
+    files::build_snapshot(&repo_root.into(), keep_open)
 }
 
 /// App-wide selection. A GPUI global rather than a field, for the same
@@ -280,9 +292,10 @@ pub struct RightPanel {
     /// Whether any top-level walk has ever finished, successfully or not.
     ///
     /// This, and not `refresh_started`, is what "Loading files…" is about.
-    /// `ensure_tree_refresh` re-walks every second, so gating the
+    /// A refresh re-walks the tree whenever the watcher, a view change or a
+    /// retry asks (it once did so every second), so gating the
     /// placeholder on "a walk is in flight" put a full-panel placeholder
-    /// over a perfectly good tree once a second — on this 4-core box the
+    /// over a perfectly good tree on every walk — on this 4-core box the
     /// tree was visible roughly one frame in three, for minutes. Gating it
     /// on "no walk has ever finished" also covers the two cases an
     /// `is_empty()` test gets wrong: a directory that is genuinely empty
@@ -1041,8 +1054,8 @@ mod tests {
 
     /// The Files rail icon never carries a spinner. It used to overlay
     /// `loading::compact` for as long as `walk_task` was in flight, and
-    /// `ensure_tree_refresh` puts a walk in flight every second, so the icon
-    /// blinked once a second for the duration of every `git status`. A walk
+    /// `ensure_tree_refresh` once put a walk in flight every second, so the
+    /// icon blinked for the duration of every `git status`. A walk
     /// over a settled tree is silent: the tree stays and the new listing
     /// lands in place.
     ///

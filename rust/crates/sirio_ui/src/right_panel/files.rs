@@ -8,11 +8,12 @@ use gpui::{
     AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, uniform_list,
 };
 use sirio_git::{DirectoryGitStatus, IgnoredPaths, directory_statuses, ignored_paths, status};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 mod facts;
+mod listing;
 pub use facts::{FileRowFacts, FilesFacts};
 pub(super) use facts::{BoundsCell, RowBounds};
 
@@ -21,7 +22,10 @@ use crate::loading;
 use crate::popup::{menu_card, menu_label, menu_row};
 use crate::sidebar::icons::{file_glyph, folder_glyph};
 
-pub(super) fn build_snapshot(repo_root: &Path) -> Result<super::FilesSnapshot, String> {
+pub(super) fn build_snapshot(
+    repo_root: &Path,
+    keep_open: Vec<PathBuf>,
+) -> Result<super::FilesSnapshot, String> {
     let snapshot = status(repo_root).ok();
     let (files, directories) = snapshot
         .as_ref()
@@ -41,14 +45,15 @@ pub(super) fn build_snapshot(repo_root: &Path) -> Result<super::FilesSnapshot, S
         directories,
         ignored: ignored_paths(repo_root).unwrap_or_default(),
     };
-    let file_tree = read_tree(repo_root, repo_root, &markers).map_err(|error| error.to_string())?;
+    let open: HashSet<PathBuf> = keep_open.iter().cloned().collect();
+    let file_tree = listing::reload_tree(repo_root, &open, &markers)?;
     let mut flattened_file_rows = Vec::new();
     flatten_files(&file_tree, 0, &mut flattened_file_rows);
     Ok(super::FilesSnapshot {
         file_tree,
         flattened_file_rows,
         git_markers: markers,
-        expanded: Vec::new(),
+        expanded: keep_open,
         dirty: false,
         captured_at: std::time::SystemTime::now(),
     })
@@ -132,6 +137,15 @@ pub(super) struct FileNode {
     /// vanish silently and must not panic.
     read_error: Option<String>,
     children: Vec<FileNode>,
+    /// `children` holds this directory's full listing, dotfiles included.
+    /// A directory the loader has not read yet is not `loaded`, and its
+    /// empty `children` mean "unknown", not "empty".
+    loaded: bool,
+    /// The loader has looked ahead into this directory's children: it read
+    /// every child directory's listing except those it skips on purpose
+    /// (over the cap, or privacy-guarded). Only then may the directory's
+    /// children be drawn at once, already folded (spec §3.5).
+    children_resolved: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +190,10 @@ impl RightPanel {
         self.updating = !self.settled;
         self.refresh_error = None;
         let repo_root = self.repo_root.clone();
+        // The directories open now: the background read re-reads each of them
+        // (and the lookahead into their children), so a change at any open
+        // depth shows. A folder opened while it runs is carried over at landing.
+        let open: HashSet<PathBuf> = collect_expanded(&self.file_tree).into_iter().collect();
         self.refresh_generation += 1;
         let refresh_generation = self.refresh_generation;
         let expected_repo_root = repo_root.clone();
@@ -212,8 +230,7 @@ impl RightPanel {
                         // an unreadable filesystem.
                         ignored: ignored_paths(&repo_root).unwrap_or_default(),
                     };
-                    let tree = read_tree(&repo_root, &repo_root, &markers)
-                        .map_err(|error| error.to_string())?;
+                    let tree = listing::reload_tree(&repo_root, &open, &markers)?;
                     Ok::<_, String>((markers, tree))
                 })
                 .await;
@@ -236,17 +253,12 @@ impl RightPanel {
                 match result {
                     Ok((markers, tree)) => {
                         panel.git_markers = markers;
-                        // F-TAB-01: the periodic 1s refresh loop
-                        // (`ensure_tree_refresh`) walks only the root
-                        // listing and used to replace `file_tree` wholesale,
-                        // so any folder a user had expanded (and its
-                        // already-loaded children) silently collapsed back
-                        // the instant the next tick landed — visible as a
-                        // "Loading files…" flash followed by the tree
-                        // reverting to fully collapsed. Preserve prior
-                        // expansion/children for any node the fresh walk
-                        // still reports at the same path.
-                        panel.file_tree = preserve_expansion(&panel.file_tree, tree);
+                        // F-TAB-01: a refresh must not collapse the folders
+                        // the user has open. The fresh walk re-read every
+                        // listing the tree holds, so its entries win; what
+                        // the user did while it ran (a folder opened or
+                        // closed) is carried over by path.
+                        panel.file_tree = listing::carry_open_state(&panel.file_tree, tree);
                         panel.rebuild_file_rows();
                         panel.refresh_error = None;
                         panel.is_stale = false;
@@ -354,7 +366,9 @@ impl RightPanel {
             };
             node.expanded = !node.expanded;
             node.read_error = None;
-            (node.expanded, node.expanded && node.children.is_empty())
+            // A resolved directory holds every listing its children need, so
+            // it opens at once; only an unresolved one walks off-thread.
+            (node.expanded, node.expanded && !node.children_resolved)
         };
         self.rebuild_file_rows();
         if needs_walk {
@@ -364,6 +378,11 @@ impl RightPanel {
             // any) folder: its result must not land later.
             self.walk_task = None;
             self.walk_generation += 1;
+            // That walk's landing is what would have run a refresh asked for
+            // meanwhile.
+            if self.refresh_dirty {
+                self.request_refresh(cx);
+            }
         }
         cx.notify();
     }
@@ -384,7 +403,9 @@ impl RightPanel {
         let apply_path = path.clone();
         self.walk_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { read_tree(&repo_root, &path, &markers) })
+                .background_spawn(async move {
+                    listing::read_with_chains(&repo_root, &path, &markers)
+                })
                 .await;
             let _ = this.update(cx, |panel, cx| {
                 if generation != panel.walk_generation {
@@ -395,10 +416,25 @@ impl RightPanel {
                 panel.walk_task = None;
                 if let Some(node) = find_node_mut(&mut panel.file_tree, &apply_path) {
                     match result {
-                        Ok(children) => node.children = children,
-                        Err(error) => node.read_error = Some(error),
+                        Ok(children) => {
+                            node.children = children;
+                            node.loaded = true;
+                            node.children_resolved = true;
+                            node.read_error = None;
+                        }
+                        Err(error) => {
+                            node.read_error = Some(error);
+                            node.children.clear();
+                            node.loaded = false;
+                            node.children_resolved = false;
+                        }
                     }
                     panel.rebuild_file_rows();
+                }
+                // A refresh asked for while this walk ran was declined by
+                // `refresh`; the landing is what starts it.
+                if panel.refresh_dirty {
+                    panel.request_refresh(cx);
                 }
                 cx.notify();
             });
@@ -491,9 +527,9 @@ impl RightPanel {
                 // The Files view's only Refresh affordance — the
                 // toolbar that used to carry one is gone. It is a
                 // manual nudge, not the sole route back to a current
-                // tree: `ensure_tree_refresh` re-walks every second on
-                // its own, which is also what covers the states with no
-                // row to right-click.
+                // tree: the watcher and `ensure_tree_refresh` keep it
+                // current on their own, which is also what covers the
+                // states with no row to right-click.
                 "file-context-refresh" => row.on_click(move |_, _, cx| {
                     action_entity.update(cx, |panel, cx| {
                         panel.refresh(cx);
@@ -831,8 +867,8 @@ impl RightPanel {
         // — see the `settled` field. A refresh over a settled panel happens
         // in place: whatever the panel was truthfully showing stays on
         // screen until the new walk lands, which is the same rule
-        // `preserve_expansion` above already applies to expansion state and
-        // the same rule `ChangesTab::render_body` applies to its own 1 s
+        // `listing::carry_open_state` applies to expansion state and the
+        // same rule `ChangesTab::render_body` applies to its own 1 s
         // poll.
         let body = if !self.settled {
             div()
@@ -1153,6 +1189,8 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
                 expanded: false,
                 read_error: None,
                 children: Vec::new(),
+                loaded: false,
+                children_resolved: false,
             })
         })
         .collect::<Vec<_>>();
@@ -1168,37 +1206,16 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
     Ok(nodes)
 }
 
-/// Carries a matching old node's `expanded` flag and already-loaded
-/// `children` forward onto a freshly-walked node at the same path. The
-/// periodic root-level refresh only re-lists the immediate directory, so it
-/// has no fresher data for a subdirectory's own contents; without this, the
-/// blind replacement in `refresh()` silently collapsed every expanded
-/// folder on the next 1s tick.
-fn preserve_expansion(old: &[FileNode], new: Vec<FileNode>) -> Vec<FileNode> {
-    let old_by_path: HashMap<(&Path, bool), &FileNode> = old
-        .iter()
-        .map(|node| ((node.path.as_path(), node.is_dir), node))
-        .collect();
-    new.into_iter()
-        .map(|mut node| {
-            if let Some(old_node) = old_by_path.get(&(node.path.as_path(), node.is_dir))
-                && old_node.expanded
-            {
-                node.expanded = true;
-                node.children = old_node.children.clone();
-            }
-            node
-        })
-        .collect()
-}
-
 fn flatten_files(nodes: &[FileNode], depth: usize, rows: &mut Vec<FileRow>) {
     for node in nodes {
         rows.push(FileRow {
             node: node.clone(),
             depth,
         });
-        if node.is_dir && node.expanded {
+        // An expanded directory whose children are not resolved is waiting
+        // for its walk: drawing the held listing first and folding it when
+        // the walk lands would make the rows jump.
+        if node.is_dir && node.expanded && node.children_resolved {
             flatten_files(&node.children, depth + 1, rows);
         }
     }
@@ -1363,6 +1380,9 @@ mod tests {
         let dir = TempDir::new();
         let subdir = dir.0.join("subdir");
         seed_dir_with_files(&subdir, 2000);
+        // A folder inside it keeps it unresolved (the loader has not read
+        // that folder's own listing), so opening it still walks.
+        std::fs::create_dir_all(subdir.join("inner")).expect("create the inner folder");
 
         let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
         panel.update(cx, |panel, cx| panel.refresh(cx));
@@ -1381,8 +1401,13 @@ mod tests {
             let node = find_node(&panel.file_tree, &subdir).expect("subdir node");
             assert!(node.expanded, "the folder toggles open immediately");
             assert!(
-                node.children.is_empty(),
+                !node.children_resolved,
                 "children must arrive asynchronously, not during the click handler"
+            );
+            assert_eq!(
+                panel.flattened_file_rows.len(),
+                1,
+                "nothing is drawn beneath the folder until its walk lands"
             );
         });
 
@@ -1390,9 +1415,7 @@ mod tests {
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| {
                 find_node(&panel.file_tree, &subdir)
-                    .map(|node| node.children.len())
-                    .unwrap_or(0)
-                    == 2000
+                    .is_some_and(|node| node.children_resolved && node.children.len() == 2001)
             })
         });
     }
@@ -1538,6 +1561,9 @@ mod tests {
         let second = dir.0.join("second");
         seed_dir_with_files(&first, 100);
         seed_dir_with_files(&second, 100);
+        // A folder inside each keeps it unresolved, so opening it walks.
+        std::fs::create_dir_all(first.join("inner")).expect("create the inner folder");
+        std::fs::create_dir_all(second.join("inner")).expect("create the inner folder");
 
         let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
         panel.update(cx, |panel, cx| panel.refresh(cx));
@@ -1556,21 +1582,18 @@ mod tests {
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| {
                 find_node(&panel.file_tree, &second)
-                    .map(|node| node.children.len())
-                    .unwrap_or(0)
-                    == 100
+                    .is_some_and(|node| node.children_resolved && node.children.len() == 101)
             })
         });
 
         panel.read_with(cx, |panel, _| {
             let first_node = find_node(&panel.file_tree, &first).expect("first node");
             let second_node = find_node(&panel.file_tree, &second).expect("second node");
-            assert_eq!(
-                first_node.children.len(),
-                0,
+            assert!(
+                !first_node.children_resolved,
                 "the superseded walk's result must not be applied over the newer one"
             );
-            assert_eq!(second_node.children.len(), 100);
+            assert_eq!(second_node.children.len(), 101);
         });
     }
 
@@ -1593,21 +1616,17 @@ mod tests {
         std::fs::create_dir_all(&locked).expect("create dir");
         std::fs::write(locked.join("secret.txt"), "x").expect("write file");
 
-        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
-        panel.update(cx, |panel, cx| panel.refresh(cx));
-        pump_until(cx, || {
-            panel.read_with(cx, |panel, _| {
-                find_node(&panel.file_tree, &locked).is_some()
-            })
-        });
-
+        // Locked before the first load: the loader reads each child folder
+        // ahead of the user, so it records the failure on the row at load,
+        // with no click needed.
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
                 .expect("lock the directory");
         }
 
-        panel.update(cx, |panel, cx| panel.toggle_file(&locked, cx));
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
 
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| {
