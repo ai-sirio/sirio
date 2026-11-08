@@ -258,8 +258,11 @@ Calls marked *(my call)*:
   card on the global theme (`*Theme::get(cx)`), so its `headline` stays at
   the global size. The right panel's empty state ("No worktree selected")
   draws its title (`headline`) and subtitle (`footnote`) both at 13. The
-  subtitle stays secondary by colour (`fg_subtle` against `fg`). Its
-  `large_title` icon is a glyph and keeps its 20 px (part 3).
+  subtitle stays secondary by colour (`fg_subtle` against `fg`). Its icon is
+  a glyph and keeps its 20 px as `scaled(20.0)` (part 3); it was sized with
+  `large_title`, which the cap would have brought to 13. The prompt card's
+  title and preview (`right_panel/prompts.rs`) also both reach 13; the
+  preview stays secondary by weight and colour.
 
   Fixed boxes keep their size. The unread pill's 14 px box holds 10 px text,
   as it already does outside the sidebar. The captures in §6.1 are where a
