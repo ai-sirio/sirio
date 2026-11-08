@@ -136,7 +136,7 @@ cleanup() {
   [ -z "$APP_PID" ] || terminate "$APP_PID"
   # What a failed run needs to be diagnosed, before $WORK goes.
   [ ! -f "$WORK/seen.log" ] || cp "$WORK/seen.log" "$OUT_DIR/seen.log"
-  printf '%s\n' "$STATE" >"$OUT_DIR/last-state.txt"
+  printf '%s\n' "${STATE:-}" >"$OUT_DIR/last-state.txt"
   collect_logs
   stop_hosts
   [ -z "$XVFB_PID" ] || terminate "$XVFB_PID"
@@ -325,18 +325,6 @@ wait_until() { # description command...
   done
   fail "$SCENARIO: never: $description"
 }
-# A shell condition holds on every check for SECONDS.
-hold_until() { # seconds description command...
-  local end description=$2
-  end=$(( $(date +%s) + $1 ))
-  shift 2
-  while :; do
-    "$@" || fail "$SCENARIO: stopped holding: $description"
-    [ "$(date +%s)" -lt "$end" ] || break
-    sleep 0.2
-  done
-  note "OK: held: $description"
-}
 
 # ---------------------------------------------------------------- the rows, the log, the disk
 
@@ -366,23 +354,25 @@ ever_built() { # label...
   done
   note "OK: built: $*"
 }
-# Waits until `refreshes` has not moved for SECONDS, starting the count over each time it moves;
-# the deadline is the failure. A late refresh is waited out, never taken as a failure.
-settle_refreshes() { # seconds
+# Milliseconds since the epoch; EPOCHREALTIME's separator follows the locale.
+now_ms() { local us=${EPOCHREALTIME/[.,]/}; printf '%s' $(( us / 1000 )); }
+# Waits until `refreshes` has not moved for MS milliseconds, starting the count over each time it
+# moves; the deadline is the failure. A late refresh is waited out, never taken as a failure.
+settle_refreshes() { # ms
   local deadline last since now
-  deadline=$(( $(date +%s) + DEADLINE_SECS ))
+  deadline=$(( $(now_ms) + DEADLINE_SECS * 1000 ))
   read_state files
   last="$(value refreshes)"
-  since=$(date +%s)
+  since=$(now_ms)
   while :; do
-    now=$(date +%s)
+    now=$(now_ms)
     [ $(( now - since )) -lt "$1" ] || break
     [ "$now" -lt "$deadline" ] || fail "$SCENARIO: refreshes never settled -- last read: $(last_read)"
     sleep 0.2
     read_state files
     if [ "$(value refreshes)" != "$last" ]; then
       last="$(value refreshes)"
-      since=$(date +%s)
+      since=$(now_ms)
     fi
   done
   note "OK: refreshes settled at $last"
@@ -612,7 +602,7 @@ SCENARIO="hidden_files"
 # A precache walk of this worktree can still land after check 5 and refresh once more: let the
 # count settle before taking it as the baseline.
 wait_on files stale=0 updating=0
-settle_refreshes 2
+settle_refreshes 2000
 read_state files
 before="$(value drawnRefreshes)"
 touch "$REPO/source/src/main/java/it/.DS_Store"
@@ -640,6 +630,10 @@ printf 'late\n' >"$REPO/source/src/main/Precache.md"
 sleep 3
 seen_reset
 ctl select-workspace --workspace "$(worktree_id)" >/dev/null
+# A hint for the artifact, not a check: stale=0 on the first read of the repository's panel
+# means the switch back restored the snapshot the precache rebuilt; stale=1, the dirty one.
+wait_on files 'row:source:Depth=0'
+note "first read after the switch back: $(grep -E '^(stale|updating)=' <<<"$STATE" | tr '\n' ' ')"
 wait_on files "row:$JAVA:Expanded=1" 'row:domain / model:Depth=4' 'row:Precache.md:Depth=3'
 never_built java domain
 snapshot 7
