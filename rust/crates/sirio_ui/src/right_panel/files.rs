@@ -50,7 +50,7 @@ pub(super) fn build_snapshot(repo_root: &Path) -> Result<super::FilesSnapshot, S
     })
 }
 
-/// File-tree rows: 12.5px text at 26px, the app's single-line row rhythm.
+/// File-tree rows: 13px text at 26px, the app's single-line row rhythm.
 pub(crate) const ROW_HEIGHT: f32 = 26.0;
 
 /// The git state the Files tree paints, for both halves of the tree.
@@ -581,7 +581,7 @@ impl RightPanel {
             format!("file-status-{}-{relative}", status.slug())
         });
         let expanded = row.node.expanded;
-        let indent = row.depth as f32 * 16.0;
+        let indent = row.depth as f32 * 20.0;
         let row_id = format!("file-{}", path.display());
         let click_path = path.clone();
         let context_path = path.clone();
@@ -600,7 +600,7 @@ impl RightPanel {
             })
             .h(px(ROW_HEIGHT))
             .w_full()
-            .pl(px(8.0 + indent))
+            .pl(px(6.0 + indent))
             .pr(px(12.0))
             .flex()
             .items_center()

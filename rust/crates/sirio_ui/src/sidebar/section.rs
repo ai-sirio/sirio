@@ -7,7 +7,7 @@ use gpui::SharedString;
 
 /// Height of a section header. Shorter than a row on purpose: it is a label,
 /// not something you select.
-pub(super) const SECTION_HEIGHT: f32 = 26.0;
+pub(super) const SECTION_HEIGHT: f32 = 31.0;
 
 pub(super) fn render_section(
     row: SidebarRow,
@@ -35,7 +35,7 @@ pub(super) fn render_section(
         .relative()
         .h(px(SECTION_HEIGHT))
         .w_full()
-        .px(px(12.0))
+        .px(px(6.0))
         .flex()
         .items_center()
         .gap(px(6.0))

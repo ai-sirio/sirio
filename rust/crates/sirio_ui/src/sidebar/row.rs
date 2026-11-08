@@ -194,9 +194,9 @@ impl Sidebar {
             .filter(|title| !title.trim().is_empty())
     }
 
-    /// The minimum row rhythm: a single-line row is 32px (13.5px title at
-    /// an 18px line height plus 7px of vertical padding — the action-row
-    /// math); a card with a context line is 51px (7 + 18 + 4 + 15 + 7 —
+    /// The minimum row rhythm: a single-line row is 34px (13px title at
+    /// an 18px line height plus 8px of vertical padding — the action-row
+    /// math); a card with a context line is 53px (8 + 18 + 4 + 15 + 8 —
     /// the session-card math). Content-sized titles grow beyond this floor.
     /// Whether a row draws a second line at all.
     ///
@@ -493,9 +493,9 @@ impl Sidebar {
         // context-menu item, it cannot be `git worktree remove`d.
         let is_removable_worktree = is_worktree && !row.is_primary;
         // waku's card rhythm: a project or worktree row becomes a two-line
-        // card (13.5px title over an 11.5px context line) only when it has
+        // card (13px title over a 12.5px context line) only when it has
         // something for that second line; every other row is single-line at
-        // the 32px action-row height. See `has_sub_line`.
+        // the 34px action-row height. See `has_sub_line`.
         let has_sub_line = Self::has_sub_line(&row);
         let row_height = Self::row_drawn_height(&row, &theme.typography);
         // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
@@ -565,8 +565,8 @@ impl Sidebar {
             .relative()
             .h(px(row_height))
             .w_full()
-            .px(px(12.0))
-            .py(px(7.0))
+            .px(px(6.0))
+            .py(px(8.0))
             .flex()
             .gap(px(8.0))
             .when(selected, |this| this.bg(theme.ely.active))

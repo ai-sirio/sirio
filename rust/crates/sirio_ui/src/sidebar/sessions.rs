@@ -604,7 +604,7 @@ impl Sidebar {
             .relative()
             .w_full()
             .h(px(Self::row_drawn_height_for_card(&theme.typography)))
-            .px(px(12.0))
+            .px(px(6.0))
             .py(px(7.0))
             .flex()
             .flex_col()

@@ -192,7 +192,7 @@ const HEADER_ICON_SIZE: IconSize = IconSize::Medium;
 /// Horizontal padding of one Projects/Sessions segment.
 const VIEW_TAB_PAD_X: f32 = 10.0;
 
-pub(crate) const ROW_HEIGHT: f32 = 32.0;
+pub(crate) const ROW_HEIGHT: f32 = 34.0;
 /// Single-line row title line height (13px at waku's row ratio).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
 /// Single-line row title size, in the same points every other explicit UI
@@ -200,7 +200,7 @@ pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
 /// [`Typography::scaled`], never as a bare `px`, so Settings -> Appearance ->
 /// Interface font size carries the worktree names with the rest of the shell.
 pub(crate) const ROW_TITLE_FONT_SIZE: f32 = 13.0;
-/// Two-line card context line height (11.5px).
+/// Two-line card context line height (12.5px).
 pub(crate) const ROW_SUB_LINE_HEIGHT: f32 = 15.0;
 /// Gap between a card's title and context lines.
 pub(crate) const ROW_GAP: f32 = 4.0;
@@ -208,8 +208,8 @@ pub(crate) const ROW_GAP: f32 = 4.0;
 /// fills paint across a card's whole box, so cards that touch merge into
 /// one highlight block; this keeps them reading as separate cards.
 pub(crate) const ROW_V_GAP: f32 = 2.0;
-/// Two-line card height: 7 + 18 + 4 + 15 + 7 — waku's session-card math.
-pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 51.0;
+/// Two-line card height: 8 + 18 + 4 + 15 + 8 — waku's session-card math.
+pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 53.0;
 /// A visible row in the flattened sidebar tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarRow {
@@ -4000,7 +4000,7 @@ impl Render for Sidebar {
                     .mt(px(6.0))
                     .h(px(section::SECTION_HEIGHT))
                     .w_full()
-                    .px(px(12.0))
+                    .px(px(6.0))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -5189,7 +5189,7 @@ mod tests {
 
         cx.simulate_event(ScrollWheelEvent {
             position: point(px(160.0), px(180.0)),
-            delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-2000.0))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,
         });
