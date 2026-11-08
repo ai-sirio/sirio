@@ -23,12 +23,17 @@ Scripts/Tests/test-update-ui-e2e.sh   # -> prints "UPDATE UI E2E OK"
 # The host foundation: a real sirio-host started detached, adopted, killed
 # around, idled out and drained across a protocol major; --out-dir DIR keeps
 # every host's log and state; SIRIO_HOST_E2E_VERBOSE=1 prints each probe line. Cases
-# program_is_named .. repeated_report_is_one_event (Linux and macOS; they need python3) type
+# program_is_named .. empty_argv0_is_kept_padded (Linux and macOS; they need python3) type
 # real commands into a /bin/sh -i the host owns and read `term.list`'s program and status,
 # the OSC 7501 probe answer (at most one a second, and before a DA1 reply), that bytes from
 # `term.feed` or the prelude are never scanned, that no argv, script or cwd reaches host.log,
 # the `program` and `status` events a `host_probe term-events <ms>` subscriber receives (a report
 # repeated five times is one event), and that a program's argv is bounded to 4096 bytes in all.
+# The last two, empty_argv0_is_kept and empty_argv0_is_kept_padded, also need perl: bash
+# started with an empty argv[0] is listed with it, not with its argv shifted left, whether or
+# not its exec path is padded in macOS's `KERN_PROCARGS2` reply. Only macOS tests #719's
+# change to `parse_procargs2`: Linux reads argv from /proc/<pid>/cmdline, so there they pass
+# with or without it.
 Scripts/Tests/test-host-e2e.sh      # -> prints "HOST E2E OK (<n> cases, <s>s)"
 # Whether a detached process survives its parent's world, row by row.
 Scripts/Tests/probe-host-detach.sh  # -> prints "DETACH PROBE OK"

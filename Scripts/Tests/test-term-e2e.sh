@@ -595,7 +595,7 @@ case_lagged_dense() {
   HELPERS+=("$stalled")
   log_direct "term-attach $id --no-read --for 20000 & (stalled client, pid $stalled)"
   wait_until 60 term_read_has "$id" "FLOOD-DONE" \
-    || fail "the flood never finished: the session blocked on its stalled client"
+    || fail "the flood did not reach FLOOD-DONE in 60 s: for example the session blocked on its stalled client, or parsed this flood too slowly"
   wait "$stalled" || fail "the stalled attach failed"
   grep -q '^lagged=1$' "$ROOT/stalled.out" \
     || fail "the attach was not served while the flood ran (late or timed out), so it never lagged: $(cat "$ROOT/stalled.out" "$ROOT/stalled.err" 2>/dev/null | head -c 600)"

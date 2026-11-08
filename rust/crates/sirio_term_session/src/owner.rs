@@ -398,9 +398,10 @@ fn run(inputs: Inputs) {
             let _ = events.send(Event::Title(last_title.clone()));
         }
 
-        // The foreground, the program and the exit are read only after a pass that emptied
-        // the byte channel, as before the slice: none is seen ahead of the output (or the
-        // status reports) still queued in it.
+        // The foreground, the program and the exit are read only after a drain that emptied
+        // the byte channel within its slice, so they never overtake a flood's backlog (or the
+        // status reports in it). Output can still come after them: what reached the channel
+        // after that drain, what the reader thread has not sent yet, and what is in the PTY.
         if !backlog {
             #[cfg(unix)]
             let foreground_pgid = master_fd.and_then(|fd| {
