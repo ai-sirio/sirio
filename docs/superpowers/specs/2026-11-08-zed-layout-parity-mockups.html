@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zed layout parity – mockups</title>
+<style>body{background:#0f1012;color:#d6d8de;font-family:-apple-system,system-ui,sans-serif;margin:24px}.subtitle{opacity:.75}</style>
+</head><body>
+<style>
+  .w { background:#141518; border:1px solid #2c2d33; border-radius:9px; overflow:hidden; display:flex; flex-direction:column;
+       font-family:-apple-system, system-ui, sans-serif; color:#c9cbd1; }
+  .tb { flex:none; display:flex; align-items:center; gap:5px; background:#1a1b1f; color:#8d909a; }
+  .tb .d { border-radius:50%; flex:none; }
+  .bd { flex:1; display:flex; min-height:0; }
+  .st { flex:none; background:#1a1b1f; display:flex; align-items:center; color:#7d808a; }
+  .c { background:#212226; border:1px solid #34353b; border-radius:5px; display:flex; flex-direction:column; min-width:0; overflow:hidden; position:relative; }
+  .pane { flex:1; display:flex; flex-direction:column; min-width:0; position:relative; }
+  .vd { width:1px; background:#34353b; flex:none; }
+  .tabs { flex:none; border-bottom:1px solid #34353b; display:flex; align-items:center; color:#e4e6eb; box-sizing:border-box; }
+  .hd { flex:none; border-bottom:1px solid #34353b; display:flex; align-items:center; justify-content:center; box-sizing:border-box; }
+  .hd i { display:inline-block; background:#3a3c43; border-radius:3px; }
+  .ln { border-radius:3px; background:#3a3c43; }
+  .sec { color:#7d808a; text-transform:uppercase; letter-spacing:.04em; display:flex; align-items:center; box-sizing:border-box; }
+  .row { display:flex; align-items:center; white-space:nowrap; box-sizing:border-box; border-radius:4px; }
+  .row.sel { background:#2f3138; color:#eceef2; }
+  .row .ic { background:#5b5e68; border-radius:2px; flex:none; }
+  .card2 { display:flex; flex-direction:column; justify-content:center; box-sizing:border-box; }
+  .card2 small { color:#7d808a; }
+  .pill { position:absolute; background:#3d6bd9; color:#fff; font:700 10.5px/1 system-ui; padding:3px 7px; border-radius:9px; white-space:nowrap; z-index:3; }
+  .meas { position:absolute; right:4px; font:600 10px/1 system-ui; color:#f0b34a; z-index:3; }
+  .pair { display:flex; gap:22px; flex-wrap:wrap; }
+  .pair > div > h4 { margin:0 0 6px; }
+</style>
+
+<h2>Misure verticali di Zed, testo a 13</h2>
+<p class="subtitle">In alto la finestra intera, ridotta al 50% (1710 × 987 pt, come il tuo Zed). In basso un angolo a grandezza reale (1 pt = 1 px CSS), per vedere altezze, margini e testo. È uno schema, non l'aspetto definitivo di Sirio.</p>
+
+<h3>Finestra intera, 50%</h3>
+<div class="pair">
+  <div>
+    <h4>Oggi</h4>
+    <div class="w" style="width:427px;height:247px;font-size:6.5px">
+      <div class="tb" style="height:19px;padding-left:6px"><span class="d" style="width:6px;height:6px;background:#ff5f57"></span><span class="d" style="width:6px;height:6px;background:#febc2e"></span><span class="d" style="width:6px;height:6px;background:#28c840"></span></div>
+      <div class="bd" style="padding:1px;gap:1px">
+        <div class="c" style="width:70px;flex:none"><span class="pill" style="bottom:4px;left:50%;transform:translateX(-50%)">280</span></div>
+        <div class="c" style="flex:1;flex-direction:row">
+          <div class="pane"><div class="tabs" style="height:17.5px"></div><span class="pill" style="bottom:4px;left:50%;transform:translateX(-50%)">≈547</span></div>
+          <div class="vd"></div>
+          <div class="pane"><div class="tabs" style="height:17.5px"></div><span class="pill" style="bottom:4px;left:50%;transform:translateX(-50%)">≈547</span></div>
+        </div>
+        <div class="c" style="width:80px;flex:none"><div class="hd" style="height:20px"></div><span class="pill" style="bottom:4px;left:50%;transform:translateX(-50%)">320</span></div>
+      </div>
+      <div class="st" style="height:20px"></div>
+    </div>
+  </div>
+  <div>
+    <h4>Nuovo</h4>
+    <div class="w" style="width:427px;height:247px;font-size:6.5px">
+      <div class="tb" style="height:17px;padding-left:5px"><span class="d" style="width:6px;height:6px;background:#ff5f57"></span><span class="d" style="width:6px;height:6px;background:#febc2e"></span><span class="d" style="width:6px;height:6px;background:#28c840"></span></div>
+      <div class="bd" style="padding:1px;gap:1px">
+        <div class="c" style="width:75px;flex:none"><span class="pill" style="bottom:4px;left:50%;transform:translateX(-50%)">300</span></div>
+        <div class="c" style="flex:1;flex-direction:row">
+          <div class="pane"><div class="tabs" style="height:16px"></div><span class="pill" style="bottom:4px;left:50%;transform:translateX(-50%)">≈577</span></div>
+          <div class="vd"></div>
+          <div class="pane"><div class="tabs" style="height:16px"></div><span class="pill" style="bottom:4px;left:50%;transform:translateX(-50%)">≈577</span></div>
+        </div>
+        <div class="c" style="width:60px;flex:none"><div class="hd" style="height:16px"></div><span class="pill" style="bottom:4px;left:50%;transform:translateX(-50%)">240</span></div>
+      </div>
+      <div class="st" style="height:15px"></div>
+    </div>
+  </div>
+</div>
+
+<h3 style="margin-top:26px">Angolo in alto a sinistra, grandezza reale</h3>
+<div class="pair">
+  <!-- OGGI -->
+  <div>
+    <h4>Oggi: titlebar 38 · tab 35 · righe 32 · intestazioni 26 · margine 12 · testo 12,5</h4>
+    <div class="w" style="width:430px;height:330px;border-radius:9px 0 0 0;border-right:none;border-bottom:none">
+      <div class="tb" style="height:38px;padding-left:12px;gap:8px;position:relative"><span class="d" style="width:12px;height:12px;background:#ff5f57"></span><span class="d" style="width:12px;height:12px;background:#febc2e"></span><span class="d" style="width:12px;height:12px;background:#28c840"></span><span style="margin-left:20px;font-size:13px">aad-prodotto-web-v2</span><span class="meas" style="top:14px">38</span></div>
+      <div class="bd" style="padding:4px 0 0 4px;gap:4px">
+        <div class="c" style="width:280px;flex:none;font-size:12.5px;border-bottom:none;border-radius:5px 5px 0 0">
+          <div class="sec" style="height:26px;padding:0 12px;font-size:11.5px;margin-top:8px;position:relative">aad-prodotto-web-v2<span class="meas" style="top:8px">26</span></div>
+          <div class="row sel" style="height:32px;padding:0 12px;gap:8px;margin:2px 0;position:relative"><span class="ic" style="width:12px;height:12px"></span>New Claude Agent Thread<span class="meas" style="top:11px">32</span></div>
+          <div class="row" style="height:32px;padding:0 12px;gap:8px;margin:2px 0"><span class="ic" style="width:12px;height:12px"></span>Terminale</div>
+          <div class="sec" style="height:26px;padding:0 12px;font-size:11.5px;margin-top:6px">PIG</div>
+          <div class="row card2" style="height:51px;padding:7px 12px;align-items:flex-start;position:relative">Saluto iniziale della conversazione<small>1w</small><span class="meas" style="top:20px">51</span></div>
+          <div class="row card2" style="height:51px;padding:7px 12px;align-items:flex-start">Apertura<small>1mo</small></div>
+        </div>
+        <div class="c" style="flex:1;border-right:none;border-bottom:none;border-radius:5px 0 0 0">
+          <div class="tabs" style="height:35px;padding:0 10px;font-size:13px;position:relative">✳ Claude<span class="meas" style="top:12px">35</span></div>
+          <div class="ln" style="height:7px;margin:14px 12px 0;width:70%"></div>
+          <div class="ln" style="height:7px;margin:10px 12px 0;width:50%"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- NUOVO -->
+  <div>
+    <h4>Nuovo: titlebar 34 · tab 32 · righe 34 · intestazioni 31 · margine 6 · testo 13</h4>
+    <div class="w" style="width:430px;height:330px;border-radius:9px 0 0 0;border-right:none;border-bottom:none">
+      <div class="tb" style="height:34px;padding-left:10px;gap:8px;position:relative"><span class="d" style="width:12px;height:12px;background:#ff5f57"></span><span class="d" style="width:12px;height:12px;background:#febc2e"></span><span class="d" style="width:12px;height:12px;background:#28c840"></span><span style="margin-left:20px;font-size:13px">aad-prodotto-web-v2</span><span class="meas" style="top:12px">34</span></div>
+      <div class="bd" style="padding:4px 0 0 4px;gap:4px">
+        <div class="c" style="width:300px;flex:none;font-size:13px;border-bottom:none;border-radius:5px 5px 0 0">
+          <div class="sec" style="height:31px;padding:0 6px;font-size:11.5px;margin-top:4px;position:relative">aad-prodotto-web-v2<span class="meas" style="top:10px">31</span></div>
+          <div class="row sel" style="height:34px;padding:0 6px;gap:6px;margin:0 4px;position:relative"><span class="ic" style="width:12px;height:12px"></span>New Claude Agent Thread<span class="meas" style="top:12px">34</span></div>
+          <div class="row" style="height:34px;padding:0 6px;gap:6px;margin:0 4px"><span class="ic" style="width:12px;height:12px"></span>Terminale</div>
+          <div class="sec" style="height:31px;padding:0 6px;font-size:11.5px">PIG</div>
+          <div class="row card2" style="height:53px;padding:6px 6px;margin:0 4px;align-items:flex-start;position:relative">Saluto iniziale della conversazione<small>1w</small><span class="meas" style="top:21px">53</span></div>
+          <div class="row card2" style="height:53px;padding:6px 6px;margin:0 4px;align-items:flex-start">Apertura<small>1mo</small></div>
+        </div>
+        <div class="c" style="flex:1;border-right:none;border-bottom:none;border-radius:5px 0 0 0">
+          <div class="tabs" style="height:32px;padding:0 10px;font-size:13px;position:relative">✳ Claude<span class="meas" style="top:11px">32</span></div>
+          <div class="ln" style="height:7px;margin:14px 12px 0;width:70%"></div>
+          <div class="ln" style="height:7px;margin:10px 12px 0;width:50%"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3 style="margin-top:26px">Pannello destro e status bar, grandezza reale</h3>
+<div class="pair">
+  <div>
+    <h4>Oggi: intestazione 40 · righe 26 · rientro 16 · status 40</h4>
+    <div class="w" style="width:330px;height:250px;border-radius:0">
+      <div class="bd" style="padding:4px;gap:4px">
+        <div class="c" style="width:320px;flex:none;font-size:12.5px">
+          <div class="hd" style="height:40px;gap:4px;position:relative"><i style="width:28px;height:28px"></i><i style="width:28px;height:28px;opacity:.5"></i><i style="width:28px;height:28px;opacity:.5"></i><i style="width:28px;height:28px;opacity:.5"></i><span class="meas" style="top:15px">40</span></div>
+          <div class="row" style="height:26px;padding-left:8px;gap:6px"><span class="ic" style="width:12px;height:12px"></span>source</div>
+          <div class="row" style="height:26px;padding-left:24px;gap:6px"><span class="ic" style="width:12px;height:12px"></span>src</div>
+          <div class="row" style="height:26px;padding-left:40px;gap:6px"><span class="ic" style="width:12px;height:12px"></span>main</div>
+          <div class="row sel" style="height:26px;padding-left:56px;gap:6px"><span class="ic" style="width:12px;height:12px"></span>ContractorRepository.java</div>
+        </div>
+      </div>
+      <div class="st" style="height:40px;padding:0 12px;font-size:12.5px;position:relative">⊗ 3961 ⚠ 103<span class="meas" style="top:15px">40</span></div>
+    </div>
+  </div>
+  <div>
+    <h4>Nuovo: intestazione 32 · righe 26 · rientro 20 · status 30</h4>
+    <div class="w" style="width:250px;height:250px;border-radius:0">
+      <div class="bd" style="padding:4px;gap:4px">
+        <div class="c" style="width:240px;flex:none;font-size:13px">
+          <div class="hd" style="height:32px;gap:4px;position:relative"><i style="width:24px;height:24px"></i><i style="width:24px;height:24px;opacity:.5"></i><i style="width:24px;height:24px;opacity:.5"></i><i style="width:24px;height:24px;opacity:.5"></i><span class="meas" style="top:11px">32</span></div>
+          <div class="row" style="height:26px;padding-left:6px;gap:6px"><span class="ic" style="width:12px;height:12px"></span>source</div>
+          <div class="row" style="height:26px;padding-left:26px;gap:6px"><span class="ic" style="width:12px;height:12px"></span>src</div>
+          <div class="row" style="height:26px;padding-left:46px;gap:6px"><span class="ic" style="width:12px;height:12px"></span>main</div>
+          <div class="row sel" style="height:26px;padding-left:66px;gap:6px"><span class="ic" style="width:12px;height:12px"></span>ContractorRepository.java</div>
+        </div>
+      </div>
+      <div class="st" style="height:30px;padding:0 6px;font-size:13px;position:relative">⊗ 3961 ⚠ 103<span class="meas" style="top:10px">30</span></div>
+    </div>
+  </div>
+</div>
+</body></html>
