@@ -304,6 +304,16 @@ A centre-divider drag is saved exactly like a side-panel drag: the same
 500 ms debounce (`main.rs:5459`) and the same settings write. On relaunch the
 halves come back at the dragged ratio, within the existing 100..900 clamp.
 
+**Found while building this (2026-11-08).** That shared write,
+`schedule_panel_width_save`, built its row from `app_settings_from_snapshot`.
+That function hard-codes `updates_enabled: true` and the default
+`forge_hosts`. So every panel-width save reset the user's update opt-out and
+wiped their custom forge hosts. The bug dates from #578. Saving divider drags
+would have made it fire far more often. So the save now starts from the
+stored row, through `app_settings_for_settings_save`, and overrides only the
+three drag keys and the LSP list. A regression test covers the opt-out and
+the hosts.
+
 ### §4.3 Scope
 
 Only the divider between the two centre halves. In-tab terminal splits
