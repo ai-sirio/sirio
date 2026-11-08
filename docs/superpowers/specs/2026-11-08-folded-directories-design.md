@@ -162,12 +162,26 @@ starts there. This applies to the root refresh, the walk started by opening a di
 - A child that can start a chain is followed link by link until the chain ends. The leaf's
   listing is read, because that is how the walk learns the chain has ended, and it is kept. Only
   the fold decision uses it.
-- **Children appear in one update, already folded.**
-  - Opening a directory, whether a folded row or a plain one, starts a walk like today's. The
-    walk covers its listing plus its children's chains.
-  - The children are drawn only when that walk lands, never first from the held listing and
-    then folded.
-  - Opening is therefore asynchronous, as it is today. It is not instant.
+- **Children appear already folded.**
+  - A directory is *resolved* when every child directory in its listing has its own listing
+    loaded, or failed to read.
+  - Every link of a chain is resolved. The walk loads all of a link's child directories,
+    dot-directories included, so the chain is right in both toggle states.
+  - Opening a resolved directory draws its children at once. They are already folded, because
+    every listing the fold needs is held.
+  - Opening an unresolved directory starts a walk, as today. An unresolved directory is a leaf,
+    or a plain folder with subfolders. The walk reads the directory's listing plus its
+    children's chains.
+  - The children of an unresolved directory are drawn only when that walk lands, never first
+    from the held listing and then folded. That open is asynchronous, as today.
+  - This bullet was revised after the plan review. The first version said that every open walks.
+- **macOS privacy.** Lookahead never reads a child that is itself one of the folders macOS
+  guards with a privacy prompt: `~/Desktop`, `~/Documents`, `~/Downloads`, `~/Pictures`,
+  `~/Movies`, `~/Music` and `~/Library`.
+  - Such a folder is read only when the user opens it, as today, so browsing a project rooted at
+    `~` raises no prompt by itself.
+  - A project that lives inside one of them is unaffected: Sirio already reads it.
+  - This is my call, after the plan review.
 - **What the tree holds:**
   - the root's listing;
   - for every directory whose children are on screen (the root, and every expanded directory):
@@ -206,6 +220,19 @@ starts there. This applies to the root refresh, the walk started by opening a di
     after that refresh it does both.
 - Fresh listings replace the old ones, and the `expanded` flags carry over by path.
   `preserve_expansion`'s copying of stale children goes away.
+- **A user's open during a refresh is kept, and the fresh listings still win.**
+  - When a refresh lands, every entry now on disk is in the tree.
+  - The fresh read may not have loaded some child that sits below a directory open at landing
+    time. That happens when the user opened that folder while the refresh ran. Such a child
+    takes the subtree the panel already had, and the next refresh re-reads it.
+  - Nothing is carried below a closed directory.
+- **No refresh request is lost.** A refresh asked for while an open's walk runs is not dropped:
+  the walk's landing starts it. Today `refresh` returns early while a walk is in flight and
+  leaves the request pending with nothing to re-arm it.
+- **The host's precache keeps a worktree's open folders.** It rebuilds a dirty snapshot through
+  the same reload, with the expanded paths that snapshot already had. Switching worktrees and
+  back therefore finds the same rows open. Today a rebuilt snapshot comes back with nothing
+  open.
 - Results:
   - A file created inside `it` splits the row after the watcher and the debounce.
   - Deleting the file rejoins the row.
@@ -265,8 +292,11 @@ starts there. This applies to the root refresh, the walk started by opening a di
   Do not switch folding off for tests.
 - `build_snapshot` and the panel's refresh use one loader. A worktree restored from the host's
   snapshot cache arrives already folded.
-- Testing rules (CLAUDE.md): end to end first. A unit test exists only for the fold rule and is
-  written before the code, from the failure list in §6.
+- Testing rules (CLAUDE.md): end to end first.
+  - Unit tests exist only for the two isolated units, the fold rule and the loader.
+  - Each is written before its code, from a failure list. The fold rule's list is in §6; the
+    loader's is in the plan.
+  - The plan review added the loader.
 
 ## §6 Proof
 
@@ -298,9 +328,16 @@ function from the tree, `show_hidden` and the expanded flags to rows.
 on screen it returns:
 - the label;
 - the leaf path relative to the worktree;
-- depth, `is_dir` and expanded;
+- depth, `is_dir`, expanded and selected;
 - the git marker slug;
 - the row's window bounds.
+
+It also returns:
+- the count of refreshes that have landed, so a script can wait for the refresh that sees a
+  change before it holds a state;
+- every row label the panel built since the last read that asked to reset that record. A row
+  drawn unfolded for a single frame is therefore caught however fast the walk lands, which
+  polling could not guarantee.
 
 **The script.** A new `Scripts/Tests/test-files-fold-e2e.sh --xvfb`, shaped like
 `test-prompts-e2e.sh`:
@@ -318,14 +355,19 @@ The fixture is one git worktree holding:
 
 Its checks, each printed as `ok N`:
 1. `java / it / acme / app / v2`, `docs / adr` and `config / pmd` are single rows. The Python
-   package is not folded. Opening `source` and `src` never shows the unfolded form first: the
-   verb is polled across the open.
+   package is not folded. Opening `source` and `src` never builds the unfolded form first,
+   according to the verb's record of built labels.
 2. Opening the Java row shows `App.java` and the folded row `domain / model` one level deeper.
-   `domain / model` must never appear unfolded first: the verb is polled across the open.
+   `domain / model` is never built unfolded first.
 3. `touch .../java/it/New.java` splits the row into an open `java / it` with `New.java` and
-   `acme / app / v2` under it. Removing the file rejoins the row.
-4. Create `.../it/.DS_Store`. With hidden files off, the row stays joined. Turn hidden files on:
-   it splits. Turn them off again: it rejoins.
+   `acme / app / v2` under it.
+   - Moving the selection to `java / it` with the ↑ key, then removing the file, rejoins the
+     row.
+   - The joined row is selected, although the selected path `it` is now a middle link.
+4. Create `.../it/.DS_Store` and wait for the refresh that sees it.
+   - With hidden files off, the row stays joined.
+   - Turn hidden files on: it splits.
+   - Turn them off again: it rejoins.
 5. A new file inside an expanded ordinary subfolder appears. This is the §2 bug.
 6. With `Old.java` deleted, the Java row carries the changed dot.
 
