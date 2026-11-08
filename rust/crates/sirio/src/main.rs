@@ -27237,6 +27237,7 @@ impl SirioWorkspace {
             return;
         }
         self.center_split_ratio = millis;
+        self.schedule_panel_width_save(cx);
         cx.notify();
     }
 
