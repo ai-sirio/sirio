@@ -34,7 +34,7 @@ pub use prompts::{PromptCardFacts, PromptsFacts};
 pub use references::{GroupedRow, ReferenceRow, ReferencesState, group_by_file, summary};
 use references::{ReferencesEvent, ReferencesList};
 
-const HEADER_HEIGHT: f32 = 40.0;
+const HEADER_HEIGHT: f32 = 32.0;
 /// User actions originating from the panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RightPanelEvent {
@@ -608,8 +608,8 @@ impl RightPanel {
                 div()
                     .id(view.element_id())
                     .debug_selector(move || view.element_id().to_owned())
-                    .w(px(28.0))
-                    .h(px(28.0))
+                    .w(px(24.0))
+                    .h(px(24.0))
                     .flex()
                     .items_center()
                     .justify_center()

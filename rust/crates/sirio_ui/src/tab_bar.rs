@@ -16,7 +16,8 @@ use crate::popup::{
 };
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
-const HEIGHT: f32 = 34.0;
+/// The strip's content box: the 32 px strip less its inside hairline.
+const HEIGHT: f32 = 31.0;
 /// The strip's buttons: the `+`, and the collapse button right of it. Each
 /// takes one `titlebar_control_frame` (this plus its 2 px right margin).
 const STRIP_BUTTON: f32 = 24.0;

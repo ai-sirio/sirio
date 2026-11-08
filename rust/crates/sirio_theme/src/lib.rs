@@ -593,13 +593,13 @@ impl Default for Radii {
 /// [`WindowsCaption::button_width`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrowserChrome {
-    /// The bar's total height (comet: 38px).
+    /// The bar's total height (Zed's title bar: 34px).
     pub bar_height: Pixels,
     /// Diameter of one traffic-light dot. Not a comet measurement — comet's
     /// lights are OS-drawn on macOS and absent on Linux, so there is no
     /// dimension to transcribe. 12px matches the widely-documented real-world
     /// size of macOS's own dots, chosen independently for legibility at a
-    /// 38px bar height (12 / 38 ≈ 0.32 of the bar), not copied from any
+    /// 34px bar height (12 / 34 ≈ 0.35 of the bar), not copied from any
     /// comet inset constant.
     ///
     /// P102 fallback-only: read only when `titlebar.rs` draws the dots at
@@ -680,7 +680,7 @@ impl BrowserChrome {
 impl Default for BrowserChrome {
     fn default() -> Self {
         Self {
-            bar_height: px(38.0),
+            bar_height: px(34.0),
             traffic_light_diameter: px(12.0),
             traffic_light_gap: px(8.0),
             traffic_light_inset: px(10.0),

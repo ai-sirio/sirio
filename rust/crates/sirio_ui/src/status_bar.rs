@@ -25,7 +25,7 @@ use crate::loading;
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 use crate::text_selection::selectable_text;
 
-pub(crate) const HEIGHT: f32 = 40.0;
+pub(crate) const HEIGHT: f32 = 30.0;
 
 /// The Swift default: refresh every five minutes (60..3600 allowed).
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);

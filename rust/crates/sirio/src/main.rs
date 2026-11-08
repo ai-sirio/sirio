@@ -663,10 +663,18 @@ fn close_tab_fallback_fires(
     is_linux && modifiers.control && !modifiers.shift && !terminal_focused
 }
 
-/// Fixed panel geometry, measured off the frozen reference shots — see
-/// `docs/MEASURED.md`.
-const STATUS_BAR_HEIGHT: f32 = 40.;
-const TAB_BAR_HEIGHT: f32 = 34.;
+/// Fixed bar heights, Zed's factory layout — see §3.2 of
+/// `docs/superpowers/specs/2026-11-08-zed-layout-parity-design.md`.
+const STATUS_BAR_HEIGHT: f32 = 30.;
+/// The tab strip, hairline included; the `TabBar` inside is one less.
+const TAB_BAR_HEIGHT: f32 = 32.;
+
+/// The top that centres a strip button (one `titlebar_control_frame` tall) in
+/// the strip's content box, the strip less its inside hairline.
+fn strip_control_top(theme: &Theme) -> gpui::Pixels {
+    (px(TAB_BAR_HEIGHT - 1.0) - theme.spacing.titlebar_control_frame.height) / 2.0
+}
+
 /// #320: the rule between the two center panes.
 const CENTER_DIVIDER_WIDTH: f32 = 1.;
 const CHAT_TAB_MIN_WIDTH: f32 = 108.;
@@ -25426,7 +25434,7 @@ impl SirioWorkspace {
             .debug_selector(|| "secondary-pane-close".to_owned())
             .absolute()
             .right_0()
-            .top(theme.spacing.titlebar_control_spacing)
+            .top(strip_control_top(&theme))
             .w(theme.spacing.titlebar_control_frame.width)
             .h(theme.spacing.titlebar_control_frame.height)
             .flex()
@@ -26576,7 +26584,7 @@ impl SirioWorkspace {
                 .debug_selector(|| "tab-overflow-button".to_owned())
                 .absolute()
                 .right_0()
-                .top(theme.spacing.titlebar_control_spacing)
+                .top(strip_control_top(&theme))
                 .w(theme.spacing.titlebar_control_frame.width)
                 .h(theme.spacing.titlebar_control_frame.height)
                 .flex()
@@ -32242,7 +32250,7 @@ fn main() {
                 icon: Some(app_icon()),
                 titlebar: Some(TitlebarOptions {
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.), px(12.))),
+                    traffic_light_position: Some(point(px(12.), px(10.))),
                     ..Default::default()
                 }),
                 ..Default::default()
