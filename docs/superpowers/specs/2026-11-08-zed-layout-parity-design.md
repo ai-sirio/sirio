@@ -247,12 +247,19 @@ Calls marked *(my call)*:
   | Session time, armed delete confirm (`sessions.rs:702`, `:725`) | `scaled(11.5)` | 10.5 | 11.5 |
   | Small labels | `scaled(11.0)` | 10 | 11 |
   | Unread pill (`section.rs:183`), primary star (`row.rs:727`) | `scaled(10.0)` | 9 | 10 |
-  | Headings (`headline` in `project_settings.rs:639`, `mod.rs:4558`, `:4572`) | named | 14 | 13 |
+  | Headings (`headline` in `mod.rs:4558`, `:4572`) | named | 14 | 13 |
 
   Secondary text that is drawn smaller today stays smaller than the labels
   next to it (subline, time, pill). `footnote` texts reach 13 under part 1.
   The playback said 12 because it assumed they draw at 11 today. They draw
   at 12.
+
+  `sidebar/project_settings.rs` is not in these panels: it draws a centre
+  card on the global theme (`*Theme::get(cx)`), so its `headline` stays at
+  the global size. The right panel's empty state ("No worktree selected")
+  draws its title (`headline`) and subtitle (`footnote`) both at 13. The
+  subtitle stays secondary by colour (`fg_subtle` against `fg`). Its
+  `large_title` icon is a glyph and keeps its 20 px (part 3).
 
   Fixed boxes keep their size. The unread pill's 14 px box holds 10 px text,
   as it already does outside the sidebar. The captures in §6.1 are where a
