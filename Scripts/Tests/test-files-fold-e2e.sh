@@ -366,9 +366,26 @@ ever_built() { # label...
   done
   note "OK: built: $*"
 }
-refreshes_are() { # n
-  STATE="$(read_verb files 2>&1)" || return 1
-  [ "$(value refreshes)" = "$1" ]
+# Waits until `refreshes` has not moved for SECONDS, starting the count over each time it moves;
+# the deadline is the failure. A late refresh is waited out, never taken as a failure.
+settle_refreshes() { # seconds
+  local deadline last since now
+  deadline=$(( $(date +%s) + DEADLINE_SECS ))
+  read_state files
+  last="$(value refreshes)"
+  since=$(date +%s)
+  while :; do
+    now=$(date +%s)
+    [ $(( now - since )) -lt "$1" ] || break
+    [ "$now" -lt "$deadline" ] || fail "$SCENARIO: refreshes never settled -- last read: $(last_read)"
+    sleep 0.2
+    read_state files
+    if [ "$(value refreshes)" != "$last" ]; then
+      last="$(value refreshes)"
+      since=$(date +%s)
+    fi
+  done
+  note "OK: refreshes settled at $last"
 }
 drawn_refreshes_over() { # n
   STATE="$(read_verb files 2>&1)" || return 1
@@ -595,8 +612,7 @@ SCENARIO="hidden_files"
 # A precache walk of this worktree can still land after check 5 and refresh once more: let the
 # count settle before taking it as the baseline.
 wait_on files stale=0 updating=0
-read_state files
-hold_until 2 "no refresh is still landing" refreshes_are "$(value refreshes)"
+settle_refreshes 2
 read_state files
 before="$(value drawnRefreshes)"
 touch "$REPO/source/src/main/java/it/.DS_Store"
