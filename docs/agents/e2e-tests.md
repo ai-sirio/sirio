@@ -161,6 +161,19 @@ Scripts/Tests/test-project-identity-e2e.sh   # -> prints "PROJECT IDENTITY E2E O
 # gir1.2-gtk-3.0 for the clipboard, which it reads through X11 even when WAYLAND_DISPLAY is set.
 Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "PROMPTS E2E OK"
 
+# Folded directories in the Files tree, in one real, isolated debug Sirio on a private Xvfb, driven
+# by real X clicks and keys at the row bounds the debug `surface files read` verb reports for the
+# last drawn frame. A Maven-like fixture proves: a file made under the third open level shows and
+# goes (nested listings stay current), single-child chains are joined into one row at the right
+# depth and no link of a chain is ever built as a row of its own (the verb's destructive `seen`
+# record, which the script drains on every read into seen.log), the joined row carries the
+# outermost link's git status, opening it shows its children joined, a sibling file splits it and
+# removing the file rejoins it with the selection kept, hidden files decide the chain until they
+# are shown, and a worktree switch away and back keeps the rows. Linux only: --xvfb is required;
+# --out-dir DIR keeps transcript.log, captures/light-<n>.png (and failure.png on a failed run),
+# seen-<n>.log snapshots, git-status-<n>.txt, light-app.log and xvfb.log.
+Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 7", then "FILES FOLD E2E OK"
+
 # The chat's session panel column in a real, isolated Sirio: a stub `claude`
 # (Scripts/Tests/stubs/session-panel/claude over sirio_chat's claude_fixture.py in
 # session_panel mode) and the fake forge, asserted on `surface.chat.read`'s `sessionPanel`:
