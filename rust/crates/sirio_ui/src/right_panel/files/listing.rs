@@ -216,8 +216,13 @@ fn carry_nodes(current: &[FileNode], fresh: Vec<FileNode>, adopt_loaded: bool) -
 /// Merges what `held` (open in the current tree) knows into the fresh `node`.
 fn carry_into_open(held: &FileNode, node: &mut FileNode) {
     if node.loaded {
+        // A closed child is adopted only where this parent's lookahead did
+        // not run (a folder opened during the refresh). Where it ran and
+        // skipped the child on purpose, the held listing is stale and
+        // reopening must walk.
+        let adopt_closed = !node.children_resolved;
         let fresh = std::mem::take(&mut node.children);
-        node.children = carry_nodes(&held.children, fresh, true);
+        node.children = carry_nodes(&held.children, fresh, adopt_closed);
         node.children_resolved = node.children_resolved || held.children_resolved;
     } else {
         adopt_listing(held, node);
@@ -435,6 +440,9 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
             .expect("restore the directory");
         if !staged {
+            eprintln!(
+                "SKIP: the directory stays readable (running as root), so no failure can be staged"
+            );
             return;
         }
         let listing = result.expect("a child's failure is not the read's failure");
@@ -550,6 +558,37 @@ mod tests {
         let merged = carry_open_state(&current, fresh);
         assert_eq!(names(&merged[0].children), ["acme", "New.java"]);
         assert!(merged[0].children[0].loaded);
+    }
+
+    #[test]
+    fn carry_open_state_does_not_resurrect_a_listing_the_lookahead_skipped() {
+        // The fresh parent's lookahead ran and left this child unread on
+        // purpose (over the cap, or privacy-guarded); the held listing is
+        // old, and opening the child must walk it afresh.
+        let current = vec![folder(
+            "big",
+            true,
+            true,
+            true,
+            vec![folder(
+                "big/d5",
+                false,
+                true,
+                true,
+                vec![node("big/d5/old.txt", false)],
+            )],
+        )];
+        let fresh = vec![folder(
+            "big",
+            false,
+            true,
+            true,
+            vec![folder("big/d5", false, false, false, vec![])],
+        )];
+        let merged = carry_open_state(&current, fresh);
+        let d5 = &merged[0].children[0];
+        assert!(!d5.loaded);
+        assert!(!d5.children_resolved);
     }
 
     #[test]

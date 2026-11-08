@@ -168,6 +168,9 @@ impl RightPanel {
     /// render thread. Single-flight on the walk task.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh_started || self.walk_task.is_some() {
+            // Remembered, not lost: the landing of whatever is in flight
+            // runs it.
+            self.refresh_dirty = true;
             return;
         }
         if !self
@@ -365,7 +368,10 @@ impl RightPanel {
                 return;
             };
             node.expanded = !node.expanded;
-            node.read_error = None;
+            if node.expanded {
+                // The walk records the error again if the read still fails.
+                node.read_error = None;
+            }
             // A resolved directory holds every listing its children need, so
             // it opens at once; only an unresolved one walks off-thread.
             (node.expanded, node.expanded && !node.children_resolved)
@@ -376,10 +382,13 @@ impl RightPanel {
         } else if !expanded {
             // The collapse supersedes any in-flight expansion of this (or
             // any) folder: its result must not land later.
-            self.walk_task = None;
+            // A dropped walk leaves its folder open and unresolved; a refresh
+            // re-reads it. That walk's landing would also have run a refresh
+            // asked for meanwhile.
+            if self.walk_task.take().is_some() {
+                self.refresh_dirty = true;
+            }
             self.walk_generation += 1;
-            // That walk's landing is what would have run a refresh asked for
-            // meanwhile.
             if self.refresh_dirty {
                 self.request_refresh(cx);
             }
@@ -393,7 +402,12 @@ impl RightPanel {
     /// generation guard drops any walk that completes after a newer one
     /// was requested.
     fn start_walk(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.walk_task = None;
+        // The dropped walk's folder stays open and unresolved; this walk's
+        // landing runs the refresh that re-reads it (a refresh now would
+        // only be declined while this walk is in flight).
+        if self.walk_task.take().is_some() {
+            self.refresh_dirty = true;
+        }
         self.walk_generation += 1;
         let generation = self.walk_generation;
         let repo_root = self.repo_root.clone();
@@ -1421,6 +1435,69 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_refresh_asked_for_during_a_walk_still_runs(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let subdir = dir.0.join("subdir");
+        seed_dir_with_files(&subdir, 200);
+        std::fs::create_dir_all(subdir.join("inner")).expect("create the inner folder");
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                find_node(&panel.file_tree, &subdir).is_some()
+            })
+        });
+
+        panel.update(cx, |panel, cx| {
+            panel.toggle_file(&subdir, cx);
+            assert!(panel.walk_task.is_some(), "the open's walk is in flight");
+            // A direct refresh (the menu's Refresh, a retry) is declined
+            // while the walk runs; it must be remembered, not lost.
+            panel.refresh(cx);
+        });
+        let late = dir.0.join("late.txt");
+        std::fs::write(&late, "x").expect("write the late file");
+
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| find_node(&panel.file_tree, &late).is_some())
+        });
+    }
+
+    #[gpui::test]
+    async fn a_dropped_walk_does_not_leave_its_folder_empty(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let first = dir.0.join("first");
+        let second = dir.0.join("second");
+        for folder in [&first, &second] {
+            seed_dir_with_files(folder, 50);
+            std::fs::create_dir_all(folder.join("inner")).expect("create the inner folder");
+        }
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                find_node(&panel.file_tree, &first).is_some()
+                    && find_node(&panel.file_tree, &second).is_some()
+            })
+        });
+
+        // The second open drops the first's walk.
+        panel.update(cx, |panel, cx| panel.toggle_file(&first, cx));
+        panel.update(cx, |panel, cx| panel.toggle_file(&second, cx));
+
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                [&first, &second].iter().all(|folder| {
+                    find_node(&panel.file_tree, folder)
+                        .is_some_and(|node| node.expanded && node.children_resolved)
+                })
+            })
+        });
+    }
+
+    #[gpui::test]
     async fn a_periodic_refresh_does_not_collapse_an_expanded_folder(cx: &mut TestAppContext) {
         // F-TAB-01: `ensure_tree_refresh` reruns `refresh()` on every tick.
         // Before the fix, that walk replaced `file_tree` wholesale, so a
@@ -1576,6 +1653,7 @@ mod tests {
 
         // Expand the first folder, then immediately the second: the first
         // walk is superseded and its result must not land late.
+        let landed_before = panel.read_with(cx, |panel, _| panel.refreshes_landed);
         panel.update(cx, |panel, cx| panel.toggle_file(&first, cx));
         panel.update(cx, |panel, cx| panel.toggle_file(&second, cx));
 
@@ -1589,8 +1667,10 @@ mod tests {
         panel.read_with(cx, |panel, _| {
             let first_node = find_node(&panel.file_tree, &first).expect("first node");
             let second_node = find_node(&panel.file_tree, &second).expect("second node");
+            // The dropped walk's folder is resolved later by the refresh its
+            // drop asks for; only a walk's own landing would be a bug.
             assert!(
-                !first_node.children_resolved,
+                !first_node.children_resolved || panel.refreshes_landed > landed_before,
                 "the superseded walk's result must not be applied over the newer one"
             );
             assert_eq!(second_node.children.len(), 101);
