@@ -26764,9 +26764,9 @@ impl SirioWorkspace {
                     // The one `+`: it routes a new surface to its own half by
                     // what the surface is, so a second copy in the Secondary
                     // strip would be a button that sends you elsewhere.
-                    // Clipped to the content box: the view sizes itself to
-                    // the full strip height and would otherwise paint its
-                    // surface over the hairline under the `+`. Its menu is
+                    // Clipped to the content box as a guard: the view is one
+                    // less than the strip (`tab_bar.rs` `HEIGHT`), so it ends
+                    // above the hairline under the `+`. Its menu is
                     // deferred, so the clip never reaches it.
                     .child(
                         div()
