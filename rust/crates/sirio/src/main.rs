@@ -27265,12 +27265,15 @@ impl SirioWorkspace {
                 if this.panel_width_save_generation != generation {
                     return;
                 }
-                let mut settings = app_settings_from_snapshot(this.settings.read(cx).snapshot());
+                // This writes the whole row, so start from the stored one: the
+                // opt-out and the forge hosts are not in the snapshot.
+                let stored = this.session.load_settings();
+                let mut settings =
+                    app_settings_for_settings_save(this.settings.read(cx).snapshot(), &stored);
                 settings.sidebar_width = sidebar;
                 settings.right_panel_width = right_panel;
                 settings.center_split_ratio = center_split;
-                settings.lsp_silenced_languages =
-                    this.session.load_settings().lsp_silenced_languages;
+                settings.lsp_silenced_languages = stored.lsp_silenced_languages;
                 this.session.save_settings(&settings);
             });
         }));
@@ -47823,6 +47826,52 @@ done
         assert_eq!(
             stored.lsp_silenced_languages, r#"["java"]"#,
             "and it left the install offer's key alone"
+        );
+    }
+
+    /// The debounced width save writes the whole settings row, so it must
+    /// carry what the drag does not own: the update opt-out is written by its
+    /// own callback, and the forge hosts by `ForgeHub`. Rebuilding them from
+    /// `Default` would switch updates back on and forget every host the user
+    /// configured, on each divider drag.
+    #[gpui::test]
+    async fn a_panel_width_save_keeps_the_update_opt_out_and_the_forge_hosts(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let session = workspace.read_with(&cx.cx, |workspace, _| workspace.session.clone());
+        let hosts = r#"[{"host":"git.corp","forge":"gitlab"}]"#;
+        let mut stored = session.load_settings();
+        stored.updates_enabled = false;
+        stored.forge_hosts = hosts.to_owned();
+        session.save_settings(&stored);
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.center_split_ratio = 640;
+            workspace.schedule_panel_width_save(cx);
+        });
+        cx.background_executor
+            .advance_clock(PANEL_WIDTH_SAVE_DEBOUNCE);
+        cx.run_until_parked();
+
+        let stored = session.load_settings();
+        assert_eq!(stored.center_split_ratio, 640, "the drag itself was saved");
+        assert!(
+            !stored.updates_enabled,
+            "the update opt-out survives a panel width save"
+        );
+        assert_eq!(
+            stored.forge_hosts, hosts,
+            "the forge hosts survive a panel width save"
         );
     }
 
