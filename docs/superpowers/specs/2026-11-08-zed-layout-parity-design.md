@@ -42,6 +42,14 @@ In the order he decided them:
 Enzo reviewed the playback of §2–§3, including the calls marked *(my call)*,
 and changed nothing.
 
+After his approval, the plan's code survey corrected three playback numbers.
+They are reported to him with the plan:
+- The tab strip is 34 today, hairline included, not 35.
+- The rail's bottom bar stays 40 (§3.2).
+- `footnote` texts go from 12 to 13, not from 11 to 12 (§3.3).
+
+What he decided does not change.
+
 ## §2 Widths
 
 ### §2.1 Reference: what Zed does
@@ -119,6 +127,10 @@ exactly 280 keeps 280. A rule applied at load time would undo that drag on
 every launch, and is rejected for that reason. This includes Enzo's own
 install.
 
+There is a precedent. `migrate_v21` (`migrations.rs:502-509`) moved the
+previous defaults the same way, 325 → 280 and 405 → 320, with one `UPDATE
+setting … WHERE key = … AND value = …` per panel.
+
 Check again for a v27 on in-flight branches before taking the number.
 `primary_rail` once had to renumber after such a collision.
 
@@ -148,12 +160,17 @@ The values are logical px, the same as Zed's.
 | Sirio element | Today | New | Where today |
 |---|---|---|---|
 | Title bar | 38 | **34** | `sirio_theme` `browser_chrome.bar_height` (`lib.rs:683`); wrapper `main.rs:28856` |
-| Tab strip of each centre half | 34 + 1 hairline | **32 including the hairline** *(my call: Zed's toolbar is 32 with its border inside)* | `main.rs:669` `TAB_BAR_HEIGHT`, duplicated at `tab_bar.rs:19` |
+| Tab strip of each centre half | 34, hairline inside | **32 including the hairline** *(my call: Zed's toolbar is 32 with its border inside)* | `main.rs:669` `TAB_BAR_HEIGHT`. The `TabBar` inside draws `tab_bar.rs:19` `HEIGHT` 34, clipped to the 33 px content box today, so it becomes 31. |
 | Status bar | 40 | **30** | `main.rs:668`, duplicated at `status_bar.rs:28` |
 | Sidebar section header | 26 | **31** | `sidebar/section.rs:10` |
-| Sidebar one-line row (tab rows) | 32 | **34** | `sidebar/mod.rs:195` |
-| Sidebar two-line row (worktree cards) | 51 | **53** | `sidebar/mod.rs:212` |
-| Horizontal padding of sidebar rows and headers | 12 | **6** | `sidebar/row.rs:218-222`, `sidebar/section.rs:36-46` |
+| Sidebar one-line row (tab rows) | 31 drawn (constant 32) | **34 drawn** | `sidebar/mod.rs:195` |
+| Sidebar two-line row (worktree and session cards) | 50 drawn (constant 51) | **53 drawn** | `sidebar/mod.rs:212` |
+| Horizontal padding of sidebar rows and section headers | 12 | **6** | `sidebar/row.rs:568`, `sidebar/sessions.rs:607`, `sidebar/section.rs:38`, `sidebar/mod.rs:4003` |
+
+Sidebar rows draw 1 px shorter than their constants today. `row_drawn_height`
+(`row.rs:238-240`) adds the title line height minus 18, and under the −1
+shift the title line is `scaled(18)` = 17. When §3.3 removes the shift, the
+title line is 18 and the drawn heights equal the constants.
 | Right panel header | 40, 28 px icons | **32, 24 px icons** *(my call, see below)* | `right_panel/mod.rs:37`, `:611-612` |
 | File tree row | 26 | 26 (already Zed's) | `right_panel/files.rs:54` |
 | File tree indent / left padding | 16 / 8 | **20 / 6** | `right_panel/files.rs:584`, `:603` |
@@ -165,16 +182,21 @@ Calls marked *(my call)*:
   under it continues the line under the centre tabs. The icons must shrink as
   well: at 240, seven views × 28 px + 6 × 4 px gaps + 20 px padding = 240,
   more than the 238 px inside the panel's borders. At 24 px they take 212.
-- **Anything aligned to the tab strip or to the status bar follows it**, so
-  the lines that run across the window stay aligned. Known cases:
-  - The rail's top expand row is 34 today (`primary_rail.rs:49`), equal to the
-    tab strip, so it becomes 32.
-  - The rail's bottom bar is 40 (`primary_rail.rs:204`), equal to the status
-    bar, so it becomes 30.
-  - The Secondary's close button (26 × 26, top 6, `main.rs:25423-25431`) is
-    re-centred in the 32 strip.
-  - Anything else the builder finds pinned to the old 34, 35 or 40 for the
-    same reason follows too.
+- **Anything aligned to the tab strip follows it**, so the lines that run
+  across the window stay aligned. Known cases:
+  - The rail's top expand row is drawn at `TAB_BAR_HEIGHT`
+    (`primary_rail.rs:49`), so it follows with no edit.
+  - The Secondary's close button (`main.rs:25423-25431`) and the tab overflow
+    button (`main.rs:26574-26581`) are 26 × 26 at top 6. In the 31 px
+    content box they are re-centred, at top (31 − 26) / 2 = 2.5.
+- **The rail's bottom bar stays 40** (`primary_rail.rs:204`). It is 5 + 30 + 5
+  around the rail's 30 px `+` (`tab_bar.rs:24`, `:27`), and it is not tied to
+  the status bar. The playback said it would become 30. Checking the code
+  showed that premise was wrong.
+- **Equal numbers with no link stay as they are**, for example the Changes
+  toolbar (`changes.rs:97`, 34), the settings header (`settings.rs:53`, 40),
+  the drawer header (`drawer/view.rs:70`, 30) and the outline rows
+  (`outline.rs:23`, 31).
 - **Surfaces with no Zed equivalent keep their sizes:** the sidebar's view
   switch (30), its filter field (34) and header actions, the peek, the
   drawer, the chat composer and the chat transcript.
@@ -197,25 +219,40 @@ Calls marked *(my call)*:
   "everything at 13" read literally would make the captions as loud as the
   titles they annotate. Zed keeps its metadata a step smaller too.)*
 - **The rule that settles every size** *(my call)*. `with_sidebar_typography`
-  lowers `base_size` by 1, so inside these panels `typography.scaled(x)`
-  draws at x − 1 and every named step (`footnote`, `ui_size`, …) draws 1
-  smaller. The rule has two parts:
+  (`sirio_theme/src/lib.rs:1521-1542`) subtracts 1 from every field of the
+  typography, `base_size` included. So inside these panels
+  `typography.scaled(x)` draws at x − 1 and every named step draws 1
+  smaller. The rule has three parts:
   1. Every text in the sidebar and the right panel draws at the size the same
-     call draws anywhere else in Sirio. The −1 shift goes.
-  2. Nothing in these two panels draws above 13. A size that would land
-     above it is drawn at 13.
+     call draws anywhere else in Sirio. The −1 shift goes, line heights
+     included.
+  2. Nothing in these panels draws text above `ui_size`, which is 13 at the
+     default interface size and moves with it. A named size above it
+     (`caption2`, `headline`, `title*`, `callout`) is capped at it. A
+     `scaled(x)` text size above 13 at the call site becomes 13.
+     `scaled(x)` used as a line height is not text and is not capped.
+  3. Glyph marks keep the size they are drawn at today: the project mark
+     (`row.rs:538`, `headline`), the emoji mark (`row.rs:542`, `scaled(15)`)
+     and the tab close × (`row.rs:830`, `scaled(14)`). They are icons set in
+     a font, not text to read.
 
   At the default interface size this gives:
 
   | Text | Call | Today | New |
   |---|---|---|---|
-  | Row titles, section headers | `scaled(13.5)` / `ROW_TITLE_FONT_SIZE` | 12.5 | 13 (cap) |
-  | Worktree card subline (`row.rs:748`) | `scaled(12.5)` | 11.5 | 12.5 |
-  | Filter field text (`mod.rs:4303`) | `scaled(12.5)` | 11.5 | 12.5 |
-  | `footnote` captions and counts | `footnote` | 11 | 12 |
+  | Row titles, section headers, file names | `ROW_TITLE_FONT_SIZE` / `scaled(13.5)` | 12.5 | 13 |
+  | Panel roots' inherited size (`sidebar/mod.rs:4131`, `right_panel/mod.rs:945`) | `scaled(16)` | 15 | 13 |
+  | `ui_size`, `footnote`, `caption2` texts | named | 12 / 12 / 13 | 13 |
+  | Worktree card subline (`row.rs:748`), filter field text (`mod.rs:4303`) | `scaled(12.5)` | 11.5 | 12.5 |
   | Session time, armed delete confirm (`sessions.rs:702`, `:725`) | `scaled(11.5)` | 10.5 | 11.5 |
+  | Small labels | `scaled(11.0)` | 10 | 11 |
   | Unread pill (`section.rs:183`), primary star (`row.rs:727`) | `scaled(10.0)` | 9 | 10 |
-  | Headings, e.g. `headline`, `scaled(14..16)` | various | 13–15 | 13 (cap) |
+  | Headings (`headline` in `project_settings.rs:639`, `mod.rs:4558`, `:4572`) | named | 14 | 13 |
+
+  Secondary text that is drawn smaller today stays smaller than the labels
+  next to it (subline, time, pill). `footnote` texts reach 13 under part 1.
+  The playback said 12 because it assumed they draw at 11 today. They draw
+  at 12.
 
   Fixed boxes keep their size. The unread pill's 14 px box holds 10 px text,
   as it already does outside the sidebar. The captures in §6.1 are where a
@@ -228,11 +265,27 @@ Calls marked *(my call)*:
 
 ### §3.4 Titlebar controls
 
-The traffic lights are placed for a 38 px bar today (`traffic_light_inset`
-14, position (12, 12), `main.rs:32241`). At 34 they must be re-centred
-vertically. The titlebar's own controls (`titlebar_control_frame` 26 × 26)
-must still fit, and on Linux and Windows the client-side window controls too.
-This cannot be checked from Linux, so it is an owed macOS hand check (§6).
+- **macOS.** AppKit draws the traffic lights at `traffic_light_position`
+  (12, 12) (`main.rs:32241`). That centres AppKit's 14 pt frame in a 38 bar
+  (`sirio_theme/src/lib.rs:630-634`). At 34 it becomes (12, 10). The same
+  (12, 12) literal sits in five `sirio_ui` / `sirio_terminal` examples, which
+  follow.
+- **Linux client-side decorations** draw three 12 px dots, centred by the
+  row's flex (`titlebar.rs:740-766`, inset `BrowserChrome::traffic_light_inset`
+  10 at `lib.rs:686`). With a window manager (`OsDrawnAbove`) the WM draws its
+  own bar, and Sirio's row holds only its own controls.
+- **Windows** caption buttons take the bar's height (`titlebar.rs:668`), so
+  they follow.
+- **The row's own buttons** are `compact_action` 24 px (`titlebar.rs:707`).
+  They fit in 34.
+
+The macOS position cannot be checked from Linux, so it is an owed hand check
+(§6.3).
+
+**Status bar at the largest interface size.** Its text is `caption2` with
+gpui's default 1.618 line height. At interface 18 that line box is 30.7 px,
+0.7 over the 30 px bar. The glyphs themselves fit. This is accepted, and the
+§6.1 captures include one at interface 18.
 
 ## §4 The centre divider
 
@@ -299,9 +352,12 @@ artifact anyone can re-run: a socket transcript plus PID-matched window
 captures under `--out-dir`.
 
 - **Extend `surface.layout.read`** (debug builds only, like the rail's
-  `railRects`) to report the drawn rects of the three shell columns and the
-  two centre halves, and the drawn heights of the title bar, of each tab
-  strip, of the status bar and of the right panel header.
+  `railRects`) to report the drawn rects of:
+  - the title bar, the three shell columns, the two centre halves, each tab
+    strip, the status bar and the right panel header;
+  - the sidebar's first section header, first one-line row and first
+    two-line card;
+  - the centre divider's handle, which the divider case drags.
 - **Assert at two window sizes, 1470 × 833 and 1710 × 987.** The column
   widths must match §2.2 within 1 px. The heights must match §3.2 exactly.
 - **Migration cases**, each launched on a seeded database:
@@ -317,17 +373,30 @@ captures under `--out-dir`.
 
 ### §6.2 Tests that go red by design
 
-Existing tests that pin the old numbers are **updated, not deleted**. Known
-ones:
+Existing tests that pin the old numbers are **updated, not deleted**. Checked
+against the code:
 
-- the `panel_layout` thresholds (1257 / 936 / 976);
-- `ranges_match_the_persisted_settings_ranges`, if a range constant moves;
-- any fixture built on `DEFAULT_SIDEBAR_WIDTH` 280 (`sidebar/mod.rs:187`) or
-  the right panel's 320 fallback (`right_panel/mod.rs:387`,
-  `right_panel/history.rs:178`);
-- E2E scripts that click fixed coordinates under the old chrome. Some,
-  including the rail E2E, already click at the rects `surface.layout.read`
-  reports and should pass unchanged.
+- `panel_widths_round_trip_and_clamp_into_their_ranges`
+  (`sirio_persistence/tests/persistence_integration.rs:1951`) asserts the
+  fresh defaults 280 / 320. They become 300 / 240.
+- `compact_panel_migration_updates_only_the_previous_defaults`
+  (`migrations.rs:692`) runs every migration, so v27 would rewrite its
+  expected 280 / 320. It is pinned to `migrate_up_to(&mut conn, 21)`, so it
+  keeps proving v21 alone.
+- The `panel_layout` thresholds have no literal test. They are arithmetic,
+  and the tests pass explicit widths.
+- `DEFAULT_SIDEBAR_WIDTH` (`sidebar/mod.rs:187`) and the right panel's 320
+  fallbacks (`right_panel/mod.rs:387`, `right_panel/history.rs:178`) move with
+  the defaults. `rows_follow_the_panel_width` derives from the constant.
+- Fixed-pixel regions in `Scripts/Tests/test-ely-chat-ui-e2e.py`
+  (`SIDEBAR_BLOOM`, `FIELD_BAND`, `BAND_BESIDE_FIELD`, `POPUP_REGION`,
+  `COMPOSER_CLICK`) and the rows of `Scripts/capture-masks.tsv` for the status
+  bar, the transcript clocks, the sidebar dots, the identity lane and the
+  settings toolbar move with the chrome. A drifted mask fails nothing; it
+  just stops covering its clock. So they are re-measured from a run, not left
+  to a red test.
+- The rail E2E already clicks at the rects `surface.layout.read` reports and
+  should pass unchanged.
 
 The bezel-off capture diff (`Scripts/bezel-off-captures.sh` with
 `Scripts/capture-diff.py`) will flag every frame, because every coordinate
@@ -365,7 +434,6 @@ moves. That is expected. The PR says so and attaches both capture sets.
   `with_sidebar_typography` that applies the cap instead of the shift.
 - Removing the duplicated constants listed in §3.2 (34 in two places, 40 in
   two places, 280 and 320 fallbacks), or keeping them in step.
-- The exact traffic-light offsets for the 34 px bar.
 - Stale references touched along the way: `panel_layout.rs:35` cites
   `main.rs:3339`, and `main.rs:667` cites a `docs/MEASURED.md` that does not
   exist.
