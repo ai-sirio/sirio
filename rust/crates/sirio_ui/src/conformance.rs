@@ -100,6 +100,9 @@
 //!   the width stopped being a frozen constant when the sidebar became
 //!   user-resizable, so 300 is the default, not the geometry. Sirio's range is the
 //!   wider one because its rows carry a checkout path under the branch name.
+//! - **Sidebar rows are Zed's 34 / 53px, section headers 31px, padding 6**:
+//!   Zed's factory thread rows take the place of waku's 32 / 51px rows, 26px
+//!   section headers and 12px padding (spec §3.2).
 //! - **Icons are sized by the iconography scale (9–16px), not the type
 //!   scale**: glyph `text_size` calls are not type-scale members.
 //! - **The top bar is 34px (`BrowserChrome::bar_height`), not the 48px

@@ -35,7 +35,7 @@ pub(super) fn render_section(
         .relative()
         .h(px(SECTION_HEIGHT))
         .w_full()
-        .px(px(6.0))
+        .px(px(ROW_PAD_X))
         .flex()
         .items_center()
         .gap(px(6.0))

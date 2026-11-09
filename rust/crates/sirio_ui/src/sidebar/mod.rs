@@ -193,6 +193,10 @@ const HEADER_ICON_SIZE: IconSize = IconSize::Medium;
 const VIEW_TAB_PAD_X: f32 = 10.0;
 
 pub(crate) const ROW_HEIGHT: f32 = 34.0;
+/// Horizontal padding of a sidebar row and of a section header (Zed's 6px).
+pub(crate) const ROW_PAD_X: f32 = 6.0;
+/// Vertical padding of a sidebar row: 8 + 18 + 8 = 34, and 8 + 18 + 4 + 15 + 8 = 53.
+pub(crate) const ROW_PAD_Y: f32 = 8.0;
 /// Single-line row title line height (13px at waku's row ratio).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
 /// Single-line row title size, in the same points every other explicit UI
@@ -208,7 +212,7 @@ pub(crate) const ROW_GAP: f32 = 4.0;
 /// fills paint across a card's whole box, so cards that touch merge into
 /// one highlight block; this keeps them reading as separate cards.
 pub(crate) const ROW_V_GAP: f32 = 2.0;
-/// Two-line card height: 8 + 18 + 4 + 15 + 8 — waku's session-card math.
+/// Two-line card height: 8 + 18 + 4 + 15 + 8 — Zed's two-line thread row.
 pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 53.0;
 /// A visible row in the flattened sidebar tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4000,7 +4004,7 @@ impl Render for Sidebar {
                     .mt(px(6.0))
                     .h(px(section::SECTION_HEIGHT))
                     .w_full()
-                    .px(px(6.0))
+                    .px(px(ROW_PAD_X))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -5176,6 +5180,9 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
+        // Far past the end of the list on purpose: the scroll clamps, so a
+        // taller row never leaves this short of the last row.
+        const WHEEL_PAST_THE_END: f32 = 100_000.0;
         let last_row_before = cx
             .debug_bounds("sidebar-row-20")
             .expect("the last sidebar row is rendered");
@@ -5189,7 +5196,7 @@ mod tests {
 
         cx.simulate_event(ScrollWheelEvent {
             position: point(px(160.0), px(180.0)),
-            delta: ScrollDelta::Pixels(point(px(0.0), px(-2000.0))),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-WHEEL_PAST_THE_END))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,
         });

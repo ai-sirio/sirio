@@ -337,22 +337,26 @@ impl Sidebar {
 
     const PILL_SIZE: f32 = 20.0;
 
-    /// The 6px info dot at a card's leading edge, level with its title line (the
-    /// card's top padding down). Drawn by a worktree row and a Sessions card alike.
+    const UNREAD_DOT_SIZE: f32 = 6.0;
+
+    /// The 6px info dot, level with its title line (the card's top padding
+    /// down) and wholly inside the leading gutter the row's horizontal padding
+    /// leaves, so it never touches the glyph. Drawn by a worktree row and a
+    /// Sessions card alike.
     pub(super) fn unread_dot(selector: String, theme: &Theme) -> impl IntoElement + use<> {
         let line = Self::title_line_height(&theme.typography);
         let colour = theme.ely.info;
         div()
             .absolute()
-            .top(px(7.0))
+            .top(px(ROW_PAD_Y))
             .h(line)
-            .left(px(3.0))
+            .left(px((ROW_PAD_X - Self::UNREAD_DOT_SIZE) / 2.0))
             .flex()
             .items_center()
             .child(
                 div()
                     .debug_selector(move || selector.clone())
-                    .size(px(6.0))
+                    .size(px(Self::UNREAD_DOT_SIZE))
                     .rounded_full()
                     .bg(colour),
             )
@@ -492,10 +496,10 @@ impl Sidebar {
         // #372: the primary checkout offers no hover-x — like its disabled
         // context-menu item, it cannot be `git worktree remove`d.
         let is_removable_worktree = is_worktree && !row.is_primary;
-        // waku's card rhythm: a project or worktree row becomes a two-line
-        // card (13px title over a 12.5px context line) only when it has
-        // something for that second line; every other row is single-line at
-        // the 34px action-row height. See `has_sub_line`.
+        // Zed's row rhythm (34 / 53): a worktree row is always a two-line
+        // card (13px title over a 12.5px context line); any other row that
+        // reaches this renderer is single-line at 34px. Project rows draw
+        // through `render_section` at `SECTION_HEIGHT`. See `has_sub_line`.
         let has_sub_line = Self::has_sub_line(&row);
         let row_height = Self::row_drawn_height(&row, &theme.typography);
         // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
@@ -565,8 +569,8 @@ impl Sidebar {
             .relative()
             .h(px(row_height))
             .w_full()
-            .px(px(6.0))
-            .py(px(8.0))
+            .px(px(ROW_PAD_X))
+            .py(px(ROW_PAD_Y))
             .flex()
             .gap(px(8.0))
             .when(selected, |this| this.bg(theme.ely.active))
