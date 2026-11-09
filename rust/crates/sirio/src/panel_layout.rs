@@ -160,7 +160,11 @@ pub(crate) fn resolve_panel_widths(
             ((budget - held).max(left_floor), held)
         }
         // No drag: the window shrank under them. Neither is "the one being
-        // touched", so they scale together and keep their ratio.
+        // touched", so they scale together and keep their ratio. A panel
+        // lifted to its floor takes more than its share, so the other one
+        // gives that back (down to its own floor, never above its
+        // preference); otherwise the pair would overrun the budget and
+        // squeeze the centre under its floor.
         None => {
             let requested = left + right;
             let scale = if requested > 0.0 {
@@ -168,10 +172,17 @@ pub(crate) fn resolve_panel_widths(
             } else {
                 0.0
             };
-            (
-                (left * scale).max(left_floor),
-                (right * scale).max(right_floor),
-            )
+            let (scaled_left, scaled_right) = (left * scale, right * scale);
+            let (mut left_out, mut right_out) =
+                (scaled_left.max(left_floor), scaled_right.max(right_floor));
+            if left_out + right_out > budget {
+                if scaled_right < right_floor {
+                    left_out = (budget - right_out).clamp(left_floor, left.max(left_floor));
+                } else if scaled_left < left_floor {
+                    right_out = (budget - left_out).clamp(right_floor, right.max(right_floor));
+                }
+            }
+            (left_out, right_out)
         }
     };
 
@@ -242,6 +253,26 @@ mod tests {
 
         assert_eq!(left, Some(332.0));
         assert_eq!(right, Some(332.0));
+    }
+
+    /// When the scaled right panel falls under its floor and is lifted to
+    /// it, the left one must not keep its scaled width: together they would
+    /// overrun the budget and squeeze the centre under its floor.
+    #[test]
+    fn without_a_drag_a_floored_panel_leaves_the_rest_to_the_other() {
+        let (left, right) = resolve_panel_widths(
+            1100.0,
+            Some(300.0),
+            Some(240.0),
+            None,
+            4.0,
+            4.0,
+            MIN_CENTER_PANE_WIDTH * 2.0 + 1.0,
+        );
+
+        // budget = 1100 - 8 - 8 - 641 = 443; the right panel floors at 220.
+        assert_eq!(left, Some(223.0));
+        assert_eq!(right, Some(220.0));
     }
 
     /// The yielding panel stops at the low end of its own settings range
