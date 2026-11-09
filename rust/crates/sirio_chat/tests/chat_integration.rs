@@ -88,6 +88,8 @@ fn chat_session_streams_tool_permission_stops_and_restores() {
     .expect("launch chat session");
 
     session.send("exercise the chat door").expect("send turn");
+    // The fixture sends `streamed` 30 ms after `first `, so a poll under load can find the two
+    // already joined. Either text is mid-turn: the permission request holds the turn open.
     let streaming = wait_for(&session, |snapshot| {
         snapshot.status == ChatStatus::Streaming
             && snapshot
@@ -95,7 +97,7 @@ fn chat_session_streams_tool_permission_stops_and_restores() {
                 .turns
                 .iter()
                 .flat_map(|turn| turn.entries.iter())
-                .any(|entry| matches!(entry, sirio_persistence::ChatEntry::AssistantMessage { text } if text == "first "))
+                .any(|entry| matches!(entry, sirio_persistence::ChatEntry::AssistantMessage { text } if text.starts_with("first ")))
     });
     assert_eq!(streaming.status, ChatStatus::Streaming);
     let pending = wait_for(&session, |snapshot| {
