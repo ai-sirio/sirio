@@ -2580,14 +2580,19 @@ scenario_status_actions() {
 }
 
 # The bell's place in the window of CLICK_WINDOW with the sidebar and the right
-# panel hidden (measured on the captures this scenario takes), and Clear in its
-# panel when two messages are listed.
-STATUS_BELL_ITEM=(1454 775)
-STATUS_BELL_CLEAR=(1431 744)
+# panel hidden (measured on the captures this scenario takes: bell-count's bell
+# glyph spans y 779-791, bell-list's Clear and second Copy sit at y 754 and 700),
+# and Clear in its panel when two messages are listed. The app's status bar is
+# 30 px (it was 40), so the editor's own status row, and everything the bell
+# opens above it, sits 10 px lower than these points used to.
+STATUS_BELL_ITEM=(1454 785)
+STATUS_BELL_CLEAR=(1431 754)
 # The bell as the compact row draws it, with the sidebar and the right panel
-# shown, and the Copy of the older of two rows in the full row's panel.
-STATUS_BELL_COMPACT=(1128 775)
-STATUS_BELL_COPY_OLDER=(1445 690)
+# shown (the editor card is then 767-1221 wide: the sidebar draws 300 and the right
+# panel 240, so the bell glyph of bell-compact spans x 1198-1210), and the Copy of
+# the older of two rows in the full row's panel.
+STATUS_BELL_COMPACT=(1206 785)
+STATUS_BELL_COPY_OLDER=(1445 700)
 # The corner card, over the file's bottom right corner: a point of a card of
 # three lines, and one inside the card whatever its size. The card sits above the
 # status row and the drawer's header row (30 px, the drawer closed).
@@ -3228,8 +3233,9 @@ sweep_for_the_error_card() { # x y_first
   fail "$SCENARIO: the pointer never found the Error's card in column $1"
 }
 # The Error's name on line_7 sits at about this column (after `fn `, in a window of
-# CLICK_WINDOW at the default size and font).
-ERROR_COLUMN=830
+# CLICK_WINDOW at the default size and font; measured on diagnostics-hover, where the
+# name `line_7` spans x 860-905 with the sidebar at 300 and the right panel at 240).
+ERROR_COLUMN=880
 
 scenario_hover_leave() {
   local fixture="$WT/main.rs" error_row bar_row rows_above
@@ -3372,8 +3378,10 @@ scenario_drawer() {
 
   # The top edge dragged up 50 px by a real pointer: the height follows it and
   # the drop saves it (the relaunch reads it back). At 300 px in this window the
-  # drawer's edge is at y=462, and a press 3 px below it is on its 6 px strip.
-  drag_up 900 465 50
+  # drawer's edge is at y=472 (measured on drawer-open: the editor's status row
+  # ends at 772 since the app's status bar is 30), and a press 3 px below it is on
+  # its 6 px strip.
+  drag_up 900 475 50
   expect_state drawer_height 350
   app_restart
   open_file "$WT/main.rs"
