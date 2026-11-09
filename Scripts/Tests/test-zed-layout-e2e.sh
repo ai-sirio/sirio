@@ -35,8 +35,9 @@ set -eEuo pipefail
 # panel's probes fill on their first paint, so every read polls until the keys
 # it asserts are drawn, the layout reflects the window's size, and two reads
 # 0.4 s apart agree. No fixed sleep stands in for a paint: the only fixed waits
-# are the 1.5 s the divider's debounced (500 ms) save is given and the 2 s
-# before each capture.
+# are the 1.5 s the divider's debounced (500 ms) save is given (counted from
+# the real mouseup), the 2 s before each capture and the three 0.3 s pauses of
+# the divider's X drag.
 #
 # Isolation: the app starts under `env -i` with an allowlist (launch_app), from
 # a copy of its binary with no sirio-host beside it, SIRIO_HOST_BIN naming a
@@ -51,8 +52,8 @@ set -eEuo pipefail
 # The artifact: --out-dir DIR (default artifacts/zed-layout-e2e-<stamp>-<pid>)
 # keeps transcript.log (it starts with the commit and the binary's sha256 and
 # logs every sirioctl call with its exit status), app.log, measurements.tsv
-# (case, key, expected, drawn, ok), reads/ (the decoded shellRects behind every
-# measured assertion) and PID-matched window captures in frames/.
+# (case, key, expected, drawn, ok), reads/ (the decoded shellRects of every
+# successful assertion read: <case>.json, then <case>-2.json, -3 ...) and PID-matched window captures in frames/.
 #
 # Usage: Scripts/Tests/test-zed-layout-e2e.sh --display :N [--out-dir DIR]
 #   Xvfb :97 -screen 0 1720x1000x24 &   # a private display
@@ -212,7 +213,6 @@ KEYS = ["titlebar", "left", "center", "right", "primary", "secondary", "primaryS
         "dividerHandle"]
 LAST = {}
 READS = os.environ["ZL_READS"]
-SAVED = {}
 
 
 def rpc(method, params=None):
@@ -247,13 +247,16 @@ def fail_row(case, key, expected, drawn):
     line = "\t".join([case, key, expected, drawn, "FAIL"])
     with open(TSV, "a") as f:
         f.write(line + "\n")
-    print(f"  FAIL  {key}: expected {expected}, drawn {drawn}")
+    print(f"  FAIL  {key}: expected {expected}, drawn {drawn}", file=sys.stderr)
 
 
 def save_read(case):
-    """The decoded shellRects behind a case's assertions: reads/<case>.json, then -2, -3 ..."""
-    SAVED[case] = SAVED.get(case, 0) + 1
-    name = case if SAVED[case] == 1 else f"{case}-{SAVED[case]}"
+    """The decoded shellRects of a successful read: reads/<case>.json, then -2, -3 ... (the next
+    free name on disk, since every call of this script is a new process)."""
+    name, n = case, 1
+    while os.path.exists(os.path.join(READS, name + ".json")):
+        n += 1
+        name = f"{case}-{n}"
     with open(os.path.join(READS, name + ".json"), "w") as f:
         json.dump(LAST["rects"], f, indent=1, sort_keys=True)
 
@@ -266,8 +269,10 @@ def settled(case, keys, width):
     while True:
         try:
             L, rects = read()
-            if sorted(rects) != sorted(KEYS):
-                raise RuntimeError(f"shellRects keys are {sorted(rects)}, not the expected {sorted(KEYS)}")
+            absent = [k for k in KEYS if k not in rects]
+            if absent:
+                fail_row(case, "shellRects keys", f"each of {len(KEYS)} expected keys present", f"absent {absent}")
+                sys.exit(1)
             ok = all(rects.get(k) is not None for k in keys) and rects.get("titlebar") is not None \
                 and abs(rects["titlebar"].w - width) <= 1
             snap = json.dumps(LAST["rects"], sort_keys=True)
@@ -340,9 +345,9 @@ elif command == "get":
     rects = settled(sys.argv[2], KEYS if keys == ["ALL"] else keys, float(sys.argv[3]))
     print(fmt(evaluate(sys.argv[5], rects)))
 elif command == "wait":
-    # wait CASE WIDTH SECONDS LABEL EXPR: polls until EXPR (over the drawn rects) is true. A poll
+    # wait CASE SECONDS LABEL EXPR: polls until EXPR (over the drawn rects) is true. A poll
     # that never settles writes a FAIL row and exits 1.
-    case, width, seconds, label, expr = sys.argv[2], float(sys.argv[3]), float(sys.argv[4]), sys.argv[5], sys.argv[6]
+    case, seconds, label, expr = sys.argv[2], float(sys.argv[3]), sys.argv[4], sys.argv[5]
     deadline = time.time() + seconds
     value = None
     while time.time() < deadline:
@@ -351,6 +356,7 @@ elif command == "wait":
             if all(rects.get(k) is not None for k in KEYS):
                 value = evaluate(expr, rects)
                 if value is True:
+                    save_read(case)
                     row(case, label, expr, "true", "ok")
                     sys.exit(0)
         except Exception as e:
@@ -560,8 +566,26 @@ capture() { # name
 
 # The mean luminance (0-255) of a 40x40 patch of a capture, in window pixels, as a plain number.
 LUMA_THRESHOLD=128 # the midpoint of 0-255: a light surface sits far above it, a dark one far below
-luma() { # frame x y
-  "$IM" "$OUT_DIR/frames/$1.png" -crop 40x40+"$2"+"$3" +repage -colorspace Gray -format '%[fx:mean*255]' info:
+luma() { # frame x y: prints the mean; fails on a missing frame, a patch outside it or a non-number
+  local frame="$OUT_DIR/frames/$1.png" size mean
+  size=$(identify -format '%w %h' "$frame") || return 1
+  [ -n "$size" ] && [ $(($2 + 40)) -le "${size% *}" ] && [ $(($3 + 40)) -le "${size#* }" ] && [ "$2" -ge 0 ] && [ "$3" -ge 0 ] \
+    || { echo "the 40x40 patch at $2,$3 is outside the ${size:-unknown} frame $1" >&2; return 1; }
+  mean=$("$IM" "$frame" -crop 40x40+"$2"+"$3" +repage -colorspace Gray -format '%[fx:mean*255]' info:) || return 1
+  [[ "$mean" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "luminance of $1 is not a number: '$mean'" >&2; return 1; }
+  echo "$mean"
+}
+# A luminance row: CASE FRAME OP (< or >). Fails the run on a wrong or unreadable value.
+check_luma() { # case frame op
+  local mean
+  mean=$(luma "$2" $PATCH) || { tsv_row "$1" "$2 patch luminance" "$3 $LUMA_THRESHOLD" "unreadable" FAIL; fail "could not read the luminance of $2"; }
+  echo "luminance patch $PATCH: $2 mean $mean"
+  if awk -v v="$mean" -v t="$LUMA_THRESHOLD" -v op="$3" 'BEGIN {exit !((op == "<" && v < t) || (op == ">" && v > t))}'; then
+    tsv_row "$1" "$2 patch luminance" "$3 $LUMA_THRESHOLD" "$mean" ok
+  else
+    tsv_row "$1" "$2 patch luminance" "$3 $LUMA_THRESHOLD" "$mean" FAIL
+    fail "the patch of $2 is on the wrong side of $LUMA_THRESHOLD"
+  fi
 }
 ALL=ALL # the one list of shellRects keys lives in zl.py (KEYS)
 COLUMNS_ONLY=titlebar,left,right
@@ -598,11 +622,7 @@ capture dark-1470
 # A patch of the right panel, near its bottom (empty background), whose luminance tells dark from light.
 PATCH=$(ZL get 1a 1470 ALL 'round(right.x + right.w / 2 - 20)') || fail "could not place the luminance patch"
 PATCH="$PATCH $(ZL get 1a 1470 ALL 'round(right.y + right.h - 80)')" || fail "could not place the luminance patch"
-DARK_LUMA=$(luma dark-1470 $PATCH)
-echo "luminance patch (window px) $PATCH: dark-1470 mean $DARK_LUMA"
-awk -v v="$DARK_LUMA" -v t="$LUMA_THRESHOLD" 'BEGIN {exit !(v < t)}' \
-  && tsv_row 1a "dark-1470 patch luminance" "< $LUMA_THRESHOLD" "$DARK_LUMA" ok \
-  || { tsv_row 1a "dark-1470 patch luminance" "< $LUMA_THRESHOLD" "$DARK_LUMA" FAIL; fail "the dark frame's patch is not dark"; }
+check_luma 1a dark-1470 "<"
 
 step "1b: fresh database at 1710x987"
 resize_window 1710 987
@@ -663,16 +683,20 @@ ZL measure 6 1710 "$ALL" 'primary.w before the drag|primary.w|~|576.5' || fail "
 HANDLE=$(ZL center 1710 dividerHandle 6)
 echo "divider handle at window pixel $HANDLE"
 drag_window "${HANDLE% *}" "${HANDLE#* }" $((${HANDLE% *} + 120)) "${HANDLE#* }"
+MOUSEUP_AT=$(date +%s.%N)
+echo "mouseup at $(date -d "@$MOUSEUP_AT" +%T.%N)"
 # The halves move by about 120 px; wait for the paint that shows it.
-ZL wait 6 1710 20 'primary.w after the drag exceeds 600 (poll)' 'primary.w > 600' || fail "the halves never moved with the drag"
+ZL wait 6 20 'primary.w after the drag exceeds 600 (poll)' 'primary.w > 600' || fail "the halves never moved with the drag"
 PRIMARY=$(ZL get 6 1710 "$ALL" 'primary.w')
 SECONDARY=$(ZL get 6 1710 "$ALL" 'secondary.w')
 echo "after the drag: primary.w $PRIMARY, secondary.w $SECONDARY"
 ZL measure 6 1710 "$ALL" 'primary.w grew with the drag|primary.w|>=|600' 'secondary.w shrank with the drag|secondary.w|<=|550' \
   || fail "the drag did not move the halves"
-echo "mouseup at $(date +%T.%N); waiting 1.5 s for the debounced save"
-sleep 1.5 # the save is debounced 500 ms
-echo "quitting at $(date +%T.%N)"
+# The save is debounced 500 ms: quit 1.5 s after the real mouseup, counting the reads above.
+SPARE=$(awk -v t0="$MOUSEUP_AT" -v t1="$(date +%s.%N)" 'BEGIN {d = 1.5 - (t1 - t0); print (d > 0 ? d : 0)}')
+sleep "$SPARE"
+QUIT_AT=$(date +%s.%N)
+echo "quitting at $(date -d "@$QUIT_AT" +%T.%N); mouseup to quit: $(awk -v a="$MOUSEUP_AT" -v b="$QUIT_AT" 'BEGIN {printf "%.3f", b - a}') s"
 quit_app
 RATIO=$(db_get appearance.centerSplitRatio)
 if [ "$RATIO" != 500 ] && [ "$RATIO" != "<none>" ]; then
@@ -699,11 +723,7 @@ ZL measure 7 1470 "$ALL" \
   'sidebarSection.h at font 18|sidebarSection.h|==|31' 'sidebarCard.h at font 18 (53 + 5 for the title line)|sidebarCard.h|==|58' \
   || fail "a measurement of 7 is wrong"
 capture light-1470-font18
-LIGHT_LUMA=$(luma light-1470-font18 $PATCH)
-echo "luminance patch $PATCH: light-1470-font18 mean $LIGHT_LUMA"
-awk -v v="$LIGHT_LUMA" -v t="$LUMA_THRESHOLD" 'BEGIN {exit !(v > t)}' \
-  && tsv_row 7 "light-1470-font18 patch luminance" "> $LUMA_THRESHOLD" "$LIGHT_LUMA" ok \
-  || { tsv_row 7 "light-1470-font18 patch luminance" "> $LUMA_THRESHOLD" "$LIGHT_LUMA" FAIL; fail "the light frame's patch is not light"; }
+check_luma 7 light-1470-font18 ">"
 quit_app
 
 # ---- case 7b: interface font back to 13, light, at 1710x987 --------------------
@@ -712,6 +732,7 @@ db_seed 27 appearance.uiFontSize=13
 start 1710 987
 measure_case1 7b 1710 576.5
 capture light-1710
+check_luma 7b light-1710 ">"
 quit_app
 
 echo "measurements: $OUT_DIR/measurements.tsv"

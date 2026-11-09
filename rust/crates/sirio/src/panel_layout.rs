@@ -72,10 +72,10 @@ pub(crate) fn resolve_center_split(
     let usable = (center_width - divider).max(0.0);
     let ratio = (ratio_millis as f32 / 1000.0).clamp(0.0, 1.0);
     // Too narrow for two floors: both go under together, keeping their ratio.
-    // The side panels do the same when the window shrinks under them, except
-    // that a panel lifted to its floor makes the other give the difference
-    // back. The Secondary pane is never auto-hidden to make room — that would
-    // take the user's tabs off screen without being asked.
+    // The side panels never go under theirs: when the window is too small they
+    // sit at their floors and the centre absorbs the rest, which is how it can
+    // arrive here too narrow. The Secondary pane is never auto-hidden to make
+    // room — that would take the user's tabs off screen without being asked.
     if usable < MIN_CENTER_PANE_WIDTH * 2.0 {
         let primary = usable * ratio;
         return (primary, Some(usable - primary));
@@ -367,9 +367,9 @@ mod tests {
     }
 
     /// Too narrow for two floors: both go under together and keep their
-    /// ratio, like the side panels shrinking together when the window
-    /// shrinks under them (a floored panel there leaves the rest to the
-    /// other). Neither pane is hidden to make the other fit.
+    /// ratio. The side panels never go under their own floors, so this is
+    /// the centre absorbing a window too small for everything. Neither pane
+    /// is hidden to make the other fit.
     #[test]
     fn a_centre_too_small_for_both_floors_shrinks_both_and_keeps_the_ratio() {
         let (primary, secondary) = resolve_center_split(501.0, 600, true, 1.0);

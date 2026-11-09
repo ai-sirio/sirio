@@ -389,8 +389,8 @@ Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 # 1720x1000 with Mesa's lavapipe; --out-dir DIR keeps transcript.log (the
 # commit, the binary's sha256, every sirioctl call and its exit status),
 # app.log, measurements.tsv (case, key, expected, drawn, ok), reads/ (the
-# decoded shellRects behind each measured assertion) and PID-matched captures
-# in frames/.
+# decoded shellRects of every successful assertion read, <case>.json then
+# <case>-2.json ...) and PID-matched captures in frames/.
 Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
 
 # Acting on a change request: every write of sirio_forge on the wire (the token
