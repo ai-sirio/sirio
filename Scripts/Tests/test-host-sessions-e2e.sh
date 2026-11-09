@@ -51,6 +51,9 @@ set -eEuo pipefail
 #                       mounted stops (a needs-input hook, no Running first, the Codex shape): its
 #                       session is marked unread and posts one notification naming its branch;
 #                       selecting its worktree and looking clears the mark, once
+#   35. restored-scrollback-rows  a terminal whose session is gone when the app starts again
+#                       gets a new session with its saved rows above it, each starting at
+#                       column zero (the scrollback is saved as rows joined by a bare LF)
 #
 # Prints `CASE <n> <name> PASS|FAIL` per case, `HOST SESSIONS E2E OK (<n> cases,
 # <s>s)` at the end.
@@ -1928,6 +1931,72 @@ case_unread_unmounted_after_restart() {
 
 # ---------------------------------------------------------------- the run
 
+# Prints "total at_zero in_order": the beat=N occurrences in the text on stdin, the lines starting
+# with one, and 1 when the occurrences count up by one from the first (each row once, in order).
+beat_rows_at_zero() {
+  python3 -c '
+import re, sys
+text = sys.stdin.read()
+beats = [int(n) for n in re.findall(r"beat=(\d+)", text)]
+total = len(beats)
+at_zero = sum(1 for line in text.splitlines() if re.match(r"beat=\d+", line))
+in_order = int(beats == list(range(beats[0], beats[0] + total))) if beats else 0
+print(total, at_zero, in_order)'
+}
+# At least COUNT beat=N occurrences anywhere in the pane's text. A pane that cannot be read yet
+# shows none, and the `$(...)` never fails (newest_codex says why that matters on macOS).
+beats_shown() { # pane, count
+  local shown
+  shown=$(pane_text "$1" 2>/dev/null | beat_rows_at_zero | cut -d' ' -f1 || true)
+  [ "${shown:-0}" -ge "$2" ]
+}
+
+# Saved scrollback is plain text, rows joined by a bare LF. When the app starts again and the
+# tab's host session is gone, a new session is created and that text is fed to its VT as the
+# prelude; a bare LF moves down without returning to column zero, so the rows would come back as
+# a staircase. This case quits the app, shuts the host down, starts the app again and reads the
+# restored pane: every saved beat=N row must start at column zero. It leaves case35-restored.txt.
+case_restored_scrollback_rows() {
+  new_world c35
+  # The stub's guard shell, not the runner's own login shell: the restored tab starts
+  # `$SHELL -il`, and an rc that clears or redraws the screen would take the saved rows with it.
+  install_codex_stub
+  local -a shell_env=("SHELL=$W/bin/guard-shell")
+  app_start "${shell_env[@]}"
+  select_repo "$W/repo"
+  local pane pidfile pid new_pid text counts total at_zero in_order
+  pidfile="$W/pid.txt"
+  pane=$(open_terminal "$(heartbeat "$pidfile")")
+  wait_until 10 pid_written "$pidfile" || fail "the terminal never wrote its pid"
+  pid=$(pid_in "$pidfile")
+  wait_until 10 beat_above "$pane" 5 || fail "the heartbeat of $pane never passed beat=5"
+  app_quit
+  probe shutdown --force
+  wait_until 10 host_gone || fail "the host did not leave"
+  wait_until 5 dead "$pid" || fail "pid $pid survived the host's shutdown"
+  # The lock of the host that just left is stale.
+  rm -f "$W/host/host-v1.lock"
+  app_start "${shell_env[@]}"
+  wait_until 30 pane_known "$pane" || fail "the restored $pane is unknown"
+  wait_until 30 session_listed "$pane" || fail "the restored $pane was not created on the host"
+  new_pid=$(session_pid "$pane")
+  { [ -n "$new_pid" ] && [ "$new_pid" != "$pid" ]; } \
+    || fail "the restored $pane is not a new session (pid '$new_pid', the old one was $pid); its rows could be live ones"
+  wait_until 30 beats_shown "$pane" 3 \
+    || fail "the saved rows never came back to the restored $pane: $(pane_text "$pane" 2>/dev/null | tr '\n' '|')"
+  text=$(pane_text "$pane")
+  printf '%s\n' "$text" > "$OUT_DIR/case35-restored.txt"
+  counts=$(printf '%s\n' "$text" | beat_rows_at_zero)
+  read -r total at_zero in_order <<<"$counts"
+  [ "$total" -ge 3 ] || fail "only $total saved rows are in the restored $pane; see case35-restored.txt"
+  [ "$at_zero" -eq "$total" ] \
+    || fail "only $at_zero of the $total saved rows of the restored $pane start at column zero (a bare LF in the prelude draws them as a staircase); see case35-restored.txt"
+  [ "$in_order" -eq 1 ] \
+    || fail "the $total saved rows of the restored $pane do not count up by one, each once (a prelude fed twice repeats them); see case35-restored.txt"
+  NOTE="$total saved rows, each once, all at column zero"
+  capture restored-scrollback-rows
+}
+
 # Fix batch 6, N1 (a nested Sirio does not inherit the outer app's host root):
 # app 2, launched from a pane of app 1 with only its own SIRIO_DB and
 # SIRIO_SOCKET, has a host root of its own. It does not adopt app 1's host or
@@ -2131,6 +2200,7 @@ run_case 31 agent-rebind-reports-under-its-id case_agent_rebind_reports_under_it
 run_case 32 restored-agent-rebind-resumes-under-its-id case_restored_agent_rebind_resumes_under_its_id
 run_case 33 unread-across-restart case_unread_across_restart
 run_case 34 unread-unmounted-after-restart case_unread_unmounted_after_restart
+run_case 35 restored-scrollback-rows case_restored_scrollback_rows
 
 if [ -n "$ONLY" ]; then
   echo "HOST SESSIONS E2E PARTIAL ($CASES_PASSED cases passed)"
