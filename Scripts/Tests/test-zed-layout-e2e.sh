@@ -193,7 +193,11 @@ ctl() {
   echo "  -> sirioctl exit $status"
   return "$status"
 }
-echo "commit: $(git -C "$ROOT" rev-parse HEAD)"
+# A run from a working tree that differs from HEAD says so: the commit alone
+# would claim a script or a binary the run did not use.
+dirty=''
+git -C "$ROOT" diff --quiet HEAD -- || dirty=' (with uncommitted changes)'
+echo "commit: $(git -C "$ROOT" rev-parse HEAD)$dirty"
 echo "binary: $BIN sha256 $(sha256sum "$BIN" | cut -d' ' -f1)"
 mkdir -p "$OUT_DIR/reads"
 # A row of measurements.tsv written by the script itself.
