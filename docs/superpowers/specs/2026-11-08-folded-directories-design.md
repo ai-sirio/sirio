@@ -323,7 +323,8 @@ function from the tree, `show_hidden` and the expanded flags to rows.
 4. With hidden files on, a dotfile in a link fails to break the chain.
 5. A directory whose only entry is a dot-directory folds into it while hidden files are off.
 6. A git-ignored sibling fails to break the chain.
-7. A symlink to a directory is folded through.
+7. A symlink to a directory is folded through. The loader holds this one, not the fold rule: it
+   types a symlinked directory as a file and never walks it.
 8. A link whose listing is unknown or unreadable folds anyway, or panics.
 9. A directory holding exactly one file folds.
 10. The leaf's children land at the wrong depth.
@@ -384,6 +385,12 @@ Its checks, each printed as `ok N`:
    - Turn them off again: it rejoins.
 5. A new file inside an expanded ordinary subfolder appears. This is the §2 bug.
 6. With `Old.java` deleted, the Java row carries the changed dot.
+
+The script as built runs these as eight checks in its own order (its header lists them). Two
+were added in the reviews:
+- a closed joined row stays closed through a refresh;
+- with hidden files on, closing `java / it` while `acme / app / v2` stays open makes the
+  rejoined row draw closed (§3.4).
 
 The artifact goes under `--out-dir`:
 - `transcript.log` of every socket exchange;
