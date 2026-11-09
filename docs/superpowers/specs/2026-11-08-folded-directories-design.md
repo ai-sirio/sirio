@@ -386,14 +386,21 @@ Its checks, each printed as `ok N`:
 5. A new file inside an expanded ordinary subfolder appears. This is the §2 bug.
 6. With `Old.java` deleted, the Java row carries the changed dot.
 
-The script as built runs these as eight checks in its own order (its header lists them). Two
-were added in the reviews:
-- a closed joined row stays closed through a refresh;
-- with hidden files on, closing `java / it` while `acme / app / v2` stays open makes the
-  rejoined row draw closed (§3.4).
+The script as built runs eight checks in its own order (its header lists them): the six above,
+plus two more:
+- check 6, added in the final review: a closed joined row stays closed through a refresh;
+- check 8: a worktree switch away and back keeps the opened rows (§3.6).
+
+Check 7 also proves §3.4 with links that disagree, both ways round. With hidden files on, close
+`java / it` while `acme / app / v2` stays open, or the other way: the rejoined row draws closed,
+and one click opens it. In the first way round, a refresh that starts after the close forgets
+the open links below the closed `java` and closes every link, which would prove nothing, so the
+script fails that step if any refresh lands during it. The other way round needs no guard: a
+refresh keeps the open `java / it` above the closed `acme`.
 
 The artifact goes under `--out-dir`:
-- `transcript.log` of every socket exchange;
+- `transcript.log`: the script's notes and every logged sirioctl call with its reply; the reads
+  and the quit sent through the quiet `ctlq` are not logged;
 - a PID-matched window capture of each state;
 - the fixture's `git status` at each step.
 

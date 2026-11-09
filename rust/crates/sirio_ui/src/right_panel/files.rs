@@ -1372,20 +1372,19 @@ mod tests {
     }
 
     /// Pumps the test executors until `condition` holds or the budget is
-    /// exhausted (a real filesystem walk completes on a real thread).
-    /// Pumps the test executors until `condition` holds or the budget is
-    /// exhausted (a real filesystem walk completes on a real thread). The
-    /// budget mirrors the F-CHG-09 drawn-test pattern: generous enough that
-    /// a state landing late under parallel CI load still passes, and a
-    /// failure is a real failure, never a timing-luck win.
+    /// exhausted. The budget mirrors the F-CHG-09 drawn-test pattern: generous
+    /// enough that a state landing late under parallel CI load still passes,
+    /// and a failure is a real failure, never a timing-luck win.
     fn pump_until(cx: &TestAppContext, mut condition: impl FnMut() -> bool) {
         cx.executor().allow_parking();
         for _ in 0..600 {
             if condition() {
                 return;
             }
-            // Advance the virtual clock so the panel's timers (the refresh
-            // debounce) fire; the walk itself completes on a real thread.
+            // Advance the virtual clock: the test scheduler runs every task
+            // and timer that comes due on this thread (the refresh debounce,
+            // the background walk and its landing); `run_until_parked` then
+            // drains whatever they queued.
             cx.executor()
                 .advance_clock(std::time::Duration::from_secs(1));
             std::thread::sleep(std::time::Duration::from_millis(10));

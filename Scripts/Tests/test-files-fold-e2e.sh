@@ -17,15 +17,18 @@ set -eEuo pipefail
 #                                          link, removing the file rejoins it, still selected
 #   6 a closed row stays closed           Space closes the joined row; a refresh does not reopen it
 #   7 hidden files decide the chain        a dotfile does not split it until hidden files are shown
+#                                          and a row whose links disagree, either way, draws closed
+#                                          and opens with one click
 #   8 a worktree switch keeps the rows     away and back, the opened rows are as they were
 #
 # `seen.log` is the union of every label the app built since the previous read (a destructive
 # read the script drains on every poll); `never_built` and `ever_built` ask it. The artifact:
 # --out-dir DIR (default artifacts/files-fold-e2e-<stamp>-<pid>) keeps transcript.log (the
-# script's notes and every logged sirioctl call with its reply; the polled `surface files read`
-# calls are not logged), captures/light-<n>.png and light-5-split.png (PID-matched window captures), seen-<n>.log
-# snapshots, git-status-<n>.txt, light-app.log and xvfb.log, and from any run seen.log and
-# last-state.txt (the last Files read), written on exit. Rerunning the script reproduces it.
+# script's notes and every logged sirioctl call with its reply; the reads and the quit sent
+# through the quiet ctlq are not logged), captures/light-<n>.png, light-5-split.png and
+# light-7-disagree.png (PID-matched window captures), seen-<n>.log snapshots, git-status-<n>.txt,
+# light-app.log and xvfb.log, and from any run seen.log and last-state.txt (the last Files read),
+# written on exit. Rerunning the script reproduces it.
 #
 # Usage: Scripts/Tests/test-files-fold-e2e.sh --xvfb [--out-dir DIR]
 #
@@ -639,12 +642,35 @@ click_at_bounds "$(value hiddenSwitchBounds)"
 wait_on files showHidden=0 "row:$JAVA:Depth=3" "row:$JAVA:Expanded=1"
 # Spec §3.4: a row is drawn open only when every link is. With hidden files on, close `java / it`
 # while `acme / app / v2` stays open; hidden files off joins them again, and the joined row must
-# draw closed. A row that took its state from the leaf alone would draw it open.
+# draw closed, and one click must open it. A row or a click that took its state from the leaf
+# alone would draw it open, or close it on that click. A refresh that starts after the close forgets
+# the open links under the closed `java` and closes every link, which proves nothing, so no refresh
+# may land from before the close until the row has opened again.
+settle_refreshes 2000
 read_state files
+quiet="$(value refreshes)"
 click_at_bounds "$(value hiddenSwitchBounds)"
 wait_on files showHidden=1 'row:java / it:Expanded=1' 'row:acme / app / v2:Expanded=1'
 click_row 'java / it'
 wait_on files 'row:java / it:Expanded=0' 'norow:acme / app / v2'
+read_state files
+click_at_bounds "$(value hiddenSwitchBounds)"
+wait_on files showHidden=0 "row:$JAVA:Depth=3" "row:$JAVA:Expanded=0" 'norow:domain / model'
+capture 7-disagree
+click_row "$JAVA"
+wait_on files "row:$JAVA:Expanded=1" 'row:domain / model:Depth=4' 'row:App.java:Depth=4'
+[ "$(value refreshes)" = "$quiet" ] \
+  || fail "$SCENARIO: a refresh landed while the links disagreed, so the step proved nothing -- last read: $(last_read)"
+note "no refresh landed while the links disagreed (refreshes=$quiet)"
+# The other way round: close `acme / app / v2` while `java / it` stays open. The joined row must
+# draw closed again, and one click must open it. A row or a click that read the first link alone
+# would draw it open, or close it on that click. This way needs no guard: a refresh keeps the open
+# `java / it` above the closed `acme`, so the links still disagree.
+read_state files
+click_at_bounds "$(value hiddenSwitchBounds)"
+wait_on files showHidden=1 'row:java / it:Expanded=1' 'row:acme / app / v2:Expanded=1'
+click_row 'acme / app / v2'
+wait_on files 'row:acme / app / v2:Expanded=0' 'row:java / it:Expanded=1' 'norow:domain / model'
 read_state files
 click_at_bounds "$(value hiddenSwitchBounds)"
 wait_on files showHidden=0 "row:$JAVA:Depth=3" "row:$JAVA:Expanded=0" 'norow:domain / model'
