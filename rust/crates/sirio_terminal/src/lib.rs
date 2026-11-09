@@ -6213,36 +6213,43 @@ mod tests {
     /// re-scan and grid render cache must stay flat while the pane is idle — a
     /// still pane costs one integer comparison per frame, not a channel round
     /// trip plus three placement walks and a snapshot — and bump the moment
-    /// anything is written. Driven
-    /// through a real PTY so the owner-thread poll loop is the one under
-    /// test, the same shape `pty_output_wakes_the_event_pump` uses.
+    /// anything is written. Driven through a real PTY so the owner-thread
+    /// poll loop is the one under test, with a child that is silent once
+    /// its marker is drawn.
     #[test]
     fn mutation_stamp_stays_flat_while_idle_and_bumps_on_output() {
         let working_directory =
             std::env::temp_dir().join(format!("sirio-terminal-test-stamp-{}", std::process::id()));
         std::fs::create_dir_all(&working_directory).unwrap();
-        let (handle, mut wakeup_rx) =
-            TerminalHandle::new(&working_directory, &TerminalShell::System).unwrap();
+        let (handle, mut wakeup_rx) = TerminalHandle::new(
+            &working_directory,
+            &pty_fixture_shell(
+                "printf 'STAMP_READY\\n'; exec cat",
+                &["cat", "--prologue", "STAMP_READY\\n"],
+            ),
+        )
+        .unwrap();
 
-        // Wait for TRUE quiescence: Windows ConPTY shells deliver startup
-        // traffic in several chunks with gaps between them, so a single
-        // `Empty` drain can return before the banner has fully arrived. Settle
-        // only when the stamp is unchanged across three consecutive quiet
-        // gaps — more output would have bumped it — and only once it has
-        // moved at all: a stamp still at zero means the shell has not even
-        // printed its prompt yet (it starts late when the test binary spawns
-        // many PTYs at once), and that prompt would land inside the idle
-        // window below. Three gaps, not one: session output now crosses two
-        // owner ticks and the link forwarder before it reaches this stamp,
-        // so a single 100 ms gap can sit entirely inside one burst's
-        // delivery skew under a spawn storm.
+        // The child prints one marker and then writes nothing until it is
+        // typed at, so once the marker is on the grid the pane is still by
+        // construction. A login shell gives no such point: the attach
+        // snapshot moves the stamp before the shell has printed anything,
+        // and the shell's own startup can come a second later.
+        //
+        // The marker alone is not enough either. `screen_text` is answered
+        // before the owner bumps the stamp for the output it just drew, so
+        // a gap counts only when the marker was already drawn before its
+        // sample. Three such gaps, not one, also absorb whatever a ConPTY
+        // sends after the child's own bytes.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut flat_gaps = 0;
         let before = loop {
             while wakeup_rx.try_recv().is_ok() {}
+            let marker_drawn = screen_text(&handle).contains("STAMP_READY");
             let sample = handle.mutation_stamp.load(Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(100));
-            if sample > 0 && handle.mutation_stamp.load(Ordering::Relaxed) == sample {
+            let after = handle.mutation_stamp.load(Ordering::Relaxed);
+            if marker_drawn && after == sample {
                 flat_gaps += 1;
             } else {
                 flat_gaps = 0;
@@ -6252,7 +6259,7 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "startup never settled"
+                "the pane never went still: marker drawn {marker_drawn}, stamp {sample} -> {after} across the last gap"
             );
         };
         std::thread::sleep(Duration::from_millis(200));
@@ -6263,7 +6270,7 @@ mod tests {
         );
 
         // Any output bumps it; kitty transmits arrive through the same path.
-        handle.write(b"printf STAMP_PROBE\n".to_vec());
+        handle.write(b"STAMP_PROBE\n".to_vec());
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut bumped = false;
         while std::time::Instant::now() < deadline {
