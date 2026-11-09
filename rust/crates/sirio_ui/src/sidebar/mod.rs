@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use ely_gpui_component::menus::{Hang, layer};
 use gpui::{
-    App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
+    App, Bounds, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
     MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render, Rgba,
     ScrollHandle, StyleRefinement, Window, div, img, prelude::*, px, rgb,
 };
@@ -626,6 +626,29 @@ impl WorktreePrompt {
 }
 
 /// A fixture-backed project sidebar.
+/// The bounds the debug layout read reports for the sidebar, from the latest
+/// paint: the first project section header and the first worktree card.
+/// `first_*` name the rows that may write, so a row that scrolled into the
+/// sticky header or moved down the list cannot leave its rect behind.
+#[derive(Default)]
+struct ProbeRects {
+    first_section: std::cell::Cell<Option<usize>>,
+    first_card: std::cell::Cell<Option<usize>>,
+    section: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    card: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl ProbeRects {
+    fn follow(&self, section: Option<usize>, card: Option<usize>) {
+        if self.first_section.replace(section) != section {
+            self.section.set(None);
+        }
+        if self.first_card.replace(card) != card {
+            self.card.set(None);
+        }
+    }
+}
+
 pub struct Sidebar {
     rows: Vec<SidebarRow>,
     project_ids: std::collections::HashMap<usize, String>,
@@ -690,6 +713,8 @@ pub struct Sidebar {
     /// every spinner frame as the spinner's ancestor — would drag every row
     /// along with it.
     cache_rows: bool,
+    /// What the debug layout read measures; see [`ProbeRects`].
+    probe: std::rc::Rc<ProbeRects>,
     list_scroll: ScrollHandle,
     view: SidebarView,
     closed_sessions: Vec<sessions::ClosedSession>,
@@ -726,6 +751,14 @@ impl Sidebar {
 
     pub fn view(&self) -> SidebarView {
         self.view
+    }
+
+    /// The first project section header and the first worktree card as last
+    /// painted, for the debug layout read. Both are `None` outside the
+    /// Projects view, and a row that stopped being the first one is
+    /// forgotten when the sidebar next renders.
+    pub fn probe_bounds(&self) -> (Option<Bounds<Pixels>>, Option<Bounds<Pixels>>) {
+        (self.probe.section.get(), self.probe.card.get())
     }
 
     /// Restores a view without reporting it (the host already knows).
@@ -1003,6 +1036,7 @@ impl Sidebar {
             panel_width: DEFAULT_SIDEBAR_WIDTH,
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
+            probe: Default::default(),
             list_scroll: ScrollHandle::new(),
             view: SidebarView::Projects,
             closed_sessions: Vec::new(),
@@ -1103,6 +1137,7 @@ impl Sidebar {
             panel_width: DEFAULT_SIDEBAR_WIDTH,
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
+            probe: Default::default(),
             list_scroll: ScrollHandle::new(),
             view: SidebarView::Projects,
             closed_sessions: Vec::new(),
@@ -3812,6 +3847,16 @@ impl Render for Sidebar {
         }
         let rows = self.visible_rows();
         let view = self.view;
+        self.probe.follow(
+            (view == SidebarView::Projects)
+                .then(|| rows.iter().find(|row| row.kind == RowKind::Project).map(|row| row.id))
+                .flatten(),
+            (view == SidebarView::Projects)
+                .then(|| rows.iter().find(|row| row.kind == RowKind::Worktree).map(|row| row.id))
+                .flatten(),
+        );
+        let first_section_probe = self.probe.first_section.get();
+        let section_probe = self.probe.section.clone();
         let session_list = sessions::session_list(&self.rows, &self.closed_sessions, &self.filter);
         let badge = (view == SidebarView::Projects)
             .then(|| sessions::attention(&sessions::session_list(&self.rows, &[], "").open))
@@ -3916,8 +3961,9 @@ impl Render for Sidebar {
             for (index, row) in rows.iter().cloned().enumerate() {
                 if row.kind == RowKind::Project {
                     let worktree_count = self.worktree_count(row.id);
+                    let probe = (first_section_probe == Some(row.id)).then(|| section_probe.clone());
                     rendered_rows.push(
-                        section::render_section(row, worktree_count, entity.clone(), theme)
+                        section::render_section(row, worktree_count, entity.clone(), theme, probe)
                             .into_any_element(),
                     );
                     continue;
@@ -4432,6 +4478,7 @@ impl Render for Sidebar {
                                     sticky_worktree_count,
                                     entity.clone(),
                                     theme,
+                                    None,
                                 )),
                         )
                     }),

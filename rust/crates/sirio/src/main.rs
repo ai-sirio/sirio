@@ -300,6 +300,7 @@ mod panes;
 mod primary_rail;
 mod session;
 mod shell_chrome;
+mod shell_rects;
 mod tab_machinery;
 #[allow(dead_code)] // Parked transition seam; main.rs remains synchronous for now.
 mod worktree_transition;
@@ -5714,6 +5715,9 @@ struct SirioWorkspace {
     /// `railRects` read. `Rc` because the paint closures that record them must
     /// be `'static`.
     rail_rects: Rc<primary_rail::RailRects>,
+    /// The shell's drawn rectangles from their last paint, for the debug
+    /// `shellRects` read.
+    shell_rects: Rc<shell_rects::ShellRects>,
     /// The tab the rail's peek shows (spec 2026-11-01-primary-rail §5), by
     /// tab id. Closed with `close`, never `begin_close`: a dying card would
     /// keep painting a live terminal after focus moved on.
@@ -7176,6 +7180,7 @@ impl SirioWorkspace {
             primary_pane_collapsed: persisted_primary_pane_collapsed && secondary_visible_at_boot,
             drawn_center_widths: std::cell::Cell::new((0.0, 0.0)),
             rail_rects: Rc::default(),
+            shell_rects: Rc::default(),
             primary_peek: sirio_ui::popup::Popup::default(),
             peek_focus_pending: false,
             center_drag_anchor: None,
@@ -22771,6 +22776,49 @@ impl SirioWorkspace {
                 })
                 .to_string(),
             ));
+            // The shell's drawn rects `[x, y, w, h]`, null while one is not
+            // drawn. The columns' cells are cleared by `columns()` and the
+            // settings branch; the sidebar's and the right panel's own
+            // probes live in their entities, so they are gated here.
+            let rects = &self.shell_rects;
+            let columns_drawn = !self.show_settings;
+            let sidebar_drawn = columns_drawn && self.sidebar_visible;
+            let right_drawn = columns_drawn && self.right_panel_visible;
+            let (sidebar_section, sidebar_card) = if sidebar_drawn {
+                self.sidebar.read(cx).probe_bounds()
+            } else {
+                (None, None)
+            };
+            let right_panel = self.right_panel.read(cx);
+            let (right_header, right_header_icon) = if right_drawn {
+                (
+                    right_panel.header_bounds(),
+                    right_panel.last_header_icon_bounds(),
+                )
+            } else {
+                (None, None)
+            };
+            layout.push((
+                "shellRects".into(),
+                serde_json::json!({
+                    "titlebar": rects.titlebar.get().map(rect),
+                    "left": rects.left.get().map(rect),
+                    "center": rects.center.get().map(rect),
+                    "right": rects.right.get().map(rect),
+                    "primary": rects.primary.get().map(rect),
+                    "secondary": rects.secondary.get().map(rect),
+                    "primaryStrip": rects.primary_strip.get().map(rect),
+                    "secondaryStrip": rects.secondary_strip.get().map(rect),
+                    "secondaryClose": rects.secondary_close.get().map(rect),
+                    "status": rects.status.get().map(rect),
+                    "rightHeader": right_header.map(rect),
+                    "rightHeaderLastIcon": right_header_icon.map(rect),
+                    "sidebarSection": sidebar_section.map(rect),
+                    "sidebarCard": sidebar_card.map(rect),
+                    "dividerHandle": rects.divider_handle.get().map(rect),
+                })
+                .to_string(),
+            ));
         }
         layout
     }
@@ -25453,6 +25501,7 @@ impl SirioWorkspace {
                 });
             })
             .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.ely.fg_subtle))
+            .child(shell_rects::probe(&self.shell_rects.secondary_close, [0.0; 4]))
     }
 
     fn close_tab_by_id(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
@@ -26742,6 +26791,7 @@ impl SirioWorkspace {
         div()
             .id("pane-primary")
             .debug_selector(|| "pane-primary".into())
+            .relative()
             .flex()
             .flex_col()
             .w(px(primary_width))
@@ -26785,9 +26835,14 @@ impl SirioWorkspace {
                     .when(
                         self.tab_menu_open && menu_role == Some(PaneRole::Primary),
                         |this| this.child(self.render_tab_context_menu(*theme, entity.clone(), cx)),
-                    ),
+                    )
+                    .child(shell_rects::probe(
+                        &self.shell_rects.primary_strip,
+                        [0.0, 0.0, 1.0, 0.0],
+                    )),
             )
             .child(primary_surface)
+            .child(shell_rects::probe(&self.shell_rects.primary, [0.0; 4]))
             .into_any_element()
     }
 
@@ -26817,6 +26872,29 @@ impl SirioWorkspace {
             .set((primary_width, secondary_width.unwrap_or(0.0)));
         let rail_drawn = self.primary_rail_drawn();
         let collapse_visible = self.secondary_pane_visible();
+        // A probe reports the latest paint, so a surface this frame does not
+        // draw is forgotten here rather than left at its last rect.
+        let shell_rects = self.shell_rects.clone();
+        if !self.sidebar_visible {
+            shell_rects.left.set(None);
+        }
+        if !self.right_panel_visible {
+            shell_rects.right.set(None);
+        }
+        if rail_drawn {
+            shell_rects.primary.set(None);
+            shell_rects.primary_strip.set(None);
+        }
+        if !collapse_visible || rail_drawn {
+            shell_rects.divider_handle.set(None);
+        }
+        if !collapse_visible {
+            shell_rects.secondary.set(None);
+            shell_rects.secondary_strip.set(None);
+        }
+        if !collapse_visible || !self.has_current_worktree() {
+            shell_rects.secondary_close.set(None);
+        }
         self.tab_bar.update(cx, |tab_bar, cx| {
             tab_bar.set_placement(
                 if rail_drawn {
@@ -26890,7 +26968,8 @@ impl SirioWorkspace {
                                 })
                                 .on_drag(DraggedCenterDivider, |_, _, _, cx| {
                                     cx.new(|_| gpui::Empty)
-                                }),
+                                })
+                                .child(shell_rects::probe(&shell_rects.divider_handle, [0.0; 4])),
                         ),
                 )
             })
@@ -26899,6 +26978,7 @@ impl SirioWorkspace {
                     div()
                         .id("pane-secondary")
                         .debug_selector(|| "pane-secondary".into())
+                        .relative()
                         .flex()
                         .flex_col()
                         .w(px(secondary_width.unwrap_or(0.0)))
@@ -26939,7 +27019,11 @@ impl SirioWorkspace {
                                             cx,
                                         ))
                                     },
-                                ),
+                                )
+                                .child(shell_rects::probe(
+                                    &shell_rects.secondary_strip,
+                                    [0.0, 0.0, 1.0, 0.0],
+                                )),
                         )
                         .child(
                             div()
@@ -26962,7 +27046,8 @@ impl SirioWorkspace {
                                     entity.clone(),
                                     cx,
                                 )),
-                        ),
+                        )
+                        .child(shell_rects::probe(&shell_rects.secondary, [0.0; 4])),
                 )
             })
             // Last, so it paints over the Secondary; it never reaches a side panel.
@@ -27081,14 +27166,16 @@ impl SirioWorkspace {
                         .child(self.render_panel_resize_handle(
                             panel_layout::PanelSide::Left,
                             entity.clone(),
-                        )),
+                        ))
+                        .child(shell_rects::probe(&shell_rects.left, [1.0; 4])),
                 )
             })
             .child(
                 shell_chrome::panel("shell-center-panel", &self.center_panel_focus, theme)
                     .flex_1()
                     .min_w_0()
-                    .child(center_column),
+                    .child(center_column)
+                    .child(shell_rects::probe(&shell_rects.center, [1.0; 4])),
             )
             .when(self.right_panel_visible, |row| {
                 row.child(
@@ -27099,7 +27186,8 @@ impl SirioWorkspace {
                         .child(self.render_panel_resize_handle(
                             panel_layout::PanelSide::Right,
                             entity.clone(),
-                        )),
+                        ))
+                        .child(shell_rects::probe(&shell_rects.right, [1.0; 4])),
                 )
             })
     }
@@ -28721,6 +28809,8 @@ impl Render for SirioWorkspace {
         self.sync_browser_overlay_obscured(cx);
 
         if self.show_settings {
+            // The settings surface replaces the three columns.
+            self.shell_rects.clear_columns();
             return div()
                 .id("shell-frame")
                 .debug_selector(|| "shell-frame".into())
@@ -28755,9 +28845,11 @@ impl Render for SirioWorkspace {
                 })
                 .child(
                     div()
+                        .relative()
                         .h(theme.browser_chrome.bar_height)
                         .w_full()
-                        .child(self.child_view(self.titlebar.clone())),
+                        .child(self.child_view(self.titlebar.clone()))
+                        .child(shell_rects::probe(&self.shell_rects.titlebar, [0.0; 4])),
                 )
                 .child(
                     div()
@@ -28778,9 +28870,11 @@ impl Render for SirioWorkspace {
                 )
                 .child(
                     div()
+                        .relative()
                         .h(px(STATUS_BAR_HEIGHT))
                         .w_full()
-                        .child(self.child_view(self.status_bar.clone())),
+                        .child(self.child_view(self.status_bar.clone()))
+                        .child(shell_rects::probe(&self.shell_rects.status, [0.0; 4])),
                 )
                 .when(self.palette_open, |this| {
                     this.child(self.render_command_palette(theme, cx.entity(), cx))
@@ -28866,9 +28960,11 @@ impl Render for SirioWorkspace {
             .when(self.identity_dialog.is_none(), |frame| self.shell_actions(frame, cx))
             .child(
                 div()
+                    .relative()
                     .h(theme.browser_chrome.bar_height)
                     .w_full()
-                    .child(self.titlebar.clone()),
+                    .child(self.titlebar.clone())
+                    .child(shell_rects::probe(&self.shell_rects.titlebar, [0.0; 4])),
             )
             .child(div().flex_1().min_h_0().w_full().child(self.columns(
                 &theme,
@@ -28878,9 +28974,11 @@ impl Render for SirioWorkspace {
             )))
             .child(
                 div()
+                    .relative()
                     .h(px(STATUS_BAR_HEIGHT))
                     .w_full()
-                    .child(self.status_bar.clone()),
+                    .child(self.status_bar.clone())
+                    .child(shell_rects::probe(&self.shell_rects.status, [0.0; 4])),
             )
             .when(self.palette_open, |this| {
                 this.child(self.render_command_palette(theme, cx.entity(), cx))

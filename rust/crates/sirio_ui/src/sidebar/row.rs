@@ -875,7 +875,20 @@ impl Sidebar {
             .child(title_line)
             .when(has_sub_line, |this| this.child(sub_line));
 
-        row_view.child(content)
+        // The first worktree card records where it is drawn for the debug
+        // layout read. The card has no border, so a full-size absolute child
+        // spans its whole box.
+        let card_probe = (is_worktree && entity.read(cx).probe.first_card.get() == Some(row_id))
+            .then(|| entity.read(cx).probe.card.clone());
+        row_view.child(content).when_some(card_probe, |this, cell| {
+            this.child(
+                gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+        })
     }
 }
 
