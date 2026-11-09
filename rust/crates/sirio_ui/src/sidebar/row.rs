@@ -213,8 +213,8 @@ impl Sidebar {
 
     /// The minimum row rhythm: a single-line row is 34px (an 18px title line
     /// with 8px of padding above and 8px below); a card with a context line
-    /// is 53px (8 + 18 + 4 + 15 + 8). Content-sized titles grow beyond this
-    /// floor.
+    /// is 53px (8 + 18 + 4 + 15 + 8). The drawn height adds only the
+    /// interface-font delta (`row_drawn_height`); titles never wrap.
     pub(super) fn row_min_height(row: &SidebarRow) -> f32 {
         if row.kind == RowKind::Worktree {
             CARD_TWO_LINE_HEIGHT
@@ -343,8 +343,10 @@ impl Sidebar {
     /// leading gutter the row's horizontal padding leaves, so it never
     /// overlaps the glyph. It is a child of the (relative) title line: it
     /// spans that line's height and sits left of it by half of the gutter
-    /// plus half the dot, which is row x 0. Drawn by a worktree row and a
-    /// Sessions card alike.
+    /// plus half the dot, so it is centred in the gutter (row x 0 while the
+    /// gutter and the dot are both 6px). This holds only while the title
+    /// line's column is the row's first in-flow child, at `ROW_PAD_X`.
+    /// Drawn by a worktree row and a Sessions card alike.
     pub(super) fn unread_dot(selector: String, theme: &Theme) -> impl IntoElement + use<> {
         let colour = theme.ely.info;
         div()
@@ -498,9 +500,9 @@ impl Sidebar {
         // context-menu item, it cannot be `git worktree remove`d.
         let is_removable_worktree = is_worktree && !row.is_primary;
         // Zed's row rhythm (34 / 53): a worktree row is always a two-line
-        // card (13px title over a 12.5px context line); any other row that
-        // reaches this renderer is single-line at 34px. Project rows draw
-        // through `render_section` at `SECTION_HEIGHT`. See `has_sub_line`.
+        // card (13px title over a 12.5px context line). Project rows draw
+        // through `render_section` at `SECTION_HEIGHT`, so no single-line
+        // row reaches this renderer today. See `has_sub_line`.
         let has_sub_line = Self::has_sub_line(&row);
         let row_height = Self::row_drawn_height(&row, &theme.typography);
         // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
