@@ -33,6 +33,9 @@ set -eEuo pipefail
 #    5. lagged                a client that never reads is detached with
 #                             `lagged` while a 20 MB flood runs to `FLOOD-DONE`
 #                             without blocking the session
+#   5b. lagged-dense          the same with an ESC-dense flood (slow to parse):
+#                             the stalled client's attach is served during the
+#                             flood, not after it
 #    6. close-kills-tree      `term.close` ends the shell and a backgrounded
 #                             grandchild (on Windows, through the session's
 #                             job object)
@@ -579,6 +582,28 @@ case_lagged() {
   pass
 }
 
+case_lagged_dense() {
+  if [ "$OS" = windows ]; then skip "ConPTY repaints the program's output, so the owner never parses the program's ESC density"; return 0; fi
+  fresh_root
+  start_held_host
+  # Each line is 7 bytes with one ESC (an SGR, a visible pair, a newline): the
+  # owner steps this slowly, so its byte channel never empties during the flood.
+  new_session -- sh -c 'yes "$(printf "\033[1mxx")" | head -c 20000000; echo; echo FLOOD-DONE; sleep 60'
+  local id="$NEW_ID" stalled
+  "$PROBE" term-attach "$id" --no-read --for 20000 >"$ROOT/stalled.out" 2>"$ROOT/stalled.err" &
+  stalled=$!
+  HELPERS+=("$stalled")
+  log_direct "term-attach $id --no-read --for 20000 & (stalled client, pid $stalled)"
+  wait_until 60 term_read_has "$id" "FLOOD-DONE" \
+    || fail "the flood did not reach FLOOD-DONE in 60 s: for example the session blocked on its stalled client, or parsed this flood too slowly"
+  wait "$stalled" || fail "the stalled attach failed"
+  grep -q '^lagged=1$' "$ROOT/stalled.out" \
+    || fail "the attach was not served while the flood ran (late or timed out), so it never lagged: $(cat "$ROOT/stalled.out" "$ROOT/stalled.err" 2>/dev/null | head -c 600)"
+  { echo "--- stalled attach.out"; cat "$ROOT/stalled.out"; } >>"$TRANSCRIPT"
+  NOTE="the attach was served during an ESC-dense flood"
+  pass
+}
+
 case_close_kills_tree() {
   fresh_root
   start_held_host
@@ -916,7 +941,8 @@ run_case resume               case_resume
 run_case snapshot-fidelity    case_snapshot_fidelity
 run_case query-one-reply      case_query_one_reply
 run_case lagged               case_lagged
-run_case close-kills-tree     case_close_kills_tree
+run_case lagged-dense         case_lagged_dense         5b
+run_case close-kills-tree     case_close_kills_tree     6
 run_case sirioctl-direct      case_sirioctl_direct      7
 run_case exited-then-idle     case_exited_then_idle     8
 run_case flood                case_flood                10

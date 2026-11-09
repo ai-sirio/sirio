@@ -24,6 +24,11 @@ pub const KITTY_IMAGE_STORAGE_LIMIT: u64 = 64 * 1024 * 1024;
 /// #303 R2.4: cap PNG decoder allocations, including decompressed RGBA output.
 pub const KITTY_DECOMPRESSED_MAX_BYTES: u64 = KITTY_IMAGE_STORAGE_LIMIT;
 
+/// How long one pass of the owner loop drains PTY bytes before it serves commands: a
+/// flood that outpaces the VT keeps the byte channel non-empty, and without a bound
+/// attach, input, resize, snapshot and close would wait until it ends.
+const DRAIN_SLICE: Duration = Duration::from_millis(8);
+
 /// #301: PNG decoding is registered by each terminal owner so Kitty f=100
 /// transmits are stored while the optional libghostty PNG feature stays off.
 pub struct KittyPngDecoder {
@@ -202,7 +207,11 @@ fn run(inputs: Inputs) {
 
     let mut carried = None;
     loop {
-        // 1. Drain PTY bytes into the resident VT, journal, and every stream.
+        // 1. Drain PTY bytes into the resident VT, journal, and every stream, for at most
+        // one slice: the commands below are served between slices, so a flood cannot hold
+        // them. A slice ends only after a whole chunk, never inside one.
+        let deadline = Instant::now() + DRAIN_SLICE;
+        let mut backlog = false;
         while let Ok(bytes) = bytes_rx.try_recv() {
             let offset = journal.head();
             scanned.clear();
@@ -249,6 +258,10 @@ fn run(inputs: Inputs) {
             terminal.vt_write(&bytes[written..]);
             journal.push(&bytes);
             fanout.broadcast_output(offset, &bytes);
+            if Instant::now() >= deadline {
+                backlog = true;
+                break;
+            }
         }
 
         // 2. This VT alone answers queries and writes those replies to the PTY.
@@ -276,7 +289,7 @@ fn run(inputs: Inputs) {
         let mut close_reply = None;
 
         // 4. Commands run between PTY drains, making attach/snapshot atomic
-        // with respect to output already read from the master.
+        // with respect to output already fed to the VT and journal.
         while let Some(command) = carried.take().or_else(|| command_rx.try_recv().ok()) {
             match command {
                 Command::Input(bytes, reply) => {
@@ -375,7 +388,8 @@ fn run(inputs: Inputs) {
 
         cached.attachments = fanout.len();
 
-        // 5. Publish changes to observable process and VT state once per tick.
+        // 5. Publish changes to observable process and VT state once per tick (the foreground,
+        // the program and the exit only after a pass that emptied the byte channel, below).
         if let Ok(title) = terminal.title()
             && title != last_title
         {
@@ -384,70 +398,77 @@ fn run(inputs: Inputs) {
             let _ = events.send(Event::Title(last_title.clone()));
         }
 
-        #[cfg(unix)]
-        let foreground_pgid = master_fd.and_then(|fd| {
-            let pgid = unsafe { libc::tcgetpgrp(fd) };
-            (pgid > 0).then_some(pgid as u32)
-        });
-        #[cfg(windows)]
-        let foreground_pgid: Option<u32> = None;
-        let foreground = foreground_pgid.is_some_and(|pgid| pgid != cached.pid);
-        if foreground != last_foreground {
-            last_foreground = foreground;
-            cached.foreground = foreground;
-            let _ = events.send(Event::Foreground(foreground));
-        }
+        // The foreground, the program and the exit are read only after a drain that emptied
+        // the byte channel within its slice, so they never overtake a flood's backlog (or the
+        // status reports in it). Output can still come after them: what reached the channel
+        // after that drain, what the reader thread has not sent yet, and what is in the PTY.
+        if !backlog {
+            #[cfg(unix)]
+            let foreground_pgid = master_fd.and_then(|fd| {
+                let pgid = unsafe { libc::tcgetpgrp(fd) };
+                (pgid > 0).then_some(pgid as u32)
+            });
+            #[cfg(windows)]
+            let foreground_pgid: Option<u32> = None;
+            let foreground = foreground_pgid.is_some_and(|pgid| pgid != cached.pid);
+            if foreground != last_foreground {
+                last_foreground = foreground;
+                cached.foreground = foreground;
+                let _ = events.send(Event::Foreground(foreground));
+            }
 
-        // Name the program that holds the terminal, and drop its status report when the
-        // shell takes the terminal back.
-        if cached.exit.is_none() {
-            match tracker.poll(foreground_pgid, cached.pid, Instant::now()) {
-                Update::Nothing => {}
-                Update::Named(program) => {
-                    cached.program = Some(program.clone());
-                    let _ = events.send(Event::Program(Some(program)));
-                }
-                Update::Replaced(program) => {
-                    // The old program is over: end it as `ShellAgain` does, then name
-                    // the new one.
-                    let _ = events.send(Event::Program(None));
-                    if cached.status.take().is_some() {
-                        let _ = events.send(Event::Status(None, elapsed_ms(started)));
+            // Name the program that holds the terminal, and drop its status report when the
+            // shell takes the terminal back.
+            if cached.exit.is_none() {
+                match tracker.poll(foreground_pgid, cached.pid, Instant::now()) {
+                    Update::Nothing => {}
+                    Update::Named(program) => {
+                        cached.program = Some(program.clone());
+                        let _ = events.send(Event::Program(Some(program)));
                     }
-                    cached.program = Some(program.clone());
-                    let _ = events.send(Event::Program(Some(program)));
+                    Update::Replaced(program) => {
+                        // The old program is over: end it as `ShellAgain` does, then name
+                        // the new one.
+                        let _ = events.send(Event::Program(None));
+                        if cached.status.take().is_some() {
+                            let _ = events.send(Event::Status(None, elapsed_ms(started)));
+                        }
+                        cached.program = Some(program.clone());
+                        let _ = events.send(Event::Program(Some(program)));
+                    }
+                    Update::ShellAgain => {
+                        cached.program = None;
+                        let _ = events.send(Event::Program(None));
+                        if cached.status.take().is_some() {
+                            let _ = events.send(Event::Status(None, elapsed_ms(started)));
+                        }
+                    }
                 }
-                Update::ShellAgain => {
+            }
+
+            if cached.exit.is_none() {
+                let exit = match child.try_wait() {
+                    Ok(Some(status)) if status.success() => Some(Exit::Success),
+                    Ok(Some(status)) => Some(Exit::Code(status.exit_code() as i32)),
+                    Ok(None) => None,
+                    Err(_) => Some(Exit::Unknown),
+                };
+                if let Some(exit) = exit {
+                    cached.exit = Some(exit.clone());
+                    // No event: the app settles a turn that was mid-way from `Exited`, and a
+                    // `Status(None)` ahead of it would erase the state that settling needs.
+                    cached.status = None;
                     cached.program = None;
-                    let _ = events.send(Event::Program(None));
-                    if cached.status.take().is_some() {
-                        let _ = events.send(Event::Status(None, elapsed_ms(started)));
-                    }
+                    let _ = events.send(Event::Exited(exit.clone()));
+                    let (exit_lock, changed) = &*wait_state;
+                    *exit_lock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(exit.clone());
+                    changed.notify_all();
                 }
             }
         }
 
-        if cached.exit.is_none() {
-            let exit = match child.try_wait() {
-                Ok(Some(status)) if status.success() => Some(Exit::Success),
-                Ok(Some(status)) => Some(Exit::Code(status.exit_code() as i32)),
-                Ok(None) => None,
-                Err(_) => Some(Exit::Unknown),
-            };
-            if let Some(exit) = exit {
-                cached.exit = Some(exit.clone());
-                // No event: the app settles a turn that was mid-way from `Exited`, and a
-                // `Status(None)` ahead of it would erase the state that settling needs.
-                cached.status = None;
-                cached.program = None;
-                let _ = events.send(Event::Exited(exit.clone()));
-                let (exit_lock, changed) = &*wait_state;
-                *exit_lock
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(exit.clone());
-                changed.notify_all();
-            }
-        }
         publish_info(&shared_info, &cached);
 
         if should_close {
@@ -465,8 +486,15 @@ fn run(inputs: Inputs) {
             return;
         }
 
+        // With a backlog left in the byte channel, do not idle: poll the commands and go
+        // straight back to draining.
+        let idle = if backlog {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(4)
+        };
         // A disconnected handle means no caller can use the session anymore.
-        match command_rx.recv_timeout(Duration::from_millis(4)) {
+        match command_rx.recv_timeout(idle) {
             Ok(command) => carried = Some(command),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {

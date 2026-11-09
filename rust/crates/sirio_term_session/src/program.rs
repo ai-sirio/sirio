@@ -366,16 +366,31 @@ fn read_argv(pid: libc::c_int) -> Option<Vec<String>> {
     parse_procargs2(buf.get(..len)?)
 }
 
-/// The layout assumed, from the kernel's `KERN_PROCARGS2` reply: `argc` as a native `i32`,
-/// the executable path and a NUL, any number of padding NULs, then `argc` NUL-terminated
-/// arguments, then the environment (which is never read).
+/// The layout of the kernel's `KERN_PROCARGS2` reply: `argc` as a native `i32`, the executable
+/// path and its NUL, NUL padding, then `argc` NUL-terminated arguments, then the environment
+/// (which is never read).
+///
+/// XNU's `exec_extract_strings` pads after the path until the string space is a multiple of the
+/// pointer size (8 for a 64-bit image), so argv[0] starts at `(path_len + 1)` rounded up to 8,
+/// counted from the path's first byte. Skipping every NUL after the path is wrong: an empty
+/// argv[0] is a single NUL, and it would be taken for padding, shifting argv left by one, which
+/// can pull the first environment string into argv. When the bytes up to that offset
+/// are not all NULs (a layout this rule does not describe, such as a 32-bit image padded to 4),
+/// every NUL is skipped as a fallback.
 #[cfg(target_os = "macos")]
 fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
     let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?);
     let argc = usize::try_from(argc).ok()?;
     let rest = buf.get(4..)?;
-    let after_path = rest.get(rest.iter().position(|byte| *byte == 0)?..)?;
-    let args = after_path.get(after_path.iter().position(|byte| *byte != 0)?..)?;
+    let path_end = rest.iter().position(|byte| *byte == 0)?;
+    let argv_start = (path_end + 1).next_multiple_of(8);
+    let args = match rest.get(path_end..argv_start) {
+        Some(padding) if padding.iter().all(|byte| *byte == 0) => rest.get(argv_start..)?,
+        _ => {
+            let after_path = rest.get(path_end..)?;
+            after_path.get(after_path.iter().position(|byte| *byte != 0)?..)?
+        }
+    };
     Some(cap_argv(
         args.split(|byte| *byte == 0)
             .take(argc.min(MAX_ARGS))

@@ -86,11 +86,17 @@ set -eEuo pipefail
 #   29. repeated_report_is_one_event
 #                         the same report written five times is one `status`
 #                         event of `term.sessions`, not five
+#   30. empty_argv0_is_kept
+#                         bash started with an EMPTY argv[0] and an exec path
+#                         that needs no padding in the kernel's argument block is
+#                         listed with argv `["", "-c", "sleep 61; :"]`, not shifted left
+#   31. empty_argv0_is_kept_padded
+#                         the same with an exec path that needs 7 bytes of padding
 # Cases 10 and 11 are unix-only and print SKIP on Windows; case 13 runs on
-# Linux only; cases 16 to 29 run on Linux and macOS and print SKIP on Windows.
+# Linux only; cases 16 to 31 run on Linux and macOS and print SKIP on Windows.
 # The systemd scope arm of case 3 runs only on Linux with a user manager.
-# Cases 16 to 29 need python3 on PATH (they read `term.list`'s JSON, and the
-# probe stub is a python3 script).
+# Cases 16 to 31 need python3 on PATH (they read `term.list`'s JSON, and the
+# probe stub is a python3 script); cases 30 and 31 also need perl.
 #
 # Each case force-shuts every host in its own root and retires the root
 # afterwards (a staged host binary is 7 MB; a dozen of them have no business
@@ -1364,6 +1370,36 @@ print(sum(len(word.encode()) for word in argv))')"
   pass
 }
 
+# An empty argv[0] must stay in the listed argv. macOS pads the kernel's argument block after
+# the exec path to a multiple of 8, so the reader must not take the empty argv[0] (one NUL)
+# for padding; the two cases use a path with no padding and a path with 7 bytes of it.
+# perl's exec with an indirect object is the portable way to start a program with argv[0] "".
+# The program is bash, which runs as plain bash with an empty argv[0] (only a leading `-`
+# or the name `sh` changes its mode): a multicall coreutils (Ubuntu 26.04's
+# uutils) picks `sleep` from argv[0] and would fail with "". The `; :` stops bash from
+# exec'ing sleep in its place, so the group leader stays bash.
+empty_argv0_case() {
+  local pane="$1" arg="$2" shape="$3" s L zero
+  if [ "$OS" = windows ]; then skip "no foreground process group to read on Windows"; return 0; fi
+  command -v perl >/dev/null 2>&1 || fail "perl is required by the empty argv[0] cases and is not on PATH"
+  s="$(command -v bash)"
+  case "$s" in /*) ;; *) fail "bash is not an absolute path: $s" ;; esac
+  L=${#s}
+  zero="$(printf '%*s' $(( (7 - L % 8 + 8) % 8 )) '' | tr ' ' /)$s"
+  case "$shape" in
+    aligned) s="$zero" ;;
+    padded) s="/$zero" ;;
+  esac
+  interactive_shell "$pane"
+  probe term-write "$pane" "$(printf "perl -e 'exec { \$ARGV[0] } \"\", \"-c\", \$ARGV[1]' %s 'sleep %s; :'\r" "$s" "$arg")"
+  wait_until 5 field_is "$pane" program.argv "[\"\",\"-c\",\"sleep $arg; :\"]" \
+    || fail "argv is not [\"\", \"-c\", \"sleep $arg; :\"] within 5 s: $SESSION_DOC"
+  NOTE="exec path of ${#s} bytes ($shape)"
+  pass
+}
+case_empty_argv0_is_kept() { empty_argv0_case pane-30 61 aligned; }
+case_empty_argv0_is_kept_padded() { empty_argv0_case pane-31 62 padded; }
+
 run_case start-and-adopt   case_start_and_adopt
 run_case concurrent-start  case_concurrent_start
 run_case client-killed     case_client_killed
@@ -1382,7 +1418,7 @@ run_case isolation         case_isolation 15
 # The program cases read `term.list`'s JSON and run a python3 stub. A missing
 # python3 is a failure of the machine, not a reason to skip them.
 if [ "$OS" != windows ] && ! command -v python3 >/dev/null 2>&1; then
-  echo "FAIL: python3 is required by the program cases (16 to 29) and is not on PATH" >&2
+  echo "FAIL: python3 is required by the program cases (16 to 31) and is not on PATH" >&2
   exit 1
 fi
 run_case program_is_named                  case_program_is_named
@@ -1399,5 +1435,7 @@ run_case events_carry_program_and_status   case_events_carry_program_and_status
 run_case record_survives_a_child_group     case_record_survives_a_child_group
 run_case argv_is_bounded                   case_argv_is_bounded
 run_case repeated_report_is_one_event      case_repeated_report_is_one_event
+run_case empty_argv0_is_kept               case_empty_argv0_is_kept
+run_case empty_argv0_is_kept_padded        case_empty_argv0_is_kept_padded
 
 echo "HOST E2E OK ($N cases, $(( $(date +%s) - RUN_STARTED ))s)"
