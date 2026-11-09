@@ -1027,10 +1027,10 @@ def effort_full_light(run: Run) -> None:
 # Fractions of a frame (x, y, width, height). The transcript column from the top of the list down
 # to just above the composer card, with the thinking orb at its foot. Measured on the 1470x833
 # frames: the orb moves at x 376-470, y 642-679 (spin frames), the band's rule is at y 683, and the
-# region is x 367-1145, y 94-680, so it holds the whole orb and stops above the rule. The thinking row carries no
-# elapsed-seconds label in this build (none appeared in 15 s of a turn), so nothing in the region
-# needs masking; a build that draws one must mask it here, or `reduced_motion` breaks every time a
-# second ticks over.
+# region is x 367-1145, y 94-680, so it holds the whole orb and stops above the rule. The thinking
+# row carries no elapsed-seconds label in this build (none appeared in 15 s of a turn), so nothing
+# in the region needs masking; a build that draws one must mask it here, or `reduced_motion` breaks
+# every time a second ticks over.
 TRANSCRIPT_REGION = (0.25, 0.113, 0.53, 0.705)
 # The sidebar row's status bloom, the ring glyph that stands where the row's status word was, in
 # pixels of the default 1470x833 window (the sidebar is a fixed-width column, so it does not move
