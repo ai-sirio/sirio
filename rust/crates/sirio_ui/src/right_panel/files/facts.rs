@@ -108,8 +108,8 @@ impl RightPanel {
         #[cfg(debug_assertions)]
         {
             let mut seen = self.built_labels.borrow_mut();
-            for row in &self.flattened_file_rows {
-                seen.insert(row.node.name.clone());
+            for row in &self.folded_rows {
+                seen.insert(row.label.clone());
             }
         }
     }

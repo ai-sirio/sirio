@@ -109,7 +109,6 @@ pub enum PanelView {
 #[derive(Clone, Debug)]
 pub struct FilesSnapshot {
     file_tree: Vec<files::FileNode>,
-    flattened_file_rows: Vec<files::FileRow>,
     git_markers: files::GitMarkers,
     expanded: Vec<PathBuf>,
     /// Whether the snapshot was invalidated by a filesystem change.
@@ -277,7 +276,12 @@ pub struct RightPanel {
     /// Files/Changes surface look current while serving stale data.
     worktree_selected: bool,
     file_tree: Vec<files::FileNode>,
-    flattened_file_rows: Vec<files::FileRow>,
+    /// The rows the Files tree draws: `file_tree` with its single-folder
+    /// chains joined, built by `ensure_file_rows` at render.
+    folded_rows: Vec<files::FileRow>,
+    /// The hidden-files setting `folded_rows` was built under; `None` means
+    /// they are out of date and the next render rebuilds them.
+    rows_show_hidden: Option<bool>,
     git_markers: files::GitMarkers,
     /// The in-flight folder-expansion walk, if any. Replaced (never
     /// queued) on every new expansion request.
@@ -383,7 +387,8 @@ impl RightPanel {
             allowed_roots: vec![repo_root],
             worktree_selected: true,
             file_tree: Vec::new(),
-            flattened_file_rows: Vec::new(),
+            folded_rows: Vec::new(),
+            rows_show_hidden: None,
             git_markers: files::GitMarkers::default(),
             walk_task: None,
             refresh_started: false,
@@ -453,7 +458,6 @@ impl RightPanel {
             let snapshot_is_fresh = snapshot.is_fresh(SystemTime::now());
             panel.file_tree = snapshot.file_tree;
             files::restore_expanded(&mut panel.file_tree, &snapshot.expanded);
-            panel.flattened_file_rows = snapshot.flattened_file_rows;
             panel.git_markers = snapshot.git_markers;
             panel.settled = true;
             panel.is_stale = snapshot.dirty;
@@ -483,7 +487,6 @@ impl RightPanel {
         }
         Some(FilesSnapshot {
             file_tree: self.file_tree.clone(),
-            flattened_file_rows: self.flattened_file_rows.clone(),
             git_markers: self.git_markers.clone(),
             expanded: files::collect_expanded(&self.file_tree),
             dirty: self.is_stale,
@@ -521,7 +524,8 @@ impl RightPanel {
         }
         self.worktree_selected = false;
         self.file_tree.clear();
-        self.flattened_file_rows.clear();
+        self.folded_rows.clear();
+        self.rows_show_hidden = None;
         self.git_markers = files::GitMarkers::default();
         self.selected_path = None;
         self.refresh_error = None;
@@ -587,7 +591,8 @@ impl RightPanel {
         self.worktree_selected = true;
         self.repo_root = repo_root;
         self.file_tree.clear();
-        self.flattened_file_rows.clear();
+        self.folded_rows.clear();
+        self.rows_show_hidden = None;
         self.git_markers = files::GitMarkers::default();
         self.settled = false;
         self.is_stale = false;
@@ -950,6 +955,11 @@ impl Render for RightPanel {
             self.file_focus = Some(cx.focus_handle().tab_stop(true));
         }
         let entity = cx.entity();
+        if self.worktree_selected {
+            // The rows are built here, once per change of the tree or of the
+            // hidden-files setting, never by the code that changes them.
+            self.ensure_file_rows(ShowHiddenFilesSetting::get(cx));
+        }
         // Prompts is global, so it alone renders without a worktree (spec §5).
         let body = if !self.worktree_selected && view != PanelView::Prompts {
             self.render_no_worktree(theme).into_any_element()
