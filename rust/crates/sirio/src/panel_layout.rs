@@ -72,9 +72,10 @@ pub(crate) fn resolve_center_split(
     let usable = (center_width - divider).max(0.0);
     let ratio = (ratio_millis as f32 / 1000.0).clamp(0.0, 1.0);
     // Too narrow for two floors: both go under together, keeping their ratio.
-    // That is the side panels' own no-drag rule. The Secondary pane is never
-    // auto-hidden to make room — that would take the user's tabs off screen
-    // without being asked.
+    // The side panels do the same when the window shrinks under them, except
+    // that a panel lifted to its floor makes the other give the difference
+    // back. The Secondary pane is never auto-hidden to make room — that would
+    // take the user's tabs off screen without being asked.
     if usable < MIN_CENTER_PANE_WIDTH * 2.0 {
         let primary = usable * ratio;
         return (primary, Some(usable - primary));
@@ -275,6 +276,25 @@ mod tests {
         assert_eq!(right, Some(220.0));
     }
 
+    /// The mirror: the scaled left panel falls under its floor, and the right
+    /// one gives back what the lift cost.
+    #[test]
+    fn without_a_drag_a_floored_left_panel_leaves_the_rest_to_the_right() {
+        let (left, right) = resolve_panel_widths(
+            1100.0,
+            Some(300.0),
+            Some(640.0),
+            None,
+            4.0,
+            4.0,
+            MIN_CENTER_PANE_WIDTH * 2.0 + 1.0,
+        );
+
+        // budget = 443; the left panel floors at 220, the right takes 443 - 220.
+        assert_eq!(left, Some(220.0));
+        assert_eq!(right, Some(223.0));
+    }
+
     /// The yielding panel stops at the low end of its own settings range
     /// rather than collapsing to nothing.
     #[test]
@@ -347,8 +367,9 @@ mod tests {
     }
 
     /// Too narrow for two floors: both go under together and keep their
-    /// ratio, the same rule the side panels follow when the window shrinks
-    /// under them. Neither pane is hidden to make the other fit.
+    /// ratio, like the side panels shrinking together when the window
+    /// shrinks under them (a floored panel there leaves the rest to the
+    /// other). Neither pane is hidden to make the other fit.
     #[test]
     fn a_centre_too_small_for_both_floors_shrinks_both_and_keeps_the_ratio() {
         let (primary, secondary) = resolve_center_split(501.0, 600, true, 1.0);
