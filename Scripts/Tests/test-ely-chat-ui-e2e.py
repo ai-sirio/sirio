@@ -1029,33 +1029,33 @@ def effort_full_light(run: Run) -> None:
 # elapsed-seconds label in this build (none appeared in 15 s of a turn), so nothing in the region
 # needs masking; a build that draws one must mask it here, or `reduced_motion` breaks every time a
 # second ticks over.
-TRANSCRIPT_REGION = (0.228, 0.12, 0.52, 0.635)
+TRANSCRIPT_REGION = (0.262, 0.113, 0.52, 0.654)
 # The sidebar row's status bloom, the ring glyph that stands where the row's status word was, in
 # pixels of the default 1470x833 window (the sidebar is a fixed-width column, so it does not move
-# with the window's size): the 14 px glyph centred at (265, 199), with a margin. `unfocused_spinner`
+# with the window's size): the 14 px glyph centred at (291, 200), with a margin. `unfocused_spinner`
 # judges this and not the transcript, see there.
-SIDEBAR_BLOOM = "32x30+250+184"
+SIDEBAR_BLOOM = "32x30+275+185"
 # The slash popup's box: the three command rows hung above the composer band, which starts below.
 # Measured on the 1470x833 frames `composer_keys` writes (`before-slash.png`, `slash-popup.png`): the
-# popup is the box x 360-640, y 571-664 (the pixels that differ between the two frames above the band,
-# which starts at y 673), and the region is that box with 4 px around it, as fractions of the frame.
-POPUP_REGION = (0.2422, 0.6807, 0.196, 0.1213)
+# popup is the box x 410-690, y 580-673 (the pixels that differ between the two frames above the band,
+# which starts at y 683), and the region is that box with 4 px around it, as fractions of the frame.
+POPUP_REGION = (0.2762, 0.6927, 0.196, 0.1213)
 # Where a click lands in the composer band, in window pixels from the bottom edge and as a fraction
 # of the width: the field's second row, in the chat column. Measured on the 1470x833 frame
-# (`composer-band/frames/default.png`): the band is y 673-788, the field y 683-747 (the rule, 10 px
-# of padding, 5 px of field padding, three 18 px rows), so y 715 is its middle, 118 px from the
-# bottom; x 716 is the chat column's middle (the chat pane is x 289-1141).
-COMPOSER_CLICK = (0.487, 118)
+# (`composer-band/frames/default.png`): the band is y 683-798, the field y 693-757 (the rule, 10 px
+# of padding, 5 px of field padding, three 18 px rows), so y 725 is its middle, 108 px from the
+# bottom; x 765 is the chat column's middle (the chat pane is x 309-1221).
+COMPOSER_CLICK = (0.52, 108)
 # Where the composer's field must paint nothing, in pixels of the default 1470x833 window as an
 # ImageMagick `WxH+X+Y`: a band on the field's second and third rows (the first holds the placeholder
 # and the caret) across its whole width and 8 pixels of the band's padding to each side, so that a
 # frame drawn on the field's edge lies inside it; and the band's own padding just left of the field
 # on the same rows. `composer_field_has_no_fill` compares the two. Measured on the same frame: the
-# content column is 712 px wide (BAND_COLUMN), centred in the 852 px chat pane, so the field is
-# x 359-1071; its rows are y 688-706, 706-724 and 724-742, and the crops sit in 710-738.
+# content column is 712 px wide (BAND_COLUMN), centred in the 912 px chat pane, so the field is
+# x 409-1121; its rows are y 698-716, 716-734 and 734-752, and the crops sit in 720-748.
 DEFAULT_WINDOW = "1470x833"
-FIELD_BAND = "728x28+351+710"
-BAND_BESIDE_FIELD = "8x28+349+710"
+FIELD_BAND = "728x28+401+720"
+BAND_BESIDE_FIELD = "8x28+399+720"
 
 
 def crop_difference(run: Run, before: Path, after: Path, crop: str, tolerance: int = 0) -> int:
