@@ -114,7 +114,8 @@ gaps, and the 1 px divider. Each half takes half of that.
   centre went under its floor: at 1100 wide each half drew 308. The old
   defaults overran too, by less. Now the other panel gives back what the
   floored one took, down to its own floor. At 1100 the panels draw 223 and
-  220, and each half draws 320. The layout E2E's case 1c pins this.
+  220, and each half is laid out 320 wide (the Secondary's last 2 px pass the
+  centre card's inner edge, see §9). The layout E2E's case 1c pins this.
 
 - **The window still opens at 1470 × 833.** The window size is not persisted,
   and that does not change here.
@@ -180,9 +181,16 @@ Sidebar rows draw 1 px shorter than their constants today. `row_drawn_height`
 (`row.rs:238-240`) adds the title line height minus 18, and under the −1
 shift the title line is `scaled(18)` = 17. When §3.3 removes the shift, the
 title line is 18 and the drawn heights equal the constants.
+
 | Right panel header | 40, 28 px icons | **32, 24 px icons** *(my call, see below)* | `right_panel/mod.rs:37`, `:611-612` |
 | File tree row | 26 | 26 (already Zed's) | `right_panel/files.rs:54` |
 | File tree indent / left padding | 16 / 8 | **20 / 6** | `right_panel/files.rs:584`, `:603` |
+
+*Found while building this (2026-11-08):* no surface draws a one-line row.
+Project rows render as section headers and Worktree rows are always two-line,
+so the "one-line row (tab rows)" line of the table has nothing to measure.
+`ROW_HEIGHT` stays 34 as the constant, but no probe or E2E asserts it, and
+§6.1 no longer asks for a first one-line row probe.
 
 Calls marked *(my call)*:
 
@@ -384,8 +392,8 @@ captures under `--out-dir`.
   `railRects`) to report the drawn rects of:
   - the title bar, the three shell columns, the two centre halves, each tab
     strip, the status bar and the right panel header;
-  - the sidebar's first section header, first one-line row and first
-    two-line card;
+  - the sidebar's first section header and first two-line card (no surface
+    draws a one-line row, see §3.2);
   - the centre divider's handle, which the divider case drags.
 - **Assert at two window sizes, 1470 × 833 and 1710 × 987.** The column
   widths must match §2.2 within 1 px. The heights must match §3.2 exactly.
@@ -473,4 +481,12 @@ moves. That is expected. The PR says so and attaches both capture sets.
   centre card's two 1 px borders, which could clip the Secondary's rightmost
   2 px. This is unverified. Check it while measuring for §6.1, and file an
   issue if it is real.
+
+  *Found while building this (2026-11-08):* it is real, and the layout E2E
+  verified it: with the Secondary open at the floor (1100 wide), its laid-out
+  right edge (873) passes the centre card's inner edge, inside the border
+  (871), by 2 px, and the card's outer edge (872) by 1. The visible Secondary
+  there is 318, not 320. The fix couples with `min_center` (641 to 643). Out of scope
+  here; an issue is to be filed. The E2E's `secondaryInsideCenter` row reports
+  it (cases 1a, 1b, 1c, 7b) and never fails.
 - `SidebarRow.depth` is stored, but no drawing code reads it.

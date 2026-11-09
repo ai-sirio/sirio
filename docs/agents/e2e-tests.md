@@ -376,8 +376,9 @@ Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 # 1710x987, the title bar 34, the tab strips 32, the status bar 30, the right
 # header 32, a sidebar section header 31 and a two-line card 53 high, the
 # right header's last icon and the Secondary's close button inside their
-# parents (and spec §9's `secondaryInsideCenter`, report only); at 1100x800 the
-# halves stay at least 320 wide; the width migration (a stored 280 / 320 at
+# parents, the sidebar's card inside the panel less its border (and spec §9's
+# `secondaryInsideCenter`, report only); at 1100x800 the halves are laid out at
+# least 320 wide (the Secondary's last 2 px pass the centre card's inner edge, spec §9); the width migration (a stored 280 / 320 at
 # schema 26 draws and stores 300 / 240, 350 / 400 is kept, a stored 280 at
 # schema 27 is kept, an unparseable width falls back to 300); a divider dragged
 # with real X input is saved and drawn again after a relaunch; light theme at

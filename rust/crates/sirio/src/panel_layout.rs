@@ -32,7 +32,7 @@ impl PanelSide {
 }
 
 /// Narrowest **one centre pane** may get before the side panels start
-/// yielding. `MIN_SPLIT_PANE_SIZE` (160, `main.rs:3339`) is the comparable
+/// yielding. `MIN_SPLIT_PANE_SIZE` (160, in `main.rs`) is the comparable
 /// floor for terminal splits; a centre pane carries a whole tab strip above a
 /// terminal, so it gets twice that.
 ///

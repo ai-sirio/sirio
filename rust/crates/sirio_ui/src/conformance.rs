@@ -52,7 +52,8 @@
 //! A frozen reference is a starting point, not an authority over a
 //! decision made for a good reason. These are the recorded ones:
 //!
-//! - **Tab strip 32px, toolbars 34px** (tab_bar, changes, right panel): waku
+//! - **Tab strip 32px, Changes toolbar 34px** (tab_bar, changes; the right
+//!   panel's own header is 32px, below): waku
 //!   has no tab strip and no toolbars — it is one conversation. Sirio's
 //!   chrome rows are its own; no waku measurement exists for them.
 //!   The Diff toolbar embedded in the right sidebar wraps its title and
@@ -100,9 +101,10 @@
 //!   the width stopped being a frozen constant when the sidebar became
 //!   user-resizable, so 300 is the default, not the geometry. Sirio's range is the
 //!   wider one because its rows carry a checkout path under the branch name.
-//! - **Sidebar rows are Zed's 34 / 53px, section headers 31px, padding 6**:
-//!   Zed's factory thread rows take the place of waku's 32 / 51px rows, 26px
-//!   section headers and 12px padding (spec §3.2).
+//! - **Sidebar worktree cards are Zed's 53px, section headers 31px, padding
+//!   6**: Zed's factory thread rows take the place of waku's 32 / 51px rows,
+//!   26px section headers and 12px padding (spec §3.2). No surface draws
+//!   the 34px single-line row (`ROW_HEIGHT`) the spec also names.
 //! - **Icons are sized by the iconography scale (9–16px), not the type
 //!   scale**: glyph `text_size` calls are not type-scale members.
 //! - **The top bar is 34px (`BrowserChrome::bar_height`), not the 48px
