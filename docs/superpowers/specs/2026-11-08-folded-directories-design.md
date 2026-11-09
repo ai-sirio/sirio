@@ -145,6 +145,11 @@ shortened** (my call). Example: `… / aad / prodotto / v2`. Today's end-ellipsi
 
 - **Opening a folded row marks every link expanded. Closing marks every link collapsed** (my
   call).
+- **A row is drawn open only when every link is expanded**, and opening or closing acts on that
+  drawn state. The links can disagree: a refresh that started before a close reopens the leaf
+  it re-read, and turning hidden files off can join a closed folder with an open one. Taking
+  the state from the leaf alone would then draw a closed row as open. This was revised after the
+  final review; the first version took the row's state from the leaf.
 - When a chain later splits, each piece keeps the state the user saw. If `v2` was open and a
   file appears in `it`, the result is an open `java / it` with an open
   `unipolsai / aad / prodotto / v2` under it, and the content stays on screen.
@@ -203,6 +208,15 @@ starts there. This applies to the root refresh, the walk started by opening a di
   - For a huge listing (`node_modules`), the builder may cap the lookahead (my call). One
     option: above a threshold of child directories, show that listing unfolded. This is the
     only case where rows may appear unfolded.
+  - **A huge child listing is not read ahead** (revised after the final review).
+    - Lookahead stops reading a child directory once that child is past
+      `LOOKAHEAD_ENTRY_CAP = 256` entries.
+    - Such a child cannot fold in either toggle state, so its listing is not held: it stays
+      unknown, and opening it walks, as today.
+    - Without this, opening `target/debug` read all of `deps` (36,000 entries) before drawing
+      anything, and every refresh read it again.
+    - One exception gives way: a listing that is all dotfiles except one folder would fold with
+      hidden files off, but past the cap it shows unfolded.
 
 ### §3.6 It stays true by itself
 
