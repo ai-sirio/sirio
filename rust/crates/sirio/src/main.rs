@@ -26377,8 +26377,8 @@ impl SirioWorkspace {
         }
     }
 
-    /// What the centre column needs: the rail and one pane while the rail
-    /// is drawn, otherwise `panel_layout::min_center_width`. `secondary_open`
+    /// What the centre card needs, border included: the rail and one pane
+    /// while the rail is drawn, otherwise `panel_layout::min_center_width`. `secondary_open`
     /// as in `center_available_width`, so the drop ghost still sizes the
     /// expanded split.
     fn center_min_width(&self, secondary_open: bool) -> f32 {
@@ -26397,7 +26397,9 @@ impl SirioWorkspace {
     }
 
     /// The centre column's width once the side panels have given up
-    /// `min_center` (`panel_layout::resolve_panel_widths`).
+    /// `min_center` (`panel_layout::resolve_panel_widths`). `min_center` is
+    /// the card's floor, border included; what comes back is its content box,
+    /// the width the panes share (#723).
     fn center_width_for_floor(&self, window: &Window, theme: Theme, min_center: f32) -> f32 {
         let (left_width, right_width) = panel_layout::resolve_panel_widths(
             f32::from(window.bounds().size.width),
@@ -26408,13 +26410,14 @@ impl SirioWorkspace {
             f32::from(theme.spacing.shell_gap),
             min_center,
         );
-        center_available_width_for_shell(
+        (center_available_width_for_shell(
             f32::from(window.bounds().size.width),
             left_width,
             right_width,
             f32::from(theme.spacing.shell_outer_inset),
             f32::from(theme.spacing.shell_gap),
-        )
+        ) - panel_layout::CENTER_CARD_BORDERS)
+            .max(0.0)
     }
 
     fn render_overflow_menu(
@@ -26795,8 +26798,12 @@ impl SirioWorkspace {
             .debug_selector(|| "pane-primary".into())
             .flex()
             .flex_col()
-            .w(px(primary_width))
-            .flex_none()
+            // Alone, the Primary is the last pane and fills the card, like
+            // the Secondary does beside it (see `pane-secondary`, #723).
+            .when(self.secondary_pane_visible(), |pane| {
+                pane.w(px(primary_width)).flex_none()
+            })
+            .when(!self.secondary_pane_visible(), |pane| pane.flex_1())
             .min_w_0()
             .min_h_0()
             .child(
@@ -26981,8 +26988,13 @@ impl SirioWorkspace {
                         .debug_selector(|| "pane-secondary".into())
                         .flex()
                         .flex_col()
-                        .w(px(secondary_width.unwrap_or(0.0)))
-                        .flex_none()
+                        // The last pane fills what the Primary (or the rail)
+                        // and the divider leave, by layout rather than by its
+                        // computed width: at a fractional scale the card's
+                        // 1 px border is one device pixel, not the logical
+                        // pixel `CENTER_CARD_BORDERS` counts, so a computed
+                        // width would stop short of it or run under it (#723).
+                        .flex_1()
                         .min_w_0()
                         .min_h_0()
                         .child(
@@ -47470,10 +47482,14 @@ done
 
         let center = cx.debug_bounds("shell-center-panel").expect("center panel");
         let secondary = cx.debug_bounds("pane-secondary").expect("secondary pane");
-        assert!(
-            secondary.right() >= center.right() && secondary.right() - center.right() <= px(1.0),
-            "the Secondary pane paints through the centre panel's right edge, \
-             overlapping at most its one-pixel border: secondary={secondary:?}, center={center:?}"
+        // #723: the pane ends at the card's content edge, against the inside
+        // of its 1 px border: neither short of it (a background strip) nor
+        // under or past it.
+        assert_eq!(
+            secondary.right(),
+            center.right() - px(1.0),
+            "the Secondary pane ends at the centre panel's content edge: \
+             secondary={secondary:?}, center={center:?}"
         );
 
         assert!(
@@ -47483,9 +47499,11 @@ done
         cx.run_until_parked();
         let center = cx.debug_bounds("shell-center-panel").expect("center panel");
         let primary = cx.debug_bounds("pane-primary").expect("primary pane");
-        assert!(
-            primary.right() >= center.right() && primary.right() - center.right() <= px(1.0),
-            "hidden, the Primary pane takes the edge back: primary={primary:?}, center={center:?}"
+        assert_eq!(
+            primary.right(),
+            center.right() - px(1.0),
+            "hidden, the Primary pane takes the content edge back: \
+             primary={primary:?}, center={center:?}"
         );
     }
 
@@ -50116,8 +50134,10 @@ done
         assert!(cx.debug_bounds("center-divider").is_none());
         let center = cx.debug_bounds("shell-center-panel").expect("center panel");
         let primary = cx.debug_bounds("pane-primary").expect("primary pane");
-        assert!(
-            primary.right() >= center.right() && primary.right() - center.right() <= px(1.0),
+        // #723: to the card's content edge, inside its 1 px border.
+        assert_eq!(
+            primary.right(),
+            center.right() - px(1.0),
             "primary={primary:?}, center={center:?}"
         );
     }

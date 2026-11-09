@@ -372,13 +372,13 @@ Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 # The Zed layout parity (spec 2026-11-08-zed-layout-parity-design.md §6.1) in a
 # real, isolated Sirio under Xvfb, measured from the rects the app drew
 # (`surface layout read`'s `shellRects`, debug builds): the sidebar 300 and the
-# right panel 240, the two centre halves 456.5 / 576.5 wide at 1470x833 /
+# right panel 240, the two centre halves 455.5 / 575.5 wide (+-1) at 1470x833 /
 # 1710x987, the title bar 34, the tab strips 32, the status bar 30, the right
 # header 32, a sidebar section header 31 and a two-line card 53 high, the
 # right header's last icon and the Secondary's close button inside their
-# parents, the sidebar's card inside the panel less its border (and spec §9's
-# `secondaryInsideCenter`, report only); at 1100x800 the halves are laid out at
-# least 320 wide (the Secondary's last 2 px pass the centre card's inner edge, spec §9); the width migration (a stored 280 / 320 at
+# parents, the sidebar's card inside the panel less its border; at 1100x800
+# the halves are laid out exactly 320 wide; at all three sizes the Secondary
+# ends exactly at the centre card's content edge (#723); the width migration (a stored 280 / 320 at
 # schema 26 draws and stores 300 / 240, 350 / 400 is kept, a stored 280 at
 # schema 27 is kept, an unparseable width falls back to 300); a divider dragged
 # with real X input is saved and drawn again after a relaunch; light theme at
