@@ -176,15 +176,14 @@ The values are logical px, the same as Zed's.
 | Sidebar one-line row (tab rows) | 31 drawn (constant 32) | **34 drawn** | `sidebar/mod.rs:195` |
 | Sidebar two-line row (worktree and session cards) | 50 drawn (constant 51) | **53 drawn** | `sidebar/mod.rs:212` |
 | Horizontal padding of sidebar rows and section headers | 12 | **6** | `sidebar/row.rs:568`, `sidebar/sessions.rs:607`, `sidebar/section.rs:38`, `sidebar/mod.rs:4003` |
+| Right panel header | 40, 28 px icons | **32, 24 px icons** *(my call, see below)* | `right_panel/mod.rs:37`, `:611-612` |
+| File tree row | 26 | 26 (already Zed's) | `right_panel/files.rs:54` |
+| File tree indent / left padding | 16 / 8 | **20 / 6** | `right_panel/files.rs:584`, `:603` |
 
 Sidebar rows draw 1 px shorter than their constants today. `row_drawn_height`
 (`row.rs:238-240`) adds the title line height minus 18, and under the −1
 shift the title line is `scaled(18)` = 17. When §3.3 removes the shift, the
 title line is 18 and the drawn heights equal the constants.
-
-| Right panel header | 40, 28 px icons | **32, 24 px icons** *(my call, see below)* | `right_panel/mod.rs:37`, `:611-612` |
-| File tree row | 26 | 26 (already Zed's) | `right_panel/files.rs:54` |
-| File tree indent / left padding | 16 / 8 | **20 / 6** | `right_panel/files.rs:584`, `:603` |
 
 *Found while building this (2026-11-08):* no surface draws a one-line row.
 Project rows render as section headers and Worktree rows are always two-line,

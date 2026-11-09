@@ -183,7 +183,8 @@ pub struct SidebarTab {
 /// Width the sidebar draws itself at until the host says otherwise, and the
 /// same number as `AppSettings::sidebar_width`'s default. Every fixture in
 /// this file's tests, and the demo sidebar, keep it: only the running shell
-/// pushes a different one, through [`Sidebar::set_panel_width`].
+/// pushes a different one, through [`Sidebar::set_panel_width`] — the
+/// panel's content width, so 298 for the default 300 less the panel's border.
 const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
 /// The one size of the icons under the view switch: expand all, collapse
@@ -739,9 +740,10 @@ impl Sidebar {
         display_absolute_path(path)
     }
 
-    /// The host pushes the resolved sidebar width every render; same
-    /// every-render push as `RightPanel::set_panel_width`, no-op when
-    /// unchanged so a drag does not notify more than it must.
+    /// The host pushes the panel's content width (its resolved outer width
+    /// less the panel's border) every render; the same every-render push as
+    /// `RightPanel::set_panel_width`, which takes the outer width. A no-op when
+    /// unchanged, so a drag does not notify more than it must.
     pub fn set_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
         if self.panel_width == width {
             return;
