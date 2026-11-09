@@ -30,6 +30,7 @@ use history::{GitHistory, GitHistoryEvent};
 pub use change_requests::{filter_word, parse_filter};
 pub(crate) use change_requests::error_text;
 pub use open_list::{OpenListFacts, OpenSurface};
+pub use files::{FileRowFacts, FilesFacts};
 pub use prompts::{PromptCardFacts, PromptsFacts};
 pub use references::{GroupedRow, ReferenceRow, ReferencesState, group_by_file, summary};
 use references::{ReferencesEvent, ReferencesList};
@@ -108,7 +109,6 @@ pub enum PanelView {
 #[derive(Clone, Debug)]
 pub struct FilesSnapshot {
     file_tree: Vec<files::FileNode>,
-    flattened_file_rows: Vec<files::FileRow>,
     git_markers: files::GitMarkers,
     expanded: Vec<PathBuf>,
     /// Whether the snapshot was invalidated by a filesystem change.
@@ -158,11 +158,23 @@ impl FilesSnapshot {
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
+
+    /// The directories that were open when this snapshot was taken, to hand
+    /// to [`build_files_snapshot`] so a rebuild keeps them listed.
+    #[must_use]
+    pub fn expanded_paths(&self) -> Vec<PathBuf> {
+        self.expanded.clone()
+    }
 }
 
 /// Builds a settled Files snapshot without creating a visible panel.
-pub fn build_files_snapshot(repo_root: impl Into<PathBuf>) -> Result<FilesSnapshot, String> {
-    files::build_snapshot(&repo_root.into())
+/// `keep_open` names the directories to list as open, so a rebuild of a
+/// snapshot does not lose what the user had expanded.
+pub fn build_files_snapshot(
+    repo_root: impl Into<PathBuf>,
+    keep_open: Vec<PathBuf>,
+) -> Result<FilesSnapshot, String> {
+    files::build_snapshot(&repo_root.into(), keep_open)
 }
 
 /// App-wide selection. A GPUI global rather than a field, for the same
@@ -264,7 +276,12 @@ pub struct RightPanel {
     /// Files/Changes surface look current while serving stale data.
     worktree_selected: bool,
     file_tree: Vec<files::FileNode>,
-    flattened_file_rows: Vec<files::FileRow>,
+    /// The rows the Files tree draws: `file_tree` with its single-folder
+    /// chains joined, built by `ensure_file_rows` at render.
+    folded_rows: Vec<files::FileRow>,
+    /// The hidden-files setting `folded_rows` was built under; `None` means
+    /// they are out of date and the next render rebuilds them.
+    rows_show_hidden: Option<bool>,
     git_markers: files::GitMarkers,
     /// The in-flight folder-expansion walk, if any. Replaced (never
     /// queued) on every new expansion request.
@@ -279,9 +296,10 @@ pub struct RightPanel {
     /// Whether any top-level walk has ever finished, successfully or not.
     ///
     /// This, and not `refresh_started`, is what "Loading files…" is about.
-    /// `ensure_tree_refresh` re-walks every second, so gating the
+    /// A refresh re-walks the tree whenever the watcher, a view change or a
+    /// retry asks (it once did so every second), so gating the
     /// placeholder on "a walk is in flight" put a full-panel placeholder
-    /// over a perfectly good tree once a second — on this 4-core box the
+    /// over a perfectly good tree on every walk — on this 4-core box the
     /// tree was visible roughly one frame in three, for minutes. Gating it
     /// on "no walk has ever finished" also covers the two cases an
     /// `is_empty()` test gets wrong: a directory that is genuinely empty
@@ -343,6 +361,18 @@ pub struct RightPanel {
     open_list_chat_expanded: bool,
     /// The Prompts view's cards and the bounds it records; see `prompts.rs`.
     prompts: prompts::PromptsView,
+    /// The Files rows the last frame prepainted, with their window bounds. The
+    /// debug verb `surface.files.read` reads it; debug builds fill it.
+    file_row_bounds: files::RowBounds,
+    /// The hidden-files toggle's window bounds, for the same verb.
+    hidden_switch_bounds: files::BoundsCell,
+    /// How many Files refreshes have landed, whatever their result.
+    refreshes_landed: u64,
+    /// `refreshes_landed` as of the last frame that drew the Files rows.
+    drawn_refreshes: std::cell::Cell<u64>,
+    /// Every row label a rows rebuild produced since the last facts read.
+    #[cfg(debug_assertions)]
+    built_labels: std::cell::RefCell<std::collections::BTreeSet<String>>,
     is_stale: bool,
     updating: bool,
     /// The header's and its last icon's window bounds from the latest paint,
@@ -371,7 +401,8 @@ impl RightPanel {
             allowed_roots: vec![repo_root],
             worktree_selected: true,
             file_tree: Vec::new(),
-            flattened_file_rows: Vec::new(),
+            folded_rows: Vec::new(),
+            rows_show_hidden: None,
             git_markers: files::GitMarkers::default(),
             walk_task: None,
             refresh_started: false,
@@ -402,6 +433,12 @@ impl RightPanel {
             open_list_facts: open_list::OpenListFacts::default(),
             open_list_chat_expanded: false,
             prompts: prompts::PromptsView::default(),
+            file_row_bounds: Default::default(),
+            hidden_switch_bounds: Default::default(),
+            refreshes_landed: 0,
+            drawn_refreshes: Default::default(),
+            #[cfg(debug_assertions)]
+            built_labels: Default::default(),
             is_stale: false,
             updating: false,
             header_bounds: Default::default(),
@@ -437,7 +474,6 @@ impl RightPanel {
             let snapshot_is_fresh = snapshot.is_fresh(SystemTime::now());
             panel.file_tree = snapshot.file_tree;
             files::restore_expanded(&mut panel.file_tree, &snapshot.expanded);
-            panel.flattened_file_rows = snapshot.flattened_file_rows;
             panel.git_markers = snapshot.git_markers;
             panel.settled = true;
             panel.is_stale = snapshot.dirty;
@@ -467,7 +503,6 @@ impl RightPanel {
         }
         Some(FilesSnapshot {
             file_tree: self.file_tree.clone(),
-            flattened_file_rows: self.flattened_file_rows.clone(),
             git_markers: self.git_markers.clone(),
             expanded: files::collect_expanded(&self.file_tree),
             dirty: self.is_stale,
@@ -505,7 +540,8 @@ impl RightPanel {
         }
         self.worktree_selected = false;
         self.file_tree.clear();
-        self.flattened_file_rows.clear();
+        self.folded_rows.clear();
+        self.rows_show_hidden = None;
         self.git_markers = files::GitMarkers::default();
         self.selected_path = None;
         self.refresh_error = None;
@@ -571,7 +607,8 @@ impl RightPanel {
         self.worktree_selected = true;
         self.repo_root = repo_root;
         self.file_tree.clear();
-        self.flattened_file_rows.clear();
+        self.folded_rows.clear();
+        self.rows_show_hidden = None;
         self.git_markers = files::GitMarkers::default();
         self.settled = false;
         self.is_stale = false;
@@ -941,6 +978,8 @@ impl Render for RightPanel {
         }
         // The frame being built records again the bounds it draws.
         self.prompts.clear_bounds();
+        self.file_row_bounds.borrow_mut().clear();
+        self.hidden_switch_bounds.set(None);
         if self.worktree_selected {
             let showing_files = view == PanelView::Files;
             if showing_files {
@@ -955,6 +994,11 @@ impl Render for RightPanel {
             self.file_focus = Some(cx.focus_handle().tab_stop(true));
         }
         let entity = cx.entity();
+        if self.worktree_selected {
+            // The rows are built here, once per change of the tree or of the
+            // hidden-files setting, never by the code that changes them.
+            self.ensure_file_rows(ShowHiddenFilesSetting::get(cx));
+        }
         // Prompts is global, so it alone renders without a worktree (spec §5).
         let body = if !self.worktree_selected && view != PanelView::Prompts {
             self.render_no_worktree(theme).into_any_element()
@@ -1059,8 +1103,8 @@ mod tests {
 
     /// The Files rail icon never carries a spinner. It used to overlay
     /// `loading::compact` for as long as `walk_task` was in flight, and
-    /// `ensure_tree_refresh` puts a walk in flight every second, so the icon
-    /// blinked once a second for the duration of every `git status`. A walk
+    /// `ensure_tree_refresh` once put a walk in flight every second, so the
+    /// icon blinked for the duration of every `git status`. A walk
     /// over a settled tree is silent: the tree stays and the new listing
     /// lands in place.
     ///

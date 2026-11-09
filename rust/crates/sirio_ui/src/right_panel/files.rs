@@ -8,16 +8,26 @@ use gpui::{
     AnyElement, App, ClipboardItem, KeyDownEvent, MouseButton, Pixels, Point, uniform_list,
 };
 use sirio_git::{DirectoryGitStatus, IgnoredPaths, directory_statuses, ignored_paths, status};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
+
+mod facts;
+mod fold;
+mod listing;
+pub(super) use fold::FileRow;
+pub use facts::{FileRowFacts, FilesFacts};
+pub(super) use facts::{BoundsCell, RowBounds};
 
 use crate::editor::fs_actions;
 use crate::loading;
 use crate::popup::{menu_card, menu_label, menu_row};
 use crate::sidebar::icons::{file_glyph, folder_glyph};
 
-pub(super) fn build_snapshot(repo_root: &Path) -> Result<super::FilesSnapshot, String> {
+pub(super) fn build_snapshot(
+    repo_root: &Path,
+    keep_open: Vec<PathBuf>,
+) -> Result<super::FilesSnapshot, String> {
     let snapshot = status(repo_root).ok();
     let (files, directories) = snapshot
         .as_ref()
@@ -37,14 +47,12 @@ pub(super) fn build_snapshot(repo_root: &Path) -> Result<super::FilesSnapshot, S
         directories,
         ignored: ignored_paths(repo_root).unwrap_or_default(),
     };
-    let file_tree = read_tree(repo_root, repo_root, &markers).map_err(|error| error.to_string())?;
-    let mut flattened_file_rows = Vec::new();
-    flatten_files(&file_tree, 0, &mut flattened_file_rows);
+    let open: HashSet<PathBuf> = keep_open.iter().cloned().collect();
+    let file_tree = listing::reload_tree(repo_root, &open, &markers)?;
     Ok(super::FilesSnapshot {
         file_tree,
-        flattened_file_rows,
         git_markers: markers,
-        expanded: Vec::new(),
+        expanded: keep_open,
         dirty: false,
         captured_at: std::time::SystemTime::now(),
     })
@@ -128,12 +136,15 @@ pub(super) struct FileNode {
     /// vanish silently and must not panic.
     read_error: Option<String>,
     children: Vec<FileNode>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct FileRow {
-    node: FileNode,
-    depth: usize,
+    /// `children` holds this directory's full listing, dotfiles included.
+    /// A directory the loader has not read yet is not `loaded`, and its
+    /// empty `children` mean "unknown", not "empty".
+    loaded: bool,
+    /// The loader has looked ahead into this directory's children: it read
+    /// every child directory's listing except those it skips on purpose
+    /// (over the cap, or privacy-guarded). Only then may the directory's
+    /// children be drawn at once, already folded (spec §3.5).
+    children_resolved: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +161,9 @@ impl RightPanel {
     /// render thread. Single-flight on the walk task.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.refresh_started || self.walk_task.is_some() {
+            // Remembered, not lost: the landing of whatever is in flight
+            // runs it.
+            self.refresh_dirty = true;
             return;
         }
         if !self
@@ -172,6 +186,10 @@ impl RightPanel {
         self.updating = !self.settled;
         self.refresh_error = None;
         let repo_root = self.repo_root.clone();
+        // The directories open now: the background read re-reads each of them
+        // (and the lookahead into their children), so a change at any open
+        // depth shows. A folder opened while it runs is carried over at landing.
+        let open: HashSet<PathBuf> = collect_expanded(&self.file_tree).into_iter().collect();
         self.refresh_generation += 1;
         let refresh_generation = self.refresh_generation;
         let expected_repo_root = repo_root.clone();
@@ -208,8 +226,7 @@ impl RightPanel {
                         // an unreadable filesystem.
                         ignored: ignored_paths(&repo_root).unwrap_or_default(),
                     };
-                    let tree = read_tree(&repo_root, &repo_root, &markers)
-                        .map_err(|error| error.to_string())?;
+                    let tree = listing::reload_tree(&repo_root, &open, &markers)?;
                     Ok::<_, String>((markers, tree))
                 })
                 .await;
@@ -228,20 +245,16 @@ impl RightPanel {
                 // has something truthful to show — a tree, an empty tree, or
                 // an error — and must never fall back to "Loading files…".
                 panel.settled = true;
+                panel.refreshes_landed += 1;
                 match result {
                     Ok((markers, tree)) => {
                         panel.git_markers = markers;
-                        // F-TAB-01: the periodic 1s refresh loop
-                        // (`ensure_tree_refresh`) walks only the root
-                        // listing and used to replace `file_tree` wholesale,
-                        // so any folder a user had expanded (and its
-                        // already-loaded children) silently collapsed back
-                        // the instant the next tick landed — visible as a
-                        // "Loading files…" flash followed by the tree
-                        // reverting to fully collapsed. Preserve prior
-                        // expansion/children for any node the fresh walk
-                        // still reports at the same path.
-                        panel.file_tree = preserve_expansion(&panel.file_tree, tree);
+                        // F-TAB-01: a refresh must not collapse the folders
+                        // the user has open. The fresh walk re-read every
+                        // listing the tree holds, so its entries win; what
+                        // the user did while it ran (a folder opened or
+                        // closed) is carried over by path.
+                        panel.file_tree = listing::carry_open_state(&panel.file_tree, tree);
                         panel.rebuild_file_rows();
                         panel.refresh_error = None;
                         panel.is_stale = false;
@@ -341,24 +354,52 @@ impl RightPanel {
         self.refresh(cx);
     }
 
-    fn toggle_file(&mut self, path: &Path, cx: &mut Context<Self>) {
+    /// Opens or closes the row whose links are `chain` (outermost first, the
+    /// leaf last): its new state is the opposite of what the row draws (open
+    /// only when every link is expanded), and every link takes it.
+    fn toggle_row(&mut self, chain: &[PathBuf], cx: &mut Context<Self>) {
+        let Some(leaf_path) = chain.last() else {
+            return;
+        };
+        let drawn_open = chain.iter().all(|link| {
+            find_node_mut(&mut self.file_tree, link).is_some_and(|node| node.expanded)
+        });
         let (expanded, needs_walk) = {
-            let Some(node) = find_node_mut(&mut self.file_tree, path) else {
+            let Some(leaf) = find_node_mut(&mut self.file_tree, leaf_path) else {
                 cx.notify();
                 return;
             };
-            node.expanded = !node.expanded;
-            node.read_error = None;
-            (node.expanded, node.expanded && node.children.is_empty())
+            let expanded = !drawn_open;
+            if expanded {
+                // The walk records the error again if the read still fails.
+                leaf.read_error = None;
+            }
+            // A resolved directory holds every listing its children need, so
+            // it opens at once; only an unresolved one walks off-thread.
+            let needs_walk = expanded && !leaf.children_resolved;
+            (expanded, needs_walk)
         };
+        for link in chain {
+            if let Some(node) = find_node_mut(&mut self.file_tree, link) {
+                node.expanded = expanded;
+            }
+        }
         self.rebuild_file_rows();
         if needs_walk {
-            self.start_walk(path.to_path_buf(), cx);
+            self.start_walk(leaf_path.clone(), cx);
         } else if !expanded {
             // The collapse supersedes any in-flight expansion of this (or
             // any) folder: its result must not land later.
-            self.walk_task = None;
+            // A dropped walk leaves its folder open and unresolved; a refresh
+            // re-reads it. That walk's landing would also have run a refresh
+            // asked for meanwhile.
+            if self.walk_task.take().is_some() {
+                self.refresh_dirty = true;
+            }
             self.walk_generation += 1;
+            if self.refresh_dirty {
+                self.request_refresh(cx);
+            }
         }
         cx.notify();
     }
@@ -369,17 +410,31 @@ impl RightPanel {
     /// generation guard drops any walk that completes after a newer one
     /// was requested.
     fn start_walk(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.walk_task = None;
+        // The dropped walk's folder stays open and unresolved; this walk's
+        // landing runs the refresh that re-reads it (a refresh now would
+        // only be declined while this walk is in flight).
+        if self.walk_task.take().is_some() {
+            self.refresh_dirty = true;
+        }
         self.walk_generation += 1;
         let generation = self.walk_generation;
         let repo_root = self.repo_root.clone();
         let markers = self.git_markers.clone();
+        let show_hidden = ShowHiddenFilesSetting::get(cx);
         // The walk consumes `path`; the update needs its own copy to find
         // the node again.
         let apply_path = path.clone();
         self.walk_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { read_tree(&repo_root, &path, &markers) })
+                .background_spawn(async move {
+                    let mut listing = listing::read_with_chains(&repo_root, &path, &markers);
+                    // The listing may fold deeper than the folder opened: read
+                    // what the row's leaf needs here, off the UI thread.
+                    if let Ok(listing) = &mut listing {
+                        listing::resolve_walked_fold(&repo_root, listing, show_hidden, &markers);
+                    }
+                    listing
+                })
                 .await;
             let _ = this.update(cx, |panel, cx| {
                 if generation != panel.walk_generation {
@@ -390,10 +445,30 @@ impl RightPanel {
                 panel.walk_task = None;
                 if let Some(node) = find_node_mut(&mut panel.file_tree, &apply_path) {
                     match result {
-                        Ok(children) => node.children = children,
-                        Err(error) => node.read_error = Some(error),
+                        Ok(children) => {
+                            node.children = children;
+                            node.loaded = true;
+                            node.children_resolved = true;
+                            node.read_error = None;
+                            if node.expanded {
+                                // The row now folds through these links: they
+                                // open with it, so the user's open is kept.
+                                listing::open_folded_links(node, show_hidden);
+                            }
+                        }
+                        Err(error) => {
+                            node.read_error = Some(error);
+                            node.children.clear();
+                            node.loaded = false;
+                            node.children_resolved = false;
+                        }
                     }
                     panel.rebuild_file_rows();
+                }
+                // A refresh asked for while this walk ran was declined by
+                // `refresh`; the landing is what starts it.
+                if panel.refresh_dirty {
+                    panel.request_refresh(cx);
                 }
                 cx.notify();
             });
@@ -486,9 +561,9 @@ impl RightPanel {
                 // The Files view's only Refresh affordance — the
                 // toolbar that used to carry one is gone. It is a
                 // manual nudge, not the sole route back to a current
-                // tree: `ensure_tree_refresh` re-walks every second on
-                // its own, which is also what covers the states with no
-                // row to right-click.
+                // tree: the watcher and `ensure_tree_refresh` keep it
+                // current on their own, which is also what covers the
+                // states with no row to right-click.
                 "file-context-refresh" => row.on_click(move |_, _, cx| {
                     action_entity.update(cx, |panel, cx| {
                         panel.refresh(cx);
@@ -518,32 +593,26 @@ impl RightPanel {
         cx.emit(RightPanelActionEvent::OpenDiff(relative_path));
     }
 
-    fn file_rows(&self, show_hidden: bool) -> Vec<FileRow> {
-        self.flattened_file_rows
-            .iter()
-            .filter(|row| {
-                show_hidden
-                    || !row
-                        .node
-                        .path
-                        .strip_prefix(&self.repo_root)
-                        .unwrap_or(&row.node.path)
-                        .components()
-                        .any(|component| {
-                            matches!(
-                                component,
-                                Component::Normal(name)
-                                    if name.to_string_lossy().starts_with('.')
-                            )
-                        })
-            })
-            .cloned()
-            .collect()
+    /// The rows the tree draws, as `ensure_file_rows` last built them.
+    fn file_rows(&self) -> &[FileRow] {
+        &self.folded_rows
     }
 
+    /// Marks the rows out of date; the next `ensure_file_rows` rebuilds them.
     fn rebuild_file_rows(&mut self) {
-        self.flattened_file_rows.clear();
-        flatten_files(&self.file_tree, 0, &mut self.flattened_file_rows);
+        self.rows_show_hidden = None;
+    }
+
+    /// Builds the rows again when the tree or the hidden-files setting has
+    /// changed since they were built. The one place rows are built, so the
+    /// debug record of built labels is taken here.
+    pub(super) fn ensure_file_rows(&mut self, show_hidden: bool) {
+        if self.rows_show_hidden == Some(show_hidden) {
+            return;
+        }
+        self.folded_rows = fold::build_rows(&self.file_tree, show_hidden);
+        self.rows_show_hidden = Some(show_hidden);
+        self.record_built_labels();
     }
 
     fn render_file_row(
@@ -553,13 +622,35 @@ impl RightPanel {
         selected: bool,
         file_focus: FocusHandle,
         repo_root: PathBuf,
+        row_bounds: facts::RowBounds,
     ) -> impl IntoElement {
-        let path = row.node.path.clone();
-        let is_dir = row.node.is_dir;
-        let name = row.node.name.clone();
-        let git_status = row.node.git_status;
-        let is_ignored = row.node.is_ignored;
-        let read_error = row.node.read_error.clone();
+        let path = row.path().to_path_buf();
+        let chain = row.chain.clone();
+        let folded = row.is_folded();
+        #[cfg(debug_assertions)]
+        let probe = Some(facts::row_probe(
+            &row_bounds,
+            FileRowFacts {
+                label: row.label.clone(),
+                path: facts::relative_slash(&repo_root, &path),
+                depth: row.depth,
+                is_dir: row.is_dir,
+                expanded: row.expanded,
+                selected,
+                status: row.git_status.map(|status| status.slug()),
+                bounds: None,
+            },
+        ));
+        #[cfg(not(debug_assertions))]
+        let probe = {
+            let _ = &row_bounds;
+            None::<gpui::Empty>
+        };
+        let is_dir = row.is_dir;
+        let name = row.label.clone();
+        let git_status = row.git_status;
+        let is_ignored = row.is_ignored;
+        let read_error = row.read_error.clone();
         // The marker's selector names both the row and the status it
         // resolved to, so a drawn test can assert that a directory holding a
         // conflict *and* a modification marks conflicted — the precedence is
@@ -580,7 +671,7 @@ impl RightPanel {
                 .replace(std::path::MAIN_SEPARATOR, "/");
             format!("file-status-{}-{relative}", status.slug())
         });
-        let expanded = row.node.expanded;
+        let expanded = row.expanded;
         let indent = row.depth as f32 * 20.0;
         let row_id = format!("file-{}", path.display());
         let click_path = path.clone();
@@ -598,6 +689,7 @@ impl RightPanel {
                     "file-row".to_owned()
                 }
             })
+            .relative()
             .h(px(ROW_HEIGHT))
             .w_full()
             .pl(px(6.0 + indent))
@@ -622,7 +714,7 @@ impl RightPanel {
                 entity.update(cx, |panel, cx| {
                     panel.select_file(click_path.clone(), cx);
                     if is_dir {
-                        panel.toggle_file(&click_path, cx);
+                        panel.toggle_row(&chain, cx);
                     } else if event.click_count >= 2 {
                         // Files follow the inventory's double-click contract;
                         // a single click only gives the row focus/hover.
@@ -682,7 +774,10 @@ impl RightPanel {
                     })
                     .flex_1()
                     .overflow_hidden()
-                    .text_ellipsis()
+                    // A folded name keeps its leaf readable: the start of the
+                    // chain is what gives way (spec §3.2).
+                    .when(folded, |this| this.text_ellipsis_start())
+                    .when(!folded, |this| this.text_ellipsis())
                     .child(name),
             )
             .when(read_error.is_some(), |this| {
@@ -716,6 +811,7 @@ impl RightPanel {
                     },
                 ))
             })
+            .children(probe)
     }
 
     fn select_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -730,38 +826,39 @@ impl RightPanel {
             self.close_file_context_menu(cx);
             return;
         }
-        let rows = self.file_rows(ShowHiddenFilesSetting::get(cx));
+        self.ensure_file_rows(ShowHiddenFilesSetting::get(cx));
+        let rows = self.folded_rows.clone();
         if rows.is_empty() {
             return;
         }
         let current = self
             .selected_path
             .as_ref()
-            .and_then(|path| rows.iter().position(|row| &row.node.path == path));
+            .and_then(|selected| rows.iter().position(|row| row.contains(selected)));
         match event.keystroke.key.as_str() {
             "down" => {
                 let index = current.map_or(0, |index| (index + 1).min(rows.len() - 1));
-                self.select_file(rows[index].node.path.clone(), cx);
+                self.select_file(rows[index].path().to_path_buf(), cx);
             }
             "up" => {
                 let index = current.unwrap_or(0).saturating_sub(1);
-                self.select_file(rows[index].node.path.clone(), cx);
+                self.select_file(rows[index].path().to_path_buf(), cx);
             }
             "space" => {
                 if let Some(index) = current {
-                    let row = &rows[index].node;
+                    let row = &rows[index];
                     if row.is_dir {
-                        self.toggle_file(&row.path.clone(), cx);
+                        self.toggle_row(&row.chain, cx);
                     }
                 }
             }
             "enter" | "return" => {
                 if let Some(index) = current {
-                    let row = &rows[index].node;
+                    let row = &rows[index];
                     if row.is_dir {
-                        self.toggle_file(&row.path.clone(), cx);
+                        self.toggle_row(&row.chain, cx);
                     } else {
-                        self.open_file(row.path.clone(), cx);
+                        self.open_file(row.path().to_path_buf(), cx);
                     }
                 }
             }
@@ -779,7 +876,7 @@ impl RightPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let show_hidden = ShowHiddenFilesSetting::get(cx);
-        let rows = self.file_rows(show_hidden);
+        let rows = self.file_rows().to_vec();
         let row_entity = entity.clone();
         let file_focus = self
             .file_focus
@@ -789,6 +886,9 @@ impl RightPanel {
         let selected_path = self.selected_path.clone();
         let processor_focus = file_focus.clone();
         let repo_root = self.repo_root.clone();
+        let row_bounds = self.file_row_bounds.clone();
+        self.drawn_refreshes.set(self.refreshes_landed);
+        let hidden_switch_bounds = self.hidden_switch_bounds.clone();
         // The Files view has no toolbar of its own. The row it used to
         // hold showed the checkout path — which the sidebar already
         // names — and its bottom border stacked a second hairline
@@ -800,8 +900,8 @@ impl RightPanel {
         // — see the `settled` field. A refresh over a settled panel happens
         // in place: whatever the panel was truthfully showing stays on
         // screen until the new walk lands, which is the same rule
-        // `preserve_expansion` above already applies to expansion state and
-        // the same rule `ChangesTab::render_body` applies to its own 1 s
+        // `listing::carry_open_state` applies to expansion state and the
+        // same rule `ChangesTab::render_body` applies to its own 1 s
         // poll.
         let body = if !self.settled {
             div()
@@ -872,9 +972,10 @@ impl RightPanel {
                                 row.clone(),
                                 row_entity.clone(),
                                 theme,
-                                selected_path.as_ref() == Some(&row.node.path),
+                                selected_path.as_ref().is_some_and(|selected| row.contains(selected)),
                                 processor_focus.clone(),
                                 repo_root.clone(),
+                                row_bounds.clone(),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -919,7 +1020,7 @@ impl RightPanel {
                 this.child(files_refresh_indicator(window, cx))
             })
             .child(body)
-            .child(hidden_files_switch(show_hidden, entity, theme))
+            .child(hidden_files_switch(show_hidden, entity, theme, &hidden_switch_bounds))
             .into_any_element()
     }
 }
@@ -928,6 +1029,7 @@ fn hidden_files_switch(
     show_hidden: bool,
     entity: gpui::Entity<RightPanel>,
     theme: Theme,
+    switch_bounds: &facts::BoundsCell,
 ) -> impl IntoElement {
     // Singola icona toggle: mostra Eye (mostra nascosti) quando sono nascosti,
     // EyeOff (nascondi nascosti) quando sono visibili. L'icona rappresenta
@@ -956,6 +1058,7 @@ fn hidden_files_switch(
             !show_hidden,
             entity,
             theme,
+            facts::cell_probe(switch_bounds),
         ))
 }
 
@@ -967,10 +1070,12 @@ fn hidden_files_option(
     show_hidden: bool,
     entity: gpui::Entity<RightPanel>,
     theme: Theme,
+    probe: Option<impl IntoElement>,
 ) -> impl IntoElement {
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
+        .relative()
         .w(px(28.0))
         .h(px(24.0))
         .flex()
@@ -986,6 +1091,7 @@ fn hidden_files_option(
             entity.update(cx, |_, cx| cx.notify());
         })
         .child(IconElement::new(icon, IconSize::Small))
+        .children(probe)
 }
 
 fn files_refresh_indicator(window: &mut Window, cx: &mut App) -> AnyElement {
@@ -1088,6 +1194,17 @@ fn path_is_within(root: &Path, path: &Path) -> bool {
 }
 
 fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<FileNode>, String> {
+    Ok(read_listing(root, directory, markers, None)?.unwrap_or_default())
+}
+
+/// [`read_tree`] with an optional bound: past `limit` entries the read stops
+/// (before any node is built) and returns `Ok(None)`.
+fn read_listing(
+    root: &Path,
+    directory: &Path,
+    markers: &GitMarkers,
+    limit: Option<usize>,
+) -> Result<Option<Vec<FileNode>>, String> {
     if !path_is_within(root, directory) {
         return Err(format!(
             "refusing to read {} outside file-tree root {}",
@@ -1096,8 +1213,18 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
         ));
     }
     let entries = std::fs::read_dir(directory).map_err(|error| error.to_string())?;
+    let entries: Vec<std::fs::DirEntry> = match limit {
+        Some(limit) => {
+            let held: Vec<_> = entries.filter_map(Result::ok).take(limit + 1).collect();
+            if held.len() > limit {
+                return Ok(None);
+            }
+            held
+        }
+        None => entries.filter_map(Result::ok).collect(),
+    };
     let mut nodes = entries
-        .filter_map(Result::ok)
+        .into_iter()
         .filter_map(|entry| {
             let path = entry.path();
             if path.file_name().is_some_and(|name| name == ".git") {
@@ -1116,6 +1243,8 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
                 expanded: false,
                 read_error: None,
                 children: Vec::new(),
+                loaded: false,
+                children_resolved: false,
             })
         })
         .collect::<Vec<_>>();
@@ -1128,43 +1257,7 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
     nodes.sort_by(|left, right| {
         sirio_project::compare_file_tree_names(left.is_dir, &left.name, right.is_dir, &right.name)
     });
-    Ok(nodes)
-}
-
-/// Carries a matching old node's `expanded` flag and already-loaded
-/// `children` forward onto a freshly-walked node at the same path. The
-/// periodic root-level refresh only re-lists the immediate directory, so it
-/// has no fresher data for a subdirectory's own contents; without this, the
-/// blind replacement in `refresh()` silently collapsed every expanded
-/// folder on the next 1s tick.
-fn preserve_expansion(old: &[FileNode], new: Vec<FileNode>) -> Vec<FileNode> {
-    let old_by_path: HashMap<(&Path, bool), &FileNode> = old
-        .iter()
-        .map(|node| ((node.path.as_path(), node.is_dir), node))
-        .collect();
-    new.into_iter()
-        .map(|mut node| {
-            if let Some(old_node) = old_by_path.get(&(node.path.as_path(), node.is_dir))
-                && old_node.expanded
-            {
-                node.expanded = true;
-                node.children = old_node.children.clone();
-            }
-            node
-        })
-        .collect()
-}
-
-fn flatten_files(nodes: &[FileNode], depth: usize, rows: &mut Vec<FileRow>) {
-    for node in nodes {
-        rows.push(FileRow {
-            node: node.clone(),
-            depth,
-        });
-        if node.is_dir && node.expanded {
-            flatten_files(&node.children, depth + 1, rows);
-        }
-    }
+    Ok(Some(nodes))
 }
 
 pub(super) fn collect_expanded(nodes: &[FileNode]) -> Vec<PathBuf> {
@@ -1279,20 +1372,19 @@ mod tests {
     }
 
     /// Pumps the test executors until `condition` holds or the budget is
-    /// exhausted (a real filesystem walk completes on a real thread).
-    /// Pumps the test executors until `condition` holds or the budget is
-    /// exhausted (a real filesystem walk completes on a real thread). The
-    /// budget mirrors the F-CHG-09 drawn-test pattern: generous enough that
-    /// a state landing late under parallel CI load still passes, and a
-    /// failure is a real failure, never a timing-luck win.
+    /// exhausted. The budget mirrors the F-CHG-09 drawn-test pattern: generous
+    /// enough that a state landing late under parallel CI load still passes,
+    /// and a failure is a real failure, never a timing-luck win.
     fn pump_until(cx: &TestAppContext, mut condition: impl FnMut() -> bool) {
         cx.executor().allow_parking();
         for _ in 0..600 {
             if condition() {
                 return;
             }
-            // Advance the virtual clock so the panel's own 1s refresh timer
-            // fires; the walk itself completes on a real thread.
+            // Advance the virtual clock: the test scheduler runs every task
+            // and timer that comes due on this thread (the refresh debounce,
+            // the background walk and its landing); `run_until_parked` then
+            // drains whatever they queued.
             cx.executor()
                 .advance_clock(std::time::Duration::from_secs(1));
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1326,6 +1418,9 @@ mod tests {
         let dir = TempDir::new();
         let subdir = dir.0.join("subdir");
         seed_dir_with_files(&subdir, 2000);
+        // A folder inside it keeps it unresolved (the loader has not read
+        // that folder's own listing), so opening it still walks.
+        std::fs::create_dir_all(subdir.join("inner")).expect("create the inner folder");
 
         let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
         panel.update(cx, |panel, cx| panel.refresh(cx));
@@ -1335,7 +1430,7 @@ mod tests {
             })
         });
 
-        panel.update(cx, |panel, cx| panel.toggle_file(&subdir, cx));
+        panel.update(cx, |panel, cx| panel.toggle_row(&[subdir.clone()], cx));
 
         // The observable consequence of the fix: the call returns before
         // the tree has been populated — the expansion must not perform the
@@ -1344,18 +1439,174 @@ mod tests {
             let node = find_node(&panel.file_tree, &subdir).expect("subdir node");
             assert!(node.expanded, "the folder toggles open immediately");
             assert!(
-                node.children.is_empty(),
+                !node.children_resolved,
                 "children must arrive asynchronously, not during the click handler"
             );
+        });
+        cx.update(|app| {
+            panel.update(app, |panel, _| {
+                panel.ensure_file_rows(false);
+                assert_eq!(
+                    panel.file_rows().len(),
+                    1,
+                    "nothing is drawn beneath the folder until its walk lands"
+                );
+            })
         });
 
         // …and the tree arrives afterwards, once the walk completes.
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| {
                 find_node(&panel.file_tree, &subdir)
-                    .map(|node| node.children.len())
-                    .unwrap_or(0)
-                    == 2000
+                    .is_some_and(|node| node.children_resolved && node.children.len() == 2001)
+            })
+        });
+    }
+
+    #[gpui::test]
+    async fn a_refresh_asked_for_during_a_walk_still_runs(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let subdir = dir.0.join("subdir");
+        seed_dir_with_files(&subdir, 200);
+        std::fs::create_dir_all(subdir.join("inner")).expect("create the inner folder");
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                find_node(&panel.file_tree, &subdir).is_some()
+            })
+        });
+
+        panel.update(cx, |panel, cx| {
+            panel.toggle_row(&[subdir.clone()], cx);
+            assert!(panel.walk_task.is_some(), "the open's walk is in flight");
+            // A direct refresh (the menu's Refresh, a retry) is declined
+            // while the walk runs; it must be remembered, not lost.
+            panel.refresh(cx);
+        });
+        let late = dir.0.join("late.txt");
+        std::fs::write(&late, "x").expect("write the late file");
+
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| find_node(&panel.file_tree, &late).is_some())
+        });
+    }
+
+    #[gpui::test]
+    async fn a_walk_that_folds_deeper_keeps_the_users_open(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        // Over the lookahead cap, so no folder is read until it is opened.
+        for index in 0..=listing::LOOKAHEAD_DIR_CAP {
+            std::fs::create_dir_all(dir.0.join(format!("d{index:03}"))).expect("create a folder");
+        }
+        let scope = dir.0.join("scope");
+        std::fs::create_dir_all(scope.join("pkg/lib")).expect("create the scope");
+        std::fs::write(scope.join("pkg/index.js"), "x").expect("write index.js");
+        std::fs::write(scope.join("pkg/lib/x.js"), "x").expect("write x.js");
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| find_node(&panel.file_tree, &scope).is_some())
+        });
+
+        panel.update(cx, |panel, cx| panel.toggle_row(&[scope.clone()], cx));
+        pump_until(cx, || {
+            cx.update(|app| {
+                panel.update(app, |panel, _| {
+                    panel.ensure_file_rows(false);
+                    panel.file_rows().iter().any(|row| row.label == "index.js")
+                })
+            })
+        });
+        cx.update(|app| {
+            panel.update(app, |panel, _| {
+                panel.ensure_file_rows(false);
+                let rows = panel.file_rows();
+                let at = rows
+                    .iter()
+                    .position(|row| row.label == "scope / pkg")
+                    .expect("the walk's listing folds into one row");
+                assert!(rows[at].expanded, "the open the user asked for survives the fold");
+                let below: Vec<(&str, usize)> = rows[at + 1..]
+                    .iter()
+                    .take(2)
+                    .map(|row| (row.label.as_str(), row.depth))
+                    .collect();
+                assert_eq!(
+                    below,
+                    [("lib", rows[at].depth + 1), ("index.js", rows[at].depth + 1)]
+                );
+            })
+        });
+    }
+
+    #[gpui::test]
+    async fn a_close_during_a_refresh_stays_closed(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        std::fs::create_dir_all(dir.0.join("w/c")).expect("create the chain");
+        std::fs::write(dir.0.join("w/c/f.txt"), "x").expect("write f.txt");
+        std::fs::write(dir.0.join("other.txt"), "x").expect("write other.txt");
+        let chain = vec![dir.0.join("w"), dir.0.join("w/c")];
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| find_node(&panel.file_tree, &chain[1]).is_some())
+        });
+        panel.update(cx, |panel, cx| panel.toggle_row(&chain, cx));
+        let landed = panel.read_with(cx, |panel, _| panel.refreshes_landed);
+
+        // The refresh starts with the row open and lands after it was closed.
+        panel.update(cx, |panel, cx| {
+            panel.refresh(cx);
+            assert!(panel.refresh_started);
+            panel.toggle_row(&chain, cx);
+        });
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| panel.refreshes_landed > landed)
+        });
+        cx.update(|app| {
+            panel.update(app, |panel, _| {
+                panel.ensure_file_rows(false);
+                let rows = panel.file_rows();
+                let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+                assert_eq!(labels, ["w / c", "other.txt"], "the closed row draws no children");
+                assert!(!rows[0].expanded);
+            })
+        });
+    }
+
+    #[gpui::test]
+    async fn a_dropped_walk_does_not_leave_its_folder_empty(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let first = dir.0.join("first");
+        let second = dir.0.join("second");
+        for folder in [&first, &second] {
+            seed_dir_with_files(folder, 50);
+            std::fs::create_dir_all(folder.join("inner")).expect("create the inner folder");
+        }
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                find_node(&panel.file_tree, &first).is_some()
+                    && find_node(&panel.file_tree, &second).is_some()
+            })
+        });
+
+        // The second open drops the first's walk.
+        panel.update(cx, |panel, cx| panel.toggle_row(&[first.clone()], cx));
+        panel.update(cx, |panel, cx| panel.toggle_row(&[second.clone()], cx));
+
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| {
+                [&first, &second].iter().all(|folder| {
+                    find_node(&panel.file_tree, folder)
+                        .is_some_and(|node| node.expanded && node.children_resolved)
+                })
             })
         });
     }
@@ -1379,7 +1630,7 @@ mod tests {
             })
         });
 
-        panel.update(cx, |panel, cx| panel.toggle_file(&subdir, cx));
+        panel.update(cx, |panel, cx| panel.toggle_row(&[subdir.clone()], cx));
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| {
                 find_node(&panel.file_tree, &subdir)
@@ -1481,7 +1732,7 @@ mod tests {
         panel.update(cx, |panel, cx| {
             panel.refresh(cx);
             assert!(panel.refresh_started, "the root refresh is still loading");
-            panel.toggle_file(&folder, cx);
+            panel.toggle_row(&[folder.clone()], cx);
         });
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| !panel.refresh_started)
@@ -1501,6 +1752,9 @@ mod tests {
         let second = dir.0.join("second");
         seed_dir_with_files(&first, 100);
         seed_dir_with_files(&second, 100);
+        // A folder inside each keeps it unresolved, so opening it walks.
+        std::fs::create_dir_all(first.join("inner")).expect("create the inner folder");
+        std::fs::create_dir_all(second.join("inner")).expect("create the inner folder");
 
         let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
         panel.update(cx, |panel, cx| panel.refresh(cx));
@@ -1513,27 +1767,36 @@ mod tests {
 
         // Expand the first folder, then immediately the second: the first
         // walk is superseded and its result must not land late.
-        panel.update(cx, |panel, cx| panel.toggle_file(&first, cx));
-        panel.update(cx, |panel, cx| panel.toggle_file(&second, cx));
+        let landed_before = panel.read_with(cx, |panel, _| panel.refreshes_landed);
+        panel.update(cx, |panel, cx| panel.toggle_row(&[first.clone()], cx));
+        panel.update(cx, |panel, cx| panel.toggle_row(&[second.clone()], cx));
 
-        pump_until(cx, || {
-            panel.read_with(cx, |panel, _| {
+        // Drive the walks to their landing without advancing the clock: the
+        // read runs on a real thread, but the 300 ms debounce of the refresh
+        // a dropped walk asks for stays pending, so nothing but a walk's own
+        // landing can resolve `first` here.
+        cx.executor().allow_parking();
+        for _ in 0..600 {
+            cx.run_until_parked();
+            let landed = panel.read_with(cx, |panel, _| {
                 find_node(&panel.file_tree, &second)
-                    .map(|node| node.children.len())
-                    .unwrap_or(0)
-                    == 100
-            })
-        });
+                    .is_some_and(|node| node.children_resolved && node.children.len() == 101)
+            });
+            if landed {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         panel.read_with(cx, |panel, _| {
             let first_node = find_node(&panel.file_tree, &first).expect("first node");
             let second_node = find_node(&panel.file_tree, &second).expect("second node");
-            assert_eq!(
-                first_node.children.len(),
-                0,
+            assert_eq!(panel.refreshes_landed, landed_before, "no refresh has run yet");
+            assert!(
+                !first_node.children_resolved,
                 "the superseded walk's result must not be applied over the newer one"
             );
-            assert_eq!(second_node.children.len(), 100);
+            assert_eq!(second_node.children.len(), 101);
         });
     }
 
@@ -1556,21 +1819,17 @@ mod tests {
         std::fs::create_dir_all(&locked).expect("create dir");
         std::fs::write(locked.join("secret.txt"), "x").expect("write file");
 
-        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
-        panel.update(cx, |panel, cx| panel.refresh(cx));
-        pump_until(cx, || {
-            panel.read_with(cx, |panel, _| {
-                find_node(&panel.file_tree, &locked).is_some()
-            })
-        });
-
+        // Locked before the first load: the loader reads each child folder
+        // ahead of the user, so it records the failure on the row at load,
+        // with no click needed.
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
                 .expect("lock the directory");
         }
 
-        panel.update(cx, |panel, cx| panel.toggle_file(&locked, cx));
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
 
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| {
@@ -2360,9 +2619,14 @@ mod tests {
         git(dir, &["config", "commit.gpgSign", "false"]);
         for (relative, contents) in [
             ("src/app/deep/mod.rs", "mod deep;\n"),
+            // A committed file beside each single-folder chain, so no row
+            // folds: this test proves every ancestor carries its own marker.
+            ("src/app/mod.rs", "mod app;\n"),
+            ("docs/README.md", "docs\n"),
             ("docs/guide/readme.md", "guide\n"),
             ("conflict/dir/file.txt", "base\n"),
             ("conflict/also_mod.txt", "base\n"),
+            ("move/keep.txt", "keep\n"),
             ("move/from/orig.txt", "moving\n"),
         ] {
             let path = dir.join(relative);
@@ -2480,11 +2744,14 @@ mod tests {
             .expect("the rename source directory is drawn");
         cx.simulate_click(source.center(), Modifiers::none());
         pump_until(&cx.cx, || {
-            panel.read_with(&cx.cx, |panel, _| {
-                panel
-                    .file_rows(false)
-                    .iter()
-                    .any(|row| row.node.name == "from" && row.depth == 1)
+            cx.cx.update(|app| {
+                panel.update(app, |panel, _| {
+                    panel.ensure_file_rows(false);
+                    panel
+                        .file_rows()
+                        .iter()
+                        .any(|row| row.label == "from" && row.depth == 1)
+                })
             })
         });
         cx.cx.run_until_parked();
@@ -2507,12 +2774,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("{marker} is drawn"));
             cx.simulate_click(row.center(), Modifiers::none());
             pump_until(&cx.cx, || {
-                panel.read_with(&cx.cx, |panel, _| {
-                    let wanted = panel.repo_root.join(opened);
-                    panel
-                        .file_rows(false)
-                        .iter()
-                        .any(|row| row.node.path == wanted)
+                cx.cx.update(|app| {
+                    panel.update(app, |panel, _| {
+                        let wanted = panel.repo_root.join(opened);
+                        panel.ensure_file_rows(false);
+                        panel.file_rows().iter().any(|row| row.path() == wanted)
+                    })
                 })
             });
             cx.cx.run_until_parked();
@@ -2545,11 +2812,11 @@ mod tests {
             .expect("the conflicted directory is drawn");
         cx.simulate_click(conflict.center(), Modifiers::none());
         pump_until(&cx.cx, || {
-            panel.read_with(&cx.cx, |panel, _| {
-                panel
-                    .file_rows(false)
-                    .iter()
-                    .any(|row| row.node.name == "also_mod.txt")
+            cx.cx.update(|app| {
+                panel.update(app, |panel, _| {
+                    panel.ensure_file_rows(false);
+                    panel.file_rows().iter().any(|row| row.label == "also_mod.txt")
+                })
             })
         });
         cx.cx.run_until_parked();
