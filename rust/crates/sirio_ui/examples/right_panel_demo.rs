@@ -25,7 +25,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     appears_transparent: false,
-                    traffic_light_position: Some(point(px(12.0), px(12.0))),
+                    traffic_light_position: Some(point(px(12.0), px(10.0))),
                     ..Default::default()
                 }),
                 ..Default::default()

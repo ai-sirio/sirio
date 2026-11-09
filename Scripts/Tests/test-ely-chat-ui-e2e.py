@@ -852,7 +852,7 @@ def pane_difference(run: Run, before: Path, after: Path) -> int:
     width, height = (int(v) for v in subprocess.run(
         ["identify", "-format", "%w %h", str(before)], capture_output=True, text=True, check=True
     ).stdout.split())
-    crop = f"{int(width * 0.25)}x{int(height * 0.40)}+{int(width * 0.195)}+{int(height * 0.12)}"
+    crop = f"{int(width * 0.25)}x{int(height * 0.40)}+{int(width * 0.215)}+{int(height * 0.12)}"
     cuts = []
     for index, frame in enumerate((before, after)):
         cut = run.work / f"pane-{index}.png"
@@ -1025,37 +1025,39 @@ def effort_full_light(run: Run) -> None:
 
 
 # Fractions of a frame (x, y, width, height). The transcript column from the top of the list down
-# to just above the composer card, with the thinking orb at its foot. The thinking row carries no
-# elapsed-seconds label in this build (none appeared in 15 s of a turn), so nothing in the region
-# needs masking; a build that draws one must mask it here, or `reduced_motion` breaks every time a
-# second ticks over.
-TRANSCRIPT_REGION = (0.228, 0.12, 0.52, 0.635)
+# to just above the composer card, with the thinking orb at its foot. Measured on the 1470x833
+# frames: the orb moves at x 376-470, y 642-679 (spin frames), the band's rule is at y 683, and the
+# region is x 367-1145, y 94-680, so it holds the whole orb and stops above the rule. The thinking
+# row carries no elapsed-seconds label in this build (none appeared in 15 s of a turn), so nothing
+# in the region needs masking; a build that draws one must mask it here, or `reduced_motion` breaks
+# every time a second ticks over.
+TRANSCRIPT_REGION = (0.25, 0.113, 0.53, 0.705)
 # The sidebar row's status bloom, the ring glyph that stands where the row's status word was, in
 # pixels of the default 1470x833 window (the sidebar is a fixed-width column, so it does not move
-# with the window's size): the 14 px glyph centred at (265, 199), with a margin. `unfocused_spinner`
+# with the window's size): the 14 px glyph centred at (291, 200), with a margin. `unfocused_spinner`
 # judges this and not the transcript, see there.
-SIDEBAR_BLOOM = "32x30+250+184"
+SIDEBAR_BLOOM = "32x30+275+185"
 # The slash popup's box: the three command rows hung above the composer band, which starts below.
 # Measured on the 1470x833 frames `composer_keys` writes (`before-slash.png`, `slash-popup.png`): the
-# popup is the box x 360-640, y 571-664 (the pixels that differ between the two frames above the band,
-# which starts at y 673), and the region is that box with 4 px around it, as fractions of the frame.
-POPUP_REGION = (0.2422, 0.6807, 0.196, 0.1213)
+# popup is the box x 410-690, y 580-673 (the pixels that differ between the two frames above the band,
+# which starts at y 683), and the region is that box with 4 px around it, as fractions of the frame.
+POPUP_REGION = (0.2762, 0.6927, 0.196, 0.1213)
 # Where a click lands in the composer band, in window pixels from the bottom edge and as a fraction
 # of the width: the field's second row, in the chat column. Measured on the 1470x833 frame
-# (`composer-band/frames/default.png`): the band is y 673-788, the field y 683-747 (the rule, 10 px
-# of padding, 5 px of field padding, three 18 px rows), so y 715 is its middle, 118 px from the
-# bottom; x 716 is the chat column's middle (the chat pane is x 289-1141).
-COMPOSER_CLICK = (0.487, 118)
+# (`composer-band/frames/default.png`): the band is y 683-798, the field y 693-757 (the rule, 10 px
+# of padding, 5 px of field padding, three 18 px rows), so y 725 is its middle, 108 px from the
+# bottom; x 765 is the chat column's middle (the chat pane is x 309-1221).
+COMPOSER_CLICK = (0.52, 108)
 # Where the composer's field must paint nothing, in pixels of the default 1470x833 window as an
 # ImageMagick `WxH+X+Y`: a band on the field's second and third rows (the first holds the placeholder
 # and the caret) across its whole width and 8 pixels of the band's padding to each side, so that a
 # frame drawn on the field's edge lies inside it; and the band's own padding just left of the field
 # on the same rows. `composer_field_has_no_fill` compares the two. Measured on the same frame: the
-# content column is 712 px wide (BAND_COLUMN), centred in the 852 px chat pane, so the field is
-# x 359-1071; its rows are y 688-706, 706-724 and 724-742, and the crops sit in 710-738.
+# content column is 712 px wide (BAND_COLUMN), centred in the 912 px chat pane, so the field is
+# x 409-1121; its rows are y 698-716, 716-734 and 734-752, and the crops sit in 720-748.
 DEFAULT_WINDOW = "1470x833"
-FIELD_BAND = "728x28+351+710"
-BAND_BESIDE_FIELD = "8x28+349+710"
+FIELD_BAND = "728x28+401+720"
+BAND_BESIDE_FIELD = "8x28+399+720"
 
 
 def crop_difference(run: Run, before: Path, after: Path, crop: str, tolerance: int = 0) -> int:

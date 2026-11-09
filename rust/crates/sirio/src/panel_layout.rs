@@ -32,7 +32,7 @@ impl PanelSide {
 }
 
 /// Narrowest **one centre pane** may get before the side panels start
-/// yielding. `MIN_SPLIT_PANE_SIZE` (160, `main.rs:3339`) is the comparable
+/// yielding. `MIN_SPLIT_PANE_SIZE` (160, in `main.rs`) is the comparable
 /// floor for terminal splits; a centre pane carries a whole tab strip above a
 /// terminal, so it gets twice that.
 ///
@@ -72,9 +72,10 @@ pub(crate) fn resolve_center_split(
     let usable = (center_width - divider).max(0.0);
     let ratio = (ratio_millis as f32 / 1000.0).clamp(0.0, 1.0);
     // Too narrow for two floors: both go under together, keeping their ratio.
-    // That is the side panels' own no-drag rule. The Secondary pane is never
-    // auto-hidden to make room — that would take the user's tabs off screen
-    // without being asked.
+    // The side panels never go under theirs: when the window is too small they
+    // sit at their floors and the centre absorbs the rest, which is how it can
+    // arrive here too narrow. The Secondary pane is never auto-hidden to make
+    // room — that would take the user's tabs off screen without being asked.
     if usable < MIN_CENTER_PANE_WIDTH * 2.0 {
         let primary = usable * ratio;
         return (primary, Some(usable - primary));
@@ -160,7 +161,11 @@ pub(crate) fn resolve_panel_widths(
             ((budget - held).max(left_floor), held)
         }
         // No drag: the window shrank under them. Neither is "the one being
-        // touched", so they scale together and keep their ratio.
+        // touched", so they scale together and keep their ratio. A panel
+        // lifted to its floor takes more than its share, so the other one
+        // gives that back (down to its own floor, never above its
+        // preference); otherwise the pair would overrun the budget and
+        // squeeze the centre under its floor.
         None => {
             let requested = left + right;
             let scale = if requested > 0.0 {
@@ -168,10 +173,17 @@ pub(crate) fn resolve_panel_widths(
             } else {
                 0.0
             };
-            (
-                (left * scale).max(left_floor),
-                (right * scale).max(right_floor),
-            )
+            let (scaled_left, scaled_right) = (left * scale, right * scale);
+            let (mut left_out, mut right_out) =
+                (scaled_left.max(left_floor), scaled_right.max(right_floor));
+            if left_out + right_out > budget {
+                if scaled_right < right_floor {
+                    left_out = (budget - right_out).clamp(left_floor, left.max(left_floor));
+                } else if scaled_left < left_floor {
+                    right_out = (budget - left_out).clamp(right_floor, right.max(right_floor));
+                }
+            }
+            (left_out, right_out)
         }
     };
 
@@ -242,6 +254,45 @@ mod tests {
 
         assert_eq!(left, Some(332.0));
         assert_eq!(right, Some(332.0));
+    }
+
+    /// When the scaled right panel falls under its floor and is lifted to
+    /// it, the left one must not keep its scaled width: together they would
+    /// overrun the budget and squeeze the centre under its floor.
+    #[test]
+    fn without_a_drag_a_floored_panel_leaves_the_rest_to_the_other() {
+        let (left, right) = resolve_panel_widths(
+            1100.0,
+            Some(300.0),
+            Some(240.0),
+            None,
+            4.0,
+            4.0,
+            MIN_CENTER_PANE_WIDTH * 2.0 + 1.0,
+        );
+
+        // budget = 1100 - 8 - 8 - 641 = 443; the right panel floors at 220.
+        assert_eq!(left, Some(223.0));
+        assert_eq!(right, Some(220.0));
+    }
+
+    /// The mirror: the scaled left panel falls under its floor, and the right
+    /// one gives back what the lift cost.
+    #[test]
+    fn without_a_drag_a_floored_left_panel_leaves_the_rest_to_the_right() {
+        let (left, right) = resolve_panel_widths(
+            1100.0,
+            Some(300.0),
+            Some(640.0),
+            None,
+            4.0,
+            4.0,
+            MIN_CENTER_PANE_WIDTH * 2.0 + 1.0,
+        );
+
+        // budget = 443; the left panel floors at 220, the right takes 443 - 220.
+        assert_eq!(left, Some(220.0));
+        assert_eq!(right, Some(223.0));
     }
 
     /// The yielding panel stops at the low end of its own settings range
@@ -316,8 +367,9 @@ mod tests {
     }
 
     /// Too narrow for two floors: both go under together and keep their
-    /// ratio, the same rule the side panels follow when the window shrinks
-    /// under them. Neither pane is hidden to make the other fit.
+    /// ratio. The side panels never go under their own floors, so this is
+    /// the centre absorbing a window too small for everything. Neither pane
+    /// is hidden to make the other fit.
     #[test]
     fn a_centre_too_small_for_both_floors_shrinks_both_and_keeps_the_ratio() {
         let (primary, secondary) = resolve_center_split(501.0, 600, true, 1.0);

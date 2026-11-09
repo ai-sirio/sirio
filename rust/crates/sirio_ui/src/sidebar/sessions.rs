@@ -604,8 +604,8 @@ impl Sidebar {
             .relative()
             .w_full()
             .h(px(Self::row_drawn_height_for_card(&theme.typography)))
-            .px(px(12.0))
-            .py(px(7.0))
+            .px(px(ROW_PAD_X))
+            .py(px(ROW_PAD_Y))
             .flex()
             .flex_col()
             .justify_center()
@@ -613,9 +613,6 @@ impl Sidebar {
             .when(row.selected, |this| this.bg(theme.ely.active))
             .when(!row.selected, |this| this.hover(|style| style.bg(theme.ely.hover)))
             .when(cursor, |this| this.border_1().border_color(theme.sirio.quantity))
-            .when(row.unread, |this| {
-                this.child(Self::unread_dot(format!("{prefix}-unread-dot-{index}"), &theme))
-            })
             .on_click(move |_, window, cx| {
                 let event = match &select_target {
                     SessionTarget::Open(id) => SidebarEvent::SelectTab(*id),
@@ -637,11 +634,18 @@ impl Sidebar {
             })
             .child(
                 div()
+                    .relative()
                     .w_full()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
                     .line_height(Self::title_line_height(&theme.typography))
+                    .when(row.unread, |this| {
+                        this.child(Self::unread_dot(
+                            format!("{prefix}-unread-dot-{index}"),
+                            &theme,
+                        ))
+                    })
                     .child(
                         div()
                             .w(px(16.0))
@@ -717,8 +721,8 @@ impl Sidebar {
                         .id(("closed-session-confirm", index))
                         .debug_selector(move || format!("{prefix}-confirm-{index}"))
                         .absolute()
-                        .right(px(10.0))
-                        .bottom(px(4.0))
+                        .right(px(ROW_PAD_X - 2.0))
+                        .bottom(px(ROW_PAD_Y - 3.0))
                         .px(px(6.0))
                         .rounded(theme.radii.chip)
                         .bg(theme.ely.surface)
@@ -743,8 +747,8 @@ impl Sidebar {
                         .id(("closed-session-delete", index))
                         .debug_selector(move || format!("{prefix}-delete-{index}"))
                         .absolute()
-                        .right(px(10.0))
-                        .bottom(px(5.0))
+                        .right(px(ROW_PAD_X - 2.0))
+                        .bottom(px(ROW_PAD_Y - 2.0))
                         .w(px(18.0))
                         .h(px(18.0))
                         .flex()
@@ -776,8 +780,8 @@ impl Sidebar {
                             .id(("session-close", index))
                             .debug_selector(move || format!("{prefix}-close-{index}"))
                             .absolute()
-                            .right(px(10.0))
-                            .bottom(px(5.0))
+                            .right(px(ROW_PAD_X - 2.0))
+                            .bottom(px(ROW_PAD_Y - 2.0))
                             .w(px(18.0))
                             .h(px(18.0))
                             .flex()

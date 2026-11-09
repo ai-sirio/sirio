@@ -300,6 +300,7 @@ mod panes;
 mod primary_rail;
 mod session;
 mod shell_chrome;
+mod shell_rects;
 mod tab_machinery;
 #[allow(dead_code)] // Parked transition seam; main.rs remains synchronous for now.
 mod worktree_transition;
@@ -663,10 +664,18 @@ fn close_tab_fallback_fires(
     is_linux && modifiers.control && !modifiers.shift && !terminal_focused
 }
 
-/// Fixed panel geometry, measured off the frozen reference shots — see
-/// `docs/MEASURED.md`.
-const STATUS_BAR_HEIGHT: f32 = 40.;
-const TAB_BAR_HEIGHT: f32 = 34.;
+/// Fixed bar heights, Zed's factory layout — see §3.2 of
+/// `docs/superpowers/specs/2026-11-08-zed-layout-parity-design.md`.
+const STATUS_BAR_HEIGHT: f32 = 30.;
+/// The tab strip, hairline included; the `TabBar` inside is one less.
+const TAB_BAR_HEIGHT: f32 = 32.;
+
+/// The top that centres a strip button (one `titlebar_control_frame` tall) in
+/// the strip's content box, the strip less its inside hairline.
+fn strip_control_top(theme: &Theme) -> gpui::Pixels {
+    (px(TAB_BAR_HEIGHT - 1.0) - theme.spacing.titlebar_control_frame.height) / 2.0
+}
+
 /// #320: the rule between the two center panes.
 const CENTER_DIVIDER_WIDTH: f32 = 1.;
 const CHAT_TAB_MIN_WIDTH: f32 = 108.;
@@ -5714,6 +5723,9 @@ struct SirioWorkspace {
     /// `railRects` read. `Rc` because the paint closures that record them must
     /// be `'static`.
     rail_rects: Rc<primary_rail::RailRects>,
+    /// The shell's drawn rectangles from their last paint, for the debug
+    /// `shellRects` read.
+    shell_rects: Rc<shell_rects::ShellRects>,
     /// The tab the rail's peek shows (spec 2026-11-01-primary-rail §5), by
     /// tab id. Closed with `close`, never `begin_close`: a dying card would
     /// keep painting a live terminal after focus moved on.
@@ -7179,6 +7191,7 @@ impl SirioWorkspace {
             primary_pane_collapsed: persisted_primary_pane_collapsed && secondary_visible_at_boot,
             drawn_center_widths: std::cell::Cell::new((0.0, 0.0)),
             rail_rects: Rc::default(),
+            shell_rects: Rc::default(),
             primary_peek: sirio_ui::popup::Popup::default(),
             peek_focus_pending: false,
             center_drag_anchor: None,
@@ -22830,6 +22843,51 @@ impl SirioWorkspace {
                 })
                 .to_string(),
             ));
+            // The shell's drawn rects `[x, y, w, h]`, null while one is not
+            // drawn. The columns' cells are cleared by `columns()` and the
+            // settings branch; the sidebar's and the right panel's own
+            // probes live in their entities, so they follow `left` / `right`
+            // (null whenever that panel was not drawn in the last frame).
+            let rects = &self.shell_rects;
+            // Gated on the last frame, not on current state: a panel just
+            // re-shown still holds the rects of before it was hidden.
+            let sidebar_drawn = rects.left.get().is_some();
+            let right_drawn = rects.right.get().is_some();
+            let (sidebar_section, sidebar_card) = if sidebar_drawn {
+                self.sidebar.read(cx).probe_bounds()
+            } else {
+                (None, None)
+            };
+            let right_panel = self.right_panel.read(cx);
+            let (right_header, right_header_icon) = if right_drawn {
+                (
+                    right_panel.header_bounds(),
+                    right_panel.last_header_icon_bounds(),
+                )
+            } else {
+                (None, None)
+            };
+            layout.push((
+                "shellRects".into(),
+                serde_json::json!({
+                    "titlebar": rects.titlebar.get().map(rect),
+                    "left": rects.left.get().map(rect),
+                    "center": rects.center.get().map(rect),
+                    "right": rects.right.get().map(rect),
+                    "primary": rects.primary.get().map(rect),
+                    "secondary": rects.secondary.get().map(rect),
+                    "primaryStrip": rects.primary_strip.get().map(rect),
+                    "secondaryStrip": rects.secondary_strip.get().map(rect),
+                    "secondaryClose": rects.secondary_close.get().map(rect),
+                    "status": rects.status.get().map(rect),
+                    "rightHeader": right_header.map(rect),
+                    "rightHeaderLastIcon": right_header_icon.map(rect),
+                    "sidebarSection": sidebar_section.map(rect),
+                    "sidebarCard": sidebar_card.map(rect),
+                    "dividerHandle": rects.divider_handle.get().map(rect),
+                })
+                .to_string(),
+            ));
         }
         layout
     }
@@ -25493,7 +25551,7 @@ impl SirioWorkspace {
             .debug_selector(|| "secondary-pane-close".to_owned())
             .absolute()
             .right_0()
-            .top(theme.spacing.titlebar_control_spacing)
+            .top(strip_control_top(&theme))
             .w(theme.spacing.titlebar_control_frame.width)
             .h(theme.spacing.titlebar_control_frame.height)
             .flex()
@@ -25512,6 +25570,7 @@ impl SirioWorkspace {
                 });
             })
             .child(IconElement::new(Icon::Close, IconSize::XSmall).text_color(theme.ely.fg_subtle))
+            .child(shell_rects::probe(&self.shell_rects.secondary_close, [0.0; 4]))
     }
 
     fn close_tab_by_id(&mut self, id: usize, window: Option<&mut Window>, cx: &mut Context<Self>) {
@@ -26643,7 +26702,7 @@ impl SirioWorkspace {
                 .debug_selector(|| "tab-overflow-button".to_owned())
                 .absolute()
                 .right_0()
-                .top(theme.spacing.titlebar_control_spacing)
+                .top(strip_control_top(&theme))
                 .w(theme.spacing.titlebar_control_frame.width)
                 .h(theme.spacing.titlebar_control_frame.height)
                 .flex()
@@ -26823,9 +26882,9 @@ impl SirioWorkspace {
                     // The one `+`: it routes a new surface to its own half by
                     // what the surface is, so a second copy in the Secondary
                     // strip would be a button that sends you elsewhere.
-                    // Clipped to the content box: the view sizes itself to
-                    // the full strip height and would otherwise paint its
-                    // surface over the hairline under the `+`. Its menu is
+                    // Clipped to the content box as a guard: the view is one
+                    // less than the strip (`tab_bar.rs` `HEIGHT`), so it ends
+                    // above the hairline under the `+`. Its menu is
                     // deferred, so the clip never reaches it.
                     .child(
                         div()
@@ -26844,9 +26903,14 @@ impl SirioWorkspace {
                     .when(
                         self.tab_menu_open && menu_role == Some(PaneRole::Primary),
                         |this| this.child(self.render_tab_context_menu(*theme, entity.clone(), cx)),
-                    ),
+                    )
+                    .child(shell_rects::probe(
+                        &self.shell_rects.primary_strip,
+                        [0.0, 0.0, 1.0, 0.0],
+                    )),
             )
             .child(primary_surface)
+            .child(shell_rects::probe(&self.shell_rects.primary, [0.0; 4]))
             .into_any_element()
     }
 
@@ -26876,6 +26940,29 @@ impl SirioWorkspace {
             .set((primary_width, secondary_width.unwrap_or(0.0)));
         let rail_drawn = self.primary_rail_drawn();
         let collapse_visible = self.secondary_pane_visible();
+        // A probe reports the latest paint, so a surface this frame does not
+        // draw is forgotten here rather than left at its last rect.
+        let shell_rects = self.shell_rects.clone();
+        if !self.sidebar_visible {
+            shell_rects.left.set(None);
+        }
+        if !self.right_panel_visible {
+            shell_rects.right.set(None);
+        }
+        if rail_drawn {
+            shell_rects.primary.set(None);
+            shell_rects.primary_strip.set(None);
+        }
+        if !collapse_visible || rail_drawn {
+            shell_rects.divider_handle.set(None);
+        }
+        if !collapse_visible {
+            shell_rects.secondary.set(None);
+            shell_rects.secondary_strip.set(None);
+        }
+        if !collapse_visible || !self.has_current_worktree() {
+            shell_rects.secondary_close.set(None);
+        }
         self.tab_bar.update(cx, |tab_bar, cx| {
             tab_bar.set_placement(
                 if rail_drawn {
@@ -26949,7 +27036,8 @@ impl SirioWorkspace {
                                 })
                                 .on_drag(DraggedCenterDivider, |_, _, _, cx| {
                                     cx.new(|_| gpui::Empty)
-                                }),
+                                })
+                                .child(shell_rects::probe(&shell_rects.divider_handle, [0.0; 4])),
                         ),
                 )
             })
@@ -26998,7 +27086,11 @@ impl SirioWorkspace {
                                             cx,
                                         ))
                                     },
-                                ),
+                                )
+                                .child(shell_rects::probe(
+                                    &shell_rects.secondary_strip,
+                                    [0.0, 0.0, 1.0, 0.0],
+                                )),
                         )
                         .child(
                             div()
@@ -27021,7 +27113,8 @@ impl SirioWorkspace {
                                     entity.clone(),
                                     cx,
                                 )),
-                        ),
+                        )
+                        .child(shell_rects::probe(&shell_rects.secondary, [0.0; 4])),
                 )
             })
             // Last, so it paints over the Secondary; it never reaches a side panel.
@@ -27053,8 +27146,13 @@ impl SirioWorkspace {
         // laid out to an explicit width, so without this they keep the
         // default width and the panel's `overflow_hidden` silently cuts
         // whatever the drag took away.
+        //
+        // The width pushed is the panel's content box: `left_width` is the
+        // outer width, and `shell_chrome::panel` takes a 1px border off each
+        // side. The sidebar draws no border of its own, so a row ends at the
+        // content box's right edge, not a pixel past it.
         self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_panel_width(left_width.unwrap_or(0.0), cx);
+            sidebar.set_panel_width((left_width.unwrap_or(0.0) - 2.0).max(0.0), cx);
         });
 
         div()
@@ -27140,14 +27238,16 @@ impl SirioWorkspace {
                         .child(self.render_panel_resize_handle(
                             panel_layout::PanelSide::Left,
                             entity.clone(),
-                        )),
+                        ))
+                        .child(shell_rects::probe(&shell_rects.left, [1.0; 4])),
                 )
             })
             .child(
                 shell_chrome::panel("shell-center-panel", &self.center_panel_focus, theme)
                     .flex_1()
                     .min_w_0()
-                    .child(center_column),
+                    .child(center_column)
+                    .child(shell_rects::probe(&shell_rects.center, [1.0; 4])),
             )
             .when(self.right_panel_visible, |row| {
                 row.child(
@@ -27158,7 +27258,8 @@ impl SirioWorkspace {
                         .child(self.render_panel_resize_handle(
                             panel_layout::PanelSide::Right,
                             entity.clone(),
-                        )),
+                        ))
+                        .child(shell_rects::probe(&shell_rects.right, [1.0; 4])),
                 )
             })
     }
@@ -27304,6 +27405,7 @@ impl SirioWorkspace {
             return;
         }
         self.center_split_ratio = millis;
+        self.schedule_panel_width_save(cx);
         cx.notify();
     }
 
@@ -27331,12 +27433,15 @@ impl SirioWorkspace {
                 if this.panel_width_save_generation != generation {
                     return;
                 }
-                let mut settings = app_settings_from_snapshot(this.settings.read(cx).snapshot());
+                // This writes the whole row, so start from the stored one: the
+                // opt-out and the forge hosts are not in the snapshot.
+                let stored = this.session.load_settings();
+                let mut settings =
+                    app_settings_for_settings_save(this.settings.read(cx).snapshot(), &stored);
                 settings.sidebar_width = sidebar;
                 settings.right_panel_width = right_panel;
                 settings.center_split_ratio = center_split;
-                settings.lsp_silenced_languages =
-                    this.session.load_settings().lsp_silenced_languages;
+                settings.lsp_silenced_languages = stored.lsp_silenced_languages;
                 this.session.save_settings(&settings);
             });
         }));
@@ -28776,6 +28881,8 @@ impl Render for SirioWorkspace {
         self.sync_browser_overlay_obscured(cx);
 
         if self.show_settings {
+            // The settings surface replaces the three columns.
+            self.shell_rects.clear_columns();
             return div()
                 .id("shell-frame")
                 .debug_selector(|| "shell-frame".into())
@@ -28812,7 +28919,8 @@ impl Render for SirioWorkspace {
                     div()
                         .h(theme.browser_chrome.bar_height)
                         .w_full()
-                        .child(self.child_view(self.titlebar.clone())),
+                        .child(self.child_view(self.titlebar.clone()))
+                        .child(shell_rects::probe(&self.shell_rects.titlebar, [0.0; 4])),
                 )
                 .child(
                     div()
@@ -28835,7 +28943,8 @@ impl Render for SirioWorkspace {
                     div()
                         .h(px(STATUS_BAR_HEIGHT))
                         .w_full()
-                        .child(self.child_view(self.status_bar.clone())),
+                        .child(self.child_view(self.status_bar.clone()))
+                        .child(shell_rects::probe(&self.shell_rects.status, [0.0; 4])),
                 )
                 .when(self.palette_open, |this| {
                     this.child(self.render_command_palette(theme, cx.entity(), cx))
@@ -28923,7 +29032,8 @@ impl Render for SirioWorkspace {
                 div()
                     .h(theme.browser_chrome.bar_height)
                     .w_full()
-                    .child(self.titlebar.clone()),
+                    .child(self.titlebar.clone())
+                    .child(shell_rects::probe(&self.shell_rects.titlebar, [0.0; 4])),
             )
             .child(div().flex_1().min_h_0().w_full().child(self.columns(
                 &theme,
@@ -28935,7 +29045,8 @@ impl Render for SirioWorkspace {
                 div()
                     .h(px(STATUS_BAR_HEIGHT))
                     .w_full()
-                    .child(self.status_bar.clone()),
+                    .child(self.status_bar.clone())
+                    .child(shell_rects::probe(&self.shell_rects.status, [0.0; 4])),
             )
             .when(self.palette_open, |this| {
                 this.child(self.render_command_palette(theme, cx.entity(), cx))
@@ -32305,7 +32416,7 @@ fn main() {
                 icon: Some(app_icon()),
                 titlebar: Some(TitlebarOptions {
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.), px(12.))),
+                    traffic_light_position: Some(point(px(12.), px(10.))),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -47889,6 +48000,52 @@ done
         assert_eq!(
             stored.lsp_silenced_languages, r#"["java"]"#,
             "and it left the install offer's key alone"
+        );
+    }
+
+    /// The debounced width save writes the whole settings row, so it must
+    /// carry what the drag does not own: the update opt-out is written by its
+    /// own callback, and the forge hosts by `ForgeHub`. Rebuilding them from
+    /// `Default` would switch updates back on and forget every host the user
+    /// configured, on each divider drag.
+    #[gpui::test]
+    async fn a_panel_width_save_keeps_the_update_opt_out_and_the_forge_hosts(
+        cx: &mut TestAppContext,
+    ) {
+        cx.set_global(Theme::dark());
+        let window = cx.add_window(|_window, cx| palette_test_workspace(cx));
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let workspace = cx.update(|window, _| {
+            window
+                .root::<SirioWorkspace>()
+                .flatten()
+                .expect("workspace root")
+        });
+        let session = workspace.read_with(&cx.cx, |workspace, _| workspace.session.clone());
+        let hosts = r#"[{"host":"git.corp","forge":"gitlab"}]"#;
+        let mut stored = session.load_settings();
+        stored.updates_enabled = false;
+        stored.forge_hosts = hosts.to_owned();
+        session.save_settings(&stored);
+
+        workspace.update(&mut cx.cx, |workspace, cx| {
+            workspace.center_split_ratio = 640;
+            workspace.schedule_panel_width_save(cx);
+        });
+        cx.background_executor
+            .advance_clock(PANEL_WIDTH_SAVE_DEBOUNCE);
+        cx.run_until_parked();
+
+        let stored = session.load_settings();
+        assert_eq!(stored.center_split_ratio, 640, "the drag itself was saved");
+        assert!(
+            !stored.updates_enabled,
+            "the update opt-out survives a panel width save"
+        );
+        assert_eq!(
+            stored.forge_hosts, hosts,
+            "the forge hosts survive a panel width save"
         );
     }
 

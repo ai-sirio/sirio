@@ -78,6 +78,10 @@ pub(super) struct RowInputs {
     pub(super) project_id: Option<String>,
     pub(super) project_icon: Option<ProjectIcon>,
     pub(super) drag: Option<RowDrag>,
+    /// Whether this is the first worktree card, the one the debug layout read
+    /// measures. An input so a row that becomes the first re-renders, even
+    /// when it is mounted cached, and paints its probe.
+    pub(super) first_card: bool,
 }
 
 /// One sidebar row as its own view. It owns nothing but its inputs; every
@@ -105,6 +109,7 @@ impl Render for RowView {
             inputs.project_id,
             inputs.project_icon,
             inputs.drag,
+            inputs.first_card,
             self.sidebar.clone(),
             theme,
             window,
@@ -194,10 +199,6 @@ impl Sidebar {
             .filter(|title| !title.trim().is_empty())
     }
 
-    /// The minimum row rhythm: a single-line row is 32px (13.5px title at
-    /// an 18px line height plus 7px of vertical padding — the action-row
-    /// math); a card with a context line is 51px (7 + 18 + 4 + 15 + 7 —
-    /// the session-card math). Content-sized titles grow beyond this floor.
     /// Whether a row draws a second line at all.
     ///
     /// The sub-line used to lead with the checkout path, which every project
@@ -215,6 +216,10 @@ impl Sidebar {
         matches!(row.kind, RowKind::Worktree)
     }
 
+    /// The minimum row rhythm: a single-line row is 34px (an 18px title line
+    /// with 8px of padding above and 8px below); a card with a context line
+    /// is 53px (8 + 18 + 4 + 15 + 8). The drawn height adds only the
+    /// interface-font delta (`row_drawn_height`); titles never wrap.
     pub(super) fn row_min_height(row: &SidebarRow) -> f32 {
         if row.kind == RowKind::Worktree {
             CARD_TWO_LINE_HEIGHT
@@ -337,22 +342,29 @@ impl Sidebar {
 
     const PILL_SIZE: f32 = 20.0;
 
-    /// The 6px info dot at a card's leading edge, level with its title line (the
-    /// card's top padding down). Drawn by a worktree row and a Sessions card alike.
+    const UNREAD_DOT_SIZE: f32 = 6.0;
+
+    /// The 6px info dot, centred on its title line and wholly inside the
+    /// leading gutter the row's horizontal padding leaves, so it never
+    /// overlaps the glyph. It is a child of the (relative) title line: it
+    /// spans that line's height and sits left of it by half of the gutter
+    /// plus half the dot, so it is centred in the gutter (row x 0 while the
+    /// gutter and the dot are both 6px). This holds only while the title
+    /// line's column is the row's first in-flow child, at `ROW_PAD_X`.
+    /// Drawn by a worktree row and a Sessions card alike.
     pub(super) fn unread_dot(selector: String, theme: &Theme) -> impl IntoElement + use<> {
-        let line = Self::title_line_height(&theme.typography);
         let colour = theme.ely.info;
         div()
             .absolute()
-            .top(px(7.0))
-            .h(line)
-            .left(px(3.0))
+            .top_0()
+            .bottom_0()
+            .left(px(-(ROW_PAD_X + Self::UNREAD_DOT_SIZE) / 2.0))
             .flex()
             .items_center()
             .child(
                 div()
                     .debug_selector(move || selector.clone())
-                    .size(px(6.0))
+                    .size(px(Self::UNREAD_DOT_SIZE))
                     .rounded_full()
                     .bg(colour),
             )
@@ -475,6 +487,7 @@ impl Sidebar {
         project_id: Option<String>,
         project_icon: Option<ProjectIcon>,
         drag: Option<RowDrag>,
+        first_card: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
         window: &mut Window,
@@ -492,10 +505,10 @@ impl Sidebar {
         // #372: the primary checkout offers no hover-x — like its disabled
         // context-menu item, it cannot be `git worktree remove`d.
         let is_removable_worktree = is_worktree && !row.is_primary;
-        // waku's card rhythm: a project or worktree row becomes a two-line
-        // card (13.5px title over an 11.5px context line) only when it has
-        // something for that second line; every other row is single-line at
-        // the 32px action-row height. See `has_sub_line`.
+        // Zed's row rhythm (34 / 53): a worktree row is always a two-line
+        // card (13px title over a 12.5px context line). Project rows draw
+        // through `render_section` at `SECTION_HEIGHT`, so no single-line
+        // row reaches this renderer today. See `has_sub_line`.
         let has_sub_line = Self::has_sub_line(&row);
         let row_height = Self::row_drawn_height(&row, &theme.typography);
         // F-CORE-ACT-18: the trailing running-agents badge is one 12px mark
@@ -535,11 +548,11 @@ impl Sidebar {
         let hover_group = format!("sidebar-project-{row_id}");
         let tab_id = row.tab_id;
         let parked_tab = row.parked_tab;
-        let mark_size = theme.typography.headline;
+        let mark_size = theme.typography.scaled(14.0);
         let icon_size = IconSize::Small;
         let project_mark = match project_icon.as_ref().map(|icon| &icon.value) {
             Some(ProjectIconValue::Emoji(emoji)) => div()
-                .text_size(theme.typography.scaled(15.0))
+                .text_size(theme.typography.scaled(14.0))
                 .child(emoji.clone())
                 .into_any_element(),
             // A locally chosen PNG is real file content already on disk — no
@@ -565,8 +578,8 @@ impl Sidebar {
             .relative()
             .h(px(row_height))
             .w_full()
-            .px(px(12.0))
-            .py(px(7.0))
+            .px(px(ROW_PAD_X))
+            .py(px(ROW_PAD_Y))
             .flex()
             .gap(px(8.0))
             .when(selected, |this| this.bg(theme.ely.active))
@@ -702,10 +715,14 @@ impl Sidebar {
             .text_color(Self::title_color(parked_tab.is_some(), theme))
             .child(title);
         let title_line = div()
+            .relative()
             .w_full()
             .flex()
             .items_center()
             .gap(px(6.0))
+            .when(row_unread, |this| {
+                this.child(Self::unread_dot(format!("sidebar-unread-dot-{row_id}"), &theme))
+            })
             .child({
                 let slot = div().w(px(16.0)).flex().items_center().justify_center();
                 if is_worktree {
@@ -827,7 +844,7 @@ impl Sidebar {
                         .debug_selector(move || format!("sidebar-tab-close-{row_id}"))
                         .w(px(16.0))
                         .flex_none()
-                        .text_size(theme.typography.scaled(14.0))
+                        .text_size(theme.typography.scaled(13.0))
                         .text_color(theme.ely.fg_muted)
                         .rounded(theme.radii.chip)
                         .hover(|style| style.bg(theme.ely.hover))
@@ -864,11 +881,19 @@ impl Sidebar {
             .child(title_line)
             .when(has_sub_line, |this| this.child(sub_line));
 
-        row_view
-            .when(row_unread, |this| {
-                this.child(Self::unread_dot(format!("sidebar-unread-dot-{row_id}"), &theme))
-            })
-            .child(content)
+        // The first worktree card records where it is drawn for the debug
+        // layout read. The card has no border, so a full-size absolute child
+        // spans its whole box.
+        let card_probe = (is_worktree && first_card).then(|| entity.read(cx).probe.card.clone());
+        row_view.child(content).when_some(card_probe, |this, cell| {
+            this.child(
+                gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+        })
     }
 }
 

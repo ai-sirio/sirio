@@ -584,6 +584,21 @@ fn migrate_v26(db: &Transaction) -> Result<(), rusqlite::Error> {
     )
 }
 
+/// v27 — Zed-like side-panel defaults for existing installations.
+///
+/// Only the previous defaults move (sidebar 280 to 300, right panel 320 to
+/// 240). This is a migration and not a load-time rule because `save_settings`
+/// writes every setting, so a stored 280 does not prove a drag, and a
+/// load-time rule would undo a later deliberate drag to 280.
+fn migrate_v27(db: &Transaction) -> Result<(), rusqlite::Error> {
+    db.execute_batch(
+        "UPDATE setting SET value = '300'
+         WHERE key = 'appearance.sidebarWidth' AND value = '280';
+         UPDATE setting SET value = '240'
+         WHERE key = 'appearance.rightPanelWidth' AND value = '320';",
+    )
+}
+
 /// All migrations in order. Appending a function here (and nothing else) is
 /// how a new schema version is added.
 pub(crate) const MIGRATIONS: &[Migration] = &[
@@ -613,6 +628,7 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
     migrate_v24,
     migrate_v25,
     migrate_v26,
+    migrate_v27,
 ];
 
 /// Migrates `conn` forward to [`CURRENT_SCHEMA_VERSION`]. Databases already
@@ -709,7 +725,7 @@ mod tests {
             )
             .expect("save right panel preference");
 
-            migrate(&mut conn).expect("upgrade existing settings");
+            migrate_up_to(&mut conn, 21).expect("upgrade existing settings");
 
             for (key, expected) in [
                 ("appearance.sidebarWidth", expected_left),
