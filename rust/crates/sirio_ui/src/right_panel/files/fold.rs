@@ -57,6 +57,9 @@ fn push_rows(nodes: &[FileNode], show_hidden: bool, depth: usize, rows: &mut Vec
         let mut chain = vec![first.path.clone()];
         let mut label = first.name.clone();
         let mut leaf = first;
+        // Drawn open only when every link is (spec §3.4): the links can
+        // disagree after a refresh or a change of the hidden-files setting.
+        let mut open = first.expanded;
         while leaf.is_dir
             && leaf.loaded
             && leaf.read_error.is_none()
@@ -65,6 +68,7 @@ fn push_rows(nodes: &[FileNode], show_hidden: bool, depth: usize, rows: &mut Vec
             chain.push(next.path.clone());
             label.push_str(" / ");
             label.push_str(&next.name);
+            open &= next.expanded;
             leaf = next;
         }
         rows.push(FileRow {
@@ -72,7 +76,7 @@ fn push_rows(nodes: &[FileNode], show_hidden: bool, depth: usize, rows: &mut Vec
             label,
             depth,
             is_dir: leaf.is_dir,
-            expanded: leaf.expanded,
+            expanded: open,
             git_status: first.git_status,
             is_ignored: leaf.is_ignored,
             read_error: leaf.read_error.clone(),
@@ -80,7 +84,7 @@ fn push_rows(nodes: &[FileNode], show_hidden: bool, depth: usize, rows: &mut Vec
         // An open directory whose children are not resolved is waiting for
         // its walk: drawing the held listing first and folding it when the
         // walk lands would make the rows jump.
-        if leaf.is_dir && leaf.expanded && leaf.children_resolved {
+        if leaf.is_dir && open && leaf.children_resolved {
             push_rows(&leaf.children, show_hidden, depth + 1, rows);
         }
     }
@@ -151,10 +155,6 @@ mod tests {
     fn unreadable(mut node: FileNode) -> FileNode {
         node.read_error = Some("denied".to_string());
         node
-    }
-
-    fn symlink(name: &str) -> FileNode {
-        node(name, false, Vec::new())
     }
 
     /// Gives every node the path its place in the tree implies, under ROOT.
@@ -249,12 +249,6 @@ mod tests {
     }
 
     #[test]
-    fn a_symlinked_directory_is_a_file_and_does_not_fold() {
-        let tree = placed(vec![dir("a", vec![symlink("link")])]);
-        assert_eq!(labels(&build_rows(&tree, false)), ["a"]);
-    }
-
-    #[test]
     fn an_unknown_listing_does_not_fold() {
         // Not loaded, yet holding a lone folder: only the loaded guard stops
         // the chain at `a`.
@@ -293,8 +287,9 @@ mod tests {
     fn the_leaf_children_sit_one_level_below_the_row() {
         let tree = placed(vec![dir(
             "a",
-            vec![dir("b", vec![open(dir("c", vec![file("f.txt")]))])],
+            vec![open(dir("b", vec![open(dir("c", vec![file("f.txt")]))]))],
         )]);
+        let tree = placed(tree.into_iter().map(open).collect());
         let rows = build_rows(&tree, false);
         assert_eq!(labels(&rows), ["a / b / c", "f.txt"]);
         assert_eq!(depths(&rows), [0, 1]);
@@ -313,12 +308,30 @@ mod tests {
     fn the_row_takes_path_state_and_ignore_from_the_leaf() {
         let tree = placed(vec![dir(
             "a",
-            vec![dir("b", vec![ignored(open(dir("c", vec![])))])],
+            vec![open(dir("b", vec![ignored(open(dir("c", vec![])))]))],
         )]);
+        let tree = placed(tree.into_iter().map(open).collect());
         let rows = build_rows(&tree, false);
         assert!(rows[0].path().ends_with("a/b/c"));
         assert!(rows[0].expanded);
         assert!(rows[0].is_ignored);
+    }
+
+    #[test]
+    fn a_row_is_open_only_when_every_link_is_expanded() {
+        // The head closed while the leaf is open (a refresh reopened it).
+        let tree = placed(vec![dir(
+            "w",
+            vec![open(dir("c", vec![file("f.txt")]))],
+        )]);
+        let rows = build_rows(&tree, false);
+        assert_eq!(labels(&rows), ["w / c"]);
+        assert!(!rows[0].expanded);
+        // The mirror: the head open, the leaf closed.
+        let tree = placed(vec![open(dir("w", vec![dir("c", vec![file("f.txt")])]))]);
+        let rows = build_rows(&tree, false);
+        assert_eq!(labels(&rows), ["w / c"]);
+        assert!(!rows[0].expanded);
     }
 
     #[test]

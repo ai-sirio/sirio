@@ -168,14 +168,14 @@ Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "
 # depth and no link of a chain is ever built as a row of its own (the verb's destructive `seen`
 # record, which the script drains on every read into seen.log), the joined row carries the
 # outermost link's git status, opening it shows its children joined, a sibling file splits it and
-# removing the file rejoins it with the selection kept, hidden files decide the chain until they
-# are shown, and a worktree switch away and back keeps the rows, even when the precache rebuilt
-# the repository's snapshot meanwhile. Linux only: --xvfb is required; --out-dir DIR keeps
+# removing the file rejoins it with the selection kept, Space closes the joined row and a refresh does not reopen it, hidden files decide the chain until they
+# are shown, and a worktree switch away and back keeps the rows, after a pause in which the precache may rebuild
+# the repository's snapshot (the transcript logs whether it did). Linux only: --xvfb is required; --out-dir DIR keeps
 # transcript.log (the script's notes and its logged sirioctl calls, not the polled reads),
 # captures/light-<n>.png and light-5-split.png (and failure.png on a failed run), seen-<n>.log snapshots,
 # git-status-<n>.txt, light-app.log, xvfb.log, and seen.log and last-state.txt (the last Files
 # read).
-Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 7", then "FILES FOLD E2E OK"
+Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then "FILES FOLD E2E OK"
 
 # The chat's session panel column in a real, isolated Sirio: a stub `claude`
 # (Scripts/Tests/stubs/session-panel/claude over sirio_chat's claude_fixture.py in

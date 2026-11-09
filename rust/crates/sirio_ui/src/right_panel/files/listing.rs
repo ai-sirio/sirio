@@ -6,13 +6,19 @@
 //! the background task, ahead of the user (spec §3.5), and the merge that
 //! keeps a refresh from undoing what the user did while it ran (spec §3.6).
 
-use super::{FileNode, GitMarkers, read_tree};
+use super::{FileNode, GitMarkers, read_listing, read_tree};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A listing with more child directories than this gets no lookahead, and
 /// its rows show unfolded.
 pub(super) const LOOKAHEAD_DIR_CAP: usize = 256;
+
+/// Lookahead stops reading a child directory once it is past this many
+/// entries and leaves it unknown: such a listing cannot usefully fold, and
+/// reading it (`target/debug/deps`) before anything draws, then again on
+/// every refresh, costs more than the fold is worth. Opening it walks.
+pub(super) const LOOKAHEAD_ENTRY_CAP: usize = 256;
 
 /// The folders macOS guards with a privacy prompt, relative to the home
 /// directory. Lookahead never reads one; opening it does, as today.
@@ -66,7 +72,8 @@ pub(super) fn is_privacy_guarded(path: &Path, home: &Path) -> bool {
 ///
 /// Looking ahead means reading each child directory's listing (unless the
 /// listing holds more than [`LOOKAHEAD_DIR_CAP`] directories, or the child
-/// is privacy-guarded) and marking the child `loaded`. A child whose listing
+/// is privacy-guarded, or holds more than [`LOOKAHEAD_ENTRY_CAP`] entries)
+/// and marking the child `loaded`. A child whose listing
 /// [`could_fold`] is a chain link: the lookahead follows it into its own
 /// listing, recursively. A child's read failure lands in its `read_error`;
 /// only the top-level read is an `Err`.
@@ -172,8 +179,17 @@ fn look_ahead(root: &Path, listing: &mut [FileNode], markers: &GitMarkers, home:
         if home.is_some_and(|home| is_privacy_guarded(&node.path, home)) {
             continue;
         }
-        match read_tree(root, &node.path, markers) {
-            Ok(children) => {
+        match read_listing(root, &node.path, markers, Some(LOOKAHEAD_ENTRY_CAP)) {
+            // Past the entry cap: skipped on purpose, like the dir cap and
+            // the privacy guard. The child stays unknown and opening it
+            // walks; its parent still counts as resolved.
+            Ok(None) => {
+                node.children.clear();
+                node.loaded = false;
+                node.read_error = None;
+                node.children_resolved = false;
+            }
+            Ok(Some(children)) => {
                 node.children = children;
                 node.loaded = true;
                 node.read_error = None;
@@ -421,6 +437,20 @@ mod tests {
         let b = child(&listing, "b");
         assert!(b.loaded && b.children_resolved, "the leaf draws its children at once");
         assert!(child(&b.children, "c").loaded, "and each of them is known");
+    }
+
+    #[test]
+    fn lookahead_leaves_a_huge_child_listing_unknown() {
+        let dir = TempDir::new();
+        for index in 0..=LOOKAHEAD_ENTRY_CAP {
+            dir.file(&format!("big/f{index}.txt"));
+        }
+        dir.file("small/one.txt");
+        let tree = read(&dir.0);
+        assert!(child(&tree, "small").loaded);
+        let big = child(&tree, "big");
+        assert!(big.is_dir && !big.loaded, "the huge listing is skipped, not held");
+        assert!(big.read_error.is_none() && big.children.is_empty());
     }
 
     #[test]

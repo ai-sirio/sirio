@@ -15,8 +15,9 @@ set -eEuo pipefail
 #   4 opening a joined row                 its children are joined too; the row is expanded, selected
 #   5 the row splits and rejoins           a sibling file splits the chain, Up moves to the middle
 #                                          link, removing the file rejoins it, still selected
-#   6 hidden files decide the chain        a dotfile does not split it until hidden files are shown
-#   7 a worktree switch keeps the rows     away and back, the opened rows are as they were
+#   6 a closed row stays closed           Space closes the joined row; a refresh does not reopen it
+#   7 hidden files decide the chain        a dotfile does not split it until hidden files are shown
+#   8 a worktree switch keeps the rows     away and back, the opened rows are as they were
 #
 # `seen.log` is the union of every label the app built since the previous read (a destructive
 # read the script drains on every poll); `never_built` and `ever_built` ask it. The artifact:
@@ -563,7 +564,9 @@ wait_on files "row:$JAVA:Depth=3" \
   'row:docs / adr:Depth=1' 'row:config / pmd:Depth=1' 'row:tools / pkg:Depth=1'
 wait_on files "row:$JAVA:Path=source/src/main/java/it/acme/app/v2"
 ever_built "$JAVA" 'docs / adr' 'test / java / it / acme / app / v2'
-never_built java docs config tools test
+never_built java docs config tools test \
+  'java / it' 'java / it / acme' 'java / it / acme / app' \
+  'test / java' 'test / java / it' 'test / java / it / acme' 'test / java / it / acme / app'
 snapshot 2
 ok 2 "chains are joined and never built unfolded"
 
@@ -600,6 +603,24 @@ wait_on files "row:$JAVA:Expanded=1" "row:$JAVA:Selected=1" 'row:App.java:Select
 snapshot 5
 ok 5 "the row splits and rejoins with the disk"
 
+SCENARIO="closed_stays_closed"
+# The rejoined row is still selected: Space, a real key, closes it (every link).
+xkey space
+wait_on files "row:$JAVA:Expanded=0" "row:$JAVA:Selected=1" 'norow:domain / model' 'norow:App.java'
+settle_refreshes 2000
+read_state files
+before="$(value drawnRefreshes)"
+touch "$REPO/source/src/main/Tick.md"
+wait_until "a frame drew a refresh after Tick.md" drawn_refreshes_over "$before"
+wait_on files 'row:Tick.md:Depth=3'
+# A refresh landed and was drawn: the closed row must not have reopened itself.
+hold_on 2 files "row:$JAVA:Expanded=0" 'norow:domain / model' 'norow:App.java'
+snapshot 6
+rm "$REPO/source/src/main/Tick.md"
+xkey space
+wait_on files "row:$JAVA:Expanded=1" 'row:domain / model:Depth=4' 'row:App.java:Depth=4' 'norow:Tick.md'
+ok 6 "a closed row stays closed through a refresh"
+
 SCENARIO="hidden_files"
 # A precache walk of this worktree can still land after check 5 and refresh once more: let the
 # count settle before taking it as the baseline.
@@ -616,8 +637,8 @@ wait_on files showHidden=1 'row:java / it:Depth=3' 'row:.DS_Store:Depth=4'
 read_state files
 click_at_bounds "$(value hiddenSwitchBounds)"
 wait_on files showHidden=0 "row:$JAVA:Depth=3" "row:$JAVA:Expanded=1"
-snapshot 6
-ok 6 "hidden files decide the chain"
+snapshot 7
+ok 7 "hidden files decide the chain"
 
 SCENARIO="worktree_switch"
 wait_on files stale=0 updating=0
@@ -625,9 +646,10 @@ ctl select-workspace --workspace "$(worktree_id_of "$OTHER_REPO")" >/dev/null
 wait_on files 'row:README:Depth=0'
 # Spec 3.6: while the repository is not shown, its watcher marks its cached snapshot dirty (a
 # 300 ms poll, main.rs start_files_watcher_poll -> mark_files_snapshot_dirty) and the precache
-# rebuilds it with build_files_snapshot, which knows no open directory. Only that rebuilt snapshot
-# is restored by the switch back. No verb signals the precache, so the wait is a bounded pause: a
-# short one only weakens the check (the switch back then finds the dirty snapshot), never flakes it.
+# rebuilds it with build_files_snapshot, which keeps the open paths and re-reads them. Either
+# snapshot (the rebuilt one, or the dirty one it replaces) restores the open rows. No verb signals
+# the precache, so the wait is a bounded pause, after which the note below logs whether the precache
+# had rebuilt the snapshot (stale=0) or not (stale=1); neither outcome is a failure.
 printf 'late\n' >"$REPO/source/src/main/Precache.md"
 sleep 3
 seen_reset
@@ -638,8 +660,8 @@ wait_on files 'row:source:Depth=0'
 note "first read after the switch back: $(grep -E '^(stale|updating)=' <<<"$STATE" | tr '\n' ' ')"
 wait_on files "row:$JAVA:Expanded=1" 'row:domain / model:Depth=4' 'row:Precache.md:Depth=3'
 never_built java domain
-snapshot 7
-ok 7 "a worktree switch keeps the rows"
+snapshot 8
+ok 8 "a worktree switch keeps the rows"
 app_quit
 
 # ---------------------------------------------------------------- teardown

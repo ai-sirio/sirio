@@ -355,18 +355,21 @@ impl RightPanel {
     }
 
     /// Opens or closes the row whose links are `chain` (outermost first, the
-    /// leaf last): its new state is the opposite of the leaf's, and every
-    /// link takes it.
+    /// leaf last): its new state is the opposite of what the row draws (open
+    /// only when every link is expanded), and every link takes it.
     fn toggle_row(&mut self, chain: &[PathBuf], cx: &mut Context<Self>) {
         let Some(leaf_path) = chain.last() else {
             return;
         };
+        let drawn_open = chain.iter().all(|link| {
+            find_node_mut(&mut self.file_tree, link).is_some_and(|node| node.expanded)
+        });
         let (expanded, needs_walk) = {
             let Some(leaf) = find_node_mut(&mut self.file_tree, leaf_path) else {
                 cx.notify();
                 return;
             };
-            let expanded = !leaf.expanded;
+            let expanded = !drawn_open;
             if expanded {
                 // The walk records the error again if the read still fails.
                 leaf.read_error = None;
@@ -1191,6 +1194,17 @@ fn path_is_within(root: &Path, path: &Path) -> bool {
 }
 
 fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<FileNode>, String> {
+    Ok(read_listing(root, directory, markers, None)?.unwrap_or_default())
+}
+
+/// [`read_tree`] with an optional bound: past `limit` entries the read stops
+/// (before any node is built) and returns `Ok(None)`.
+fn read_listing(
+    root: &Path,
+    directory: &Path,
+    markers: &GitMarkers,
+    limit: Option<usize>,
+) -> Result<Option<Vec<FileNode>>, String> {
     if !path_is_within(root, directory) {
         return Err(format!(
             "refusing to read {} outside file-tree root {}",
@@ -1199,8 +1213,18 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
         ));
     }
     let entries = std::fs::read_dir(directory).map_err(|error| error.to_string())?;
+    let entries: Vec<std::fs::DirEntry> = match limit {
+        Some(limit) => {
+            let held: Vec<_> = entries.filter_map(Result::ok).take(limit + 1).collect();
+            if held.len() > limit {
+                return Ok(None);
+            }
+            held
+        }
+        None => entries.filter_map(Result::ok).collect(),
+    };
     let mut nodes = entries
-        .filter_map(Result::ok)
+        .into_iter()
         .filter_map(|entry| {
             let path = entry.path();
             if path.file_name().is_some_and(|name| name == ".git") {
@@ -1233,7 +1257,7 @@ fn read_tree(root: &Path, directory: &Path, markers: &GitMarkers) -> Result<Vec<
     nodes.sort_by(|left, right| {
         sirio_project::compare_file_tree_names(left.is_dir, &left.name, right.is_dir, &right.name)
     });
-    Ok(nodes)
+    Ok(Some(nodes))
 }
 
 pub(super) fn collect_expanded(nodes: &[FileNode]) -> Vec<PathBuf> {
@@ -1515,6 +1539,42 @@ mod tests {
                     below,
                     [("lib", rows[at].depth + 1), ("index.js", rows[at].depth + 1)]
                 );
+            })
+        });
+    }
+
+    #[gpui::test]
+    async fn a_close_during_a_refresh_stays_closed(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        std::fs::create_dir_all(dir.0.join("w/c")).expect("create the chain");
+        std::fs::write(dir.0.join("w/c/f.txt"), "x").expect("write f.txt");
+        std::fs::write(dir.0.join("other.txt"), "x").expect("write other.txt");
+        let chain = vec![dir.0.join("w"), dir.0.join("w/c")];
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| find_node(&panel.file_tree, &chain[1]).is_some())
+        });
+        panel.update(cx, |panel, cx| panel.toggle_row(&chain, cx));
+        let landed = panel.read_with(cx, |panel, _| panel.refreshes_landed);
+
+        // The refresh starts with the row open and lands after it was closed.
+        panel.update(cx, |panel, cx| {
+            panel.refresh(cx);
+            assert!(panel.refresh_started);
+            panel.toggle_row(&chain, cx);
+        });
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| panel.refreshes_landed > landed)
+        });
+        cx.update(|app| {
+            panel.update(app, |panel, _| {
+                panel.ensure_file_rows(false);
+                let rows = panel.file_rows();
+                let labels: Vec<&str> = rows.iter().map(|row| row.label.as_str()).collect();
+                assert_eq!(labels, ["w / c", "other.txt"], "the closed row draws no children");
+                assert!(!rows[0].expanded);
             })
         });
     }
