@@ -107,6 +107,15 @@ gaps, and the 1 px divider. Each half takes half of that.
   | Secondary closed | below 936 | below 876 |
   | Rail drawn | below 976 | below 916 |
 
+  *Found while building this:* the rule did not always hold. Without a drag,
+  `resolve_panel_widths` (`panel_layout.rs`) scaled both side panels by the
+  same factor and then lifted each to its floor. When one panel was lifted,
+  the other kept its scaled width, so the pair overran the budget and the
+  centre went under its floor: at 1100 wide each half drew 308. The old
+  defaults overran too, by less. Now the other panel gives back what the
+  floored one took, down to its own floor. At 1100 the panels draw 223 and
+  220, and each half draws 320. The layout E2E's case 1c pins this.
+
 - **The window still opens at 1470 × 833.** The window size is not persisted,
   and that does not change here.
 
