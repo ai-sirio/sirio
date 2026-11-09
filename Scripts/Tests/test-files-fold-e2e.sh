@@ -199,7 +199,7 @@ fixture_git -C "$REPO" add -A
 fixture_git -C "$REPO" commit -q -m first
 # An unstaged deletion inside the chain: the middle link `it` carries it, the leaf `v2` does not.
 rm "$REPO/source/src/main/java/it/Old.java"
-# A second project, only to switch worktree to (check 7).
+# A second project, only to switch worktree to (check 8).
 OTHER_REPO="$WORK/other"
 mkdir -p "$OTHER_REPO"
 fixture_git -C "$OTHER_REPO" init -q -b main
@@ -622,7 +622,7 @@ wait_on files "row:$JAVA:Expanded=1" 'row:domain / model:Depth=4' 'row:App.java:
 ok 6 "a closed row stays closed through a refresh"
 
 SCENARIO="hidden_files"
-# A precache walk of this worktree can still land after check 5 and refresh once more: let the
+# A precache walk of this worktree can still land after check 6 and refresh once more: let the
 # count settle before taking it as the baseline.
 wait_on files stale=0 updating=0
 settle_refreshes 2000
@@ -637,6 +637,19 @@ wait_on files showHidden=1 'row:java / it:Depth=3' 'row:.DS_Store:Depth=4'
 read_state files
 click_at_bounds "$(value hiddenSwitchBounds)"
 wait_on files showHidden=0 "row:$JAVA:Depth=3" "row:$JAVA:Expanded=1"
+# Spec §3.4: a row is drawn open only when every link is. With hidden files on, close `java / it`
+# while `acme / app / v2` stays open; hidden files off joins them again, and the joined row must
+# draw closed. A row that took its state from the leaf alone would draw it open.
+read_state files
+click_at_bounds "$(value hiddenSwitchBounds)"
+wait_on files showHidden=1 'row:java / it:Expanded=1' 'row:acme / app / v2:Expanded=1'
+click_row 'java / it'
+wait_on files 'row:java / it:Expanded=0' 'norow:acme / app / v2'
+read_state files
+click_at_bounds "$(value hiddenSwitchBounds)"
+wait_on files showHidden=0 "row:$JAVA:Depth=3" "row:$JAVA:Expanded=0" 'norow:domain / model'
+click_row "$JAVA"
+wait_on files "row:$JAVA:Expanded=1" 'row:domain / model:Depth=4' 'row:App.java:Depth=4'
 snapshot 7
 ok 7 "hidden files decide the chain"
 

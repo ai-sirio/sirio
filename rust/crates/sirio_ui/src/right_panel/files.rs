@@ -1384,8 +1384,8 @@ mod tests {
             if condition() {
                 return;
             }
-            // Advance the virtual clock so the panel's own 1s refresh timer
-            // fires; the walk itself completes on a real thread.
+            // Advance the virtual clock so the panel's timers (the refresh
+            // debounce) fire; the walk itself completes on a real thread.
             cx.executor()
                 .advance_clock(std::time::Duration::from_secs(1));
             std::thread::sleep(std::time::Duration::from_millis(10));
