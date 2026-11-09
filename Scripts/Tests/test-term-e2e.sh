@@ -690,7 +690,10 @@ case_sirioctl_direct() {
   case "$text" in *worker-ok*) ;; *) fail "panel read never showed worker-ok" ;; esac
   sirioctl_panel write "$id" --input 'x' || fail "sirioctl panel write failed"
   local waited
-  if waited="$(sirioctl_panel wait "$id" --timeout-ms 200 2>&1)"; then
+  # The `trap - ERR` inside the `$(...)`: macOS's /bin/bash is 3.2, where the
+  # ERR trap, inherited through `set -E`, fires inside a command substitution
+  # even when an `if` tests it, and prints a FAIL line for a case that passes.
+  if waited="$(trap - ERR; sirioctl_panel wait "$id" --timeout-ms 200 2>&1)"; then
     fail "panel wait reported an exit for a session still sleeping: $waited"
   fi
   case "$waited" in *"timed out"*) ;; *) fail "panel wait did not time out: $waited" ;; esac
@@ -719,7 +722,8 @@ case_sirioctl_direct() {
   case "$text" in *"id=$keyed"*) ;; *) fail "SIRIO_PANE_ID did not read back as $keyed: $text" ;; esac
   # Show session needs the app: with none, the host route says so.
   local shown
-  if shown="$(sirioctl_panel show "$id" 2>&1)"; then
+  # `trap - ERR`: see `panel wait` above.
+  if shown="$(trap - ERR; sirioctl_panel show "$id" 2>&1)"; then
     fail "panel show succeeded with no app: $shown"
   fi
   case "$shown" in *"Show session needs Sirio running"*) ;; *) fail "panel show said: $shown" ;; esac

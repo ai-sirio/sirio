@@ -1547,8 +1547,11 @@ GUARD
 }
 
 # The newest codex launch of this world: its file (argv or env) and, from the
-# argv, the --session its notify names.
-newest_codex() { ls -t "$W"/stub/codex-*."$1" 2>/dev/null | head -n 1; }
+# argv, the --session its notify names. Empty, not a failure, until a launch
+# has written its file: codex_launched polls it inside a `$(...)`, and macOS's
+# /bin/bash is 3.2, where the ERR trap, inherited through `set -E`, fires there
+# even though `wait_until` tests it, and prints FAIL lines for a case that passes.
+newest_codex() { ls -t "$W"/stub/codex-*."$1" 2>/dev/null | head -n 1 || true; }
 codex_launched() { [ -n "$(newest_codex env)" ]; }
 codex_notify_session() {
   python3 -c '
