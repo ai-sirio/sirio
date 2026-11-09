@@ -197,7 +197,7 @@ pub(crate) const ROW_HEIGHT: f32 = 34.0;
 pub(crate) const ROW_PAD_X: f32 = 6.0;
 /// Vertical padding of a sidebar row: 8 + 18 + 8 = 34, and 8 + 18 + 4 + 15 + 8 = 53.
 pub(crate) const ROW_PAD_Y: f32 = 8.0;
-/// Single-line row title line height (13px at waku's row ratio).
+/// Single-line row title line height (the 13px title's line, 8px of padding above and below).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
 /// Single-line row title size, in the same points every other explicit UI
 /// size in this file is written in. It is drawn through

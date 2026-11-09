@@ -613,9 +613,6 @@ impl Sidebar {
             .when(row.selected, |this| this.bg(theme.ely.active))
             .when(!row.selected, |this| this.hover(|style| style.bg(theme.ely.hover)))
             .when(cursor, |this| this.border_1().border_color(theme.sirio.quantity))
-            .when(row.unread, |this| {
-                this.child(Self::unread_dot(format!("{prefix}-unread-dot-{index}"), &theme))
-            })
             .on_click(move |_, window, cx| {
                 let event = match &select_target {
                     SessionTarget::Open(id) => SidebarEvent::SelectTab(*id),
@@ -637,11 +634,18 @@ impl Sidebar {
             })
             .child(
                 div()
+                    .relative()
                     .w_full()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
                     .line_height(Self::title_line_height(&theme.typography))
+                    .when(row.unread, |this| {
+                        this.child(Self::unread_dot(
+                            format!("{prefix}-unread-dot-{index}"),
+                            &theme,
+                        ))
+                    })
                     .child(
                         div()
                             .w(px(16.0))

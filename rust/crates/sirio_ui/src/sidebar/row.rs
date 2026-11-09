@@ -194,10 +194,6 @@ impl Sidebar {
             .filter(|title| !title.trim().is_empty())
     }
 
-    /// The minimum row rhythm: a single-line row is 34px (13px title at
-    /// an 18px line height plus 8px of vertical padding — the action-row
-    /// math); a card with a context line is 53px (8 + 18 + 4 + 15 + 8 —
-    /// the session-card math). Content-sized titles grow beyond this floor.
     /// Whether a row draws a second line at all.
     ///
     /// The sub-line used to lead with the checkout path, which every project
@@ -215,6 +211,10 @@ impl Sidebar {
         matches!(row.kind, RowKind::Worktree)
     }
 
+    /// The minimum row rhythm: a single-line row is 34px (an 18px title line
+    /// with 8px of padding above and 8px below); a card with a context line
+    /// is 53px (8 + 18 + 4 + 15 + 8). Content-sized titles grow beyond this
+    /// floor.
     pub(super) fn row_min_height(row: &SidebarRow) -> f32 {
         if row.kind == RowKind::Worktree {
             CARD_TWO_LINE_HEIGHT
@@ -339,18 +339,19 @@ impl Sidebar {
 
     const UNREAD_DOT_SIZE: f32 = 6.0;
 
-    /// The 6px info dot, level with its title line (the card's top padding
-    /// down) and wholly inside the leading gutter the row's horizontal padding
-    /// leaves, so it never overlaps the glyph. Drawn by a worktree row and a
+    /// The 6px info dot, centred on its title line and wholly inside the
+    /// leading gutter the row's horizontal padding leaves, so it never
+    /// overlaps the glyph. It is a child of the (relative) title line: it
+    /// spans that line's height and sits left of it by half of the gutter
+    /// plus half the dot, which is row x 0. Drawn by a worktree row and a
     /// Sessions card alike.
     pub(super) fn unread_dot(selector: String, theme: &Theme) -> impl IntoElement + use<> {
-        let line = Self::title_line_height(&theme.typography);
         let colour = theme.ely.info;
         div()
             .absolute()
-            .top(px(ROW_PAD_Y))
-            .h(line)
-            .left(px((ROW_PAD_X - Self::UNREAD_DOT_SIZE) / 2.0))
+            .top_0()
+            .bottom_0()
+            .left(px(-(ROW_PAD_X + Self::UNREAD_DOT_SIZE) / 2.0))
             .flex()
             .items_center()
             .child(
@@ -706,10 +707,14 @@ impl Sidebar {
             .text_color(Self::title_color(parked_tab.is_some(), theme))
             .child(title);
         let title_line = div()
+            .relative()
             .w_full()
             .flex()
             .items_center()
             .gap(px(6.0))
+            .when(row_unread, |this| {
+                this.child(Self::unread_dot(format!("sidebar-unread-dot-{row_id}"), &theme))
+            })
             .child({
                 let slot = div().w(px(16.0)).flex().items_center().justify_center();
                 if is_worktree {
@@ -868,11 +873,7 @@ impl Sidebar {
             .child(title_line)
             .when(has_sub_line, |this| this.child(sub_line));
 
-        row_view
-            .when(row_unread, |this| {
-                this.child(Self::unread_dot(format!("sidebar-unread-dot-{row_id}"), &theme))
-            })
-            .child(content)
+        row_view.child(content)
     }
 }
 
