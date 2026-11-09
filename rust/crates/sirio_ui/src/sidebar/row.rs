@@ -341,7 +341,7 @@ impl Sidebar {
 
     /// The 6px info dot, level with its title line (the card's top padding
     /// down) and wholly inside the leading gutter the row's horizontal padding
-    /// leaves, so it never touches the glyph. Drawn by a worktree row and a
+    /// leaves, so it never overlaps the glyph. Drawn by a worktree row and a
     /// Sessions card alike.
     pub(super) fn unread_dot(selector: String, theme: &Theme) -> impl IntoElement + use<> {
         let line = Self::title_line_height(&theme.typography);
