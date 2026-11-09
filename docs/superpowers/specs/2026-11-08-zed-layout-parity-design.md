@@ -85,11 +85,13 @@ Worked numbers, with the Secondary open and the rail not drawn:
 
 | Window width | Sidebar | Primary | Secondary | Right panel |
 |---|---|---|---|---|
-| 1470 (Sirio's launch size, `main.rs:32076`) | 300 | ≈456 | ≈456 | 240 |
-| 1710 (Enzo's screen) | 300 | ≈576 | ≈576 | 240 |
+| 1470 (Sirio's launch size, `main.rs:32076`) | 300 | 456 | 455 | 240 |
+| 1710 (Enzo's screen) | 300 | 576 | 575 | 240 |
 
 The centre is the window width minus both side panels, 16 px of inset and
-gaps, and the 1 px divider. Each half takes half of that.
+gaps, the centre card's 2 px of border, and the 1 px divider. The Primary
+takes half of that, rounded to a whole pixel, and the Secondary the rest
+(#723; first written without the border, as ≈456 / ≈576 each).
 
 ### §2.3 What stays as it is *(my calls)*
 
@@ -103,9 +105,12 @@ gaps, and the 1 px divider. Each half takes half of that.
 
   | Case | Today | New |
   |---|---|---|
-  | Secondary open | below 1257 | below 1197 |
-  | Secondary closed | below 936 | below 876 |
-  | Rail drawn | below 976 | below 916 |
+  | Secondary open | below 1257 | below 1199 |
+  | Secondary closed | below 936 | below 878 |
+  | Rail drawn | below 976 | below 918 |
+
+  The new column counts the centre card's 2 px of border, which #723 added
+  to every floor (first written as 1197 / 876 / 916).
 
   *Found while building this:* the rule did not always hold. Without a drag,
   `resolve_panel_widths` (`panel_layout.rs`) scaled both side panels by the
@@ -114,8 +119,9 @@ gaps, and the 1 px divider. Each half takes half of that.
   centre went under its floor: at 1100 wide each half drew 308. The old
   defaults overran too, by less. Now the other panel gives back what the
   floored one took, down to its own floor. At 1100 the panels draw 223 and
-  220, and each half is laid out 320 wide (the Secondary's last 2 px pass the
-  centre card's inner edge, see §9). The layout E2E's case 1c pins this.
+  220, and each half is laid out 320 wide (with #723 the panels draw 221
+  and 220, and both halves fit inside the centre card's border, see §9). The
+  layout E2E's case 1c pins this.
 
 - **The window still opens at 1470 × 833.** The window size is not persisted,
   and that does not change here.
@@ -486,6 +492,18 @@ moves. That is expected. The PR says so and attaches both capture sets.
   right edge (873) passes the centre card's inner edge, inside the border
   (871), by 2 px, and the card's outer edge (872) by 1. The visible Secondary
   there is 318, not 320. The fix couples with `min_center` (641 to 643). Out of scope
-  here; an issue is to be filed. The E2E's `secondaryInsideCenter` row reports
-  it (cases 1a, 1b, 1c, 7b) and never fails.
+  here; filed as #723.
+
+  *Fixed by #723:* the panes now share the card's content box and every
+  centre floor counts the border (643 open, 322 closed, 362 with the rail).
+  The last pane (the Secondary, or the Primary alone) fills what is left by
+  layout, not by its computed width, so it meets the border whatever the
+  arithmetic says: at a fractional scale the 1 px border is one device pixel,
+  not one logical pixel. That is exact at 1x and 2x only; at 125 % or 150 %
+  gpui's own clip still insets by the logical pixel, so the column next to the
+  border can be clipped there (gpui's behaviour, not measured here). The
+  Primary is rounded to a whole pixel so that at 1x and 2x the computed widths
+  (the peek, the tab strips, the drop ghost) are the drawn ones. The
+  E2E's row (now `secondaryEndsAtCenterContentEdge`, cases 1a, 1b, 1c, 7b)
+  fails unless the Secondary ends exactly at the card's content edge.
 - `SidebarRow.depth` is stored, but no drawing code reads it.

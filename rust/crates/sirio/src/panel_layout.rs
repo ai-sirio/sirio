@@ -42,17 +42,27 @@ impl PanelSide {
 /// from it by [`min_center_width`].
 pub(crate) const MIN_CENTER_PANE_WIDTH: f32 = 320.0;
 
-/// What the whole centre column needs: one pane's floor, or two of them with
-/// the divider between, depending on whether the Secondary pane is open.
+/// The centre card's border, both sides together: `shell_chrome::panel` draws
+/// 1 px on each side, and the panes are laid out inside it. The side panels
+/// yield to the card's *outer* width, so every floor handed to
+/// [`resolve_panel_widths`] counts it, and the width the panes share leaves it
+/// out (#723: without it the Secondary ran under the card's right border).
+pub(crate) const CENTER_CARD_BORDERS: f32 = 2.0;
+
+/// What the centre card needs: one pane's floor, or two of them with the
+/// divider between, depending on whether the Secondary pane is open, plus the
+/// card's own border.
 pub(crate) fn min_center_width(secondary_open: bool, divider: f32) -> f32 {
-    if secondary_open {
+    let panes = if secondary_open {
         MIN_CENTER_PANE_WIDTH * 2.0 + divider
     } else {
         MIN_CENTER_PANE_WIDTH
-    }
+    };
+    panes + CENTER_CARD_BORDERS
 }
 
-/// Splits the centre column between the two panes.
+/// Splits the centre column between the two panes. `center_width` is the
+/// card's content box, inside its border.
 ///
 /// The ratio is a *preference*, exactly like a panel's width above: the clamp
 /// happens here, at render time, and is never written back, so narrowing the
@@ -76,11 +86,19 @@ pub(crate) fn resolve_center_split(
     // sit at their floors and the centre absorbs the rest, which is how it can
     // arrive here too narrow. The Secondary pane is never auto-hidden to make
     // room — that would take the user's tabs off screen without being asked.
+    //
+    // The Primary is a whole number of pixels and the Secondary gets the rest,
+    // so that at 1x and 2x the widths computed here are the ones drawn: gpui
+    // snaps an explicit width on its own, rounding a half pixel down, and a
+    // 455.5 Primary would draw 455 while the peek, the tab strips and the drop
+    // ghost sized themselves for 455.5 (#723).
     if usable < MIN_CENTER_PANE_WIDTH * 2.0 {
-        let primary = usable * ratio;
+        let primary = (usable * ratio).round();
         return (primary, Some(usable - primary));
     }
-    let primary = (usable * ratio).clamp(MIN_CENTER_PANE_WIDTH, usable - MIN_CENTER_PANE_WIDTH);
+    let primary = (usable * ratio)
+        .round()
+        .clamp(MIN_CENTER_PANE_WIDTH, usable - MIN_CENTER_PANE_WIDTH);
     (primary, Some(usable - primary))
 }
 
@@ -88,9 +106,10 @@ pub(crate) fn resolve_center_split(
 /// (spec 2026-11-01-primary-rail §3). Fixed, with no pane floor.
 pub(crate) const PRIMARY_RAIL_WIDTH: f32 = 40.0;
 
-/// What the whole centre column needs while the rail is drawn: the rail and
-/// one pane's floor, with no divider between them.
-pub(crate) const MIN_COLLAPSED_CENTER_WIDTH: f32 = PRIMARY_RAIL_WIDTH + MIN_CENTER_PANE_WIDTH;
+/// What the centre card needs while the rail is drawn: the rail and one
+/// pane's floor, with no divider between them, plus the card's own border.
+pub(crate) const MIN_COLLAPSED_CENTER_WIDTH: f32 =
+    PRIMARY_RAIL_WIDTH + MIN_CENTER_PANE_WIDTH + CENTER_CARD_BORDERS;
 
 /// The centre while the Primary half is collapsed to the rail.
 #[derive(Clone, Copy, Debug, PartialEq)]

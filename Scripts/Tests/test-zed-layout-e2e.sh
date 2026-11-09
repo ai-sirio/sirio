@@ -9,14 +9,15 @@ set -eEuo pipefail
 # proves seven cases, in order; every assertion is a row of measurements.tsv
 # and the run stops at the first wrong row, after printing it:
 #    1  a fresh database: at 1470x833 and at 1710x987 the sidebar is 300 and the
-#       right panel 240, the two centre halves 456.5 / 576.5 wide, the title
+#       right panel 240, the two centre halves 455.5 / 575.5 wide (+-1), the title
 #       bar 34, the tab strips 32, the status bar 30, the right header 32, a
 #       sidebar section header 31 and a two-line card 53 high, the right
 #       header's last icon and the Secondary's close button inside their
 #       parents, the sidebar's card filling the panel less its border; at
-#       1100x800 the halves stay at least 320 wide and the columns do not
-#       overlap. Spec §9's `secondaryInsideCenter` is report-only
-#       (`ok` is `warn`, never a failure).
+#       1100x800 the halves are exactly 320 wide and the columns do not
+#       overlap; at all three sizes the Secondary ends exactly at the centre
+#       card's content edge, neither under its right border nor short of it
+#       (#723).
 #    2  migration: a stored 280 / 320 at schema 26 draws 300 / 240 and is
 #       stored as such, at schema 27
 #    3  a stored 350 / 400 at schema 26 is kept, drawn and stored
@@ -319,7 +320,7 @@ def evaluate(expr, rects):
 command = sys.argv[1]
 if command == "measure":
     # measure CASE WIDTH KEYS SPEC...: settle, then one row per SPEC "label|expr|op|expected".
-    # op: == (exact), ~ (within 1), >= and <= (expected is an expression too), warn<= (report only).
+    # op: == (exact), ~ (within 1), >= and <= (expected is an expression too).
     case, width, keys = sys.argv[2], float(sys.argv[3]), [k for k in sys.argv[4].split(",") if k]
     rects = settled(case, KEYS if keys == ["ALL"] else keys, width)
     for spec in sys.argv[5:]:
@@ -334,10 +335,6 @@ if command == "measure":
             ok, shown = drawn >= want, f">= {fmt(want)}"
         elif op == "<=":
             ok, shown = drawn <= want, f"<= {fmt(want)}"
-        elif op == "warn<=":
-            ok, shown = drawn <= want, f"<= {fmt(want)}"
-            row(case, label, shown, fmt(drawn), "ok" if ok else "warn")
-            continue
         else:
             sys.exit(f"unknown op {op}")
         row(case, label, shown, fmt(drawn), "ok" if ok else "FAIL")
@@ -609,7 +606,7 @@ INSIDE=(
   'secondaryClose inside secondaryStrip less its bottom px (min px to spare)|min(secondaryClose.x - secondaryStrip.x, secondaryClose.y - secondaryStrip.y, secondaryStrip.x + secondaryStrip.w - secondaryClose.x - secondaryClose.w, secondaryStrip.y + secondaryStrip.h - 1 - secondaryClose.y - secondaryClose.h)|>=|0'
   'sidebarCard ends at the left panel content edge (px from it, right)|left.x + left.w - 1 - (sidebarCard.x + sidebarCard.w)|==|0'
   'sidebarCard starts at the left panel content edge (px from it, left)|sidebarCard.x - (left.x + 1)|==|0'
-  'secondaryInsideCenter (spec §9, report only; overhang px past center right edge - 1)|secondary.x + secondary.w - (center.x + center.w - 1)|warn<=|0'
+  'secondaryEndsAtCenterContentEdge (#723; px past the center card content edge, inside its right border)|secondary.x + secondary.w - (center.x + center.w - 1)|==|0'
 )
 measure_case1() { # case width half
   ZL measure "$1" "$2" "$ALL" \
@@ -624,7 +621,7 @@ ctl project add "$WT"
 ctl select-workspace --workspace "$WT"
 ensure_secondary
 step "1a: fresh database at 1470x833"
-measure_case1 1a 1470 456.5
+measure_case1 1a 1470 455.5
 capture dark-1470
 # A patch of the right panel, near its bottom (empty background), whose luminance tells dark from light.
 PATCH=$(ZL get 1a 1470 ALL 'round(right.x + right.w / 2 - 20)') || fail "could not place the luminance patch"
@@ -634,17 +631,17 @@ check_luma 1a dark-1470 "<"
 step "1b: fresh database at 1710x987"
 resize_window 1710 987
 WIDTH=1710
-measure_case1 1b 1710 576.5
+measure_case1 1b 1710 575.5
 capture dark-1710
 
 step "1c: fresh database at 1100x800"
 resize_window 1100 800
 WIDTH=1100
 ZL measure 1c 1100 "$ALL" \
-  'primary.w|primary.w|>=|320' 'secondary.w|secondary.w|>=|320' \
+  'primary.w|primary.w|==|320' 'secondary.w|secondary.w|==|320' \
   'right.x vs center end|right.x|>=|center.x + center.w' \
   'center.x vs left end|center.x|>=|left.x + left.w' \
-  'secondaryInsideCenter (spec §9, report only; overhang px past center right edge - 1)|secondary.x + secondary.w - (center.x + center.w - 1)|warn<=|0' \
+  'secondaryEndsAtCenterContentEdge (#723; px past the center card content edge, inside its right border)|secondary.x + secondary.w - (center.x + center.w - 1)|==|0' \
   || fail "a measurement of 1c is wrong (see the FAIL row above)"
 quit_app
 
@@ -690,7 +687,7 @@ expect_version 5 27
 step "6: a dragged divider is saved and drawn again after a relaunch"
 db_seed 27 appearance.sidebarWidth=300 appearance.rightPanelWidth=240 appearance.centerSplitRatio=500
 start 1710 987
-ZL measure 6 1710 "$ALL" 'primary.w before the drag|primary.w|~|576.5' || fail "a measurement of 6 is wrong"
+ZL measure 6 1710 "$ALL" 'primary.w before the drag|primary.w|~|575.5' || fail "a measurement of 6 is wrong"
 HANDLE=$(ZL center 1710 dividerHandle 6)
 echo "divider handle at window pixel $HANDLE"
 drag_window "${HANDLE% *}" "${HANDLE#* }" $((${HANDLE% *} + 120)) "${HANDLE#* }"
@@ -741,13 +738,13 @@ quit_app
 step "7b: light theme at interface font 13, 1710x987"
 db_seed 27 appearance.uiFontSize=13
 start 1710 987
-measure_case1 7b 1710 576.5
+measure_case1 7b 1710 575.5
 capture light-1710
 check_luma 7b light-1710 ">"
 quit_app
 
 echo "measurements: $OUT_DIR/measurements.tsv"
-if awk -F'\t' 'NR > 1 && $5 != "ok" && $5 != "warn" {bad = 1} END {exit bad}' "$OUT_DIR/measurements.tsv"; then
+if awk -F'\t' 'NR > 1 && $5 != "ok" {bad = 1} END {exit bad}' "$OUT_DIR/measurements.tsv"; then
   echo "ZED LAYOUT E2E OK"
 else
   fail "a measurements row is not ok"
