@@ -24,14 +24,19 @@ set -eEuo pipefail
 #    6  the divider: a real drag moves the halves, the ratio is saved, and a
 #       relaunch draws the same halves (the case that fails when the drag does
 #       not schedule the save)
-#    7  light theme, interface font 18: the heights hold (the card may grow)
+#    7  light theme, interface font 18: the exact heights at 18 (the card is 58),
+#       the light background really drawn (and the dark one in dark-1470), every
+#       key of shellRects drawn
+#    7b interface font back to 13, light, at 1710x987: the case 1 heights and
+#       widths again
 #
 # The Secondary pane is opened with `surface open-list open --entry changes`
 # after every launch that does not restore one. The sidebar's and the right
 # panel's probes fill on their first paint, so every read polls until the keys
 # it asserts are drawn, the layout reflects the window's size, and two reads
-# 0.4 s apart agree. No fixed sleep stands in for a paint; the only one is the
-# 1.5 s the divider's debounced (500 ms) save is given.
+# 0.4 s apart agree. No fixed sleep stands in for a paint: the only fixed waits
+# are the 1.5 s the divider's debounced (500 ms) save is given and the 2 s
+# before each capture.
 #
 # Isolation: the app starts under `env -i` with an allowlist (launch_app), from
 # a copy of its binary with no sirio-host beside it, SIRIO_HOST_BIN naming a
@@ -44,8 +49,10 @@ set -eEuo pipefail
 # xwininfo, xprop, xdotool and ImageMagick's magick or convert.
 #
 # The artifact: --out-dir DIR (default artifacts/zed-layout-e2e-<stamp>-<pid>)
-# keeps transcript.log, app.log, measurements.tsv (case, key, expected, drawn,
-# ok) and PID-matched window captures in frames/.
+# keeps transcript.log (it starts with the commit and the binary's sha256 and
+# logs every sirioctl call with its exit status), app.log, measurements.tsv
+# (case, key, expected, drawn, ok), reads/ (the decoded shellRects behind every
+# measured assertion) and PID-matched window captures in frames/.
 #
 # Usage: Scripts/Tests/test-zed-layout-e2e.sh --display :N [--out-dir DIR]
 #   Xvfb :97 -screen 0 1720x1000x24 &   # a private display
@@ -178,7 +185,21 @@ export SIRIO_SOCKET="$RUN_DIR/c.sock"
 export SIRIO_DB="$RUN_DIR/session.sqlite"
 [ "${#SIRIO_SOCKET}" -lt 108 ] || fail "the control socket path is too long for a unix socket: $SIRIO_SOCKET (point TMPDIR at a shorter directory)"
 CALL_TIMEOUT=30
-ctl() { echo "+ sirioctl $*"; timeout -k 5 "$CALL_TIMEOUT" "$CTL" "$@"; }
+ctl() {
+  local status=0
+  echo "+ sirioctl $*"
+  timeout -k 5 "$CALL_TIMEOUT" "$CTL" "$@" || status=$?
+  echo "  -> sirioctl exit $status"
+  return "$status"
+}
+echo "commit: $(git -C "$ROOT" rev-parse HEAD)"
+echo "binary: $BIN sha256 $(sha256sum "$BIN" | cut -d' ' -f1)"
+mkdir -p "$OUT_DIR/reads"
+# A row of measurements.tsv written by the script itself.
+tsv_row() { # case key expected drawn ok
+  printf '%s\t%s\t%s\t%s\t%s\n' "$@" >>"$OUT_DIR/measurements.tsv"
+  printf '  %-4s  %s: expected %s, drawn %s\n' "$5" "$2" "$3" "$4"
+}
 
 printf 'case\tkey\texpected\tdrawn\tok\n' >"$OUT_DIR/measurements.tsv"
 cat >"$RUN_DIR/zl.py" <<'PY'
@@ -190,6 +211,8 @@ KEYS = ["titlebar", "left", "center", "right", "primary", "secondary", "primaryS
         "secondaryClose", "status", "rightHeader", "rightHeaderLastIcon", "sidebarSection", "sidebarCard",
         "dividerHandle"]
 LAST = {}
+READS = os.environ["ZL_READS"]
+SAVED = {}
 
 
 def rpc(method, params=None):
@@ -220,7 +243,22 @@ def read():
     return L, rects
 
 
-def settled(keys, width):
+def fail_row(case, key, expected, drawn):
+    line = "\t".join([case, key, expected, drawn, "FAIL"])
+    with open(TSV, "a") as f:
+        f.write(line + "\n")
+    print(f"  FAIL  {key}: expected {expected}, drawn {drawn}")
+
+
+def save_read(case):
+    """The decoded shellRects behind a case's assertions: reads/<case>.json, then -2, -3 ..."""
+    SAVED[case] = SAVED.get(case, 0) + 1
+    name = case if SAVED[case] == 1 else f"{case}-{SAVED[case]}"
+    with open(os.path.join(READS, name + ".json"), "w") as f:
+        json.dump(LAST["rects"], f, indent=1, sort_keys=True)
+
+
+def settled(case, keys, width):
     """Reads until every key is drawn, the title bar spans the window (the resize happened) and
     two reads 0.4 s apart agree. Exits 1 with the last read when that never happens."""
     deadline = time.time() + float(os.environ.get("ZL_SETTLE_SECONDS", "40"))
@@ -228,16 +266,21 @@ def settled(keys, width):
     while True:
         try:
             L, rects = read()
+            if sorted(rects) != sorted(KEYS):
+                raise RuntimeError(f"shellRects keys are {sorted(rects)}, not the expected {sorted(KEYS)}")
             ok = all(rects.get(k) is not None for k in keys) and rects.get("titlebar") is not None \
                 and abs(rects["titlebar"].w - width) <= 1
             snap = json.dumps(LAST["rects"], sort_keys=True)
             if ok and snap == previous:
+                save_read(case)
                 return rects
             previous = snap if ok else None
         except Exception as e:
             LAST["error"] = repr(e)
         if time.time() > deadline:
             missing = [k for k in keys if (LAST.get("rects") or {}).get(k) is None]
+            fail_row(case, "settled (drawn, window width, stable)", f"keys {keys} at width {width:g}",
+                     f"undrawn {missing}; error {LAST.get('error')}")
             print(f"  never settled at width {width}; undrawn: {missing}; error: {LAST.get('error')}", file=sys.stderr)
             print(f"  last shellRects: {json.dumps(LAST.get('rects'))}", file=sys.stderr)
             sys.exit(1)
@@ -259,6 +302,7 @@ def evaluate(expr, rects):
     ns = {k: v for k, v in rects.items()}
     ns["min"] = min
     ns["max"] = max
+    ns["round"] = round
     return eval(expr, {"__builtins__": {}}, ns)
 
 
@@ -267,7 +311,7 @@ if command == "measure":
     # measure CASE WIDTH KEYS SPEC...: settle, then one row per SPEC "label|expr|op|expected".
     # op: == (exact), ~ (within 1), >= and <= (expected is an expression too), warn<= (report only).
     case, width, keys = sys.argv[2], float(sys.argv[3]), [k for k in sys.argv[4].split(",") if k]
-    rects = settled(keys, width)
+    rects = settled(case, KEYS if keys == ["ALL"] else keys, width)
     for spec in sys.argv[5:]:
         label, expr, op, expected = spec.split("|")
         drawn = evaluate(expr, rects)
@@ -291,12 +335,32 @@ if command == "measure":
             print(f"  shellRects: {json.dumps(LAST['rects'])}", file=sys.stderr)
             sys.exit(1)
 elif command == "get":
-    # get WIDTH KEYS EXPR: the value of EXPR over the settled rects.
-    rects = settled([k for k in sys.argv[3].split(",") if k], float(sys.argv[2]))
-    print(fmt(evaluate(sys.argv[4], rects)))
+    # get CASE WIDTH KEYS EXPR: the value of EXPR over the settled rects.
+    keys = [k for k in sys.argv[4].split(",") if k]
+    rects = settled(sys.argv[2], KEYS if keys == ["ALL"] else keys, float(sys.argv[3]))
+    print(fmt(evaluate(sys.argv[5], rects)))
+elif command == "wait":
+    # wait CASE WIDTH SECONDS LABEL EXPR: polls until EXPR (over the drawn rects) is true. A poll
+    # that never settles writes a FAIL row and exits 1.
+    case, width, seconds, label, expr = sys.argv[2], float(sys.argv[3]), float(sys.argv[4]), sys.argv[5], sys.argv[6]
+    deadline = time.time() + seconds
+    value = None
+    while time.time() < deadline:
+        try:
+            L, rects = read()
+            if all(rects.get(k) is not None for k in KEYS):
+                value = evaluate(expr, rects)
+                if value is True:
+                    row(case, label, expr, "true", "ok")
+                    sys.exit(0)
+        except Exception as e:
+            LAST["error"] = repr(e)
+        time.sleep(0.2)
+    fail_row(case, label, expr, f"{value} within {seconds:g} s; error {LAST.get('error')}")
+    sys.exit(1)
 elif command == "center":
-    # center WIDTH KEY: the window pixel at the centre of the rect.
-    rects = settled([sys.argv[3]], float(sys.argv[2]))
+    # center WIDTH KEY CASE: the window pixel at the centre of the rect.
+    rects = settled(sys.argv[4], [sys.argv[3]], float(sys.argv[2]))
     r = rects[sys.argv[3]]
     print(f"{round(r.x + r.w / 2)} {round(r.y + r.h / 2)}")
 elif command == "secondary-tabs":
@@ -306,7 +370,7 @@ elif command == "answers":
 else:
     sys.exit(f"unknown command {command}")
 PY
-export ZL_TSV="$OUT_DIR/measurements.tsv"
+export ZL_TSV="$OUT_DIR/measurements.tsv" ZL_READS="$OUT_DIR/reads"
 ZL() { python3 -I "$RUN_DIR/zl.py" "$@"; }
 
 # ---- the database, edited while the app is quit ---------------------------
@@ -431,7 +495,7 @@ app_running() {
   [ -n "$state" ] && [ "${state#Z}" = "$state" ]
 }
 quit_app() {
-  ctl quit >/dev/null || true
+  ctl quit || true
   for _ in $(seq 1 75); do # up to 15 s
     app_running || break
     sleep 0.2
@@ -452,7 +516,7 @@ ensure_secondary() {
     sleep 0.3
   done
   for _ in $(seq 1 30); do
-    ctl surface open-list open --entry changes >/dev/null 2>&1 && break
+    ctl surface open-list open --entry changes && break
     sleep 1
   done
   for _ in $(seq 1 30); do
@@ -465,7 +529,7 @@ ensure_secondary() {
 # A launch with a Secondary tab open, ready to measure.
 start() { # w h
   launch_app "$1" "$2"
-  ctl select-workspace --workspace "$WT" >/dev/null
+  ctl select-workspace --workspace "$WT"
   ensure_secondary
 }
 
@@ -494,7 +558,12 @@ capture() { # name
   echo "FRAME: $1 ($colours colours; pid $APP_PID)"
 }
 
-ALL=titlebar,left,center,right,primary,secondary,primaryStrip,secondaryStrip,secondaryClose,status,rightHeader,rightHeaderLastIcon,sidebarSection,sidebarCard,dividerHandle
+# The mean luminance (0-255) of a 40x40 patch of a capture, in window pixels, as a plain number.
+LUMA_THRESHOLD=128 # the midpoint of 0-255: a light surface sits far above it, a dark one far below
+luma() { # frame x y
+  "$IM" "$OUT_DIR/frames/$1.png" -crop 40x40+"$2"+"$3" +repage -colorspace Gray -format '%[fx:mean*255]' info:
+}
+ALL=ALL # the one list of shellRects keys lives in zl.py (KEYS)
 COLUMNS_ONLY=titlebar,left,right
 # The assertions of case 1 at one window size; $1 case, $2 width, $3 each half's width.
 HEIGHTS=(
@@ -526,6 +595,14 @@ ensure_secondary
 step "1a: fresh database at 1470x833"
 measure_case1 1a 1470 456.5
 capture dark-1470
+# A patch of the right panel, near its bottom (empty background), whose luminance tells dark from light.
+PATCH=$(ZL get 1a 1470 ALL 'round(right.x + right.w / 2 - 20)') || fail "could not place the luminance patch"
+PATCH="$PATCH $(ZL get 1a 1470 ALL 'round(right.y + right.h - 80)')" || fail "could not place the luminance patch"
+DARK_LUMA=$(luma dark-1470 $PATCH)
+echo "luminance patch (window px) $PATCH: dark-1470 mean $DARK_LUMA"
+awk -v v="$DARK_LUMA" -v t="$LUMA_THRESHOLD" 'BEGIN {exit !(v < t)}' \
+  && tsv_row 1a "dark-1470 patch luminance" "< $LUMA_THRESHOLD" "$DARK_LUMA" ok \
+  || { tsv_row 1a "dark-1470 patch luminance" "< $LUMA_THRESHOLD" "$DARK_LUMA" FAIL; fail "the dark frame's patch is not dark"; }
 
 step "1b: fresh database at 1710x987"
 resize_window 1710 987
@@ -561,6 +638,7 @@ ZL measure 3 1710 "$COLUMNS_ONLY" 'left.w|left.w|~|350' 'right.w|right.w|~|400' 
 quit_app
 expect_db 3 appearance.sidebarWidth 350
 expect_db 3 appearance.rightPanelWidth 400
+expect_version 3 27
 
 # ---- case 4: a deliberate 280 after the migration -----------------------------
 step "4: a stored 280 at schema 27 is kept"
@@ -575,26 +653,26 @@ db_seed 26 appearance.sidebarWidth=abc appearance.rightPanelWidth=240
 start 1710 987
 ZL measure 5 1710 "$COLUMNS_ONLY" 'left.w|left.w|~|300' || fail "a measurement of 5 is wrong"
 quit_app
+expect_version 5 27
 
 # ---- case 6: the divider -----------------------------------------------------
 step "6: a dragged divider is saved and drawn again after a relaunch"
 db_seed 27 appearance.sidebarWidth=300 appearance.rightPanelWidth=240 appearance.centerSplitRatio=500
 start 1710 987
 ZL measure 6 1710 "$ALL" 'primary.w before the drag|primary.w|~|576.5' || fail "a measurement of 6 is wrong"
-HANDLE=$(ZL center 1710 dividerHandle)
+HANDLE=$(ZL center 1710 dividerHandle 6)
 echo "divider handle at window pixel $HANDLE"
 drag_window "${HANDLE% *}" "${HANDLE#* }" $((${HANDLE% *} + 120)) "${HANDLE#* }"
 # The halves move by about 120 px; wait for the paint that shows it.
-for _ in $(seq 1 40); do
-  moved=$(ZL get 1710 "$ALL" 'primary.w > 600') && [ "$moved" = True ] && break
-  sleep 0.4
-done
-PRIMARY=$(ZL get 1710 "$ALL" 'primary.w')
-SECONDARY=$(ZL get 1710 "$ALL" 'secondary.w')
+ZL wait 6 1710 20 'primary.w after the drag exceeds 600 (poll)' 'primary.w > 600' || fail "the halves never moved with the drag"
+PRIMARY=$(ZL get 6 1710 "$ALL" 'primary.w')
+SECONDARY=$(ZL get 6 1710 "$ALL" 'secondary.w')
 echo "after the drag: primary.w $PRIMARY, secondary.w $SECONDARY"
 ZL measure 6 1710 "$ALL" 'primary.w grew with the drag|primary.w|>=|600' 'secondary.w shrank with the drag|secondary.w|<=|550' \
   || fail "the drag did not move the halves"
+echo "mouseup at $(date +%T.%N); waiting 1.5 s for the debounced save"
 sleep 1.5 # the save is debounced 500 ms
+echo "quitting at $(date +%T.%N)"
 quit_app
 RATIO=$(db_get appearance.centerSplitRatio)
 if [ "$RATIO" != 500 ] && [ "$RATIO" != "<none>" ]; then
@@ -617,9 +695,23 @@ db_seed 27 appearance.uiFontSize=18
 start 1470 833
 ZL measure 7 1470 "$ALL" \
   'titlebar.h|titlebar.h|==|34' 'primaryStrip.h|primaryStrip.h|==|32' 'secondaryStrip.h|secondaryStrip.h|==|32' \
-  'status.h|status.h|==|30' 'sidebarCard.h at font 18|sidebarCard.h|>=|53' \
+  'status.h|status.h|==|30' 'rightHeader.h|rightHeader.h|==|32' \
+  'sidebarSection.h at font 18|sidebarSection.h|==|31' 'sidebarCard.h at font 18 (53 + 5 for the title line)|sidebarCard.h|==|58' \
   || fail "a measurement of 7 is wrong"
 capture light-1470-font18
+LIGHT_LUMA=$(luma light-1470-font18 $PATCH)
+echo "luminance patch $PATCH: light-1470-font18 mean $LIGHT_LUMA"
+awk -v v="$LIGHT_LUMA" -v t="$LUMA_THRESHOLD" 'BEGIN {exit !(v > t)}' \
+  && tsv_row 7 "light-1470-font18 patch luminance" "> $LUMA_THRESHOLD" "$LIGHT_LUMA" ok \
+  || { tsv_row 7 "light-1470-font18 patch luminance" "> $LUMA_THRESHOLD" "$LIGHT_LUMA" FAIL; fail "the light frame's patch is not light"; }
+quit_app
+
+# ---- case 7b: interface font back to 13, light, at 1710x987 --------------------
+step "7b: light theme at interface font 13, 1710x987"
+db_seed 27 appearance.uiFontSize=13
+start 1710 987
+measure_case1 7b 1710 576.5
+capture light-1710
 quit_app
 
 echo "measurements: $OUT_DIR/measurements.tsv"

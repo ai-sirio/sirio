@@ -381,11 +381,16 @@ Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 # schema 26 draws and stores 300 / 240, 350 / 400 is kept, a stored 280 at
 # schema 27 is kept, an unparseable width falls back to 300); a divider dragged
 # with real X input is saved and drawn again after a relaunch; light theme at
-# interface font 18 keeps the heights. Every assertion is a row of
-# measurements.tsv and the run stops at the first wrong one. --display :N is a
-# private Xvfb of at least 1720x1000 with Mesa's lavapipe; --out-dir DIR keeps
-# transcript.log, app.log, measurements.tsv (case, key, expected, drawn, ok)
-# and PID-matched captures in frames/.
+# interface font 18 draws the exact heights (the card 58) and a light
+# background (a patch of the right panel is dark in dark-1470, light in
+# light-1470-font18), then font 13 in light at 1710x987 draws case 1's
+# numbers again. Every assertion is a row of measurements.tsv and the run
+# stops at the first wrong one. --display :N is a private Xvfb of at least
+# 1720x1000 with Mesa's lavapipe; --out-dir DIR keeps transcript.log (the
+# commit, the binary's sha256, every sirioctl call and its exit status),
+# app.log, measurements.tsv (case, key, expected, drawn, ok), reads/ (the
+# decoded shellRects behind each measured assertion) and PID-matched captures
+# in frames/.
 Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
 
 # Acting on a change request: every write of sirio_forge on the wire (the token
