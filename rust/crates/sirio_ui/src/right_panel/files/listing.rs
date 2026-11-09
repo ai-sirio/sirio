@@ -30,14 +30,20 @@ const PRIVACY_GUARDED: [&str; 7] = [
 /// not starting with `.` (every entry when `show_hidden`) are exactly one,
 /// and it is a directory.
 pub(super) fn single_visible_dir(listing: &[FileNode], show_hidden: bool) -> Option<&FileNode> {
+    single_visible_index(listing, show_hidden).map(|index| &listing[index])
+}
+
+/// The index [`single_visible_dir`] finds.
+fn single_visible_index(listing: &[FileNode], show_hidden: bool) -> Option<usize> {
     let mut visible = listing
         .iter()
-        .filter(|node| show_hidden || !node.name.starts_with('.'));
-    let only = visible.next()?;
+        .enumerate()
+        .filter(|(_, node)| show_hidden || !node.name.starts_with('.'));
+    let (index, only) = visible.next()?;
     if visible.next().is_some() {
         return None;
     }
-    only.is_dir.then_some(only)
+    only.is_dir.then_some(index)
 }
 
 /// Whether `listing` folds in either toggle state.
@@ -73,6 +79,48 @@ pub(super) fn read_with_chains(
     let mut listing = read_tree(root, directory, markers)?;
     look_ahead(root, &mut listing, markers, home.as_deref());
     Ok(listing)
+}
+
+/// Resolves the fold below a freshly walked listing, in the walk's own
+/// background task: follows the single visible directory of each level
+/// (the same rule `fold::build_rows` joins by) down to the chain's leaf,
+/// looking ahead into every loaded link whose children are not yet
+/// resolved and marking it resolved. The row the walk opened can then
+/// extend over a deeper leaf that is drawn open at once (spec §3.5).
+pub(super) fn resolve_walked_fold(
+    root: &Path,
+    listing: &mut [FileNode],
+    show_hidden: bool,
+    markers: &GitMarkers,
+) {
+    let home = privacy_home();
+    let mut level = listing;
+    while let Some(index) = single_visible_index(level, show_hidden) {
+        let link = &mut level[index];
+        if !link.loaded || link.read_error.is_some() {
+            return;
+        }
+        if !link.children_resolved {
+            look_ahead(root, &mut link.children, markers, home.as_deref());
+            link.children_resolved = true;
+        }
+        level = &mut link.children;
+    }
+}
+
+/// Marks open every link below the open `node` that its row now folds
+/// through, down to the leaf, stopping before a link that is not loaded or
+/// is unreadable: opening those is the user's click, not a guess.
+pub(super) fn open_folded_links(node: &mut FileNode, show_hidden: bool) {
+    let mut node = node;
+    while let Some(index) = single_visible_index(&node.children, show_hidden) {
+        let link = &mut node.children[index];
+        if !link.loaded || link.read_error.is_some() {
+            return;
+        }
+        link.expanded = true;
+        node = link;
+    }
 }
 
 /// Reads the whole tree the panel will draw: the root with its lookahead,
@@ -359,6 +407,20 @@ mod tests {
         assert!(!child(&v2.children, "domain").loaded);
         assert!(!v2.children_resolved);
         assert!(node.loaded && node.children_resolved, "app");
+    }
+
+    #[test]
+    fn a_walked_fold_is_resolved_down_to_its_leaf() {
+        let dir = TempDir::new();
+        dir.file("w/b/f.txt");
+        dir.file("w/b/c/x.txt");
+        let markers = GitMarkers::default();
+        let mut listing =
+            read_with_chains(&dir.0, &dir.0.join("w"), &markers).expect("walk the fixture");
+        resolve_walked_fold(&dir.0, &mut listing, false, &markers);
+        let b = child(&listing, "b");
+        assert!(b.loaded && b.children_resolved, "the leaf draws its children at once");
+        assert!(child(&b.children, "c").loaded, "and each of them is known");
     }
 
     #[test]

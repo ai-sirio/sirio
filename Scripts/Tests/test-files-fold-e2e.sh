@@ -592,6 +592,8 @@ wait_on files 'row:java / it:Depth=3' 'row:java / it:Expanded=1' \
 xkey Up
 wait_on files 'row:java / it:Selected=1' 'row:java / it:Path=source/src/main/java/it' \
   'row:acme / app / v2:Selected=0'
+# The split state, on screen: `java / it` above its own open `acme / app / v2` and New.java.
+capture 5-split
 rm "$REPO/source/src/main/java/it/New.java"
 # Spec §6 #14: the selected path `it` is now a middle link of the rejoined row.
 wait_on files "row:$JAVA:Expanded=1" "row:$JAVA:Selected=1" 'row:App.java:Selected=0'

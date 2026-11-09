@@ -417,13 +417,20 @@ impl RightPanel {
         let generation = self.walk_generation;
         let repo_root = self.repo_root.clone();
         let markers = self.git_markers.clone();
+        let show_hidden = ShowHiddenFilesSetting::get(cx);
         // The walk consumes `path`; the update needs its own copy to find
         // the node again.
         let apply_path = path.clone();
         self.walk_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    listing::read_with_chains(&repo_root, &path, &markers)
+                    let mut listing = listing::read_with_chains(&repo_root, &path, &markers);
+                    // The listing may fold deeper than the folder opened: read
+                    // what the row's leaf needs here, off the UI thread.
+                    if let Ok(listing) = &mut listing {
+                        listing::resolve_walked_fold(&repo_root, listing, show_hidden, &markers);
+                    }
+                    listing
                 })
                 .await;
             let _ = this.update(cx, |panel, cx| {
@@ -440,6 +447,11 @@ impl RightPanel {
                             node.loaded = true;
                             node.children_resolved = true;
                             node.read_error = None;
+                            if node.expanded {
+                                // The row now folds through these links: they
+                                // open with it, so the user's open is kept.
+                                listing::open_folded_links(node, show_hidden);
+                            }
                         }
                         Err(error) => {
                             node.read_error = Some(error);
@@ -1407,11 +1419,16 @@ mod tests {
                 !node.children_resolved,
                 "children must arrive asynchronously, not during the click handler"
             );
-            assert_eq!(
-                fold::build_rows(&panel.file_tree, false).len(),
-                1,
-                "nothing is drawn beneath the folder until its walk lands"
-            );
+        });
+        cx.update(|app| {
+            panel.update(app, |panel, _| {
+                panel.ensure_file_rows(false);
+                assert_eq!(
+                    panel.file_rows().len(),
+                    1,
+                    "nothing is drawn beneath the folder until its walk lands"
+                );
+            })
         });
 
         // …and the tree arrives afterwards, once the walk completes.
@@ -1450,6 +1467,55 @@ mod tests {
 
         pump_until(cx, || {
             panel.read_with(cx, |panel, _| find_node(&panel.file_tree, &late).is_some())
+        });
+    }
+
+    #[gpui::test]
+    async fn a_walk_that_folds_deeper_keeps_the_users_open(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        // Over the lookahead cap, so no folder is read until it is opened.
+        for index in 0..=listing::LOOKAHEAD_DIR_CAP {
+            std::fs::create_dir_all(dir.0.join(format!("d{index:03}"))).expect("create a folder");
+        }
+        let scope = dir.0.join("scope");
+        std::fs::create_dir_all(scope.join("pkg/lib")).expect("create the scope");
+        std::fs::write(scope.join("pkg/index.js"), "x").expect("write index.js");
+        std::fs::write(scope.join("pkg/lib/x.js"), "x").expect("write x.js");
+
+        let panel = cx.new(|_| RightPanel::new(dir.0.clone()));
+        panel.update(cx, |panel, cx| panel.refresh(cx));
+        pump_until(cx, || {
+            panel.read_with(cx, |panel, _| find_node(&panel.file_tree, &scope).is_some())
+        });
+
+        panel.update(cx, |panel, cx| panel.toggle_row(&[scope.clone()], cx));
+        pump_until(cx, || {
+            cx.update(|app| {
+                panel.update(app, |panel, _| {
+                    panel.ensure_file_rows(false);
+                    panel.file_rows().iter().any(|row| row.label == "index.js")
+                })
+            })
+        });
+        cx.update(|app| {
+            panel.update(app, |panel, _| {
+                panel.ensure_file_rows(false);
+                let rows = panel.file_rows();
+                let at = rows
+                    .iter()
+                    .position(|row| row.label == "scope / pkg")
+                    .expect("the walk's listing folds into one row");
+                assert!(rows[at].expanded, "the open the user asked for survives the fold");
+                let below: Vec<(&str, usize)> = rows[at + 1..]
+                    .iter()
+                    .take(2)
+                    .map(|row| (row.label.as_str(), row.depth))
+                    .collect();
+                assert_eq!(
+                    below,
+                    [("lib", rows[at].depth + 1), ("index.js", rows[at].depth + 1)]
+                );
+            })
         });
     }
 
@@ -2619,10 +2685,14 @@ mod tests {
             .expect("the rename source directory is drawn");
         cx.simulate_click(source.center(), Modifiers::none());
         pump_until(&cx.cx, || {
-            panel.read_with(&cx.cx, |panel, _| {
-                fold::build_rows(&panel.file_tree, false)
-                    .iter()
-                    .any(|row| row.label == "from" && row.depth == 1)
+            cx.cx.update(|app| {
+                panel.update(app, |panel, _| {
+                    panel.ensure_file_rows(false);
+                    panel
+                        .file_rows()
+                        .iter()
+                        .any(|row| row.label == "from" && row.depth == 1)
+                })
             })
         });
         cx.cx.run_until_parked();
@@ -2645,11 +2715,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("{marker} is drawn"));
             cx.simulate_click(row.center(), Modifiers::none());
             pump_until(&cx.cx, || {
-                panel.read_with(&cx.cx, |panel, _| {
-                    let wanted = panel.repo_root.join(opened);
-                    fold::build_rows(&panel.file_tree, false)
-                        .iter()
-                        .any(|row| row.path() == wanted)
+                cx.cx.update(|app| {
+                    panel.update(app, |panel, _| {
+                        let wanted = panel.repo_root.join(opened);
+                        panel.ensure_file_rows(false);
+                        panel.file_rows().iter().any(|row| row.path() == wanted)
+                    })
                 })
             });
             cx.cx.run_until_parked();
@@ -2682,10 +2753,11 @@ mod tests {
             .expect("the conflicted directory is drawn");
         cx.simulate_click(conflict.center(), Modifiers::none());
         pump_until(&cx.cx, || {
-            panel.read_with(&cx.cx, |panel, _| {
-                fold::build_rows(&panel.file_tree, false)
-                    .iter()
-                    .any(|row| row.label == "also_mod.txt")
+            cx.cx.update(|app| {
+                panel.update(app, |panel, _| {
+                    panel.ensure_file_rows(false);
+                    panel.file_rows().iter().any(|row| row.label == "also_mod.txt")
+                })
             })
         });
         cx.cx.run_until_parked();

@@ -146,6 +146,13 @@ mod tests {
         node
     }
 
+    /// Loaded, yet carrying an error: only the read_error guard can stop a
+    /// chain here.
+    fn unreadable(mut node: FileNode) -> FileNode {
+        node.read_error = Some("denied".to_string());
+        node
+    }
+
     fn symlink(name: &str) -> FileNode {
         node(name, false, Vec::new())
     }
@@ -249,7 +256,9 @@ mod tests {
 
     #[test]
     fn an_unknown_listing_does_not_fold() {
-        let tree = placed(vec![unloaded(dir("a", vec![]))]);
+        // Not loaded, yet holding a lone folder: only the loaded guard stops
+        // the chain at `a`.
+        let tree = placed(vec![unloaded(dir("a", vec![dir("b", vec![])]))]);
         assert_eq!(labels(&build_rows(&tree, false)), ["a"]);
         let tree = placed(vec![dir("a", vec![unloaded(dir("b", vec![]))])]);
         assert_eq!(labels(&build_rows(&tree, false)), ["a / b"]);
@@ -258,6 +267,15 @@ mod tests {
     #[test]
     fn an_unreadable_link_is_the_leaf_and_carries_the_error() {
         let tree = placed(vec![dir("a", vec![denied(dir("b", vec![]))])]);
+        let rows = build_rows(&tree, false);
+        assert_eq!(labels(&rows), ["a / b"]);
+        assert!(rows[0].read_error.is_some());
+        // A listing that came back with an error does not fold onward, even
+        // if it still holds a lone folder.
+        let tree = placed(vec![dir(
+            "a",
+            vec![unreadable(dir("b", vec![dir("c", vec![])]))],
+        )]);
         let rows = build_rows(&tree, false);
         assert_eq!(labels(&rows), ["a / b"]);
         assert!(rows[0].read_error.is_some());
