@@ -1657,20 +1657,29 @@ mod tests {
         panel.update(cx, |panel, cx| panel.toggle_file(&first, cx));
         panel.update(cx, |panel, cx| panel.toggle_file(&second, cx));
 
-        pump_until(cx, || {
-            panel.read_with(cx, |panel, _| {
+        // Drive the walks to their landing without advancing the clock: the
+        // read runs on a real thread, but the 300 ms debounce of the refresh
+        // a dropped walk asks for stays pending, so nothing but a walk's own
+        // landing can resolve `first` here.
+        cx.executor().allow_parking();
+        for _ in 0..600 {
+            cx.run_until_parked();
+            let landed = panel.read_with(cx, |panel, _| {
                 find_node(&panel.file_tree, &second)
                     .is_some_and(|node| node.children_resolved && node.children.len() == 101)
-            })
-        });
+            });
+            if landed {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         panel.read_with(cx, |panel, _| {
             let first_node = find_node(&panel.file_tree, &first).expect("first node");
             let second_node = find_node(&panel.file_tree, &second).expect("second node");
-            // The dropped walk's folder is resolved later by the refresh its
-            // drop asks for; only a walk's own landing would be a bug.
+            assert_eq!(panel.refreshes_landed, landed_before, "no refresh has run yet");
             assert!(
-                !first_node.children_resolved || panel.refreshes_landed > landed_before,
+                !first_node.children_resolved,
                 "the superseded walk's result must not be applied over the newer one"
             );
             assert_eq!(second_node.children.len(), 101);
