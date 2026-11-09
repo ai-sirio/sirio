@@ -22,7 +22,7 @@ set -eEuo pipefail
 # read the script drains on every poll); `never_built` and `ever_built` ask it. The artifact:
 # --out-dir DIR (default artifacts/files-fold-e2e-<stamp>-<pid>) keeps transcript.log (the
 # script's notes and every logged sirioctl call with its reply; the polled `surface files read`
-# calls are not logged), captures/light-<n>.png (PID-matched window captures), seen-<n>.log
+# calls are not logged), captures/light-<n>.png and light-5-split.png (PID-matched window captures), seen-<n>.log
 # snapshots, git-status-<n>.txt, light-app.log and xvfb.log, and from any run seen.log and
 # last-state.txt (the last Files read), written on exit. Rerunning the script reproduces it.
 #

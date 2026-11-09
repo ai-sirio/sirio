@@ -172,7 +172,7 @@ Scripts/Tests/test-prompts-e2e.sh --xvfb   # -> prints "ok 1" to "ok 15", then "
 # are shown, and a worktree switch away and back keeps the rows, even when the precache rebuilt
 # the repository's snapshot meanwhile. Linux only: --xvfb is required; --out-dir DIR keeps
 # transcript.log (the script's notes and its logged sirioctl calls, not the polled reads),
-# captures/light-<n>.png (and failure.png on a failed run), seen-<n>.log snapshots,
+# captures/light-<n>.png and light-5-split.png (and failure.png on a failed run), seen-<n>.log snapshots,
 # git-status-<n>.txt, light-app.log, xvfb.log, and seen.log and last-state.txt (the last Files
 # read).
 Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 7", then "FILES FOLD E2E OK"
