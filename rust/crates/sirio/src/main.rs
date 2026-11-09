@@ -27079,8 +27079,13 @@ impl SirioWorkspace {
         // laid out to an explicit width, so without this they keep the
         // default width and the panel's `overflow_hidden` silently cuts
         // whatever the drag took away.
+        //
+        // The width pushed is the panel's content box: `left_width` is the
+        // outer width, and `shell_chrome::panel` takes a 1px border off each
+        // side. The sidebar draws no border of its own, so a row ends at the
+        // content box's right edge, not a pixel past it.
         self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_panel_width(left_width.unwrap_or(0.0), cx);
+            sidebar.set_panel_width((left_width.unwrap_or(0.0) - 2.0).max(0.0), cx);
         });
 
         div()

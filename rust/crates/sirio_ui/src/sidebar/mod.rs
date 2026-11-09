@@ -694,7 +694,8 @@ pub struct Sidebar {
     /// Cancel. `None` leaves the real prompt in place.
     debug_prompt_answer: Option<u8>,
     pending_reorder: Option<(RowDrag, usize, bool)>,
-    /// The panel's current width, pushed in by the host each render — the
+    /// The panel's content width (its outer width less the host's panel
+    /// border), pushed in by the host each render — the
     /// same arrangement `RightPanel::set_panel_width` uses, and for the same
     /// reason: a view cannot measure its own container, and reading the last
     /// drawn frame would lag a frame behind every drag.
@@ -4184,8 +4185,6 @@ impl Render for Sidebar {
             .text_size(theme.typography.scaled(13.0))
             .overflow_hidden()
             .bg(theme.ely.bg)
-            .border_r_1()
-            .border_color(theme.ely.border)
             .pt(px(8.0))
             .child(
                 div()

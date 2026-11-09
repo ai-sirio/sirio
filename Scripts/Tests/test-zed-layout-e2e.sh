@@ -13,8 +13,9 @@ set -eEuo pipefail
 #       bar 34, the tab strips 32, the status bar 30, the right header 32, a
 #       sidebar section header 31 and a two-line card 53 high, the right
 #       header's last icon and the Secondary's close button inside their
-#       parents; at 1100x800 the halves stay at least 320 wide and the columns
-#       do not overlap. Spec §9's `secondaryInsideCenter` is report-only
+#       parents, the sidebar's card inside the panel less its border; at
+#       1100x800 the halves stay at least 320 wide and the columns do not
+#       overlap. Spec §9's `secondaryInsideCenter` is report-only
 #       (`ok` is `warn`, never a failure).
 #    2  migration: a stored 280 / 320 at schema 26 draws 300 / 240 and is
 #       stored as such, at schema 27
@@ -606,6 +607,8 @@ HEIGHTS=(
 INSIDE=(
   'rightHeaderLastIcon inside right (px to spare)|right.x + right.w - 1 - (rightHeaderLastIcon.x + rightHeaderLastIcon.w)|>=|0'
   'secondaryClose inside secondaryStrip less its bottom px (min px to spare)|min(secondaryClose.x - secondaryStrip.x, secondaryClose.y - secondaryStrip.y, secondaryStrip.x + secondaryStrip.w - secondaryClose.x - secondaryClose.w, secondaryStrip.y + secondaryStrip.h - 1 - secondaryClose.y - secondaryClose.h)|>=|0'
+  'sidebarCard inside left less its border px (px to spare on the right)|left.x + left.w - 1 - (sidebarCard.x + sidebarCard.w)|>=|0'
+  'sidebarCard starts at the left content edge (px lost on the left)|sidebarCard.x - (left.x + 1)|<=|0'
   'secondaryInsideCenter (spec §9, report only; overhang px past center right edge - 1)|secondary.x + secondary.w - (center.x + center.w - 1)|warn<=|0'
 )
 measure_case1() { # case width half
@@ -641,10 +644,14 @@ ZL measure 1c 1100 "$ALL" \
   'primary.w|primary.w|>=|320' 'secondary.w|secondary.w|>=|320' \
   'right.x vs center end|right.x|>=|center.x + center.w' \
   'center.x vs left end|center.x|>=|left.x + left.w' \
+  'secondaryInsideCenter (spec §9, report only; overhang px past center right edge - 1)|secondary.x + secondary.w - (center.x + center.w - 1)|warn<=|0' \
   || fail "a measurement of 1c is wrong (see the FAIL row above)"
 quit_app
 
 # ---- case 2: the migration --------------------------------------------------
+# Cases 2, 3 and 5 set user_version back to 26 on a database that case 1 already migrated to
+# head. That works only while every migration after v26 is data-only: the first schema-changing
+# migration must make these cases seed a fresh v26 database instead.
 step "2: a stored 280 / 320 at schema 26 draws 300 / 240"
 db_seed 26 appearance.sidebarWidth=280 appearance.rightPanelWidth=320
 start 1710 987
