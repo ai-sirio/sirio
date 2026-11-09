@@ -387,8 +387,12 @@ shutdown_hosts_in() { # ROOT [cleanup]
     major="${f##*host-v}"
     major="${major%.json}"
     # A host removes its state file as it leaves, so the file can be gone by
-    # now even though the test above saw it: that host needs no shutdown.
-    pid="$(sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null | head -n 1)" || continue
+    # now even though the test above saw it: that host needs no shutdown, and
+    # its empty pid skips it below. The `|| true` sits inside the `$(...)`
+    # because macOS's /bin/bash is 3.2: there the ERR trap, inherited through
+    # `set -E`, fires inside a command substitution even when an `||` outside
+    # it guards the assignment, and prints a FAIL line for a case that passed.
+    pid="$({ sed -n 's/.*"pid": *\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null || true; } | head -n 1)"
     [ -n "$pid" ] || continue
     if [ "$mode" = cleanup ] && [ "$OS" != windows ] && is_a_host "$pid"; then
       kill -CONT "$pid" 2>/dev/null || true # a host the case left stopped
