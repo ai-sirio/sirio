@@ -7,13 +7,14 @@ use gpui::SharedString;
 
 /// Height of a section header. Shorter than a row on purpose: it is a label,
 /// not something you select.
-pub(super) const SECTION_HEIGHT: f32 = 26.0;
+pub(super) const SECTION_HEIGHT: f32 = 31.0;
 
 pub(super) fn render_section(
     row: SidebarRow,
     worktree_count: usize,
     entity: gpui::Entity<Sidebar>,
     theme: Theme,
+    probe: Option<std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>>,
 ) -> impl IntoElement {
     let row_id = row.id;
     let expanded = row.expanded;
@@ -35,7 +36,7 @@ pub(super) fn render_section(
         .relative()
         .h(px(SECTION_HEIGHT))
         .w_full()
-        .px(px(12.0))
+        .px(px(ROW_PAD_X))
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -43,7 +44,7 @@ pub(super) fn render_section(
         .border_t_1()
         .border_b_1()
         .border_color(theme.ely.border)
-        .text_size(theme.typography.scaled(13.5))
+        .text_size(theme.typography.scaled(13.0))
         .text_color(theme.ely.fg_muted)
         .cursor_pointer()
         // Keep the old project-row selector as a compatibility probe for
@@ -54,6 +55,18 @@ pub(super) fn render_section(
                 .absolute()
                 .inset_0(),
         )
+        // Reaches over the header's two hairlines: an absolute child spans
+        // the padding box, and the header's bounds are what the person sees.
+        .when_some(probe, |this, cell| {
+            this.child(
+                gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .top(px(-1.0))
+                    .bottom(px(-1.0))
+                    .left_0()
+                    .right_0(),
+            )
+        })
         .on_click(move |_, _, cx| {
             collapse_entity.update(cx, |sidebar, cx| {
                 if let Some(index) = sidebar

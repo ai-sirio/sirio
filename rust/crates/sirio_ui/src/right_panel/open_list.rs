@@ -205,7 +205,7 @@ fn row(
         .flex()
         .items_center()
         .gap(theme.spacing.titlebar_control_spacing)
-        .text_size(theme.typography.scaled(13.5))
+        .text_size(theme.typography.scaled(13.0))
         .text_color(theme.ely.fg)
         .when_some(icon, |this, icon| {
             this.child(IconElement::new(icon, IconSize::Small).text_color(theme.ely.fg_muted))

@@ -3,48 +3,50 @@
 # frame_glob<TAB>x<TAB>y<TAB>w<TAB>h<TAB>why
 #
 # Status bar, every main-window frame (1470x833): the usage meter on the left, the path on the right.
-sweep-*/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
-changes-*/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
-chat-ui-default/scenarios/*	76	802	300	22	status bar usage meter: the account's live percent used and its reset countdown, read at run time
-sweep-*/*	780	802	690	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left)
-changes-*/*	780	802	690	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left)
-chat-ui-default/scenarios/*	780	802	690	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left)
+sweep-*/*	76	807	704	22	status bar usage meter: every account's live percent used and its reset countdown, read at run time (as many as the machine shows); runs to x 780 so the gap before the path is masked too, where a narrow window's right-aligned path label can land
+changes-*/*	76	807	704	22	status bar usage meter: every account's live percent used and its reset countdown, read at run time (as many as the machine shows); runs to x 780 so the gap before the path is masked too, where a narrow window's right-aligned path label can land
+chat-ui-default/scenarios/*	76	807	704	22	status bar usage meter: every account's live percent used and its reset countdown, read at run time (as many as the machine shows); runs to x 780 so the gap before the path is masked too, where a narrow window's right-aligned path label can land
+sweep-*/*	780	807	753	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left); 753 wide so it reaches x 1533, the right edge of the widest frame the glob takes in (composer-band wide)
+changes-*/*	780	807	753	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left); 753 wide so it reaches x 1533, the right edge of the widest frame the glob takes in (composer-band wide)
+chat-ui-default/scenarios/*	780	807	753	22	status bar path: the mktemp-random directory name of the fixture (not a clock); right-aligned, so the label's left edge follows the length of TMPDIR (found on held-out run 6, when visual-sweep.sh began to honour TMPDIR and its label grew 114 px to the left); 753 wide so it reaches x 1533, the right edge of the widest frame the glob takes in (composer-band wide)
 #
 # Chat transcript: the time between turns, centred in the transcript column (HH:MM wall clock).
-chat-ui-default/scenarios/activity/frames/*	689	398	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/cancel/frames/after-cancel	689	479	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/death-recovery/frames/recovered	689	287	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/effort/frames/*	689	287	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/effort-full/frames/*	689	287	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/effort-full-light/frames/*	689	287	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/effort-light/frames/*	689	287	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/long-history/frames/back-at-the-tail	689	173	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/long-history/frames/back-at-the-tail	689	365	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/long-history/frames/back-at-the-tail	689	557	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/long-history/frames/scrolled-up	689	245	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/long-history/frames/scrolled-up	689	437	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/long-history/frames/scrolled-up-after-new-turn	689	245	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/long-history/frames/scrolled-up-after-new-turn	689	437	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/long-history/frames/tail	689	173	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/long-history/frames/tail	689	365	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/long-history/frames/tail	689	557	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/permission/frames/permission-answered	689	326	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/plan/frames/plan-approved	689	417	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/question-options/frames/question-answered	689	445	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/restore/frames/*	689	300	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/staged-queue/frames/queue-drained	689	173	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/staged-queue/frames/queue-drained	689	365	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/staged-queue/frames/queue-drained	689	557	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/subagent/frames/*	689	236	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/wide-content/frames/wide-content	689	557	52	17	message time (HH:MM wall clock)
-chat-ui-default/scenarios/wide-content/frames/wide-content-expanded	689	557	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/activity/frames/*	739	392	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/cancel/frames/after-cancel	739	473	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/death-recovery/frames/recovered	739	281	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort/frames/*	739	281	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort-full/frames/*	739	281	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort-full-light/frames/*	739	281	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/effort-light/frames/*	739	281	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/back-at-the-tail	739	224	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/back-at-the-tail	739	416	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/back-at-the-tail	739	608	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up	739	104	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up	739	296	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up	739	488	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up-after-new-turn	739	104	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up-after-new-turn	739	296	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up-after-new-turn	739	488	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/tail	739	224	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/tail	739	416	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/long-history/frames/tail	739	608	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/permission/frames/permission-answered	739	320	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/plan/frames/plan-approved	739	411	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/question-options/frames/question-answered	739	439	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/restore/frames/*	739	294	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	739	224	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	739	416	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	739	608	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/subagent/frames/*	739	230	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/wide-content/frames/wide-content	739	608	52	17	message time (HH:MM wall clock)
+chat-ui-default/scenarios/wide-content/frames/wide-content-expanded	739	608	52	17	message time (HH:MM wall clock)
 #
 # Chat transcript: other clocks and run-to-run accidents.
-chat-ui-default/scenarios/cancel/frames/after-cancel	655	287	120	17	message time before the word cancelled (HH:MM wall clock)
-chat-ui-default/scenarios/staged-queue/frames/queue-drained	1000	133	50	17	turn duration in ms (elapsed wall-clock time)
-chat-ui-default/scenarios/death-recovery/frames/agent-died	547	482	400	45	crash report of the dead fixture agent: process addresses that ASLR moves on every start (not a clock)
-chat-ui-default/scenarios/*	240	194	32	26	sidebar session dots: the green connected indicators appear in some runs and not in others (a timing race of the fixture session, not a clock)
-chat-ui-default/scenarios/long-history/frames/scrolled-up*	1133	77	10	540	transcript scrollbar thumb: once a turn completes it follows the transcript's estimated total height, so it sits about 7 px higher in some runs while the visible content is identical (a run-to-run accident, not a clock; found on held-out run 7). The track column only
+chat-ui-default/scenarios/cancel/frames/after-cancel	705	281	120	17	message time before the word cancelled (HH:MM wall clock)
+chat-ui-default/scenarios/staged-queue/frames/queue-drained	1030	182	86	20	turn duration in ms (elapsed wall-clock time)
+chat-ui-default/scenarios/death-recovery/frames/agent-died	540	477	420	42	crash report of the dead fixture agent: process addresses that ASLR moves on every start (not a clock)
+chat-ui-default/scenarios/*	266	193	34	32	sidebar session dots: the green connected indicators appear in some runs and not in others (a timing race of the fixture session, not a clock)
+chat-ui-default/scenarios/long-history/frames/scrolled-up*	1213	71	10	556	transcript scrollbar thumb: once a turn completes it follows the transcript's estimated total height, so it sits about 7 px higher in some runs while the visible content is identical (a run-to-run accident, not a clock; found on held-out run 7). The track column only
 #
 # The probe window of the identity lane (820x700): the time of its one message.
 chat-ui-default/identity/*	385	209	52	18	message time (HH:MM wall clock) in the identity probe window

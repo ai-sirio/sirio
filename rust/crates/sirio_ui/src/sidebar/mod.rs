@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 
 use ely_gpui_component::menus::{Hang, layer};
 use gpui::{
-    App, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render, Rgba,
-    ScrollHandle, StyleRefinement, Window, div, img, prelude::*, px, rgb,
+    App, Bounds, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight,
+    KeyDownEvent, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel,
+    Render, Rgba, ScrollHandle, StyleRefinement, Window, div, img, prelude::*, px, rgb,
 };
 use sirio_git::{
     UpstreamBranch, create_worktree, derive_worktree_path, remove_worktree,
@@ -183,8 +183,9 @@ pub struct SidebarTab {
 /// Width the sidebar draws itself at until the host says otherwise, and the
 /// same number as `AppSettings::sidebar_width`'s default. Every fixture in
 /// this file's tests, and the demo sidebar, keep it: only the running shell
-/// pushes a different one, through [`Sidebar::set_panel_width`].
-const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
+/// pushes a different one, through [`Sidebar::set_panel_width`] — the
+/// panel's content width, so 298 for the default 300 less the panel's border.
+const DEFAULT_SIDEBAR_WIDTH: f32 = 300.0;
 const FILTER_LEFT_INSET: f32 = 20.0;
 /// The one size of the icons under the view switch: expand all, collapse
 /// all and the `+`.
@@ -192,15 +193,19 @@ const HEADER_ICON_SIZE: IconSize = IconSize::Medium;
 /// Horizontal padding of one Projects/Sessions segment.
 const VIEW_TAB_PAD_X: f32 = 10.0;
 
-pub(crate) const ROW_HEIGHT: f32 = 32.0;
-/// Single-line row title line height (13.5px at waku's row ratio).
+pub(crate) const ROW_HEIGHT: f32 = 34.0;
+/// Horizontal padding of a sidebar row and of a section header (Zed's 6px).
+pub(crate) const ROW_PAD_X: f32 = 6.0;
+/// Vertical padding of a sidebar row: 8 + 18 + 8 = 34, and 8 + 18 + 4 + 15 + 8 = 53.
+pub(crate) const ROW_PAD_Y: f32 = 8.0;
+/// Row title line height: the 13px title's line (the row adds `ROW_PAD_Y` above and below).
 pub(crate) const ROW_TITLE_LINE_HEIGHT: f32 = 18.0;
 /// Single-line row title size, in the same points every other explicit UI
 /// size in this file is written in. It is drawn through
 /// [`Typography::scaled`], never as a bare `px`, so Settings -> Appearance ->
 /// Interface font size carries the worktree names with the rest of the shell.
-pub(crate) const ROW_TITLE_FONT_SIZE: f32 = 13.5;
-/// Two-line card context line height (11.5px).
+pub(crate) const ROW_TITLE_FONT_SIZE: f32 = 13.0;
+/// Two-line card context line height (12.5px).
 pub(crate) const ROW_SUB_LINE_HEIGHT: f32 = 15.0;
 /// Gap between a card's title and context lines.
 pub(crate) const ROW_GAP: f32 = 4.0;
@@ -208,8 +213,8 @@ pub(crate) const ROW_GAP: f32 = 4.0;
 /// fills paint across a card's whole box, so cards that touch merge into
 /// one highlight block; this keeps them reading as separate cards.
 pub(crate) const ROW_V_GAP: f32 = 2.0;
-/// Two-line card height: 7 + 18 + 4 + 15 + 7 — waku's session-card math.
-pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 51.0;
+/// Two-line card height: 8 + 18 + 4 + 15 + 8 — Zed's two-line thread row.
+pub(crate) const CARD_TWO_LINE_HEIGHT: f32 = 53.0;
 /// A visible row in the flattened sidebar tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarRow {
@@ -621,6 +626,29 @@ impl WorktreePrompt {
     }
 }
 
+/// The bounds the debug layout read reports for the sidebar, from the latest
+/// paint: the first project section header and the first worktree card.
+/// `first_*` name the rows that may write, so a row that scrolled into the
+/// sticky header or moved down the list cannot leave its rect behind.
+#[derive(Default)]
+struct ProbeRects {
+    first_section: std::cell::Cell<Option<usize>>,
+    first_card: std::cell::Cell<Option<usize>>,
+    section: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    card: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+}
+
+impl ProbeRects {
+    fn follow(&self, section: Option<usize>, card: Option<usize>) {
+        if self.first_section.replace(section) != section {
+            self.section.set(None);
+        }
+        if self.first_card.replace(card) != card {
+            self.card.set(None);
+        }
+    }
+}
+
 /// A fixture-backed project sidebar.
 pub struct Sidebar {
     rows: Vec<SidebarRow>,
@@ -667,7 +695,8 @@ pub struct Sidebar {
     /// Cancel. `None` leaves the real prompt in place.
     debug_prompt_answer: Option<u8>,
     pending_reorder: Option<(RowDrag, usize, bool)>,
-    /// The panel's current width, pushed in by the host each render — the
+    /// The panel's content width (its outer width less the host's panel
+    /// border), pushed in by the host each render — the
     /// same arrangement `RightPanel::set_panel_width` uses, and for the same
     /// reason: a view cannot measure its own container, and reading the last
     /// drawn frame would lag a frame behind every drag.
@@ -686,6 +715,8 @@ pub struct Sidebar {
     /// every spinner frame as the spinner's ancestor — would drag every row
     /// along with it.
     cache_rows: bool,
+    /// What the debug layout read measures; see [`ProbeRects`].
+    probe: std::rc::Rc<ProbeRects>,
     list_scroll: ScrollHandle,
     view: SidebarView,
     closed_sessions: Vec<sessions::ClosedSession>,
@@ -709,9 +740,10 @@ impl Sidebar {
         display_absolute_path(path)
     }
 
-    /// The host pushes the resolved sidebar width every render; same
-    /// every-render push as `RightPanel::set_panel_width`, no-op when
-    /// unchanged so a drag does not notify more than it must.
+    /// The host pushes the panel's content width (its resolved outer width
+    /// less the panel's border) every render; the same every-render push as
+    /// `RightPanel::set_panel_width`, which takes the outer width. A no-op when
+    /// unchanged, so a drag does not notify more than it must.
     pub fn set_panel_width(&mut self, width: f32, cx: &mut Context<Self>) {
         if self.panel_width == width {
             return;
@@ -722,6 +754,14 @@ impl Sidebar {
 
     pub fn view(&self) -> SidebarView {
         self.view
+    }
+
+    /// The first project section header and the first worktree card as last
+    /// painted, for the debug layout read. Both are `None` outside the
+    /// Projects view, and a row that stopped being the first one is
+    /// forgotten when the sidebar next renders.
+    pub fn probe_bounds(&self) -> (Option<Bounds<Pixels>>, Option<Bounds<Pixels>>) {
+        (self.probe.section.get(), self.probe.card.get())
     }
 
     /// Restores a view without reporting it (the host already knows).
@@ -999,6 +1039,7 @@ impl Sidebar {
             panel_width: DEFAULT_SIDEBAR_WIDTH,
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
+            probe: Default::default(),
             list_scroll: ScrollHandle::new(),
             view: SidebarView::Projects,
             closed_sessions: Vec::new(),
@@ -1099,6 +1140,7 @@ impl Sidebar {
             panel_width: DEFAULT_SIDEBAR_WIDTH,
             row_views: std::collections::HashMap::new(),
             cache_rows: !cfg!(test),
+            probe: Default::default(),
             list_scroll: ScrollHandle::new(),
             view: SidebarView::Projects,
             closed_sessions: Vec::new(),
@@ -3808,6 +3850,17 @@ impl Render for Sidebar {
         }
         let rows = self.visible_rows();
         let view = self.view;
+        self.probe.follow(
+            (view == SidebarView::Projects)
+                .then(|| rows.iter().find(|row| row.kind == RowKind::Project).map(|row| row.id))
+                .flatten(),
+            (view == SidebarView::Projects)
+                .then(|| rows.iter().find(|row| row.kind == RowKind::Worktree).map(|row| row.id))
+                .flatten(),
+        );
+        let first_section_probe = self.probe.first_section.get();
+        let first_card_probe = self.probe.first_card.get();
+        let section_probe = self.probe.section.clone();
         let session_list = sessions::session_list(&self.rows, &self.closed_sessions, &self.filter);
         let badge = (view == SidebarView::Projects)
             .then(|| sessions::attention(&sessions::session_list(&self.rows, &[], "").open))
@@ -3912,8 +3965,10 @@ impl Render for Sidebar {
             for (index, row) in rows.iter().cloned().enumerate() {
                 if row.kind == RowKind::Project {
                     let worktree_count = self.worktree_count(row.id);
+                    let probe =
+                        (first_section_probe == Some(row.id)).then(|| section_probe.clone());
                     rendered_rows.push(
-                        section::render_section(row, worktree_count, entity.clone(), theme)
+                        section::render_section(row, worktree_count, entity.clone(), theme, probe)
                             .into_any_element(),
                     );
                     continue;
@@ -3929,6 +3984,7 @@ impl Render for Sidebar {
                     index,
                     project_id,
                     project_icon,
+                    first_card: first_card_probe == Some(row.id),
                     row,
                 };
                 let row_id = inputs.row.id;
@@ -4000,7 +4056,7 @@ impl Render for Sidebar {
                     .mt(px(6.0))
                     .h(px(section::SECTION_HEIGHT))
                     .w_full()
-                    .px(px(12.0))
+                    .px(px(ROW_PAD_X))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -4019,7 +4075,7 @@ impl Render for Sidebar {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(theme.typography.scaled(13.5))
+                            .text_size(theme.typography.scaled(13.0))
                             .text_color(theme.ely.fg_muted)
                             .child("Closed"),
                     )
@@ -4128,11 +4184,9 @@ impl Render for Sidebar {
             .flex_col()
             .w(px(panel_width))
             .h_full()
-            .text_size(theme.typography.scaled(16.0))
+            .text_size(theme.typography.scaled(13.0))
             .overflow_hidden()
             .bg(theme.ely.bg)
-            .border_r_1()
-            .border_color(theme.ely.border)
             .pt(px(8.0))
             .child(
                 div()
@@ -4428,6 +4482,7 @@ impl Render for Sidebar {
                                     sticky_worktree_count,
                                     entity.clone(),
                                     theme,
+                                    None,
                                 )),
                         )
                     }),
@@ -5176,6 +5231,9 @@ mod tests {
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
+        // Far past the end of the list on purpose: the scroll clamps, so a
+        // taller row never leaves this short of the last row.
+        const WHEEL_PAST_THE_END: f32 = 100_000.0;
         let last_row_before = cx
             .debug_bounds("sidebar-row-20")
             .expect("the last sidebar row is rendered");
@@ -5189,7 +5247,7 @@ mod tests {
 
         cx.simulate_event(ScrollWheelEvent {
             position: point(px(160.0), px(180.0)),
-            delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-WHEEL_PAST_THE_END))),
             modifiers: Modifiers::none(),
             touch_phase: TouchPhase::Moved,
         });

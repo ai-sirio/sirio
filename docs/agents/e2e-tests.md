@@ -369,6 +369,31 @@ Scripts/Tests/test-open-list-e2e.sh   # -> prints "OPEN LIST E2E OK"
 # --appearance light|dark.
 Scripts/Tests/test-primary-rail-e2e.sh   # -> prints "PRIMARY RAIL E2E OK"
 
+# The Zed layout parity (spec 2026-11-08-zed-layout-parity-design.md §6.1) in a
+# real, isolated Sirio under Xvfb, measured from the rects the app drew
+# (`surface layout read`'s `shellRects`, debug builds): the sidebar 300 and the
+# right panel 240, the two centre halves 456.5 / 576.5 wide at 1470x833 /
+# 1710x987, the title bar 34, the tab strips 32, the status bar 30, the right
+# header 32, a sidebar section header 31 and a two-line card 53 high, the
+# right header's last icon and the Secondary's close button inside their
+# parents, the sidebar's card inside the panel less its border (and spec §9's
+# `secondaryInsideCenter`, report only); at 1100x800 the halves are laid out at
+# least 320 wide (the Secondary's last 2 px pass the centre card's inner edge, spec §9); the width migration (a stored 280 / 320 at
+# schema 26 draws and stores 300 / 240, 350 / 400 is kept, a stored 280 at
+# schema 27 is kept, an unparseable width falls back to 300); a divider dragged
+# with real X input is saved and drawn again after a relaunch; light theme at
+# interface font 18 draws the exact heights (the card 58) and a light
+# background (a patch of the right panel is dark in dark-1470, light in
+# light-1470-font18), then font 13 in light at 1710x987 draws case 1's
+# numbers again. Every assertion is a row of measurements.tsv and the run
+# stops at the first wrong one. --display :N is a private Xvfb of at least
+# 1720x1000 with Mesa's lavapipe; --out-dir DIR keeps transcript.log (the
+# commit, the binary's sha256, every sirioctl call and its exit status),
+# app.log, measurements.tsv (case, key, expected, drawn, ok), reads/ (the
+# decoded shellRects of every successful assertion read, <case>.json then
+# <case>-2.json ...) and PID-matched captures in frames/.
+Scripts/Tests/test-zed-layout-e2e.sh   # -> prints "ZED LAYOUT E2E OK"
+
 # Acting on a change request: every write of sirio_forge on the wire (the token
 # transport and the real gh/glab), then the tab's actions in a real, isolated
 # Sirio driven by the debug-only `surface change-request act` verb. --stage NAME

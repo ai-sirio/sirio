@@ -379,7 +379,8 @@ impl RenderOnce for UpdateCard {
             .debug_selector(|| "update-card".to_owned())
             .occlude()
             .absolute()
-            .bottom(px(44.0))
+            // Clear of the status bar, with the shell's outer gap above it.
+            .bottom(px(crate::status_bar::HEIGHT) + theme.spacing.shell_outer_inset)
             .right(px(16.0))
             .w(px(CARD_WIDTH))
             .flex()

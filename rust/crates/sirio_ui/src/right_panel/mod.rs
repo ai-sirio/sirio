@@ -34,7 +34,7 @@ pub use prompts::{PromptCardFacts, PromptsFacts};
 pub use references::{GroupedRow, ReferenceRow, ReferencesState, group_by_file, summary};
 use references::{ReferencesEvent, ReferencesList};
 
-const HEADER_HEIGHT: f32 = 40.0;
+const HEADER_HEIGHT: f32 = 32.0;
 /// User actions originating from the panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RightPanelEvent {
@@ -345,9 +345,23 @@ pub struct RightPanel {
     prompts: prompts::PromptsView,
     is_stale: bool,
     updating: bool,
+    /// The header's and its last icon's window bounds from the latest paint,
+    /// for the debug layout read.
+    header_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    last_header_icon_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
 }
 
 impl RightPanel {
+    /// The header strip as last painted, its hairline included.
+    pub fn header_bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.header_bounds.get()
+    }
+
+    /// The last view icon of the header as last painted.
+    pub fn last_header_icon_bounds(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        self.last_header_icon_bounds.get()
+    }
+
     /// Creates the panel for one checkout.
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
         let repo_root = repo_root.into();
@@ -384,12 +398,14 @@ impl RightPanel {
             references_subscription: None,
             change_requests: None,
             change_requests_subscription: None,
-            panel_width: 320.0,
+            panel_width: 240.0,
             open_list_facts: open_list::OpenListFacts::default(),
             open_list_chat_expanded: false,
             prompts: prompts::PromptsView::default(),
             is_stale: false,
             updating: false,
+            header_bounds: Default::default(),
+            last_header_icon_bounds: Default::default(),
         }
     }
 
@@ -593,6 +609,13 @@ impl RightPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = PanelView::get(cx);
+        let views: Vec<PanelView> = PanelView::ORDER
+            .into_iter()
+            .filter(|view| *view != PanelView::ChangeRequests || self.project_is_git)
+            .collect();
+        let last_view = views.last().copied();
+        let header_bounds = self.header_bounds.clone();
+        let last_icon_bounds = self.last_header_icon_bounds.clone();
         div()
             .h(px(HEADER_HEIGHT))
             .w_full()
@@ -603,13 +626,13 @@ impl RightPanel {
             .gap(px(4.0))
             .border_b_1()
             .border_color(theme.ely.border)
-            .children(PanelView::ORDER.into_iter().filter(|view| *view != PanelView::ChangeRequests || self.project_is_git).map(|view| {
+            .children(views.into_iter().map(|view| {
                 let is_active = view == active;
                 div()
                     .id(view.element_id())
                     .debug_selector(move || view.element_id().to_owned())
-                    .w(px(28.0))
-                    .h(px(28.0))
+                    .w(px(24.0))
+                    .h(px(24.0))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -618,6 +641,9 @@ impl RightPanel {
                     .hover(|style| style.bg(theme.ely.hover))
                     .when(view == PanelView::Prompts, |this| {
                         this.relative().child(prompts::bounds_probe(self.prompts.rail_cell()))
+                    })
+                    .when(Some(view) == last_view, |this| {
+                        this.child(prompts::bounds_probe(&last_icon_bounds))
                     })
                     .child(IconElement::new(view.icon(), IconSize::Small).text_color(
                         if is_active {
@@ -634,6 +660,19 @@ impl RightPanel {
                         }
                     })
             }))
+            // Reaches over the hairline: an absolute child spans the padding
+            // box, and the header's bounds are what the person sees.
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| header_bounds.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom(px(-1.0)),
+            )
     }
 
     fn render_no_worktree(&self, theme: Theme) -> impl IntoElement {
@@ -653,7 +692,7 @@ impl RightPanel {
             .child(
                 IconElement::new(
                     Icon::PanelRight,
-                    IconSize::Custom(theme.typography.large_title),
+                    IconSize::Custom(theme.typography.scaled(20.0)),
                 )
                 .text_color(theme.ely.fg),
             )
@@ -942,7 +981,7 @@ impl Render for RightPanel {
             .flex_col()
             .w_full()
             .h_full()
-            .text_size(theme.typography.scaled(16.0))
+            .text_size(theme.typography.scaled(13.0))
             .overflow_hidden()
             .bg(theme.ely.bg)
             .child(self.render_header(entity.clone(), theme, cx))

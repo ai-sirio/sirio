@@ -175,7 +175,7 @@ impl GitHistory {
             path_draft: String::new(),
             path_blink: crate::caret::Blink::new(),
             path_caret_visible: false,
-            panel_width: 320.0,
+            panel_width: 240.0,
             search_task: None,
             search_generation: 0,
             search_focus: None,
@@ -2018,11 +2018,15 @@ mod tests {
         cx.update(Theme::init);
         let dir = TempDir::new();
         seed_two_commits(&dir.0);
-        let window = cx.add_window(|_window, cx| GitHistory::new(dir.0.clone(), cx));
+        let window = cx.add_window(|_window, cx| {
+            let mut history = GitHistory::new(dir.0.clone(), cx);
+            history.panel_width = 405.0;
+            history
+        });
         let mut cx = VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
 
-        // The test window is wide, so every chip is drawn.
+        // The panel is 405 wide, above the chip row's minimum, so every chip is drawn.
         assert!(cx.debug_bounds("history-chip-branch").is_some());
         assert!(cx.debug_bounds("history-chip-paths").is_some());
         assert!(cx.debug_bounds("history-chips-collapsed").is_none());
