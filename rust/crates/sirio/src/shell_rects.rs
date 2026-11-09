@@ -45,7 +45,8 @@ impl ShellRects {
 }
 
 /// An absolute, non-interactive child that records the bounds it is laid out
-/// to. The parent must be positioned (`relative()`). An absolute child spans
+/// to, placed against its direct parent (taffy resolves an absolute child
+/// against its parent, positioned or not). An absolute child spans
 /// its parent's padding box, inside the borders, so `border` is the parent's
 /// border widths (top, right, bottom, left) and the probe reaches over them:
 /// what is recorded is the border box the user sees.

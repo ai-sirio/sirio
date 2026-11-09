@@ -78,6 +78,10 @@ pub(super) struct RowInputs {
     pub(super) project_id: Option<String>,
     pub(super) project_icon: Option<ProjectIcon>,
     pub(super) drag: Option<RowDrag>,
+    /// Whether this is the first worktree card, the one the debug layout read
+    /// measures. An input so a row that becomes the first re-renders, even
+    /// when it is mounted cached, and paints its probe.
+    pub(super) first_card: bool,
 }
 
 /// One sidebar row as its own view. It owns nothing but its inputs; every
@@ -105,6 +109,7 @@ impl Render for RowView {
             inputs.project_id,
             inputs.project_icon,
             inputs.drag,
+            inputs.first_card,
             self.sidebar.clone(),
             theme,
             window,
@@ -482,6 +487,7 @@ impl Sidebar {
         project_id: Option<String>,
         project_icon: Option<ProjectIcon>,
         drag: Option<RowDrag>,
+        first_card: bool,
         entity: gpui::Entity<Self>,
         theme: Theme,
         window: &mut Window,
@@ -878,8 +884,7 @@ impl Sidebar {
         // The first worktree card records where it is drawn for the debug
         // layout read. The card has no border, so a full-size absolute child
         // spans its whole box.
-        let card_probe = (is_worktree && entity.read(cx).probe.first_card.get() == Some(row_id))
-            .then(|| entity.read(cx).probe.card.clone());
+        let card_probe = (is_worktree && first_card).then(|| entity.read(cx).probe.card.clone());
         row_view.child(content).when_some(card_probe, |this, cell| {
             this.child(
                 gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})

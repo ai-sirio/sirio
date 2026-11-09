@@ -22779,11 +22779,13 @@ impl SirioWorkspace {
             // The shell's drawn rects `[x, y, w, h]`, null while one is not
             // drawn. The columns' cells are cleared by `columns()` and the
             // settings branch; the sidebar's and the right panel's own
-            // probes live in their entities, so they are gated here.
+            // probes live in their entities, so they follow `left` / `right`
+            // (null whenever that panel was not drawn in the last frame).
             let rects = &self.shell_rects;
-            let columns_drawn = !self.show_settings;
-            let sidebar_drawn = columns_drawn && self.sidebar_visible;
-            let right_drawn = columns_drawn && self.right_panel_visible;
+            // Gated on the last frame, not on current state: a panel just
+            // re-shown still holds the rects of before it was hidden.
+            let sidebar_drawn = rects.left.get().is_some();
+            let right_drawn = rects.right.get().is_some();
             let (sidebar_section, sidebar_card) = if sidebar_drawn {
                 self.sidebar.read(cx).probe_bounds()
             } else {
@@ -26791,7 +26793,6 @@ impl SirioWorkspace {
         div()
             .id("pane-primary")
             .debug_selector(|| "pane-primary".into())
-            .relative()
             .flex()
             .flex_col()
             .w(px(primary_width))
@@ -26978,7 +26979,6 @@ impl SirioWorkspace {
                     div()
                         .id("pane-secondary")
                         .debug_selector(|| "pane-secondary".into())
-                        .relative()
                         .flex()
                         .flex_col()
                         .w(px(secondary_width.unwrap_or(0.0)))
@@ -28845,7 +28845,6 @@ impl Render for SirioWorkspace {
                 })
                 .child(
                     div()
-                        .relative()
                         .h(theme.browser_chrome.bar_height)
                         .w_full()
                         .child(self.child_view(self.titlebar.clone()))
@@ -28870,7 +28869,6 @@ impl Render for SirioWorkspace {
                 )
                 .child(
                     div()
-                        .relative()
                         .h(px(STATUS_BAR_HEIGHT))
                         .w_full()
                         .child(self.child_view(self.status_bar.clone()))
@@ -28960,7 +28958,6 @@ impl Render for SirioWorkspace {
             .when(self.identity_dialog.is_none(), |frame| self.shell_actions(frame, cx))
             .child(
                 div()
-                    .relative()
                     .h(theme.browser_chrome.bar_height)
                     .w_full()
                     .child(self.titlebar.clone())
@@ -28974,7 +28971,6 @@ impl Render for SirioWorkspace {
             )))
             .child(
                 div()
-                    .relative()
                     .h(px(STATUS_BAR_HEIGHT))
                     .w_full()
                     .child(self.status_bar.clone())

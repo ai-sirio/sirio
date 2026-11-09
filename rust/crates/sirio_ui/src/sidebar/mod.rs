@@ -16,9 +16,9 @@ use std::path::{Path, PathBuf};
 
 use ely_gpui_component::menus::{Hang, layer};
 use gpui::{
-    App, Bounds, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel, Render, Rgba,
-    ScrollHandle, StyleRefinement, Window, div, img, prelude::*, px, rgb,
+    App, Bounds, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, FontWeight,
+    KeyDownEvent, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, PromptLevel,
+    Render, Rgba, ScrollHandle, StyleRefinement, Window, div, img, prelude::*, px, rgb,
 };
 use sirio_git::{
     UpstreamBranch, create_worktree, derive_worktree_path, remove_worktree,
@@ -625,7 +625,6 @@ impl WorktreePrompt {
     }
 }
 
-/// A fixture-backed project sidebar.
 /// The bounds the debug layout read reports for the sidebar, from the latest
 /// paint: the first project section header and the first worktree card.
 /// `first_*` name the rows that may write, so a row that scrolled into the
@@ -649,6 +648,7 @@ impl ProbeRects {
     }
 }
 
+/// A fixture-backed project sidebar.
 pub struct Sidebar {
     rows: Vec<SidebarRow>,
     project_ids: std::collections::HashMap<usize, String>,
@@ -3856,6 +3856,7 @@ impl Render for Sidebar {
                 .flatten(),
         );
         let first_section_probe = self.probe.first_section.get();
+        let first_card_probe = self.probe.first_card.get();
         let section_probe = self.probe.section.clone();
         let session_list = sessions::session_list(&self.rows, &self.closed_sessions, &self.filter);
         let badge = (view == SidebarView::Projects)
@@ -3961,7 +3962,8 @@ impl Render for Sidebar {
             for (index, row) in rows.iter().cloned().enumerate() {
                 if row.kind == RowKind::Project {
                     let worktree_count = self.worktree_count(row.id);
-                    let probe = (first_section_probe == Some(row.id)).then(|| section_probe.clone());
+                    let probe =
+                        (first_section_probe == Some(row.id)).then(|| section_probe.clone());
                     rendered_rows.push(
                         section::render_section(row, worktree_count, entity.clone(), theme, probe)
                             .into_any_element(),
@@ -3979,6 +3981,7 @@ impl Render for Sidebar {
                     index,
                     project_id,
                     project_icon,
+                    first_card: first_card_probe == Some(row.id),
                     row,
                 };
                 let row_id = inputs.row.id;

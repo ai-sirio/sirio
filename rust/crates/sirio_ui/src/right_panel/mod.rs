@@ -617,7 +617,6 @@ impl RightPanel {
         let header_bounds = self.header_bounds.clone();
         let last_icon_bounds = self.last_header_icon_bounds.clone();
         div()
-            .relative()
             .h(px(HEADER_HEIGHT))
             .w_full()
             .px(px(10.0))
@@ -644,8 +643,7 @@ impl RightPanel {
                         this.relative().child(prompts::bounds_probe(self.prompts.rail_cell()))
                     })
                     .when(Some(view) == last_view, |this| {
-                        this.relative()
-                            .child(prompts::bounds_probe(&last_icon_bounds))
+                        this.child(prompts::bounds_probe(&last_icon_bounds))
                     })
                     .child(IconElement::new(view.icon(), IconSize::Small).text_color(
                         if is_active {
