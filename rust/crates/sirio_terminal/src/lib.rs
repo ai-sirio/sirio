@@ -2063,6 +2063,21 @@ fn normalize_scrollback_for_replay(bytes: &[u8]) -> Vec<u8> {
     normalized
 }
 
+/// The prelude a new session is given for a captured scrollback: the capture's
+/// rows (joined by a bare LF, the last one with no line break after it) with
+/// CR LF line ends, and a CR LF after the last row. The child's first byte
+/// then starts a row of its own; without that the new shell writes on the
+/// last saved row, and one that redraws its prompt line (readline, when the
+/// terminal is resized) erases that row. An empty capture stays empty: a new
+/// terminal has none, and must not start one row down.
+fn prelude_for_new_session(captured: &[u8]) -> Vec<u8> {
+    let mut prelude = normalize_scrollback_for_replay(captured);
+    if !prelude.is_empty() && !prelude.ends_with(b"\n") {
+        prelude.extend_from_slice(b"\r\n");
+    }
+    prelude
+}
+
 const TERMINAL_RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// Reads where the viewport sits and stores it for the view, returning whether
@@ -2583,10 +2598,10 @@ impl TerminalView {
     }
 
     /// Sets the prelude for the next open: a restored tab's scrollback as it
-    /// was captured (rows joined by a bare LF). `open_request` sends it with
-    /// CR LF line ends, and a session created here feeds that into its VT and
-    /// journal before the child's first byte (SP2 spec §3.1). Ignored when an
-    /// existing session is attached.
+    /// was captured (rows joined by a bare LF). `open_request` sends what
+    /// `prelude_for_new_session` makes of it, and a session created here feeds
+    /// that into its VT and journal before the child's first byte (SP2 spec
+    /// §3.1). Ignored when an existing session is attached.
     pub fn set_prelude(&mut self, prelude: Vec<u8>) {
         self.pending_prelude = prelude;
     }
@@ -2900,9 +2915,8 @@ impl TerminalView {
             rows: Self::LINK_ROWS,
             // Built from the kept bytes, not taken: a `Pending` factory holds
             // the request, and the retry must carry the same prelude. The kept
-            // bytes are the capture (rows joined by a bare LF); the session's
-            // VT needs CR LF to start each row at column zero.
-            prelude: normalize_scrollback_for_replay(&self.pending_prelude),
+            // bytes are the capture, which a VT cannot be fed as it is.
+            prelude: prelude_for_new_session(&self.pending_prelude),
             recreate: self.pending_recreate,
             // An attached tab never creates the session it shows (spec §5).
             attach_only: self.attached,

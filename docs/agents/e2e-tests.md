@@ -67,8 +67,9 @@ Scripts/Tests/test-term-e2e.sh      # -> prints "TERM E2E OK (<n> cases, <s>s)"
 # clears the mark, the session is listed once, and no second notification is posted. It leaves
 # case34-restored.json and case34-shown.json (the `surface attention read` of each moment).
 # Case 35 (restored scrollback rows) quits the app, shuts its host down and starts the app again:
-# the terminal's session is a new one, its saved rows are above it and every one starts at column
-# zero. It leaves case35-restored.txt (the restored pane's text).
+# the terminal's session is a new one and its saved rows are above it. Every one starts at column
+# zero, the last saved row is whole, and the new shell's first line is a row of its own. It leaves
+# case35-restored.txt (the restored pane's text).
 Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> cases, <s>s)"
 # The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
 # socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
