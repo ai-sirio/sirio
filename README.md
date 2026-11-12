@@ -13,6 +13,10 @@
 </p>
 
 <p align="center">
+  <a href="https://www.producthunt.com/products/sirio-2?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-sirio-2" target="_blank" rel="noopener noreferrer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1314575&amp;theme=dark&amp;t=1794518018220" /><img alt="Sirio - Every coding agent. One native window | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1314575&amp;theme=light&amp;t=1794517977101" /></picture></a>
+</p>
+
+<p align="center">
   <strong>Every coding agent. One native window.</strong><br/>
   Run Claude Code, Codex, OpenCode, Pi and Oh-My-Pi side by side: one sidebar for every project and session,<br/>
   terminals and chats in every git worktree, one glance at who needs you.
