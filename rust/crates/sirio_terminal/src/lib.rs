@@ -2063,6 +2063,21 @@ fn normalize_scrollback_for_replay(bytes: &[u8]) -> Vec<u8> {
     normalized
 }
 
+/// The prelude a new session is given for a captured scrollback: the capture's
+/// rows (joined by a bare LF, the last one with no line break after it) with
+/// CR LF line ends, and a CR LF after the last row. The child's first byte
+/// then starts a row of its own; without that the new shell writes on the
+/// last saved row, and one that redraws its prompt line (readline, when the
+/// terminal is resized) erases that row. An empty capture stays empty: a new
+/// terminal has none, and must not start one row down.
+fn prelude_for_new_session(captured: &[u8]) -> Vec<u8> {
+    let mut prelude = normalize_scrollback_for_replay(captured);
+    if !prelude.is_empty() && !prelude.ends_with(b"\n") {
+        prelude.extend_from_slice(b"\r\n");
+    }
+    prelude
+}
+
 const TERMINAL_RESIZE_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// Reads where the viewport sits and stores it for the view, returning whether
@@ -2215,7 +2230,8 @@ pub struct TerminalView {
     /// Scrollback to feed the next session as its prelude: set by
     /// `set_prelude` on a restored tab and by `restart` after a lost session,
     /// sent with every open request and cleared once a session opens (or an
-    /// attach-only open fails).
+    /// attach-only open fails). Kept as captured, rows joined by a bare LF;
+    /// `open_request` makes the bytes a VT needs out of it.
     pending_prelude: Vec<u8>,
     /// A restart re-opens under the same id: carried into `OpenRequest.recreate`
     /// so the factory closes the old session before re-creating.
@@ -2581,10 +2597,11 @@ impl TerminalView {
         self.identity = identity;
     }
 
-    /// Sets the prelude for the next open: a restored tab's scrollback, fed
-    /// into the VT and the journal before the child's first byte when the
-    /// session is created here (SP2 spec §3.1). Ignored when an existing
-    /// session is attached.
+    /// Sets the prelude for the next open: a restored tab's scrollback as it
+    /// was captured (rows joined by a bare LF). `open_request` sends what
+    /// `prelude_for_new_session` makes of it, and a session created here feeds
+    /// that into its VT and journal before the child's first byte (SP2 spec
+    /// §3.1). Ignored when an existing session is attached.
     pub fn set_prelude(&mut self, prelude: Vec<u8>) {
         self.pending_prelude = prelude;
     }
@@ -2837,11 +2854,12 @@ impl TerminalView {
     /// Captures the renderer's current plain-text history for persistence or
     /// headless verification. A pane with no running session (a restored one
     /// not started yet, one still connecting to the host, or one whose open
-    /// failed) answers with the prelude its next session would get: the
-    /// scrollback it was restored with (`set_prelude`), or the replica's after
-    /// a lost session (`restart`). So saving it, or restarting it, does not
-    /// replace that history with nothing. Where the prelude was already
-    /// cleared (an attach-only failure), that is empty.
+    /// failed) answers with the scrollback its next session will be given as
+    /// its prelude, in the captured form: the one it was restored with
+    /// (`set_prelude`), or the replica's after a lost session (`restart`). So
+    /// saving it, or restarting it, does not replace that history with
+    /// nothing. Where the prelude was already cleared (an attach-only
+    /// failure), that is empty.
     pub fn capture_scrollback(&self) -> Vec<u8> {
         match &self.terminal {
             TerminalState::Running(terminal) => terminal.capture_scrollback(),
@@ -2895,9 +2913,10 @@ impl TerminalView {
             shell: self.spawn.shell.clone(),
             cols: Self::LINK_COLS,
             rows: Self::LINK_ROWS,
-            // Cloned, not taken: a `Pending` factory holds the request, and
-            // the retry must carry the same prelude.
-            prelude: self.pending_prelude.clone(),
+            // Built from the kept bytes, not taken: a `Pending` factory holds
+            // the request, and the retry must carry the same prelude. The kept
+            // bytes are the capture, which a VT cannot be fed as it is.
+            prelude: prelude_for_new_session(&self.pending_prelude),
             recreate: self.pending_recreate,
             // An attached tab never creates the session it shows (spec §5).
             attach_only: self.attached,
