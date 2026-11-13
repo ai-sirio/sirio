@@ -96,8 +96,12 @@ jobs:
             fonts-dejavu-core
           fc-cache -f
 
+      # Pinned to 1.99.1: on 1.100.0, 128 sirio_ui tests fail under gpui's test
+      # scheduler (#737). Move every pin together once that is fixed.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
 
       # Exactly 0.15.2, and the pin is upstream's, not a preference: a *newer*
       # Zig fails too, so the upgrade reflex makes it worse (#63). Scripts/ci.sh
