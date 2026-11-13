@@ -2144,12 +2144,14 @@ fn chat_door_streams_stops_and_restores_transcript_over_a_real_socket() {
     .expect("send chat turn over socket");
     assert!(sent.ok, "chat send failed: {sent:?}");
 
+    // The fixture sends `streamed` 30 ms after `first `, so a read under load can find the two
+    // already joined. Either text is mid-turn: the permission request holds the turn open.
     let first_chunk = wait_for_chat_read(&socket_path, |result| {
         result.get("status").map(String::as_str) == Some("streaming")
             && rows::decode(result.get("transcript").expect("transcript")).is_some_and(|rows| {
                 rows.iter().any(|row| {
                     row.get("kind").map(String::as_str) == Some("assistant")
-                        && row.get("text").map(String::as_str) == Some("first ")
+                        && row.get("text").is_some_and(|text| text.starts_with("first "))
                 })
             })
     });
