@@ -255,11 +255,17 @@ fn prepare(id: &str, scratch: &Scratch, pane: &str, sirioctl: &Path) {
 
 /// The `sirioctl` built beside this test binary, `target/<profile>/sirioctl`.
 /// `CARGO_BIN_EXE_sirioctl` is set only for the package that owns the binary.
+/// The profile directory is one level above the test binary's directory in
+/// cargo's old layout (`deps/`) and four above it since cargo 1.100
+/// (`build/<pkg>/<hash>/out/`), so look at each of those ancestors.
 fn built_sirioctl() -> Option<PathBuf> {
     let test_binary = std::env::current_exe().ok()?;
-    let profile = test_binary.parent()?.parent()?;
-    let path = profile.join("sirioctl");
-    path.is_file().then_some(path)
+    test_binary
+        .ancestors()
+        .skip(2)
+        .take(4)
+        .map(|dir| dir.join("sirioctl"))
+        .find(|path| path.is_file())
 }
 
 /// The statuses of the `notify` requests that name `pane`, in arrival order.

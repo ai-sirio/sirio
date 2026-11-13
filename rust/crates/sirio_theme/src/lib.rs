@@ -1442,10 +1442,11 @@ impl Theme {
     #[cfg(target_os = "linux")]
     fn follow_portal(cx: &mut App) {
         // zbus connects to D-Bus through its own blocking executor, whose
-        // threads must never wake GPUI's single-threaded test scheduler
-        // (it asserts on cross-thread activity). The real app never runs on
-        // a thread named like a test, so this reliably skips test runs.
-        if in_test_harness() {
+        // threads must never wake GPUI's single-threaded test scheduler (it
+        // asserts on cross-thread activity). Asking the scheduler itself is
+        // exact; the earlier guesses from thread names and the test binary's
+        // directory broke when cargo 1.100 moved test binaries out of `deps/`.
+        if cx.background_executor().scheduler_executor().scheduler().as_test().is_some() {
             return;
         }
         cx.spawn(async move |cx| {
@@ -1638,49 +1639,6 @@ impl Theme {
     }
 }
 
-/// Whether the current thread is a `cargo test` harness thread.
-///
-/// libtest names every test thread `<path>::tests::<name>`, so a thread
-/// name containing `::tests::` reliably identifies a test run. GPUI's test
-/// scheduler is single-threaded and asserts on cross-thread wakeups; the
-/// portal query connects to D-Bus through zbus's own blocking executor,
-/// which would trip that assertion. The real app never runs on a thread
-/// named like a test.
-#[cfg(target_os = "linux")]
-fn in_test_harness() -> bool {
-    looks_like_test_harness(
-        std::thread::current().name(),
-        std::env::current_exe().ok().as_deref(),
-    )
-}
-
-/// Whether this process is a test binary, decided from the two signals a
-/// library can see from inside a dependency. `cfg!(test)` is useless here:
-/// it is set only for the crate being tested, and `sirio_theme` is always
-/// the dependency, never that crate.
-///
-/// The thread name alone was the original check, and it missed: it required
-/// the segment `tests::`, which assumes every test lives in a `mod tests`.
-/// `sirio_ui`'s `changes::perf_baseline` declares its tests directly in the
-/// module, so its threads are named `changes::perf_baseline::<test>` and the
-/// portal query really ran — waking GPUI's single-threaded test scheduler
-/// from zbus's blocking pool and panicking the test as non-deterministic.
-///
-/// The executable path is the signal that does not depend on how a module
-/// spells its tests: cargo and nextest both run test binaries out of
-/// `target/<profile>/deps/`, while every real Sirio build — the dev binary
-/// at `target/<profile>/sirio`, the installed one, the one inside
-/// `Sirio.app` — sits somewhere else.
-fn looks_like_test_harness(thread_name: Option<&str>, current_exe: Option<&std::path::Path>) -> bool {
-    if thread_name.is_some_and(|name| name.starts_with("tests::") || name.contains("::tests::")) {
-        return true;
-    }
-    current_exe.is_some_and(|exe| {
-        exe.parent()
-            .is_some_and(|dir| dir.file_name().is_some_and(|dir| dir == "deps"))
-    })
-}
-
 /// Queries the XDG desktop portal for the preferred color scheme.
 ///
 /// Returns `None` when no portal is reachable or the query fails — the
@@ -1811,42 +1769,6 @@ mod tests {
             g: color.g + (target.g - color.g) * fraction,
             b: color.b + (target.b - color.b) * fraction,
             a: color.a,
-        }
-    }
-
-    mod looks_like_test_harness {
-        use std::path::Path;
-
-        /// The name the original guard was written for.
-        #[test]
-        fn a_thread_inside_a_mod_tests_is_a_test() {
-            assert!(super::super::looks_like_test_harness(
-                Some("changes::tests::a_drawn_frame_is_counted"),
-                None
-            ));
-        }
-
-        /// The case that got through and panicked the suite: `perf_baseline`
-        /// declares its tests in the module itself, so no `tests::` segment
-        /// ever appears in the thread name.
-        #[test]
-        fn a_test_declared_outside_a_mod_tests_is_still_a_test() {
-            assert!(
-                super::super::looks_like_test_harness(
-                    Some("changes::perf_baseline::drawn_frames_count_rebuilds_and_payload_copies_separately"),
-                    Some(Path::new("/w/rust/target/debug/deps/sirio_ui-2f1c9a")),
-                ),
-                "a test binary under deps/ is a test harness whatever its threads are named"
-            );
-        }
-
-        /// An installed copy must follow the portal like any real run.
-        #[test]
-        fn an_installed_binary_is_not_a_test_harness() {
-            assert!(!super::super::looks_like_test_harness(
-                Some("main"),
-                Some(Path::new("/usr/bin/sirio"))
-            ));
         }
     }
 
@@ -2160,19 +2082,6 @@ mod tests {
                 "the palette cycles"
             );
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn libtest_root_thread_name_is_recognized_as_test_harness() {
-        let thread = std::thread::Builder::new()
-            .name("tests::theme_portal_guard".into())
-            .spawn(in_test_harness)
-            .expect("spawn named test-harness probe");
-        assert!(
-            thread.join().expect("named test-harness probe completes"),
-            "libtest names test threads tests::<name>, without a leading ::"
-        );
     }
 
     /// WCAG 2.1 relative luminance of an opaque colour.

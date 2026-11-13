@@ -81,8 +81,9 @@ cargo build --workspace --all-targets
 
 # `resolve_sirioctl_path` looks in three places: the copy installed under the
 # XDG data directory, the directory holding the running executable, and PATH. A
-# test binary lives in `target/debug/deps/`, where cargo writes
-# `sirioctl-<hash>` and never a plain `sirioctl`, so the second can never match
+# test binary lives in cargo's build directory (`target/debug/deps/`, and since
+# cargo 1.100 `target/debug/build/<pkg>/<hash>/out/`), where no plain
+# `sirioctl` ever sits beside it, so the second can never match
 # from a test -- and the first only matches on a machine where somebody has
 # already run Sirio.
 #
