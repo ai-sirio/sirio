@@ -150,12 +150,13 @@ jobs:
           bash Scripts/Tests/test-pr-workflow.sh
           bash Scripts/Tests/test-generate-changelog.sh
 
-      # Pinned to 1.99.1: on 1.100.0, 128 sirio_ui tests fail under gpui's test
-      # scheduler (#737). Move every pin together once that is fixed.
+      # Pinned, not `stable`: a floating toolchain changed under an unchanged tree
+      # once already (cargo 1.100 moved test binaries out of deps/, #737). Move
+      # every pin together, on purpose.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
 
       # `mlugg/setup-zig` here too, which the self-hosted runner could not use.
       # The reason is the whole reason `macos-15` is pinned above rather than
@@ -439,12 +440,13 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: Scripts/set-workspace-version.sh "$VERSION"
 
-      # Pinned to 1.99.1: on 1.100.0, 128 sirio_ui tests fail under gpui's test
-      # scheduler (#737). Move every pin together once that is fixed.
+      # Pinned, not `stable`: a floating toolchain changed under an unchanged tree
+      # once already (cargo 1.100 moved test binaries out of deps/, #737). Move
+      # every pin together, on purpose.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
 
       # libghostty-vt-sys shells out to `zig build`; upstream pins 0.15.2
       # exactly, and a newer Zig fails too.
@@ -540,12 +542,13 @@ jobs:
       # The MSVC toolchain is required: with the GNU ABI, libghostty-vt-sys
       # produces MSVC-shaped artifacts that rustc-gnu cannot link. See
       # docs/prototypes/ghostty-pane-windows.md.
-      # Pinned to 1.99.1: on 1.100.0, 128 sirio_ui tests fail under gpui's test
-      # scheduler (#737). Move every pin together once that is fixed.
+      # Pinned, not `stable`: a floating toolchain changed under an unchanged tree
+      # once already (cargo 1.100 moved test binaries out of deps/, #737). Move
+      # every pin together, on purpose.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.1-x86_64-pc-windows-msvc
+          toolchain: 1.100.0-x86_64-pc-windows-msvc
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
@@ -636,12 +639,13 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # Pinned to 1.99.1: on 1.100.0, 128 sirio_ui tests fail under gpui's test
-      # scheduler (#737). Move every pin together once that is fixed.
+      # Pinned, not `stable`: a floating toolchain changed under an unchanged tree
+      # once already (cargo 1.100 moved test binaries out of deps/, #737). Move
+      # every pin together, on purpose.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
 
       # rust/.cargo/config.toml sets rustc-wrapper = "sccache" unconditionally
       # (spec §1.5); this job compiles too.

@@ -43,12 +43,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Pinned to 1.99.1: on 1.100.0, 128 sirio_ui tests fail under gpui's test
-      # scheduler (#737). Move every pin together once that is fixed.
+      # Pinned, not `stable`: a floating toolchain changed under an unchanged tree
+      # once already (cargo 1.100 moved test binaries out of deps/, #737). Move
+      # every pin together, on purpose.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
 
       # libghostty-vt-sys shells out to `zig build`; upstream pins 0.15.2
       # exactly, and a newer Zig fails too (#63).

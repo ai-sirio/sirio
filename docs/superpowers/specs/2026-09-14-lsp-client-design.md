@@ -58,7 +58,7 @@ tokio runtime or adapters that cost more than the framing code they
 save — and an ambient runtime is precisely the failure this repo debugged
 on 2026-09-14, when a portal query reached D-Bus on the `blocking`
 crate's threadpool and gpui's deterministic test scheduler panicked with
-"Your test is not deterministic". See `sirio_theme::looks_like_test_harness`.
+"Your test is not deterministic". See `sirio_theme`'s `Theme::follow_portal`, which since #740 skips that query whenever GPUI runs on its test scheduler.
 
 ### Rejected: a separate broker process
 

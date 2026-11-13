@@ -39,12 +39,13 @@ jobs:
       # The MSVC toolchain, named as build-release.yml's windows job names it:
       # the GNU ABI is not what the release ships, and what is proven here must
       # be what is shipped.
-      # Pinned to 1.99.1: on 1.100.0, 128 sirio_ui tests fail under gpui's test
-      # scheduler (#737). Move every pin together once that is fixed.
+      # Pinned, not `stable`: a floating toolchain changed under an unchanged tree
+      # once already (cargo 1.100 moved test binaries out of deps/, #737). Move
+      # every pin together, on purpose.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.1-x86_64-pc-windows-msvc
+          toolchain: 1.100.0-x86_64-pc-windows-msvc
 
       # As build-release.yml's windows job names it: libghostty-vt-sys shells
       # out to `zig build`, and upstream pins exactly 0.15.2.
