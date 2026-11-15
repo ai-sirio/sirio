@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use sirio_agents::{AgentAdapter, OhMyPiAdapter, OpenCodeAdapter};
 
+mod claude_live;
+
 const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false}}}}"#;
 // Cold-starting a CLI can take a few seconds, but a missing handshake must not hang the suite.
 const ACP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -711,4 +713,265 @@ fn answers_stdio_handshake(program: &str, args: &[&str], handshake: &str) -> Han
     let _ = child.kill();
     let _ = child.wait();
     result
+}
+// ---------------------------------------------------------------------------------------
+// claude_sends_mcp_elicitation_to_its_host
+//
+// The ways this can fail, each of which the test below catches:
+//  - the CLI never forwards `elicitation` to its host (it answers the MCP server itself, or
+//    the subtype was renamed): no request arrives before the deadline;
+//  - the line changed shape, so `ElicitationRequest::parse` yields no request, a wrong
+//    mode or server, or a schema without the four fields the MCP server sent;
+//  - the CLI stops handing the host's accepted `content` on to the MCP server, or the
+//    action name `accept` no longer means that;
+//  - an error answer stops mapping to `cancel` for the server, or the turn no longer
+//    continues to a successful `result` after one;
+//  - `interrupt` with an elicitation pending stops sending `control_cancel_request`, or
+//    names some other id, which would leave the host's form open for a dead request.
+
+/// What one live run saw.
+#[derive(Default)]
+struct ElicitationRun {
+    request: Option<sirio_claude::ElicitationRequest>,
+    tool_result: Option<String>,
+    cancelled: Vec<String>,
+    result: Option<serde_json::Value>,
+    seen: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Answer {
+    Accept,
+    Error,
+    /// No answer: `interrupt` instead, and stop at the CLI's cancel.
+    Interrupt,
+}
+
+fn tool_result_text(line: &serde_json::Value) -> Option<String> {
+    line.get("message")?
+        .get("content")?
+        .as_array()?
+        .iter()
+        .find_map(|block| {
+            if block.get("type")?.as_str()? != "tool_result" {
+                return None;
+            }
+            let content = block.get("content")?;
+            Some(match content.as_array() {
+                Some(parts) => parts
+                    .iter()
+                    .filter_map(|part| part.get("text")?.as_str())
+                    .collect::<String>(),
+                None => content.as_str().unwrap_or_default().to_string(),
+            })
+        })
+}
+
+/// One CLI process, one `run form` prompt, the answer `answer`; read on until the run's end
+/// (the turn's `result`, or the CLI's cancel) or 30 s. The process is killed on every path.
+fn run_elicitation(
+    claude: &std::path::Path,
+    python: &std::path::Path,
+    scratch: &std::path::Path,
+    answer: Answer,
+) -> ElicitationRun {
+    use sirio_claude::{
+        CanUseTool, CliMessage, ControlRequest, ElicitationRequest, PermissionResult,
+    };
+
+    let name = match answer {
+        Answer::Accept => "accept",
+        Answer::Error => "error",
+        Answer::Interrupt => "interrupt",
+    };
+    let mut session = claude_live::Session::start(claude, python, &scratch.join(name));
+    session.write(&ControlRequest::initialize("elicit-init"));
+    session.write(&serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": "run form"}]},
+        "parent_tool_use_id": null,
+        "session_id": "",
+    }));
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut run = ElicitationRun::default();
+    while let Some(line) = session.next(deadline) {
+        let kind = line
+            .get("type")
+            .and_then(|kind| kind.as_str())
+            .unwrap_or("?")
+            .to_string();
+        if kind != "stream_event" {
+            run.seen.push(kind.clone());
+        }
+        if let Some(CliMessage::ControlCancelRequest(id)) = CliMessage::parse(&line.to_string()) {
+            run.cancelled.push(id);
+            if answer == Answer::Interrupt {
+                break;
+            }
+        }
+        if let Some(call) = CanUseTool::parse(&line) {
+            session.write(&PermissionResult::allow(call.input).into_response(&call.request_id));
+        } else if let Some(request) = ElicitationRequest::parse(&line) {
+            match answer {
+                Answer::Accept => {
+                    let content = serde_json::json!({"colour": "blue", "count": 2, "ok": true});
+                    let content = content.as_object().cloned();
+                    session.write(&sirio_claude::elicitation_response(
+                        &request.request_id,
+                        "accept",
+                        content,
+                    ));
+                }
+                Answer::Error => {
+                    session.write(&sirio_claude::control_error(
+                        &request.request_id,
+                        "Sirio does not handle elicitation",
+                    ));
+                }
+                Answer::Interrupt => session.write(&ControlRequest::interrupt("elicit-int")),
+            }
+            run.request = Some(request);
+        } else if kind == "user" {
+            if let Some(text) = tool_result_text(&line) {
+                run.tool_result = Some(text);
+            }
+        } else if kind == "result" {
+            run.result = Some(line);
+            break;
+        }
+    }
+    run
+}
+
+/// Whether a `result` line is the CLI's success: the turn ran to its end.
+fn result_is_success(result: &serde_json::Value) -> bool {
+    result.get("subtype").and_then(|s| s.as_str()) == Some("success")
+        && result.get("is_error").and_then(|e| e.as_bool()) == Some(false)
+}
+
+/// Proves the real `claude` hands an MCP server's `elicitation/create` to its stream-json
+/// host as Sirio's wire code reads it, and acts on the three ways a host can end it.
+///
+/// A fake model API makes the model call an MCP tool whose server elicits a form; the
+/// test plays the host in three separate CLI processes: accept with content, answer with a
+/// `control_error`, and `interrupt` while the request is open. It uses no credential and no
+/// network beyond 127.0.0.1, but launches a real CLI three times, so it is `#[ignore]`d and
+/// stays off CI:
+///
+///     cargo nextest run -p sirio_agents --test acp_conformance --run-ignored only -E 'test(=claude_sends_mcp_elicitation_to_its_host)'
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, and without
+/// `python3` (looked up on `/usr/bin:/bin`, the only PATH the CLI gets). Its scratch directory is
+/// under the system temp dir (outside `$HOME` and any git repo), removed after a pass and kept,
+/// with its path printed, after a failure.
+#[test]
+#[ignore = "launches the real claude three times"]
+fn claude_sends_mcp_elicitation_to_its_host() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return;
+    };
+    let scratch = claude_live::Scratch::new("elicitation", &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version: {version_text:?}");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude {version} is below the claimed floor");
+        return;
+    }
+
+    // Run 1: accept with content.
+    let run = run_elicitation(&claude, &python, &scratch.root, Answer::Accept);
+    let request = run
+        .request
+        .as_ref()
+        .unwrap_or_else(|| panic!("no elicitation reached the host; saw {:?}", run.seen));
+    assert_eq!(request.mode, "form");
+    assert_eq!(request.server, "elic");
+    assert_eq!(request.message, "Pick a colour for the probe");
+    let properties = request
+        .requested_schema
+        .as_ref()
+        .and_then(|schema| schema.get("properties"))
+        .and_then(|p| p.as_object());
+    let mut names: Vec<&str> = properties
+        .map(|p| p.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["colour", "count", "note", "ok"],
+        "the schema the server sent"
+    );
+    if let Some(order) = &request.property_order {
+        assert_eq!(
+            order,
+            &["colour", "count", "note", "ok"],
+            "the server's field order"
+        );
+    }
+    let answered = run
+        .tool_result
+        .as_deref()
+        .unwrap_or_else(|| panic!("no tool_result; saw {:?}", run.seen));
+    assert!(
+        answered.contains(r#""action": "accept""#),
+        "the server saw the accept: {answered}"
+    );
+    assert!(
+        answered.contains(r#""colour": "blue""#),
+        "the server saw the content: {answered}"
+    );
+    assert!(
+        run.result.as_ref().is_some_and(result_is_success),
+        "the turn ends in success; saw {:?}",
+        run.seen
+    );
+
+    // Run 2: a control_error answer is a cancel for the server, and the turn goes on.
+    let run = run_elicitation(&claude, &python, &scratch.root, Answer::Error);
+    assert!(
+        run.request.is_some(),
+        "no elicitation reached the host; saw {:?}",
+        run.seen
+    );
+    let answered = run
+        .tool_result
+        .as_deref()
+        .unwrap_or_else(|| panic!("no tool_result; saw {:?}", run.seen));
+    assert!(
+        answered.contains(r#""action": "cancel""#),
+        "the server saw a cancel: {answered}"
+    );
+    assert!(
+        run.result.as_ref().is_some_and(result_is_success),
+        "the turn ends in success; saw {:?}",
+        run.seen
+    );
+
+    // Run 3: unanswered, then interrupted: the CLI withdraws the very request it sent.
+    let run = run_elicitation(&claude, &python, &scratch.root, Answer::Interrupt);
+    let request = run
+        .request
+        .as_ref()
+        .unwrap_or_else(|| panic!("no elicitation reached the host; saw {:?}", run.seen));
+    assert!(
+        run.cancelled.contains(&request.request_id),
+        "a control_cancel_request names {}; got {:?}, saw {:?}",
+        request.request_id,
+        run.cancelled,
+        run.seen
+    );
 }
