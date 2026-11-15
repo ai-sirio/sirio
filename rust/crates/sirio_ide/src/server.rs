@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::http::{HeaderValue, StatusCode};
 use tungstenite::protocol::WebSocketConfig;
-use tungstenite::{Message, WebSocket, accept_hdr_with_config};
+use tungstenite::{HandshakeError, Message, WebSocket, accept_hdr_with_config};
 
 use crate::mcp::{self, FileDiagnostics, Notification};
 use crate::uri::from_file_uri;
@@ -98,6 +98,8 @@ struct Shared {
     next_conn: AtomicU64,
     next_diag: AtomicU64,
     conns: Mutex<HashMap<ConnId, Sender<Command>>>,
+    /// A clone of every accepted socket, so `shutdown` can unblock a read, send or flush.
+    streams: Mutex<HashMap<ConnId, TcpStream>>,
 }
 
 impl Shared {
@@ -135,12 +137,13 @@ impl Bridge {
             next_conn: AtomicU64::new(1),
             next_diag: AtomicU64::new(1),
             conns: Mutex::new(HashMap::new()),
+            streams: Mutex::new(HashMap::new()),
         });
         let acceptor = {
             let shared = Arc::clone(&shared);
             thread::Builder::new()
                 .name("sirio-ide-accept".into())
-                .spawn(move || accept_loop(&listener, &shared))?
+                .spawn(move || accept_loop(listener, &shared))?
         };
         Ok(Bridge { shared, port, acceptor: Some(acceptor) })
     }
@@ -180,12 +183,14 @@ impl Drop for Bridge {
     }
 }
 
-fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
+fn accept_loop(listener: TcpListener, shared: &Arc<Shared>) {
     let mut connections: Vec<JoinHandle<()>> = Vec::new();
     while !shared.stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
                 let conn = ConnId(shared.next_conn.fetch_add(1, Ordering::SeqCst));
+                let Ok(clone) = stream.try_clone() else { continue };
+                shared.streams.lock().unwrap_or_else(|p| p.into_inner()).insert(conn, clone);
                 let shared = Arc::clone(shared);
                 if let Ok(handle) = thread::Builder::new()
                     .name("sirio-ide-conn".into())
@@ -197,6 +202,12 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
             Err(_) => thread::sleep(POLL),
         }
         connections.retain(|h| !h.is_finished());
+    }
+    // Free the port first, then cut every socket: a connection stuck in a handshake, a send or
+    // the closing flush must not hold shutdown up.
+    drop(listener);
+    for stream in shared.streams.lock().unwrap_or_else(|p| p.into_inner()).values() {
+        let _ = stream.shutdown(Shutdown::Both);
     }
     for handle in connections {
         let _ = handle.join();
@@ -228,7 +239,7 @@ fn offers_mcp(request: &Request) -> bool {
 fn handshake(shared: &Shared, stream: TcpStream) -> Option<WebSocket<TcpStream>> {
     stream.set_nonblocking(false).ok()?;
     stream.set_nodelay(true).ok()?;
-    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok()?;
+    stream.set_read_timeout(Some(POLL)).ok()?;
     stream.set_write_timeout(Some(WRITE_TIMEOUT)).ok()?;
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE_BYTES))
@@ -252,13 +263,30 @@ fn handshake(shared: &Shared, stream: TcpStream) -> Option<WebSocket<TcpStream>>
         }
         Ok(response)
     };
-    let ws = accept_hdr_with_config(stream, check, Some(config)).ok()?;
+    // Under the short read timeout, so `stop` and the overall deadline are looked at between
+    // attempts; the timeout is per read, not per handshake.
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let mut attempt = accept_hdr_with_config(stream, check, Some(config));
+    let ws = loop {
+        match attempt {
+            Ok(ws) => break ws,
+            Err(HandshakeError::Interrupted(mid)) => {
+                if shared.stop.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                    return None;
+                }
+                attempt = mid.handshake();
+            }
+            Err(HandshakeError::Failure(_)) => return None,
+        }
+    };
     ws.get_ref().set_read_timeout(Some(POLL)).ok()?;
     Some(ws)
 }
 
 struct PendingDiagnostics {
     id: DiagId,
+    /// The request's `uri`, echoed as the answer's `uri`.
+    uri: Option<String>,
     rpc_id: Value,
     deadline: Instant,
 }
@@ -275,12 +303,16 @@ struct Conn<'a> {
 }
 
 fn serve(shared: &Shared, stream: TcpStream, id: ConnId) {
-    let Some(ws) = handshake(shared, stream) else { return };
+    let Some(ws) = handshake(shared, stream) else {
+        shared.streams.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+        return;
+    };
     let (tx, rx) = mpsc::channel();
     shared.conns.lock().unwrap_or_else(|p| p.into_inner()).insert(id, tx);
     let mut conn = Conn { shared, id, ws, pending: Vec::new(), announced: false };
     let _ = conn.run(&rx);
     shared.conns.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+    shared.streams.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
     let _ = conn.ws.close(None);
     let _ = conn.ws.flush();
     if conn.announced {
@@ -295,6 +327,7 @@ impl Conn<'_> {
                 self.apply(command)?;
             }
             self.expire()?;
+            self.set_read_timeout();
             match self.ws.read() {
                 Ok(Message::Text(text)) => self.handle(text.as_str())?,
                 Ok(_) => {}
@@ -304,6 +337,19 @@ impl Conn<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Wake for the nearest diagnostics deadline when it is sooner than the next poll, so the
+    /// deadline error leaves no later than the deadline plus a millisecond.
+    fn set_read_timeout(&self) {
+        let now = Instant::now();
+        let wait = self
+            .pending
+            .iter()
+            .map(|p| p.deadline.saturating_duration_since(now))
+            .fold(POLL, Duration::min)
+            .max(Duration::from_millis(1));
+        let _ = self.ws.get_ref().set_read_timeout(Some(wait));
     }
 
     fn send(&mut self, frame: String) -> Result<(), Dead> {
@@ -318,7 +364,8 @@ impl Conn<'_> {
                     return Ok(());
                 };
                 let pending = self.pending.remove(at);
-                self.send(mcp::result(&pending.rpc_id, mcp::diagnostics_result(&files)))
+                let result = mcp::diagnostics_result(&files, pending.uri.as_deref());
+                self.send(mcp::result(&pending.rpc_id, result))
             }
         }
     }
@@ -400,10 +447,10 @@ impl Conn<'_> {
     }
 
     fn get_diagnostics(&mut self, id: &Value, arguments: Option<&Value>) -> Result<(), Dead> {
-        let path = match arguments.and_then(|a| a.get("uri")) {
-            None | Some(Value::Null) => None,
+        let (uri, path) = match arguments.and_then(|a| a.get("uri")) {
+            None | Some(Value::Null) => (None, None),
             Some(Value::String(uri)) => match from_file_uri(uri) {
-                Some(path) => Some(path),
+                Some(path) => (Some(uri.clone()), Some(path)),
                 None => {
                     return self.send(mcp::error(id, mcp::INVALID_PARAMS, "uri must be a file:// URI"));
                 }
@@ -413,6 +460,7 @@ impl Conn<'_> {
         let diag = DiagId { conn: self.id, n: self.shared.next_diag.fetch_add(1, Ordering::SeqCst) };
         self.pending.push(PendingDiagnostics {
             id: diag.clone(),
+            uri,
             rpc_id: id.clone(),
             deadline: Instant::now() + self.shared.options.diagnostics_deadline,
         });

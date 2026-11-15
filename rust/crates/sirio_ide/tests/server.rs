@@ -404,6 +404,40 @@ fn slow_diagnostics_do_not_block_ping() {
 }
 
 #[test]
+fn per_file_answer_echoes_the_request_uri() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    let uri = "file:///work/my dir/%41 b.rs";
+    c.request(15, "tools/call", json!({"name":"getDiagnostics","arguments":{"uri":uri}}));
+    let (id, _, path) = diagnostics_event(&h);
+    assert_eq!(path, Some(PathBuf::from("/work/my dir/%41 b.rs")));
+    h.bridge.answer_diagnostics(
+        &id,
+        vec![FileDiagnostics {
+            path: PathBuf::from("/work/my dir/%41 b.rs"),
+            diagnostics: vec![warning("w")],
+        }],
+    );
+    let v = c.recv(Duration::from_secs(5)).unwrap();
+    let text = v["result"]["content"][0]["text"].as_str().unwrap();
+    let files: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(files[0]["uri"], uri);
+}
+
+#[test]
+fn shutdown_is_not_held_by_a_silent_peer() {
+    let h = default_harness();
+    let port = h.port;
+    let _silent = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let started = Instant::now();
+    h.bridge.shutdown();
+    assert!(started.elapsed() < Duration::from_secs(4));
+    assert_eq!(bind(Some(port)).unwrap().local_addr().unwrap().port(), port);
+}
+
+#[test]
 fn shutdown_closes_every_connection_and_the_port() {
     let h = default_harness();
     let port = h.port;

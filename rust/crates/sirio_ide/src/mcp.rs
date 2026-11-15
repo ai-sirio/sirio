@@ -162,13 +162,15 @@ pub fn text_result(text: &str) -> Value {
     json!({"content": [{"type": "text", "text": text}]})
 }
 
-/// The `getDiagnostics` answer: one text item holding the JSON array of files.
-pub fn diagnostics_result(files: &[FileDiagnostics]) -> Value {
+/// The `getDiagnostics` answer: one text item holding the JSON array of files. `echo` is the
+/// request's own `uri` string, given back byte for byte as each entry's `uri` (a per-file
+/// request); without it each `uri` is spelt from the entry's path.
+pub fn diagnostics_result(files: &[FileDiagnostics], echo: Option<&str>) -> Value {
     let files: Vec<Value> = files
         .iter()
         .map(|f| {
             json!({
-                "uri": to_file_uri(&f.path),
+                "uri": echo.map_or_else(|| to_file_uri(&f.path), str::to_string),
                 "diagnostics": f.diagnostics.iter().map(diagnostic).collect::<Vec<_>>(),
             })
         })
