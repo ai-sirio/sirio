@@ -148,13 +148,25 @@ Each item is laid out the same way:
      from the types, not from a live run);
   3. the response shape the CLI accepts.
   The plan adapts to what the probe shows.
+- **What the probe found** (2026-11-15, Claude Code 2.1.325, with `initialize` sent as Sirio sends
+  it):
+  1. The CLI sends `elicitation` without being asked.
+  2. Unanswered, the turn hangs. The CLI writes `tool_progress` every 30 s.
+  3. An error reply reaches the server as `cancel`, and the turn goes on.
+  4. `{action, content}` reaches the server verbatim.
+  5. URL completion arrives as `system/elicitation_complete`.
+  6. On `interrupt`, the CLI sends `control_cancel_request` for the pending elicitation.
 - **Sirio.** A card above the composer, in the place the permission and question cards use.
   - It names the server and shows `message` as plain, selectable text.
-  - Form mode: one field per property, in `property_order` (else schema order). Supported kinds are
-    string (with `format` hints shown, not enforced), number, integer, boolean and enum, with
-    required fields marked. Buttons: Accept, Decline, Cancel.
-  - URL mode: the URL as text, Open (only for `http`/`https`, through the existing web-URL path),
-    then Done and Cancel. `elicitation_complete` closes the card.
+  - Form mode: the question dock walks the form one field at a time, in `property_order` (else
+    schema order). It reuses the dock's keys: arrows, Enter, digits, Esc.
+    - Supported kinds are string (with `format` hints shown, not enforced), number, integer,
+      boolean and enum, with required fields marked.
+    - It ends on a review of the answers, with Accept and Decline. Decline is also offered at
+      every step, and Esc is Cancel.
+  - URL mode: the URL as text, with Open and Decline. Open is offered only for `http`/`https`. It
+    opens the URL in the system browser, as the Connectors card's sign-in does, and accepts.
+    `elicitation_complete` marks the card completed.
   - A schema Sirio cannot render shows the message, plus Decline with a line saying why.
 - **Waiting** (my call). An open elicitation is waiting on the user, the same as an open
   permission card.
@@ -162,9 +174,10 @@ Each item is laid out the same way:
   - It expires on the same clock as a permission card, answering `cancel`, which is MCP's
     "dismissed without a choice".
   - A `control_cancel_request` for it closes the card.
-  - The CLI may list pending elicitations in its `initialize` answer
-    (`pending_elicitation_requests`, newer than 2.1.257). If it does, each is shown once, deduped
-    by `request_id`.
+  - Not replayed: the `pending_elicitation_requests` that the `initialize` answer may carry (newer
+    than 2.1.257). It serves a client that joins a process already running. Sirio starts its own
+    process and initializes it before the first prompt, so nothing can be pending yet. The live
+    probe's `initialize` answer did not carry the field.
   - Stop (interrupt) stays available throughout.
   - #699's watchdog bug is still not fixed here.
 - **Degrade.** None needed, because the request exists at 2.1.257. `property_order` absent → schema
