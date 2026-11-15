@@ -45,6 +45,7 @@ mod band_tests;
 mod ely_tests;
 pub(crate) mod identity;
 mod bypass;
+mod composer_height;
 mod composer_row;
 mod composer_view;
 mod controls;

@@ -25,6 +25,7 @@ pub mod controls;
 pub mod diff_annotations;
 pub mod drawer;
 pub mod editor;
+pub mod composer_prefs;
 pub mod editor_prefs;
 pub mod ely;
 pub mod file_context_menu;
