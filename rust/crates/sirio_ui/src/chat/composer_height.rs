@@ -3,7 +3,7 @@
 
 use gpui::Context;
 
-use super::Chat;
+use super::{Chat, ChatEvent};
 use crate::composer_prefs::ComposerPrefs;
 
 /// The composer's fixed line height, in px.
@@ -44,6 +44,23 @@ pub(crate) fn drag_rows(
     Some(rows as usize)
 }
 
+/// What a drag of the composer's top edge carries; it paints nothing.
+pub(super) struct DraggedComposerEdge;
+
+/// A press on the composer's top edge, from the press until the release.
+pub(super) struct ComposerDrag {
+    /// The window y the press was at.
+    anchor_y: f32,
+    /// The field's rows when the press began.
+    anchor_rows: usize,
+    /// The rows the pointer asks for now.
+    rows: usize,
+    /// The pointer has moved: the field is pinned to `rows` while this holds.
+    pub(super) dragged: bool,
+    /// `rows` has differed from `anchor_rows` at some point: the release saves.
+    changed: bool,
+}
+
 impl Chat {
     /// The most rows the field is drawn to grow to, at rest: the stored maximum
     /// held to the cap, and to at least `MIN_ROWS`. Before the first paint the
@@ -66,10 +83,67 @@ impl Chat {
         self.composer_row
             .stored_max_rows
             .set(ComposerPrefs::current(cx).max_rows);
-        let wanted = (MIN_ROWS, self.drawn_max_rows());
+        // A drag that has moved pins the field to its rows; a press that has
+        // not moved pins nothing.
+        let wanted = match &self.composer_drag {
+            Some(drag) if drag.dragged => (drag.rows, drag.rows),
+            _ => (MIN_ROWS, self.drawn_max_rows()),
+        };
         if self.composer_field.read(cx).rows() != Some(wanted) {
             self.composer_field
                 .update(cx, |field, cx| field.set_rows(wanted.0, wanted.1, cx));
+        }
+    }
+
+    /// A press on the edge at window `pointer_y`: the anchor is the field's
+    /// measured rows, or the drawn maximum before it is measured. It replaces
+    /// a drag a lost release left behind.
+    pub(super) fn begin_composer_drag(&mut self, pointer_y: f32) {
+        let anchor_rows = self
+            .composer_snapshot()
+            .field_rows
+            .filter(|rows| *rows >= MIN_ROWS)
+            .unwrap_or_else(|| self.drawn_max_rows());
+        self.composer_drag = Some(ComposerDrag {
+            anchor_y: pointer_y,
+            anchor_rows,
+            rows: anchor_rows,
+            dragged: false,
+            changed: false,
+        });
+    }
+
+    /// The pointer is at window `pointer_y` mid-drag: the field follows it,
+    /// drawn but not saved (the release saves).
+    pub(super) fn composer_drag_to(&mut self, pointer_y: f32, cx: &mut Context<Self>) {
+        let cap = self.composer_row.cap_rows.get().unwrap_or(120);
+        let Some(drag) = self.composer_drag.as_mut() else {
+            return;
+        };
+        let Some(rows) = drag_rows(drag.anchor_rows, drag.anchor_y, pointer_y, cap) else {
+            return;
+        };
+        drag.dragged = true;
+        drag.rows = rows;
+        if rows != drag.anchor_rows {
+            drag.changed = true;
+        }
+        self.sync_composer_rows(cx);
+    }
+
+    /// The press ended, wherever the pointer was. It runs for each way a drag
+    /// can end and does nothing the second time. A drag that changed the rows
+    /// publishes them (every chat follows), then the workspace saves them.
+    pub(super) fn finish_composer_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.composer_drag.take() else {
+            return;
+        };
+        if drag.changed {
+            ComposerPrefs::apply(ComposerPrefs { max_rows: drag.rows }, cx);
+            self.sync_composer_rows(cx);
+            cx.emit(ChatEvent::ComposerMaxRowsChanged(drag.rows));
+        } else {
+            self.sync_composer_rows(cx);
         }
     }
 }
@@ -117,7 +191,6 @@ mod tests {
     async fn every_open_chat_takes_a_new_maximum(cx: &mut gpui::TestAppContext) {
         use crate::chat::tests::{offline_chat_view, refresh_frame};
         use gpui::AppContext as _;
-        use crate::composer_prefs::ComposerPrefs;
 
         let (painted, cx) = offline_chat_view(cx);
         // The window is tall enough that half of it holds 20 rows.

@@ -9711,6 +9711,8 @@ impl SirioWorkspace {
                 ChatEvent::OpenTrace => workspace.add_trace_tab(&chat_entity, cx),
                 // The Trace tab listens to this itself.
                 ChatEvent::TraceChanged => {}
+                // A drag of the composer's top edge ended on a new maximum.
+                ChatEvent::ComposerMaxRowsChanged(rows) => workspace.save_composer_max_rows(*rows),
                 ChatEvent::SessionIdentified(session_id) => {
                     // A hook write, like `save_session_ref`: the id must
                     // survive a restart that comes before any other save.
@@ -18027,6 +18029,14 @@ impl SirioWorkspace {
                 serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
             self.session.save_settings(&stored);
         }
+    }
+
+    /// The composer's top edge was released on `rows`: stored for the next
+    /// launch. Once per drag; every open chat already follows the published value.
+    fn save_composer_max_rows(&mut self, rows: usize) {
+        let mut stored = self.session.load_settings();
+        stored.composer_max_rows = rows as i64;
+        self.session.save_settings(&stored);
     }
 
     /// Cards raised this session. Test-only counter: `offered` also holds

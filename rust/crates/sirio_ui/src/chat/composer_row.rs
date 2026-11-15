@@ -144,6 +144,8 @@ pub(crate) struct RowFrame {
     pub send: Cell<Option<Bounds<Pixels>>>,
     /// The composer's field box (`composer-input`), as its probe last measured it.
     pub field: Cell<Option<Bounds<Pixels>>>,
+    /// The composer's top edge (`composer-edge`), as its probe last measured it.
+    pub edge: Cell<Option<Bounds<Pixels>>>,
     /// The most rows the chat's height allows the field, as the root probe last
     /// computed it; `None` before the first paint.
     pub cap_rows: Cell<Option<usize>>,
@@ -194,6 +196,10 @@ pub struct ComposerSnapshot {
     pub chips: Option<[f32; 4]>,
     /// The field's box (`composer-input`, its vertical padding included).
     pub field: Option<[f32; 4]>,
+    /// The top edge a drag starts from (`composer-edge`).
+    pub edge: Option<[f32; 4]>,
+    /// Whether a drag of the edge has moved and is held: the field is pinned.
+    pub resizing: bool,
     /// The rows the field is drawn at: its height less the padding, over a row.
     pub field_rows: Option<usize>,
     /// The most rows the field is drawn to grow to, at rest.
@@ -309,6 +315,8 @@ impl Chat {
             send: boxed(frame.send.get()),
             chips: boxed(frame.chips.get()),
             field: boxed(frame.field.get()),
+            edge: boxed(frame.edge.get()),
+            resizing: self.composer_drag.as_ref().is_some_and(|drag| drag.dragged),
             field_rows: frame.field.get().map(|field| {
                 let height: f32 = field.size.height.into();
                 ((height - 2.0 * FIELD_PAD_Y) / ROW_HEIGHT).round().max(0.0) as usize

@@ -692,7 +692,7 @@ impl Chat {
     }
 }
 
-use super::composer_height::ROW_HEIGHT;
+use super::composer_height::{DraggedComposerEdge, EDGE_HEIGHT, ROW_HEIGHT};
 use super::composer_row::{BAND_COLUMN, BAND_TOP_PAD, RowLayout, row_layout, row_width};
 use super::*;
 use crate::popup::{hang_above_at, menu_card, menu_row};
@@ -1385,6 +1385,41 @@ impl Chat {
                 .trailing(self.render_agent_controls(theme, layout, window, cx));
         }
 
+        let edge_frame = self.composer_row.clone();
+        let edge_entity = cx.entity();
+        let finish_entity = cx.entity();
+        // The strip along the top that a drag of resizes the field by. It sits in
+        // the band's top padding, so it covers no text row.
+        let edge = div()
+            .id("composer-edge")
+            .debug_selector(|| "composer-edge".into())
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(EDGE_HEIGHT))
+            .cursor_row_resize()
+            .on_mouse_down(gpui::MouseButton::Left, {
+                move |event, _, cx| {
+                    let pointer_y = f32::from(event.position.y);
+                    edge_entity.update(cx, |chat, _| chat.begin_composer_drag(pointer_y));
+                }
+            })
+            // A press released on the edge with no drag is not a drop: this ends
+            // it, so the anchor never outlives its press.
+            .on_mouse_up(gpui::MouseButton::Left, {
+                move |_, _, cx| finish_entity.update(cx, |chat, cx| chat.finish_composer_drag(cx))
+            })
+            .on_drag(DraggedComposerEdge, |_, _, _, cx| cx.new(|_| gpui::Empty))
+            // Measures the edge; paints nothing.
+            .child(
+                canvas(
+                    move |bounds, _, _| edge_frame.edge.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
         div()
             .w_full()
             .flex()
@@ -1404,7 +1439,22 @@ impl Chat {
                                 .focus(window, cx);
                         }),
                     )
+                    .on_drag_move::<DraggedComposerEdge>(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<DraggedComposerEdge>, _, cx| {
+                            this.composer_drag_to(f32::from(event.event.position.y), cx);
+                        },
+                    ))
+                    // A release over the composer drops; one outside it never
+                    // reaches `on_drop`, so it ends the drag here too.
+                    .on_drop::<DraggedComposerEdge>(
+                        cx.listener(|this, _, _, cx| this.finish_composer_drag(cx)),
+                    )
+                    .on_mouse_up_out(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.finish_composer_drag(cx)),
+                    )
                     .child(prompt)
+                    .child(edge)
                     // Measures the band; paints nothing.
                     .child(
                         canvas(

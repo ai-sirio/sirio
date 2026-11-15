@@ -1803,6 +1803,9 @@ pub enum ChatEvent {
     /// listens to this rather than observing the chat, which notifies on
     /// every streamed chunk; the workspace ignores it.
     TraceChanged,
+    /// A drag of the composer's top edge ended on a new maximum: the
+    /// workspace saves it (every chat already follows the published value).
+    ComposerMaxRowsChanged(usize),
 }
 
 /// Per-tool-call state for the post-turn edited-files summary (F-CHAT-32).
@@ -2150,6 +2153,8 @@ pub struct Chat {
     session_panel: session_panel::SessionPanel,
     /// What the control row and the chat-width probe tell each other.
     composer_row: Rc<composer_row::RowFrame>,
+    /// A press on the composer's top edge, from the press until the release.
+    composer_drag: Option<composer_height::ComposerDrag>,
     entries: Vec<Entry>,
     /// One slot per entry in `entries`: the checkpoint id of a user turn
     /// sent on this connection, `None` everywhere else — restored turns,
@@ -2592,20 +2597,22 @@ impl Chat {
         )
         .detach();
 
-        let composer_field = cx.new(|cx| {
-            TextInput::detached(cx)
-                .multi_line(
-                    composer_height::MIN_ROWS,
-                    ComposerPrefs::current(cx)
-                        .max_rows
-                        .min(composer_height::DEFAULT_MAX_ROWS),
-                )
-                .host_context("ChatComposer")
-        });
         let composer_row = Rc::<composer_row::RowFrame>::default();
         composer_row
             .stored_max_rows
             .set(ComposerPrefs::current(cx).max_rows);
+        // The field's first maximum is `drawn_max_rows` before any paint, so a
+        // stored value under the minimum cannot trip the field's assert.
+        let first_max = composer_row
+            .stored_max_rows
+            .get()
+            .min(composer_height::DEFAULT_MAX_ROWS)
+            .max(composer_height::MIN_ROWS);
+        let composer_field = cx.new(|cx| {
+            TextInput::detached(cx)
+                .multi_line(composer_height::MIN_ROWS, first_max)
+                .host_context("ChatComposer")
+        });
         // Both text and caret changes notify, and the mention behind the
         // caret changes when either does: this is an observer, not a
         // subscription to `Changed`. The blink's notifies reach it too, and
@@ -2626,6 +2633,7 @@ impl Chat {
             agent_cwd: cwd,
             session_panel: session_panel::SessionPanel::new(),
             composer_row,
+            composer_drag: None,
             entries: Vec::new(),
             turn_message_ids: Vec::new(),
             pending_rewind: None,
@@ -6977,6 +6985,11 @@ impl Render for Chat {
             sirio_perf::event("motion.Chat.woken", cx.entity_id().as_u64());
         }
         sirio_perf::event("Chat.entries", self.entries.len() as u64);
+        // A drag the platform ended without a drop or a release over the
+        // composer (the window lost the pointer) would leave the field pinned.
+        if self.composer_drag.as_ref().is_some_and(|drag| drag.dragged) && !cx.has_active_drag() {
+            cx.defer_in(window, |chat, _, cx| chat.finish_composer_drag(cx));
+        }
         // The responses painted from here on refill it.
         self.transcript_links.borrow_mut().clear();
         // Fetched fresh every frame from the global, so a change of
