@@ -9,4 +9,4 @@ publish.workspace = true
 # no channels, no local crates. That is what keeps it a leaf both sirio_chat
 # and sirio_usage can depend on without inverting the graph.
 serde = { workspace = true }
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }

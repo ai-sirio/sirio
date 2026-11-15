@@ -35,6 +35,9 @@ pub enum CliMessage {
     ControlRequest(serde_json::Value),
     /// The answer to a request this client made.
     ControlResponse(serde_json::Value),
+    /// The CLI withdrawing a request it made (`request_id`), e.g. an
+    /// elicitation the turn's interrupt cancelled.
+    ControlCancelRequest(String),
     /// A line this build has no model for. Named, never dropped silently.
     Other {
         /// The wire `type`.
@@ -72,6 +75,10 @@ impl CliMessage {
             "rate_limit_event" => RateLimitPush::parse(&value).map(Self::RateLimit),
             "control_request" => Some(Self::ControlRequest(value.clone())),
             "control_response" => Some(Self::ControlResponse(value.clone())),
+            "control_cancel_request" => value
+                .get("request_id")
+                .and_then(|id| id.as_str())
+                .map(|id| Self::ControlCancelRequest(id.to_string())),
             _ => None,
         };
         Some(typed.unwrap_or(Self::Other { kind, subtype }))
@@ -114,6 +121,10 @@ pub struct SystemPayload {
     pub slash_commands: Vec<String>,
     /// Commands whose UX is bound to a terminal; a desktop chat hides them.
     pub terminal_slash_commands: Vec<String>,
+    /// Present on `elicitation_complete`: the MCP server that finished it.
+    pub mcp_server_name: Option<String>,
+    /// Present on `elicitation_complete`: the id the url request carried.
+    pub elicitation_id: Option<String>,
     /// Present on `commands_changed`.
     pub commands: Option<serde_json::Value>,
     /// Present on `compact_boundary`.
@@ -1130,5 +1141,39 @@ mod tests {
         };
         assert!(result.is_error);
         assert_eq!(result.duration_ms, None);
+    }
+
+    // Ways the new lines can fail:
+    // - a `control_cancel_request` falls to `Other`, so a pending form stays
+    //   on screen after the CLI withdrew it;
+    // - one without an id becomes a cancel of nothing instead of `Other`;
+    // - `elicitation_complete` loses its server or id, so a url prompt
+    //   cannot be matched to the one it completes.
+
+    #[test]
+    fn a_cancel_request_line_is_its_own_message() {
+        let line = r#"{"type":"control_cancel_request","request_id":"abc"}"#;
+        assert_eq!(
+            CliMessage::parse(line),
+            Some(CliMessage::ControlCancelRequest("abc".into()))
+        );
+        assert_eq!(
+            CliMessage::parse(r#"{"type":"control_cancel_request"}"#),
+            Some(CliMessage::Other {
+                kind: "control_cancel_request".into(),
+                subtype: None
+            })
+        );
+    }
+
+    #[test]
+    fn elicitation_complete_carries_server_and_id() {
+        let line = r#"{"type": "system", "subtype": "elicitation_complete", "mcp_server_name": "elic", "elicitation_id": "el-2"}"#;
+        let Some(CliMessage::System(system)) = CliMessage::parse(line) else {
+            panic!("a system line");
+        };
+        assert_eq!(system.subtype, "elicitation_complete");
+        assert_eq!(system.mcp_server_name.as_deref(), Some("elic"));
+        assert_eq!(system.elicitation_id.as_deref(), Some("el-2"));
     }
 }

@@ -29,7 +29,8 @@ pub use context::{
     MemoryFile, OriginNode, Standing,
 };
 pub use control::{
-    CanUseTool, ControlEnvelope, ControlRequest, PermissionResult, THINKING_DISPLAYS,
+    CanUseTool, ControlEnvelope, ControlRequest, ElicitationRequest, PermissionResult,
+    THINKING_DISPLAYS, control_error, control_request_subtype, elicitation_response,
 };
 pub use launch::{ChatSession, LaunchLine};
 pub use mcp::{McpAuthStart, McpOrigin, McpServer, McpState, parse_mcp_status};

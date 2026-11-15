@@ -9,9 +9,14 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod elicitation;
 mod permission;
 mod trace_event;
 
+pub use elicitation::{
+    ElicitationAction, ElicitationChoice, ElicitationField, ElicitationFieldKind,
+    ElicitationPrompt, elicitation_fields, elicitation_value,
+};
 pub use permission::parse_permission_question;
 pub use trace_event::{SpanKind, SpanOutcome, TokenCount, TraceEvent, TurnOutcome};
 
