@@ -508,6 +508,14 @@ it names; the live probe (§8.1) adds its findings here before any product code.
     unless Enzo decides otherwise, announced with a toast "Claude proposes a change in
     <worktree name>"; the owner terminal's own attention state is not relied on, since a
     hand-typed `claude` may have no activity agent id.
+15. **What "taken" means for the saved port** (refines §4.1). On macOS and Linux the listener sets
+    `SO_REUSEADDR`, so a port held only by the TIME_WAIT of a connection Sirio closed first stays
+    bindable across a quick relaunch (Claude retries for only 15–25 s, §10.13). Before every bind
+    Sirio connects to `127.0.0.1:<port>` and treats the port as taken unless that connect is
+    refused, because on macOS `SO_REUSEADDR` would let a `127.0.0.1` bind succeed next to another
+    process listening on `*:<port>`. Windows binds with neither the option nor the probe (there the
+    option lets a socket take a port in active use). The gap between the probe and the bind is a
+    race that is accepted.
 
 ### §10.13 Probe findings (2026-11-15)
 

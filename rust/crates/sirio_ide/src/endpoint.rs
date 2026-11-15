@@ -11,10 +11,29 @@ pub const PORT_RANGE: RangeInclusive<u16> = 10000..=65535;
 
 const RANDOM_TRIES: usize = 64;
 
-/// Bind 127.0.0.1:`port` without SO_REUSEADDR (std's `TcpListener::bind` sets it on unix, which on
-/// macOS lets a bind succeed next to another process listening on `*:port`).
+/// Bind 127.0.0.1:`port`, failing when the port is taken.
+///
+/// On unix the socket sets `SO_REUSEADDR`, so a port held only by the TIME_WAIT of a connection
+/// Sirio closed first stays bindable across a quick relaunch (Claude retries for only 15-25 s).
+/// That option would also let a `127.0.0.1` bind succeed next to another process listening on
+/// `*:port` on macOS, so first a connect to the port must be refused: any other outcome counts as
+/// taken. On Windows neither the option nor the probe is used (there the option lets a socket take
+/// a port in active use). The gap between the probe and the bind is a race that is accepted.
 fn listen(port: u16) -> io::Result<TcpListener> {
+    #[cfg(unix)]
+    {
+        let probe = std::net::TcpStream::connect_timeout(
+            &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            std::time::Duration::from_millis(250),
+        );
+        match probe {
+            Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {}
+            _ => return Err(io::Error::new(io::ErrorKind::AddrInUse, "port is taken")),
+        }
+    }
     let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
     socket.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)).into())?;
     socket.listen(128)?;
     Ok(socket.into())
@@ -100,6 +119,20 @@ mod tests {
         let taken = held.local_addr().unwrap().as_socket().unwrap().port();
         let l = bind(Some(taken)).unwrap();
         assert_ne!(l.local_addr().unwrap().port(), taken);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_port_survives_a_lingering_close() {
+        let l = bind(None).unwrap();
+        let port = l.local_addr().unwrap().port();
+        let client = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        let (accepted, _) = l.accept().unwrap();
+        drop(accepted);
+        drop(client);
+        drop(l);
+        let again = bind(Some(port)).unwrap();
+        assert_eq!(again.local_addr().unwrap().port(), port);
     }
 
     #[test]
