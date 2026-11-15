@@ -999,6 +999,20 @@ def script_elic_url():
     )
 
 
+def script_elic_url_early():
+    # The user finished the flow by hand: the completion arrives before any answer.
+    ask_elicitation(
+        "elic-url-early",
+        message="Sign in to the probe service",
+        mode="url",
+        url="https://example.com/auth?x=1",
+        elicitation_id="el-2",
+    )
+    send({"type": "system", "subtype": "elicitation_complete",
+          "mcp_server_name": "elic", "elicitation_id": "el-2",
+          "session_id": SESSION_ID, "uuid": "elicitation-complete-early-uuid"})
+
+
 def script_elic_bad_schema():
     ask_form("elic-bad", {"type": "object", "properties": {"nested": {"type": "object"}}})
 
@@ -1037,6 +1051,7 @@ def script_elic_silent_form():
 ELIC_SCRIPTS = {
     "form": script_elic_form,
     "url": script_elic_url,
+    "url early": script_elic_url_early,
     "bad schema": script_elic_bad_schema,
     "withdraw": script_elic_withdraw,
     "withdraw permission": script_elic_withdraw_permission,

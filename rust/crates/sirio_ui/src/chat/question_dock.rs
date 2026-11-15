@@ -7,6 +7,11 @@
 use crate::text_selection::selectable_text;
 use ely_gpui_component::agent::{HumanInputRequest, PermissionPrompt};
 use gpui::{AnyElement, Context, Focusable, KeyDownEvent, Window, actions, div, prelude::*, px};
+use serde_json::Value;
+use sirio_chat::{
+    CloseReason, ElicitationAction, ElicitationField, ElicitationFieldKind, ElicitationPrompt,
+    RequestKind, elicitation_value,
+};
 use sirio_theme::Theme;
 
 actions!(
@@ -30,6 +35,9 @@ pub(super) struct QuestionView {
     pub(super) body: String,
     /// The answers, in the order they are numbered.
     pub(super) rows: Vec<DockRow>,
+    /// The field of a form the dock is on; 0 for everything else. Part of
+    /// what a question is: the next field is a new question.
+    pub(super) step: usize,
 }
 
 /// One numbered row of the dock.
@@ -41,6 +49,334 @@ pub(super) enum DockRow {
     FreeText(AnswerTextInput),
     /// The way out of a request that offered nothing to choose.
     Dismiss,
+    /// Leave an optional field of a form unanswered.
+    Skip,
+}
+
+impl DockRow {
+    /// What the row says, for the control surface and for tests.
+    pub(super) fn label(&self) -> String {
+        match self {
+            Self::Option(option) => option.label.clone(),
+            Self::FreeText(_) => "FreeText".into(),
+            Self::Dismiss => "Dismiss".into(),
+            Self::Skip => "Skip".into(),
+        }
+    }
+}
+
+/// Whether `char` is one a server's text must not carry onto the screen: a
+/// control character, or a bidi control that can reorder what follows it
+/// (a host that reads one way and opens another).
+fn is_hidden(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{061C}'
+                | '\u{FEFF}'
+        )
+}
+
+/// Server text with its control and bidi characters removed; line breaks stay.
+pub(super) fn clean_text(text: &str) -> String {
+    text.chars()
+        .filter(|character| *character == '\n' || !is_hidden(*character))
+        .collect()
+}
+
+/// Server text for one line (a title, a label, a URL): `clean_text` without
+/// the line breaks too.
+pub(super) fn clean_line(text: &str) -> String {
+    text.chars().filter(|character| !is_hidden(*character)).collect()
+}
+
+/// The host of a web link, lower-cased and without userinfo or port; `None`
+/// for anything that is not an `http` or `https` URL with a host. The one
+/// gate before a link goes to the system opener, so it reads the URL the
+/// way a browser does: `\` ends the authority like `/`, and the host is what
+/// follows the last `@`.
+pub(super) fn web_url_host(url: &str) -> Option<String> {
+    let url = clean_line(url);
+    let (scheme, rest) = url.trim().split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority = rest.split(['/', '\\', '?', '#']).next()?;
+    let host_and_port = authority.rsplit('@').next()?;
+    let (host, port) = if host_and_port.starts_with('[') {
+        let end = host_and_port.find(']')?;
+        let (host, after) = host_and_port.split_at(end + 1);
+        let inside = &host[1..end];
+        if inside.is_empty() || !inside.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
+            return None;
+        }
+        (host, after.strip_prefix(':').or(after.is_empty().then_some("")))
+    } else {
+        match host_and_port.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (host_and_port, Some("")),
+        }
+    };
+    if !port?.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let unusable = |c: char| {
+        c.is_whitespace() || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '%' | ':')
+    };
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare.is_empty() || (!host.starts_with('[') && host.chars().any(unusable)) {
+        return None;
+    }
+    Some(host.to_lowercase())
+}
+
+const ROW_ACCEPT: &str = "elicitation-accept";
+const ROW_DECLINE: &str = "elicitation-decline";
+const ROW_OPEN: &str = "elicitation-open";
+
+fn action_row(id: &str, label: &str, is_rejection: bool) -> DockRow {
+    DockRow::Option(AnswerOption {
+        id: id.into(),
+        label: label.into(),
+        description: None,
+        is_rejection,
+    })
+}
+
+/// How many of a field's rows are its own answers (one per choice, Yes and
+/// No), before Skip and Decline.
+fn answer_row_count(field: &ElicitationField) -> usize {
+    match &field.kind {
+        ElicitationFieldKind::Choice(choices) => choices.len(),
+        ElicitationFieldKind::Boolean => 2,
+        _ => 0,
+    }
+}
+
+/// A given or default value as the text of a field.
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// A field's value as the review shows it.
+fn shown_value(field: &ElicitationField, value: &Value) -> String {
+    match (&field.kind, value) {
+        (ElicitationFieldKind::Choice(choices), Value::String(wire)) => choices
+            .iter()
+            .find(|choice| choice.value == *wire)
+            .map_or_else(|| clean_line(wire), |choice| clean_line(&choice.label)),
+        (ElicitationFieldKind::Boolean, Value::Bool(true)) => "Yes".into(),
+        (ElicitationFieldKind::Boolean, Value::Bool(false)) => "No".into(),
+        (_, other) => clean_line(&value_text(other)),
+    }
+}
+
+/// What the dock draws for an elicitation, open or not.
+struct ElicitationDock {
+    caption: String,
+    body: String,
+    rows: Vec<DockRow>,
+}
+
+fn elicitation_dock(entry: &Entry) -> Option<ElicitationDock> {
+    let Entry::Elicitation {
+        server,
+        message,
+        prompt,
+        step,
+        values,
+        ..
+    } = entry
+    else {
+        return None;
+    };
+    let caption = format!("{} asks", clean_line(server));
+    let mut lines = vec![clean_text(message)];
+    let mut rows = Vec::new();
+    match prompt {
+        ElicitationPrompt::Form(fields) => match fields.get(*step) {
+            Some(field) => {
+                let title = clean_line(&field.title);
+                lines.push(if field.required {
+                    format!("{title} (required)")
+                } else {
+                    title.clone()
+                });
+                lines.extend(field.description.as_deref().map(clean_text));
+                if let ElicitationFieldKind::Text {
+                    format: Some(format),
+                } = &field.kind
+                {
+                    lines.push(format!("Format: {}", clean_line(format)));
+                }
+                match &field.kind {
+                    ElicitationFieldKind::Choice(choices) => rows.extend(choices.iter().map(
+                        |choice| {
+                            DockRow::Option(AnswerOption {
+                                id: choice.value.clone(),
+                                label: clean_line(&choice.label),
+                                description: None,
+                                is_rejection: false,
+                            })
+                        },
+                    )),
+                    ElicitationFieldKind::Boolean => {
+                        rows.push(action_row("true", "Yes", false));
+                        rows.push(action_row("false", "No", false));
+                    }
+                    _ => rows.push(DockRow::FreeText(AnswerTextInput {
+                        placeholder: Some(title),
+                        prefill: values
+                            .get(&field.name)
+                            .or(field.default.as_ref())
+                            .map(|value| clean_line(&value_text(value))),
+                    })),
+                }
+                if !field.required {
+                    rows.push(DockRow::Skip);
+                }
+                rows.push(action_row(ROW_DECLINE, "Decline", true));
+            }
+            None => {
+                lines.extend(fields.iter().filter_map(|field| {
+                    values.get(&field.name).map(|value| {
+                        format!("{}: {}", clean_line(&field.title), shown_value(field, value))
+                    })
+                }));
+                rows.push(action_row(ROW_ACCEPT, "Accept", false));
+                rows.push(action_row(ROW_DECLINE, "Decline", true));
+            }
+        },
+        ElicitationPrompt::Url { url, .. } => {
+            let url = clean_line(url);
+            let host = web_url_host(&url);
+            lines.extend(host.as_ref().map(|host| format!("Host: {host}")));
+            lines.push(url.trim().to_string());
+            if host.is_some() {
+                rows.push(action_row(ROW_OPEN, "Open in browser", false));
+            }
+            rows.push(action_row(ROW_DECLINE, "Decline", true));
+        }
+        ElicitationPrompt::Unsupported { reason } => {
+            lines.push(format!(
+                "Sirio can't show this form: {}",
+                clean_line(reason)
+            ));
+            rows.push(action_row(ROW_DECLINE, "Decline", true));
+        }
+    }
+    lines.retain(|line| !line.is_empty());
+    Some(ElicitationDock {
+        caption,
+        body: lines.join("\n"),
+        rows,
+    })
+}
+
+/// The row a step starts on: a boolean's default, the choice already
+/// given, otherwise the first.
+pub(super) fn elicitation_start_row(entry: &Entry) -> usize {
+    let Entry::Elicitation {
+        prompt: ElicitationPrompt::Form(fields),
+        step,
+        values,
+        ..
+    } = entry
+    else {
+        return 0;
+    };
+    let Some(field) = fields.get(*step) else {
+        return 0;
+    };
+    match &field.kind {
+        ElicitationFieldKind::Boolean => {
+            usize::from(values.get(&field.name).or(field.default.as_ref()) == Some(&Value::Bool(false)))
+        }
+        ElicitationFieldKind::Choice(choices) => values
+            .get(&field.name)
+            .or(field.default.as_ref())
+            .and_then(Value::as_str)
+            .and_then(|given| choices.iter().position(|choice| choice.value == given))
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// What `control_entry_row` reports of an elicitation, besides its kind and id.
+pub(super) fn elicitation_control_row(
+    entry: &Entry,
+    row: &mut std::collections::BTreeMap<String, String>,
+) {
+    let Entry::Elicitation {
+        server,
+        prompt,
+        step,
+        error,
+        resolved,
+        expired,
+        withdrawn,
+        completed,
+        ..
+    } = entry
+    else {
+        return;
+    };
+    let status = if *completed {
+        "completed"
+    } else if *withdrawn {
+        "withdrawn"
+    } else if let Some(resolved) = resolved {
+        resolved
+    } else if *expired {
+        "expired"
+    } else {
+        "pending"
+    };
+    let (mode, fields, url) = match prompt {
+        ElicitationPrompt::Form(fields) => (
+            "form",
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>()
+                .join("|"),
+            String::new(),
+        ),
+        ElicitationPrompt::Url { url, .. } => ("url", String::new(), clean_line(url).trim().into()),
+        ElicitationPrompt::Unsupported { .. } => ("unsupported", String::new(), String::new()),
+    };
+    let host = web_url_host(&url);
+    let rows = if is_open(entry) {
+        elicitation_dock(entry)
+            .map(|dock| {
+                dock.rows
+                    .iter()
+                    .map(DockRow::label)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    row.insert("status".into(), status.into());
+    row.insert("mode".into(), mode.into());
+    row.insert("step".into(), step.to_string());
+    row.insert("fields".into(), fields);
+    row.insert("rows".into(), rows);
+    row.insert("error".into(), error.as_deref().map(clean_line).unwrap_or_default());
+    row.insert("openOffered".into(), (mode == "url" && host.is_some() && is_open(entry)).to_string());
+    row.insert("host".into(), host.unwrap_or_default());
+    row.insert("url".into(), url);
+    row.insert("server".into(), clean_line(server));
 }
 
 /// Whether an entry is a question still waiting on the user. The one
@@ -60,6 +396,12 @@ pub(super) fn is_open(entry: &Entry) -> bool {
                 expired: false,
                 ..
             }),
+            ..
+        } | Entry::Elicitation {
+            resolved: None,
+            expired: false,
+            withdrawn: false,
+            completed: false,
             ..
         }
     )
@@ -102,6 +444,18 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView> {
                 caption,
                 body,
                 rows,
+                step: 0,
+            })
+        }
+        Entry::Elicitation { request_id, step, .. } => {
+            let dock = elicitation_dock(entry)?;
+            Some(QuestionView {
+                request_id: *request_id,
+                entry_index,
+                caption: dock.caption,
+                body: dock.body,
+                rows: dock.rows,
+                step: *step,
             })
         }
         Entry::Plan {
@@ -113,6 +467,7 @@ pub(super) fn question_view(entries: &[Entry]) -> Option<QuestionView> {
             caption: "Plan approval".to_string(),
             body: approval.title.clone(),
             rows: approval.options.iter().cloned().map(DockRow::Option).collect(),
+            step: 0,
         }),
         _ => None,
     }
@@ -173,10 +528,15 @@ impl Chat {
         let dock_or_field_focused = self.question_dock.focus.is_focused(window)
             || self.question_answer.focus.is_focused(window);
         match view {
-            Some(view) if self.question_dock.for_request != Some(view.request_id) => {
-                self.question_dock.for_request = Some(view.request_id);
+            Some(view)
+                if self.question_dock.for_request != Some((view.request_id, view.step)) =>
+            {
+                self.question_dock.for_request = Some((view.request_id, view.step));
                 self.question_dock.shown_at = Some(cx.background_executor().now());
-                self.question_dock.selected = 0;
+                self.question_dock.selected = self
+                    .entries
+                    .get(view.entry_index)
+                    .map_or(0, elicitation_start_row);
                 let focus_in_chat = dock_or_field_focused
                     || composer.contains_focused(window, cx)
                     || self.transcript_focus.is_focused(window);
@@ -203,7 +563,7 @@ impl Chat {
     /// or click is ignored — and moves nothing — because it may have been
     /// meant for the question before, or be a key already in flight.
     fn dock_armed(&self, view: &QuestionView, cx: &Context<Self>) -> bool {
-        self.question_dock.for_request == Some(view.request_id)
+        self.question_dock.for_request == Some((view.request_id, view.step))
             && self.question_dock.shown_at.is_some_and(|shown_at| {
                 cx.background_executor()
                     .now()
@@ -302,11 +662,22 @@ impl Chat {
             return;
         };
         self.question_answer.for_request = None;
-        self.question_dock.selected = view
-            .rows
-            .iter()
-            .rposition(|row| matches!(row, DockRow::Option(_)))
-            .unwrap_or(0);
+        self.question_dock.selected = if matches!(
+            self.entries.get(view.entry_index),
+            Some(Entry::Elicitation { .. })
+        ) {
+            // The only listed rows of a field are Skip and Decline, below
+            // the field: Up goes back onto the field's own row.
+            view.rows
+                .iter()
+                .position(|row| matches!(row, DockRow::FreeText(_)))
+                .unwrap_or(0)
+        } else {
+            view.rows
+                .iter()
+                .rposition(|row| matches!(row, DockRow::Option(_)))
+                .unwrap_or(0)
+        };
         self.question_dock.focus.focus(window, cx);
         cx.notify();
     }
@@ -323,6 +694,11 @@ impl Chat {
         let typography = theme.typography;
         let entity = cx.entity();
         let request_id = view.request_id;
+        let step = view.step;
+        let error = match self.entries.get(view.entry_index) {
+            Some(Entry::Elicitation { error, .. }) => error.as_deref().map(clean_line),
+            _ => None,
+        };
         let selected = clamp_selection(self.question_dock.selected, view.rows.len());
         let after_options = view
             .rows
@@ -382,9 +758,9 @@ impl Chat {
                     })
                     .on_click(move |_, window, cx| {
                         click_entity.update(cx, |chat, cx| {
-                            if question_view(&chat.entries)
-                                .is_some_and(|view| view.request_id == request_id)
-                            {
+                            if question_view(&chat.entries).is_some_and(|view| {
+                                view.request_id == request_id && view.step == step
+                            }) {
                                 chat.activate_dock_row(index, window, cx);
                             }
                         });
@@ -431,6 +807,16 @@ impl Chat {
                             self.answer_caret_visible,
                         ))
                         .into_any_element(),
+                    DockRow::Skip => frame
+                        .debug_selector(|| "question-dock-skip".into())
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(typography.callout)
+                                .text_color(theme.ely.fg)
+                                .child("Skip"),
+                        )
+                        .into_any_element(),
                     DockRow::Dismiss => frame
                         .debug_selector(|| "question-dock-dismiss".into())
                         .child(
@@ -459,7 +845,14 @@ impl Chat {
                         .text_color(theme.ely.fg)
                         .child(selectable_text(view.body)),
                 )
-            });
+            })
+            .children(error.map(|error| {
+                div()
+                    .debug_selector(|| "question-dock-error".into())
+                    .text_size(typography.footnote)
+                    .text_color(theme.ely.danger)
+                    .child(selectable_text(error))
+            }));
         let actions = div()
             .id(("question-dock-options", request_id as usize))
             .w_full()
@@ -489,7 +882,7 @@ impl Chat {
             Some(Entry::Permission {
                 is_question: true,
                 ..
-            })
+            }) | Some(Entry::Elicitation { .. })
         );
         let shell = if is_question {
             HumanInputRequest::custom(id, view.caption)
@@ -542,16 +935,343 @@ impl Chat {
         let Some(row) = view.rows.get(index).cloned() else {
             return;
         };
-        if matches!(row, DockRow::Option(_)) && !self.dock_armed(&view, cx) {
+        if matches!(row, DockRow::Option(_) | DockRow::Skip) && !self.dock_armed(&view, cx) {
             return;
         }
         self.question_dock.selected = index;
+        if matches!(
+            self.entries.get(view.entry_index),
+            Some(Entry::Elicitation { .. })
+        ) {
+            self.activate_elicitation_row(view.entry_index, index, row, window, cx);
+            return;
+        }
         match row {
             DockRow::Option(option) => self.respond_permission(view.request_id, &option, cx),
             DockRow::FreeText(input) => {
                 self.focus_question_answer(view.request_id, input.prefill, window, cx)
             }
             DockRow::Dismiss => self.dismiss_permission(view.request_id, cx),
+            DockRow::Skip => {}
+        }
+    }
+
+    /// The transcript index of the open question the dock is on, when its
+    /// request id is `request_id`. Answers from the dock act on this entry,
+    /// not on the last entry that happens to share the id.
+    pub(super) fn dock_entry_index(&self, request_id: u64) -> Option<usize> {
+        question_view(&self.entries)
+            .filter(|view| view.request_id == request_id)
+            .map(|view| view.entry_index)
+    }
+
+    /// The transcript index of the open elicitation `request_id`, when it is
+    /// the question the dock is on. Typed answers and Esc ask this before
+    /// anything else: a permission may share the id.
+    pub(super) fn open_elicitation_index(&self, request_id: u64) -> Option<usize> {
+        let view = question_view(&self.entries)?;
+        (view.request_id == request_id
+            && matches!(
+                self.entries.get(view.entry_index),
+                Some(Entry::Elicitation { .. })
+            ))
+        .then_some(view.entry_index)
+    }
+
+    /// Acts on row `index` of the open elicitation at `entry_index`: an
+    /// answer to the current field, Skip, Accept, Decline, or the link.
+    fn activate_elicitation_row(
+        &mut self,
+        entry_index: usize,
+        index: usize,
+        row: DockRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Entry::Elicitation {
+            request_id,
+            prompt,
+            step,
+            values,
+            ..
+        }) = self.entries.get(entry_index).cloned()
+        else {
+            return;
+        };
+        let decline = |chat: &mut Self, cx: &mut Context<Self>| {
+            chat.respond_elicitation(request_id, ElicitationAction::Decline, cx)
+        };
+        let id = match &row {
+            DockRow::Option(option) => Some(option.id.as_str()),
+            _ => None,
+        };
+        match &prompt {
+            ElicitationPrompt::Form(fields) => match fields.get(step) {
+                Some(field) => match row {
+                    DockRow::FreeText(input) => {
+                        self.focus_question_answer(request_id, input.prefill, window, cx)
+                    }
+                    DockRow::Skip => self.advance_elicitation(entry_index, Ok(None), cx),
+                    DockRow::Option(_) if index < answer_row_count(field) => {
+                        // The option's own value, never its label: a label that
+                        // equals another option's value must not pick that one.
+                        let value = match &field.kind {
+                            ElicitationFieldKind::Choice(choices) => {
+                                Value::String(choices[index].value.clone())
+                            }
+                            _ => Value::Bool(index == 0),
+                        };
+                        self.advance_elicitation(entry_index, Ok(Some(value)), cx);
+                    }
+                    DockRow::Option(_) if id == Some(ROW_DECLINE) => decline(self, cx),
+                    _ => {}
+                },
+                None => match id {
+                    Some(ROW_ACCEPT) => {
+                        self.respond_elicitation(request_id, ElicitationAction::Accept(values), cx)
+                    }
+                    Some(ROW_DECLINE) => decline(self, cx),
+                    _ => {}
+                },
+            },
+            ElicitationPrompt::Url { url, .. } => match id {
+                Some(ROW_OPEN) => {
+                    let url = clean_line(url);
+                    // The gate again, at the moment of the click.
+                    if web_url_host(&url).is_some() {
+                        cx.open_url(url.trim());
+                        self.respond_elicitation(
+                            request_id,
+                            ElicitationAction::Accept(serde_json::Map::new()),
+                            cx,
+                        );
+                    }
+                }
+                Some(ROW_DECLINE) => decline(self, cx),
+                _ => {}
+            },
+            ElicitationPrompt::Unsupported { .. } => {
+                if id == Some(ROW_DECLINE) {
+                    decline(self, cx);
+                }
+            }
+        }
+    }
+
+    /// Takes a typed answer to the current field of the open elicitation.
+    pub(super) fn answer_elicitation_text(
+        &mut self,
+        request_id: u64,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.open_elicitation_index(request_id) else {
+            return;
+        };
+        let Some(Entry::Elicitation {
+            prompt: ElicitationPrompt::Form(fields),
+            step,
+            ..
+        }) = self.entries.get(index)
+        else {
+            return;
+        };
+        let Some(field) = fields.get(*step) else {
+            return;
+        };
+        let value = elicitation_value(field, text);
+        self.advance_elicitation(index, value, cx);
+    }
+
+    /// Records one step's outcome: a value moves on and is kept, an empty
+    /// optional moves on, an error stays on the step and says why.
+    fn advance_elicitation(
+        &mut self,
+        index: usize,
+        outcome: Result<Option<Value>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Entry::Elicitation {
+            prompt: ElicitationPrompt::Form(fields),
+            step,
+            values,
+            error,
+            ..
+        }) = self.entries.get_mut(index)
+        else {
+            return;
+        };
+        let Some(field) = fields.get(*step) else {
+            return;
+        };
+        match outcome {
+            Err(message) => *error = Some(message),
+            Ok(value) => {
+                if let Some(value) = value {
+                    values.insert(field.name.clone(), value);
+                }
+                *error = None;
+                *step += 1;
+                // A draft typed for the last field is not the next one's.
+                self.clear_question_answer_focus();
+            }
+        }
+        self.remeasure_entry(index);
+        cx.notify();
+    }
+
+    /// Answers the open elicitation `request_id`, records what the user
+    /// chose on its card and tells the agent. A request that is closed (answered,
+    /// expired or withdrawn) takes nothing and sends nothing.
+    pub(super) fn respond_elicitation(
+        &mut self,
+        request_id: u64,
+        action: ElicitationAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.entries.iter().rposition(|entry| {
+            is_open(entry)
+                && matches!(entry, Entry::Elicitation { request_id: id, .. } if *id == request_id)
+        }) else {
+            return;
+        };
+        self.answer_elicitation_at(index, action, cx);
+    }
+
+    /// Answers the open elicitation at `index`: records the answer on its
+    /// card and tells the agent. The typed draft is cleared only when this
+    /// is the card the dock is on; a server event answering a later card
+    /// leaves the draft of the question being answered alone.
+    fn answer_elicitation_at(
+        &mut self,
+        index: usize,
+        action: ElicitationAction,
+        cx: &mut Context<Self>,
+    ) {
+        if !is_open(&self.entries[index]) {
+            return;
+        }
+        let was_on_dock = question_view(&self.entries).is_some_and(|view| view.entry_index == index);
+        let Entry::Elicitation {
+            request_id,
+            resolved,
+            ..
+        } = &mut self.entries[index]
+        else {
+            return;
+        };
+        let request_id = *request_id;
+        *resolved = Some(match action {
+            ElicitationAction::Accept(_) => "accepted",
+            ElicitationAction::Decline => "declined",
+            ElicitationAction::Cancel => "cancelled",
+        });
+        self.remeasure_entry(index);
+        if let Some(client) = &self.client {
+            let _ = client.respond_elicitation(request_id, action);
+        }
+        if was_on_dock {
+            self.clear_question_answer_focus();
+        }
+        cx.notify();
+    }
+
+    /// The agent closed request `request_id` of `kind`: the latest open entry
+    /// of that kind with that id is closed, and no other.
+    pub(super) fn close_request(
+        &mut self,
+        request_id: u64,
+        kind: RequestKind,
+        reason: CloseReason,
+    ) {
+        let withdrawn = matches!(reason, CloseReason::Withdrawn);
+        let position = self.entries.iter().rposition(|entry| match (kind, entry) {
+            (RequestKind::Elicitation, Entry::Elicitation { request_id: id, .. }) => {
+                *id == request_id && is_open(entry)
+            }
+            (RequestKind::Permission, Entry::Permission { request_id: id, .. }) => {
+                *id == request_id && is_open(entry)
+            }
+            (
+                RequestKind::Permission,
+                Entry::Plan {
+                    approval: Some(approval),
+                    ..
+                },
+            ) => approval.request_id == request_id && is_open(entry),
+            _ => false,
+        });
+        let Some(index) = position else {
+            return;
+        };
+        let was_on_dock = question_view(&self.entries).is_some_and(|view| view.entry_index == index);
+        match &mut self.entries[index] {
+            Entry::Elicitation {
+                withdrawn: was_withdrawn,
+                expired,
+                ..
+            } => {
+                if withdrawn {
+                    *was_withdrawn = true;
+                } else {
+                    *expired = true;
+                }
+            }
+            Entry::Permission {
+                withdrawn: was_withdrawn,
+                expired,
+                ..
+            } => {
+                *expired = true;
+                *was_withdrawn = withdrawn;
+            }
+            Entry::Plan {
+                approval: Some(approval),
+                ..
+            } => {
+                approval.expired = true;
+                approval.withdrawn = withdrawn;
+            }
+            _ => {}
+        }
+        self.remeasure_entry(index);
+        if was_on_dock {
+            self.clear_question_answer_focus();
+        }
+    }
+
+    /// The server finished the page flow of the URL elicitation `elicitation_id`.
+    ///
+    /// A card still waiting for its answer is accepted first, as a click on
+    /// "Open in browser" would: the user finished the flow by hand, the worker
+    /// still holds the request, and a URL accept carries no data.
+    pub(super) fn complete_elicitation(
+        &mut self,
+        server: &str,
+        elicitation_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let position = self.entries.iter().rposition(|entry| {
+            matches!(
+                entry,
+                Entry::Elicitation {
+                    server: entry_server,
+                    prompt: ElicitationPrompt::Url { elicitation_id: Some(id), .. },
+                    ..
+                } if entry_server == server && id == elicitation_id
+            )
+        });
+        if let Some(index) = position {
+            self.answer_elicitation_at(
+                index,
+                ElicitationAction::Accept(serde_json::Map::new()),
+                cx,
+            );
+            if let Entry::Elicitation { completed, .. } = &mut self.entries[index] {
+                *completed = true;
+            }
+            self.remeasure_entry(index);
+            cx.notify();
         }
     }
 }
@@ -583,6 +1303,25 @@ pub(super) fn open_permission(request_id: u64, title: &str, labels: &[&str]) -> 
         resolved: None,
         expired: false,
         dismissed: false,
+        withdrawn: false,
+    }
+}
+
+/// A fresh elicitation, on its first step.
+#[cfg(test)]
+pub(super) fn open_elicitation(request_id: u64, prompt: sirio_chat::ElicitationPrompt) -> Entry {
+    Entry::Elicitation {
+        request_id,
+        server: "elic".into(),
+        message: "Pick a colour for the probe".into(),
+        prompt,
+        step: 0,
+        values: serde_json::Map::new(),
+        error: None,
+        resolved: None,
+        expired: false,
+        withdrawn: false,
+        completed: false,
     }
 }
 
@@ -608,6 +1347,7 @@ mod tests {
             resolved: None,
             expired: false,
             dismissed: false,
+            withdrawn: false,
         }
     }
 
@@ -708,6 +1448,7 @@ mod tests {
                 options: answer_options(&["Approve", "Keep planning"]),
                 resolved: None,
                 expired: false,
+                withdrawn: false,
             }),
         };
         assert!(is_open(&plan));
@@ -785,5 +1526,335 @@ mod tests {
         assert_eq!(badge_label(0).as_deref(), Some("1"));
         assert_eq!(badge_label(8).as_deref(), Some("9"));
         assert_eq!(badge_label(9), None);
+    }
+
+    // Ways the elicitation half of the dock can fail:
+    // - an answered, expired or withdrawn request still holds the dock (or a
+    //   fresh one does not), so the composer and the dock disagree;
+    // - a form is drawn in the wrong order, or a step shows the wrong rows:
+    //   a required field offers Skip, an optional one does not, Decline is
+    //   missing, a boolean is not Yes/No;
+    // - the review step shows nothing the user typed;
+    // - a link that is not a web page is offered to open (`javascript:`,
+    //   `file:`, a custom scheme, a bare host), or its host is read wrongly
+    //   (userinfo, port, case, a backslash that a browser reads as a path);
+    // - server text keeps a control or bidi character that disguises the host;
+    // - an unsupported form offers anything but a way out;
+    // - open requests are walked in any order but the transcript's.
+
+    use sirio_chat::{ElicitationChoice, ElicitationField, ElicitationFieldKind, ElicitationPrompt};
+
+    fn probe_fields() -> Vec<ElicitationField> {
+        let field = |name: &str, title: &str, required, kind, default| ElicitationField {
+            name: name.into(),
+            title: title.into(),
+            description: None,
+            required,
+            kind,
+            default,
+        };
+        let mut note = field(
+            "note",
+            "note",
+            false,
+            ElicitationFieldKind::Text {
+                format: Some("email".into()),
+            },
+            None,
+        );
+        note.description = Some("free text".into());
+        vec![
+            field(
+                "colour",
+                "Colour",
+                true,
+                ElicitationFieldKind::Choice(vec![
+                    ElicitationChoice {
+                        value: "red".into(),
+                        label: "red".into(),
+                    },
+                    ElicitationChoice {
+                        value: "blue".into(),
+                        label: "blue".into(),
+                    },
+                ]),
+                None,
+            ),
+            field("count", "How many", false, ElicitationFieldKind::Integer, None),
+            note,
+            field(
+                "ok",
+                "ok",
+                false,
+                ElicitationFieldKind::Boolean,
+                Some(serde_json::Value::Bool(true)),
+            ),
+        ]
+    }
+
+    fn form_at(step: usize) -> Entry {
+        let mut entry = open_elicitation(1, ElicitationPrompt::Form(probe_fields()));
+        if let Entry::Elicitation { step: at, values, .. } = &mut entry {
+            *at = step;
+            if step > 0 {
+                values.insert("colour".into(), "blue".into());
+            }
+        }
+        entry
+    }
+
+    fn labels(view: &QuestionView) -> Vec<String> {
+        view.rows.iter().map(DockRow::label).collect()
+    }
+
+    #[test]
+    fn an_open_elicitation_is_an_open_question() {
+        let fresh = form_at(0);
+        assert!(is_open(&fresh));
+        for close in [
+            |e: &mut Entry| {
+                if let Entry::Elicitation { resolved, .. } = e {
+                    *resolved = Some("declined");
+                }
+            },
+            |e: &mut Entry| {
+                if let Entry::Elicitation { expired, .. } = e {
+                    *expired = true;
+                }
+            },
+            |e: &mut Entry| {
+                if let Entry::Elicitation { withdrawn, .. } = e {
+                    *withdrawn = true;
+                }
+            },
+        ] {
+            let mut closed = form_at(0);
+            close(&mut closed);
+            assert!(!is_open(&closed));
+            assert_eq!(question_view(&[closed]), None);
+        }
+    }
+
+    #[test]
+    fn a_form_is_walked_one_field_at_a_time() {
+        let colour = question_view(&[form_at(0)]).unwrap();
+        assert_eq!(colour.caption, "elic asks");
+        assert_eq!(labels(&colour), ["red", "blue", "Decline"]);
+        assert!(colour.body.contains("(required)"), "{}", colour.body);
+        assert!(colour.body.contains("Pick a colour"), "{}", colour.body);
+
+        let count = question_view(&[form_at(1)]).unwrap();
+        assert_eq!(count.step, 1);
+        assert_eq!(labels(&count), ["FreeText", "Skip", "Decline"]);
+        assert!(!count.body.contains("(required)"));
+
+        let note = question_view(&[form_at(2)]).unwrap();
+        assert!(note.body.contains("Format: email"), "{}", note.body);
+        assert!(note.body.contains("free text"), "{}", note.body);
+
+        let review = question_view(&[form_at(4)]).unwrap();
+        assert!(review.body.contains("Colour: blue"), "{}", review.body);
+        assert_eq!(labels(&review), ["Accept", "Decline"]);
+    }
+
+    #[test]
+    fn a_form_with_no_fields_starts_at_its_review() {
+        let entry = open_elicitation(1, ElicitationPrompt::Form(Vec::new()));
+        let view = question_view(&[entry]).unwrap();
+        assert_eq!(labels(&view), ["Accept", "Decline"]);
+    }
+
+    #[test]
+    fn a_boolean_step_offers_yes_and_no() {
+        let view = question_view(&[form_at(3)]).unwrap();
+        assert_eq!(labels(&view), ["Yes", "No", "Skip", "Decline"]);
+        assert_eq!(elicitation_start_row(&form_at(3)), 0, "the default is true");
+        let mut no = form_at(3);
+        if let Entry::Elicitation {
+            prompt: ElicitationPrompt::Form(fields),
+            ..
+        } = &mut no
+        {
+            fields[3].default = Some(serde_json::Value::Bool(false));
+        }
+        assert_eq!(elicitation_start_row(&no), 1, "the default is false");
+    }
+
+    #[test]
+    fn a_step_starts_on_the_answer_given_else_the_default() {
+        let mut entry = form_at(0);
+        if let Entry::Elicitation { values, prompt: ElicitationPrompt::Form(fields), .. } = &mut entry {
+            values.insert("colour".into(), "blue".into());
+            fields[0].default = Some("red".into());
+        }
+        assert_eq!(elicitation_start_row(&entry), 1, "the given answer wins over the default");
+        if let Entry::Elicitation { values, .. } = &mut entry {
+            values.clear();
+        }
+        assert_eq!(elicitation_start_row(&entry), 0, "the default is red, row 0");
+        if let Entry::Elicitation { prompt: ElicitationPrompt::Form(fields), .. } = &mut entry {
+            fields[0].default = Some("blue".into());
+        }
+        assert_eq!(elicitation_start_row(&entry), 1, "a choice's default is its start row");
+        assert_eq!(elicitation_start_row(&form_at(1)), 0);
+    }
+
+    #[test]
+    fn a_completed_link_is_closed_and_offers_nothing() {
+        let mut link = open_elicitation(
+            2,
+            ElicitationPrompt::Url {
+                url: "https://example.com/a".into(),
+                elicitation_id: Some("el-2".into()),
+            },
+        );
+        assert!(is_open(&link));
+        if let Entry::Elicitation { completed, .. } = &mut link {
+            *completed = true;
+        }
+        assert!(!is_open(&link));
+        assert_eq!(question_view(&[link.clone()]), None);
+        let row = super::super::control_entry_row(&link);
+        assert_eq!(row["openOffered"], "false");
+        assert_eq!(row["host"], "example.com");
+    }
+
+    #[test]
+    fn invisible_characters_are_dropped_from_server_text() {
+        for hidden in ['\u{200B}', '\u{200F}', '\u{061C}', '\u{2060}', '\u{FEFF}', '\u{202E}'] {
+            assert_eq!(clean_line(&format!("a{hidden}b")), "ab");
+        }
+        let mut entry = form_at(1);
+        if let Entry::Elicitation { prompt: ElicitationPrompt::Form(fields), .. } = &mut entry {
+            fields[1].kind = ElicitationFieldKind::Text { format: None };
+            fields[1].default = Some("x\u{202e}y".into());
+        }
+        let view = question_view(&[entry]).unwrap();
+        assert!(matches!(&view.rows[0], DockRow::FreeText(input) if input.prefill.as_deref() == Some("xy")));
+    }
+
+    #[test]
+    fn only_web_urls_are_offered_to_open() {
+        for (url, host) in [
+            ("https://example.com/a", "example.com"),
+            ("HTTP://X.y:8080/p", "x.y"),
+            ("https://user@evil.com/", "evil.com"),
+            ("https://good.com@evil.com/", "evil.com"),
+            ("https://evil.com\\@good.com/", "evil.com"),
+            ("https://example.com?q=1", "example.com"),
+            ("https://[::1]:9/x", "[::1]"),
+        ] {
+            assert_eq!(web_url_host(url).as_deref(), Some(host), "{url}");
+        }
+        for url in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "vscode://x",
+            "example.com",
+            "https://",
+            "https:///path",
+            "https://:80/",
+            "https://ex ample.com/",
+            "https://example.com:80x/",
+        ] {
+            assert_eq!(web_url_host(url), None, "{url}");
+        }
+        let entry = open_elicitation(
+            1,
+            ElicitationPrompt::Url {
+                url: "https://exa\u{202e}mple.com/\u{0007}a".into(),
+                elicitation_id: None,
+            },
+        );
+        let view = question_view(&[entry]).unwrap();
+        assert!(!view.body.contains('\u{202e}') && !view.body.contains('\u{0007}'));
+        assert!(view.body.contains("Host: example.com"), "{}", view.body);
+        assert_eq!(labels(&view), ["Open in browser", "Decline"]);
+    }
+
+    #[test]
+    fn a_link_that_is_not_a_web_page_offers_only_decline() {
+        let entry = open_elicitation(
+            1,
+            ElicitationPrompt::Url {
+                url: "file:///etc/passwd".into(),
+                elicitation_id: None,
+            },
+        );
+        let view = question_view(&[entry]).unwrap();
+        assert_eq!(labels(&view), ["Decline"]);
+        assert!(!view.body.contains("Host:"));
+    }
+
+    #[test]
+    fn an_unsupported_form_offers_only_decline() {
+        let entry = open_elicitation(
+            1,
+            ElicitationPrompt::Unsupported {
+                reason: "`nested` is not a flat field".into(),
+            },
+        );
+        let view = question_view(&[entry]).unwrap();
+        assert_eq!(labels(&view), ["Decline"]);
+        assert!(
+            view.body
+                .contains("Sirio can't show this form: `nested` is not a flat field"),
+            "{}",
+            view.body
+        );
+    }
+
+    #[test]
+    fn the_dock_walks_open_requests_in_transcript_order() {
+        let entries = vec![
+            open_permission(1, "/repo/a.rs", &["Allow"]),
+            form_at(0),
+        ];
+        let view = question_view(&entries).unwrap();
+        assert_eq!(view.entry_index, 0);
+        let mut first = entries;
+        if let Entry::Permission { resolved, .. } = &mut first[0] {
+            *resolved = Some("Allow".into());
+        }
+        let view = question_view(&first).unwrap();
+        assert_eq!((view.entry_index, view.caption.as_str()), (1, "elic asks"));
+    }
+
+    #[test]
+    fn an_elicitation_row_reports_what_the_dock_draws() {
+        let row = super::super::control_entry_row(&form_at(1));
+        let get = |key: &str| row.get(key).map(String::as_str);
+        assert_eq!(get("kind"), Some("elicitation"));
+        assert_eq!(get("id"), Some("1"));
+        assert_eq!(get("status"), Some("pending"));
+        assert_eq!(get("mode"), Some("form"));
+        assert_eq!(get("step"), Some("1"));
+        assert_eq!(get("fields"), Some("colour|count|note|ok"));
+        assert_eq!(get("rows"), Some("FreeText|Skip|Decline"));
+        assert_eq!(get("server"), Some("elic"));
+        assert_eq!(get("openOffered"), Some("false"));
+
+        let mut closed = form_at(1);
+        if let Entry::Elicitation { resolved, completed, .. } = &mut closed {
+            *resolved = Some("accepted");
+            *completed = true;
+        }
+        let row = super::super::control_entry_row(&closed);
+        assert_eq!(row["status"], "completed", "completed outranks accepted");
+        assert_eq!(row["rows"], "", "a closed request draws no rows");
+
+        let link = open_elicitation(
+            2,
+            ElicitationPrompt::Url {
+                url: "https://User@Example.com/a".into(),
+                elicitation_id: Some("el-2".into()),
+            },
+        );
+        let row = super::super::control_entry_row(&link);
+        assert_eq!(row["mode"], "url");
+        assert_eq!(row["host"], "example.com");
+        assert_eq!(row["url"], "https://User@Example.com/a");
+        assert_eq!(row["openOffered"], "true");
+        assert_eq!(row["rows"], "Open in browser|Decline");
     }
 }

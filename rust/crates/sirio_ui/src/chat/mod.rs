@@ -891,6 +891,9 @@ struct PlanApproval {
     resolved: Option<String>,
     /// No longer answerable.
     expired: bool,
+    /// The agent took the request back; `expired` is set too, and the card
+    /// says so rather than that the turn ended.
+    withdrawn: bool,
 }
 
 /// F-CHAT-25: the live state of the question-card answer field — which
@@ -915,8 +918,9 @@ struct QuestionDockState {
     focus: FocusHandle,
     /// The selected row, clamped to the open question's rows when read.
     selected: usize,
-    /// The request `selected` belongs to.
-    for_request: Option<u64>,
+    /// The request and step `selected` belongs to: a form's next field is a
+    /// new question, so it starts on its own row and is armed afresh.
+    for_request: Option<(u64, usize)>,
     /// When the current request first appeared in the dock.
     shown_at: Option<std::time::Instant>,
 }
@@ -1015,6 +1019,31 @@ enum Entry {
         expired: bool,
         /// The user dismissed an unrenderable request; distinct from denial.
         dismissed: bool,
+        /// The agent took the request back; `expired` is set too.
+        withdrawn: bool,
+    },
+    /// An MCP server's request for input: a form walked one field at a
+    /// time, or a link to open. Answered from the question dock, and never
+    /// persisted: it is a live request, not part of the conversation.
+    Elicitation {
+        request_id: u64,
+        server: String,
+        message: String,
+        prompt: sirio_chat::ElicitationPrompt,
+        /// The field the dock is on; `fields.len()` is the review.
+        step: usize,
+        /// The answers so far, by field name, in the order they were given.
+        values: serde_json::Map<String, serde_json::Value>,
+        /// Why the current step did not take the typed answer.
+        error: Option<String>,
+        /// What the user answered: `accepted`, `declined` or `cancelled`.
+        resolved: Option<&'static str>,
+        /// The turn ended with no answer.
+        expired: bool,
+        /// The agent took the request back.
+        withdrawn: bool,
+        /// The server said the page flow finished.
+        completed: bool,
     },
     /// The agent's execution plan (F-CHAT-24). Replaced in place as entries
     /// advance; a pending approval attaches its option buttons to the card.
@@ -1149,6 +1178,13 @@ impl Entry {
                     .collect::<Vec<_>>()
                     .join(" / ")
             }),
+            Self::Elicitation {
+                server, message, ..
+            } => format!(
+                "{} asks: {}",
+                question_dock::clean_line(server),
+                question_dock::clean_text(message)
+            ),
             Self::Plan { entries, .. } => entries
                 .iter()
                 .map(|entry| format!("{} · {}", entry.status, entry.content))
@@ -1365,6 +1401,9 @@ fn persisted_entry(entry: &Entry) -> Option<ChatEntry> {
         // not the conversation: restoring it later would present a stale
         // restore as a live one.
         Entry::RewindPreview { .. } | Entry::RewindReport { .. } => None,
+        // A live request: restored tomorrow it would offer an answer to a
+        // server that is no longer waiting.
+        Entry::Elicitation { .. } => None,
         Entry::Error {
             message, retryable, ..
         } => Some(ChatEntry::Error {
@@ -1513,6 +1552,7 @@ fn restored_entry(entry: ChatEntry) -> Entry {
                 resolved,
                 expired,
                 dismissed,
+                withdrawn: false,
             }
         }
         ChatEntry::Plan { entries } => Entry::Plan {
@@ -3400,6 +3440,7 @@ impl Chat {
                             options: answer_options,
                             resolved: None,
                             expired: false,
+                            withdrawn: false,
                         });
                     }
                 } else {
@@ -3443,13 +3484,40 @@ impl Chat {
                         resolved: None,
                         expired: false,
                         dismissed: false,
+                        withdrawn: false,
                     });
                 }
             }
-            // Drawn by the elicitation card; nothing to do until it exists.
-            sirio_chat::ChatEvent::Elicitation { .. }
-            | sirio_chat::ChatEvent::RequestClosed { .. }
-            | sirio_chat::ChatEvent::ElicitationCompleted { .. } => {}
+            sirio_chat::ChatEvent::Elicitation {
+                request_id,
+                server,
+                message,
+                prompt,
+                ..
+            } => {
+                self.push_entry(Entry::Elicitation {
+                    request_id,
+                    server,
+                    message,
+                    prompt,
+                    step: 0,
+                    values: serde_json::Map::new(),
+                    error: None,
+                    resolved: None,
+                    expired: false,
+                    withdrawn: false,
+                    completed: false,
+                });
+            }
+            sirio_chat::ChatEvent::RequestClosed {
+                request_id,
+                kind,
+                reason,
+            } => self.close_request(request_id, kind, reason),
+            sirio_chat::ChatEvent::ElicitationCompleted {
+                server,
+                elicitation_id,
+            } => self.complete_elicitation(&server, &elicitation_id, cx),
             sirio_chat::ChatEvent::PlanUpdate { entries } => {
                 let entries = entries
                     .into_iter()
@@ -5456,7 +5524,19 @@ impl Chat {
         option: &AnswerOption,
         cx: &mut Context<Self>,
     ) {
-        if let Some((index, entry)) = self
+        if let Some(index) = self.dock_entry_index(request_id) {
+            // From the dock: the entry the dock is on, never another one that
+            // shares the id (ids restart after "Restart agent").
+            match &mut self.entries[index] {
+                Entry::Permission { resolved, .. } => *resolved = Some(option.label.clone()),
+                Entry::Plan {
+                    approval: Some(approval),
+                    ..
+                } => approval.resolved = Some(option.label.clone()),
+                _ => {}
+            }
+            self.remeasure_entry(index);
+        } else if let Some((index, entry)) = self
             .entries
             .iter_mut()
             .enumerate()
@@ -5500,11 +5580,16 @@ impl Chat {
     /// rides the selected-option channel; the transcript records it as the
     /// answer, and the pending state ends.
     fn answer_question_text(&mut self, request_id: u64, text: &str, cx: &mut Context<Self>) {
+        if self.open_elicitation_index(request_id).is_some() {
+            self.answer_elicitation_text(request_id, text, cx);
+            return;
+        }
         let answer = text.trim().to_string();
         if answer.is_empty() {
             return;
         }
         let mut answered = false;
+        let target = self.dock_entry_index(request_id);
         if let Some((index, Entry::Permission {
             resolved, expired, ..
         })) = self
@@ -5512,7 +5597,10 @@ impl Chat {
             .iter_mut()
             .enumerate()
             .rev()
-            .find(|(_, entry)| matches!(entry, Entry::Permission { request_id: id, .. } if *id == request_id))
+            .find(|(index, entry)| match target {
+                Some(target) => *index == target,
+                None => matches!(entry, Entry::Permission { request_id: id, .. } if *id == request_id),
+            })
             && resolved.is_none()
             && !*expired
         {
@@ -5531,8 +5619,28 @@ impl Chat {
     /// reads as no longer answerable; the agent is told the decision was
     /// cancelled.
     fn cancel_question(&mut self, request_id: u64, cx: &mut Context<Self>) {
+        if self.open_elicitation_index(request_id).is_some() {
+            self.respond_elicitation(request_id, sirio_chat::ElicitationAction::Cancel, cx);
+            return;
+        }
         let mut cancelled = false;
-        if let Some((index, entry)) = self
+        if let Some(index) = self.dock_entry_index(request_id) {
+            match &mut self.entries[index] {
+                Entry::Permission { expired, .. } => {
+                    *expired = true;
+                    cancelled = true;
+                }
+                Entry::Plan {
+                    approval: Some(approval),
+                    ..
+                } => {
+                    approval.expired = true;
+                    cancelled = true;
+                }
+                _ => {}
+            }
+            self.remeasure_entry(index);
+        } else if let Some((index, entry)) = self
             .entries
             .iter_mut()
             .enumerate()
@@ -5643,6 +5751,12 @@ impl Chat {
                         }),
                     ..
                 } => *expired = true,
+                Entry::Elicitation {
+                    resolved: None,
+                    withdrawn: false,
+                    expired,
+                    ..
+                } => *expired = true,
                 _ => {}
             }
         }
@@ -5664,6 +5778,7 @@ impl Chat {
                 approval: Some(approval),
                 ..
             } => Some((index, approval.title.clone())),
+            Entry::Elicitation { server, .. } => Some((index, server.clone())),
             _ => None,
         }
     }
@@ -6831,6 +6946,7 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
             resolved,
             expired,
             dismissed,
+            withdrawn,
             ..
         } => {
             row.insert("kind".into(), "permission".into());
@@ -6839,6 +6955,8 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
                 "status".into(),
                 if *dismissed {
                     "cancelled".into()
+                } else if *withdrawn {
+                    "withdrawn".into()
                 } else if *expired {
                     "expired".into()
                 } else if resolved.is_some() {
@@ -6865,7 +6983,9 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
                 row.insert("id".into(), approval.request_id.to_string());
                 row.insert(
                     "status".into(),
-                    if approval.expired {
+                    if approval.withdrawn {
+                        "withdrawn".into()
+                    } else if approval.expired {
                         "expired".into()
                     } else if approval.resolved.is_some() {
                         "selected".into()
@@ -6874,6 +6994,11 @@ fn control_entry_row(entry: &Entry) -> BTreeMap<String, String> {
                     },
                 );
             }
+        }
+        Entry::Elicitation { request_id, .. } => {
+            row.insert("kind".into(), "elicitation".into());
+            row.insert("id".into(), request_id.to_string());
+            question_dock::elicitation_control_row(entry, &mut row);
         }
         Entry::TurnFooter(text) => {
             row.insert("kind".into(), "turn".into());
@@ -8346,6 +8471,7 @@ mod tests {
             resolved: None,
             expired: false,
             dismissed: false,
+            withdrawn: false,
         }
     }
 
@@ -13890,6 +14016,534 @@ two"
         })
     }
 
+    // Ways an elicitation can fail in a real chat, on the fake `claude`:
+    // - a step starts on the row the last step left selected, so Enter picks
+    //   Skip or Decline instead of the field;
+    // - a typed answer or Esc does not reach the elicitation (or reaches an
+    //   old permission with the same id), so the CLI is never told;
+    // - a skipped optional field is sent as an empty value, or a field the
+    //   user answered is lost;
+    // - a rejected value advances the step or reaches the CLI;
+    // - a withdrawal closes the wrong entry (one of the other kind or an
+    //   old one with the same id), or a withdrawn request still takes an
+    //   answer that is then sent;
+    // - opening a link sends content with the accept, or never accepts;
+    // - a completion before any answer leaves the request waiting, so the CLI
+    //   runs out its clock although the user finished the flow;
+    // - a completion answering a later card wipes the typed draft of the
+    //   question the dock is on, or lands on another card with the same id.
+
+    fn claude_chat_answering_elicitations<'a>(
+        cx: &'a mut TestAppContext,
+        log: &Path,
+    ) -> (Entity<Chat>, &'a mut VisualTestContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(init);
+        cx.executor().allow_parking();
+        let launch = sirio_chat::ClaudeLaunch::fixture(
+            "python3",
+            vec![
+                CLAUDE_FIXTURE.to_string(),
+                "elicitation".to_string(),
+                format!("--fixture-response-log={}", log.display()),
+            ],
+        );
+        cx.add_window_view(|_, cx| {
+            Chat::from_test_command(LaunchSpec::Claude(launch), std::env::temp_dir(), cx)
+        })
+    }
+
+    /// What the fake CLI heard the host answer, in order.
+    fn elicitation_answers(log: &Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|line| line["response"]["response"].as_object().cloned())
+            .map(serde_json::Value::Object)
+            .collect()
+    }
+
+    /// Asks the fake CLI `prompt` and waits for its elicitation to be drawn.
+    fn ask_elicitation(chat: &Entity<Chat>, cx: &mut VisualTestContext, prompt: &str) {
+        pump_chat_until(cx, chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, prompt);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Elicitation { .. }))
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+    }
+
+    /// Draws the dock for the current step and lets it arm.
+    fn arm_dock(cx: &mut VisualTestContext) {
+        refresh_frame(cx);
+        refresh_frame(cx);
+        cx.executor()
+            .advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+    }
+
+    /// The row labelled `label` on the open question, by the handler a click takes.
+    fn activate_dock_label(chat: &Entity<Chat>, cx: &mut VisualTestContext, label: &str) {
+        arm_dock(cx);
+        let index = chat.read_with(&cx.cx, |chat, _| {
+            question_dock::question_view(&chat.entries)
+                .expect("a question is open")
+                .rows
+                .iter()
+                .position(|row| row.label() == label)
+                .unwrap_or_else(|| panic!("no {label} row"))
+        });
+        cx.update(|window, cx| chat.update(cx, |chat, cx| chat.activate_dock_row(index, window, cx)));
+        cx.run_until_parked();
+    }
+
+    fn elicitation_state(
+        chat: &Entity<Chat>,
+        cx: &VisualTestContext,
+    ) -> (usize, serde_json::Value, Option<String>, Option<&'static str>) {
+        chat.read_with(&cx.cx, |chat, _| {
+            match chat
+                .entries
+                .iter()
+                .rev()
+                .find(|entry| matches!(entry, Entry::Elicitation { .. }))
+            {
+                Some(Entry::Elicitation {
+                    step,
+                    values,
+                    error,
+                    resolved,
+                    ..
+                }) => (
+                    *step,
+                    serde_json::Value::Object(values.clone()),
+                    error.clone(),
+                    *resolved,
+                ),
+                _ => panic!("no elicitation"),
+            }
+        })
+    }
+
+    /// Types into the dock's answer field, which the row's Enter focuses.
+    fn type_into_the_answer(cx: &mut VisualTestContext, text: &str) {
+        arm_dock(cx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_input(text);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn each_step_starts_on_its_own_row(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("responses.jsonl");
+        let (chat, cx) = claude_chat_answering_elicitations(cx, &log);
+        ask_elicitation(&chat, cx, "form");
+
+        // Blue is the second row; the count step must not inherit row 1.
+        activate_dock_label(&chat, cx, "blue");
+        arm_dock(cx);
+        chat.read_with(&cx.cx, |chat, _| {
+            let view = question_dock::question_view(&chat.entries).unwrap();
+            assert_eq!(view.step, 1);
+            assert_eq!(chat.question_dock.selected, 0);
+            assert_eq!(view.rows[0].label(), "FreeText");
+        });
+        type_into_the_answer(cx, "2");
+
+        let (step, values, error, resolved) = elicitation_state(&chat, cx);
+        assert_eq!(
+            (step, values, error, resolved),
+            (2, serde_json::json!({"colour": "blue", "count": 2}), None, None),
+            "Enter on the count step submitted the typed text, not Skip or Decline"
+        );
+        assert!(elicitation_answers(&log).is_empty());
+    }
+
+    #[gpui::test]
+    async fn typed_answers_and_escape_reach_the_elicitation(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("responses.jsonl");
+        let (chat, cx) = claude_chat_answering_elicitations(cx, &log);
+        ask_elicitation(&chat, cx, "form");
+        activate_dock_label(&chat, cx, "blue");
+        type_into_the_answer(cx, "2");
+        assert_eq!(elicitation_state(&chat, cx).1["count"], 2);
+
+        // Esc inside the typed answer of the note step withdraws the whole form.
+        arm_dock(cx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |_| !elicitation_answers(&log).is_empty());
+        assert_eq!(
+            elicitation_answers(&log),
+            vec![serde_json::json!({"action": "cancel"})]
+        );
+        assert_eq!(elicitation_state(&chat, cx).3, Some("cancelled"));
+    }
+
+    #[gpui::test]
+    async fn an_optional_step_can_be_skipped(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("responses.jsonl");
+        let (chat, cx) = claude_chat_answering_elicitations(cx, &log);
+        ask_elicitation(&chat, cx, "form");
+        activate_dock_label(&chat, cx, "blue");
+        for _ in 0..3 {
+            activate_dock_label(&chat, cx, "Skip");
+        }
+        activate_dock_label(&chat, cx, "Accept");
+        pump_chat_until(cx, &chat, |_| !elicitation_answers(&log).is_empty());
+        assert_eq!(
+            elicitation_answers(&log),
+            vec![serde_json::json!({"action": "accept", "content": {"colour": "blue"}})]
+        );
+    }
+
+    #[gpui::test]
+    async fn a_rejected_value_keeps_the_step(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("responses.jsonl");
+        let (chat, cx) = claude_chat_answering_elicitations(cx, &log);
+        ask_elicitation(&chat, cx, "form");
+        activate_dock_label(&chat, cx, "blue");
+        type_into_the_answer(cx, "abc");
+
+        let (step, _, error, resolved) = elicitation_state(&chat, cx);
+        assert_eq!((step, resolved), (1, None));
+        assert!(error.is_some_and(|error| error.contains("How many")));
+        let_the_agent_answer(cx);
+        assert!(elicitation_answers(&log).is_empty());
+        refresh_frame(cx);
+        assert!(chat.read_with(&cx.cx, |chat, _| {
+            question_dock::question_view(&chat.entries).is_some_and(|view| view.step == 1)
+        }));
+    }
+
+    #[gpui::test]
+    async fn a_close_reaches_only_the_open_entry_of_its_kind(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        let mut old = question_dock::open_elicitation(
+            1,
+            sirio_chat::ElicitationPrompt::Form(Vec::new()),
+        );
+        if let Entry::Elicitation { resolved, .. } = &mut old {
+            *resolved = Some("declined");
+        }
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(old);
+            chat.push_entry(question_dock::open_permission(1, "/repo/a.rs", &["Allow"]));
+            chat.handle_event(
+                sirio_chat::ChatEvent::RequestClosed {
+                    request_id: 1,
+                    kind: sirio_chat::RequestKind::Elicitation,
+                    reason: sirio_chat::CloseReason::Withdrawn,
+                },
+                cx,
+            );
+        });
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(
+                matches!(&chat.entries[0], Entry::Elicitation { withdrawn: false, expired: false, resolved: Some("declined"), .. }),
+                "a resolved elicitation is not closed again"
+            );
+            assert!(
+                matches!(&chat.entries[1], Entry::Permission { expired: false, withdrawn: false, .. }),
+                "an elicitation's close never reaches a permission"
+            );
+        });
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::RequestClosed {
+                    request_id: 1,
+                    kind: sirio_chat::RequestKind::Permission,
+                    reason: sirio_chat::CloseReason::Withdrawn,
+                },
+                cx,
+            );
+        });
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(
+                &chat.entries[0],
+                Entry::Elicitation { withdrawn: false, expired: false, resolved: Some("declined"), .. }
+            ));
+            assert!(matches!(
+                &chat.entries[1],
+                Entry::Permission { expired: true, withdrawn: true, resolved: None, .. }
+            ));
+            assert_eq!(control_entry_row(&chat.entries[1])["status"], "withdrawn");
+            assert!(chat.pending_question().is_none());
+        });
+    }
+
+    // Ways a close or an answer can reach the wrong card:
+    // - closing another request wipes the draft of the question the dock is on;
+    // - after ids restart, an answer or Esc on a Plan approval rewrites an old,
+    //   closed permission that shares its id and leaves the approval open.
+
+    #[gpui::test]
+    async fn closing_another_request_keeps_the_open_answers_draft(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(open_question_with_free_text(1));
+            chat.push_entry(question_dock::open_elicitation(
+                2,
+                sirio_chat::ElicitationPrompt::Form(Vec::new()),
+            ));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let field = cx.debug_bounds("question-answer-input").expect("the field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("Bl");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::RequestClosed {
+                    request_id: 2,
+                    kind: sirio_chat::RequestKind::Elicitation,
+                    reason: sirio_chat::CloseReason::Withdrawn,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.simulate_input("ue");
+        chat.read_with(&cx.cx, |chat, _| {
+            assert_eq!(chat.question_answer.draft, "Blue");
+            assert_eq!(chat.question_answer.for_request, Some(1));
+        });
+    }
+
+    fn plan_approval_beside_a_closed_permission() -> (Entry, Entry) {
+        let mut old = question_dock::open_permission(1, "/repo/a.rs", &["Allow"]);
+        if let Entry::Permission { resolved, .. } = &mut old {
+            *resolved = Some("Old".into());
+        }
+        let plan = Entry::Plan {
+            entries: Vec::new(),
+            approval: Some(PlanApproval {
+                request_id: 1,
+                title: "Ready?".into(),
+                options: question_dock::answer_options(&["Approve"]),
+                resolved: None,
+                expired: false,
+                withdrawn: false,
+            }),
+        };
+        (old, plan)
+    }
+
+    #[gpui::test]
+    async fn a_dock_answer_reaches_the_plan_not_an_old_permission_with_its_id(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = offline_chat_view(cx);
+        let (old, plan) = plan_approval_beside_a_closed_permission();
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(old);
+            chat.push_entry(plan);
+            cx.notify();
+        });
+        arm_dock(cx);
+        cx.update(|window, cx| chat.update(cx, |chat, cx| chat.activate_dock_row(0, window, cx)));
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(&chat.entries[0], Entry::Permission { resolved: Some(r), .. } if r == "Old"));
+            assert!(matches!(
+                &chat.entries[1],
+                Entry::Plan { approval: Some(PlanApproval { resolved: Some(r), .. }), .. } if r == "Approve"
+            ));
+        });
+    }
+
+    #[gpui::test]
+    async fn escape_reaches_the_plan_not_an_old_permission_with_its_id(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        let (old, plan) = plan_approval_beside_a_closed_permission();
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(old);
+            chat.push_entry(plan);
+            cx.notify();
+        });
+        arm_dock(cx);
+        cx.update(|window, cx| {
+            chat.update(cx, |chat, cx| chat.dock_cancel(&DockCancel, window, cx))
+        });
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(&chat.entries[0], Entry::Permission { expired: false, .. }));
+            assert!(matches!(
+                &chat.entries[1],
+                Entry::Plan { approval: Some(PlanApproval { expired: true, .. }), .. }
+            ));
+        });
+    }
+
+    #[gpui::test]
+    async fn a_withdrawn_elicitation_takes_no_answer(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("responses.jsonl");
+        let (chat, cx) = claude_chat_answering_elicitations(cx, &log);
+        ask_elicitation(&chat, cx, "withdraw");
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Elicitation { withdrawn: true, .. }))
+        });
+        arm_dock(cx);
+        cx.update(|window, cx| {
+            chat.update(cx, |chat, cx| {
+                chat.activate_dock_row(0, window, cx);
+                chat.respond_elicitation(1, sirio_chat::ElicitationAction::Decline, cx);
+                chat.cancel_question(1, cx);
+            });
+        });
+        let_the_agent_answer(cx);
+        assert!(elicitation_answers(&log).is_empty(), "nothing is sent for a withdrawn request");
+        chat.read_with(&cx.cx, |chat, _| {
+            // The card itself takes nothing: the UI guard, not just the worker's.
+            assert!(
+                chat.entries.iter().any(|entry| matches!(
+                    entry,
+                    Entry::Elicitation { resolved: None, expired: false, withdrawn: true, .. }
+                )),
+                "a withdrawn card stays unresolved: {:?}",
+                chat.entries
+            );
+            assert!(question_dock::question_view(&chat.entries).is_none());
+            assert!(chat.pending_question().is_none());
+            let row = control_entry_row(
+                chat.entries
+                    .iter()
+                    .find(|entry| matches!(entry, Entry::Elicitation { .. }))
+                    .unwrap(),
+            );
+            assert_eq!(row["status"], "withdrawn");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_completion_before_any_answer_accepts_the_request(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("responses.jsonl");
+        let (chat, cx) = claude_chat_answering_elicitations(cx, &log);
+        pump_chat_until(cx, &chat, |chat| chat.client.is_some());
+        refresh_frame(cx);
+        focus_and_type(cx, "url early");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Elicitation { completed: true, .. }))
+                && chat.has_completed_turn
+        });
+        assert_eq!(
+            elicitation_answers(&log),
+            vec![serde_json::json!({"action": "accept"})],
+            "the CLI was told, once, what the user already did"
+        );
+        assert_eq!(cx.cx.opened_url(), None, "nothing was clicked");
+        chat.read_with(&cx.cx, |chat, _| {
+            let card = chat
+                .entries
+                .iter()
+                .find(|entry| matches!(entry, Entry::Elicitation { .. }))
+                .unwrap();
+            assert_eq!(control_entry_row(card)["status"], "completed");
+            assert!(matches!(card, Entry::Elicitation { resolved: Some("accepted"), .. }));
+            assert!(chat.pending_question().is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn a_completion_leaves_the_draft_of_an_earlier_question_alone(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = offline_chat_view(cx);
+        let link = |request_id| {
+            question_dock::open_elicitation(
+                request_id,
+                sirio_chat::ElicitationPrompt::Url {
+                    url: "https://example.com/a".into(),
+                    elicitation_id: Some("el-2".into()),
+                },
+            )
+        };
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(open_question_with_free_text(1));
+            chat.push_entry(link(2));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        let field = cx.debug_bounds("question-answer-input").expect("the field is drawn");
+        cx.simulate_click(field.center(), Modifiers::none());
+        cx.run_until_parked();
+        cx.simulate_input("Bl");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::ElicitationCompleted {
+                    server: "elic".into(),
+                    elicitation_id: "el-2".into(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.simulate_input("ue");
+        chat.read_with(&cx.cx, |chat, _| {
+            assert_eq!(chat.question_answer.draft, "Blue");
+            assert_eq!(chat.question_answer.for_request, Some(1));
+            assert!(matches!(
+                &chat.entries[1],
+                Entry::Elicitation { completed: true, resolved: Some("accepted"), .. }
+            ));
+            assert_eq!(control_entry_row(&chat.entries[1])["status"], "completed");
+            assert!(matches!(&chat.entries[0], Entry::Permission { resolved: None, .. }));
+        });
+    }
+
+    #[gpui::test]
+    async fn opening_a_link_accepts_without_content_and_completes(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let log = dir.0.join("responses.jsonl");
+        let (chat, cx) = claude_chat_answering_elicitations(cx, &log);
+        ask_elicitation(&chat, cx, "url");
+        assert_eq!(cx.cx.opened_url(), None, "nothing opens before the click");
+        activate_dock_label(&chat, cx, "Open in browser");
+        assert_eq!(cx.cx.opened_url().as_deref(), Some("https://example.com/auth?x=1"));
+        pump_chat_until(cx, &chat, |chat| {
+            chat.entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Elicitation { completed: true, .. }))
+        });
+        assert_eq!(
+            elicitation_answers(&log),
+            vec![serde_json::json!({"action": "accept"})]
+        );
+        let row = chat.read_with(&cx.cx, |chat, _| {
+            control_entry_row(
+                chat.entries
+                    .iter()
+                    .find(|entry| matches!(entry, Entry::Elicitation { .. }))
+                    .unwrap(),
+            )
+        });
+        assert_eq!(row["status"], "completed");
+    }
+
     /// The `effortLevel` of every settings change the fake CLI logged that
     /// names one, oldest first. Fast mode and the thinking display are other
     /// requests (or other keys), so they are not here.
@@ -14065,6 +14719,7 @@ two"
                 resolved: None,
                 expired: false,
                 dismissed: false,
+                withdrawn: false,
             });
             cx.notify();
         });
@@ -14111,6 +14766,7 @@ two"
                 resolved: None,
                 expired: false,
                 dismissed: false,
+                withdrawn: false,
             });
             cx.notify();
         });
