@@ -439,10 +439,13 @@ it names; the live probe (§8.1) adds its findings here before any product code.
    selected the lines X to Y from <file>: …") cut to 2000 characters with " ... (truncated)".
    Sirio sends at most 4096 UTF-16 code units, cut on a character boundary, so Claude's own
    marker still appears; the line range is always exact.
-3. **Owner resolution.** Pure in `sirio_ide`: a bounded breadth-first walk down from each
-   terminal pane's `shell_pid()` (depth 8, 1024 processes in all), with the child lookup
-   injected. The app supplies it from a new public `sirio_activity::process::child_pids`
-   (Linux `/proc`, macOS libproc, Windows the toolhelp snapshot), on the background executor.
+3. **Owner resolution.** Pure in `sirio_ide`: a walk **up** from the connecting pid through
+   its parents (at most 32 steps) until it meets the `shell_pid()` of any terminal Sirio holds,
+   mounted or parked, with the parent lookup injected. The app supplies it from a new public
+   `sirio_activity::process::parent_pid` (Linux `/proc/<pid>/stat`, macOS libproc, Windows one
+   toolhelp snapshot per resolution), on the background executor. A connection left ownerless
+   is resolved again when a worktree's terminals attach and before any owner-dependent action
+   (a restart mounts only the selected worktree at first).
    A process's cwd, for an ownerless connection (§4.2), is read on Linux only
    (`/proc/<pid>/cwd`); elsewhere it is none, and §4.6's every-worktree fallback applies.
 4. **The answers Sirio gives, all of them.** `FILE_SAVED` and `DIFF_REJECTED` come only from
@@ -462,7 +465,9 @@ it names; the live probe (§8.1) adds its findings here before any product code.
    both sides to private temporary files under Sirio's data directory (beside
    `session::database_path()`), runs `git diff --no-index` with `diff_entry`'s flags, and parses
    with `parse_diff`; the parsed path is rewritten to the real file. An untrusted path never
-   reaches git. A missing file diffs against `/dev/null`.
+   reaches git. A missing file diffs against `/dev/null`. The file is read, and the path
+   canonicalised, on the connection's thread before the request reaches the app, so a stalled
+   file system never blocks the UI.
 7. **Reusing Changes.** `ChangesSource::Proposal(Arc<FileDiff>)` and
    `ChangesTab::for_proposal`: the Changes body, both diff modes, word highlights and the `+`
    comment affordance, with no stage or discard controls and a header of its own. The
@@ -471,8 +476,11 @@ it names; the live probe (§8.1) adds its findings here before any product code.
 8. **The tab.** `TabKind::Proposal` and `PaneContent::Proposal`, never saved, like Trace. A
    proposal of a worktree that is not on screen is held tab-less in the workspace, parked with
    its worktree and put back with it (beside the Trace tabs), and never dropped by an
-   eviction. Closing a worktree or project that holds proposals asks once "Closing rejects
-   Claude's change" (Reject / Cancel).
+   eviction. **Every way of closing a proposal tab** (its ✕, Ctrl+W, the tab menu, Close
+   Others, Close Tabs to the Right, `surface.tabs.close`) and closing a worktree or project that
+   holds proposals first asks once, in the window, "Closing rejects Claude's change" (Reject /
+   Cancel), before anything else is closed or any session ended. The release `workspace.close`
+   verb, which cannot ask, refuses while the worktree holds a proposal.
 9. **Where it starts.** The bridge starts from `main()`, after settings load and before the
    first terminal is created or restored, never from the workspace's constructor: in-process
    UI tests never bind a port or write a lockfile. The lockfile directory is a parameter of
@@ -487,4 +495,6 @@ it names; the live probe (§8.1) adds its findings here before any product code.
     migration.
 12. **Comment delivery.** The clipboard path is built first and always works; typing into the
     terminal is added on top only if the probe finds both a reliable idle signal and a paste
-    Claude shows as text (§4.8, Enzo's decision).
+    Claude shows as text (§4.8, Enzo's decision), and even then only while the terminal's
+    bracketed-paste mode is on: without it a multi-line paste would run each line in whatever
+    is in the foreground.
