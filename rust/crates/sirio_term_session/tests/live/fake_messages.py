@@ -4,46 +4,72 @@
 # either "ok" or, when the latest user turn says "run tool" and carries no tool result yet,
 # a Bash tool call that sleeps 3 s and touches `probe-file` in Claude's cwd. When it says
 # "run edit" (an Edit not yet answered): an Edit of `<cwd>/probe.txt` ("alpha" -> "beta");
-# "run edit twice" streams that Edit in two successive turns (each Edit asked for and not yet answered).
+# "run edit twice" streams it in two successive turns (beta -> alpha the second time, so both apply).
+# Only the latest prompt decides; every response has its own message id, so Claude keeps the turns apart.
 # The cwd is the "Primary working directory" Claude reports in its request, else this process's.
 # Binds 127.0.0.1 only. Nothing here is a credential.
-import json, os, re, sys, time
+import itertools, json, os, re, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOLD = float(sys.argv[2])
 TOOL_INPUT = {"command": "sleep 3; touch probe-file", "description": "Create a probe file"}
 EDIT_OLD, EDIT_NEW = "alpha", "beta"
+COUNTER = itertools.count(1)
 
 
 def edit_input(request):
-    found = re.search(r"Primary working directory: ([^\\\n]+)", json.dumps(request))
+    """The Edit of `<cwd>/probe.txt`: alpha -> beta, and beta -> alpha once the file holds beta, so
+    successive Edits keep applying."""
+    found = re.search(r"Primary working directory: ([^\\\n]+)", json.dumps(request, ensure_ascii=False))
     cwd = found.group(1).strip() if found else os.getcwd()
-    return {"file_path": cwd + "/probe.txt", "old_string": EDIT_OLD, "new_string": EDIT_NEW}
+    path = cwd + "/probe.txt"
+    try:
+        text = open(path).read()
+    except OSError:
+        text = EDIT_OLD
+    old, new = (EDIT_NEW, EDIT_OLD) if EDIT_OLD not in text and EDIT_NEW in text else (EDIT_OLD, EDIT_NEW)
+    return {"file_path": path, "old_string": old, "new_string": new}
 
 
 def wants_edit(users):
-    """Whether this turn streams an Edit. The content blocks of the user turns are read in order,
-    because Claude merges a new prompt into the user message that holds the previous tool result:
-    the last block saying "run edit" decides, and the Edit results after it are the Edits already
-    answered (one for "run edit", two for "run edit twice")."""
+    """Whether this turn streams an Edit. Only the latest prompt (a text block that is not a system
+    reminder or an interruption note) decides the scenario. "run edit" streams one Edit while
+    nothing follows the prompt; "run edit twice" streams a second one when the latest user turn is
+    the tool result of the first."""
     blocks = []
     for user in users:
         content = user.get("content")
         blocks += content if isinstance(content, list) else [content]
-    said = None
+
+    def text_of(block):
+        if isinstance(block, dict):
+            return "" if block.get("type") == "tool_result" else str(block.get("text", ""))
+        return str(block or "")
+
+    def noise(block):
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            return False
+        text = text_of(block).lstrip()
+        return not text or text.startswith("<system-reminder>") or text.startswith("[Request interrupted")
+
+    prompt = None
     for index, block in enumerate(blocks):
-        text = block.get("text", "") if isinstance(block, dict) else str(block or "")
-        if "run edit" in text and not (isinstance(block, dict) and block.get("type") == "tool_result"):
-            said = index
-    if said is None:
+        if not noise(block) and not (isinstance(block, dict) and block.get("type") == "tool_result"):
+            prompt = index
+    if prompt is None or "run edit" not in text_of(blocks[prompt]):
         return False
-    text = blocks[said].get("text", "") if isinstance(blocks[said], dict) else str(blocks[said])
-    answered = sum(
-        1 for block in blocks[said:]
-        if isinstance(block, dict) and block.get("type") == "tool_result"
-        and str(block.get("tool_use_id", "")).startswith("toolu_edit_")
+    after = [block for block in blocks[prompt + 1:] if not noise(block)]
+    if not after:
+        return True
+    if "run edit twice" not in text_of(blocks[prompt]):
+        return False
+    results = [block for block in after if isinstance(block, dict) and block.get("type") == "tool_result"]
+    last = after[-1]
+    return (
+        len(results) == 1
+        and last is results[0]
+        and str(last.get("tool_use_id", "")).startswith("toolu_edit_")
     )
-    return answered < (2 if "run edit twice" in text else 1)
 
 
 def sse(event, data):
@@ -76,7 +102,7 @@ class Handler(BaseHTTPRequestHandler):
         want_edit = bool(request.get("tools")) and wants_edit(users)
         print("POST", self.path, "messages", len(messages), "edit" if want_edit else "tool" if want_tool else "text", flush=True)
         time.sleep(HOLD)
-        message = {"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+        message = {"id": f"msg_{next(COUNTER)}", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
                    "content": [], "stop_reason": None, "stop_sequence": None,
                    "usage": {"input_tokens": 1, "output_tokens": 1}}
         if not request.get("stream"):
@@ -92,7 +118,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("content-type", "text/event-stream")
         self.end_headers()
         if want_edit:
-            block = {"type": "tool_use", "id": f"toolu_edit_{len(messages)}", "name": "Edit", "input": {}}
+            block = {"type": "tool_use", "id": f"toolu_edit_{next(COUNTER)}", "name": "Edit", "input": {}}
             delta = {"type": "input_json_delta", "partial_json": json.dumps(edit_input(request))}
             stop = "tool_use"
         elif want_tool:
