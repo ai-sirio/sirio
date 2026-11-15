@@ -125,6 +125,7 @@ sirio_privacy = { path = "crates/sirio_privacy" }
 sirio_ide = { path = "crates/sirio_ide" }
 socket2 = "0.6"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+url = "2.5.8"
 
 # Local override for F-CORE-FILE-03A: upstream `gpui_linux`'s wl_data_device `Drop` handler
 # bails out silently (no `finish()`/`destroy()`, no error, no event delivered to the app) when
