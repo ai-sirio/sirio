@@ -766,6 +766,7 @@ fn never_decides_without_answer() {
     // Per slot: the client (if connected) and the ids of its openDiff requests.
     let mut slots: Vec<Option<(Client, Vec<u64>)>> = vec![None, None];
     let mut next_id = 10u64;
+    let (mut answers_checked, mut withdrawals_checked) = (0u32, 0u32);
     for seq in 0..200u64 {
         let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15 ^ (seq + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
         let mut checked: Vec<Value> = Vec::new();
@@ -799,17 +800,24 @@ fn never_decides_without_answer() {
                     json!({"name":"closeAllDiffTabs","arguments":{}})),
             }
         }
+        // The ids stay for the client's whole life: a proposal opened in one sequence is
+        // closed, replaced or swept in a later one, and that frame must be checked too.
         for (client, ids) in slots.iter_mut().flatten() {
             checked.extend(drain(client, ids));
-            ids.clear();
         }
         for frame in checked {
+            answers_checked += 1;
+            if frame["error"]["code"] == -32000 {
+                withdrawals_checked += 1;
+            }
             let text = frame.to_string();
             for word in forbidden {
                 assert!(!text.contains(word), "sequence {seq}: an openDiff frame decided: {text}");
             }
         }
     }
+    assert!(withdrawals_checked > 0, "the test never saw a withdrawn openDiff");
+    println!("never_decides: {answers_checked} openDiff answer frames checked, {withdrawals_checked} of them -32000, {next_id} requests sent in all");
 }
 
 /// The frames answering `ids`, read up to a `ping` sent behind them (answers are in order, so
@@ -827,4 +835,39 @@ fn drain(client: &mut Client, ids: &[u64]) -> Vec<Value> {
         }
     }
     panic!("no ping reply");
+}
+
+#[test]
+fn ids_are_not_reused_across_bridges() {
+    let first = default_harness();
+    let mut a = connect(first.port);
+    a.handshake(&first, 1);
+    a.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let old = next_open_diff(&first);
+    first.bridge.shutdown();
+
+    let second = default_harness();
+    let mut b = connect(second.port);
+    b.handshake(&second, 1);
+    b.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let new = next_open_diff(&second);
+    assert_ne!(old.id, new.id);
+    assert_ne!(old.conn, new.conn);
+    assert_eq!(second.bridge.answer_diff(&old.id, DiffAnswer::Rejected), Err(Gone));
+    assert!(b.recv(Duration::from_millis(200)).is_none(), "the stale id answered the new proposal");
+    assert_eq!(second.bridge.answer_diff(&new.id, DiffAnswer::Rejected), Ok(()));
+}
+
+#[test]
+fn relative_paths_are_refused() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    for (old, new) in [("rel/a.txt", "/abs/a.txt"), ("/abs/a.txt", "rel/a.txt")] {
+        let v = c.call(5, "tools/call", json!({"name":"openDiff","arguments":{
+            "old_file_path": old, "new_file_path": new,
+            "new_file_contents": "x", "tab_name": "t"}}));
+        assert_eq!(v["error"]["code"], -32602);
+    }
+    assert!(h.events.recv_timeout(Duration::from_millis(200)).is_err());
 }

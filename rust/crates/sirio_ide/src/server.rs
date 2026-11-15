@@ -41,6 +41,12 @@ const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 /// The most of a file Sirio reads to draw its diff (the editor's own cap, 1 MiB).
 const MAX_DIFF_FILE_BYTES: u64 = 1_048_576;
 
+// Process-wide, so an id the app still holds from an earlier `Bridge` (the switch went off and
+// on) never names anything in a later one.
+static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
+static NEXT_DIAG: AtomicU64 = AtomicU64::new(1);
+static NEXT_DIFF: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnId(pub u64);
 
@@ -121,9 +127,6 @@ struct Shared {
     options: BridgeOptions,
     on_event: Box<dyn Fn(BridgeEvent) + Send + Sync>,
     stop: AtomicBool,
-    next_conn: AtomicU64,
-    next_diag: AtomicU64,
-    next_diff: AtomicU64,
     diffs: Mutex<Pending>,
     conns: Mutex<HashMap<ConnId, Sender<Command>>>,
     /// A clone of every accepted socket, so `shutdown` can unblock a read, send or flush.
@@ -164,9 +167,6 @@ impl Bridge {
             options,
             on_event: Box::new(on_event),
             stop: AtomicBool::new(false),
-            next_conn: AtomicU64::new(1),
-            next_diag: AtomicU64::new(1),
-            next_diff: AtomicU64::new(1),
             diffs: Mutex::new(Pending::default()),
             conns: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
@@ -228,7 +228,7 @@ fn accept_loop(listener: TcpListener, shared: &Arc<Shared>) {
     while !shared.stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
-                let conn = ConnId(shared.next_conn.fetch_add(1, Ordering::SeqCst));
+                let conn = ConnId(NEXT_CONN.fetch_add(1, Ordering::SeqCst));
                 let Ok(clone) = stream.try_clone() else { continue };
                 shared.streams.lock().unwrap_or_else(|p| p.into_inner()).insert(conn, clone);
                 let shared = Arc::clone(shared);
@@ -354,6 +354,8 @@ fn serve(shared: &Shared, stream: TcpStream, id: ConnId) {
     shared.conns.lock().unwrap_or_else(|p| p.into_inner()).insert(id, tx);
     let mut conn = Conn { shared, id, ws, pending: Vec::new(), announced: false };
     let _ = conn.run(&rx);
+    // From here no `tx.send` can succeed, so `answer_diff` on an ending connection is `Gone`.
+    drop(rx);
     shared.conns.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
     // Nothing is owed to anyone any more: no frame is attempted for a proposal still waiting.
     shared.diffs().drop_conn(id);
@@ -505,7 +507,7 @@ impl Conn<'_> {
             },
             Some(_) => return self.send(mcp::error(id, mcp::INVALID_PARAMS, "uri must be a string")),
         };
-        let diag = DiagId { conn: self.id, n: self.shared.next_diag.fetch_add(1, Ordering::SeqCst) };
+        let diag = DiagId { conn: self.id, n: NEXT_DIAG.fetch_add(1, Ordering::SeqCst) };
         self.pending.push(PendingDiagnostics {
             id: diag.clone(),
             uri,
@@ -532,13 +534,17 @@ impl Conn<'_> {
                 "openDiff needs old_file_path, new_file_path, new_file_contents and tab_name",
             ));
         };
+        // A relative path would be read from Sirio's own working directory.
+        if !Path::new(old).is_absolute() || !Path::new(new).is_absolute() {
+            return self.send(mcp::error(id, mcp::INVALID_PARAMS, "openDiff paths must be absolute"));
+        }
         let old_path = Path::new(old).to_path_buf();
         let original = read_regular_file(&old_path, MAX_DIFF_FILE_BYTES);
         let canonical = match original {
             ReadOutcome::Missing => None,
             _ => std::fs::canonicalize(&old_path).ok(),
         };
-        let diff = DiffId { n: self.shared.next_diff.fetch_add(1, Ordering::SeqCst) };
+        let diff = DiffId { n: NEXT_DIFF.fetch_add(1, Ordering::SeqCst) };
         let replaced = self.shared.diffs().insert(diff.clone(), self.id, tab_name.to_string(), id.clone());
         let replaces = replaced.as_ref().map(|w| w.id.clone());
         (self.shared.on_event)(BridgeEvent::OpenDiff {

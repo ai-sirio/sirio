@@ -28,8 +28,12 @@ pub enum Refusal {
 #[cfg(unix)]
 fn open(path: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
-    // Non-blocking, so opening a FIFO with no writer returns at once and `fstat` can refuse it.
-    std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path)
+    // Non-blocking, so opening a FIFO with no writer returns at once and `fstat` can refuse it;
+    // no controlling terminal, so opening a terminal device cannot take one.
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
 }
 
 #[cfg(not(unix))]
