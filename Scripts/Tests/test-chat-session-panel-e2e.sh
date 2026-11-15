@@ -147,7 +147,10 @@ set -euo pipefail
 #                      the dragged edge now is); pulled to the transcript it stops at the cap (released
 #                      over the transcript); an emptied field is 3 rows; a drag held 5 rows up pins the field at 8
 #                      and the release frees it with the maximum kept at 8; a press that never moved changes
-#                      nothing, and one held 8 px up pins the field at 3 rows and, released, saves nothing. Frames: rest, full, short, taller, held
+#                      nothing, and one held 8 px up pins the field at 3 rows and, released, saves nothing. Last, Sirio is
+#                      stopped and started again under the same name (the same database) with a new chat: its
+#                      maximum, stored and drawn, is the 8 the drag left, and the empty field shows 3 rows.
+#                      Frames: rest, full, short, taller, held, relaunched
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
@@ -2399,7 +2402,17 @@ scenario_composer_resize() {
   DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool mouseup 1 || fail "xdotool could not release the button"
   wait_composer "released, the 8 px drag keeps the maximum at 8" \
     'not c["composerRow"]["resizing"] and c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3'
-  echo "OK: composer_resize: the field follows the stored maximum and the cap, and the edge's drag sets and keeps it"
+
+  echo "step: Sirio starts again and the new chat keeps the dragged maximum"
+  stop_app
+  launch composer_resize
+  open_chat
+  show_chat
+  wait_panel "the new chat is ready" 'c["status"] in ("idle", "completed")' 30
+  wait_composer "after the relaunch the maximum and the stored maximum are 8 and the empty field shows 3 rows" \
+    'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3'
+  capture composer-resize-relaunched
+  echo "OK: composer_resize: the field follows the stored maximum and the cap, the edge's drag sets and keeps it, and a relaunch restores it"
   stop_app
 }
 

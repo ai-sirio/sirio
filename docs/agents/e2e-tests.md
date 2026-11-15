@@ -241,6 +241,16 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # mode is drawn as the danger shield, and typing still reaches the composer, so no dialog holds the
 # keyboard. It needs --display :N --window-size 2200x1000 and captures
 # frames/composer-keys-*.png.
+# The composer_resize scenario (this script's own, default stub) proves the composer's resizable
+# maximum on the `composerRow` of `surface.chat.read` (`capRows`, `maxRows`, `storedMaxRows`,
+# `fieldRows`, `resizing`, `edge`, `root`), which exists only once a frame paints. At 2200x1000 the
+# stored 12 is drawn and the empty field shows 3 rows; a 40-line draft fills it to 12; a 2200x400
+# window caps the field at half the chat while the stored maximum stays 12. Then real X drags on the
+# composer's top edge: 4 rows up sets 16 and stores it; pulled to the transcript it stops at the cap;
+# a drag held 5 rows up pins the field at 8 and its release keeps 8; a press that never moved, and one
+# held 8 px up, save nothing. Last, Sirio is stopped and started again under the same name with a new
+# chat: the maximum, drawn and stored, is still 8. It needs --display :N --window-size 2200x1000 and
+# captures frames/composer-resize-{rest,full,short,taller,held,relaunched}.png.
 # The four unread scenarios run in the default set and need no display: `unread_parked_chat` (a
 # turn that ends while its worktree is not selected marks the chat unread, posts one notification
 # naming its branch, and showing the worktree clears the mark), `unread_question` (a permission
