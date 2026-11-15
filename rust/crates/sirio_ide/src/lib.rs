@@ -6,6 +6,7 @@ pub mod endpoint;
 pub mod lockfile;
 mod mcp;
 mod server;
+mod socket;
 pub mod uri;
 
 pub use endpoint::{PORT_RANGE, bind, new_token};

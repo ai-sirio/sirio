@@ -22,6 +22,7 @@ use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{HandshakeError, Message, WebSocket, accept_hdr_with_config};
 
 use crate::mcp::{self, FileDiagnostics, Notification};
+use crate::socket::WouldBlockOnTimeout;
 use crate::uri::from_file_uri;
 
 /// How long the app has to answer a `getDiagnostics` before Claude gets an error (spec §10.5).
@@ -236,7 +237,7 @@ fn offers_mcp(request: &Request) -> bool {
         .any(|p| p.trim() == "mcp")
 }
 
-fn handshake(shared: &Shared, stream: TcpStream) -> Option<WebSocket<TcpStream>> {
+fn handshake(shared: &Shared, stream: TcpStream) -> Option<Ws> {
     stream.set_nonblocking(false).ok()?;
     stream.set_nodelay(true).ok()?;
     stream.set_read_timeout(Some(POLL)).ok()?;
@@ -266,7 +267,7 @@ fn handshake(shared: &Shared, stream: TcpStream) -> Option<WebSocket<TcpStream>>
     // Under the short read timeout, so `stop` and the overall deadline are looked at between
     // attempts; the timeout is per read, not per handshake.
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    let mut attempt = accept_hdr_with_config(stream, check, Some(config));
+    let mut attempt = accept_hdr_with_config(WouldBlockOnTimeout(stream), check, Some(config));
     let ws = loop {
         match attempt {
             Ok(ws) => break ws,
@@ -279,9 +280,12 @@ fn handshake(shared: &Shared, stream: TcpStream) -> Option<WebSocket<TcpStream>>
             Err(HandshakeError::Failure(_)) => return None,
         }
     };
-    ws.get_ref().set_read_timeout(Some(POLL)).ok()?;
+    ws.get_ref().0.set_read_timeout(Some(POLL)).ok()?;
     Some(ws)
 }
+
+/// A connection's WebSocket: expired socket timeouts read as `WouldBlock` on every platform.
+type Ws = WebSocket<WouldBlockOnTimeout<TcpStream>>;
 
 struct PendingDiagnostics {
     id: DiagId,
@@ -297,7 +301,7 @@ struct Dead;
 struct Conn<'a> {
     shared: &'a Shared,
     id: ConnId,
-    ws: WebSocket<TcpStream>,
+    ws: Ws,
     pending: Vec<PendingDiagnostics>,
     announced: bool,
 }
@@ -312,9 +316,11 @@ fn serve(shared: &Shared, stream: TcpStream, id: ConnId) {
     let mut conn = Conn { shared, id, ws, pending: Vec::new(), announced: false };
     let _ = conn.run(&rx);
     shared.conns.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
-    shared.streams.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+    // The clone stays in `streams` until the close and flush are done, so a shutdown sweep can
+    // still cut a peer that stopped reading.
     let _ = conn.ws.close(None);
     let _ = conn.ws.flush();
+    shared.streams.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
     if conn.announced {
         (shared.on_event)(BridgeEvent::Disconnected { conn: id });
     }
@@ -332,7 +338,7 @@ impl Conn<'_> {
                 Ok(Message::Text(text)) => self.handle(text.as_str())?,
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(e))
-                    if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                    if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(_) => return Err(Dead),
             }
         }
@@ -349,7 +355,7 @@ impl Conn<'_> {
             .map(|p| p.deadline.saturating_duration_since(now))
             .fold(POLL, Duration::min)
             .max(Duration::from_millis(1));
-        let _ = self.ws.get_ref().set_read_timeout(Some(wait));
+        let _ = self.ws.get_ref().0.set_read_timeout(Some(wait));
     }
 
     fn send(&mut self, frame: String) -> Result<(), Dead> {

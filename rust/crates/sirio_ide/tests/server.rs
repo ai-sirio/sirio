@@ -415,7 +415,8 @@ fn per_file_answer_echoes_the_request_uri() {
     h.bridge.answer_diagnostics(
         &id,
         vec![FileDiagnostics {
-            path: PathBuf::from("/work/my dir/%41 b.rs"),
+            // Not the path the uri names: only the echo can produce the request's spelling.
+            path: PathBuf::from("/elsewhere/other.rs"),
             diagnostics: vec![warning("w")],
         }],
     );
