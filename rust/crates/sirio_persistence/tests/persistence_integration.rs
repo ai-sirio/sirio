@@ -2053,6 +2053,45 @@ fn the_centre_split_ratio_survives_a_relaunch_and_clamps_a_corrupt_value() {
 }
 
 #[test]
+fn the_composer_rows_survive_a_relaunch_and_clamp_a_corrupt_value() {
+    let dir = TempDir::new();
+    let path = dir.db_path("composer-max-rows");
+    {
+        let db = AppDatabase::open(&path).expect("open");
+        db.save_settings(&AppSettings {
+            composer_max_rows: 20,
+            ..AppSettings::default()
+        })
+        .expect("save the dragged rows");
+    }
+
+    let load = || {
+        AppDatabase::open(&path)
+            .expect("reopen")
+            .settings()
+            .expect("load")
+            .composer_max_rows
+    };
+    assert_eq!(load(), 20, "a value inside the range comes back verbatim");
+
+    let corrupt = |value: &str| {
+        let conn = rusqlite::Connection::open(&path).expect("open raw");
+        conn.execute(
+            "UPDATE setting SET value = ?1 WHERE key = 'chat.composerMaxRows'",
+            [value],
+        )
+        .expect("corrupt the rows");
+    };
+
+    corrupt("10000");
+    assert_eq!(load(), 120, "clamped to the upper bound, not honoured");
+    corrupt("0");
+    assert_eq!(load(), 3, "clamped to the lower bound");
+    corrupt("abc");
+    assert_eq!(load(), 12, "an unparsable value falls back to the default");
+}
+
+#[test]
 fn a_worktrees_secondary_pane_flag_survives_a_relaunch_and_defaults_visible() {
     let dir = TempDir::new();
     let path = dir.db_path("secondary-pane-flag");

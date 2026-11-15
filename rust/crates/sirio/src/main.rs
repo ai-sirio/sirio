@@ -30776,6 +30776,8 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         sidebar_width: AppSettings::default().sidebar_width,
         right_panel_width: AppSettings::default().right_panel_width,
         center_split_ratio: AppSettings::default().center_split_ratio,
+        // Not in the snapshot either: the composer's top edge owns it.
+        composer_max_rows: AppSettings::default().composer_max_rows,
         markdown_plantuml_server: snapshot.plantuml_server,
         // Not in the Settings snapshot: `ForgeHub` owns it. Callers re-apply
         // the stored value — see `app_settings_for_settings_save`.
@@ -45009,6 +45011,7 @@ done
             sidebar_width: 325,
             right_panel_width: 405,
             center_split_ratio: 610,
+            composer_max_rows: 20,
             lsp_silenced_languages: "[]".to_string(),
             markdown_plantuml_server: "http://plantuml.test".into(),
             forge_hosts: "[]".to_string(),
