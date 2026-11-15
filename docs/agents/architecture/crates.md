@@ -30,7 +30,7 @@ sirio_theme, sirio_project, sirio_git, sirio_persistence,
 sirio_activity, sirio_markdown, sirio_registry, sirio_release,
 sirio_lsp, sirio_syntax, sirio_claude, sirio_diagram,
 sirio_forge, sirio_privacy, sirio_ipc, sirio_host_protocol,
-sirio_term_session, sirio_chat_vocab, sirio_opencode_watch
+sirio_term_session, sirio_chat_vocab, sirio_opencode_watch, sirio_ide
                                 (leaves — no local deps beyond sirio_perf and sirio_env;
                                  sirio_theme takes `bezel-theme` (pinned
                                  `=0.1.4`) and the vendored `ely-palette`;
@@ -72,7 +72,12 @@ sirio_term_session, sirio_chat_vocab, sirio_opencode_watch
                                  session to a pane — with no GPUI and no local
                                  crate: it takes `ureq`, `serde` and `serde_json`
                                  only, `sirio` is its one dependent, and its
-                                 `discover` makes no network call)
+                                 `discover` makes no network call;
+                                 sirio_ide is Claude Code's IDE protocol,
+                                 protocol only — the endpoint and the
+                                 lockfile, later the server — with no GPUI,
+                                 and it never writes user-global Claude
+                                 config)
     ^
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)

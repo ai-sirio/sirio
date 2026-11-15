@@ -44,6 +44,7 @@ members = [
     "crates/sirio_host_client",
     "crates/sirio_host_protocol",
     "crates/sirio_host",
+    "crates/sirio_ide",
 ]
 
 [workspace.package]
@@ -121,6 +122,8 @@ sirio_update = { path = "crates/sirio_update" }
 sirio_apply = { path = "crates/sirio_apply" }
 sirio_forge = { path = "crates/sirio_forge" }
 sirio_privacy = { path = "crates/sirio_privacy" }
+sirio_ide = { path = "crates/sirio_ide" }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 # Local override for F-CORE-FILE-03A: upstream `gpui_linux`'s wl_data_device `Drop` handler
 # bails out silently (no `finish()`/`destroy()`, no error, no event delivered to the app) when
