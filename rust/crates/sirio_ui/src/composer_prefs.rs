@@ -7,7 +7,7 @@
 use gpui::App;
 use sirio_persistence::{AppSettings, settings_ranges};
 
-/// The composer's preferences, as the Settings snapshot carries them.
+/// The composer's preferences, as the stored settings hold them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComposerPrefs {
     /// The most rows the field may grow to, within `settings_ranges::CHAT_COMPOSER_MAX_ROWS`.

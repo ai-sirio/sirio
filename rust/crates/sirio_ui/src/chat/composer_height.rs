@@ -1,6 +1,11 @@
 //! The composer field's row arithmetic: how many rows it may grow to, and how
 //! many rows a drag of its top edge asks for.
 
+use gpui::Context;
+
+use super::Chat;
+use crate::composer_prefs::ComposerPrefs;
+
 /// The composer's fixed line height, in px.
 pub(crate) const ROW_HEIGHT: f32 = 18.0;
 /// The fewest rows the field ever shows.
@@ -22,7 +27,7 @@ pub(crate) fn cap_rows(chat_height: f32) -> usize {
 
 /// The rows the field takes when the pointer moves from `anchor_y` to
 /// `pointer_y` (window px, growing downward) while the drag began at
-/// `anchor_rows`: dragging up grows it. The row count is rounded and stays within
+/// `anchor_rows`: dragging up grows it. The row delta is rounded and the result stays within
 /// `MIN_ROWS..=cap`; a `cap` under `MIN_ROWS` counts as `MIN_ROWS`. `None` when
 /// either position is not a finite number.
 pub(crate) fn drag_rows(
@@ -38,6 +43,37 @@ pub(crate) fn drag_rows(
     let rows = (anchor_rows as f32 + delta).clamp(MIN_ROWS as f32, cap.max(MIN_ROWS) as f32);
     Some(rows as usize)
 }
+
+impl Chat {
+    /// The most rows the field is drawn to grow to, at rest: the stored maximum
+    /// held to the cap, and to at least `MIN_ROWS`. Before the first paint the
+    /// cap is unknown and the default holds the stored value instead, so a chat
+    /// shown for the first time grows into its cap rather than past it.
+    pub(super) fn drawn_max_rows(&self) -> usize {
+        let frame = &self.composer_row;
+        let stored = frame.stored_max_rows.get();
+        match frame.cap_rows.get() {
+            Some(cap) => stored.min(cap).max(MIN_ROWS),
+            None => stored.min(DEFAULT_MAX_ROWS).max(MIN_ROWS),
+        }
+    }
+
+    /// Brings the field's rows to the stored maximum and the cap: takes the
+    /// stored maximum from the global, then sets the field to `MIN_ROWS` and the
+    /// drawn maximum when it is not there already. It runs from the global's
+    /// observer and the height probe's deferred update, never from `render`.
+    pub(super) fn sync_composer_rows(&mut self, cx: &mut Context<Self>) {
+        self.composer_row
+            .stored_max_rows
+            .set(ComposerPrefs::current(cx).max_rows);
+        let wanted = (MIN_ROWS, self.drawn_max_rows());
+        if self.composer_field.read(cx).rows() != Some(wanted) {
+            self.composer_field
+                .update(cx, |field, cx| field.set_rows(wanted.0, wanted.1, cx));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +111,38 @@ mod tests {
     fn a_pointer_that_is_not_a_number_moves_nothing() {
         assert_eq!(drag_rows(5, 500.0, f32::NAN, 20), None);
         assert_eq!(drag_rows(5, f32::INFINITY, 500.0, 20), None);
+    }
+
+    #[gpui::test]
+    async fn every_open_chat_takes_a_new_maximum(cx: &mut gpui::TestAppContext) {
+        use crate::chat::tests::{offline_chat_view, refresh_frame};
+        use gpui::AppContext as _;
+        use crate::composer_prefs::ComposerPrefs;
+
+        let (painted, cx) = offline_chat_view(cx);
+        // The window is tall enough that half of it holds 20 rows.
+        cx.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(1000.0)));
+        refresh_frame(cx);
+        refresh_frame(cx);
+        let other = cx.new(|cx| {
+            crate::chat::Chat::new(
+                Some(sirio_chat::LaunchSpec::Acp(sirio_chat::AgentCommand::new(
+                    "/definitely/missing/sirio-acp-agent",
+                ))),
+                std::env::temp_dir(),
+                cx,
+            )
+        });
+
+        cx.update(|_, cx| ComposerPrefs::apply(ComposerPrefs { max_rows: 20 }, cx));
+        cx.run_until_parked();
+        refresh_frame(cx);
+
+        for chat in [&painted, &other] {
+            let stored = chat.read_with(cx, |chat, _| chat.composer_snapshot().stored_max_rows);
+            assert_eq!(stored, 20);
+        }
+        let rows = painted.read_with(cx, |chat, cx| chat.composer_field.read(cx).rows());
+        assert_eq!(rows, Some((3, 20)));
     }
 }

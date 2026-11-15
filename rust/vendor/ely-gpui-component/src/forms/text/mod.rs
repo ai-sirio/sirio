@@ -320,6 +320,18 @@ impl TextInput {
         cx.notify();
     }
 
+    /// Changes a multi-line field's rows (`multi_line`'s arguments) while it lives. Nothing is
+    /// notified when they are the same.
+    pub fn set_rows(&mut self, min: usize, max: usize, cx: &mut Context<Self>) {
+        assert!(self.rows.is_some(), "set_rows on a single-line field");
+        assert!(0 < min && min <= max, "text rows {min}..={max} are empty");
+        if self.rows == Some((min, max)) {
+            return;
+        }
+        self.rows = Some((min, max));
+        cx.notify();
+    }
+
     /// `set_text` and a fresh undo history, for an owner that clears or refills the field on its
     /// own account (a prompt sent): an undo must not bring back what it replaced.
     pub fn reset_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {

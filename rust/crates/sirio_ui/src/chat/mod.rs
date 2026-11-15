@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::caret;
+use crate::composer_prefs::ComposerPrefs;
 use crate::popup::{Filter, Popup, reap_popup};
 use crate::sidebar::icons::{Icon, IconElement, IconSize};
 
@@ -2593,9 +2594,18 @@ impl Chat {
 
         let composer_field = cx.new(|cx| {
             TextInput::detached(cx)
-                .multi_line(3, 12)
+                .multi_line(
+                    composer_height::MIN_ROWS,
+                    ComposerPrefs::current(cx)
+                        .max_rows
+                        .min(composer_height::DEFAULT_MAX_ROWS),
+                )
                 .host_context("ChatComposer")
         });
+        let composer_row = Rc::<composer_row::RowFrame>::default();
+        composer_row
+            .stored_max_rows
+            .set(ComposerPrefs::current(cx).max_rows);
         // Both text and caret changes notify, and the mention behind the
         // caret changes when either does: this is an observer, not a
         // subscription to `Changed`. The blink's notifies reach it too, and
@@ -2604,6 +2614,8 @@ impl Chat {
             chat.reread_composer(cx)
         })
         .detach();
+        cx.observe_global::<ComposerPrefs>(|chat: &mut Self, cx| chat.sync_composer_rows(cx))
+            .detach();
 
         Self {
             client: None,
@@ -2613,7 +2625,7 @@ impl Chat {
             agent_name: None,
             agent_cwd: cwd,
             session_panel: session_panel::SessionPanel::new(),
-            composer_row: Rc::default(),
+            composer_row,
             entries: Vec::new(),
             turn_message_ids: Vec::new(),
             pending_rewind: None,

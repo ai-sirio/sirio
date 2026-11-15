@@ -135,11 +135,19 @@ set -euo pipefail
 #                      Shift+Tab cycles the permission modes through a full lap and a bit more: the
 #                      fixture's log of set_permission_mode requests is the menu's order with Bypass left
 #                      out, no danger shield is drawn and no dialog holds the keyboard
+# The composer_resize scenario (this script's own) uses the default stub and reads `composerRow` of
+# `surface.chat.read`, which exists only once a frame paints:
+#   composer_resize    The composer's field follows the chat's height. At 2200x1000 the cap is at least
+#                      12 rows, the drawn maximum is the stored 12 and the empty field shows 3 rows; a
+#                      40-line draft fills it to 12. With the window resized to 2200x400 the chat is
+#                      under 432 px tall, so the cap (half the chat, in 18 px rows) is below 12 and the
+#                      drawn maximum and the draft's rows follow it while the stored maximum stays 12;
+#                      at 2200x1000 again the field is back to 12. A frame is captured at 400 px
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
 # whatever the code does.
-# trace_keys, file_links, clipboard_keys and composer_keys need a framed run at --window-size 2200x1000
+# trace_keys, file_links, clipboard_keys, composer_keys and composer_resize need a framed run at --window-size 2200x1000
 # (no --state-only): they click at pixels or send real keys.
 #
 # Isolation: every Sirio starts under `env -i` with an allowlist (see launch()), the
@@ -175,7 +183,7 @@ CTL="${CARGO_TARGET_DIR:-$ROOT/rust/target}/debug/sirioctl"
 ALL_SCENARIOS=(environment default_folds context connectors change_request rate_limit_shared restore
   trace_live trace_cost trace_request trace_interrupt trace_death trace_hang trace_subagent_permission
   trace_background trace_background_prompt trace_reveal
-  trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys
+  trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize
   unread_parked_chat unread_question unread_secondary_seen unread_restored_chat_quiet)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
@@ -206,10 +214,10 @@ case "$APPEARANCE" in ""|light|dark) ;; *) refuse "--appearance is light or dark
 # a Trace tab closes when its chat is released, which in a window comes after the paint
 # that replaces the chat's last frame, and a trace that asks for no frame proves nothing
 # when nothing is ever painted.
-PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys "
+PAINTED_SCENARIOS=" default_folds change_request rate_limit_shared trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize "
 # trace_keys, file_links and clipboard_keys send real X clicks, keys and drags at pixels, so they need a
 # framed run (no --state-only) at the 2200x1000 window size.
-FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys "
+FRAMED_SCENARIOS=" trace_keys file_links clipboard_keys composer_keys composer_resize "
 framed_run() { [ "$STATE_ONLY" -eq 0 ] && [ "$WINDOW_SIZE" = 2200x1000 ]; }
 SCENARIOS=()
 SKIPPED=()
@@ -2271,6 +2279,39 @@ scenario_composer_keys() {
   press_key BackSpace
   composer_is "the composer is empty" ""
   echo "OK: composer_keys: Up and Down recall prompts and their mentions across a relaunch, Shift+Tab cycles the modes short of Bypass"
+  stop_app
+}
+
+scenario_composer_resize() {
+  launch composer_resize
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  show_chat
+  wait_panel "the chat is ready" 'c["status"] in ("idle", "completed")' 30
+  compose() { E2E rpc surface.chat.compose surfaceId="$SURFACE" text="$1" >/dev/null || fail "composing failed"; }
+
+  echo "step: at 2200x1000 the cap is at least the stored 12 and the empty field shows 3 rows"
+  wait_panel "the cap holds the default 12, the stored value is 12 and the field shows 3 rows" \
+    '(r := c["composerRow"]) is not None and (r["capRows"] or 0) >= 12 and r["maxRows"] == 12 and r["storedMaxRows"] == 12 and r["fieldRows"] == 3' 20
+  capture composer-resize-rest
+
+  echo "step: a 40-line draft fills the field to its 12-row maximum"
+  compose "$(printf 'line %d\n' $(seq 1 40))"
+  wait_panel "the field grew to 12 rows" 'c["composerRow"]["fieldRows"] == 12' 20
+  capture composer-resize-full
+
+  echo "step: a window 400 px tall caps the field at half the chat, below the stored 12"
+  local window
+  window=$(find_window)
+  [ -n "$window" ] || fail "no window with _NET_WM_PID=$APP_PID"
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowsize "$window" 2200 400 || fail "could not resize the window to 2200x400"
+  wait_panel "the chat is under 432 px tall (the layout kept it taller)" 'c["composerRow"]["root"][3] < 432' 20
+  wait_panel "the field follows the cap while the stored maximum stays 12" \
+    '(r := c["composerRow"]) is not None and r["maxRows"] == r["capRows"] and r["capRows"] < 12 and r["capRows"] == max(3, int(r["root"][3] / 2 / 18)) and r["storedMaxRows"] == 12 and r["fieldRows"] == r["capRows"]' 20
+  capture composer-resize-short
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowsize "$window" 2200 1000 || fail "could not resize the window back to 2200x1000"
+  wait_panel "back at 2200x1000 the field is 12 rows again" '(r := c["composerRow"]) is not None and r["maxRows"] == 12 and r["fieldRows"] == 12' 20
+  echo "OK: composer_resize: the field's maximum follows the stored 12 and the cap at half the chat"
   stop_app
 }
 

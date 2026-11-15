@@ -692,6 +692,7 @@ impl Chat {
     }
 }
 
+use super::composer_height::ROW_HEIGHT;
 use super::composer_row::{BAND_COLUMN, BAND_TOP_PAD, RowLayout, row_layout, row_width};
 use super::*;
 use crate::popup::{hang_above_at, menu_card, menu_row};
@@ -706,7 +707,7 @@ use ely_gpui_component::{
 
 /// The room above and below the field's rows inside `composer-input`: what the
 /// card's field always had between its edge and its text.
-const FIELD_PAD_Y: f32 = 5.0;
+pub(super) const FIELD_PAD_Y: f32 = 5.0;
 
 /// The distance from the band's top edge to the field's first row: its 1px
 /// rule and its top padding. The completion popups hang above the token that
@@ -1295,6 +1296,7 @@ impl Chat {
         // through (`PromptInput::custom`) and the shell is the one frame the
         // composer has. The text lands on the content edge, lined up with the
         // chips and the tool row, in the 13px/18px the field has always had.
+        let field_frame = self.composer_row.clone();
         let input_box = div()
             .id("composer-input")
             .debug_selector(|| "composer-input".into())
@@ -1302,7 +1304,7 @@ impl Chat {
             .w_full()
             .py(px(FIELD_PAD_Y))
             .text_size(px(13.0))
-            .line_height(px(18.0))
+            .line_height(px(ROW_HEIGHT))
             .when(disabled, |input| input.opacity(0.6))
             .on_mouse_down(
                 MouseButton::Right,
@@ -1314,7 +1316,16 @@ impl Chat {
             .child(self.composer_field.clone())
             .children(slash_popup)
             .children(mention_popup)
-            .children(composer_context_menu);
+            .children(composer_context_menu)
+            // Measures the field; paints nothing.
+            .child(
+                canvas(
+                    move |bounds, _, _| field_frame.field.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
         let editor = div()
             .w_full()
             .flex()

@@ -15,6 +15,7 @@ mod context;
 mod environment;
 mod trace;
 
+use super::composer_height::cap_rows;
 use super::composer_row::probe_notifies;
 use super::*;
 use ely_gpui_component::{
@@ -582,6 +583,18 @@ impl Chat {
                 if moved {
                     let entity = entity.clone();
                     cx.defer(move |cx| entity.update(cx, |_, cx| cx.notify()));
+                }
+                // The field may grow to half the chat; a new cap re-syncs it.
+                let cap = cap_rows(f32::from(bounds.size.height));
+                if row.cap_rows.get() != Some(cap) {
+                    row.cap_rows.set(Some(cap));
+                    let entity = entity.clone();
+                    cx.defer(move |cx| {
+                        entity.update(cx, |chat, cx| {
+                            chat.sync_composer_rows(cx);
+                            cx.notify();
+                        })
+                    });
                 }
                 if frame.read_on_paint.get() {
                     let entity = entity.clone();

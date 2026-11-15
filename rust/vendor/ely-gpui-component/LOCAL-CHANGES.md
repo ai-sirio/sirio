@@ -1013,3 +1013,15 @@ keep their fields private to the module, so a host could not read a menu it buil
   `Menu::items` walks the rows in order, without headings or separators.
 
 A sync with upstream must keep the four readers.
+
+### A multi-line field's rows, changed live (composer resize)
+
+Sirio lets the user drag the chat composer's top edge to set how many rows its
+field may grow to, and caps that at half the chat's height, which changes as the
+window is resized. `multi_line(min, max)` only builds the field with its rows.
+
+- `src/forms/text/mod.rs`: `TextInput::set_rows(min, max, cx)` replaces the rows
+  of a multi-line field (the same bounds `multi_line` asserts) and notifies,
+  and returns without notifying when they are unchanged.
+
+A sync with upstream must keep `set_rows`.
