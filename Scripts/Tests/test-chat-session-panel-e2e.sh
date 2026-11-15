@@ -143,11 +143,11 @@ set -euo pipefail
 #                      under 432 px tall, so the cap (half the chat, in 18 px rows) is below 12 and the
 #                      drawn maximum and the draft's rows follow it while the stored maximum stays 12;
 #                      at 2200x1000 again the field is back to 12. Then the edge on the composer's top is
-#                      dragged with real X events: 4 rows up raises the maximum to 16 (released on the
-#                      edge); pulled to the transcript it stops at the cap (released outside the
-#                      composer); an emptied field is 3 rows; a drag held 5 rows up pins the field at 8
-#                      and the release frees it with the maximum kept at 8; a press that never moved, and
-#                      one that moved 8 px, change nothing. Frames: rest, full, short, taller, held
+#                      dragged with real X events: 4 rows up raises the maximum to 16 (released where
+#                      the dragged edge now is); pulled to the transcript it stops at the cap (released
+#                      over the transcript); an emptied field is 3 rows; a drag held 5 rows up pins the field at 8
+#                      and the release frees it with the maximum kept at 8; a press that never moved changes
+#                      nothing, and one held 8 px up pins the field at 3 rows and, released, saves nothing. Frames: rest, full, short, taller, held
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
@@ -2319,7 +2319,7 @@ drag_edge_to() { # window-y [hold]
     args+=(mousemove "$ex" "$here" sleep 0.05)
   done
   [ "${2:-}" = hold ] || args+=(sleep 0.3 mouseup 1)
-  echo "  drag: the edge at window pixel $ex,$ey (screen $ex,$ey) to window y $1" >&2
+  echo "  drag: the edge at window pixel ${geometry%% *},$(printf '%s' "$geometry" | awk '{print $2}') (screen $ex,$ey) to window y $1" >&2
   DISPLAY="$DISPLAY_TARGET" timeout 30 xdotool "${args[@]}" || fail "xdotool could not drag the composer's edge to window y $1"
 }
 # Drags the edge $1 rows up (a negative count is down).
@@ -2360,7 +2360,7 @@ scenario_composer_resize() {
   DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool windowsize "$window" 2200 1000 || fail "could not resize the window back to 2200x1000"
   wait_composer "back at 2200x1000 the field is 12 rows again" 'c["composerRow"]["maxRows"] == 12 and c["composerRow"]["fieldRows"] == 12'
 
-  echo "step: dragging the edge 4 rows up (released on the edge) raises the maximum to 16"
+  echo "step: dragging the edge 4 rows up (released where the dragged edge now is) raises the maximum to 16"
   drag_edge 4
   wait_composer "the field, the drawn maximum and the stored maximum are 16" \
     'c["composerRow"]["fieldRows"] == 16 and c["composerRow"]["maxRows"] == 16 and c["composerRow"]["storedMaxRows"] == 16 and not c["composerRow"]["resizing"]'
@@ -2383,7 +2383,7 @@ scenario_composer_resize() {
   wait_composer "the released field is 3 rows, its maximum 8" \
     'c["composerRow"]["fieldRows"] == 3 and c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and not c["composerRow"]["resizing"]'
 
-  echo "step: a press that never moved, and one that moved under half a row, change nothing"
+  echo "step: a press that never moved, and one held under half a row up, change nothing"
   local geometry origin ex ey
   geometry=$(composer_edge_geometry) || fail "no composer edge"
   origin=$(window_origin)
@@ -2392,9 +2392,13 @@ scenario_composer_resize() {
   DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove "$ex" "$ey" sleep 0.3 mousedown 1 sleep 0.3 mouseup 1 || fail "xdotool could not press the edge"
   wait_composer "a press and release without moving keeps the maximum at 8" \
     'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3 and not c["composerRow"]["resizing"]'
-  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove "$ex" "$ey" sleep 0.3 mousedown 1 sleep 0.2 mousemove "$ex" $((ey - 3)) sleep 0.1 mousemove "$ex" $((ey - 8)) sleep 0.2 mouseup 1 || fail "xdotool could not nudge the edge"
-  wait_composer "a drag of 8 px, under half a row, keeps the maximum at 8" \
-    'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3 and not c["composerRow"]["resizing"]'
+  # Held 8 px up (under half a row): the drag has started, so the field is pinned at the anchor's 3 rows.
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove "$ex" "$ey" sleep 0.3 mousedown 1 sleep 0.2 mousemove "$ex" $((ey - 3)) sleep 0.1 mousemove "$ex" $((ey - 8)) sleep 0.3 || fail "xdotool could not nudge the edge"
+  wait_composer "held 8 px up, the field is pinned at its 3 rows" \
+    'c["composerRow"]["resizing"] and c["composerRow"]["fieldRows"] == 3 and c["composerRow"]["maxRows"] == 8'
+  DISPLAY="$DISPLAY_TARGET" timeout 5 xdotool mouseup 1 || fail "xdotool could not release the button"
+  wait_composer "released, the 8 px drag keeps the maximum at 8" \
+    'not c["composerRow"]["resizing"] and c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3'
   echo "OK: composer_resize: the field follows the stored maximum and the cap, and the edge's drag sets and keeps it"
   stop_app
 }

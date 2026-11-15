@@ -6985,8 +6985,9 @@ impl Render for Chat {
             sirio_perf::event("motion.Chat.woken", cx.entity_id().as_u64());
         }
         sirio_perf::event("Chat.entries", self.entries.len() as u64);
-        // A drag the platform ended without a drop or a release over the
-        // composer (the window lost the pointer) would leave the field pinned.
+        // A drag that ended with no drop and no release reaching the composer (a
+        // capture listener swallowed the release, or a button other than Left came
+        // up, which clears the drag) would leave the field pinned.
         if self.composer_drag.as_ref().is_some_and(|drag| drag.dragged) && !cx.has_active_drag() {
             cx.defer_in(window, |chat, _, cx| chat.finish_composer_drag(cx));
         }

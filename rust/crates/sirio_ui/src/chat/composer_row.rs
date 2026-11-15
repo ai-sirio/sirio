@@ -7,8 +7,7 @@ use std::cell::{Cell, RefCell};
 use gpui::{Bounds, Pixels, Window};
 use sirio_theme::Theme;
 
-use super::composer_height::ROW_HEIGHT;
-use super::composer_view::FIELD_PAD_Y;
+use super::composer_height::field_rows;
 use super::controls::OverflowRow;
 use super::session_panel::COLUMN_WIDTH;
 use super::{Chat, TRANSCRIPT_WIDTH};
@@ -317,10 +316,7 @@ impl Chat {
             field: boxed(frame.field.get()),
             edge: boxed(frame.edge.get()),
             resizing: self.composer_drag.as_ref().is_some_and(|drag| drag.dragged),
-            field_rows: frame.field.get().map(|field| {
-                let height: f32 = field.size.height.into();
-                ((height - 2.0 * FIELD_PAD_Y) / ROW_HEIGHT).round().max(0.0) as usize
-            }),
+            field_rows: frame.field.get().map(field_rows),
             max_rows: self.drawn_max_rows(),
             stored_max_rows: frame.stored_max_rows.get(),
             cap_rows: frame.cap_rows.get(),

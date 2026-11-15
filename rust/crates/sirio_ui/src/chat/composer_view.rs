@@ -1386,10 +1386,11 @@ impl Chat {
         }
 
         let edge_frame = self.composer_row.clone();
+        let chat_id = cx.entity_id();
         let edge_entity = cx.entity();
         let finish_entity = cx.entity();
-        // The strip along the top that a drag of resizes the field by. It sits in
-        // the band's top padding, so it covers no text row.
+        // The strip along the top whose drag resizes the field. It sits in the
+        // band's top padding, so it covers no text row.
         let edge = div()
             .id("composer-edge")
             .debug_selector(|| "composer-edge".into())
@@ -1410,7 +1411,7 @@ impl Chat {
             .on_mouse_up(gpui::MouseButton::Left, {
                 move |_, _, cx| finish_entity.update(cx, |chat, cx| chat.finish_composer_drag(cx))
             })
-            .on_drag(DraggedComposerEdge, |_, _, _, cx| cx.new(|_| gpui::Empty))
+            .on_drag(DraggedComposerEdge(chat_id), |_, _, _, cx| cx.new(|_| gpui::Empty))
             // Measures the edge; paints nothing.
             .child(
                 canvas(
@@ -1441,6 +1442,16 @@ impl Chat {
                     )
                     .on_drag_move::<DraggedComposerEdge>(cx.listener(
                         |this, event: &gpui::DragMoveEvent<DraggedComposerEdge>, _, cx| {
+                            // Every painted chat hears every composer-edge drag:
+                            // only the chat whose edge it is follows it.
+                            if event.drag(cx).0 != cx.entity_id() {
+                                return;
+                            }
+                            // The button came up where no release reached us.
+                            if event.event.pressed_button != Some(gpui::MouseButton::Left) {
+                                this.finish_composer_drag(cx);
+                                return;
+                            }
                             this.composer_drag_to(f32::from(event.event.position.y), cx);
                         },
                     ))

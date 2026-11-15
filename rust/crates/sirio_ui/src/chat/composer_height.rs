@@ -1,10 +1,12 @@
 //! The composer field's row arithmetic: how many rows it may grow to, and how
 //! many rows a drag of its top edge asks for.
 
-use gpui::Context;
+use gpui::{Bounds, Context, EntityId, Pixels};
 
 use super::{Chat, ChatEvent};
 use crate::composer_prefs::ComposerPrefs;
+use super::composer_view::FIELD_PAD_Y;
+use sirio_persistence::settings_ranges;
 
 /// The composer's fixed line height, in px.
 pub(crate) const ROW_HEIGHT: f32 = 18.0;
@@ -44,8 +46,9 @@ pub(crate) fn drag_rows(
     Some(rows as usize)
 }
 
-/// What a drag of the composer's top edge carries; it paints nothing.
-pub(super) struct DraggedComposerEdge;
+/// What a drag of the composer's top edge carries: the chat whose edge it is,
+/// because GPUI hands a drag to every listener of its type. It paints nothing.
+pub(super) struct DraggedComposerEdge(pub(super) EntityId);
 
 /// A press on the composer's top edge, from the press until the release.
 pub(super) struct ComposerDrag {
@@ -59,6 +62,12 @@ pub(super) struct ComposerDrag {
     pub(super) dragged: bool,
     /// `rows` has differed from `anchor_rows` at some point: the release saves.
     changed: bool,
+}
+
+/// The rows a painted field box holds: its height less the padding, over a row.
+pub(super) fn field_rows(bounds: Bounds<Pixels>) -> usize {
+    let height: f32 = bounds.size.height.into();
+    ((height - 2.0 * FIELD_PAD_Y) / ROW_HEIGHT).round().max(0.0) as usize
 }
 
 impl Chat {
@@ -100,8 +109,10 @@ impl Chat {
     /// a drag a lost release left behind.
     pub(super) fn begin_composer_drag(&mut self, pointer_y: f32) {
         let anchor_rows = self
-            .composer_snapshot()
-            .field_rows
+            .composer_row
+            .field
+            .get()
+            .map(field_rows)
             .filter(|rows| *rows >= MIN_ROWS)
             .unwrap_or_else(|| self.drawn_max_rows());
         self.composer_drag = Some(ComposerDrag {
@@ -116,7 +127,14 @@ impl Chat {
     /// The pointer is at window `pointer_y` mid-drag: the field follows it,
     /// drawn but not saved (the release saves).
     pub(super) fn composer_drag_to(&mut self, pointer_y: f32, cx: &mut Context<Self>) {
-        let cap = self.composer_row.cap_rows.get().unwrap_or(120);
+        // Never past the stored range, however tall the chat.
+        let stored_most = *settings_ranges::CHAT_COMPOSER_MAX_ROWS.end() as usize;
+        let cap = self
+            .composer_row
+            .cap_rows
+            .get()
+            .unwrap_or(stored_most)
+            .min(stored_most);
         let Some(drag) = self.composer_drag.as_mut() else {
             return;
         };
