@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -22,7 +22,9 @@ use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{HandshakeError, Message, WebSocket, accept_hdr_with_config};
 
 use crate::mcp::{self, FileDiagnostics, Notification};
+use crate::pending::Pending;
 use crate::socket::WouldBlockOnTimeout;
+use crate::untrusted::{ReadOutcome, read_regular_file};
 use crate::uri::from_file_uri;
 
 /// How long the app has to answer a `getDiagnostics` before Claude gets an error (spec §10.5).
@@ -36,6 +38,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Largest frame and message accepted (an `openDiff` carries a whole file).
 const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
+/// The most of a file Sirio reads to draw its diff (the editor's own cap, 1 MiB).
+const MAX_DIFF_FILE_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnId(pub u64);
@@ -69,10 +73,29 @@ pub struct Gone;
 pub enum BridgeEvent {
     /// Claude announced itself with `ide_connected`; `pid` is Claude's own.
     Connected { conn: ConnId, pid: u32 },
-    /// A connection that had been announced is gone.
+    /// A connection that passed the handshake is gone, announced or not (the app ignores ids it
+    /// does not know). Its pending `openDiff` calls are dropped with it.
     Disconnected { conn: ConnId },
     /// Claude asked for diagnostics: of `path`, or of every file when `None`.
     Diagnostics { id: DiagId, conn: ConnId, path: Option<PathBuf> },
+    /// Claude proposes an edit and waits. Answer it with [`Bridge::answer_diff`] on a user
+    /// action only. `old_path` and `new_path` are as Claude sent them (untrusted); `original`
+    /// was read, and `canonical` computed, on the connection's thread. `replaces` is the
+    /// proposal this one took the place of (same connection and `tab_name`).
+    OpenDiff {
+        id: DiffId,
+        conn: ConnId,
+        old_path: PathBuf,
+        canonical: Option<PathBuf>,
+        original: ReadOutcome,
+        new_path: PathBuf,
+        contents: String,
+        tab_name: String,
+        replaces: Option<DiffId>,
+    },
+    /// Claude closed the proposal (`close_tab` or `closeAllDiffTabs`); it was answered with an
+    /// error that carries no decision, so close the tab without asking.
+    DiffWithdrawn { id: DiffId },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +111,8 @@ impl Default for BridgeOptions {
 
 enum Command {
     Notify(Notification),
+    /// A finished result frame for a call the app answered.
+    Reply(String),
     Diagnostics(DiagId, Vec<FileDiagnostics>),
 }
 
@@ -98,17 +123,21 @@ struct Shared {
     stop: AtomicBool,
     next_conn: AtomicU64,
     next_diag: AtomicU64,
+    next_diff: AtomicU64,
+    diffs: Mutex<Pending>,
     conns: Mutex<HashMap<ConnId, Sender<Command>>>,
     /// A clone of every accepted socket, so `shutdown` can unblock a read, send or flush.
     streams: Mutex<HashMap<ConnId, TcpStream>>,
 }
 
 impl Shared {
-    fn send_to(&self, conn: ConnId, command: Command) {
+    fn send_to(&self, conn: ConnId, command: Command) -> bool {
         let conns = self.conns.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(tx) = conns.get(&conn) {
-            let _ = tx.send(command);
-        }
+        conns.get(&conn).is_some_and(|tx| tx.send(command).is_ok())
+    }
+
+    fn diffs(&self) -> std::sync::MutexGuard<'_, Pending> {
+        self.diffs.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -137,6 +166,8 @@ impl Bridge {
             stop: AtomicBool::new(false),
             next_conn: AtomicU64::new(1),
             next_diag: AtomicU64::new(1),
+            next_diff: AtomicU64::new(1),
+            diffs: Mutex::new(Pending::default()),
             conns: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
         });
@@ -158,15 +189,23 @@ impl Bridge {
         self.shared.send_to(conn, Command::Notify(note));
     }
 
-    /// Answer an `openDiff`. No `openDiff` is served yet, so every id is `Gone`.
-    pub fn answer_diff(&self, _id: &DiffId, _answer: DiffAnswer) -> Result<(), Gone> {
-        Err(Gone)
+    /// Answer an `openDiff`, once. An id that was answered, closed, replaced, or whose
+    /// connection is gone is `Gone`. Only a user action may call this: nothing in the server
+    /// answers an `openDiff` with a decision on its own.
+    pub fn answer_diff(&self, id: &DiffId, answer: DiffAnswer) -> Result<(), Gone> {
+        let answered = self.shared.diffs().answer(id).ok_or(Gone)?;
+        let result = match &answer {
+            DiffAnswer::Saved(text) => mcp::saved_result(text),
+            DiffAnswer::Rejected => mcp::rejected_result(&answered.tab_name),
+        };
+        let frame = mcp::result(&answered.rpc_id, result);
+        if self.shared.send_to(answered.conn, Command::Reply(frame)) { Ok(()) } else { Err(Gone) }
     }
 
     /// Answer a `getDiagnostics`; one that already timed out, or whose connection is gone, is
     /// dropped.
     pub fn answer_diagnostics(&self, id: &DiagId, files: Vec<FileDiagnostics>) {
-        self.shared.send_to(id.conn, Command::Diagnostics(id.clone(), files));
+        let _ = self.shared.send_to(id.conn, Command::Diagnostics(id.clone(), files));
     }
 
     /// Close every connection and the listening port, and wait for the threads.
@@ -316,14 +355,14 @@ fn serve(shared: &Shared, stream: TcpStream, id: ConnId) {
     let mut conn = Conn { shared, id, ws, pending: Vec::new(), announced: false };
     let _ = conn.run(&rx);
     shared.conns.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+    // Nothing is owed to anyone any more: no frame is attempted for a proposal still waiting.
+    shared.diffs().drop_conn(id);
     // The clone stays in `streams` until the close and flush are done, so a shutdown sweep can
     // still cut a peer that stopped reading.
     let _ = conn.ws.close(None);
     let _ = conn.ws.flush();
     shared.streams.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
-    if conn.announced {
-        (shared.on_event)(BridgeEvent::Disconnected { conn: id });
-    }
+    (shared.on_event)(BridgeEvent::Disconnected { conn: id });
 }
 
 impl Conn<'_> {
@@ -365,6 +404,7 @@ impl Conn<'_> {
     fn apply(&mut self, command: Command) -> Result<(), Dead> {
         match command {
             Command::Notify(note) => self.send(mcp::notification(&note)),
+            Command::Reply(frame) => self.send(frame),
             Command::Diagnostics(id, files) => {
                 let Some(at) = self.pending.iter().position(|p| p.id == id) else {
                     return Ok(());
@@ -447,7 +487,9 @@ impl Conn<'_> {
         let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
         match name {
             "getDiagnostics" => self.get_diagnostics(id, params.get("arguments")),
-            // openDiff, close_tab and closeAllDiffTabs are not served yet.
+            "openDiff" => self.open_diff(id, params.get("arguments")),
+            "close_tab" => self.close_tab(id, params.get("arguments")),
+            "closeAllDiffTabs" => self.close_all_diff_tabs(id),
             _ => self.send(mcp::error(id, mcp::METHOD_NOT_FOUND, "tool not found")),
         }
     }
@@ -473,4 +515,75 @@ impl Conn<'_> {
         (self.shared.on_event)(BridgeEvent::Diagnostics { id: diag, conn: self.id, path });
         Ok(())
     }
+
+    /// Register the proposal and tell the app; the call stays unanswered until the app answers
+    /// it (or Claude closes or replaces it). The file is read here, on this connection's thread.
+    fn open_diff(&mut self, id: &Value, arguments: Option<&Value>) -> Result<(), Dead> {
+        let text = |key: &str| arguments.and_then(|a| a.get(key)).and_then(Value::as_str);
+        let (Some(old), Some(new), Some(contents), Some(tab_name)) = (
+            text("old_file_path"),
+            text("new_file_path"),
+            text("new_file_contents"),
+            text("tab_name"),
+        ) else {
+            return self.send(mcp::error(
+                id,
+                mcp::INVALID_PARAMS,
+                "openDiff needs old_file_path, new_file_path, new_file_contents and tab_name",
+            ));
+        };
+        let old_path = Path::new(old).to_path_buf();
+        let original = read_regular_file(&old_path, MAX_DIFF_FILE_BYTES);
+        let canonical = match original {
+            ReadOutcome::Missing => None,
+            _ => std::fs::canonicalize(&old_path).ok(),
+        };
+        let diff = DiffId { n: self.shared.next_diff.fetch_add(1, Ordering::SeqCst) };
+        let replaced = self.shared.diffs().insert(diff.clone(), self.id, tab_name.to_string(), id.clone());
+        let replaces = replaced.as_ref().map(|w| w.id.clone());
+        (self.shared.on_event)(BridgeEvent::OpenDiff {
+            id: diff,
+            conn: self.id,
+            old_path,
+            canonical,
+            original,
+            new_path: Path::new(new).to_path_buf(),
+            contents: contents.to_string(),
+            tab_name: tab_name.to_string(),
+            replaces,
+        });
+        match replaced {
+            Some(w) => self.send(withdrawn_error(&w.rpc_id)),
+            None => Ok(()),
+        }
+    }
+
+    fn close_tab(&mut self, id: &Value, arguments: Option<&Value>) -> Result<(), Dead> {
+        let Some(tab_name) = arguments.and_then(|a| a.get("tab_name")).and_then(Value::as_str) else {
+            return self.send(mcp::error(id, mcp::INVALID_PARAMS, "close_tab needs tab_name"));
+        };
+        let withdrawn = self.shared.diffs().close_tab(self.id, tab_name);
+        if let Some(w) = withdrawn {
+            (self.shared.on_event)(BridgeEvent::DiffWithdrawn { id: w.id });
+            self.send(withdrawn_error(&w.rpc_id))?;
+        }
+        // Claude also closes tabs it has already been answered for: nothing pending is fine.
+        self.send(mcp::result(id, mcp::text_result("TAB_CLOSED")))
+    }
+
+    fn close_all_diff_tabs(&mut self, id: &Value) -> Result<(), Dead> {
+        let withdrawn = self.shared.diffs().close_all(self.id);
+        let count = withdrawn.len();
+        for w in withdrawn {
+            (self.shared.on_event)(BridgeEvent::DiffWithdrawn { id: w.id });
+            self.send(withdrawn_error(&w.rpc_id))?;
+        }
+        self.send(mcp::result(id, mcp::text_result(&format!("CLOSED_{count}_DIFF_TABS"))))
+    }
+}
+
+/// What a pending `openDiff` gets when it is closed or replaced: an error, which Claude reads as
+/// neither an accept nor a reject.
+fn withdrawn_error(rpc_id: &Value) -> String {
+    mcp::error(rpc_id, mcp::SERVER_ERROR, "the diff was closed before the user decided")
 }

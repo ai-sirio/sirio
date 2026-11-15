@@ -1,14 +1,14 @@
 //! The server against a real `Bridge`, driven by a `tungstenite` client over loopback.
 
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sirio_ide::{
-    Bridge, BridgeEvent, BridgeOptions, ConnId, Diagnostic, FileDiagnostics,
-    Notification, Pos16, Severity, bind,
+    Bridge, BridgeEvent, BridgeOptions, ConnId, Diagnostic, DiffAnswer, DiffId, FileDiagnostics,
+    Gone, Notification, Pos16, ReadOutcome, Refusal, Severity, bind,
 };
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
@@ -453,4 +453,378 @@ fn shutdown_closes_every_connection_and_the_port() {
         assert!(c.0.read().is_err());
     }
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+}
+
+// ---- openDiff, close_tab, closeAllDiffTabs ----
+
+/// A private directory, removed on drop.
+struct Dir(PathBuf);
+
+impl Dir {
+    fn new(tag: &str) -> Dir {
+        let dir = std::env::temp_dir().join(format!("sirio-ide-srv-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Dir(dir)
+    }
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn open_diff_params(old: &Path, new_contents: &str, tab: &str) -> Value {
+    json!({"name":"openDiff","arguments":{
+        "old_file_path": old.to_string_lossy(),
+        "new_file_path": old.to_string_lossy(),
+        "new_file_contents": new_contents,
+        "tab_name": tab,
+    }})
+}
+
+struct Opened {
+    id: DiffId,
+    conn: ConnId,
+    original: ReadOutcome,
+    canonical: Option<PathBuf>,
+    tab_name: String,
+    contents: String,
+    replaces: Option<DiffId>,
+}
+
+fn next_open_diff(h: &Harness) -> Opened {
+    match h.events.recv_timeout(Duration::from_secs(5)).expect("an OpenDiff event") {
+        BridgeEvent::OpenDiff {
+            id, conn, original, canonical, tab_name, contents, replaces, ..
+        } => Opened { id, conn, original, canonical, tab_name, contents, replaces },
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+fn texts(v: &Value) -> Vec<String> {
+    v["result"]["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no content in {v}"))
+        .iter()
+        .map(|c| {
+            assert_eq!(c["type"], "text");
+            c["text"].as_str().unwrap().to_string()
+        })
+        .collect()
+}
+
+fn tab(file: &str, n: &str) -> String {
+    format!("\u{273b} [Claude Code] {file} ({n}) \u{29c9}")
+}
+
+#[test]
+fn open_diff_emits_event_and_waits() {
+    let h = default_harness();
+    let dir = Dir::new("open");
+    let file = dir.0.join("a.txt");
+    std::fs::write(&file, "alpha\n").unwrap();
+    let mut c = connect(h.port);
+    let conn = c.handshake(&h, 1);
+    let name = tab("a.txt", "abc123");
+    c.request(5, "tools/call", open_diff_params(&file, "beta\n", &name));
+    let opened = next_open_diff(&h);
+    assert_eq!(opened.conn, conn);
+    assert_eq!(opened.original, ReadOutcome::Contents(b"alpha\n".to_vec()));
+    assert_eq!(opened.canonical, std::fs::canonicalize(&file).ok());
+    assert_eq!(opened.tab_name, name);
+    assert_eq!(opened.contents, "beta\n");
+    assert_eq!(opened.replaces, None);
+    assert!(c.recv(Duration::from_millis(300)).is_none(), "openDiff answered by itself");
+}
+
+#[test]
+fn open_diff_of_a_missing_file_reports_it_missing() {
+    let h = default_harness();
+    let dir = Dir::new("openmissing");
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    c.request(5, "tools/call", open_diff_params(&dir.0.join("new.txt"), "x", "t"));
+    let opened = next_open_diff(&h);
+    assert_eq!(opened.original, ReadOutcome::Missing);
+    assert_eq!(opened.canonical, None);
+}
+
+#[test]
+fn open_diff_of_a_directory_is_refused_but_still_opens() {
+    let h = default_harness();
+    let dir = Dir::new("opendir");
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    c.request(5, "tools/call", open_diff_params(&dir.0, "x", "t"));
+    assert_eq!(next_open_diff(&h).original, ReadOutcome::Refused(Refusal::NotRegular));
+}
+
+#[test]
+fn open_diff_without_a_tab_name_is_32602_and_no_event() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    let v = c.call(5, "tools/call", json!({"name":"openDiff","arguments":{"old_file_path":"/x"}}));
+    assert_eq!(v["error"]["code"], -32602);
+    assert!(h.events.recv_timeout(Duration::from_millis(200)).is_err());
+}
+
+#[test]
+fn saved_answer_is_file_saved_then_text() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    c.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t"));
+    let opened = next_open_diff(&h);
+    h.bridge.answer_diff(&opened.id, DiffAnswer::Saved("edited\nno newline".into())).unwrap();
+    let v = c.recv(Duration::from_secs(5)).unwrap();
+    assert_eq!(v["id"], json!(5));
+    assert_eq!(v["result"]["content"], json!([
+        {"type":"text","text":"FILE_SAVED"},
+        {"type":"text","text":"edited\nno newline"},
+    ]));
+}
+
+#[test]
+fn rejected_answer_is_diff_rejected_then_tab_name() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    let name = tab("a.txt", "ffffff");
+    c.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", &name));
+    let opened = next_open_diff(&h);
+    h.bridge.answer_diff(&opened.id, DiffAnswer::Rejected).unwrap();
+    let v = c.recv(Duration::from_secs(5)).unwrap();
+    assert_eq!(texts(&v), ["DIFF_REJECTED".to_string(), name]);
+}
+
+#[test]
+fn close_tab_returns_tab_closed_and_withdraws_without_decision() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    c.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let opened = next_open_diff(&h);
+    c.request(6, "tools/call", json!({"name":"close_tab","arguments":{"tab_name":"t1"}}));
+    let mut frames = [c.recv(Duration::from_secs(5)).unwrap(), c.recv(Duration::from_secs(5)).unwrap()];
+    frames.sort_by_key(|f| f["id"].as_u64());
+    assert_eq!(frames[0]["id"], json!(5));
+    assert_eq!(frames[0]["error"]["code"], -32000);
+    assert!(frames[0].get("result").is_none());
+    assert_eq!(frames[1]["id"], json!(6));
+    assert_eq!(frames[1]["result"]["content"], json!([{"type":"text","text":"TAB_CLOSED"}]));
+    match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+        BridgeEvent::DiffWithdrawn { id } => assert_eq!(id, opened.id),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(h.bridge.answer_diff(&opened.id, DiffAnswer::Rejected), Err(Gone));
+}
+
+#[test]
+fn close_tab_after_answer_is_harmless() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    c.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let opened = next_open_diff(&h);
+    h.bridge.answer_diff(&opened.id, DiffAnswer::Saved("y".into())).unwrap();
+    assert_eq!(c.recv(Duration::from_secs(5)).unwrap()["id"], json!(5));
+    for id in [6, 7] {
+        let v = c.call(id, "tools/call", json!({"name":"close_tab","arguments":{"tab_name":"t1"}}));
+        assert_eq!(v["result"]["content"], json!([{"type":"text","text":"TAB_CLOSED"}]));
+    }
+    assert!(h.events.recv_timeout(Duration::from_millis(200)).is_err());
+}
+
+#[test]
+fn close_all_counts_its_own_connection_only() {
+    let h = default_harness();
+    let mut a = connect(h.port);
+    a.handshake(&h, 1);
+    let mut b = connect(h.port);
+    b.handshake(&h, 2);
+    a.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let a1 = next_open_diff(&h);
+    a.request(6, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t2"));
+    let a2 = next_open_diff(&h);
+    b.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let b1 = next_open_diff(&h);
+    a.request(7, "tools/call", json!({"name":"closeAllDiffTabs","arguments":{}}));
+    let mut frames: Vec<Value> = (0..3).map(|_| a.recv(Duration::from_secs(5)).unwrap()).collect();
+    frames.sort_by_key(|f| f["id"].as_u64());
+    assert_eq!(frames[0]["error"]["code"], -32000);
+    assert_eq!(frames[1]["error"]["code"], -32000);
+    assert_eq!(frames[2]["result"]["content"], json!([{"type":"text","text":"CLOSED_2_DIFF_TABS"}]));
+    let mut withdrawn = Vec::new();
+    for _ in 0..2 {
+        match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            BridgeEvent::DiffWithdrawn { id } => withdrawn.push(id),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(withdrawn.contains(&a1.id) && withdrawn.contains(&a2.id));
+    // B's proposal is untouched and still answerable.
+    assert!(b.recv(Duration::from_millis(200)).is_none());
+    h.bridge.answer_diff(&b1.id, DiffAnswer::Rejected).unwrap();
+    assert_eq!(texts(&b.recv(Duration::from_secs(5)).unwrap())[0], "DIFF_REJECTED");
+}
+
+#[test]
+fn superseded_by_same_tab_name_gets_error() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    c.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "one", "t1"));
+    let first = next_open_diff(&h);
+    c.request(6, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "two", "t1"));
+    let second = next_open_diff(&h);
+    assert_eq!(second.replaces, Some(first.id.clone()));
+    let v = c.recv(Duration::from_secs(5)).unwrap();
+    assert_eq!(v["id"], json!(5));
+    assert_eq!(v["error"]["code"], -32000);
+    assert_eq!(h.bridge.answer_diff(&first.id, DiffAnswer::Rejected), Err(Gone));
+    h.bridge.answer_diff(&second.id, DiffAnswer::Saved("two".into())).unwrap();
+    assert_eq!(c.recv(Duration::from_secs(5)).unwrap()["id"], json!(6));
+}
+
+#[test]
+fn answer_after_withdrawal_is_gone() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    c.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let opened = next_open_diff(&h);
+    c.request(6, "tools/call", json!({"name":"close_tab","arguments":{"tab_name":"t1"}}));
+    assert_eq!(c.recv(Duration::from_secs(5)).unwrap()["id"], json!(5));
+    assert_eq!(c.recv(Duration::from_secs(5)).unwrap()["id"], json!(6));
+    assert_eq!(h.bridge.answer_diff(&opened.id, DiffAnswer::Saved("x".into())), Err(Gone));
+}
+
+#[test]
+fn second_answer_is_gone() {
+    let h = default_harness();
+    let mut c = connect(h.port);
+    c.handshake(&h, 1);
+    c.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let opened = next_open_diff(&h);
+    assert_eq!(h.bridge.answer_diff(&opened.id, DiffAnswer::Rejected), Ok(()));
+    assert_eq!(h.bridge.answer_diff(&opened.id, DiffAnswer::Saved("x".into())), Err(Gone));
+}
+
+#[test]
+fn disconnect_drops_pending_and_emits_disconnected() {
+    let h = default_harness();
+    let mut announced = connect(h.port);
+    let conn_a = announced.handshake(&h, 1);
+    let mut silent = connect(h.port);
+    announced.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let a = next_open_diff(&h);
+    assert_eq!(a.conn, conn_a);
+    silent.request(5, "tools/call", open_diff_params(Path::new("/nonexistent/a"), "x", "t1"));
+    let s = next_open_diff(&h);
+    assert_ne!(s.conn, conn_a);
+    drop(announced);
+    drop(silent);
+    let mut gone = Vec::new();
+    for _ in 0..2 {
+        match h.events.recv_timeout(Duration::from_secs(5)).unwrap() {
+            BridgeEvent::Disconnected { conn } => gone.push(conn),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(gone.contains(&conn_a) && gone.contains(&s.conn));
+    assert_eq!(h.bridge.answer_diff(&a.id, DiffAnswer::Rejected), Err(Gone));
+    assert_eq!(h.bridge.answer_diff(&s.id, DiffAnswer::Rejected), Err(Gone));
+}
+
+/// Tiny deterministic generator, so the sequences are the same on every run.
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// With no `answer_diff` call, nothing Sirio does may put a decision in an `openDiff` result.
+/// The two clients live across sequences and are only now and then dropped or replaced (each
+/// accept costs up to one acceptor poll), but every sequence ends by reading what its requests
+/// were answered with.
+#[test]
+fn never_decides_without_answer() {
+    let h = default_harness();
+    let forbidden = ["FILE_SAVED", "DIFF_REJECTED", "TAB_CLOSED"];
+    // Per slot: the client (if connected) and the ids of its openDiff requests.
+    let mut slots: Vec<Option<(Client, Vec<u64>)>> = vec![None, None];
+    let mut next_id = 10u64;
+    for seq in 0..200u64 {
+        let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15 ^ (seq + 1).wrapping_mul(0xD1B5_4A32_D192_ED03));
+        let mut checked: Vec<Value> = Vec::new();
+        for _ in 0..(4 + rng.below(8)) {
+            let s = rng.below(2) as usize;
+            let op = rng.below(24);
+            if slots[s].is_none() || op == 22 {
+                // Reconnect: the old connection ends with whatever it still had pending.
+                if let Some((mut old, ids)) = slots[s].take() {
+                    checked.extend(drain(&mut old, &ids));
+                }
+                slots[s] = Some((connect(h.port), Vec::new()));
+                continue;
+            }
+            if op == 23 {
+                slots[s] = None; // disconnect with requests unanswered
+                continue;
+            }
+            let (client, ids) = slots[s].as_mut().unwrap();
+            next_id += 1;
+            let tab_name = format!("tab{}", rng.below(3));
+            match op {
+                0..=9 => {
+                    ids.push(next_id);
+                    client.request(next_id, "tools/call",
+                        open_diff_params(Path::new("/nonexistent/a"), "x", &tab_name));
+                }
+                10..=16 => client.request(next_id, "tools/call",
+                    json!({"name":"close_tab","arguments":{"tab_name":tab_name}})),
+                _ => client.request(next_id, "tools/call",
+                    json!({"name":"closeAllDiffTabs","arguments":{}})),
+            }
+        }
+        for (client, ids) in slots.iter_mut().flatten() {
+            checked.extend(drain(client, ids));
+            ids.clear();
+        }
+        for frame in checked {
+            let text = frame.to_string();
+            for word in forbidden {
+                assert!(!text.contains(word), "sequence {seq}: an openDiff frame decided: {text}");
+            }
+        }
+    }
+}
+
+/// The frames answering `ids`, read up to a `ping` sent behind them (answers are in order, so
+/// everything the server had to say about earlier requests precedes the ping's reply).
+fn drain(client: &mut Client, ids: &[u64]) -> Vec<Value> {
+    const PING: u64 = 9_000_000;
+    client.request(PING, "ping", json!({}));
+    let mut out = Vec::new();
+    while let Some(frame) = client.recv(Duration::from_secs(5)) {
+        if frame["id"] == json!(PING) {
+            return out;
+        }
+        if frame["id"].as_u64().is_some_and(|id| ids.contains(&id)) {
+            out.push(frame);
+        }
+    }
+    panic!("no ping reply");
 }

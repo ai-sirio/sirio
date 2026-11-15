@@ -177,3 +177,13 @@ pub fn diagnostics_result(files: &[FileDiagnostics], echo: Option<&str>) -> Valu
         .collect();
     text_result(&Value::Array(files).to_string())
 }
+
+/// An accepted `openDiff`: `FILE_SAVED`, then the final text exactly as the user left it.
+pub fn saved_result(text: &str) -> Value {
+    json!({"content": [{"type": "text", "text": "FILE_SAVED"}, {"type": "text", "text": text}]})
+}
+
+/// A rejected `openDiff`: `DIFF_REJECTED`, then the tab's name.
+pub fn rejected_result(tab_name: &str) -> Value {
+    json!({"content": [{"type": "text", "text": "DIFF_REJECTED"}, {"type": "text", "text": tab_name}]})
+}

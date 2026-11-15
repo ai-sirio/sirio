@@ -7490,6 +7490,7 @@ name = "sirio_ide"
 version = "0.43.0"
 dependencies = [
  "getrandom 0.4.3",
+ "libc",
  "serde",
  "serde_json",
  "socket2",

@@ -5,13 +5,16 @@
 pub mod endpoint;
 pub mod lockfile;
 mod mcp;
+mod pending;
 mod server;
 mod socket;
+mod untrusted;
 pub mod uri;
 
 pub use endpoint::{PORT_RANGE, bind, new_token};
 pub use lockfile::{LockBody, Lockfile};
 pub use mcp::{Diagnostic, FileDiagnostics, Notification, Pos16, Severity};
+pub use untrusted::{ReadOutcome, Refusal, read_regular_file};
 pub use server::{
     Bridge, BridgeEvent, BridgeOptions, ConnId, DIAGNOSTICS_DEADLINE, DiagId, DiffAnswer, DiffId,
     Gone,
