@@ -414,6 +414,17 @@ impl Fold {
                     });
                 }
             }
+            "elicitation_complete" => {
+                if let (Some(server), Some(elicitation_id)) = (
+                    system.mcp_server_name.clone(),
+                    system.elicitation_id.clone(),
+                ) {
+                    events.push(ChatEvent::ElicitationCompleted {
+                        server,
+                        elicitation_id,
+                    });
+                }
+            }
             other => events.push(ChatEvent::OtherSessionUpdate {
                 kind: format!("system/{other}"),
             }),

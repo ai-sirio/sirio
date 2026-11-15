@@ -3446,6 +3446,10 @@ impl Chat {
                     });
                 }
             }
+            // Drawn by the elicitation card; nothing to do until it exists.
+            sirio_chat::ChatEvent::Elicitation { .. }
+            | sirio_chat::ChatEvent::RequestClosed { .. }
+            | sirio_chat::ChatEvent::ElicitationCompleted { .. } => {}
             sirio_chat::ChatEvent::PlanUpdate { entries } => {
                 let entries = entries
                     .into_iter()

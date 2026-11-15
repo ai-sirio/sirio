@@ -32,8 +32,9 @@ use super::events::{Fold, ResultSummary};
 use super::permission;
 use super::trace::TraceFold;
 use sirio_chat_vocab::{
-    AgentMode, ChatError, ChatEvent, ContextCost, ContextUsage, EffortChoice, EffortOption,
-    ModeCatalog, ModelCatalog, ModelOption, TimeoutOperation, TraceEvent,
+    AgentMode, ChatError, ChatEvent, CloseReason, ContextCost, ContextUsage, EffortChoice,
+    EffortOption, ElicitationAction, ElicitationPrompt, ModeCatalog, ModelCatalog, ModelOption,
+    RequestKind, TimeoutOperation, TraceEvent,
 };
 
 /// What the client asks the worker to do.
@@ -62,6 +63,11 @@ pub(super) enum Command {
     RespondPermission {
         request_id: u64,
         choice: PermissionChoice,
+    },
+    /// Answer an MCP elicitation card.
+    RespondElicitation {
+        request_id: u64,
+        action: ElicitationAction,
     },
     /// Ask the CLI to restore tracked files to a turn's checkpoint.
     RewindFiles {
@@ -100,6 +106,16 @@ struct PendingPermission {
     /// When it was asked, for the expiry sweep. A card is not a turn: it
     /// has its own deadline, and missing it is a refusal rather than a
     /// fault.
+    asked_at: std::time::Instant,
+}
+
+/// An MCP elicitation card the surface is showing, waiting on a human.
+struct PendingElicitation {
+    /// The id the CLI asked under, which the answer must carry.
+    cli_request_id: String,
+    /// A URL request is answered without content.
+    url_mode: bool,
+    /// When it was asked, for the expiry sweep.
     asked_at: std::time::Instant,
 }
 
@@ -541,6 +557,55 @@ struct SessionContext {
     resumed: bool,
 }
 
+/// What the card for an elicitation shows: a form this build can draw, a page
+/// to visit, or the reason it cannot do either.
+fn elicitation_prompt(request: &sirio_claude::ElicitationRequest) -> ElicitationPrompt {
+    match request.mode.as_str() {
+        "form" => {
+            let Some(schema) = &request.requested_schema else {
+                return ElicitationPrompt::Unsupported {
+                    reason: "the server asked for a form without describing it".into(),
+                };
+            };
+            match sirio_chat_vocab::elicitation_fields(schema, request.property_order.as_deref()) {
+                Ok(fields) => ElicitationPrompt::Form(fields),
+                Err(reason) => ElicitationPrompt::Unsupported { reason },
+            }
+        }
+        "url" => match &request.url {
+            Some(url) => ElicitationPrompt::Url {
+                url: url.clone(),
+                elicitation_id: request.elicitation_id.clone(),
+            },
+            None => ElicitationPrompt::Unsupported {
+                reason: "the server asked for a page without naming one".into(),
+            },
+        },
+        other => ElicitationPrompt::Unsupported {
+            reason: format!("the server asked in a mode Sirio does not know ({other})"),
+        },
+    }
+}
+
+/// The refusal for an inbound `control_request` the worker has no handler for,
+/// or `None` when the request is one it answers itself (a permission or an
+/// elicitation). Silence would leave the CLI waiting for ever.
+fn refusal_for(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let handled = sirio_claude::CanUseTool::parse(value).is_some()
+        || sirio_claude::ElicitationRequest::parse(value).is_some();
+    if handled {
+        return None;
+    }
+    let id = value.get("request_id")?.as_str()?;
+    let subtype = sirio_claude::control_request_subtype(value).unwrap_or("unknown");
+    let message = match subtype {
+        "can_use_tool" => "Sirio could not read this permission request".to_string(),
+        "elicitation" => "Sirio could not read this elicitation request".to_string(),
+        other => format!("Sirio does not handle {other}"),
+    };
+    Some(sirio_claude::control_error(id, &message))
+}
+
 async fn session(context: SessionContext) -> SessionOutcome {
     let SessionContext {
         mut stdin,
@@ -572,6 +637,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
     let timeout_reason: Arc<Mutex<Option<ChatError>>> = Arc::new(Mutex::new(None));
     let permission_counter = AtomicU64::new(1);
     let mut pending_permissions: HashMap<u64, PendingPermission> = HashMap::new();
+    let mut pending_elicitations: HashMap<u64, PendingElicitation> = HashMap::new();
     let mut open_permissions: usize = 0;
     let mut pending_context_usage: Option<PendingContextUsage> = None;
     // A breakdown asked for outside a turn has its own id: the turn's slot
@@ -620,6 +686,18 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 }
                 (None, None) => break Catalog::default(),
             }
+        }
+        // A request the worker does not handle is refused, so the CLI is
+        // never left waiting on an answer that cannot come.
+        if let CliMessage::ControlRequest(value) = &message
+            && let Some(refusal) = refusal_for(value)
+        {
+            if write_line(&mut stdin, &refusal).await.is_err() {
+                return SessionOutcome::HandshakeFailed(
+                    "could not write the Claude handshake".into(),
+                );
+            }
+            continue;
         }
         // Anything else before the handshake answer is ordinary traffic.
         send_trace(&event_tx, trace.line(&message, at)).await;
@@ -933,6 +1011,74 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             continue;
                         }
                         if let CliMessage::ControlRequest(value) = &message
+                            && let Some(request) = sirio_claude::ElicitationRequest::parse(value)
+                        {
+                            let request_id = permission_counter.fetch_add(1, Ordering::Relaxed);
+                            let prompt = elicitation_prompt(&request);
+                            let _ = event_tx
+                                .send(ChatEvent::Elicitation {
+                                    request_id,
+                                    session_id: shared.session_id().unwrap_or_default(),
+                                    server: request.server.clone(),
+                                    message: request.message.clone(),
+                                    prompt,
+                                })
+                                .await;
+                            open_permissions += 1;
+                            pending_elicitations.insert(
+                                request_id,
+                                PendingElicitation {
+                                    cli_request_id: request.request_id,
+                                    url_mode: request.mode == "url",
+                                    asked_at: at,
+                                },
+                            );
+                            continue;
+                        }
+                        if let CliMessage::ControlCancelRequest(cli_id) = &message {
+                            // The CLI took the question back. Nothing is
+                            // written: the request no longer exists on its side.
+                            let permission = pending_permissions
+                                .iter()
+                                .find(|(_, pending)| pending.request.request_id == *cli_id)
+                                .map(|(id, _)| *id);
+                            let elicitation = pending_elicitations
+                                .iter()
+                                .find(|(_, pending)| pending.cli_request_id == *cli_id)
+                                .map(|(id, _)| *id);
+                            let closed = if let Some(id) = permission {
+                                pending_permissions.remove(&id);
+                                Some((id, RequestKind::Permission))
+                            } else if let Some(id) = elicitation {
+                                pending_elicitations.remove(&id);
+                                Some((id, RequestKind::Elicitation))
+                            } else {
+                                None
+                            };
+                            if let Some((request_id, kind)) = closed {
+                                open_permissions = open_permissions.saturating_sub(1);
+                                touch_activity(&activity);
+                                if kind == RequestKind::Permission {
+                                    send_trace(
+                                        &event_tx,
+                                        trace.permission_answered(
+                                            request_id,
+                                            std::time::Instant::now(),
+                                        ),
+                                    )
+                                    .await;
+                                }
+                                let _ = event_tx
+                                    .send(ChatEvent::RequestClosed {
+                                        request_id,
+                                        kind,
+                                        reason: CloseReason::Withdrawn,
+                                    })
+                                    .await;
+                            }
+                            continue;
+                        }
+                        if let CliMessage::ControlRequest(value) = &message
                             && let Some(request) = sirio_claude::CanUseTool::parse(value)
                         {
                             let request_id = permission_counter.fetch_add(1, Ordering::Relaxed);
@@ -1000,6 +1146,15 @@ async fn session(context: SessionContext) -> SessionOutcome {
                                     asked_at: at,
                                 },
                             );
+                            continue;
+                        }
+                        if let CliMessage::ControlRequest(value) = &message
+                            && let Some(refusal) = refusal_for(value)
+                        {
+                            if write_line(&mut stdin, &refusal).await.is_err() {
+                                end_held_turn(&event_tx, &mut pending_context_usage).await;
+                                return SessionOutcome::Died(": could not refuse a request".into());
+                            }
                             continue;
                         }
                         let is_result = matches!(message, CliMessage::Result(_));
@@ -1255,6 +1410,31 @@ async fn session(context: SessionContext) -> SessionOutcome {
                             }
                         }
                     }
+                    Ok(Command::RespondElicitation { request_id, action }) => {
+                        let Some(pending) = pending_elicitations.remove(&request_id) else {
+                            continue;
+                        };
+                        open_permissions = open_permissions.saturating_sub(1);
+                        touch_activity(&activity);
+                        let (name, content) = match action {
+                            ElicitationAction::Accept(content) => {
+                                ("accept", (!pending.url_mode).then_some(content))
+                            }
+                            ElicitationAction::Decline => ("decline", None),
+                            ElicitationAction::Cancel => ("cancel", None),
+                        };
+                        let line = sirio_claude::elicitation_response(
+                            &pending.cli_request_id,
+                            name,
+                            content,
+                        );
+                        if write_line(&mut stdin, &line).await.is_err() {
+                            end_held_turn(&event_tx, &mut pending_context_usage).await;
+                            return SessionOutcome::Died(
+                                ": could not answer an elicitation".into(),
+                            );
+                        }
+                    }
                     Ok(Command::RewindFiles {
                         user_message_id,
                         dry_run,
@@ -1376,6 +1556,37 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 trace.permission_answered(request_id, std::time::Instant::now()),
             )
             .await;
+        }
+        let expired_elicitations: Vec<u64> = pending_elicitations
+            .iter()
+            .filter(|(_, pending)| pending.asked_at.elapsed() >= permission_timeout)
+            .map(|(id, _)| *id)
+            .collect();
+        for request_id in expired_elicitations {
+            let Some(pending) = pending_elicitations.remove(&request_id) else {
+                continue;
+            };
+            open_permissions = open_permissions.saturating_sub(1);
+            record_timeout(
+                &timeout_reason,
+                ChatError::Timeout {
+                    operation: TimeoutOperation::Permission,
+                    duration: permission_timeout,
+                },
+            );
+            let line = sirio_claude::elicitation_response(&pending.cli_request_id, "cancel", None);
+            if write_line(&mut stdin, &line).await.is_err() {
+                end_held_turn(&event_tx, &mut pending_context_usage).await;
+                return SessionOutcome::Died(": could not expire an elicitation".into());
+            }
+            touch_activity(&activity);
+            let _ = event_tx
+                .send(ChatEvent::RequestClosed {
+                    request_id,
+                    kind: RequestKind::Elicitation,
+                    reason: CloseReason::Expired,
+                })
+                .await;
         }
         // The meter has its own grace: the turn it belongs to has already
         // finished, and a CLI that never answers must not hold its end open.

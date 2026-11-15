@@ -51,6 +51,14 @@ CONTROL_LOG_PATH = next(
     (arg[len("--fixture-control-log="):] for arg in sys.argv if arg.startswith("--fixture-control-log=")),
     os.environ.get("SIRIO_FIXTURE_CONTROL_LOG"),
 )
+# `elicitation` mode: a launch argument names the file the host's answers to
+# the fixture's own requests are appended to, verbatim, one JSON line each, and
+# every prompt as `{"prompt": <text>}`. A launch argument, not the environment,
+# so tests running side by side each keep their own log.
+RESPONSE_LOG_PATH = next(
+    (arg[len("--fixture-response-log="):] for arg in sys.argv if arg.startswith("--fixture-response-log=")),
+    None,
+)
 # The file every `user` line (a prompt, as the CLI heard it) is appended to,
 # one JSON line each, before the turn runs: what a mention became on the wire.
 USER_LOG_PATH = os.environ.get("SIRIO_FIXTURE_USER_LOG")
@@ -295,7 +303,7 @@ def ask_permission(cli_request_id, tool_name, tool_use_id, tool_input, suggestio
     })
 
 
-def finish_permission(cli_request_id, answer_message):
+def finish_permission(cli_request_id, answer_message, end_turn=True):
     pending = PENDING.pop(cli_request_id, None)
     if pending is None:
         return
@@ -318,7 +326,8 @@ def finish_permission(cli_request_id, answer_message):
         "session_id": SESSION_ID,
         "uuid": "perm-result-uuid",
     })
-    result()
+    if end_turn:
+        result()
 
 
 # ---------------------------------------------------------------------------
@@ -906,6 +915,175 @@ def trace_main():
     turns.join()
 
 
+# ---------------------------------------------------------------------------
+# `elicitation`: MCP elicitation, withdrawal and refusal. The prompt's exact
+# text (stripped) picks the script; `ELIC_SCRIPTS` lists them. A turn ends with
+# a success `result` once every request its script made is answered or
+# withdrawn, except `silent form`, which never ends by itself.
+# ---------------------------------------------------------------------------
+
+# The schema's own order is the reverse of `property_order`, so a host that
+# loses `property_order` shows the fields backwards.
+ELIC_FORM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ok": {"type": "boolean", "default": True},
+        "note": {"type": "string", "description": "free text", "format": "email"},
+        "count": {"type": "integer", "title": "How many", "minimum": 1},
+        "colour": {"type": "string", "title": "Colour", "enum": ["red", "blue"]},
+    },
+    "required": ["colour"],
+}
+# CLI request id -> "elicitation" | "permission" | "unknown", for the requests
+# the current script is still waiting on.
+ELIC_OUTSTANDING = {}
+# Every id the fixture ever issued, answered, withdrawn or not: an answer to
+# one of them is logged whatever became of it, so a host that answers a
+# withdrawn request is seen doing so.
+ELIC_ISSUED = set()
+ELIC_ENDS_TURN = True
+# Request id -> (server, elicitation id) to announce once the user accepts.
+ELIC_COMPLETES = {}
+
+
+def log_response(message):
+    if RESPONSE_LOG_PATH:
+        with open(RESPONSE_LOG_PATH, "a", encoding="utf-8") as log:
+            log.write(json.dumps(message, separators=(",", ":")) + "\n")
+
+
+def ask_elicitation(request_id, **fields):
+    ELIC_OUTSTANDING[request_id] = "elicitation"
+    ELIC_ISSUED.add(request_id)
+    request = {"subtype": "elicitation", "mcp_server_name": "elic"}
+    request.update(fields)
+    send({"type": "control_request", "request_id": request_id, "request": request})
+
+
+def ask_form(request_id, schema=None):
+    ask_elicitation(
+        request_id,
+        message="Pick a colour for the probe",
+        mode="form",
+        requested_schema=schema if schema is not None else ELIC_FORM_SCHEMA,
+        property_order=["colour", "count", "note", "ok"] if schema is None else None,
+    )
+
+
+def ask_bash_permission(request_id, tool_use_id):
+    tool_input = {"command": "rm -rf build", "description": "Remove build"}
+    assistant_tool_use(tool_use_id, "Bash", tool_input)
+    ELIC_OUTSTANDING[request_id] = "permission"
+    ELIC_ISSUED.add(request_id)
+    ask_permission(request_id, "Bash", tool_use_id, tool_input)
+
+
+def withdraw(request_id):
+    ELIC_OUTSTANDING.pop(request_id, None)
+    PENDING.pop(request_id, None)
+    send({"type": "control_cancel_request", "request_id": request_id})
+
+
+def script_elic_form():
+    ask_form("elic-form")
+
+
+def script_elic_url():
+    ELIC_COMPLETES["elic-url"] = ("elic", "el-2")
+    ask_elicitation(
+        "elic-url",
+        message="Sign in to the probe service",
+        mode="url",
+        url="https://example.com/auth?x=1",
+        elicitation_id="el-2",
+    )
+
+
+def script_elic_bad_schema():
+    ask_form("elic-bad", {"type": "object", "properties": {"nested": {"type": "object"}}})
+
+
+def script_elic_withdraw():
+    ask_form("elic-withdraw")
+    time.sleep(0.5)
+    withdraw("elic-withdraw")
+    result()
+
+
+def script_elic_withdraw_permission():
+    ask_bash_permission("cli-perm-withdraw", "toolu_withdraw_1")
+    time.sleep(0.5)
+    withdraw("cli-perm-withdraw")
+    result()
+
+
+def script_elic_unknown():
+    ELIC_OUTSTANDING["u1"] = "unknown"
+    ELIC_ISSUED.add("u1")
+    send({"type": "control_request", "request_id": "u1", "request": {"subtype": "future_thing"}})
+
+
+def script_elic_both():
+    ask_bash_permission("cli-perm-both", "toolu_both_1")
+    ask_form("elic-both")
+
+
+def script_elic_silent_form():
+    global ELIC_ENDS_TURN
+    ELIC_ENDS_TURN = False
+    ask_form("elic-silent")
+
+
+ELIC_SCRIPTS = {
+    "form": script_elic_form,
+    "url": script_elic_url,
+    "bad schema": script_elic_bad_schema,
+    "withdraw": script_elic_withdraw,
+    "withdraw permission": script_elic_withdraw_permission,
+    "unknown": script_elic_unknown,
+    "both": script_elic_both,
+    "silent form": script_elic_silent_form,
+}
+
+
+def elicitation_prompt(message):
+    global ELIC_ENDS_TURN
+    prompt = trace_prompt_text(message)
+    log_response({"prompt": prompt})
+    init_line()
+    ELIC_ENDS_TURN = True
+    script = ELIC_SCRIPTS.get(prompt.strip())
+    if script is None:
+        text("Hello")
+        result()
+        return
+    script()
+
+
+def elicitation_answered(message):
+    response = message.get("response", {})
+    request_id = response.get("request_id")
+    if request_id not in ELIC_ISSUED:
+        return
+    log_response(message)
+    kind = ELIC_OUTSTANDING.pop(request_id, None)
+    if kind is None:
+        return
+    if kind == "permission":
+        finish_permission(request_id, message, end_turn=False)
+    elif kind == "elicitation":
+        action = response.get("response", {}).get("action", "?")
+        if action == "accept" and request_id in ELIC_COMPLETES:
+            server, elicitation_id = ELIC_COMPLETES.pop(request_id)
+            send({"type": "system", "subtype": "elicitation_complete",
+                  "mcp_server_name": server, "elicitation_id": elicitation_id,
+                  "session_id": SESSION_ID, "uuid": "elicitation-complete-uuid"})
+        text(f"elicitation: {action}")
+    if not ELIC_OUTSTANDING and ELIC_ENDS_TURN:
+        result()
+
+
+
 def main():
     if MODE == "trace":
         trace_main()
@@ -1070,12 +1248,17 @@ def main():
         elif kind == "control_response":
             response = message.get("response", {})
             cli_request_id = response.get("request_id")
-            if cli_request_id in PENDING:
+            if MODE == "elicitation":
+                elicitation_answered(message)
+            elif cli_request_id in PENDING:
                 finish_permission(cli_request_id, message)
         elif kind == "user":
             if USER_LOG_PATH:
                 with open(USER_LOG_PATH, "a", encoding="utf-8") as log:
                     log.write(json.dumps(message, separators=(",", ":")) + "\n")
+            if MODE == "elicitation":
+                elicitation_prompt(message)
+                continue
             if MODE == "logged_out":
                 init_line()
                 result(subtype="error_during_execution", is_error=True,

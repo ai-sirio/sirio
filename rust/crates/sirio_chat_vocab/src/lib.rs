@@ -325,6 +325,22 @@ pub struct ToolCallLocationInfo {
     pub line: Option<u32>,
 }
 
+/// Which kind of card a [`ChatEvent::RequestClosed`] closes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestKind {
+    Permission,
+    Elicitation,
+}
+
+/// Why a card was closed without the user answering it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CloseReason {
+    /// The agent took the question back.
+    Withdrawn,
+    /// Nobody answered in time and the worker answered for the user.
+    Expired,
+}
+
 /// Typed events emitted by one ACP session.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChatEvent {
@@ -424,6 +440,31 @@ pub enum ChatEvent {
         options: Vec<PermissionOption>,
         /// A structured question carried by the tool input, when present.
         question: Option<PermissionQuestion>,
+    },
+    /// An MCP server asked the user for input through the agent. Answered
+    /// with the transport's `respond_elicitation`; native Claude only.
+    Elicitation {
+        /// Handle passed back to `respond_elicitation`. Shares the id space of
+        /// [`ChatEvent::PermissionRequest`].
+        request_id: u64,
+        /// Session that owns the request.
+        session_id: String,
+        /// The MCP server asking.
+        server: String,
+        /// What the server says it needs.
+        message: String,
+        prompt: ElicitationPrompt,
+    },
+    /// A card closed without the user answering it.
+    RequestClosed {
+        request_id: u64,
+        kind: RequestKind,
+        reason: CloseReason,
+    },
+    /// An MCP server says an out-of-band (URL) elicitation is done.
+    ElicitationCompleted {
+        server: String,
+        elicitation_id: String,
     },
     /// The agent published or advanced its execution plan.
     PlanUpdate {
