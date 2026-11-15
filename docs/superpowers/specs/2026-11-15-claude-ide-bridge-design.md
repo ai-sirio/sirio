@@ -513,28 +513,59 @@ it names; the live probe (§8.1) adds its findings here before any product code.
 
 The live probe of §8.1, run against the real Claude Code **2.1.325** (`claude --version` printed
 `2.1.325 (Claude Code)`, run from `~/.local/share/mise/installs/claude/2.1.325/claude`, never the
-mise wrapper). The child's environment was built from nothing (`env -i`), and held exactly these
-variables: `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`,
-`XDG_RUNTIME_DIR` (all under `~/.cache/st/ide-probe-tmp/<run>`), `PATH=/usr/bin:/bin`,
-`LANG=C.UTF-8`, `SHELL=/bin/sh`, `TMPDIR` (on disk, there), `TERM=xterm-256color`, a dummy
-`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` (on `fake_messages.py`), `DISABLE_AUTOUPDATER=1`,
+mise wrapper). Every Claude was started by a generated `launch.sh` as `env -i` plus exactly the
+variables below, so nothing of the user's environment reached it. Claude ran with
+`--permission-mode default`. The real `~/.claude`, `~/.claude.json` and `~/.claude/ide` were
+never touched. Every hook Sirio's Claude adapter installs (`Stop`, `Notification`,
+`SessionStart`, `UserPromptSubmit`, `SessionEnd`) plus `PreToolUse`, `PostToolUse` and
+`PermissionRequest` logged to a file. Times are seconds and come from the stub's frame log
+or the pane captures. The throwaway scripts stay in the scratchpad; this section is what is kept.
+
+Base environment of every tmux run (read from each run's `launch.sh`): `HOME`,
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR` (all
+under `~/.cache/st/ide-probe-tmp/<run>`), `PATH=<run>/bin:/usr/bin:/bin`, `LANG=C.UTF-8`,
+`SHELL=/bin/sh`, `TMPDIR=<run>/tmp`, `TERM=xterm-256color`, a dummy `ANTHROPIC_API_KEY`,
+`ANTHROPIC_BASE_URL` on `fake_messages.py`, `DISABLE_AUTOUPDATER=1`,
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`,
-`CLAUDE_CONFIG_DIR=<private home>/.claude`, `CLAUDE_CODE_SSE_PORT` (a throwaway stdlib WebSocket
-server that wrote its own lockfile under the private `HOME`), and, unless a run says otherwise,
-the dead proxy of `program_status_live.rs` (`HTTPS_PROXY=HTTP_PROXY=http://127.0.0.1:9`,
-`NO_PROXY=127.0.0.1,localhost`); the runs of items 1 to 5 and 7 had it, the runs that say "no
-proxy" had no proxy variable at all. Claude started with `--permission-mode default`.
-Which fake produced which result: the first runs (items 1, 2, 4, 5, 6b, 7, and the tmux halves
-of 3 and 6) used the first version of `fake_messages.py`, a fresh Claude per scenario, one Edit
-each; the multi-Edit runs of item 3 first used a scratch copy that alternated alpha and beta
-with unique message ids, and were **repeated with the committed fake** (below), which gave the
-same counts.
-The real `~/.claude`, `~/.claude.json` and `~/.claude/ide` were never touched. Every hook
-Sirio's Claude adapter installs (`Stop`, `Notification`, `SessionStart`, `UserPromptSubmit`,
-`SessionEnd`) plus `PreToolUse`, `PostToolUse` and `PermissionRequest` logged to a file. Panes
-were driven in tmux, except item 4, measured in a debug Sirio. Times are seconds and come from
-the stub's frame log or the pane captures. The throwaway scripts stay in the scratchpad; this
-section is what is kept.
+`CLAUDE_CONFIG_DIR=<run>/home/.claude`, `CLAUDE_CODE_SSE_PORT`. The proxy variables differ by
+run, as below ("dead proxy": `HTTPS_PROXY=HTTP_PROXY=http://127.0.0.1:9` and
+`NO_PROXY=127.0.0.1,localhost`; "NO_PROXY only": `NO_PROXY=127.0.0.1`; "none": no proxy
+variable). `l3` and `l4` added `TERM_PROGRAM=vscode`. The debug Sirio of item 4 (run `sirio`)
+was started by `sirio.sh` as `env -i` with `HOME`, the five `XDG_*`, `PATH=<run>/bin:/usr/bin:/bin`,
+`LANG`, `DISPLAY`, `GPUI_X11_SCALE_FACTOR=1`, `TMPDIR`, `VK_DRIVER_FILES`, `VK_ICD_FILENAMES`,
+`SIRIO_SOCKET`, `SIRIO_DB`, `SIRIO_CREDENTIALS`, `SIRIO_HOST_HOME`, `ANTHROPIC_API_KEY`,
+`ANTHROPIC_BASE_URL`, `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
+`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, `CLAUDE_CONFIG_DIR`, `NO_PROXY=127.0.0.1`,
+`CLAUDE_CODE_SSE_PORT`; no `SHELL` or `TERM`: the pane's shell and `TERM` were Sirio's own, and
+its `claude` was found through `<run>/bin/claude`, a symlink to the real 2.1.325 binary.
+
+Fakes: "v1" is `fake_messages.py` as first committed (30315cff): one message id for every
+response, a fresh Claude per scenario, one Edit each. "alt" is a scratch copy of v1 with unique
+message ids that alternated alpha and beta (not committed). "v2" is the committed fake of a3b30e79
+(unique ids, alternation read from `probe.txt`, only the latest prompt decides).
+
+| item | run directories | fake | proxy |
+|---|---|---|---|
+| 1, the trace of one Edit | `s1` | v1 | dead proxy |
+| 1, the disk timing of `getDiagnostics` ("Measured", including "two in a row" and the `FILE_SAVED` edit) | `f1` (two accepted Edits), `f2` (`FILE_SAVED`) | v2 | none |
+| 2, none then terminal | `s1` | v1 | dead proxy |
+| 2, `FILE_SAVED` and the edited text | `s1` (file text), `f2` (the trailing newline) | v1 in `s1` (a restarted copy of v1 in the same session), v2 in `f2` | dead proxy in `s1`, none in `f2` |
+| 2, `DIFF_REJECTED`; error `-32000` | `s2`; `s3` | v1 | dead proxy |
+| 3, errors and timeouts, first runs | `s4` (five errors), `s4b` (timeouts) | alt | dead proxy |
+| 3, repeated | `e1` (errors), `e2` (timeouts) | v2 | none |
+| 4, hooks and the tmux half | `s2` (hook log), `s1` | v1 | dead proxy |
+| 4, the Sirio pane | `sirio` | v1 | `NO_PROXY=127.0.0.1` only |
+| 5, paste | `s7` (first pastes), `s8` (thresholds) | v1 | `NO_PROXY=127.0.0.1` only |
+| 6, 2 s and 10 s and 25 s | `s7` | v1 | `NO_PROXY=127.0.0.1` only |
+| 6, 41 s and the first `/ide` attempts | `s6b` | v1 | dead proxy |
+| 6, 25 s and `/ide`, no proxy | `p1` | v2 | none |
+| 6, the first 2.3 s outage | `s1` | v1 | dead proxy |
+| 6b | `s6b` | v1 | dead proxy |
+| 7 | `l1`, `l2`, `l3`, `l4` | v1 | `NO_PROXY=127.0.0.1` only |
+| the `run tool` check | `s10` | v1 | dead proxy |
+| "run edit twice" live | `s9` (v1: second Edit failed), `f1` (v2: two `openDiff`) | v1, v2 | dead proxy, none |
+
+Items 1 to 3 and 6 were not run in a Sirio pane; only item 4's second half was.
 
 **1. Auto-connect and the traffic of one Edit.** Confirmed. With only `CLAUDE_CODE_SSE_PORT` set
 and a lockfile `<port>.lock` (`{pid, workspaceFolders, ideName, transport:"ws", authToken,
