@@ -50,7 +50,10 @@ impl Lockfile {
             running_in_windows: false,
         };
         let json = serde_json::to_vec(&wire).map_err(io::Error::other)?;
-        let tmp = self.path.with_extension("lock.tmp");
+        let mut nonce = [0u8; 8];
+        getrandom::fill(&mut nonce).map_err(io::Error::other)?;
+        let nonce: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+        let tmp = self.path.with_extension(format!("lock.{}.{nonce}.tmp", std::process::id()));
         let result = write_owner_only(&tmp, &json).and_then(|()| std::fs::rename(&tmp, &self.path));
         if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
@@ -84,7 +87,7 @@ fn create_dir_owner_only(dir: &Path) -> io::Result<()> {
 
 fn write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -181,6 +184,53 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(names, vec!["55.lock".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn leftover_temp_file_cannot_weaken_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("leftover");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stray = dir.join("31.lock.tmp");
+        std::fs::write(&stray, b"x").unwrap();
+        std::fs::set_permissions(&stray, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let l = Lockfile::write(&dir, 31, &body(&[])).unwrap();
+        assert_eq!(std::fs::metadata(l.path()).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_temp_name_is_not_followed() {
+        let dir = tmp("symlink");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("victim");
+        std::fs::write(&target, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("32.lock.tmp")).unwrap();
+        let l = Lockfile::write(&dir, 32, &body(&[])).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+        assert!(read(&l)["authToken"].is_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_rewrites_never_leave_torn_json_or_temp_files() {
+        let dir = tmp("concurrent");
+        let l = Lockfile::write(&dir, 33, &body(&["/a"])).unwrap();
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let l = &l;
+                s.spawn(move || {
+                    for _ in 0..25 {
+                        l.rewrite(&body(&[if i % 2 == 0 { "/even" } else { "/odd" }])).unwrap();
+                    }
+                });
+            }
+        });
+        read(&l);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

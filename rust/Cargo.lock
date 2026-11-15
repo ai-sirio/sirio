@@ -7480,6 +7480,16 @@ name = "sirio_icons"
 version = "0.45.0"
 
 [[package]]
+name = "sirio_ide"
+version = "0.43.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "serde",
+ "serde_json",
+ "socket2",
+]
+
+[[package]]
 name = "sirio_ipc"
 version = "0.45.0"
 dependencies = [
