@@ -1,6 +1,6 @@
 # Claude Code's `/ide` in Sirio: Sirio as the IDE of the Claude in its terminals
 
-Status: design, approved approach, not yet planned. Brainstormed with Enzo on 2026-11-15.
+Status: design approved; planned (§10 records the calls made while planning). Brainstormed with Enzo on 2026-11-15.
 
 ## §0 Intent
 
@@ -215,8 +215,8 @@ proposal in a normal Ely editor, rather than an editable diff. Line comments: **
 
 ### §4.4 Selection → `selection_changed`
 
-- A new Ely hook: the code editor emits a selection-changed event whenever the primary
-  selection or the caret moves, recorded in `rust/vendor/ely-gpui-component/LOCAL-CHANGES.md`.
+- ~~A new Ely hook~~ (superseded by §10.1: the file view detects the change itself): the code
+  editor's primary selection or caret moving is the trigger.
 - `FileView` turns it into one app-level event `{ path, range, text }`, **consumable by more
   than one subscriber** (the native-chat project subscribes too, §6).
 - The bridge sends `selection_changed` to every connection whose owner's worktree holds the
@@ -367,7 +367,7 @@ findings for it, already mapped to §1.4's severities and coordinates. The nativ
 - A new `docs/agents/architecture/ide-bridge.md`, linked from `CLAUDE.md`'s Architecture list
   with its one-line rule ("never answer `openDiff` without the user").
 - `docs/agents/e2e-tests.md`: the new E2E and the live test.
-- `rust/vendor/ely-gpui-component/LOCAL-CHANGES.md`: the selection hook.
+- ~~`rust/vendor/ely-gpui-component/LOCAL-CHANGES.md`: the selection hook~~ (none, §10.1).
 - `docs/agents/architecture/text-selection.md` if the selection hook touches what it covers.
 
 ## §8 How it is proven
@@ -419,3 +419,72 @@ only, like the other live tests; a missing CLI prints SKIP.
 - The 100 ms coalescing and the comment-delivery wait, within §4.4 and §4.8, adjusted to what
   §8.1 finds.
 - The scripted client's language (it needs a WebSocket client).
+
+## §10 Decided while planning (2026-11-15)
+
+Calls made while writing the plan, on what the code holds today. Each overrides the section
+it names; the live probe (§8.1) adds its findings here before any product code.
+
+1. **Selection without an Ely hook** (overrides §4.4's first bullet and §7's
+   `LOCAL-CHANGES.md` line). `FileView` already observes its code editor on every notify
+   (`file_view/code_surface.rs`, the observer that refreshes the caret line). That observer
+   compares the primary selection's byte offsets with the last ones seen and, only when they
+   differ, emits `FileViewEvent::SelectionChanged { path }`; focusing a file tab emits it too
+   (no notify comes from a focus). The contract data of §6 is read on demand with
+   `FileView::ide_selection(cx)`: absolute path, 0-based line and UTF-16 character, end
+   exclusive, and the text. A drag changes the selection on every mouse move, so the UTF-16
+   conversion and the text are computed only when the coalesced notification is sent, not
+   per event. No vendor change.
+2. **Selection text cap.** Claude 2.1.325 hands the selection's text to the model ("The user
+   selected the lines X to Y from <file>: …") cut to 2000 characters with " ... (truncated)".
+   Sirio sends at most 4096 UTF-16 code units, cut on a character boundary, so Claude's own
+   marker still appears; the line range is always exact.
+3. **Owner resolution.** Pure in `sirio_ide`: a bounded breadth-first walk down from each
+   terminal pane's `shell_pid()` (depth 8, 1024 processes in all), with the child lookup
+   injected. The app supplies it from a new public `sirio_activity::process::child_pids`
+   (Linux `/proc`, macOS libproc, Windows the toolhelp snapshot), on the background executor.
+   A process's cwd, for an ownerless connection (§4.2), is read on Linux only
+   (`/proc/<pid>/cwd`); elsewhere it is none, and §4.6's every-worktree fallback applies.
+4. **The answers Sirio gives, all of them.** `FILE_SAVED` and `DIFF_REJECTED` come only from
+   the proposal's buttons or from the user's Reject in the close confirmation. `TAB_CLOSED` is
+   only ever the result of the `close_tab` call itself, never of an `openDiff`.
+   `closeAllDiffTabs` returns `CLOSED_<n>_DIFF_TABS`. A pending `openDiff` that is closed by
+   `close_tab`/`closeAllDiffTabs`, or replaced by another with the same `tab_name`, gets a
+   JSON-RPC error (`-32000`), which carries no decision. The probe confirms Claude reads that
+   error as neither accept nor reject; if it does not, this comes back to Enzo.
+5. **getDiagnostics.** The connection's thread asks the app over a channel and waits at most
+   400 ms. The app reads the existing drawers by lookup (a worktree with no drawer has no
+   findings; the read never creates one). Past the deadline the answer is a JSON-RPC error,
+   not `[]`: an empty baseline would make pre-existing errors look caused by the edit. The
+   probe checks whether Claude counts that error toward its three-timeouts cutoff.
+6. **The diff.** New `sirio_git::diff_proposal`: Sirio reads the file on disk itself (regular
+   file checked on the open handle, at most `sirio_ui::editor::MAX_FILE_BYTES`, 1 MiB), writes
+   both sides to private temporary files under Sirio's data directory (beside
+   `session::database_path()`), runs `git diff --no-index` with `diff_entry`'s flags, and parses
+   with `parse_diff`; the parsed path is rewritten to the real file. An untrusted path never
+   reaches git. A missing file diffs against `/dev/null`.
+7. **Reusing Changes.** `ChangesSource::Proposal(Arc<FileDiff>)` and
+   `ChangesTab::for_proposal`: the Changes body, both diff modes, word highlights and the `+`
+   comment affordance, with no stage or discard controls and a header of its own. The
+   change-request composer is private to that tab, so the proposal gets a small composer of
+   its own (an Ely input and two text buttons).
+8. **The tab.** `TabKind::Proposal` and `PaneContent::Proposal`, never saved, like Trace. A
+   proposal of a worktree that is not on screen is held tab-less in the workspace, parked with
+   its worktree and put back with it (beside the Trace tabs), and never dropped by an
+   eviction. Closing a worktree or project that holds proposals asks once "Closing rejects
+   Claude's change" (Reject / Cancel).
+9. **Where it starts.** The bridge starts from `main()`, after settings load and before the
+   first terminal is created or restored, never from the workspace's constructor: in-process
+   UI tests never bind a port or write a lockfile. The lockfile directory is a parameter of
+   `sirio_ide`; the app passes `<home>/.claude/ide`. `CLAUDE_CODE_SSE_PORT` joins
+   `sirio_env::PER_PANE` (both of its uses are wanted: the launch's value is dropped and the
+   native chat never inherits it).
+10. **Library and threads.** `tungstenite`, synchronous, without TLS. An acceptor thread and one
+    thread per connection; each connection's loop reads with a short socket timeout and in
+    between writes what the app queued and expires deadlines, so no request blocks another.
+11. **Persistence.** Port and token in the settings key-value table (the typed pattern of
+    `active_agent_account_id`), the switch as the setting `claude.ideBridge`, default on. No
+    migration.
+12. **Comment delivery.** The clipboard path is built first and always works; typing into the
+    terminal is added on top only if the probe finds both a reliable idle signal and a paste
+    Claude shows as text (§4.8, Enzo's decision).
