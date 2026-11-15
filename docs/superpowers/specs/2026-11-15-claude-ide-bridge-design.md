@@ -508,3 +508,159 @@ it names; the live probe (§8.1) adds its findings here before any product code.
     unless Enzo decides otherwise, announced with a toast "Claude proposes a change in
     <worktree name>"; the owner terminal's own attention state is not relied on, since a
     hand-typed `claude` may have no activity agent id.
+
+### §10.13 Probe findings (2026-11-15)
+
+The live probe of §8.1, run against the real Claude Code **2.1.325** (`claude --version` printed
+`2.1.325 (Claude Code)`, run from `~/.local/share/mise/installs/claude/2.1.325/claude`, never the
+mise wrapper). The child's environment was built from nothing: a private `HOME` and `XDG_*`
+under `~/.cache/st/ide-probe-tmp`, a dummy `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` on
+`fake_messages.py` (now with an Edit scenario), `CLAUDE_CODE_SSE_PORT` on a throwaway stdlib
+WebSocket server that wrote its own lockfile under the private `HOME`, `--permission-mode default`.
+The real `~/.claude`, `~/.claude.json` and `~/.claude/ide` were never touched. Every hook
+Sirio's Claude adapter installs (`Stop`, `Notification`, `SessionStart`, `UserPromptSubmit`,
+`SessionEnd`) plus `PreToolUse`, `PostToolUse` and `PermissionRequest` logged to a file. Panes
+were driven in tmux, except item 4, measured in a debug Sirio. Times are seconds and come from
+the stub's frame log or the pane captures. The throwaway scripts stay in the scratchpad; this
+section is what is kept.
+
+**1. Auto-connect and the traffic of one Edit.** Confirmed. With only `CLAUDE_CODE_SSE_PORT` set
+and a lockfile `<port>.lock` (`{pid, workspaceFolders, ideName, transport:"ws", authToken,
+runningInWindows}`), Claude connected about 1 s after the stub listened: `GET /` with
+`Sec-WebSocket-Protocol: mcp`, `Sec-WebSocket-Extensions: permessage-deflate`, `User-Agent:
+claude-code/2.1.325 (cli)` and `x-claude-code-ide-authorization: <token>` (§1.3 holds). Frames, in
+order: `initialize` (protocolVersion `2025-11-25`, clientInfo `claude-code` 2.1.325), the
+notification `notifications/initialized`, the notification `ide_connected {"pid":558674}`
+(Claude's own pid: in the Sirio pane it was Claude, whose parent was the shell, then
+`sirio-host`, then `sirio`, so §10.3's walk up finds the pane's shell), `tools/list`. Nothing
+else until a prompt. One Edit, answered in the terminal:
+
+```
+t+0.0   closeAllDiffTabs {}                      <- at the start of EVERY turn, as the prompt is submitted
+t+1.1   openDiff {old_file_path, new_file_path: <same path>, new_file_contents: "beta\ngamma\n",
+                  tab_name: "✻ [Claude Code] probe.txt (dbf437) ⧉"}     (pending)
+        terminal: "Opened changes in SirioProbe ⧉", "Do you want to make this edit to probe.txt?"
+t+9.45  (the user presses 1 in the terminal)
+t+9.46  close_tab {tab_name}                      -> TAB_CLOSED
+t+9.52  getDiagnostics {uri: "file:///…/probe.txt"}  -> []
+t+9.56  getDiagnostics {}                         -> []      (only when the per-file call answered)
+```
+
+`old_file_path` equals `new_file_path` for an Edit of an existing file; `tab_name` is
+`✻ [Claude Code] <file name> (<6 hex>) ⧉`, new for every proposal. No `getDiagnostics` came
+**before** the edit in any of about fifteen Edits, so §1.4's "per file before and after" is
+half confirmed: only the after-call exists. The terminal prompt's tool header read `Update(probe.txt)`.
+Hook order of that run: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`,
+`Notification` (about 6 s into the prompt, `notification_type: permission_prompt`), `PostToolUse`, `Stop`.
+
+**2. What each answer does to the terminal prompt.**
+
+| answer | what happened |
+|---|---|
+| none, then `1` in the terminal | the prompt stayed up; 13 ms after the key Claude sent `close_tab`; the edit was applied |
+| `FILE_SAVED` + `"EDITED-by-user\nsecond line\nthird"` | no key needed; Claude wrote **exactly that text** to the file (byte for byte, no newline added), and told the model "The user modified your proposed changes before accepting them."; 30 ms later **two** `close_tab` calls |
+| `DIFF_REJECTED` | pane: `⎿ User rejected update to probe.txt`, the prompt back, `✻ Baked for 1s · done`; file untouched; 28 ms later **two** `close_tab` calls; the turn ended |
+| JSON-RPC error `-32000` | the prompt **stayed up and answerable**: the screen kept "Opened changes in SirioProbe ⧉" and the three options; Claude sent one `close_tab` 25 ms after the error and one more after the terminal answer; pressing `1` applied the edit; read as neither accept nor reject |
+
+Claude sends `close_tab` after **every** answer it gets (accept, reject, error) as well as after
+a terminal answer, so §1.4's "when the terminal prompt was answered first" is too narrow, and
+`closeAllDiffTabs` also arrives at the start of each turn.
+
+**3. `getDiagnostics` answered with an error.** Five Edits in a row, each answered with
+`-32000`: Claude asked after every one of them (5 calls). The control: the same five Edits with
+the call left unanswered (it times out): calls after Edits 1, 2 and 3, none after 4 or 5. So the
+cutoff is real, counts timeouts, and **errors do not count toward it**. The second, whole-workspace
+call was not made after an error.
+
+**4. After `DIFF_REJECTED`.** tmux pane: see the table in item 2. Hooks that fired after the
+answer: **none**: no `Stop`, no `PostToolUse`, no `Notification` (watched 20 s). The only later
+hook was the idle `Notification` (`idle_prompt`, "Claude is waiting for your input") about 60 s
+after the last activity. So a hook-driven status would stay "running" for a minute after a
+reject. OSC 7501 does appear. In the debug Sirio (isolated HOME, `SIRIO_DB`, socket and Xvfb;
+`claude` typed by `panel write` into a host-session pane of the worktree, `CLAUDE_CODE_SSE_PORT`
+inherited from the app's environment), the pane's raw bytes held, in order:
+`7501;state=idle:app=claude-code`, `state=working`, `state=working:…:msg=<Editing probe.txt>`,
+`state=blocked:app=claude-code:kind=permission:msg=<approve Update: …>`, then, right after the
+reject, `state=idle:app=claude-code`. `surface.attention.read --json` (session status) measured:
+
+```
+epoch      after typing  status
+…523.325   1.5 s         running
+…524.956   3.1 s         needs-input          (the permission dialog)
+…529.069   -             stub sends DIFF_REJECTED
+…529.842   0.77 s later  done, unread=true    (a notification posted: "Claude Code — work/main")
+(no change for the remaining 10 s of this 40 s watch; the earlier cycle, watched for 60 s, stayed `done` too)
+```
+
+Sampling cost about 0.3 s per read, so the real latency is under 0.8 s. A second cycle gave the
+same shape (reject at 13.3 s, `done` at 14.8 s with a coarser poll). So the idle signal is
+reliable **for a hand-typed Claude whose terminal answers Claude's probe**, as Sirio's does.
+The panes of this measurement were a host session created by `panel create` and typed through
+`panel write`, not GUI keystrokes.
+
+**5. Bracketed paste into the idle prompt** (tmux `paste-buffer -p`; the prompt was idle and Claude had
+enabled bracketed paste):
+
+| pasted | shown |
+|---|---|
+| 3 short lines (`@probe.txt#L1 first comment` …) | as the text, three lines |
+| 4 short lines | `[Pasted text #5 +3 lines]` |
+| 5, 8 and 12 short lines | `[Pasted text #1 +4 lines]` and so on, plus "paste again to expand" |
+| 3 lines of 100 characters (300) | as text |
+| 3 lines of 300 characters (902) | `[Pasted text #1 +2 lines]` |
+| 1 line of 700 characters | as text |
+| 1 line of 810 and of 1000 characters | `[Pasted text #2]`, `[Pasted text #3]` |
+
+So the collapse starts at **more than 3 lines or more than about 800 characters**. A cheaper
+route does not collapse: five lines typed as ordinary key events, each ending in a backslash and
+Enter (`\`, Enter), gave five real lines in the prompt, no marker. That was tested with one
+`send-keys` per line, not through Sirio's own input path, so a burst fast enough to look like a
+paste was not tried.
+
+**6. The stub killed and restarted on the same port** (no proxy variables in this run). Stub
+down 2 s: Claude reconnected 0.50 s after it was back (`ide_connected` again). Down 10 s:
+reconnected 4.5 s after it was back, 14.5 s after the loss. Down 25 s (and, in an earlier run
+with a dead `HTTP_PROXY` in the environment, 41 s): **no reconnect** within the next 60 s
+(100 s in the earlier run), and `/ide` did not bring it back either: choosing the listed
+`SirioProbe` again showed "Failed to connect to SirioProbe." and "SirioProbe disconnected",
+with no TCP connection reaching the stub, whether chosen straight away or after choosing None
+first. A newly started Claude connects at once. So Claude retries for roughly 15 to 25 s after
+a loss, then stays disconnected until it is restarted. `/ide` listed the lockfile and showed
+✔ beside it while it was disconnected.
+
+**6b. The stub killed (SIGKILL) while an `openDiff` was pending.** The terminal prompt stayed up,
+unchanged; pressing `1` applied the edit and the turn finished (`● ok`, `done`). Nothing waited
+on the dead connection. "No answer is owed" holds for a drop. Not told apart from a graceful
+close here: both end the socket from the kernel's side.
+
+**7. Two lockfiles for the same cwd.** A decoy stub (a second lockfile listing the same
+`workspaceFolders`, its own token, another `ideName`) next to the stub whose port is
+`CLAUDE_CODE_SSE_PORT`: the port-equal one got the only connection in all four combinations
+(its port above the decoy's, below it, each without and with `TERM_PROGRAM=vscode`); the decoy
+never saw a connection (no TCP accept). §1.2's typed-integer reading holds.
+
+**Also learned.**
+
+- The fake model needs a fresh Claude per scenario: a repeated prompt in one session merges into
+  the previous tool-result message, and `fake_messages.py` reuses one message id, so a long
+  session's history is mangled. Its Edit scenario reads the content blocks in order and works for
+  a fresh session ("run edit", and "run edit twice": two Edit calls in successive turns; when the
+  first is accepted the second fails with "String to replace not found" and never reaches
+  `openDiff`). `Edit` needed no prior `Read`.
+- The lockfile's pid must be alive; the stub's was.
+- `Opened changes in <ideName> ⧉` is the terminal's only sign of the connection; the status line
+  showed nothing else while connected. `SirioProbe disconnected` shows bottom right after a loss.
+
+**The gate.**
+
+| Finding | If it contradicts the plan | Task affected | Result |
+|---|---|---|---|
+| Port-equal lockfile not chosen | stop, back to Enzo | 7 | not triggered: chosen 4 of 4 |
+| `-32000` on a pending `openDiff` read as accept or reject | stop, back to Enzo | 4, 10 | not triggered: neither, the prompt stays answerable |
+| Errors count toward the diagnostics cutoff | answer `[]` past the deadline instead, note it | 3, 9 | not triggered: five errors in a row, five asks; only timeouts count |
+| No reliable idle signal, or paste collapses | clipboard only; skip Task 11 steps 6–8 | 11 | **triggered by the paste half**: collapses beyond 3 lines or about 800 characters (the idle signal is reliable); a typed-line route avoided it in a tmux test only |
+| No reconnect after restart | add the `/ide` line to `ide-bridge.md` and release notes | 12 | **triggered**: reconnects only within roughly 15 to 25 s of the loss; and `/ide` did not recover it, so the note is "restart Claude", not "use `/ide`" |
+| `close_tab` sent in cases other than a terminal answer | re-check Task 4's close semantics | 4, 10 | **triggered**: after every answer (accept, reject, error), twice for accept and reject; `closeAllDiffTabs` at every turn start |
+| A dropped socket with `openDiff` pending leaves the prompt unanswerable | stop, back to Enzo | 7, 10 | not triggered: the prompt stays answerable |
+
+No row reads "stop".
