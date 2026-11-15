@@ -153,8 +153,11 @@ value is one app-wide preference saved across relaunches, not one per chat.
 - The cap applies to the field only. Chips, the attach error, the tool row and the
   band's padding come on top, so the whole band can be a little more than half the
   chat. The field is what the user drags, and chips come and go.
-- Before the chat's first paint its height is unknown and nothing caps the stored
-  value (the drawer does the same before it knows the tab's height).
+- Before the chat's first paint its height is unknown, and the field uses
+  `min(stored, 12)` until the probe has measured it. A chat shown for the first
+  time then grows into its cap instead of overshooting it for a frame. This was a
+  call made while planning; the first version of this design left the stored value
+  uncapped there, as the drawer does before it knows the tab's height.
 - The probe asks for a redraw when `cap_rows` changes (a window or pane resize across
   a row boundary), as it does today for width boundaries, and at no other time.
 
