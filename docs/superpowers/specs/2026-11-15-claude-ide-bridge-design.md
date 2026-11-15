@@ -553,8 +553,8 @@ message ids that alternated alpha and beta (not committed). "v2" is the committe
 | 2, `DIFF_REJECTED`; error `-32000` | `s2`; `s3` | v1 | dead proxy |
 | 3, errors and timeouts, first runs | `s4` (five errors), `s4b` (timeouts) | alt | dead proxy |
 | 3, repeated | `e1` (errors), `e2` (timeouts) | v2 | none |
-| 4, hooks and the tmux half | `s2` (hook log), `s1` | v1 | dead proxy |
-| 4, the Sirio pane | `sirio` | v1 | `NO_PROXY=127.0.0.1` only |
+| 4, the tmux pane after the reject and the hooks that followed it there | `s2` | v1 | dead proxy |
+| 4, the idle `Notification` 60 s after a reject (three rejects), and the OSC 7501 and status measurements | `sirio` | v1 | `NO_PROXY=127.0.0.1` only |
 | 5, paste | `s7` (first pastes), `s8` (thresholds) | v1 | `NO_PROXY=127.0.0.1` only |
 | 6, 2 s and 10 s and 25 s | `s7` | v1 | `NO_PROXY=127.0.0.1` only |
 | 6, 41 s and the first `/ide` attempts | `s6b` | v1 | dead proxy |
@@ -628,11 +628,12 @@ ids, alternating alpha/beta so each Edit applies): five Edits, five `openDiff`, 
 calls answered with errors; and with the calls left unanswered, five `openDiff`, three per-file
 calls (after Edits 1, 2, 3). The sessions had no proxy variable.
 
-**4. After `DIFF_REJECTED`.** tmux pane: see the table in item 2. Hooks that fired after the
-answer: **none**: no `Stop`, no `PostToolUse`, no `Notification` (watched 20 s). The only later
-hook was the idle `Notification` (`idle_prompt`, "Claude is waiting for your input") about 60 s
-after the last activity. So a hook-driven status would stay "running" for a minute after a
-reject. OSC 7501 does appear. In the debug Sirio (isolated HOME, `SIRIO_DB`, socket and Xvfb;
+**4. After `DIFF_REJECTED`.** tmux pane (run `s2`): see the table in item 2. Hooks that fired after the
+answer in `s2`: **none** in the 35 s before the next hook, `SessionEnd`: no `Stop`, no
+`PostToolUse`, no `Notification`. In the Sirio run (`sirio`, three rejects) the only hook before the
+next prompt was an idle `Notification` (`idle_prompt`, "Claude is waiting for your input"), 60.2,
+60.1 and 60.2 s after the three rejects. So a hook-driven status would stay "running" for a minute
+after a reject. OSC 7501 does appear. In the debug Sirio (isolated HOME, `SIRIO_DB`, socket and Xvfb;
 `claude` typed by `panel write` into a host-session pane of the worktree, `CLAUDE_CODE_SSE_PORT`
 inherited from the app's environment), the pane's raw bytes held, in order:
 `7501;state=idle:app=claude-code`, `state=working`, `state=working:…:msg=<Editing probe.txt>`,
