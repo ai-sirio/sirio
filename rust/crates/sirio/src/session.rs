@@ -3810,6 +3810,7 @@ mod tests {
                 ("appearance.theme".into(), "dark".into()),
                 ("appearance.translucency".into(), "true".into()),
                 ("appearance.uiFontSize".into(), "17".into()),
+                ("chat.composerMaxRows".into(), "20".into()),
                 ("chat.limitHistory".into(), "false".into()),
                 ("chat.retentionCount".into(), "37".into()),
                 ("controlSocket.enabled".into(), "false".into()),
