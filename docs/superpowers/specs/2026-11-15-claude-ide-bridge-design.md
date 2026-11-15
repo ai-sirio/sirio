@@ -498,3 +498,13 @@ it names; the live probe (§8.1) adds its findings here before any product code.
     Claude shows as text (§4.8, Enzo's decision), and even then only while the terminal's
     bracketed-paste mode is on: without it a multi-line paste would run each line in whatever
     is in the foreground.
+13. **Copy fixed while planning.** A comment on the proposal's side reads
+    `@<path>#L<n> (proposed) <comment>` (its line exists only in the proposal); one on the disk
+    side `@<path>#L<n> <comment>`; a newline inside a comment becomes a space. Toasts: "Claude
+    closed its proposed change" (its connection went away), alongside §4.5's and §4.8's. The
+    dirty warning reads "Unsaved edits in this file: accepting lets Claude overwrite it on
+    disk".
+14. **A proposal for a worktree that is not on screen** is held without a tab (item 8) and,
+    unless Enzo decides otherwise, announced with a toast "Claude proposes a change in
+    <worktree name>"; the owner terminal's own attention state is not relied on, since a
+    hand-typed `claude` may have no activity agent id.
