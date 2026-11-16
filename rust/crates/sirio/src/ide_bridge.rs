@@ -806,6 +806,26 @@ impl SirioWorkspace {
         }
     }
 
+    /// A connection announced itself: starts the resolution chain. Debug builds only: the E2E
+    /// delays this start (and so the whole chain) by `SIRIO_DEBUG_IDE_RESOLVE_AFTER_MS`, so a
+    /// request that runs `ide_when_resolved` is proved to resolve for itself. Nothing else
+    /// waits on it: `ide_when_resolved` never reads the knob.
+    pub(crate) fn ide_resolve_after_connect(&mut self, cx: &mut Context<Self>) {
+        #[cfg(debug_assertions)]
+        if let Some(delay) = std::env::var("SIRIO_DEBUG_IDE_RESOLVE_AFTER_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(delay)).await;
+                let _ = this.update(cx, |workspace, cx| workspace.ide_resolve_ownerless(cx));
+            })
+            .detach();
+            return;
+        }
+        self.ide_resolve_ownerless(cx);
+    }
+
     /// A Claude connected, or a worktree's terminals attached: resolve what is still ownerless.
     /// The terminals of a worktree just selected have no session pid for a moment (a restored
     /// one attaches to its host session first), so a connection still ownerless afterwards is

@@ -43,7 +43,7 @@ class Transcript:
         self._lock = threading.Lock()
 
     def write(self, record):
-        line = json.dumps(record, sort_keys=True)
+        line = json.dumps(dict(record, t=time.time()), sort_keys=True)
         with self._lock:
             with open(self._path, "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")

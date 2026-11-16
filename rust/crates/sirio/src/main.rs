@@ -11508,7 +11508,7 @@ impl SirioWorkspace {
                         bridge.on_event(event);
                     });
                     if connected {
-                        workspace.ide_resolve_ownerless(cx);
+                        workspace.ide_resolve_after_connect(cx);
                     }
                     cx.notify();
                 });

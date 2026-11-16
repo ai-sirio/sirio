@@ -84,8 +84,9 @@ set -eEuo pipefail
 #                    after the select was sent (inside the select's send window), and the
 #                    client still gets the selection of the first file
 #   diagnostics_file the fake language server (Scripts/Tests/fake_lsp.py, the only server the run
-#                    can start: entries replace the built-in ones for the .py and .rs files the
-#                    run opens, and the end of the run proves no other server ran) reports one
+#                    the run maps every extension it opens, .py and .rs, to it through the
+#                    first-match languages.toml, so no other server is looked for; an end check
+#                    backstops that for live processes) reports one
 #                    warning on `hello` in a.py; getDiagnostics {uri} for that file answers one
 #                    item with the uri echoed, severity "Warning", start {1, 4}, end {1, 9}
 #   diagnostics_outside_worktree
@@ -96,17 +97,23 @@ set -eEuo pipefail
 #                    files, the seeded one included
 #   diagnostics_ownerless_cwd
 #                    a client started outside every Sirio shell (run by the script itself) with
-#                    its cwd in the second worktree is ownerless there (the state says so);
-#                    getDiagnostics {} answers only the second worktree's files
+#                    its cwd in the second worktree; getDiagnostics {} is asked at once, and
+#                    the case fails unless the answer came before the connect-time resolution
+#                    could have run (SIRIO_DEBUG_IDE_RESOLVE_AFTER_MS after the connection), so
+#                    the answer resolved the connection itself: only the second worktree's
+#                    files; the state then shows that connection (by pid) ownerless there
 #   diagnostics_ownerless_elsewhere
 #                    the same with its cwd outside every worktree: ownerless with no worktree;
 #                    getDiagnostics {} answers the files of every worktree of the sidebar (both
 #                    seeded ones, a.py of each)
 #
-# Two debug-only knobs (read under cfg(debug_assertions), so absent from release builds) are set
+# Three debug-only knobs (read under cfg(debug_assertions), so absent from release builds) are set
 # for every launch: SIRIO_DEBUG_IDE_START_DELAY_MS=600 holds each listener start in flight
-# (switch_flap), and SIRIO_DEBUG_IDE_SEND_AFTER_MS widens the selection send window from 100 ms
-# to SEND_AFTER_MS (the selection cases; the value and why are at SEND_AFTER_MS below).
+# (switch_flap), SIRIO_DEBUG_IDE_SEND_AFTER_MS widens the selection send window from 100 ms
+# to SEND_AFTER_MS (the selection cases; the value and why are at SEND_AFTER_MS below), and
+# SIRIO_DEBUG_IDE_RESOLVE_AFTER_MS=3000 delays the resolution a connection starts by itself when
+# it announces itself (never the one a request runs), for the whole run: the cases that wait for
+# an owner or a worktree in the state wait up to 3 s longer for it, a few seconds in all.
 #
 # The artifact: --out-dir DIR (default artifacts/ide-bridge-e2e-<stamp>-<pid>) keeps
 # transcript.log, app.log, client-*.jsonl (every frame a client sent and received), the lockfile
@@ -200,6 +207,11 @@ CLIENT_TAB=""
 # a loaded machine, and the case fails, rather than pass for nothing, if it ever does not. Every case that waits for a selection to arrive, or for
 # none to, waits past this window: a larger value only makes the run slower.
 SEND_AFTER_MS=1000
+# How long the app holds back the resolution a connection starts when it announces itself (the
+# debug-only SIRIO_DEBUG_IDE_RESOLVE_AFTER_MS). The ownerless diagnostics cases ask at once and
+# fail unless the answer arrives inside this window after the connection: then only the
+# resolution the request runs itself can have told the app where the client belongs.
+RESOLVE_AFTER_MS=3000
 sleep_ms() { sleep "$(($1 / 1000)).$(printf '%03d' $(($1 % 1000)))"; }
 
 is_a_host() {
@@ -292,7 +304,8 @@ LOCK_DIR="$HOME/.claude/ide"
 # by a stub first on PATH and by languages.toml entries that replace the built-in ones for every
 # extension the run opens (.py and .rs), so a pyright, pylsp or rust-analyzer on this machine is
 # never looked for; the user's own languages.toml is never read (SIRIO_CONFIG_DIR is unset).
-# `assert_only_the_fake_server` proves it at the end from the app's process tree. It reports one
+# The guarantee is that mapping (the first matching entry wins); `assert_only_the_fake_server`
+# is a backstop at the end, a denylist over the live children of the app's last launch. It reports one
 # warning on the text `hello` of a.py (line 1, columns 4 to 9, 0-based UTF-16).
 mkdir -p "$XDG_CONFIG_HOME/sirio" "$RUN_DIR/fake-lsp"
 cat >"$RUN_DIR/fake-lsp/answers.json" <<'JSON'
@@ -642,6 +655,7 @@ app_start() { # [NAME=value...]: extra variables for the app
   rm -f "$SIRIO_SOCKET"
   (cd "$WT" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 \
     SIRIO_DEBUG_IDE_START_DELAY_MS=600 SIRIO_DEBUG_IDE_SEND_AFTER_MS="$SEND_AFTER_MS" \
+    SIRIO_DEBUG_IDE_RESOLVE_AFTER_MS="$RESOLVE_AFTER_MS" \
     ${VULKAN_ENV[@]+"${VULKAN_ENV[@]}"} "$@" "$BIN" >>"$RUN_DIR/app.log" 2>&1) &
   APP_PID=$!
   for _ in $(seq 1 300); do
@@ -1601,6 +1615,31 @@ import json, sys
 paths = [row["path"] for row in json.load(sys.stdin) if row["branch"] == "ide-second"]
 print(paths[0] if paths else "")'
 }
+# The state expression for a field of the outside client's own connection (by its pid: an earlier
+# connection may still be listed).
+outside_conn() { # field
+  printf '[c for c in d["connections"] if c["pid"] == %s][0]["%s"]' "$OUTSIDE_PID" "$1"
+}
+# Fails unless the client's getDiagnostics answer arrived less than RESOLVE_AFTER_MS after its
+# connection announced itself, by the transcript's own timestamps: the connect-time resolution
+# was held back at least that long, so it cannot have resolved the connection first.
+assert_answered_before_hook_resolution() {
+  python3 -I - "$CLIENT_LOG" "$RESOLVE_AFTER_MS" <<'PY' || fail "$CASE: the answer did not come before the connect-time resolution could have run"
+import json, sys
+connected = answered = None
+for line in open(sys.argv[1], encoding="utf-8"):
+    r = json.loads(line)
+    if r.get("event") == "connected" and connected is None:
+        connected = r["t"]
+    if r.get("dir") == "in" and r.get("frame", {}).get("id") == "call-1":
+        answered = r["t"]
+if connected is None or answered is None:
+    sys.exit("missing timestamps")
+elapsed = answered - connected
+print("answer %.3f s after the connection (window %.3f s)" % (elapsed, int(sys.argv[2]) / 1000), file=sys.stderr)
+sys.exit(0 if elapsed < int(sys.argv[2]) / 1000 else 1)
+PY
+}
 # The uris of a getDiagnostics {} answer, one per line.
 workspace_uris() {
   client_do 'call tools/call {"name":"getDiagnostics","arguments":{}}'
@@ -1617,10 +1656,12 @@ case_diagnostics_ownerless_cwd() {
   [ -n "$second" ] || fail "$CASE: sirioctl does not list the second worktree"
   start_outside_client "$second"
   wait_client "connected" 'r.get("event") == "connected"' 1
-  # Asked at once, before anything waits for the resolution: the answer has to wait for it itself.
+  # Asked at once, and the answer must come before the connect-time resolution can have run
+  # (the knob holds it back RESOLVE_AFTER_MS): the request resolves the connection itself.
   uris="$(workspace_uris)"
-  expect_state "ownerless" 'd["connections"][0]["owner_pane"]' None
-  expect_state "in the worktree its cwd is in" 'd["connections"][0]["worktree"]' "$second"
+  assert_answered_before_hook_resolution
+  expect_state "ownerless" "$(outside_conn owner_pane)" None
+  expect_state "in the worktree its cwd is in" "$(outside_conn worktree)" "$second"
   [ "$uris" = "file://$second/a.py" ] || fail "$CASE: expected only file://$second/a.py, got: $uris"
   echo "OK: the ownerless client of the second worktree got that worktree's file only"
   end_outside_client
@@ -1629,11 +1670,12 @@ case_diagnostics_ownerless_cwd() {
 case_diagnostics_ownerless_elsewhere() {
   local second uris
   second="$(second_worktree)"
+  [ -n "$second" ] || fail "$CASE: sirioctl does not list the second worktree"
   start_outside_client "$RUN_DIR"
   wait_client "connected" 'r.get("event") == "connected"' 1
   uris="$(workspace_uris | sort)"
-  expect_state "ownerless" 'd["connections"][0]["owner_pane"]' None
-  expect_state "in no worktree" 'd["connections"][0]["worktree"]' None
+  expect_state "ownerless" "$(outside_conn owner_pane)" None
+  expect_state "in no worktree" "$(outside_conn worktree)" None
   [ "$uris" = "$(printf 'file://%s/a.py\nfile://%s/a.py\n' "$WT" "$second" | sort)" ] \
     || fail "$CASE: expected the a.py of $WT and of $second, got: $uris"
   echo "OK: the ownerless client with no worktree got the files of every worktree"
