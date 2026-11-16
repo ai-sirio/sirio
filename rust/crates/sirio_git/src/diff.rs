@@ -558,6 +558,101 @@ fn line_count(path: &Path) -> Option<usize> {
     }
 }
 
+/// A scratch file that is removed when it goes out of scope, on every path out.
+struct ScratchFile {
+    dir: PathBuf,
+    name: String,
+}
+
+impl ScratchFile {
+    /// Creates a new file with a unique name in `dir`. `create_new` refuses a name that
+    /// already exists, a planted symlink included; on Unix the file is private (0600).
+    fn create(dir: &Path, contents: &[u8]) -> std::io::Result<Self> {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let name = format!(
+            "proposal-{}-{}-{nanos}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(dir.join(&name))?;
+        let file_guard = Self { dir: dir.to_path_buf(), name };
+        file.write_all(contents)?;
+        Ok(file_guard)
+    }
+}
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.dir.join(&self.name));
+    }
+}
+
+/// Diffs a proposed file (`new`) against what is on disk (`old`, `None` for a file that
+/// does not exist yet).
+///
+/// Both sides are written to private files in `scratch` and git sees only their relative
+/// names (with `scratch` as its working directory), or `/dev/null` for a missing old side:
+/// the path the proposal named is untrusted and never reaches git's command line. The
+/// returned diff carries `display_path`.
+pub fn diff_proposal(
+    old: Option<&[u8]>,
+    new: &[u8],
+    display_path: &Path,
+    scratch: &Path,
+    context_lines: usize,
+) -> Result<FileDiff, GitError> {
+    let io_error = |error: std::io::Error| GitError::CommandFailed {
+        code: -1,
+        stderr: error.to_string(),
+    };
+    if !scratch.is_dir() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(scratch).map_err(io_error)?;
+    }
+    let old_file = old
+        .map(|bytes| ScratchFile::create(scratch, bytes))
+        .transpose()
+        .map_err(io_error)?;
+    let new_file = ScratchFile::create(scratch, new).map_err(io_error)?;
+
+    let unified = format!("--unified={context_lines}");
+    // The same flags as `diff_entry`'s `--no-index` branch, so the user's git config
+    // cannot change what comes back.
+    let zero_context: &[&str] = if context_lines == 0 {
+        &["--inter-hunk-context=0", "--no-textconv"]
+    } else {
+        &[]
+    };
+    let mut args: Vec<&str> = vec!["diff", "--no-color", "--no-ext-diff", "--no-index", &unified];
+    args.extend(zero_context);
+    args.extend([
+        "--",
+        old_file.as_ref().map_or("/dev/null", |f| f.name.as_str()),
+        new_file.name.as_str(),
+    ]);
+    let result = git::run_accepting(&args, scratch, &[0, 1])?;
+    Ok(parse_diff(&result.stdout_string(), display_path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -892,5 +987,130 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod diff_proposal_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    /// A fresh, empty scratch directory path (not yet created) under the system temp dir.
+    fn scratch_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sirio-diff-proposal-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn entries(dir: &Path) -> usize {
+        std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0)
+    }
+
+    #[test]
+    fn missing_old_is_all_added() {
+        let scratch = scratch_dir();
+        let diff =
+            diff_proposal(None, b"one\ntwo\n", Path::new("src/new.rs"), &scratch, 3).unwrap();
+        assert_eq!(diff.additions, 2);
+        assert_eq!(diff.deletions, 0);
+        assert_eq!(diff.hunks.len(), 1);
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn identical_is_no_hunks() {
+        let scratch = scratch_dir();
+        let diff = diff_proposal(
+            Some(b"same\n"),
+            b"same\n",
+            Path::new("same.txt"),
+            &scratch,
+            3,
+        )
+        .unwrap();
+        assert!(diff.hunks.is_empty());
+        assert_eq!((diff.additions, diff.deletions), (0, 0));
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn crlf_lines_survive_parse() {
+        let scratch = scratch_dir();
+        let diff = diff_proposal(
+            Some(b"a\r\nb\r\n"),
+            b"a\r\nc\r\n",
+            Path::new("crlf.txt"),
+            &scratch,
+            3,
+        )
+        .unwrap();
+        assert_eq!(diff.hunks.len(), 1);
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn binary_is_marked_binary() {
+        let scratch = scratch_dir();
+        let diff = diff_proposal(
+            Some(b"\0old"),
+            b"\0new",
+            Path::new("blob.bin"),
+            &scratch,
+            3,
+        )
+        .unwrap();
+        assert!(diff.is_binary);
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn path_is_the_display_path() {
+        let scratch = scratch_dir();
+        let diff = diff_proposal(
+            Some(b"a\n"),
+            b"b\n",
+            Path::new("deep/real name.txt"),
+            &scratch,
+            3,
+        )
+        .unwrap();
+        assert_eq!(diff.path, Path::new("deep/real name.txt"));
+        let dump = format!("{diff:?}");
+        assert!(!dump.contains("sirio-diff-proposal"), "{dump}");
+        assert!(!dump.contains("proposal-"), "{dump}");
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn scratch_files_are_removed() {
+        let scratch = scratch_dir();
+        diff_proposal(Some(b"a\n"), b"b\n", Path::new("f.txt"), &scratch, 3).unwrap();
+        assert_eq!(entries(&scratch), 0, "left files after Ok");
+
+        // Err path: a scratch "directory" that is a regular file cannot be created.
+        let blocker = scratch_dir();
+        std::fs::write(&blocker, b"x").unwrap();
+        assert!(diff_proposal(Some(b"a\n"), b"b\n", Path::new("f.txt"), &blocker, 3).is_err());
+        std::fs::remove_file(&blocker).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn scratch_files_are_removed_when_dropped() {
+        let scratch = scratch_dir();
+        std::fs::create_dir_all(&scratch).unwrap();
+        {
+            let a = ScratchFile::create(&scratch, b"a").unwrap();
+            let b = ScratchFile::create(&scratch, b"b").unwrap();
+            assert_eq!(entries(&scratch), 2);
+            assert_ne!(a.name, b.name);
+        }
+        assert_eq!(entries(&scratch), 0);
+        std::fs::remove_dir_all(&scratch).ok();
     }
 }
