@@ -1507,6 +1507,38 @@ fn an_unhandled_request_is_refused_by_name() {
 }
 
 #[test]
+fn a_request_sent_before_the_handshake_is_answered_is_refused() {
+    let log = response_log_path();
+    let launch = ClaudeLaunch::fixture(
+        PathBuf::from("python3"),
+        vec![
+            FIXTURE.into(),
+            "early_request".into(),
+            format!("--fixture-response-log={}", log.display()),
+        ],
+    );
+    let (_client, events) = ClaudeClient::launch(launch, std::env::temp_dir())
+        .expect("fixture claude should complete its handshake");
+    wait_for_log(&log, |lines| lines.len() >= 2);
+    let responses = logged_responses(&log);
+    for id in ["early-e", "early-p"] {
+        let error = responses
+            .iter()
+            .find(|(response_id, _)| response_id == id)
+            .and_then(|(_, body)| body["error"].as_str())
+            .unwrap_or_else(|| panic!("{id} was not refused: {responses:?}"));
+        assert!(error.contains("not ready"), "{id}: {error}");
+    }
+    assert!(
+        !std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
+            event,
+            ChatEvent::Elicitation { .. } | ChatEvent::PermissionRequest { .. }
+        )),
+        "a refused request is never shown"
+    );
+}
+
+#[test]
 fn two_open_requests_are_answered_independently() {
     let log = response_log_path();
     let (client, events) = launch_elicitation(&log);

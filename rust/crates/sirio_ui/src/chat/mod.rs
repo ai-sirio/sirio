@@ -1041,6 +1041,9 @@ enum Entry {
         resolved: Option<&'static str>,
         /// The turn ended with no answer.
         expired: bool,
+        /// `expired` because Sirio's own timer ran out, not because the turn
+        /// ended: the turn goes on and the CLI was told `cancel`.
+        timed_out: bool,
         /// The agent took the request back.
         withdrawn: bool,
         /// The server said the page flow finished.
@@ -3506,6 +3509,7 @@ impl Chat {
                     error: None,
                     resolved: None,
                     expired: false,
+                    timed_out: false,
                     withdrawn: false,
                     completed: false,
                 });
@@ -6231,8 +6235,7 @@ impl Chat {
         if let Some(request_id) = self.question_answer.for_request {
             self.answer_blink.wake();
             if matches!(event.keystroke.key.as_str(), "enter" | "return") {
-                let draft = self.question_answer.draft.clone();
-                self.answer_question_text(request_id, &draft, cx);
+                self.submit_answer_field(request_id, cx);
             } else if event.keystroke.key == "escape" {
                 self.cancel_question(request_id, cx);
             } else if event.keystroke.key == "backspace" {
@@ -6263,8 +6266,7 @@ impl Chat {
     /// focused (the raw-key fallback lives in `on_composer_key`).
     fn send_answer_action(&mut self, _: &SendAnswer, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(request_id) = self.question_answer.for_request {
-            let draft = self.question_answer.draft.clone();
-            self.answer_question_text(request_id, &draft, cx);
+            self.submit_answer_field(request_id, cx);
         }
         cx.notify();
     }
@@ -14134,11 +14136,10 @@ two"
         })
     }
 
-    /// Types into the dock's answer field, which the row's Enter focuses.
+    /// Types into the dock's answer field, which a free-text step focuses
+    /// on arrival.
     fn type_into_the_answer(cx: &mut VisualTestContext, text: &str) {
         arm_dock(cx);
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
         cx.simulate_input(text);
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
@@ -14183,8 +14184,6 @@ two"
 
         // Esc inside the typed answer of the note step withdraws the whole form.
         arm_dock(cx);
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
         cx.simulate_input("x");
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
@@ -14466,6 +14465,178 @@ two"
             assert_eq!(control_entry_row(card)["status"], "completed");
             assert!(matches!(card, Entry::Elicitation { resolved: Some("accepted"), .. }));
             assert!(chat.pending_question().is_none());
+        });
+    }
+
+    // Ways a free-text step of a form can fail in a real chat:
+    // - a digit typed into it is taken as a dock row shortcut (3 declines the
+    //   whole form, 2 skips the field, 1 opens it and swallows the digit);
+    // - an Enter meant for the step before submits an empty answer here and
+    //   skips an optional field;
+    // - a link completed after it was declined or cancelled reads "completed".
+
+    fn two_optional_integer_fields() -> sirio_chat::ElicitationPrompt {
+        let field = |name: &str| sirio_chat::ElicitationField {
+            name: name.into(),
+            title: name.into(),
+            description: None,
+            required: false,
+            kind: sirio_chat::ElicitationFieldKind::Integer,
+            default: None,
+        };
+        sirio_chat::ElicitationPrompt::Form(vec![field("a"), field("b")])
+    }
+
+    /// The reviewer's setup: an open two-step Integer form, drawn and armed.
+    fn open_integer_form(cx: &mut TestAppContext) -> (Entity<Chat>, &mut VisualTestContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        focus_composer(&chat, cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_elicitation(1, two_optional_integer_fields()));
+            cx.notify();
+        });
+        refresh_frame(cx);
+        refresh_frame(cx);
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        (chat, cx)
+    }
+
+    fn integer_form_state(
+        chat: &Entity<Chat>,
+        cx: &VisualTestContext,
+    ) -> (usize, serde_json::Value, Option<&'static str>) {
+        chat.read_with(&cx.cx, |chat, _| match &chat.entries[0] {
+            Entry::Elicitation { step, values, resolved, .. } => {
+                (*step, serde_json::Value::Object(values.clone()), *resolved)
+            }
+            _ => panic!("no elicitation"),
+        })
+    }
+
+    #[gpui::test]
+    async fn a_digit_typed_on_a_free_text_step_is_text_not_a_row_shortcut(
+        cx: &mut TestAppContext,
+    ) {
+        let (chat, cx) = open_integer_form(cx);
+        cx.simulate_input("3");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let (step, values, resolved) = integer_form_state(&chat, cx);
+        assert_eq!(values["a"], 3);
+        assert_eq!(step, 1, "the first field is answered, the second is next");
+        assert_eq!(resolved, None, "3 is not the Decline row");
+    }
+
+    #[gpui::test]
+    async fn digits_typed_on_a_free_text_step_all_reach_the_field(cx: &mut TestAppContext) {
+        let (chat, cx) = open_integer_form(cx);
+        cx.simulate_input("12");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let (_, values, resolved) = integer_form_state(&chat, cx);
+        assert_eq!(values["a"], 12);
+        assert_eq!(resolved, None);
+    }
+
+    #[gpui::test]
+    async fn an_enter_before_the_next_step_is_armed_does_not_skip_it(cx: &mut TestAppContext) {
+        let (chat, cx) = open_integer_form(cx);
+        cx.simulate_input("3");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        // The next step is drawn but its arming delay has not passed.
+        refresh_frame(cx);
+        refresh_frame(cx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let (step, values, resolved) = integer_form_state(&chat, cx);
+        assert_eq!(step, 1, "the second field was not skipped");
+        assert!(values.get("b").is_none());
+        assert_eq!(resolved, None);
+
+        cx.executor().advance_clock(question_dock::DOCK_ARMING_DELAY);
+        cx.run_until_parked();
+        cx.simulate_input("7");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let (_, values, _) = integer_form_state(&chat, cx);
+        assert_eq!(values["b"], 7, "once armed, the next field takes its text");
+    }
+
+    #[gpui::test]
+    async fn escape_on_a_free_text_step_still_cancels_the_form(cx: &mut TestAppContext) {
+        let (chat, cx) = open_integer_form(cx);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(integer_form_state(&chat, cx).2, Some("cancelled"));
+    }
+
+    #[gpui::test]
+    async fn a_sirio_expiry_is_told_apart_from_a_turn_end(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_elicitation(1, two_optional_integer_fields()));
+            chat.push_entry(question_dock::open_elicitation(2, two_optional_integer_fields()));
+            chat.handle_event(
+                sirio_chat::ChatEvent::RequestClosed {
+                    request_id: 1,
+                    kind: sirio_chat::RequestKind::Elicitation,
+                    reason: sirio_chat::CloseReason::Expired,
+                },
+                cx,
+            );
+            chat.expire_unanswered();
+        });
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(
+                &chat.entries[0],
+                Entry::Elicitation { expired: true, timed_out: true, .. }
+            ));
+            assert!(matches!(
+                &chat.entries[1],
+                Entry::Elicitation { expired: true, timed_out: false, .. }
+            ));
+            assert_eq!(control_entry_row(&chat.entries[0])["status"], "expired");
+            assert_eq!(control_entry_row(&chat.entries[1])["status"], "expired");
+        });
+    }
+
+    #[gpui::test]
+    async fn the_composer_waits_for_an_answer_to_an_open_form(cx: &mut TestAppContext) {
+        let (chat, cx) = open_integer_form(cx);
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.composer_placeholder()),
+            "Waiting for your answer to elic…"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_completion_does_not_rewrite_a_declined_link(cx: &mut TestAppContext) {
+        let (chat, cx) = offline_chat_view(cx);
+        chat.update(cx, |chat, cx| {
+            chat.push_entry(question_dock::open_elicitation(
+                2,
+                sirio_chat::ElicitationPrompt::Url {
+                    url: "https://example.com/a".into(),
+                    elicitation_id: Some("el-2".into()),
+                },
+            ));
+            chat.respond_elicitation(2, sirio_chat::ElicitationAction::Decline, cx);
+            chat.handle_event(
+                sirio_chat::ChatEvent::ElicitationCompleted {
+                    server: "elic".into(),
+                    elicitation_id: "el-2".into(),
+                },
+                cx,
+            );
+        });
+        chat.read_with(&cx.cx, |chat, _| {
+            assert!(matches!(
+                &chat.entries[0],
+                Entry::Elicitation { completed: false, resolved: Some("declined"), .. }
+            ));
+            assert_eq!(control_entry_row(&chat.entries[0])["status"], "declined");
         });
     }
 

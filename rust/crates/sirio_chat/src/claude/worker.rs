@@ -606,6 +606,21 @@ fn refusal_for(value: &serde_json::Value) -> Option<serde_json::Value> {
     Some(sirio_claude::control_error(id, &message))
 }
 
+/// The answer to a control request that arrives before the session loop
+/// runs. The CLI passes an elicitation error to the server as `cancel` and a
+/// `can_use_tool` error as a denial, so neither waits forever.
+fn handshake_refusal(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let id = value.get("request_id")?.as_str()?;
+    let subtype = sirio_claude::control_request_subtype(value).unwrap_or("unknown");
+    match subtype {
+        "can_use_tool" | "elicitation" => Some(sirio_claude::control_error(
+            id,
+            &format!("Sirio is not ready for {subtype} yet"),
+        )),
+        _ => refusal_for(value),
+    }
+}
+
 async fn session(context: SessionContext) -> SessionOutcome {
     let SessionContext {
         mut stdin,
@@ -687,10 +702,11 @@ async fn session(context: SessionContext) -> SessionOutcome {
                 (None, None) => break Catalog::default(),
             }
         }
-        // A request the worker does not handle is refused, so the CLI is
-        // never left waiting on an answer that cannot come.
+        // No request is served before the session loop starts: each is
+        // refused, so the CLI is never left waiting on an answer that cannot
+        // come.
         if let CliMessage::ControlRequest(value) = &message
-            && let Some(refusal) = refusal_for(value)
+            && let Some(refusal) = handshake_refusal(value)
         {
             if write_line(&mut stdin, &refusal).await.is_err() {
                 return SessionOutcome::HandshakeFailed(

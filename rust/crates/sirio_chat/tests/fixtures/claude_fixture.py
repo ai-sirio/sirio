@@ -1136,6 +1136,18 @@ def main():
                 with open(CONTROL_LOG_PATH, "a", encoding="utf-8") as log:
                     log.write(json.dumps(request, separators=(",", ":")) + "\n")
             if subtype == "initialize":
+                if MODE == "early_request":
+                    # Requests the CLI sends before the host's handshake is
+                    # answered: the host must refuse each, never drop it.
+                    ELIC_ISSUED.update(["early-e", "early-p"])
+                    send({"type": "control_request", "request_id": "early-e",
+                          "request": {"subtype": "elicitation", "mcp_server_name": "elic",
+                                      "mode": "form", "message": "too early",
+                                      "requested_schema": {"type": "object", "properties": {}}}})
+                    send({"type": "control_request", "request_id": "early-p",
+                          "request": {"subtype": "can_use_tool", "tool_name": "Bash",
+                                      "tool_use_id": "early-t", "input": {},
+                                      "permission_suggestions": []}})
                 if MODE == "malformed":
                     sys.stdout.write("not-json\n")
                     sys.stdout.flush()
@@ -1263,7 +1275,7 @@ def main():
         elif kind == "control_response":
             response = message.get("response", {})
             cli_request_id = response.get("request_id")
-            if MODE == "elicitation":
+            if MODE in ("elicitation", "early_request"):
                 elicitation_answered(message)
             elif cli_request_id in PENDING:
                 finish_permission(cli_request_id, message)

@@ -553,8 +553,28 @@ impl Chat {
                     || composer.contains_focused(window, cx)
                     || self.transcript_focus.is_focused(window);
                 if focus_in_chat {
-                    let dock = self.question_dock.focus.clone();
-                    cx.defer_in(window, move |_, window, cx| dock.focus(window, cx));
+                    // A free-text step starts on its field: typed characters
+                    // are text there, never the dock's row shortcuts.
+                    let free_text = match self.entries.get(view.entry_index) {
+                        Some(entry @ Entry::Elicitation { .. }) => {
+                            match view.rows.get(elicitation_start_row(entry)) {
+                                Some(DockRow::FreeText(input)) => Some(input.prefill.clone()),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    let key = (view.request_id, view.step);
+                    if let Some(prefill) = free_text {
+                        cx.defer_in(window, move |chat, window, cx| {
+                            if chat.question_dock.for_request == Some(key) {
+                                chat.focus_question_answer(key.0, prefill, window, cx);
+                            }
+                        });
+                    } else {
+                        let dock = self.question_dock.focus.clone();
+                        cx.defer_in(window, move |_, window, cx| dock.focus(window, cx));
+                    }
                 }
             }
             None if self.question_dock.for_request.is_some() => {
@@ -582,6 +602,21 @@ impl Chat {
                     .saturating_duration_since(shown_at)
                     >= DOCK_ARMING_DELAY
             })
+    }
+
+    /// Enter in the answer field of `request_id`. An open elicitation takes
+    /// it only once the dock is armed for the current step: an Enter meant
+    /// for the step before must not submit an empty answer here.
+    pub(super) fn submit_answer_field(&mut self, request_id: u64, cx: &mut Context<Self>) {
+        if let Some(view) = question_view(&self.entries)
+            && view.request_id == request_id
+            && self.open_elicitation_index(request_id).is_some()
+            && !self.dock_armed(&view, cx)
+        {
+            return;
+        }
+        let draft = self.question_answer.draft.clone();
+        self.answer_question_text(request_id, &draft, cx);
     }
 
     /// Moves the selection to row `index`, redrawing only on a change — a
@@ -1264,12 +1299,14 @@ impl Chat {
             Entry::Elicitation {
                 withdrawn: was_withdrawn,
                 expired,
+                timed_out,
                 ..
             } => {
                 if withdrawn {
                     *was_withdrawn = true;
                 } else {
                     *expired = true;
+                    *timed_out = true;
                 }
             }
             Entry::Permission {
@@ -1322,7 +1359,15 @@ impl Chat {
                 ElicitationAction::Accept(serde_json::Map::new()),
                 cx,
             );
-            if let Entry::Elicitation { completed, .. } = &mut self.entries[index] {
+            // Only a card that took the accept (just now, or earlier) reads as
+            // completed: a declined, cancelled, expired or withdrawn one got
+            // `decline` or `cancel`, and says so.
+            if let Entry::Elicitation {
+                completed,
+                resolved: Some("accepted"),
+                ..
+            } = &mut self.entries[index]
+            {
                 *completed = true;
             }
             self.remeasure_entry(index);
@@ -1375,6 +1420,7 @@ pub(super) fn open_elicitation(request_id: u64, prompt: sirio_chat::ElicitationP
         error: None,
         resolved: None,
         expired: false,
+        timed_out: false,
         withdrawn: false,
         completed: false,
     }

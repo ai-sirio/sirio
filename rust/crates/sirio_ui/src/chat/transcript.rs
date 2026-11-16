@@ -470,6 +470,7 @@ impl Chat {
                 message,
                 resolved,
                 expired,
+                timed_out,
                 withdrawn,
                 completed,
                 ..
@@ -487,6 +488,8 @@ impl Chat {
                         "declined" => "Answered: declined",
                         _ => "Answered: accepted",
                     }
+                } else if expired && timed_out {
+                    "No answer in time — cancelled"
                 } else if expired {
                     "No answer — the turn ended"
                 } else {
