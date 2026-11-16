@@ -712,12 +712,19 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # real ~/.claude or a running Sirio is touched. Cases: lockfile_and_env (six keys, 0600, the
 # port in a new pane), token_refused (401, no connection), handshake (the mcp echo, exactly four
 # tools), switch_off (lockfile gone, connection closed, then the same port and token),
-# port_survives_catalog_change, restart_keeps_port (same port and token across a quit; the old
-# client reconnects) and inherited_port (a launch's CLAUDE_CODE_SSE_PORT never reaches a pane).
+# switch_flap (off, on, off, on from one process while a start is held in flight: the original
+# port, one lockfile), port_survives_catalog_change, restart_keeps_port (same port and token across a quit; the old
+# client reconnects) and inherited_port (a launch's CLAUDE_CODE_SSE_PORT never reaches a pane): eight cases.
 # --xvfb or --display :N picks the display (never your own $DISPLAY); --state-only takes no
 # captures; --out-dir DIR keeps transcript.log, app.log, client-*.jsonl (every frame), socket.jsonl,
-# the lockfile with authToken redacted and the PID-matched captures. Run it with
-# `env -u WAYLAND_DISPLAY` from a Wayland session.
+# the lockfile with authToken redacted and the PID-matched captures. socket.jsonl is one line per
+# request the script sent to the app's control socket, with the app's complete answer (sirioctl's
+# calls pass through a recording proxy; a request with no answer is a line with an `error` and no
+# `response`); not recorded: the `system.ping` probe sirioctl sends before `panel.*` calls. The
+# run sets the debug-only SIRIO_DEBUG_IDE_START_DELAY_MS (read under cfg(debug_assertions), so
+# absent from release builds): each listener start holds its bound port for that long, which
+# keeps a start in flight while switch_flap flips the switch (without it the race never shows).
+# Run it with `env -u WAYLAND_DISPLAY` from a Wayland session.
 Scripts/Tests/test-ide-bridge-e2e.sh --xvfb   # -> prints "IDE BRIDGE E2E OK (<n> cases, state-only <0|1>)"
 
 # How Sirio launches the built-in `jdtls` around Lombok (spec

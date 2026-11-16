@@ -39,10 +39,10 @@ set -eEuo pipefail
 # JSON line per request this script sent to the app's control socket, with the app's complete
 # answer. The state, settings and switch calls go straight to the socket; every sirioctl call
 # (the app-ready poll's attempts included) goes through a recording proxy that forwards it
-# unchanged. NOT recorded: the `system.ping` route probe sirioctl sends by itself before a call
-# (the proxy forwards it and leaves it out of the log); an attempt of the app-ready poll made
-# before the app's socket answers that probe sends no request and leaves no line. A request the app could not be reached
-# for is a line with an `error` and no `response`. Rerunning the script reproduces it.
+# unchanged. A request that got no answer (a connect error, an EOF, a timeout, an answer that is
+# not JSON) is a line with the request and an `error` and no `response`. NOT recorded: the
+# `system.ping` route probe sirioctl sends by itself, and only before `panel.*` calls (the proxy
+# forwards it and leaves it out of the log). Rerunning the script reproduces it.
 #
 # Usage: Scripts/Tests/test-ide-bridge-e2e.sh [--xvfb | --display :N] [--state-only] [--out-dir DIR]
 #
@@ -217,19 +217,34 @@ import json, os, socket, sys, time
 
 method, params = sys.argv[1], dict(arg.split("=", 1) for arg in sys.argv[2:])
 request = {"id": f"e2e-{os.getpid()}-{time.time_ns()}", "method": method, "params": params}
-with socket.socket(socket.AF_UNIX) as sock:
-    sock.settimeout(20)
-    sock.connect(os.environ["SIRIO_SOCKET"])
-    sock.sendall((json.dumps(request) + "\n").encode())
-    data = b""
-    while not data.endswith(b"\n"):
-        chunk = sock.recv(65536)
-        if not chunk:
-            break
-        data += chunk
-response = json.loads(data)
-with open(os.path.join(os.environ["RUN_DIR"], "socket.jsonl"), "a", encoding="utf-8") as log:
-    log.write(json.dumps({"request": request, "response": response}, sort_keys=True) + "\n")
+log_path = os.path.join(os.environ["RUN_DIR"], "socket.jsonl")
+
+
+def write_line(entry):
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+# A connect error, an EOF before an answer, a timeout or an answer that is not JSON leaves a
+# line with the request and an `error` and no `response`, then fails as it always did.
+try:
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.settimeout(20)
+        sock.connect(os.environ["SIRIO_SOCKET"])
+        sock.sendall((json.dumps(request) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    if not data:
+        raise EOFError("no answer")
+    response = json.loads(data)
+except (OSError, EOFError, ValueError) as error:
+    write_line({"request": request, "error": type(error).__name__})
+    raise
+write_line({"request": request, "response": response})
 if not response.get("ok"):
     sys.stderr.write(f"{method} failed: {response.get('error')}\n")
     sys.exit(1)
@@ -250,17 +265,23 @@ with open(os.path.join(os.environ["RUN_DIR"], "socket.jsonl"), "a", encoding="ut
     for value in sys.argv[1:]:
         request = {"id": f"burst-{time.time_ns()}", "method": "surface.ide.switch",
                    "params": {"on": value}}
-        with socket.socket(socket.AF_UNIX) as sock:
-            sock.settimeout(20)
-            sock.connect(os.environ["SIRIO_SOCKET"])
-            sock.sendall((json.dumps(request) + "\n").encode())
-            data = b""
-            while not data.endswith(b"\n"):
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-        response = json.loads(data)
+        try:
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.settimeout(20)
+                sock.connect(os.environ["SIRIO_SOCKET"])
+                sock.sendall((json.dumps(request) + "\n").encode())
+                data = b""
+                while not data.endswith(b"\n"):
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+            if not data:
+                raise EOFError("no answer")
+            response = json.loads(data)
+        except (OSError, EOFError, ValueError) as error:
+            log.write(json.dumps({"via": "burst", "request": request, "error": type(error).__name__}, sort_keys=True) + "\n")
+            raise
         log.write(json.dumps({"via": "burst", "request": request, "response": response}, sort_keys=True) + "\n")
         if not response.get("ok"):
             sys.exit(f"switch {value} failed: {response.get('error')}")
@@ -268,7 +289,8 @@ BURST
 sockburst() { python3 -I "$RUN_DIR/sockburst.py" "$@"; }
 # Every sirioctl call goes through a recording proxy: it listens on its own socket, forwards
 # each request line to the app's socket and the answer back, and appends both, complete, to
-# socket.jsonl. sirioctl's own `system.ping` route probe is forwarded and not recorded.
+# socket.jsonl. The `system.ping` route probe sirioctl sends before a `panel.*` call is forwarded
+# and not recorded.
 cat >"$RUN_DIR/proxy.py" <<'PROXY'
 import json, os, socket, socketserver, sys, threading
 
