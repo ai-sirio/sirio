@@ -20,8 +20,10 @@ set -eEuo pipefail
 #   switch_off        `surface.ide.switch on=false`: the lockfile is gone, the client's connection
 #                     is closed, the state says enabled:false with no port; on=true: the same
 #                     port and token are back
-#   switch_flap       the switch sent off, on, off, on back to back (no wait for a start): the
-#                     port is the original, the state agrees, and exactly one lockfile exists
+#   switch_flap       the switch sent off, on, off, on from one process, back to back, while a
+#                     start is held in flight (the debug knob SIRIO_DEBUG_IDE_START_DELAY_MS, set
+#                     for the whole run): the port is the original, the state agrees, and exactly
+#                     one lockfile exists
 #   port_survives_catalog_change
 #                     a worktree added with workspace.create joins the lockfile's workspace
 #                     folders, and a pane in it still gets the port
@@ -32,10 +34,15 @@ set -eEuo pipefail
 #                     with the switch off a new pane has none
 #
 # The artifact: --out-dir DIR (default artifacts/ide-bridge-e2e-<stamp>-<pid>) keeps
-# transcript.log, app.log, client-*.jsonl (every frame a client sent and received), socket.jsonl
-# (every control-socket request and answer: the state and switch calls as sent, and each sirioctl
-# call as its --dry-run prints the request it would send, with its exit status and output), the lockfile with its authToken redacted, and the
-# PID-matched window captures in frames/. Rerunning the script reproduces it.
+# transcript.log, app.log, client-*.jsonl (every frame a client sent and received), the lockfile
+# with its authToken redacted, the PID-matched window captures in frames/ and socket.jsonl: one
+# JSON line per request this script sent to the app's control socket, with the app's complete
+# answer. The state, settings and switch calls go straight to the socket; every sirioctl call
+# (the app-ready poll's attempts included) goes through a recording proxy that forwards it
+# unchanged. NOT recorded: the `system.ping` route probe sirioctl sends by itself before a call
+# (the proxy forwards it and leaves it out of the log); an attempt of the app-ready poll made
+# before the app's socket answers that probe sends no request and leaves no line. A request the app could not be reached
+# for is a line with an `error` and no `response`. Rerunning the script reproduces it.
 #
 # Usage: Scripts/Tests/test-ide-bridge-e2e.sh [--xvfb | --display :N] [--state-only] [--out-dir DIR]
 #
@@ -140,6 +147,7 @@ cleanup() {
   [ -z "$APP_PID" ] || terminate "$APP_PID"
   stop_hosts
   [ -z "$XVFB_PID" ] || terminate "$XVFB_PID"
+  [ -z "${PROXY_PID:-}" ] || kill "$PROXY_PID" 2>/dev/null || true
   cp "$RUN_DIR"/app.log "$OUT_DIR/" 2>/dev/null || true
   cp "$RUN_DIR"/socket.jsonl "$OUT_DIR/" 2>/dev/null || true
   cp "$RUN_DIR"/client-*.jsonl "$OUT_DIR/" 2>/dev/null || true
@@ -233,30 +241,97 @@ else:
 PY
 export RUN_DIR
 sockcall() { python3 -I "$RUN_DIR/sockcall.py" "$@"; }
-# Every sirioctl call goes through this wrapper, which appends the request it makes (as
-# --dry-run prints it), its exit status and its output to socket.jsonl.
-cat >"$RUN_DIR/ctl-logged.py" <<'LOGGED'
-import json, os, subprocess, sys
+# Several `surface.ide.switch` calls from one process, back to back, each on its own connection
+# and logged like sockcall's: SWITCHES are on=true or on=false.
+cat >"$RUN_DIR/sockburst.py" <<'BURST'
+import json, os, socket, sys, time
 
-real, args = os.environ["CTL_REAL"], sys.argv[1:]
-dry = subprocess.run([real, "--dry-run", *args], capture_output=True, text=True)
-done = subprocess.run([real, *args], capture_output=True, text=True)
-try:
-    request = json.loads(dry.stdout)
-except ValueError:
-    request = dry.stdout.strip() or None
 with open(os.path.join(os.environ["RUN_DIR"], "socket.jsonl"), "a", encoding="utf-8") as log:
-    log.write(json.dumps({"sirioctl": args, "request": request, "exit": done.returncode,
-                          "output": done.stdout.strip()[:2000], "error": done.stderr.strip()[:500]},
-                         sort_keys=True) + "\n")
-sys.stdout.write(done.stdout)
-sys.stderr.write(done.stderr)
-sys.exit(done.returncode)
-LOGGED
-printf '#!/bin/sh\nexec python3 -I "%s/ctl-logged.py" "$@"\n' "$RUN_DIR" >"$RUN_DIR/ctl-logged"
-chmod +x "$RUN_DIR/ctl-logged"
-export CTL_REAL="$CTL"
-CTL="$RUN_DIR/ctl-logged"
+    for value in sys.argv[1:]:
+        request = {"id": f"burst-{time.time_ns()}", "method": "surface.ide.switch",
+                   "params": {"on": value}}
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.settimeout(20)
+            sock.connect(os.environ["SIRIO_SOCKET"])
+            sock.sendall((json.dumps(request) + "\n").encode())
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        response = json.loads(data)
+        log.write(json.dumps({"via": "burst", "request": request, "response": response}, sort_keys=True) + "\n")
+        if not response.get("ok"):
+            sys.exit(f"switch {value} failed: {response.get('error')}")
+BURST
+sockburst() { python3 -I "$RUN_DIR/sockburst.py" "$@"; }
+# Every sirioctl call goes through a recording proxy: it listens on its own socket, forwards
+# each request line to the app's socket and the answer back, and appends both, complete, to
+# socket.jsonl. sirioctl's own `system.ping` route probe is forwarded and not recorded.
+cat >"$RUN_DIR/proxy.py" <<'PROXY'
+import json, os, socket, socketserver, sys, threading
+
+listen, upstream, log_path = sys.argv[1:4]
+log_lock = threading.Lock()
+
+
+def record(entry):
+    with log_lock:
+        with open(log_path, "a", encoding="utf-8") as log:
+            log.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+class Handler(socketserver.StreamRequestHandler):
+    def handle(self):
+        up = None
+        try:
+            for line in self.rfile:
+                try:
+                    request = json.loads(line)
+                except ValueError:
+                    request = line.decode("utf-8", "replace")
+                entry = {"via": "sirioctl", "request": request}
+                try:
+                    if up is None:
+                        up = socket.socket(socket.AF_UNIX)
+                        up.connect(upstream)
+                        up_file = up.makefile("rwb")
+                    up_file.write(line)
+                    up_file.flush()
+                    answer = up_file.readline()
+                    if not answer:
+                        raise OSError("the app closed the connection")
+                    entry["response"] = json.loads(answer)
+                    self.wfile.write(answer)
+                    self.wfile.flush()
+                except (OSError, ValueError) as error:
+                    entry["error"] = f"{type(error).__name__}"
+                    if not (isinstance(request, dict) and request.get("method") == "system.ping"):
+                        record(entry)
+                    return
+                if not (isinstance(request, dict) and request.get("method") == "system.ping"):
+                    record(entry)
+        finally:
+            if up is not None:
+                up.close()
+
+
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+with Server(listen, Handler) as server:
+    server.serve_forever()
+PROXY
+PROXY_SOCKET="$RUN_DIR/p.sock"
+python3 -I "$RUN_DIR/proxy.py" "$PROXY_SOCKET" "$SIRIO_SOCKET" "$RUN_DIR/socket.jsonl" &
+PROXY_PID=$!
+for _ in $(seq 1 50); do [ -S "$PROXY_SOCKET" ] && break; sleep 0.1; done
+[ -S "$PROXY_SOCKET" ] || fail "the recording proxy did not start"
+printf '#!/bin/sh\nSIRIO_SOCKET="%s" exec "%s" "$@"\n' "$PROXY_SOCKET" "$CTL" >"$RUN_DIR/ctl-proxied"
+chmod +x "$RUN_DIR/ctl-proxied"
+CTL="$RUN_DIR/ctl-proxied"
 ctl() { echo "+ sirioctl $*"; "$CTL" "$@"; }
 say() { echo "--- $*"; }
 
@@ -296,6 +371,7 @@ expect_state() { # label expr want
 app_start() { # [NAME=value...]: extra variables for the app
   rm -f "$SIRIO_SOCKET"
   (cd "$WT" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 \
+    SIRIO_DEBUG_IDE_START_DELAY_MS=600 \
     ${VULKAN_ENV[@]+"${VULKAN_ENV[@]}"} "$@" "$BIN" >>"$RUN_DIR/app.log" 2>&1) &
   APP_PID=$!
   for _ in $(seq 1 300); do
@@ -304,7 +380,7 @@ app_start() { # [NAME=value...]: extra variables for the app
   done
   [ -S "$SIRIO_SOCKET" ] || fail "sirio never opened its control socket"
   for _ in $(seq 1 600); do
-    "$CTL_REAL" surface tabs read >/dev/null 2>&1 && return 0
+    "$CTL" surface tabs read >/dev/null 2>&1 && return 0
     sleep 0.1
   done
   fail "sirio's control actions never became ready"
@@ -591,10 +667,7 @@ case_switch_off() {
 
 case_switch_flap() {
   local file count
-  sockcall surface.ide.switch on=false >/dev/null
-  sockcall surface.ide.switch on=true >/dev/null
-  sockcall surface.ide.switch on=false >/dev/null
-  sockcall surface.ide.switch on=true >/dev/null
+  sockburst false true false true
   file="$(wait_lockfile)"
   expect_state "the flapped switch is on" 'd["enabled"]' True
   expect_state "the flapped bridge has a port" 'd["port"] is not None' True

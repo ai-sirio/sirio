@@ -190,6 +190,15 @@ impl StartJob {
     fn launch(&self) -> io::Result<Running> {
         let dir = lockfile_dir().ok_or_else(|| io::Error::other("no home directory"))?;
         let listener = sirio_ide::bind(self.saved_port)?;
+        // Debug builds only: the E2E widens the window in which a start is in flight (the
+        // listener is bound and held through this sleep), so a switch flapped meanwhile is seen.
+        #[cfg(debug_assertions)]
+        if let Some(delay) = std::env::var("SIRIO_DEBUG_IDE_START_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
         let events = self.events.clone();
         let bridge = Bridge::start(
             listener,
