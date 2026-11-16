@@ -43,25 +43,29 @@ pub struct ProposalComment {
     pub text: String,
 }
 
-/// `edited` with the line endings of `original` put back. The Ely buffer is LF only, so a
-/// CRLF file (more CRLF than bare LF; a tie is LF) would otherwise come back as a whole-file
-/// change. A missing or LF original leaves the text as it is.
-pub fn restore_line_endings(original: &[u8], edited: &str) -> String {
+/// `text` with the line endings of `reference` put back: normalised to LF first (the Ely
+/// buffer is LF only, a proposal may carry CRLF), then CRLF again when `reference` has more
+/// CRLF line ends than bare LF ones (a tie is LF).
+pub fn restore_line_endings(reference: &[u8], text: &str) -> String {
     let (mut crlf, mut lf) = (0usize, 0usize);
-    for (index, byte) in original.iter().enumerate() {
+    for (index, byte) in reference.iter().enumerate() {
         if *byte == b'\n' {
-            if index > 0 && original[index - 1] == b'\r' {
+            if index > 0 && reference[index - 1] == b'\r' {
                 crlf += 1;
             } else {
                 lf += 1;
             }
         }
     }
-    if crlf > lf {
-        edited.replace("\r\n", "\n").replace('\n', "\r\n")
-    } else {
-        edited.to_owned()
-    }
+    let lf_text = text.replace("\r\n", "\n");
+    if crlf > lf { lf_text.replace('\n', "\r\n") } else { lf_text }
+}
+
+/// What Accept sends and the diff shows: the edited text (or the proposal) in the line
+/// endings of the original, or, with no original, of the proposal as Claude sent it.
+fn text_to_send(original: Option<&[u8]>, proposal: &str, edited: Option<&str>) -> String {
+    let reference = original.unwrap_or(proposal.as_bytes());
+    restore_line_endings(reference, edited.unwrap_or(proposal))
 }
 
 /// One `@<path>#L<n> <comment>` line per comment (`#L<a>-<b>` for a range, `(proposed)`
@@ -160,9 +164,12 @@ fn bar_button(
     id: &'static str,
     label: impl Into<SharedString>,
     primary: bool,
+    enabled: bool,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let mut button = Button::new(id, label).on_click(move |_, window, cx| on_click(window, cx));
+    let mut button = Button::new(id, label)
+        .disabled(!enabled)
+        .on_click(move |_, window, cx| on_click(window, cx));
     button = if primary { button.primary() } else { button.variant(ButtonVariant::Ghost) };
     div().id(id).debug_selector(move || id.to_owned()).flex_none().child(button).into_any_element()
 }
@@ -196,6 +203,8 @@ pub struct ProposalTab {
     /// The latest computation wins: a result of an older one is dropped.
     diff_generation: u64,
     diff_stats: Option<(usize, usize)>,
+    /// A diff is being computed: the body does not show what Accept would send yet.
+    diff_pending: bool,
     /// Why the body shows a message instead of a diff.
     diff_failure: Option<String>,
     /// A pick the diff refused, in the user's words.
@@ -231,6 +240,7 @@ impl ProposalTab {
             diff_task: None,
             diff_generation: 0,
             diff_stats: None,
+            diff_pending: false,
             diff_failure: None,
             notice: None,
             comments: Vec::new(),
@@ -293,38 +303,50 @@ impl ProposalTab {
         }
     }
 
-    fn current_text(&self, cx: &App) -> String {
-        match &self.code {
-            Some(code) => code.read(cx).text().to_string(),
-            None => self.proposal.clone(),
-        }
+    /// The editor's text, once Edit has made one.
+    fn edited_text(&self, cx: &App) -> Option<String> {
+        self.code.as_ref().map(|code| code.read(cx).text().to_string())
     }
 
     /// Exactly what Accept sends, and so what the diff compares the disk against.
-    fn text_to_send(&self, cx: &App) -> String {
-        let original = self.original.as_deref().map_or(&[][..], |bytes| bytes.as_slice());
-        restore_line_endings(original, &self.current_text(cx))
+    fn to_send(&self, cx: &App) -> String {
+        text_to_send(self.original.as_deref().map(|bytes| bytes.as_slice()), &self.proposal, self.edited_text(cx).as_deref())
     }
 
-    fn too_large(&self, text: &str) -> bool {
+    /// Whether the proposed side is no longer what Claude sent: new lines the user wrote
+    /// are lines Claude never receives, so that side takes no new comment.
+    fn proposal_was_edited(&self, cx: &App) -> bool {
+        self.edited_text(cx).is_some_and(|text| text != self.proposal.replace("\r\n", "\n"))
+    }
+
+    /// The part of "too large" that needs no allocation: the disk file and the raw proposal.
+    fn too_large_inputs(&self) -> bool {
         self.original.as_ref().is_some_and(|bytes| bytes.len() as u64 > MAX_FILE_BYTES)
-            || text.len() as u64 > MAX_FILE_BYTES
+            || self.proposal.len() as u64 > MAX_FILE_BYTES
     }
 
     fn can_edit(&self) -> bool {
-        self.refusal.is_none() && !self.too_large(&self.proposal)
+        self.refusal.is_none() && !self.too_large_inputs()
     }
 
-    /// Why no diff is drawn for `text`, when it is not.
-    fn blocker(&self, text: &str) -> Option<String> {
-        if let Some(reason) = &self.refusal {
-            return Some(reason.clone());
+    fn too_large_message() -> String {
+        "This change is too large to draw (the limit is 1 MiB for the file and for the proposal). \
+         You can still Reject or Accept it."
+            .to_owned()
+    }
+
+    /// Whether Accept would send bytes the body does not show yet: a diff is being computed.
+    /// Edit mode (the user sees their own text) and a body with no diff to wait for are live.
+    fn accept_live(&self) -> bool {
+        self.mode == Mode::Edit || self.diff_failure.is_some() || !self.diff_pending
+    }
+
+    /// Redraws the bar's warning: the app drives it as the file's editor tab turns dirty or clean.
+    pub fn set_dirty_in_editor(&mut self, dirty: bool, cx: &mut Context<Self>) {
+        if self.dirty_in_editor != dirty {
+            self.dirty_in_editor = dirty;
+            cx.notify();
         }
-        self.too_large(text).then(|| {
-            "This change is too large to draw (the limit is 1 MiB for the file and for the proposal). \
-             You can still Reject or Accept it."
-                .to_owned()
-        })
     }
 
     /// Computes the diff of the disk against what Accept would send, off the main thread.
@@ -332,14 +354,22 @@ impl ProposalTab {
         self.diff_generation += 1;
         let generation = self.diff_generation;
         self.diff_task = None;
-        let text = self.text_to_send(cx);
-        if let Some(reason) = self.blocker(&text) {
-            self.diff_failure = Some(reason);
-            self.diff_stats = None;
+        self.diff_stats = None;
+        self.diff_pending = false;
+        self.diff_failure = None;
+        if let Some(reason) = &self.refusal {
+            self.diff_failure = Some(reason.clone());
             cx.notify();
             return;
         }
-        self.diff_failure = None;
+        // The raw sizes first: nothing is copied for a proposal that is refused anyway.
+        let text = if self.too_large_inputs() { None } else { Some(self.to_send(cx)) };
+        let Some(text) = text.filter(|text| text.len() as u64 <= MAX_FILE_BYTES) else {
+            self.diff_failure = Some(Self::too_large_message());
+            cx.notify();
+            return;
+        };
+        self.diff_pending = true;
         let original = self.original.clone();
         let display_path = self.display_path();
         let scratch = self.scratch.clone();
@@ -360,10 +390,10 @@ impl ProposalTab {
                     return;
                 }
                 tab.diff_task = None;
+                tab.diff_pending = false;
                 match result {
                     Ok(diff) => tab.apply_diff(Arc::new(diff), cx),
                     Err(error) => {
-                        tab.diff_stats = None;
                         tab.diff_failure = Some(format!("Sirio could not compute the diff: {error}"));
                     }
                 }
@@ -375,6 +405,7 @@ impl ProposalTab {
 
     fn apply_diff(&mut self, diff: Arc<FileDiff>, cx: &mut Context<Self>) {
         self.diff_stats = Some((diff.additions, diff.deletions));
+        let new_side_open = !self.proposal_was_edited(cx);
         match &self.changes {
             Some(changes) => changes.update(cx, |changes, cx| changes.set_proposal(diff, cx)),
             None => {
@@ -399,13 +430,20 @@ impl ProposalTab {
                 self.changes = Some(changes);
             }
         }
+        if let Some(changes) = &self.changes {
+            changes.update(cx, |changes, cx| changes.set_new_side_commentable(new_side_open, cx));
+        }
         self.push_annotations(cx);
     }
 
     /// The buttons' own entry point, also used by the debug verb.
     pub fn press(&mut self, action: ProposalAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            ProposalAction::Accept => cx.emit(ProposalEvent::Accept(self.text_to_send(cx))),
+            ProposalAction::Accept => {
+                if self.accept_live() {
+                    cx.emit(ProposalEvent::Accept(self.to_send(cx)));
+                }
+            }
             ProposalAction::Reject => cx.emit(ProposalEvent::Reject { comments: self.comments_text() }),
             ProposalAction::Edit => {
                 if self.can_edit() && self.mode == Mode::Diff {
@@ -488,6 +526,11 @@ impl ProposalTab {
     }
 
     fn open_composer(&mut self, anchor: CommentAnchor, cx: &mut Context<Self>) {
+        if anchor.side == AnnotationSide::New && self.proposal_was_edited(cx) {
+            self.notice = Some("Comments on the proposed side stop once the text is edited.".to_owned());
+            cx.notify();
+            return;
+        }
         let side = match anchor.side {
             AnnotationSide::Old => CommentSide::Old,
             AnnotationSide::New => CommentSide::New,
@@ -619,13 +662,13 @@ impl ProposalTab {
                     )
                     .when(self.can_edit(), |row| {
                         row.child(if in_edit {
-                            bar_button("proposal-show-diff", "Show diff", false, press(ProposalAction::ShowDiff))
+                            bar_button("proposal-show-diff", "Show diff", false, true, press(ProposalAction::ShowDiff))
                         } else {
-                            bar_button("proposal-edit", "Edit", false, press(ProposalAction::Edit))
+                            bar_button("proposal-edit", "Edit", false, true, press(ProposalAction::Edit))
                         })
                     })
-                    .child(bar_button("proposal-reject", self.reject_label(), false, press(ProposalAction::Reject)))
-                    .child(bar_button("proposal-accept", "Accept", true, press(ProposalAction::Accept))),
+                    .child(bar_button("proposal-reject", self.reject_label(), false, true, press(ProposalAction::Reject)))
+                    .child(bar_button("proposal-accept", "Accept", true, self.accept_live(), press(ProposalAction::Accept))),
             )
             .when(self.dirty_in_editor, |bar| {
                 bar.child(
@@ -657,7 +700,7 @@ impl Render for ProposalTab {
         let bar = self.render_bar(&theme, cx);
         let body = if self.mode == Mode::Edit && self.code.is_some() {
             let code = self.code.clone().expect("checked above");
-            div().id("proposal-edit").debug_selector(|| "proposal-edit".into()).flex_1().min_h(px(0.0)).child(code)
+            div().id("proposal-editor").debug_selector(|| "proposal-editor".into()).flex_1().min_h(px(0.0)).child(code)
         } else if let Some(reason) = &self.diff_failure {
             div()
                 .id("proposal-message")
@@ -668,6 +711,8 @@ impl Render for ProposalTab {
                 .text_size(theme.typography.scaled(13.0))
                 .text_color(theme.ely.fg_muted)
                 .child(selectable_text(reason.clone()).id("proposal-message-text"))
+        } else if self.diff_pending {
+            div().id("proposal-loading").flex_1().min_h(px(0.0)).p(px(16.0)).text_color(theme.ely.fg_muted).child("Loading…")
         } else if let Some(changes) = &self.changes {
             div().id("proposal-diff").flex_1().min_h(px(0.0)).child(changes.clone())
         } else {
@@ -835,6 +880,32 @@ mod tests {
     #[test]
     fn missing_original_keeps_lf() {
         assert_eq!(restore_line_endings(b"", "a\nb\n"), "a\nb\n");
+    }
+
+    #[test]
+    fn crlf_proposal_into_lf_file_becomes_lf() {
+        assert_eq!(text_to_send(Some(b"a\nb\n"), "a\r\nc\r\n", None), "a\nc\n");
+    }
+
+    #[test]
+    fn missing_original_follows_the_proposal() {
+        assert_eq!(text_to_send(None, "a\r\nb\r\n", None), "a\r\nb\r\n");
+        assert_eq!(text_to_send(None, "a\nb\n", None), "a\nb\n");
+    }
+
+    #[test]
+    fn edit_without_keystroke_sends_the_same_bytes() {
+        let originals: [Option<&[u8]>; 3] = [None, Some(b"x\ny\n"), Some(b"x\r\ny\r\n")];
+        for proposal in ["a\r\nb\r\n", "a\nb\n"] {
+            let lf = proposal.replace("\r\n", "\n");
+            for original in originals {
+                assert_eq!(
+                    text_to_send(original, proposal, None),
+                    text_to_send(original, proposal, Some(&lf)),
+                    "proposal {proposal:?}, original {original:?}"
+                );
+            }
+        }
     }
 
     fn comment(side: CommentSide, lines: (u32, u32), text: &str) -> ProposalComment {

@@ -621,6 +621,8 @@ pub struct ChangesTab {
     reveal_annotation: Option<u64>,
     /// Draws the gutter "+": only a change request's diff, asked by its owner.
     commentable: bool,
+    /// Whether the new side takes a comment (a proposal the user edited does not).
+    new_side_commentable: bool,
     gutter_press: Option<GutterPoint>,
     last_pick: Option<GutterPoint>,
     stats: HashMap<PathBuf, DiffStat>,
@@ -822,6 +824,16 @@ impl ChangesTab {
         }
     }
 
+    /// Whether the new side's lines take a comment; the old side's always do.
+    pub fn set_new_side_commentable(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.new_side_commentable != on {
+            self.new_side_commentable = on;
+            self.gutter_press = None;
+            self.last_pick = None;
+            cx.notify();
+        }
+    }
+
     /// The anchor for a comment on `line` (and from `start`) on `side`, as
     /// the gutter would pick it.
     pub fn comment_anchor(
@@ -859,6 +871,12 @@ impl ChangesTab {
         if from.path != to.path || from.side != to.side {
             cx.emit(ChangesTabEvent::CommentRefused(
                 "A range stays on one side of the diff.".to_string(),
+            ));
+            return;
+        }
+        if to.side == AnnotationSide::New && !self.new_side_commentable {
+            cx.emit(ChangesTabEvent::CommentRefused(
+                "The proposed side takes no new comment once it is edited.".to_string(),
             ));
             return;
         }
@@ -991,6 +1009,7 @@ impl ChangesTab {
             open_threads: Rc::default(),
             reveal_annotation: None,
             commentable: false,
+            new_side_commentable: true,
             gutter_press: None,
             last_pick: None,
         };
@@ -2126,6 +2145,7 @@ impl ChangesTab {
         split_right_x: Pixels,
         allows_staging: bool,
         draws_open_diff: bool,
+        opens_files: bool,
         selected: Option<&(ChangeSection, PathBuf)>,
         forge: Option<Rc<ForgeFiles>>,
         annotation_view: Option<AnyView>,
@@ -2154,6 +2174,7 @@ impl ChangesTab {
                         expanded,
                         allows_staging,
                         draws_open_diff,
+                        opens_files,
                         is_selected,
                         open_threads,
                         entity,
@@ -2424,6 +2445,7 @@ impl ChangesTab {
         expanded: bool,
         allows_staging: bool,
         draws_open_diff: bool,
+        opens_files: bool,
         is_selected: bool,
         open_threads: usize,
         entity: gpui::Entity<Self>,
@@ -2592,26 +2614,28 @@ impl ChangesTab {
                                 },
                             ))
                         })
-                        .child(row_icon_button(
-                            format!("open-{}-{}", section.slug(), path.display()),
-                            "changes-open-file",
-                            IconName::SquarePen,
-                            "Open file",
-                            move |_, cx| {
-                                // `entry.path` is repo-relative, and the host
-                                // opens an editor tab straight from whatever
-                                // this event carries — a relative path made
-                                // `FileView` resolve against the process CWD
-                                // and render "This file does not exist" for a
-                                // file that plainly does. Resolve against this
-                                // surface's own root, the way the Files tree
-                                // already emits absolute paths.
-                                entity_for_open.update(cx, |tab, cx| {
-                                    let absolute = tab.repo_root.join(&path);
-                                    cx.emit(ChangesTabEvent::OpenFile(absolute));
-                                });
-                            },
-                        )),
+                        .when(opens_files, |this| {
+                            this.child(row_icon_button(
+                                format!("open-{}-{}", section.slug(), path.display()),
+                                "changes-open-file",
+                                IconName::SquarePen,
+                                "Open file",
+                                move |_, cx| {
+                                    // `entry.path` is repo-relative, and the host
+                                    // opens an editor tab straight from whatever
+                                    // this event carries — a relative path made
+                                    // `FileView` resolve against the process CWD
+                                    // and render "This file does not exist" for a
+                                    // file that plainly does. Resolve against this
+                                    // surface's own root, the way the Files tree
+                                    // already emits absolute paths.
+                                    entity_for_open.update(cx, |tab, cx| {
+                                        let absolute = tab.repo_root.join(&path);
+                                        cx.emit(ChangesTabEvent::OpenFile(absolute));
+                                    });
+                                },
+                            ))
+                        }),
                 )
             })
     }
@@ -3486,11 +3510,22 @@ impl ChangesTab {
         }
         let rows = self.sync_list_rows(sections);
         let row_entity = entity.clone();
-        let open_lines: Rc<CommentableByPath> = if self.commentable {
+        let open_lines: Rc<CommentableByPath> = if !self.commentable {
+            Rc::default()
+        } else if self.new_side_commentable {
             self.commentable_by_path.clone()
         } else {
-            Rc::default()
+            Rc::new(
+                self.commentable_by_path
+                    .iter()
+                    .map(|(path, lines)| {
+                        let old = lines.iter().filter(|(side, _)| *side == AnnotationSide::Old).copied();
+                        (path.clone(), old.collect())
+                    })
+                    .collect(),
+            )
         };
+        let opens_files = !matches!(self.source, ChangesSource::Proposal(_));
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
         let source = self.source.clone();
@@ -3568,6 +3603,7 @@ impl ChangesTab {
                             split_right_x,
                             allows_staging,
                             draws_open_diff,
+                            opens_files,
                             selected.as_ref(),
                             forge.clone(),
                             match row {
@@ -4219,7 +4255,12 @@ fn load_proposal_snapshot(diff: &FileDiff) -> GitSnapshot {
     let entry = StatusEntry {
         path: diff.path.clone(),
         original_path: None,
-        index_status: Some(StatusKind::Modified),
+        // A diff against nothing starts at line 0 with no old lines: the file is new.
+        index_status: Some(if diff.hunks.first().is_some_and(|hunk| hunk.old_start == 0 && hunk.old_lines == 0) {
+            StatusKind::Added
+        } else {
+            StatusKind::Modified
+        }),
         worktree_status: None,
     };
     let stat = DiffStat {
@@ -5186,6 +5227,7 @@ mod tests {
             is_git: true,
             source: ChangesSource::WorkingTree,
             proposal_generation: 0,
+            new_side_commentable: true,
             entries: Vec::new(),
             diffs: HashMap::new(),
             commentable_by_path: Rc::default(),
@@ -7126,6 +7168,7 @@ mod tests {
             is_git: true,
             source: ChangesSource::WorkingTree,
             proposal_generation: 0,
+            new_side_commentable: true,
             entries: vec![StatusEntry {
                 path: PathBuf::from("x.rs"),
                 original_path: None,
@@ -7214,6 +7257,7 @@ mod tests {
             is_git: true,
             source: ChangesSource::WorkingTree,
             proposal_generation: 0,
+            new_side_commentable: true,
             entries: vec![StatusEntry {
                 path: PathBuf::from("image.bin"),
                 original_path: None,
@@ -7510,6 +7554,7 @@ mod tests {
             is_git: true,
             source: ChangesSource::WorkingTree,
             proposal_generation: 0,
+            new_side_commentable: true,
             entries: vec![StatusEntry {
                 path: path.clone(),
                 original_path: None,
@@ -7979,6 +8024,7 @@ mod tests {
                 is_git: true,
                 source: ChangesSource::WorkingTree,
                 proposal_generation: 0,
+                new_side_commentable: true,
                 entries: vec![StatusEntry {
                     path: path.clone(),
                     original_path: None,
@@ -8464,6 +8510,7 @@ mod tests {
             is_git: true,
             source: ChangesSource::Commit("synthetic".to_owned()),
             proposal_generation: 0,
+            new_side_commentable: true,
             entries: vec![entry],
             diffs,
             commentable_by_path: Rc::default(),
