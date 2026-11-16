@@ -642,7 +642,20 @@ pub fn diff_proposal(
     } else {
         &[]
     };
-    let mut args: Vec<&str> = vec!["diff", "--no-color", "--no-ext-diff", "--no-index", &unified];
+    // `core.autocrlf` would normalise a line-ending change away (exit 0, no output) and a
+    // global attributes file can force a textconv driver or `-diff` onto the scratch files,
+    // so both are pinned off for this call.
+    let mut args: Vec<&str> = vec![
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.attributesFile=",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-index",
+        &unified,
+    ];
     args.extend(zero_context);
     args.extend([
         "--",
@@ -650,6 +663,14 @@ pub fn diff_proposal(
         new_file.name.as_str(),
     ]);
     let result = git::run_accepting(&args, scratch, &[0, 1])?;
+    // Exit 1 means "differs" and prints a diff; with nothing printed it is git failing to
+    // read a side ("Could not access"), not an empty diff.
+    if result.status == Some(1) && result.stdout.is_empty() {
+        return Err(GitError::CommandFailed {
+            code: 1,
+            stderr: result.stderr,
+        });
+    }
     Ok(parse_diff(&result.stdout_string(), display_path))
 }
 
@@ -1007,7 +1028,7 @@ mod diff_proposal_tests {
     }
 
     fn entries(dir: &Path) -> usize {
-        std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0)
+        std::fs::read_dir(dir).expect("scratch dir is readable").count()
     }
 
     #[test]
@@ -1092,25 +1113,33 @@ mod diff_proposal_tests {
         diff_proposal(Some(b"a\n"), b"b\n", Path::new("f.txt"), &scratch, 3).unwrap();
         assert_eq!(entries(&scratch), 0, "left files after Ok");
 
-        // Err path: a scratch "directory" that is a regular file cannot be created.
-        let blocker = scratch_dir();
-        std::fs::write(&blocker, b"x").unwrap();
-        assert!(diff_proposal(Some(b"a\n"), b"b\n", Path::new("f.txt"), &blocker, 3).is_err());
-        std::fs::remove_file(&blocker).ok();
+        // Err after both files exist: a 1-byte output cap makes git's diff come back
+        // as `OutputTruncated`.
+        crate::git::set_output_limit_override_for_test(Some(1));
+        let result = diff_proposal(Some(b"a\n"), b"b\n", Path::new("f.txt"), &scratch, 3);
+        crate::git::set_output_limit_override_for_test(None);
+        assert!(matches!(result, Err(GitError::OutputTruncated { .. })), "{result:?}");
+        assert_eq!(entries(&scratch), 0, "left files after Err");
         std::fs::remove_dir_all(&scratch).ok();
     }
 
     #[test]
-    fn scratch_files_are_removed_when_dropped() {
+    fn user_autocrlf_does_not_hide_a_line_ending_change() {
         let scratch = scratch_dir();
-        std::fs::create_dir_all(&scratch).unwrap();
-        {
-            let a = ScratchFile::create(&scratch, b"a").unwrap();
-            let b = ScratchFile::create(&scratch, b"b").unwrap();
-            assert_eq!(entries(&scratch), 2);
-            assert_ne!(a.name, b.name);
-        }
-        assert_eq!(entries(&scratch), 0);
+        let config = scratch_dir();
+        std::fs::write(&config, "[core]\n\tautocrlf = true\n").unwrap();
+        // One test per process under nextest, so the process-wide variable is this test's.
+        unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", &config) };
+        let diff = diff_proposal(
+            Some(b"a\nb\n"),
+            b"a\r\nb\r\n",
+            Path::new("eol.txt"),
+            &scratch,
+            3,
+        );
+        unsafe { std::env::remove_var("GIT_CONFIG_GLOBAL") };
+        std::fs::remove_file(&config).ok();
         std::fs::remove_dir_all(&scratch).ok();
+        assert!(!diff.unwrap().hunks.is_empty());
     }
 }
