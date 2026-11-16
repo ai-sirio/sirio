@@ -618,11 +618,6 @@ impl IdeBridge {
         found
     }
 
-    /// Every connection that announced itself.
-    pub(crate) fn connection_ids(&self) -> Vec<ConnId> {
-        self.connections.keys().copied().collect()
-    }
-
     /// Notes that `view`'s selection is the one to send to `conn`. Returns the delay of the send
     /// to schedule, when none is waiting for that connection yet.
     pub(crate) fn mark_selection(&mut self, conn: ConnId, view: WeakEntity<FileView>) -> Option<Duration> {
@@ -827,7 +822,22 @@ impl SirioWorkspace {
         if !cx.has_global::<IdeBridge>() {
             return;
         }
-        for conn in cx.global::<IdeBridge>().connection_ids() {
+        // Only the connections this file can concern: those owned in its worktree, and the
+        // ownerless ones (resolved at the send, and filtered after). One owned elsewhere keeps
+        // the view it is waiting to send.
+        let path = view.read(cx).path().to_path_buf();
+        let Some(worktree) = self.worktree_root_for(&path) else {
+            return;
+        };
+        let live = self.ide_live_panes(cx);
+        let bridge = cx.global::<IdeBridge>();
+        let mut conns: Vec<sirio_ide::ConnId> = bridge
+            .owned_in(&worktree, &live, paths_name_the_same_document)
+            .into_iter()
+            .map(|(conn, _)| conn)
+            .collect();
+        conns.extend(bridge.ownerless().into_iter().map(|(conn, _)| conn));
+        for conn in conns {
             let delay = cx.update_global(|bridge: &mut IdeBridge, _| {
                 bridge.mark_selection(conn, view.downgrade())
             });

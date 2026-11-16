@@ -729,7 +729,7 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # toasts hold "No Claude terminal or chat in this worktree"), at_mention_without_focus_history (an
 # owned terminal in no focus history still gets it) and owner_after_restart (a client whose pane is
 # in a worktree not selected after a relaunch is ownerless, in the worktree its cwd is in, until
-# that worktree is selected): eighteen cases.
+# that worktree is selected, and an at-mention from a file there then reaches it with no focus recorded, focuses its tab and raises no toast): eighteen cases.
 # --xvfb or --display :N picks the display (never your own $DISPLAY); --state-only takes no
 # captures; --out-dir DIR keeps transcript.log, app.log, client-*.jsonl (every frame), socket.jsonl,
 # the lockfile with authToken redacted and the PID-matched captures. socket.jsonl is one line per

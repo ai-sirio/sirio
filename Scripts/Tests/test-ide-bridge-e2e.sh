@@ -69,7 +69,9 @@ set -eEuo pipefail
 #                    the client's pane is in a worktree that is not selected; Sirio quits and
 #                    relaunches and the client reconnects: the state shows it ownerless, in
 #                    that worktree (its cwd); six seconds later (the reconnect's retries are
-#                    over) selecting the worktree gives it an owner
+#                    over) selecting the worktree gives it an owner; one at-mention from a file
+#                    of that worktree then reaches it (nothing was focused since the relaunch),
+#                    focuses its tab and leaves the toast count as it was
 #
 # The artifact: --out-dir DIR (default artifacts/ide-bridge-e2e-<stamp>-<pid>) keeps
 # transcript.log, app.log, client-*.jsonl (every frame a client sent and received), the lockfile
@@ -1214,6 +1216,9 @@ print(paths[0] if paths else "")')"
   start_app_client
   wait_client "connected" 'r.get("event") == "connected"' 1
   expect_state "owned while its worktree is selected" 'd["connections"][0]["owner_pane"]' "$CLIENT_PANE"
+  # A file is the active tab when Sirio quits: after the relaunch nothing focuses the terminal.
+  read -r SEL_X SEL_L5S SEL_L5E SEL_L6 SEL_L7E < <(write_sel_file "$second/sel.rs")
+  ctl surface editor open --path "$second/sel.rs" >/dev/null
   ctl select-workspace --workspace "$WT_ID" >/dev/null
   app_quit
   wait_client "the old connection closed" 'r.get("event") == "closed"' 1
@@ -1231,6 +1236,26 @@ print(paths[0] if paths else "")')"
   ctl select-workspace --workspace "$second_id" >/dev/null
   expect_state "selecting the worktree gives it an owner" 'd["connections"][0]["owner_pane"] is not None' True
   expect_state "the owner's worktree is the second one" 'd["connections"][0]["worktree"]' "$second"
+  # After the relaunch nothing has been focused: one at-mention still reaches the owned terminal,
+  # focuses its tab and raises no toast.
+  local before toasts_before toasts_after client_tab
+  before="$(note_count at_mentioned)"
+  toasts_before="$(state_expr 'len(d["toasts"])')"
+  client_tab="$(tab_index terminal)"
+  [ "$(tabs_field active)" != "$client_tab" ] || fail "$CASE: the terminal is already the active tab"
+  select_ranges "$SEL_L5S..$SEL_L7E"
+  sockcall surface.editor.context "offset=$SEL_L6" action=send-to-agent >/dev/null
+  wait_notes at_mentioned "$((before + 1))"
+  tries=0
+  while [ "$(tabs_field active)" != "$client_tab" ] && [ "$tries" -lt 50 ]; do
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  [ "$(tabs_field active)" = "$client_tab" ] || fail "$CASE: the client's tab ($client_tab) is not focused (active: $(tabs_field active))"
+  sleep 0.5
+  toasts_after="$(state_expr 'len(d["toasts"])')"
+  [ "$toasts_after" = "$toasts_before" ] || fail "$CASE: the at-mention raised a toast ($toasts_before then $toasts_after)"
+  echo "OK: after the relaunch the at-mention reached the client, focused its tab and raised no toast ($toasts_before toasts both times)"
   end_app_client
 }
 
