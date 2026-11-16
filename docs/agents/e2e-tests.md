@@ -74,7 +74,12 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # The sirioctl end to end, each world in its own HOME, XDG directories, SIRIO_DB and
 # socket: the stable copy and its PATH link, replacement, a foreign file, the AppImage
 # mount kept out of a pane, quit and relaunch, every stub agent's hooks, the skill,
-# SIRIO_WORKTREE_ID and the flags sirioctl offers, `project add --display-name` (case 14:
+# SIRIO_WORKTREE_ID, OpenCode's global session plugin (case 8: Install Hooks follows `opencode
+# --version` of the stub on the PATH, which a file switches between 1.18.33 and 2.3.0: for 1 it
+# rewrites the plugin, for 2 it removes it, and says so, only when it is Sirio's generated file,
+# and leaves a user's file byte for byte; the app, restarted under 2, removes the generated
+# global plugin by itself at startup and logs `removed Sirio's generated global plugin`, and
+# leaves a copy with one line of the user's added) and the flags sirioctl offers, `project add --display-name` (case 14:
 # the label, no dialog, a duplicate). Case 15 (unread sessions) drives a claude stub
 # through `surface attention read` and `act --focus`: a stop off screen marks the session
 # until it is shown, a stop in a split pane marks the tab beside the other pane's running,
@@ -113,7 +118,26 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # real v2 endpoints, Basic auth, an SSE stream; driven by lines in $RUN/oc.cmd) registers itself
 # in the world's own $XDG_STATE_HOME/opencode/service.json, and the cases cover a session linked
 # by its title and one linked by being the first in its folder (a frame at running and at done), a
-# permission ask, a link kept through a title an older session also has, a turn under a second
+# permission ask, a link kept through a title an older session also has (a typed `opencode` never
+# gets a session ref, however it is linked), two OpenCode 2 tabs Sirio launched in one folder (the
+# stub's `POST /api/session` log line gives each tab's session: the pane's ref, read from the
+# world's database, is that id before any title exists, the tab's process runs `opencode
+# --session <id>`, `system.identify` returns it; the first turn shows its status with no title
+# (the pane's created session links, +1 at its end) and a session opened inside the TUI
+# (`create ses_tui`) takes the link away; a relaunch keeps the refs and the hidden tab
+# linked), a service that cannot create the session (500, an answer later than the 3 s deadline
+# with the control socket still answering in under a second, an OpenCode 1 on the PATH: plain
+# `opencode`, no ref, and under 1 the worktree plugin written, reading its pane from the
+# environment), OpenCode 2 leaving no worktree
+# plugin (the real v1 plugin an OpenCode 1 tab made Sirio write, and the legacy one that
+# names a pane, removed; a copy of it whose
+# sirioctl line is not a JSON string literal, a user's file, and one under Sirio's header line
+# with the user's own body, untouched), an OpenCode that
+# reports no readable version (`oc-version` `garbage`, the app relaunched: plain `opencode`, no
+# POST, no ref, no plugin written and the real v1 plugin an earlier OpenCode 1 tab wrote, and
+# the legacy one, removed), a stale row under the next fresh tab's key dropped as it is made (a
+# codex tab's), and, last because it stops the
+# host, a relaunch with no host to attach to that starts `opencode --session <id>`, a turn under a second
 # (finished, +1), two panes in one folder (no guess, then each by its title), a failed turn (the
 # service's error text and password stay out of the app's stderr), a relaunch, and a service that
 # goes away (the mark stays, no status, one `[opencode-watch] <kind>` line). Tabs no terminal

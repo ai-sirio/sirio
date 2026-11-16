@@ -61,14 +61,17 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 # world's own $XDG_STATE_HOME/opencode/service.json):
 #   opencode_three_states          a session that exists before the pane starts, linked by its
 #                                  title: busy -> running; a permission ask -> needs-input (+1);
-#                                  replied -> running; idle after >= 1 s -> done (+1)
+#                                  replied -> running; idle after >= 1 s -> done (+1); a typed
+#                                  `opencode` never gets a session ref, however it is linked
 #   opencode_first_turn_links      one OpenCode pane and a session born after it: linked with no
 #                                  title, busy -> running, idle -> done (+1); the TUI's title
-#                                  before the service's rename keeps Done and adds no stop
+#                                  before the service's rename keeps Done and adds no stop; no
+#                                  session ref is written, before or after the title
 #   opencode_duplicate_title_keeps_link
 #                                  an older session of the folder has the title the service later
 #                                  gives the pane's first-turn session, the TUI's title coming
-#                                  first: the link stays, and the next turn shows running, then done (+1)
+#                                  first: the link stays, and the next turn shows running, then
+#                                  done (+1); no session ref is written
 #   opencode_short_turn_is_finished
 #                                  a turn the service ends under a second after it began: done, +1
 #   opencode_resumed_finish_is_not_replayed
@@ -86,11 +89,44 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  finished and posts once
 #   two_opencode_panes_one_folder  two panes in one folder, one then two sessions: no status on
 #                                  either; with titles `OC | a`, `OC | b`: each follows its own
+#                                  and no session ref is written for either
 #   opencode_failed_turn_is_error  a failed turn -> error; the service's error text and its
 #                                  password stay out of the app's stderr
 #   opencode_after_relaunch        a titled session, the app quits and starts again: the pane's
 #                                  title comes from the host's seed, so busy -> running and idle
-#                                  after >= 1 s -> done (+1)
+#                                  after >= 1 s -> done (+1); still no session ref
+#   opencode_agent_tab_resumes     two tabs from `surface terminal open --agent opencode` in one
+#                                  folder (OpenCode 2): each tab's own session is created by Sirio
+#                                  (the stub's `POST /api/session 200 <id> <worktree>`), the pane's
+#                                  ref is that id before any title exists, the tab's process runs
+#                                  `opencode --session <id>`, and `system.identify` returns it; the
+#                                  first turn shows its status with no title (the pane's created
+#                                  session is linked, +1 at the end), and a session opened inside
+#                                  the TUI (`create ses_tui`) takes the link away; a relaunch with
+#                                  the host alive keeps the refs and the hidden tab linked
+#   opencode_unavailable_service_launches_plain
+#                                  `create fail` (POST answered 500), `create delay 8` (the tab
+#                                  starts plain at the 3 s deadline while the control socket still
+#                                  answers in under a second; the late reply writes no ref) and an
+#                                  OpenCode 1 (`oc-version` 1.18.33: no POST at all, the v1 plugin
+#                                  is written, reading its pane from the environment): plain
+#                                  `opencode`, no ref
+#   opencode_v2_writes_no_plugin   OpenCode 2 and a worktree plugin: the real v1 plugin an
+#                                  OpenCode 1 tab made Sirio write (`make_real_v1_plugin`) and
+#                                  the legacy one that names a pane (what older builds wrote)
+#                                  are removed at the next fresh tab; a copy of it whose sirioctl
+#                                  line is no longer one JSON string literal, a user's file with
+#                                  no Sirio header, and one with Sirio's header line over the
+#                                  user's own body, stay byte for byte
+#   opencode_unknown_version_writes_no_plugin
+#                                  `oc-version` holds `garbage` (no readable version) and the app
+#                                  is relaunched: an OpenCode tab runs a plain `opencode`, no POST
+#                                  /api/session, no ref, no plugin written and the real v1
+#                                  plugin an earlier OpenCode 1 tab wrote, and the legacy one,
+#                                  removed; then 2.3.0 is back and the app relaunched
+#   fresh_tab_drops_stale_ref      a row left under the key the next fresh tab takes (a crash, an
+#                                  older build, a closed pane) is dropped as that tab is made: a
+#                                  codex tab opened after a relaunch has no ref
 #   no_service_degrades            the service stops: the mark stays, no status, and the app's
 #                                  stderr names the failure kind once and nothing else
 #
@@ -139,7 +175,12 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #   background_host_lost           the world's host killed under an attached tab and a hidden one, both
 #                                  mid-turn: one stop each, then a turn on the fresh host is one stop
 #   end_all_sessions_parity        `host.shutdown {force}` (End all sessions) under both: one stop each,
-#                                  the same notification; last, because it shuts the host down
+#                                  the same notification; it shuts the host down
+#   opencode_resumes_without_host  last, because it stops the host itself: an OpenCode tab with its
+#                                  created session, the app quits and the host goes, the relaunch
+#                                  starts `opencode --session <id>` only after Sirio's v1 plugin is
+#                                  removed, and a hidden second tab only once it is shown; the
+#                                  world is left with the app and a host running
 #
 # The world is isolated: `env -i` with an allow-list (a private HOME, every XDG
 # directory, SIRIO_DB, SIRIO_SOCKET, SIRIO_HOST_HOME and no session bus), its own
@@ -1068,6 +1109,178 @@ oc() {
   echo "$*" >> "$RUN/oc.cmd"
   wait_until 5 oc_acked || fail "the OpenCode stub never took '$*'"
 }
+# The session ref of pane $1 in the world's database (the row a relaunch resumes with
+# `opencode --session <ref>`), or nothing when the pane has none; `__ERROR__` when the
+# database cannot be read, so a check for no row never passes on a failed read.
+session_ref_of() { # pane
+  python3 -I -c '
+import sqlite3, sys
+try:
+    con = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+    row = con.execute("SELECT reference FROM session_ref WHERE session = ?", (sys.argv[2],)).fetchone()
+except Exception:
+    print("__ERROR__")
+else:
+    print(row[0] if row and row[0] is not None else "")
+' "$W/s.sqlite" "$1" 2>/dev/null || echo __ERROR__
+}
+# Waits until pane $1's session ref reads $2 ("" for none) within $3 s.
+wait_ref() { # pane want seconds
+  local got=""
+  for _ in $(seq 1 $(( $3 * 5 ))); do
+    got="$(session_ref_of "$1")"
+    if [ "$got" = "$2" ]; then
+      echo "OK: $1 session ref = ${2:-(none)}"
+      return 0
+    fi
+    sleep 0.2
+  done
+  step "FAILED: pane $1 wanted session ref '$2', last '$got'"
+  fail "pane $1: the session ref never read '$2' within $3 s (last: '$got')"
+}
+# Holds for $3 s that pane $1's session ref stays $2 ("" for none).
+hold_ref() { # pane want seconds
+  local got=""
+  for _ in $(seq 1 $(( $3 * 5 ))); do
+    got="$(session_ref_of "$1")"
+    [ "$got" = "$2" ] || { step "FAILED: pane $1 session ref read '$got' while it had to stay '$2'"; fail "pane $1: the session ref read '$got' while it had to stay '$2'"; }
+    sleep 0.2
+  done
+  echo "OK: $1 session ref stays ${2:-(none)}"
+}
+# Stops the world's host and waits until its process is gone: the relaunch then has no host
+# session to attach to.
+host_down() {
+  local pid
+  pid="$(host_pid)"
+  SIRIO_HOST_HOME="$W/host" "$PROBE" shutdown --force >/dev/null 2>&1 || true
+  [ -z "$pid" ] && return 0
+  wait_until 20 not_alive "$pid" || fail "the host (pid $pid) did not stop after shutdown --force"
+}
+not_alive() { ! alive "$1"; }
+# The arguments after the program of the OpenCode process of pane $1, on one line (empty for a
+# plain `opencode`); fails when the pane has none. A `--version` probe is not the tab's process.
+oc_argv_of() { # pane
+  python3 -I -c '
+import os, sys
+pane, exe = sys.argv[1:3]
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        with open("/proc/" + pid + "/environ", "rb") as f:
+            env = f.read().split(b"\0")
+        if ("SIRIO_PANE_ID=" + pane).encode() not in env:
+            continue
+        with open("/proc/" + pid + "/cmdline", "rb") as f:
+            argv = [a.decode(errors="replace") for a in f.read().split(b"\0")]
+    except OSError:
+        continue
+    for i, word in enumerate(argv):
+        if exe in word:
+            rest = [a for a in argv[i + 1:] if a]
+            if "--version" in rest:
+                break
+            print(" ".join(rest))
+            sys.exit(0)
+sys.exit(1)
+' "$1" "$RUN/bin/opencode"
+}
+# Whether pane $1 runs `opencode --session <ref $2>`: what a relaunch, or a fresh tab whose
+# session Sirio created, starts.
+runs_resumed() { # pane ref
+  local argv
+  argv="$(oc_argv_of "$1")" || return 1
+  case " $argv " in *" --session $2 "*) return 0 ;; esac
+  return 1
+}
+# Whether, past the first $1 lines of `oc-starts`, a fake opencode noted a start in folder $2
+# (`plugin <dir>` or `clean <dir>`, see the stub's header).
+oc_started_since() { # lines dir
+  tail -n +"$(( $1 + 1 ))" "$RUN/oc-starts" 2>/dev/null | grep -qE "^(plugin|clean) $2\$"
+}
+# Whether pane $1 runs a plain `opencode`: a process, and no `--session` among its arguments.
+runs_plain() { # pane
+  local argv
+  argv="$(oc_argv_of "$1")" || return 1
+  case " $argv " in *" --session "*) return 1 ;; esac
+  return 0
+}
+# The `system.identify` sessionRef of pane $1 (empty when there is none).
+identify_ref() { # pane
+  SIRIO_PANE_ID="$1" SIRIO_WORKTREE_ID="$wt" ctl identify --json | python3 -I -c '
+import json, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+print(reply.get("sessionRef", ""))'
+}
+identify_is() { [ "$(identify_ref "$1")" = "$2" ]; }
+# How many lines of the stub's log match the pattern $1 (a grep pattern).
+oc_log_count() { # pattern
+  local n
+  n="$(grep -c -e "$1" "$RUN/oc.log" 2>/dev/null || true)"
+  echo "${n:-0}"
+}
+oc_log_more() { [ "$(oc_log_count "$1")" -gt "$2" ]; }
+# Holds for $3 s that the stub's log keeps exactly $2 lines matching $1.
+hold_log_count() { # pattern count seconds
+  local got
+  for _ in $(seq 1 $(( $3 * 5 ))); do
+    got="$(oc_log_count "$1")"
+    [ "$got" = "$2" ] || fail "the stub's log holds $got line(s) of '$1' while it had to stay at $2"
+    sleep 0.2
+  done
+}
+# Waits for the stub's successful POST /api/session after the first $1 of them, and sets
+# OC_POST_ID and OC_POST_DIR from its log line (the directory must be this world's worktree).
+OC_POST_ID=""
+OC_POST_DIR=""
+wait_post_ok() { # already-seen count
+  local line
+  wait_until 15 oc_log_more '^POST /api/session 200 ' "$1" || fail "the stub saw no successful POST /api/session after the first $1"
+  line="$(grep '^POST /api/session 200 ' "$RUN/oc.log" | sed -n "$(( $1 + 1 ))p")"
+  OC_POST_ID="$(echo "$line" | cut -d' ' -f4)"
+  OC_POST_DIR="$(echo "$line" | cut -d' ' -f5-)"
+  [ -n "$OC_POST_ID" ] || fail "the stub's POST line carries no session id: $line"
+  [ "$(realpath "$OC_POST_DIR")" = "$OC_DIR" ] || fail "the session was created in '$OC_POST_DIR', not in the tab's worktree $OC_DIR"
+}
+# Opens an OpenCode 2 tab (`surface terminal open --agent opencode` plus any arguments) and
+# waits until Sirio created its session: sets PANE, SESS and OC_TAB_ID. The pane's ref is that
+# session's id and the tab's process resumes it, with no title sent anywhere.
+OC_TAB_ID=""
+open_oc_tab() {
+  local seen
+  seen="$(oc_log_count '^POST /api/session 200 ')"
+  open_pane --agent opencode "$@"
+  wait_post_ok "$seen"
+  OC_TAB_ID="$OC_POST_ID"
+  wait_ref "$PANE" "$OC_TAB_ID" 10
+  wait_until 15 runs_resumed "$PANE" "$OC_TAB_ID" || fail "the OpenCode tab $PANE did not start opencode --session $OC_TAB_ID (argv: $(oc_argv_of "$PANE" || echo none))"
+}
+# Closes the tab of pane $1 (the debug build's --confirm skips the dialog for a live agent).
+close_tab() { # pane
+  ctl surface tabs close "$(tab_index_of "$1")" --confirm >/dev/null
+}
+# A typed `opencode` is linked by the watch and never gets a session ref: this fails on a ref
+# (or on a database that cannot be read) at the moment it is called, which is after the link.
+expect_no_ref() { # pane what
+  local got
+  got="$(session_ref_of "$1")"
+  [ -z "$got" ] || fail "$2: pane $1 has the session ref '$got', a typed opencode must have none"
+}
+# The pid of the world's host (empty when none is registered).
+host_pid() {
+  python3 -I -c 'import glob, json, sys
+files = glob.glob(sys.argv[1] + "/host-v*.json")
+print(json.load(open(files[0]))["pid"] if files else "")' "$W/host" 2>/dev/null || true
+}
+host_up() {
+  local pid
+  pid="$(host_pid)"
+  [ -n "$pid" ] && alive "$pid"
+}
+# Whether $2 ms have passed since the nanosecond clock reading $1.
+elapsed_since() { # start_ns ms
+  [ $(( ($(date +%s%N) - $1) / 1000000 )) -ge "$2" ]
+}
 # The number of `[opencode-watch] <kind>` lines in the app's stderr.
 watch_lines() { grep -c '^\[opencode-watch\] ' "$W/app.log" || true; }
 # Leaves the OpenCode stub in pane $1 and waits for the mark to go: a case's last step, so
@@ -1075,6 +1288,38 @@ watch_lines() { grep -c '^\[opencode-watch\] ' "$W/app.log" || true; }
 leave_opencode() { # pane
   type_line "$1" exit
   wait_agent "$1" "" 3
+}
+
+# Writes byte for byte what older Sirio builds generated as a worktree OpenCode plugin:
+# LEGACY_PANE_PLUGIN_TEMPLATE of rust/crates/sirio_agents/src/opencode.rs with `__SIRIOCTL__`
+# as the JSON string literal of the path and `__PANE__` as the pane key (the header's dash is
+# U+2014). A current build writes a plugin that reads its pane from the environment instead;
+# both are still Sirio's to remove. Sirio removes a file
+# only when it matches this text exactly, so a plant with the header and any other body would
+# be the user's file to it, and would prove nothing about the removal.
+write_generated_oc_plugin() { # file pane-key sirioctl-path
+  local tpl lit
+  IFS= read -r -d '' tpl <<'TEMPLATE' || true
+// Generated by Sirio — reports the OpenCode session id for restore.
+export const SirioSession = async ({ $ }) => {
+  let reported = ""
+  const sirioctl = __SIRIOCTL__
+  const pane = "__PANE__"
+  return {
+    event: async ({ event }) => {
+      const id = event?.properties?.info?.id
+      if (event?.type === "session.updated" && id && id !== reported) {
+        reported = id
+        await $`${sirioctl} session-ref --session ${pane} --ref ${id}`.quiet().nothrow()
+      }
+    },
+  }
+}
+TEMPLATE
+  tpl="${tpl//__SIRIOCTL__/\"$3\"}"
+  tpl="${tpl//__PANE__/"$2"}"
+  mkdir -p "$(dirname "$1")"
+  printf '%s' "$tpl" > "$1"
 }
 
 case_opencode_three_states() {
@@ -1091,6 +1336,8 @@ case_opencode_three_states() {
   # A plain turn, no ask in it: running, then done after more than a second (+1).
   oc "busy ses_t"
   wait_status "$SESS" running 4
+  # Running proves the title link holds: a title-based ref writer would have written by now.
+  expect_no_ref "$PANE" "a typed opencode linked by title and running"
   sleep 1.3
   base="$(posted_count)"
   oc "idle ses_t"
@@ -1114,6 +1361,7 @@ case_opencode_three_states() {
   wait_status "$SESS" done 4
   expect_posted "$base" 1 "the end of a turn"
   expect_attention "$SESS" unread true "the end of a turn"
+  hold_ref "$PANE" "" 1
   stepn "opencode done" "$SESS"
   capture "opencode-done"
   # The service saw the app authenticate every call.
@@ -1133,6 +1381,7 @@ case_opencode_first_turn_links() {
   wait_status "$SESS" running 4
   sleep 1.3
   stepn "opencode: first turn, linked with no title" "$SESS"
+  expect_no_ref "$PANE" "a typed opencode linked by its first turn"
   base="$(posted_count)"
   oc "idle ses_f"
   wait_status "$SESS" done 4
@@ -1147,6 +1396,8 @@ case_opencode_first_turn_links() {
   oc "rename ses_f firstturn"
   sleep 1.5
   hold_status "$SESS" done 1
+  # The title and the rename have met: a title-based ref writer would have written by now.
+  hold_ref "$PANE" "" 2
   expect_posted "$base" 0 "a title that came before the rename"
   stepn "opencode: first turn kept across the title and the rename" "$SESS"
   leave_opencode "$PANE"
@@ -1179,6 +1430,7 @@ case_opencode_duplicate_title_keeps_link() {
   hold_status "$SESS" done 2
   expect_posted "$base" 0 "a title, then a rename, to a title another session has"
   stepn "opencode: first turn kept across a duplicate title" "$SESS"
+  hold_ref "$PANE" "" 1
   oc "busy ses_d"
   wait_status "$SESS" running 4
   sleep 1.3
@@ -1186,6 +1438,7 @@ case_opencode_duplicate_title_keeps_link() {
   oc "idle ses_d"
   wait_status "$SESS" done 4
   expect_posted "$base" 1 "the end of a turn under a duplicate title"
+  hold_ref "$PANE" "" 1
   stepn "opencode: a later turn under a duplicate title" "$SESS"
   leave_opencode "$PANE"
 }
@@ -1347,6 +1600,9 @@ case_two_opencode_panes_one_folder() {
   hold_status "$sess_b" null 1
   oc "busy ses_b"
   wait_status "$sess_b" running 4
+  # Both are linked by their titles: neither typed pane has a ref.
+  expect_no_ref "$pane_a" "A linked by its title"
+  expect_no_ref "$pane_b" "B linked by its title"
   sleep 1.3
   base="$(posted_count)"
   oc "idle ses_a"
@@ -1419,7 +1675,259 @@ case_opencode_after_relaunch() {
   wait_status "$SESS" done 5
   expect_posted "$base" 1 "the end of a turn after the relaunch"
   stepn "opencode after the relaunch: done" "$SESS"
+  # Linked again by its title after the relaunch: still no ref.
+  hold_ref "$PANE" "" 1
   leave_opencode "$PANE"
+}
+
+case_opencode_agent_tab_resumes() {
+  # Two tabs Sirio launched as OpenCode 2 in one folder (`surface terminal open --agent
+  # opencode`), B opened first and A last. Sirio creates each tab's session (POST /api/session,
+  # location = the worktree) and starts `opencode --session <id>`; the pane's ref is that id
+  # from the launch on, before any title exists, and the first turn of a tab shows its status
+  # at once (the watch links the pane's own created session while the title is `OpenCode`);
+  # a session opened inside the TUI that no pane created takes that link away until the title
+  # renames it. The watch only reads status: a relaunch with
+  # the host alive keeps both refs and the hidden tab linked (B, hidden, is fed by the app's
+  # listener, whose seed carries a `Program(None)`).
+  local pane_a sess_a pane_b sess_b id_a id_b base
+  open_oc_tab
+  pane_b="$PANE"; sess_b="$SESS"; id_b="$OC_TAB_ID"
+  open_oc_tab
+  pane_a="$PANE"; sess_a="$SESS"; id_a="$OC_TAB_ID"
+  [ "$(session_ref_of "$pane_b")" = "$id_b" ] || fail "B's ref changed when A's tab opened: '$(session_ref_of "$pane_b")', wanted $id_b"
+  wait_until 5 identify_is "$pane_a" "$id_a" || fail "system.identify for $pane_a returns sessionRef '$(identify_ref "$pane_a")', wanted $id_a"
+  wait_until 5 identify_is "$pane_b" "$id_b" || fail "system.identify for $pane_b returns sessionRef '$(identify_ref "$pane_b")', wanted $id_b"
+  echo "OK: system.identify returns each tab's own session id ($id_a, $id_b)"
+  # Two panes, two sessions with no title yet: each pane's TUI title is still `OpenCode`, and
+  # the watch links a pane to the session Sirio created for it (the `created` rule), even with
+  # another OpenCode tab in the folder. So A's first turn shows its status with no title at all,
+  # and B, linked to its own idle session, shows none.
+  oc "busy $id_a"
+  wait_status "$sess_a" running 4
+  hold_status "$sess_b" null 1
+  sleep 1.3
+  base="$(posted_count)"
+  oc "idle $id_a"
+  wait_status "$sess_a" done 4
+  expect_posted "$base" 1 "the end of the first turn of an OpenCode tab Sirio launched"
+  stepn "opencode agent tab A: first turn done, linked by its created session" "$sess_a"
+  # A session opened inside the TUI (`/new`) that no pane created, born after A's: A cannot tell
+  # which session its TUI shows any more, so nothing is linked. The stub has no delete, so
+  # `ses_tui` stays in the folder; it is older than every session and pane the later cases make,
+  # and the rule only looks at sessions born at or after a pane's own, so it disturbs none of them.
+  oc "create ses_tui $OC_DIR"
+  wait_status "$sess_a" null 4
+  stepn "opencode agent tab A: a session opened in the TUI, no link" "$sess_a"
+  oc "rename $id_a agenttab-a"
+  oc "rename $id_b agenttab-b"
+  type_line "$pane_a" "title OC | agenttab-a"
+  type_line "$pane_b" "title OC | agenttab-b"
+  oc "busy $id_a"
+  wait_status "$sess_a" running 5
+  hold_status "$sess_b" null 1
+  sleep 1.3
+  base="$(posted_count)"
+  oc "idle $id_a"
+  wait_status "$sess_a" done 5
+  expect_posted "$base" 1 "the end of a turn in an OpenCode tab Sirio launched"
+  stepn "opencode agent tabs: A done, B linked and idle" "$sess_a"
+  # A relaunch with the host alive: A attaches, B stays hidden and the listener feeds it.
+  relaunch_app
+  wait_ref "$pane_a" "$id_a" 5
+  wait_ref "$pane_b" "$id_b" 5
+  oc "busy $id_b"
+  wait_status "$sess_b" running 6
+  stepn "opencode agent tab B, hidden after a relaunch: running" "$sess_b"
+  oc "idle $id_b"
+  wait_status "$sess_b" done 5
+  # The higher position first, so each tab's index is still the one read.
+  close_tab "$pane_a"
+  close_tab "$pane_b"
+}
+
+case_opencode_unavailable_service_launches_plain() {
+  local pane seen_ok seen_all seen_500 t0 t1 t2 ms
+  # (1) The service answers the POST with 500: plain opencode, and no ref.
+  oc "create fail"
+  seen_ok="$(oc_log_count '^POST /api/session 200 ')"
+  seen_500="$(oc_log_count '^POST /api/session 500$')"
+  open_pane --agent opencode
+  pane="$PANE"
+  wait_until 15 oc_log_more '^POST /api/session 500$' "$seen_500" || fail "the app never sent its POST /api/session to the failing service"
+  wait_until 15 runs_plain "$pane" || fail "the tab did not start a plain opencode after the POST failed (argv: $(oc_argv_of "$pane" || echo none))"
+  expect_no_ref "$pane" "a tab whose session could not be created"
+  hold_ref "$pane" "" 1
+  [ "$(oc_log_count '^POST /api/session 200 ')" = "$seen_ok" ] || fail "a session was created though the stub was set to fail"
+  echo "OK: POST answered 500: plain opencode, no ref"
+  close_tab "$pane"
+
+  # (2) The service answers after 8 s: the tab starts plain at the 3 s deadline, and the UI
+  # thread is free meanwhile.
+  oc "create delay 8"
+  seen_ok="$(oc_log_count '^POST /api/session 200 ')"
+  t0="$(date +%s%N)"
+  open_pane --agent opencode
+  pane="$PANE"
+  t1="$(date +%s%N)"
+  ctl surface tabs read >/dev/null
+  t2="$(date +%s%N)"
+  ms=$(( (t2 - t1) / 1000000 ))
+  # The open itself must not wait for the service either: a launch that called the service on
+  # the UI thread would hold the open's reply for the whole 3 s deadline.
+  [ $(( (t1 - t0) / 1000000 )) -lt 2500 ] || fail "opening the tab took $(( (t1 - t0) / 1000000 )) ms while the service delayed: the open waited for it"
+  elapsed_since "$t0" 7000 && fail "the control call ran $(( (t2 - t0) / 1000000 )) ms after the open: past the stub's delay, so it proves nothing"
+  [ "$ms" -lt 1000 ] || fail "a control call took $ms ms while the app waited for the service: the UI thread is blocked"
+  echo "OK: the open answered in $(( (t1 - t0) / 1000000 )) ms and a control call in $ms ms while the service delayed"
+  wait_until 8 runs_plain "$pane" || fail "the tab never started a plain opencode within the 3 s deadline plus margin (argv: $(oc_argv_of "$pane" || echo none))"
+  elapsed_since "$t0" 7500 && fail "the plain opencode appeared after the service's own 8 s delay: the deadline did not cut it"
+  [ "$(oc_log_count '^POST /api/session 200 ')" = "$seen_ok" ] || fail "the service had answered before the tab started: the deadline proves nothing"
+  expect_no_ref "$pane" "a tab that started at the deadline"
+  echo "OK: the tab started plain before the service answered"
+  # The late answer is no news to a tab that already started: it writes no ref.
+  wait_until 12 elapsed_since "$t0" 9500 || fail "the clock did not reach the end of the service's delay"
+  hold_ref "$pane" "" 2
+  oc "create ok"
+  close_tab "$pane"
+
+  # (3) OpenCode 1 on the PATH: no POST at all, a plain opencode, and the v1 plugin.
+  rm -f "$W_REPO/.opencode/plugin/sirio-session.js"
+  echo 1.18.33 > "$RUN/oc-version"
+  seen_all="$(oc_log_count '^POST /api/session ')"
+  open_pane --agent opencode
+  pane="$PANE"
+  wait_until 15 runs_plain "$pane" || { echo 2.3.0 > "$RUN/oc-version"; fail "the tab did not start a plain opencode under OpenCode 1"; }
+  echo 2.3.0 > "$RUN/oc-version"
+  wait_until 5 test -f "$W_REPO/.opencode/plugin/sirio-session.js" || fail "no v1 plugin was written for an OpenCode 1 tab"
+  [ "$(head -n 1 "$W_REPO/.opencode/plugin/sirio-session.js")" = '// Generated by Sirio — reports the OpenCode session id for restore.' ] || fail "the v1 plugin does not start with Sirio's generated header"
+  grep -qF 'process.env.SIRIO_PANE_ID' "$W_REPO/.opencode/plugin/sirio-session.js" || fail "the v1 plugin does not read its pane from the environment"
+  ! grep -qE 'pane-[0-9]' "$W_REPO/.opencode/plugin/sirio-session.js" || fail "the v1 plugin names a pane: one worktree file serves every tab"
+  hold_log_count '^POST /api/session ' "$seen_all" 2
+  expect_no_ref "$pane" "an OpenCode 1 tab"
+  echo "OK: OpenCode 1: no POST, plain opencode, no ref, the plugin is written"
+  close_tab "$pane"
+  rm -f "$W_REPO/.opencode/plugin/sirio-session.js"
+}
+
+# Has Sirio itself write the real v1 plugin: an OpenCode 1 tab (`oc-version` 1.18.33) is opened,
+# the file it writes into the worktree is waited for and copied to $RUN/real-v1-plugin.js, and
+# the tab is closed. The plugin stays in the worktree and 2.3.0 is back, on every exit path.
+make_real_v1_plugin() {
+  local plugin="$W_REPO/.opencode/plugin/sirio-session.js" pane
+  rm -f "$plugin"
+  echo 1.18.33 > "$RUN/oc-version"
+  open_pane --agent opencode
+  pane="$PANE"
+  wait_until 15 runs_plain "$pane" || { echo 2.3.0 > "$RUN/oc-version"; fail "the tab did not start a plain opencode under OpenCode 1"; }
+  wait_until 5 test -f "$plugin" || { echo 2.3.0 > "$RUN/oc-version"; fail "no v1 plugin was written for an OpenCode 1 tab"; }
+  cp "$plugin" "$RUN/real-v1-plugin.js"
+  echo 2.3.0 > "$RUN/oc-version"
+  close_tab "$pane"
+}
+
+case_opencode_v2_writes_no_plugin() {
+  local plugin="$W_REPO/.opencode/plugin/sirio-session.js" saved="$RUN/user-plugin.js" first
+  first='// Generated by Sirio — reports the OpenCode session id for restore.'
+  # Sirio's own v1 plugin, exactly as a 1.x build writes it: OpenCode 2's TUI shows "Plugin
+  # failed" for it, so the next fresh tab removes it.
+  make_real_v1_plugin
+  open_oc_tab
+  wait_until 10 test ! -e "$plugin" || fail "Sirio's generated plugin is still there after an OpenCode 2 tab was created"
+  echo "OK: Sirio's real v1 plugin was removed for an OpenCode 2 tab"
+  close_tab "$PANE"
+  # The legacy text older builds wrote, which names one pane, is Sirio's too: removed the same.
+  write_generated_oc_plugin "$plugin" pane-1 "$CTL"
+  open_oc_tab
+  wait_until 10 test ! -e "$plugin" || fail "Sirio's legacy pane-naming plugin is still there after an OpenCode 2 tab was created"
+  echo "OK: Sirio's legacy pane-naming plugin was removed for an OpenCode 2 tab"
+  close_tab "$PANE"
+  # The same file with its `const sirioctl` line turned into an expression is no longer one
+  # JSON string literal there: it is the user's file, and stays byte for byte.
+  python3 -I -c 'import sys
+out = []
+for line in open(sys.argv[1], encoding="utf-8").read().split("\n"):
+    out.append("  const sirioctl = \"a\" + x() + \"b\"" if line.startswith("  const sirioctl = ") else line)
+open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out))' "$RUN/real-v1-plugin.js" "$plugin"
+  cp "$plugin" "$saved"
+  cmp -s "$plugin" "$RUN/real-v1-plugin.js" && fail "the edited copy of the v1 plugin is identical to the original: the edit proves nothing"
+  open_oc_tab
+  cmp -s "$plugin" "$saved" || fail "a copy of Sirio's plugin whose sirioctl line is not a string literal was changed or removed by an OpenCode 2 tab"
+  echo "OK: a copy of the generated plugin with an edited sirioctl line was left byte for byte"
+  close_tab "$PANE"
+  # A plugin the user wrote, with no Sirio header, stays byte for byte.
+  printf '%s\n%s\n' "// my own plugin" "export default async () => ({ name: 'mine' })" > "$plugin"
+  cp "$plugin" "$saved"
+  open_oc_tab
+  cmp -s "$plugin" "$saved" || fail "a plugin without Sirio's header was changed or removed by an OpenCode 2 tab"
+  echo "OK: a user's plugin was left byte for byte"
+  close_tab "$PANE"
+  # A file with Sirio's header and a body of the user's own is the user's too: only the exact
+  # generated text is Sirio's to remove. The tab's `opencode --session` start (open_oc_tab
+  # waits for it) comes after the plugin step ran, as the removal above relies on.
+  printf '%s\n%s\n' "$first" "export default async () => ({ name: 'mine' })" > "$plugin"
+  cp "$plugin" "$saved"
+  open_oc_tab
+  cmp -s "$plugin" "$saved" || fail "a file with Sirio's header line and the user's own body was changed or removed by an OpenCode 2 tab"
+  echo "OK: a user's file under Sirio's header line was left byte for byte"
+  close_tab "$PANE"
+  rm -f "$plugin" "$saved"
+}
+
+case_opencode_unknown_version_writes_no_plugin() {
+  local plugin="$W_REPO/.opencode/plugin/sirio-session.js" pane seen_all
+  # `garbage` makes the fake print `opencode vgarbage`, which no probe can read. The app is
+  # relaunched so its startup probe reads nothing too (the version memo keeps a version read
+  # earlier in a run, so only a fresh process proves the unreadable case).
+  make_real_v1_plugin
+  [ -e "$plugin" ] || fail "the OpenCode 1 tab did not leave Sirio's v1 plugin in the worktree"
+  echo garbage > "$RUN/oc-version"
+  relaunch_app
+  seen_all="$(oc_log_count '^POST /api/session ')"
+  open_pane --agent opencode
+  pane="$PANE"
+  wait_until 15 runs_plain "$pane" || { echo 2.3.0 > "$RUN/oc-version"; fail "the tab did not start a plain opencode when the version could not be read (argv: $(oc_argv_of "$pane" || echo none))"; }
+  hold_log_count '^POST /api/session ' "$seen_all" 2
+  expect_no_ref "$pane" "an OpenCode tab with no readable version"
+  # Under the old rule an unreadable version counted as 1.x and the plugin was written again.
+  wait_until 10 test ! -e "$plugin" || { echo 2.3.0 > "$RUN/oc-version"; fail "Sirio's generated plugin is still there (or was rewritten) though OpenCode gave no readable version"; }
+  echo "OK: no readable version: plain opencode, no POST, no ref, no plugin written, the generated one removed"
+  close_tab "$pane"
+  # The legacy pane-naming text is removed under an unreadable version too.
+  write_generated_oc_plugin "$plugin" pane-1 "$CTL"
+  open_pane --agent opencode
+  pane="$PANE"
+  wait_until 15 runs_plain "$pane" || { echo 2.3.0 > "$RUN/oc-version"; fail "the second tab did not start a plain opencode when the version could not be read"; }
+  wait_until 10 test ! -e "$plugin" || { echo 2.3.0 > "$RUN/oc-version"; fail "Sirio's legacy pane-naming plugin is still there though OpenCode gave no readable version"; }
+  echo "OK: no readable version: the legacy pane-naming plugin was removed too"
+  close_tab "$pane"
+  echo 2.3.0 > "$RUN/oc-version"
+  relaunch_app
+  rm -f "$plugin"
+}
+
+case_fresh_tab_drops_stale_ref() {
+  local old_pane codex
+  # Pane ids are reused after a relaunch: the first free id is one past the largest a persisted
+  # layout names. A row left under the key the next tab takes (a crash, an older build, a closed
+  # pane) is dropped as the fresh tab is made, whatever its agent, before anything could resume
+  # it. A tab whose OpenCode 2 session could not be created writes none and would inherit it,
+  # and so would any other agent.
+  relaunch_app
+  open_oc_tab
+  old_pane="$PANE"
+  close_tab "$old_pane"
+  relaunch_app
+  # Written through the control socket, so the app's mirror of the rows holds it, as it holds
+  # every row it loaded at startup (a crash's, an older build's): a fresh tab looks there, and
+  # deletes nothing in the database when the mirror has no row for its key. A row another
+  # connection writes while the app runs is not seen (a known limit).
+  ctl session-ref --session "$old_pane" --ref stale-ref-from-a-crash >/dev/null
+  [ "$(session_ref_of "$old_pane")" = stale-ref-from-a-crash ] || fail "the stale row for $old_pane could not be written"
+  open_pane --agent codex
+  codex="$PANE"
+  [ "$codex" = "$old_pane" ] || fail "the codex tab got the pane key $codex, not $old_pane: the stale row proves nothing"
+  [ -z "$(session_ref_of "$codex")" ] || fail "the fresh codex tab $codex kept the stale ref '$(session_ref_of "$codex")'"
+  echo "OK: a fresh tab under $codex dropped the stale row it would have inherited"
 }
 
 case_no_service_degrades() {
@@ -2046,6 +2554,79 @@ print(len({(json.loads(l)["title"], json.loads(l)["body"]) for l in sys.stdin}))
   [ "$(attention_get "$SESS_B" status)" = "$(attention_get "$SESS_A" status)" ] || fail "the hidden tab reads '$(attention_get "$SESS_B" status)' after End all sessions, the attached tab '$(attention_get "$SESS_A" status)'"
 }
 
+# The OpenCode stub, started again when an earlier case stopped it (`no_service_degrades`):
+# the new process registers a new port and password where the service does, and reads
+# $RUN/oc.cmd from its start.
+oc_stub_restart() {
+  : > "$RUN/oc.cmd"
+  rm -f "$RUN/oc.ack"
+  OC_SENT=0
+  rm -f "$W/xdg/state/opencode/service.json"
+  python3 -I "$OC_STUB" --registry "$W/xdg/state/opencode/service.json" --cmd "$RUN/oc.cmd" \
+    --ack "$RUN/oc.ack" --log "$RUN/oc.log" >>"$RUN/oc-stub.out" 2>&1 &
+  OC_PID=$!
+  wait_until 10 test -s "$W/xdg/state/opencode/service.json" || fail "the OpenCode stub never registered again"
+}
+
+case_opencode_resumes_without_host() {
+  # Last: it stops the host. An OpenCode tab with its created session, the app quits and the
+  # host goes with every session, and the relaunch has nothing to attach to: the selected tab
+  # starts its agent again on the saved session. A second, hidden tab starts only when it is
+  # shown, as any restored tab does. The world is left with the app and a host up.
+  local pane sess id plugin starts hidden hidden_id
+  alive "$OC_PID" || oc_stub_restart
+  # A fresh app, whatever the earlier cases (End all sessions) left of the host.
+  relaunch_app
+  open_oc_tab
+  hidden="$PANE"; hidden_id="$OC_TAB_ID"
+  open_oc_tab
+  pane="$PANE"; sess="$SESS"; id="$OC_TAB_ID"
+  # Sirio's generated v1 plugin in the tab's worktree (an older build wrote it): a restored
+  # OpenCode pane waits for the first version probe of the relaunch, whose plugin step removes
+  # it under OpenCode 2, before its `opencode` starts. A pane that started at once would find it
+  # (OpenCode 2's TUI shows "Plugin failed" for it) and nothing would take it away.
+  plugin="$W_REPO/.opencode/plugin/sirio-session.js"
+  mkdir -p "$(dirname "$plugin")"
+  write_generated_oc_plugin "$plugin" pane-1 "$CTL"
+  ctl quit >/dev/null 2>&1 || true
+  for _ in $(seq 1 100); do alive "$APP_PID" || break; sleep 0.2; done
+  alive "$APP_PID" && fail "sirio did not quit after sirioctl quit"
+  APP_PID=""
+  host_down
+  # The fake opencode notes, as it starts, whether the plugin was in its folder (`oc-starts`).
+  starts="$(wc -l < "$RUN/oc-starts" 2>/dev/null || echo 0)"
+  app_start
+  ctl select-workspace --workspace "$wt" >/dev/null
+  wait_until 20 runs_resumed "$pane" "$id" || fail "the relaunched OpenCode tab $pane did not start opencode --session $id"
+  [ ! -e "$plugin" ] || fail "Sirio's generated v1 plugin is still in the worktree after the restored OpenCode pane started"
+  # The process can be there before it wrote its line: wait for the line, then read them all.
+  wait_until 5 oc_started_since "$starts" "$(cd "$W_REPO" && pwd -P)" || fail "no opencode noted its start in $W_REPO after the relaunch: $(tail -n +"$((starts + 1))" "$RUN/oc-starts" 2>/dev/null | tr '\n' ';')"
+  ! tail -n +"$((starts + 1))" "$RUN/oc-starts" | grep -q '^plugin ' || fail "a restored OpenCode pane started while Sirio's generated v1 plugin was still in its folder: $(tail -n +"$((starts + 1))" "$RUN/oc-starts" | tr '\n' ';')"
+  echo "OK: $pane was started again as opencode --session $id, and no restored opencode found Sirio's v1 plugin as it started"
+  wait_ref "$pane" "$id" 5
+  wait_until 5 identify_is "$pane" "$id" || fail "system.identify for $pane returns '$(identify_ref "$pane")' after the relaunch, wanted $id"
+  # The release of the held launches came before the shown tab started: a hidden tab it had
+  # opened would be running by now. It opens when it is shown, on its own session.
+  wait_until 2 oc_argv_of "$hidden" >/dev/null && fail "the hidden OpenCode tab $hidden started before it was shown (argv: $(oc_argv_of "$hidden"))"
+  ctl surface tabs select "$(tab_index_of "$hidden")" >/dev/null
+  wait_until 20 runs_resumed "$hidden" "$hidden_id" || fail "the hidden OpenCode tab $hidden, once shown, did not start opencode --session $hidden_id (argv: $(oc_argv_of "$hidden" || echo none))"
+  echo "OK: the hidden tab $hidden stayed unopened until shown, then resumed $hidden_id"
+  ctl surface tabs select "$(tab_index_of "$pane")" >/dev/null
+  stepn "opencode agent tab after a relaunch with no host: resumed" "$sess"
+  oc "rename $id resumed-tab"
+  type_line "$pane" "title OC | resumed-tab"
+  oc "busy $id"
+  wait_status "$sess" running 5
+  oc "idle $id"
+  wait_status "$sess" done 5
+  stepn "opencode agent tab after the resume: done" "$sess"
+  # The higher position first, so each tab's index is still the one read.
+  close_tab "$pane"
+  close_tab "$hidden"
+  ctl_ready || fail "the app does not answer after the case"
+  wait_until 20 host_up || fail "no host is running after the case"
+}
+
 run_case() { # name
   CASE_N=$((CASE_N + 1))
   CASE_NAME="$1"
@@ -2099,6 +2680,11 @@ run_case opencode_own_finish_links_late
 run_case two_opencode_panes_one_folder
 run_case opencode_failed_turn_is_error
 run_case opencode_after_relaunch
+run_case opencode_agent_tab_resumes
+run_case opencode_unavailable_service_launches_plain
+run_case opencode_v2_writes_no_plugin
+run_case opencode_unknown_version_writes_no_plugin
+run_case fresh_tab_drops_stale_ref
 run_case background_opencode_notifies
 run_case no_service_degrades
 run_case background_tab_notifies
@@ -2119,6 +2705,7 @@ run_case close_hidden_worktree_mid_turn_is_silent
 run_case background_exit_while_app_down_is_silent
 run_case background_host_lost
 run_case end_all_sessions_parity
+run_case opencode_resumes_without_host
 
 [ "$CASES_RUN" -gt 0 ] || { echo "FAIL: --only named no case" >&2; exit 1; }
 if [ -n "$ONLY" ]; then label=PARTIAL; else label=OK; fi
