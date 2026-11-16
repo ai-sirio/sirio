@@ -975,3 +975,228 @@ fn claude_sends_mcp_elicitation_to_its_host() {
         run.seen
     );
 }
+
+// Failure list for `claude_reports_its_session_state_under_the_variable`, written before the
+// test. It fails when:
+// - no `session_state_changed` line arrives under `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`
+//   (the variable is not honoured, or the line is not read), or the first state of a run is
+//   not `running` (a spurious leading `idle`);
+// - `running` does not come before the turn's `result`, or the run does not end `idle` after it;
+// - the last state before the host answers a `can_use_tool` is not `requires_action`, or
+//   it does not come after the turn's `running`;
+// - after the answer, the order is not `running`, `result`, `idle`;
+// - in the background run, any `idle` comes before the last `result`, there are not exactly
+//   two `result`s (the main turn's and the CLI's follow-up turn), or the `task_notification`
+//   is not between them;
+// - the CLI exits early, or a read runs past 40 s (the run ends and the assertion prints
+//   what was seen).
+
+/// One thing the host saw or did, in the order it happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StateStep {
+    State(String),
+    PermissionAsked,
+    Answered,
+    ResultLine,
+    TaskNotification,
+    /// The CLI's stdout closed before the run ended.
+    CliExited,
+}
+
+/// One CLI process, one prompt; reads until the first `idle` after a `result`, the CLI's exit,
+/// or 40 s. Every `can_use_tool` is allowed, but only once the latest state seen is
+/// `requires_action` (or 4 s passed), so the state of a pending request is observed before it
+/// is answered.
+fn run_state(
+    claude: &std::path::Path,
+    python: &std::path::Path,
+    scratch: &std::path::Path,
+    name: &str,
+    prompt: &str,
+) -> Vec<StateStep> {
+    use claude_live::Polled;
+    use sirio_claude::{CanUseTool, CliMessage, ControlRequest, PermissionResult};
+
+    let mut session = claude_live::Session::start_state(claude, python, &scratch.join(name));
+    session.write(&ControlRequest::initialize("state-init"));
+    session.write(&serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+        "parent_tool_use_id": null,
+        "session_id": "",
+    }));
+
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut steps = Vec::new();
+    let mut pending: Option<(CanUseTool, Instant)> = None;
+    let mut latest_state = String::new();
+    let mut seen_result = false;
+    while Instant::now() < deadline {
+        let poll = (Instant::now() + Duration::from_millis(250)).min(deadline);
+        match session.poll(poll) {
+            Polled::Line(line) => {
+                if let Some(call) = CanUseTool::parse(&line) {
+                    steps.push(StateStep::PermissionAsked);
+                    pending = Some((call, Instant::now()));
+                }
+                match CliMessage::parse(&line.to_string()) {
+                    Some(CliMessage::System(system)) => match system.subtype.as_str() {
+                        "session_state_changed" => {
+                            latest_state = system.state.unwrap_or_default();
+                            steps.push(StateStep::State(latest_state.clone()));
+                            if latest_state == "idle" && seen_result {
+                                break;
+                            }
+                        }
+                        "task_notification" => steps.push(StateStep::TaskNotification),
+                        _ => {}
+                    },
+                    Some(CliMessage::Result(_)) => {
+                        seen_result = true;
+                        steps.push(StateStep::ResultLine);
+                    }
+                    _ => {}
+                }
+            }
+            Polled::Timeout => {}
+            Polled::Closed => {
+                steps.push(StateStep::CliExited);
+                break;
+            }
+        }
+        if pending.as_ref().is_some_and(|(_, since)| {
+            latest_state == "requires_action" || since.elapsed() > Duration::from_secs(4)
+        }) {
+            let (call, _) = pending.take().unwrap();
+            steps.push(StateStep::Answered);
+            session.write(&PermissionResult::allow(call.input).into_response(&call.request_id));
+        }
+    }
+    steps
+}
+
+/// Proves the real `claude` reports its session state under
+/// `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1`, the env `LaunchLine::chat` sets, the way the
+/// chat reads it: `running` before a turn's `result` and `idle` after it, `requires_action`
+/// while a permission is open, and no `idle` while a background agent still works.
+///
+/// A fake model API (`fake_state_api.py`) drives three separate CLI processes: a plain
+/// turn, a `Bash` call that needs a permission, and a background `Agent`. It uses no
+/// credential and no network beyond 127.0.0.1, but launches a real CLI three times, so it is
+/// `#[ignore]`d and stays off CI:
+///
+///     cargo nextest run -p sirio_agents --test acp_conformance --run-ignored only -E 'test(=claude_reports_its_session_state_under_the_variable)'
+///
+/// It SKIPs without a resolvable mise `claude` binary, below the claimed floor, and without
+/// `python3`.
+#[test]
+#[ignore = "launches the real claude three times"]
+fn claude_reports_its_session_state_under_the_variable() {
+    use StateStep::{Answered, PermissionAsked, ResultLine, State, TaskNotification};
+
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        eprintln!("SKIP: HOME is not set");
+        return;
+    };
+    let real_home = home.canonicalize().unwrap_or_else(|_| home.clone());
+    let Some(claude) = claude_live::resolve_claude(&home) else {
+        eprintln!("SKIP: no mise-installed claude binary");
+        return;
+    };
+    claude_live::refuse_wrapper(&claude, &real_home);
+    let Some(python) = claude_live::python3() else {
+        eprintln!("SKIP: python3 is not available");
+        return;
+    };
+    let scratch = claude_live::Scratch::new("session-state", &real_home);
+    let version_text = claude_live::version_text(&claude, &scratch.root);
+    let Some(version) = sirio_claude::ClaudeVersion::parse(&version_text) else {
+        panic!("claude reported an unreadable version: {version_text:?}");
+    };
+    if !version.meets_floor() {
+        eprintln!("SKIP: claude {version} is below the claimed floor");
+        return;
+    }
+    let state = |name: &str| State(name.to_string());
+    let position = |steps: &[StateStep], wanted: &StateStep| steps.iter().position(|s| s == wanted);
+    let first_state = |steps: &[StateStep]| {
+        steps
+            .iter()
+            .find(|s| matches!(s, State(_)))
+            .cloned()
+            .unwrap_or_else(|| panic!("no session_state_changed under the variable; saw {steps:?}"))
+    };
+
+    // Run 1: a plain turn is running, result, idle.
+    let steps = run_state(&claude, &python, &scratch.root, "plain", "say hello");
+    assert_eq!(
+        first_state(&steps),
+        state("running"),
+        "first state: {steps:?}"
+    );
+    let result =
+        position(&steps, &ResultLine).unwrap_or_else(|| panic!("no result; saw {steps:?}"));
+    let running = position(&steps, &state("running")).unwrap();
+    assert!(
+        running < result,
+        "running comes before the result: {steps:?}"
+    );
+    assert_eq!(steps.last(), Some(&state("idle")), "ends idle: {steps:?}");
+
+    // Run 2: a permission is requires_action until it is answered; then running, result, idle.
+    let steps = run_state(&claude, &python, &scratch.root, "permission", "run bash");
+    assert_eq!(
+        first_state(&steps),
+        state("running"),
+        "first state: {steps:?}"
+    );
+    position(&steps, &PermissionAsked)
+        .unwrap_or_else(|| panic!("no can_use_tool reached the host; saw {steps:?}"));
+    let answered = position(&steps, &Answered)
+        .unwrap_or_else(|| panic!("the can_use_tool was never answered; saw {steps:?}"));
+    let before = &steps[..answered];
+    let last_before = before.iter().rposition(|s| matches!(s, State(_)));
+    assert_eq!(
+        last_before.map(|i| &before[i]),
+        Some(&state("requires_action")),
+        "the state while the request is open is requires_action: {steps:?}"
+    );
+    assert!(
+        position(&steps, &state("running")).unwrap() < last_before.unwrap(),
+        "requires_action comes after the turn's running: {steps:?}"
+    );
+    let after: Vec<&StateStep> = steps[answered + 1..].iter().collect();
+    assert_eq!(
+        after,
+        [&state("running"), &ResultLine, &state("idle")],
+        "after the answer: {steps:?}"
+    );
+
+    // Run 3: a background agent holds idle back past the main result, through the CLI's
+    // follow-up turn.
+    let steps = run_state(&claude, &python, &scratch.root, "background", "run bg");
+    assert_eq!(
+        first_state(&steps),
+        state("running"),
+        "first state: {steps:?}"
+    );
+    let results: Vec<usize> = (0..steps.len())
+        .filter(|&i| steps[i] == ResultLine)
+        .collect();
+    assert_eq!(
+        results.len(),
+        2,
+        "the main result and the follow-up's: {steps:?}"
+    );
+    let notified = position(&steps, &TaskNotification)
+        .unwrap_or_else(|| panic!("no task_notification; saw {steps:?}"));
+    assert!(
+        results[0] < notified && notified < results[1],
+        "the task_notification lies between the two results: {steps:?}"
+    );
+    assert!(
+        !steps[..results[1]].contains(&state("idle")),
+        "no idle before the last result: {steps:?}"
+    );
+    assert_eq!(steps.last(), Some(&state("idle")), "ends idle: {steps:?}");
+}
