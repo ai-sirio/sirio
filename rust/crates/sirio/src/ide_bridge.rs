@@ -400,6 +400,11 @@ pub(crate) struct IdeBridge {
     selection: Coalescer<ConnId, WeakEntity<FileView>>,
     /// What the commands said to the user, newest last; content-free copy only.
     toasts: Vec<String>,
+    /// How many resolutions finished that a hook started (a connection announcing itself, a
+    /// worktree's terminals attaching, and those chains' retries), not the ones a request runs
+    /// through `ide_when_resolved` for itself. A number only; the debug state shows it so a
+    /// test can tell that no hook resolved a connection between two points.
+    hook_resolutions: u64,
 }
 
 impl Global for IdeBridge {}
@@ -431,6 +436,7 @@ pub(crate) fn start_at_launch(
         folders,
         selection: Coalescer::default(),
         toasts: Vec::new(),
+        hook_resolutions: 0,
     };
     let mut next = if enabled { bridge.begin_start() } else { None };
     while let Some(job) = next {
@@ -692,6 +698,7 @@ impl IdeBridge {
             "proposals": [],
             "confirmation": null,
             "toasts": self.toasts,
+            "hook_resolutions": self.hook_resolutions,
             "last_delivery": null,
         })
         .to_string()
@@ -807,9 +814,11 @@ impl SirioWorkspace {
     }
 
     /// A connection announced itself: starts the resolution chain. Debug builds only: the E2E
-    /// delays this start (and so the whole chain) by `SIRIO_DEBUG_IDE_RESOLVE_AFTER_MS`, so a
-    /// request that runs `ide_when_resolved` is proved to resolve for itself. Nothing else
-    /// waits on it: `ide_when_resolved` never reads the knob.
+    /// delays this start (and so the whole chain) by `SIRIO_DEBUG_IDE_RESOLVE_AFTER_MS`. Each
+    /// delayed start is a timer nothing cancels, and when it fires it resolves EVERY ownerless
+    /// connection, not only the one that started it. `ide_when_resolved` never reads the knob.
+    /// The delay keeps hook resolutions away from a request; that none ran in between is
+    /// asserted from the state's `hook_resolutions`, not assumed from the delay.
     pub(crate) fn ide_resolve_after_connect(&mut self, cx: &mut Context<Self>) {
         #[cfg(debug_assertions)]
         if let Some(delay) = std::env::var("SIRIO_DEBUG_IDE_RESOLVE_AFTER_MS")
@@ -842,6 +851,9 @@ impl SirioWorkspace {
             return;
         }
         self.ide_when_resolved(cx, move |_, cx| {
+            if cx.has_global::<IdeBridge>() {
+                cx.update_global(|bridge: &mut IdeBridge, _| bridge.hook_resolutions += 1);
+            }
             let left = cx.has_global::<IdeBridge>() && !cx.global::<IdeBridge>().ownerless().is_empty();
             cx.notify();
             if left && attempt < RETRIES {
