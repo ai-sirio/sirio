@@ -3636,8 +3636,8 @@ impl Chat {
                     Some((true, _)) => {
                         // The stored id named a session that is gone: stop
                         // offering it, so the next restart does not retry
-                        // the same refusal. The fresh session identifies
-                        // itself on its first turn.
+                        // the same refusal. The fresh session sends its own
+                        // signal once it names itself, with the flag down.
                         self.agent_session_id = None;
                         self.persist_agent_session_id(None);
                     }
@@ -14831,6 +14831,140 @@ two"
         });
     }
 
+    /// A restored native chat whose stored session the CLI no longer has
+    /// (#696): the dead id leaves the tab's row as soon as the refusal is
+    /// known, before anything is typed, and once the fresh session's first
+    /// turn names it, that id is the one handed on to be saved, so the next
+    /// restart resumes it.
+    #[gpui::test]
+    async fn a_refused_native_resume_hands_on_the_fresh_sessions_id(cx: &mut TestAppContext) {
+        let dir = TempDir::new();
+        let path = dir.0.join("sessions.sqlite");
+        database_with_tabs(
+            &path,
+            &[sirio_persistence::TabRecord {
+                id: "restored-chat".into(),
+                worktree_id: "worktree".into(),
+                title: "restored-chat".into(),
+                kind: "chat".into(),
+                agent_id: None,
+                agent_session_id: Some("sess-gone".into()),
+                order_idx: 0,
+                is_active: true,
+                last_event_at: None,
+                closed_at: None,
+            }],
+        );
+        // The tab's row as read back, `None` only when the row cannot be
+        // read: a cleared id must not pass for a missing row.
+        let stored = || {
+            AppDatabase::open(&path)
+                .ok()
+                .and_then(|db| db.tabs_of_worktree("worktree").ok())
+                .and_then(|tabs| tabs.into_iter().find(|tab| tab.id == "restored-chat"))
+                .map(|tab| tab.agent_session_id)
+        };
+        assert_eq!(stored(), Some(Some("sess-gone".to_string())));
+
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(init);
+        cx.executor().allow_parking();
+        let launch = sirio_chat::ClaudeLaunch::fixture(
+            "python3",
+            vec![CLAUDE_FIXTURE.to_string(), "refuse_resume".to_string()],
+        )
+        .resuming("sess-gone");
+        let database_path = path.clone();
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::launch_with_command_and_persistence(
+                LaunchSpec::Claude(launch),
+                std::env::temp_dir(),
+                database_path,
+                "restored-chat".into(),
+                "worktree".into(),
+                cx,
+            )
+        });
+        let handed_on = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let handed_on = handed_on.clone();
+            cx.subscribe(&chat, move |_, event: &ChatEvent, _| {
+                if let ChatEvent::SessionIdentified(id) = event {
+                    handed_on.borrow_mut().push(id.clone());
+                }
+            })
+            .detach();
+        });
+
+        // Nothing typed: a quit from here must not keep the dead id.
+        pump_chat_until(cx, &chat, |_| stored() == Some(None));
+
+        chat.update(cx, |chat, cx| {
+            chat.submit_turn("hello".into(), Vec::new(), Vec::new(), cx)
+        });
+        pump_chat_until(cx, &chat, |chat| chat.agent_session_id().is_some());
+        // The fixture's CLI names its session itself, unlike the id Sirio
+        // minted for the retry: the CLI's is the one a `--resume` needs.
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.agent_session_id()).as_deref(),
+            Some("fixture-session-1")
+        );
+        assert_only_handed_on(&handed_on.borrow(), "fixture-session-1");
+    }
+
+    /// `expected` was handed on to be saved, and no other id was: a repeat
+    /// of the same id is a second save of the same value, harmless.
+    fn assert_only_handed_on(handed_on: &[String], expected: &str) {
+        assert!(
+            !handed_on.is_empty() && handed_on.iter().all(|id| id == expected),
+            "expected only {expected:?} handed on, got {handed_on:?}"
+        );
+    }
+
+    /// The same refusal from a CLI that prints its `init` before answering
+    /// the handshake: the fresh session has named itself before the chat
+    /// is connected, and no turn will name it again, so that early id is
+    /// the one kept and handed on.
+    #[gpui::test]
+    async fn a_refused_native_resume_named_at_startup_keeps_that_id(cx: &mut TestAppContext) {
+        cx.update(Theme::init);
+        cx.update(crate::ely::init);
+        cx.update(init);
+        cx.executor().allow_parking();
+        let launch = sirio_chat::ClaudeLaunch::fixture(
+            "python3",
+            vec![
+                CLAUDE_FIXTURE.to_string(),
+                "refuse_resume_early_init".to_string(),
+            ],
+        )
+        .resuming("sess-gone");
+        let (chat, cx) = cx.add_window_view(|_, cx| {
+            Chat::new(Some(LaunchSpec::Claude(launch)), std::env::temp_dir(), cx)
+        });
+        let handed_on = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|_, cx| {
+            let handed_on = handed_on.clone();
+            cx.subscribe(&chat, move |_, event: &ChatEvent, _| {
+                if let ChatEvent::SessionIdentified(id) = event {
+                    handed_on.borrow_mut().push(id.clone());
+                }
+            })
+            .detach();
+        });
+        // Connected only once the subscription is in place: this CLI names
+        // its session before the chat is even ready.
+        chat.update(cx, |chat, cx| chat.start_connection(cx));
+
+        pump_chat_until(cx, &chat, |chat| chat.agent_session_id().is_some());
+        assert_eq!(
+            chat.read_with(&cx.cx, |chat, _| chat.agent_session_id()).as_deref(),
+            Some("fixture-session-1")
+        );
+        assert_only_handed_on(&handed_on.borrow(), "fixture-session-1");
+    }
+
     /// A structured question is named by its own header, not by the asking
     /// tool (the native transport's title for every question is the
     /// constant `Question`), and its options keep their descriptions; a
@@ -18827,15 +18961,11 @@ two"
         });
     }
 
-    /// A chat tab with a stored past session to open and a current one.
-    fn chat_with_a_past_session(
-        cx: &mut TestAppContext,
-        dir: &TempDir,
-        past_prompts: &[&str],
-    ) -> Entity<Chat> {
-        use sirio_persistence::{ProjectRecord, TabRecord, WorktreeRecord};
-        let path = dir.0.join("history.sqlite");
-        let db = AppDatabase::open(&path).expect("history database");
+    /// A database at `path` with one project, its worktree `worktree`, and
+    /// `tabs` in that worktree.
+    fn database_with_tabs(path: &Path, tabs: &[sirio_persistence::TabRecord]) -> AppDatabase {
+        use sirio_persistence::{ProjectRecord, WorktreeRecord};
+        let db = AppDatabase::open(path).expect("test database");
         db.save_project(&ProjectRecord {
             id: "project".into(),
             name: "Project".into(),
@@ -18864,6 +18994,18 @@ two"
             primary_pane_collapsed: false,
         })
         .unwrap();
+        db.save_tabs("worktree", tabs).unwrap();
+        db
+    }
+
+    /// A chat tab with a stored past session to open and a current one.
+    fn chat_with_a_past_session(
+        cx: &mut TestAppContext,
+        dir: &TempDir,
+        past_prompts: &[&str],
+    ) -> Entity<Chat> {
+        use sirio_persistence::TabRecord;
+        let path = dir.0.join("history.sqlite");
         let tab = |id: &str| TabRecord {
             id: id.into(),
             worktree_id: "worktree".into(),
@@ -18876,8 +19018,7 @@ two"
             last_event_at: None,
             closed_at: None,
         };
-        db.save_tabs("worktree", &[tab("current-chat"), tab("past-chat")])
-            .unwrap();
+        let db = database_with_tabs(&path, &[tab("current-chat"), tab("past-chat")]);
         let turns = past_prompts
             .iter()
             .map(|prompt| ChatTurn {

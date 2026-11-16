@@ -303,8 +303,9 @@ impl ChatClient {
         }
     }
 
-    /// Whether the launch's resume id was refused and the session is fresh
-    /// instead. The ACP transport has no such notion and says `false`.
+    /// Whether the launch's resume id was refused and the fresh session that
+    /// replaced it has not named itself yet. The ACP transport has no such
+    /// notion and says `false`.
     #[must_use]
     pub fn resumed_session_refused(&self) -> bool {
         match self {

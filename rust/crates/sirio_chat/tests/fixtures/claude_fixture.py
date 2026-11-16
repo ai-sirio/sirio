@@ -1103,12 +1103,16 @@ def main():
     if MODE == "trace":
         trace_main()
         return
-    if MODE == "refuse_resume" and "--resume" in sys.argv:
+    if MODE in ("refuse_resume", "refuse_resume_early_init") and "--resume" in sys.argv:
         # The session file is gone: refuse the resume the way the real CLI
         # does, so the worker must come back without the id.
         sys.stderr.write("fixture: unknown session\n")
         sys.stderr.flush()
         os._exit(1)
+    if MODE == "refuse_resume_early_init":
+        # The fresh session the worker comes back with names itself in an
+        # unprompted init, before the handshake is answered.
+        init_line()
     if MODE == "echo_argv":
         # The real CLI prints its init line unprompted at startup, before
         # answering the handshake; the argv it reports is what the test
