@@ -34,18 +34,20 @@ set -eEuo pipefail
 #                     with the switch off a new pane has none
 #   owner_resolved    the state shows the client's connection owned by the pane it runs in
 #                     (the pane id panel create returned) and by that pane's worktree
-#   selection_utf16  opening a file sends its selection once (a focused file says it); in a
-#                    file whose line 3 is `let s = "<emoji>x";` the `x`, selected with
-#                    surface.editor.select, arrives as selection_changed with start {2, 11},
-#                    end {2, 12} (UTF-16 columns), isEmpty false, text "x"
+#   selection_utf16  opening a file sends its selection once (a focused file says it; once
+#                    within the run's send window); in a file whose line 3 is
+#                    `let s = "<emoji>x";` the `x`, selected with surface.editor.select,
+#                    arrives as selection_changed with start {2, 11}, end {2, 12} (UTF-16
+#                    columns), isEmpty false, text "x"
 #   selection_coalesced
 #                    20 surface.editor.select calls 25 ms apart: at most one notification per
-#                    100 ms of the burst's duration, plus one, and the last one is the final
-#                    selection (the 100 ms coalescing itself is proved by sirio_ide's unit
-#                    tests; the control poll alone keeps this burst under the bound)
+#                    send window (SEND_AFTER_MS) of the burst's duration, plus one, and the last
+#                    one is the final selection (the 100 ms window of a release build is proved
+#                    by sirio_ide's unit tests)
 #   focus_sends_selection
 #                    selecting a terminal tab sends nothing; selecting the file tab again sends
-#                    exactly one notification, the current selection
+#                    exactly one notification, the current selection (each count is read after
+#                    the send window has passed)
 #   at_mention       two Claude terminals: the first one's pane is focused before its client
 #                    starts, the second is created after it, the file is opened, both clients
 #                    connect and lines 5 to 7 are sent with "Add to Agent Thread"
@@ -77,8 +79,15 @@ set -eEuo pipefail
 #                    relaunch), focuses its tab and leaves the toast count as it was
 #   selection_not_lost_to_another_worktree
 #                    a file of another worktree sits in this worktree's strip: select in this
-#                    worktree's file, then select the other tab 60 ms later (inside the 100 ms
-#                    window): the client still gets the selection of the first file
+#                    worktree's file, then select the other tab once the select is answered;
+#                    the case fails unless the tab change was answered less than SEND_AFTER_MS
+#                    after the select was sent (inside the select's send window), and the
+#                    client still gets the selection of the first file
+#
+# Two debug-only knobs (read under cfg(debug_assertions), so absent from release builds) are set
+# for every launch: SIRIO_DEBUG_IDE_START_DELAY_MS=600 holds each listener start in flight
+# (switch_flap), and SIRIO_DEBUG_IDE_SEND_AFTER_MS widens the selection send window from 100 ms
+# to SEND_AFTER_MS (the selection cases; the value and why are at SEND_AFTER_MS below).
 #
 # The artifact: --out-dir DIR (default artifacts/ide-bridge-e2e-<stamp>-<pid>) keeps
 # transcript.log, app.log, client-*.jsonl (every frame a client sent and received), the lockfile
@@ -161,6 +170,18 @@ CASE="setup"
 CASES_PASSED=0
 CLIENT_N=0
 CLIENT_TAB=""
+# The selection send delay of this run, in ms: every launch sets the debug-only
+# SIRIO_DEBUG_IDE_SEND_AFTER_MS to it (read under cfg(debug_assertions), absent from release
+# builds), so the app waits this long, not 100 ms, before it sends a connection's coalesced
+# selection. selection_not_lost_to_another_worktree needs a select and then a tab change, two
+# control requests one after the other, to land inside one window: each waits for a tick of
+# the app's 40 ms control poll and one UI pass. Under Xvfb, over six runs, the select was
+# answered 7 to 44 ms after its send and the tab change 86 to 135 ms after its own, the pair
+# 102 to 179 ms after the select's send, so 1000 ms holds the pair more than five times over on
+# a loaded machine, and the case fails, rather than pass for nothing, if it ever does not. Every case that waits for a selection to arrive, or for
+# none to, waits past this window: a larger value only makes the run slower.
+SEND_AFTER_MS=1000
+sleep_ms() { sleep "$(($1 / 1000)).$(printf '%03d' $(($1 % 1000)))"; }
 
 is_a_host() {
   local comm
@@ -338,11 +359,12 @@ sockburst() { python3 -I "$RUN_DIR/sockburst.py" "$@"; }
 # N `surface.editor.select` calls 25 ms apart, each on a connection of its own opened beforehand.
 # Sent without a gap they would be one pass of the app's control poll and one change of the
 # editor's selection (gpui merges the notifies of a pass), so they are spread over several
-# passes. Be clear about what that proves: the app takes about 100 ms per pass here, so the
-# bound the case asserts also holds for a Sirio that does not coalesce. The case proves the
-# contract (the bound and the last notification being the final selection); the 100 ms coalescing
-# is proved by the unit tests of sirio_ide::coalesce. Logged like sockcall's, in request order; the ranges are the arguments, the
-# elapsed milliseconds from the first send to the last answer are printed.
+# passes, each a change the app notes. The run's send window (SEND_AFTER_MS) is longer than the
+# burst, so the case's bound (one notification per window the burst spans, plus one) is one or
+# two, which a Sirio that sent each change at once (about one notification per pass) exceeds;
+# the 100 ms window of a release build is proved by the unit tests of sirio_ide::coalesce.
+# Logged like sockcall's, in request order; the ranges are the arguments, the elapsed
+# milliseconds from the first send to the last answer are printed.
 cat >"$RUN_DIR/selburst.py" <<'SELBURST'
 import json, os, socket, sys, time
 
@@ -395,10 +417,15 @@ if failed:
     sys.exit(failed)
 print(elapsed)
 SELBURST
-# One `surface.editor.select` and, 60 ms after it is sent (a later pass of the app's 40 ms control poll, so the selection is noted before the tab change), one `surface.tabs.select`, each on a
-# connection of its own opened beforehand, so both land inside the 100 ms coalescing window.
-# Logged like sockcall's, with `sent_ms` and `answered_ms` (from the first send) as timing
-# evidence; the two sent_ms and the answers' gap are printed.
+# One `surface.editor.select`, then one `surface.tabs.select` sent only once the select is
+# answered, each on a connection of its own opened beforehand. The select is answered from
+# inside the pass that runs it and its selection is noted at the end of that same pass, so the
+# tab change, queued after the answer, runs in a later pass: after that note, never before it.
+# Times are milliseconds from just before the select is sent, read when each answer has
+# arrived (each request blocks on its own answer before anything else is sent). Logged like
+# sockcall's, with `sent_ms` and `answered_ms`; a request left without an answer (a connect
+# error, an EOF, a timeout, an answer that is not JSON) is a line with an `error`. Prints, in
+# ms: select answered, tab change sent, tab change answered.
 cat >"$RUN_DIR/selfocus.py" <<'SELFOCUS'
 import json, os, socket, sys, time
 
@@ -408,6 +435,13 @@ requests = [
     {"id": f"selfocus-0-{time.time_ns()}", "method": "surface.editor.select", "params": {"ranges": ranges}},
     {"id": f"selfocus-1-{time.time_ns()}", "method": "surface.tabs.select", "params": {"index": tab}},
 ]
+
+
+def write_line(entry):
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(json.dumps(dict(entry, via="selfocus"), sort_keys=True) + "\n")
+
+
 socks, sent, answered, answers = [], [], [], []
 try:
     for _ in requests:
@@ -419,8 +453,6 @@ try:
     for sock, request in zip(socks, requests):
         sent.append(int((time.monotonic() - start) * 1000))
         sock.sendall((json.dumps(request) + "\n").encode())
-        time.sleep(0.060)
-    for sock in socks:
         data = b""
         while not data.endswith(b"\n"):
             chunk = sock.recv(65536)
@@ -431,24 +463,24 @@ try:
             raise EOFError("no answer")
         answered.append(int((time.monotonic() - start) * 1000))
         answers.append(json.loads(data))
+        if not answers[-1].get("ok"):
+            break
 except (OSError, EOFError, ValueError) as error:
-    with open(log_path, "a", encoding="utf-8") as log:
-        for request in requests:
-            log.write(json.dumps({"via": "selfocus", "request": request, "error": type(error).__name__}, sort_keys=True) + "\n")
+    for index, request in enumerate(requests):
+        if index < len(answers):
+            write_line({"request": request, "response": answers[index],
+                        "sent_ms": sent[index], "answered_ms": answered[index]})
+        else:
+            write_line({"request": request, "error": type(error).__name__})
     raise
 finally:
     for sock in socks:
         sock.close()
-failed = None
-with open(log_path, "a", encoding="utf-8") as log:
-    for request, response, at, back in zip(requests, answers, sent, answered):
-        log.write(json.dumps({"via": "selfocus", "request": request, "response": response,
-                              "sent_ms": at, "answered_ms": back}, sort_keys=True) + "\n")
-        if not response.get("ok") and failed is None:
-            failed = f"{request['method']} failed: {response.get('error')}"
-if failed:
-    sys.exit(failed)
-print(f"sent at {sent} ms, answered at {answered} ms")
+for request, response, at, back in zip(requests, answers, sent, answered):
+    write_line({"request": request, "response": response, "sent_ms": at, "answered_ms": back})
+    if not response.get("ok"):
+        sys.exit(f"{request['method']} failed: {response.get('error')}")
+print(answered[0], sent[1], answered[1])
 SELFOCUS
 selfocus() { python3 -I "$RUN_DIR/selfocus.py" "$@"; }
 selburst() { python3 -I "$RUN_DIR/selburst.py" "$@"; }
@@ -558,7 +590,7 @@ expect_state() { # label expr want
 app_start() { # [NAME=value...]: extra variables for the app
   rm -f "$SIRIO_SOCKET"
   (cd "$WT" && exec env -u WAYLAND_DISPLAY DISPLAY="$DISPLAY_TARGET" GPUI_X11_SCALE_FACTOR=1 \
-    SIRIO_DEBUG_IDE_START_DELAY_MS=600 \
+    SIRIO_DEBUG_IDE_START_DELAY_MS=600 SIRIO_DEBUG_IDE_SEND_AFTER_MS="$SEND_AFTER_MS" \
     ${VULKAN_ENV[@]+"${VULKAN_ENV[@]}"} "$@" "$BIN" >>"$RUN_DIR/app.log" 2>&1) &
   APP_PID=$!
   for _ in $(seq 1 300); do
@@ -1060,7 +1092,7 @@ case_selection_utf16() {
   FILE_TAB="$(tabs_field active)"
   # Opening a file focuses its tab, and focusing a file tab says its selection (spec 4.4).
   wait_notes selection_changed "$((before + 1))"
-  sleep 0.5
+  sleep_ms "$((SEND_AFTER_MS + 500))"
   [ "$(note_count selection_changed)" = "$((before + 1))" ] || fail "$CASE: opening the file said its selection more than once"
   echo "OK: opening the file sent its selection once"
   before="$(note_count selection_changed)"
@@ -1087,7 +1119,10 @@ case_selection_coalesced() {
   for i in $(seq 1 19); do ranges="$ranges 0..$i"; done
   # shellcheck disable=SC2086
   elapsed="$(selburst $ranges "$SEL_L5S..$SEL_L5E")"
-  bound=$((elapsed / 100 + 1))
+  # At most one notification per window of the run's send delay that the burst spans, plus one.
+  # The last selection is noted at the end of the pass that answered it, which can be a moment
+  # after its answer is read: 100 ms of slack covers that.
+  bound=$(((elapsed + 100) / SEND_AFTER_MS + 1))
   echo "the burst of 20 selections took ${elapsed} ms: at most $bound notifications"
   local tries=0
   while [ "$tries" -lt 100 ]; do
@@ -1103,7 +1138,7 @@ s = n["selection"]
 sys.exit(0 if (n["text"] == "five();" and s["start"] == {"line": 4, "character": 0}
                and s["end"] == {"line": 4, "character": 7}) else 1)
 PY
-  sleep 0.5
+  sleep_ms "$((SEND_AFTER_MS + 500))"
   got="$(($(note_count selection_changed) - before))"
   [ "$got" -ge 1 ] && [ "$got" -le "$bound" ] || fail "$CASE: $got notifications for a ${elapsed} ms burst, expected 1 to $bound"
   echo "OK: $got notifications for the burst (bound $bound), the last is the final selection"
@@ -1114,12 +1149,12 @@ case_focus_sends_selection() {
   local before
   before="$(note_count selection_changed)"
   ctl surface tabs select "$CLIENT_TAB" >/dev/null
-  sleep 0.6
+  sleep_ms "$((SEND_AFTER_MS + 600))"
   [ "$(note_count selection_changed)" = "$before" ] || fail "$CASE: focusing a terminal tab sent a selection"
   echo "OK: focusing a terminal tab sends nothing"
   ctl surface tabs select "$FILE_TAB" >/dev/null
   wait_notes selection_changed "$((before + 1))"
-  sleep 0.6
+  sleep_ms "$((SEND_AFTER_MS + 600))"
   [ "$(note_count selection_changed)" = "$((before + 1))" ] || fail "$CASE: focusing the file tab sent more than one notification"
   case "$(client_notes selection_changed | tail -n 1)" in *five*) ;; *) fail "$CASE: the focus notification is not the current selection" ;; esac
   echo "OK: focusing the file tab sends exactly one notification, the current selection"
@@ -1226,11 +1261,16 @@ case_at_mention_to_new_terminal() {
 }
 
 # A file of another worktree can sit in this worktree's strip (surface.editor.open, the Open File
-# picker, a followed file take any path). The user selects in this worktree's file and, within
-# the 100 ms coalescing window, selects the other tab: the connection owned here must still get
+# picker, a followed file take any path). The user selects in this worktree's file and, before
+# that selection's send is due, selects the other tab: the connection owned here must still get
 # the selection of the file it was waiting to send, not lose it to a file of another worktree.
+# The window is this run's SEND_AFTER_MS, opened by the select's own change (nothing is pending
+# when it is sent: the case waits out the window of the focus that precedes it). The tab change
+# is sent once the select is answered, so the app runs it after the select's change, and
+# whatever it marks it marks before it answers; the case fails unless it was answered less than
+# SEND_AFTER_MS after the select was sent, which puts it inside the window.
 case_selection_not_lost_to_another_worktree() {
-  local second other_tab elapsed before got
+  local second other_tab timing sel_answered tab_sent tab_answered before got tries=0
   second="$("$CTL" list-workspaces --json | python3 -I -c '
 import json, sys
 paths = [row["path"] for row in json.load(sys.stdin) if row["branch"] == "ide-second"]
@@ -1239,21 +1279,32 @@ print(paths[0] if paths else "")')"
   write_sel_file "$second/other.rs" >/dev/null
   ctl surface editor open --path "$second/other.rs" >/dev/null
   other_tab="$(tabs_field active)"
+  before="$(note_count selection_changed)"
   ctl surface tabs select "$FILE_TAB" >/dev/null
-  sleep 0.5
+  # Focusing the file says its selection: wait for that send, then stay idle past the window, so
+  # no send is pending for the connection when the select arrives.
+  while [ "$(note_count selection_changed)" -le "$before" ] && [ "$tries" -lt 100 ]; do
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  [ "$(note_count selection_changed)" -gt "$before" ] || fail "$CASE: focusing this worktree's file sent no selection"
+  sleep_ms "$((SEND_AFTER_MS + 500))"
   before="$(note_count selection_changed)"
   # "six();", line 6 of this worktree's sel.rs.
-  elapsed="$(selfocus "$((SEL_L5E + 1))..$((SEL_L5E + 7))" "$other_tab")"
-  echo "select, then the other worktree's tab: $elapsed"
-  local tries=0
-  while [ "$tries" -lt 50 ]; do
+  timing="$(selfocus "$((SEL_L5E + 1))..$((SEL_L5E + 7))" "$other_tab")"
+  read -r sel_answered tab_sent tab_answered <<<"$timing"
+  echo "the select was sent at 0 ms and answered at $sel_answered ms; the tab change was sent at $tab_sent ms and answered at $tab_answered ms"
+  [ "$tab_answered" -lt "$SEND_AFTER_MS" ] || fail "$CASE: the tab change was answered $tab_answered ms after the select was sent, not inside the $SEND_AFTER_MS ms window: the case would prove nothing"
+  echo "OK: the tab change was answered inside the window ($tab_answered < $SEND_AFTER_MS ms)"
+  tries=0
+  while [ "$tries" -lt "$(((SEND_AFTER_MS + 5000) / 100))" ]; do
     got="$(client_notes selection_changed | tail -n +"$((before + 1))" | grep -F "\"text\": \"six();\"" | grep -F "$SEL_FILE" || true)"
     [ -z "$got" ] || break
     tries=$((tries + 1))
     sleep 0.1
   done
-  [ -n "$got" ] || fail "$CASE: the client never got the selection of $SEL_FILE ($elapsed; last: $(client_notes selection_changed | tail -n 1))"
-  echo "OK: the selection of this worktree's file reached its client although another worktree's tab was selected at once"
+  [ -n "$got" ] || fail "$CASE: the client never got the selection of $SEL_FILE (last: $(client_notes selection_changed | tail -n 1))"
+  echo "OK: the selection of this worktree's file reached its client although another worktree's tab was selected inside its window"
   sockcall surface.tabs.close "index=$other_tab" confirm=yes >/dev/null
 }
 

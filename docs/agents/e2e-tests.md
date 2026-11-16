@@ -718,10 +718,10 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # then, with the clients in real application terminal tabs (`surface.terminal.open`): owner_resolved
 # (the state names the pane the client runs in and its worktree), selection_utf16 (opening a file
 # sends its selection once; selecting the `x` of `let s = "<emoji>x";` sends start {2,11}, end
-# {2,12}), selection_coalesced (20 selections 25 ms apart: the bound of one notification per 100 ms
-# plus one, and the last is the final selection; the coalescing itself is proved by the unit tests
-# of `sirio_ide::coalesce`), focus_sends_selection (a terminal tab sends nothing, the file tab
-# again exactly one), at_mention (two Claude terminals, the first focused before its client
+# {2,12}), selection_coalesced (20 selections 25 ms apart: the bound of one notification per send window
+# plus one, and the last is the final selection; the 100 ms window of a release build is proved
+# by the unit tests of `sirio_ide::coalesce`), focus_sends_selection (a terminal tab sends
+# nothing, the file tab again exactly one, each counted after the send window), at_mention (two Claude terminals, the first focused before its client
 # starts: lines 5 to 7 reach it as at_mentioned lineStart 4, lineEnd 6, its tab is focused and
 # nothing is typed into the pane), selection_while_terminal_active (a mouse click and Shift+Down
 # in the file of the Secondary half, with the Primary's terminal active, reach the client),
@@ -729,16 +729,20 @@ Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenar
 # toasts hold "No Claude terminal or chat in this worktree"), at_mention_without_focus_history (an
 # owned terminal in no focus history still gets it) and owner_after_restart (a client whose pane is
 # in a worktree not selected after a relaunch is ownerless, in the worktree its cwd is in, until
-# that worktree is selected; no file tab is restored, so only the selection resolves it), at_mention_after_relaunch (the same relaunch with a file as the active tab: one at-mention reaches the client with no focus recorded, focuses its tab and raises no toast) and selection_not_lost_to_another_worktree (a file of another worktree in this strip: select here, select that tab 60 ms later, and the client still gets the first selection): twenty cases.
+# that worktree is selected; no file tab is restored, so only the selection resolves it), at_mention_after_relaunch (the same relaunch with a file as the active tab: one at-mention reaches the client with no focus recorded, focuses its tab and raises no toast) and selection_not_lost_to_another_worktree (a file of another worktree in this strip: select here, then select that tab once the select is answered; the case fails unless that tab change was answered inside the send window, and the client still gets the first selection): twenty cases.
 # --xvfb or --display :N picks the display (never your own $DISPLAY); --state-only takes no
 # captures; --out-dir DIR keeps transcript.log, app.log, client-*.jsonl (every frame), socket.jsonl,
 # the lockfile with authToken redacted and the PID-matched captures. socket.jsonl is one line per
 # request the script sent to the app's control socket, with the app's complete answer (sirioctl's
 # calls pass through a recording proxy; a request with no answer is a line with an `error` and no
 # `response`); not recorded: the `system.ping` probe sirioctl sends before `panel.*` calls. The
-# run sets the debug-only SIRIO_DEBUG_IDE_START_DELAY_MS (read under cfg(debug_assertions), so
-# absent from release builds): each listener start holds its bound port for that long, which
-# keeps a start in flight while switch_flap flips the switch (without it the race never shows).
+# run sets two debug-only knobs (read under cfg(debug_assertions), so absent from release
+# builds): SIRIO_DEBUG_IDE_START_DELAY_MS, with which each listener start holds its bound port
+# for that long, keeping a start in flight while switch_flap flips the switch (without it the
+# race never shows); and SIRIO_DEBUG_IDE_SEND_AFTER_MS=1000 (the script's SEND_AFTER_MS), with
+# which the app waits 1000 ms, not 100 ms, before it sends a connection's coalesced selection,
+# so a select and a tab change sent one after the other land in one send window (the case
+# fails if the pair took longer); every selection case waits past that window.
 # Run it with `env -u WAYLAND_DISPLAY` from a Wayland session.
 Scripts/Tests/test-ide-bridge-e2e.sh --xvfb   # -> prints "IDE BRIDGE E2E OK (<n> cases, state-only <0|1>)"
 

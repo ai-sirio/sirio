@@ -63,6 +63,21 @@ const TOASTS_KEPT: usize = 8;
 /// The shown copy of the toast an at-mention with no agent to take it leaves (spec 4.5).
 pub(crate) const NO_AGENT_TOAST: &str = "No Claude terminal or chat in this worktree";
 
+/// The delay a connection's selection send waits: the coalescer's own `delay` (100 ms). Debug
+/// builds only: the E2E widens it (never narrows it) with `SIRIO_DEBUG_IDE_SEND_AFTER_MS`, so a
+/// select and a tab change sent one after the other, each a pass of the control poll, both land
+/// in one window. Release builds wait exactly `delay`.
+fn selection_send_after(delay: Duration) -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(wide) = std::env::var("SIRIO_DEBUG_IDE_SEND_AFTER_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        return delay.max(Duration::from_millis(wide));
+    }
+    delay
+}
+
 /// The terminal pane a connection's Claude runs in, as the number `select_pane` takes (the
 /// control socket spells it `pane-<n>`). Resolved from the connecting pid's ancestry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -626,7 +641,7 @@ impl IdeBridge {
     /// Notes that `view`'s selection is the one to send to `conn`. Returns the delay of the send
     /// to schedule, when none is waiting for that connection yet.
     pub(crate) fn mark_selection(&mut self, conn: ConnId, view: WeakEntity<FileView>) -> Option<Duration> {
-        self.selection.change(conn, view)
+        self.selection.change(conn, view).map(selection_send_after)
     }
 
     /// `conn`'s send is due: the view that changed last.
