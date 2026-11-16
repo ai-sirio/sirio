@@ -291,6 +291,7 @@ mod forge;
 mod login_path;
 mod host_programs;
 mod host_sessions;
+mod ide_bridge;
 mod lsp;
 mod lsp_install;
 // Compiled everywhere so every platform checks it; macOS and Linux route to it.
@@ -1520,6 +1521,10 @@ enum ControlAction {
         act: AttentionAct,
         reply: ControlReply,
     },
+    /// Debug-only `surface.ide.state`: what the IDE bridge holds.
+    IdeState { reply: ControlReply },
+    /// Debug-only `surface.ide.switch {on}`: the setter the Settings toggle calls.
+    IdeSwitch { on: bool, reply: ControlReply },
 }
 
 enum ChatControlAction {
@@ -1885,6 +1890,8 @@ enum WorkspaceAction {
     /// Window-needing follow-up from a non-Window context.
     OpenNewTabPalette,
     SetTranslucency(bool),
+    /// "Connect Claude Code to Sirio (/ide)" was changed in Settings.
+    SetIdeBridge(bool),
     /// The Markdown Preview's PlantUML server changed in Settings; the
     /// diagram settings global follows it (needs an `App`, hence the queue).
     SetPlantumlServer(String),
@@ -3505,6 +3512,22 @@ impl ControlHandler for AppControlHandler {
             "surface.terminal.state" if cfg!(debug_assertions) => {
                 let pane = request.params.get("pane").cloned().unwrap_or_default();
                 self.queue_action(request, move |reply| ControlAction::TerminalState { pane, reply })
+            }
+            "surface.ide.state" if cfg!(debug_assertions) => {
+                self.queue_action(request, |reply| ControlAction::IdeState { reply })
+            }
+            "surface.ide.switch" if cfg!(debug_assertions) => {
+                let on = match request.params.get("on").map(String::as_str) {
+                    Some("true") => true,
+                    Some("false") => false,
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.ide.switch requires on=true or on=false",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::IdeSwitch { on, reply })
             }
             "surface.attention.read" if cfg!(debug_assertions) => self.queue_action(request, |reply| {
                 ControlAction::Attention {
@@ -5278,9 +5301,10 @@ fn paths_name_the_same_document(a: &Path, b: &Path) -> bool {
 /// The variables a terminal of the worktree that holds `directory` starts
 /// with: `SIRIO_WORKTREE_ID`, the id `worktree-set --worktree` accepts (spec
 /// §5.3), which is the id the control state names the worktree by. The deepest
-/// worktree holding `directory` wins; empty when no known worktree holds it.
+/// worktree holding `directory` wins; none when no known worktree holds it.
+/// `CLAUDE_CODE_SSE_PORT` joins them whenever the IDE bridge is up, whatever the directory.
 fn worktree_environment_in(control: &ControlState, directory: &Path) -> BTreeMap<String, String> {
-    control
+    let mut environment = control
         .workspaces
         .iter()
         .filter(|workspace| {
@@ -5289,7 +5313,13 @@ fn worktree_environment_in(control: &ControlState, directory: &Path) -> BTreeMap
         })
         .max_by_key(|workspace| workspace.path.len())
         .map(|workspace| BTreeMap::from([("SIRIO_WORKTREE_ID".to_string(), workspace.id.clone())]))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Outside the worktree match: a terminal in no worktree connects to Sirio's IDE bridge too.
+    let ide_port = ide_bridge::SSE_PORT.load(Ordering::SeqCst);
+    if ide_port != 0 {
+        environment.insert("CLAUDE_CODE_SSE_PORT".to_string(), ide_port.to_string());
+    }
+    environment
 }
 
 /// `open_paths` only ever contains this workspace's own already-open tabs
@@ -6522,6 +6552,7 @@ impl SirioWorkspace {
         let (opencode_events, opencode_inbox) =
             futures::channel::mpsc::unbounded::<(u64, sirio_opencode_watch::WatchEvent)>();
         Self::start_opencode_delivery(opencode_inbox, cx);
+        Self::start_ide_delivery(cx);
         cx.bind_keys([
             // cmd-w is the macOS close convention, not a readline key, so it
             // stays unguarded.
@@ -6687,6 +6718,9 @@ impl SirioWorkspace {
                                 }
                                 WorkspaceAction::SetTranslucency(enabled) => {
                                     workspace.apply_translucency(enabled, window, cx);
+                                }
+                                WorkspaceAction::SetIdeBridge(on) => {
+                                    workspace.ide_set_enabled(on, cx);
                                 }
                                 WorkspaceAction::SetPlantumlServer(server) => {
                                     sirio_ui::markdown_preview::DiagramSettings::apply(&server, cx);
@@ -6928,6 +6962,13 @@ impl SirioWorkspace {
                                 }
                                 ControlAction::Attention { act, reply } => {
                                     let _ = reply.send(workspace.control_attention(act, window, cx));
+                                }
+                                ControlAction::IdeState { reply } => {
+                                    let _ = reply.send(Ok(workspace.control_ide_state(cx)));
+                                }
+                                ControlAction::IdeSwitch { on, reply } => {
+                                    workspace.ide_set_enabled(on, cx);
+                                    let _ = reply.send(Ok(Vec::new()));
                                 }
                                 ControlAction::ReadTabs { reply } => {
                                     let _ = reply.send(Ok(workspace.control_read_tabs(cx)));
@@ -8489,6 +8530,7 @@ impl SirioWorkspace {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
         publish_worktree_lookup(&self.project_catalog, cx);
+        self.ide_sync_workspace_folders(cx);
     }
 
     fn mounted_worktree_paths(&self, excluded_path: Option<&Path>) -> Vec<PathBuf> {
@@ -11413,6 +11455,99 @@ impl SirioWorkspace {
             });
         })
         .detach();
+    }
+
+    /// The IDE bridge's events, onto the UI thread. The bridge's threads wake this loop through
+    /// the channel `ide_bridge::IdeBridge` holds, so nothing polls. Without the global (an
+    /// in-process UI test) there is no bridge and no loop.
+    fn start_ide_delivery(cx: &mut Context<Self>) {
+        if !cx.has_global::<ide_bridge::IdeBridge>() {
+            return;
+        }
+        let Some(mut events) = cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+            bridge.take_events()
+        }) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(event) = events.next().await {
+                let delivered = this.update(cx, |_, cx| {
+                    cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+                        bridge.on_event(event);
+                    });
+                    cx.notify();
+                });
+                if delivered.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The root of every worktree of every project in the sidebar, parked or not: what the
+    /// lockfile's `workspaceFolders` says.
+    fn ide_workspace_folders(&self) -> Vec<PathBuf> {
+        ide_bridge::workspace_folders(&self.project_catalog)
+    }
+
+    /// Tells the lockfile the catalog's worktrees, when they differ from what it holds. The
+    /// rewrite is queued to the bridge's writer thread; nothing here touches the disk.
+    fn ide_sync_workspace_folders(&self, cx: &mut App) {
+        if !cx.has_global::<ide_bridge::IdeBridge>() {
+            return;
+        }
+        let folders = self.ide_workspace_folders();
+        cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+            bridge.set_workspace_folders(folders);
+        });
+    }
+
+    /// The one setter behind Settings' "Connect Claude Code to Sirio (/ide)" and the debug verb
+    /// `surface.ide.switch`: persists the setting, shows it in Settings, and starts or ends the
+    /// bridge. Starting binds and writes the lockfile on the background executor.
+    fn ide_set_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        let mut stored = self.session.load_settings();
+        if stored.claude_ide_bridge != on {
+            stored.claude_ide_bridge = on;
+            self.session.save_settings(&stored);
+        }
+        self.settings
+            .update(cx, |settings, cx| settings.apply_claude_ide_bridge(on, cx));
+        if !cx.has_global::<ide_bridge::IdeBridge>() {
+            return;
+        }
+        if !on {
+            cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| bridge.disable());
+            cx.notify();
+            return;
+        }
+        let folders = self.ide_workspace_folders();
+        let Some(job) = cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+            bridge.begin_enable(folders)
+        }) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let started = cx.background_executor().spawn(async move { job.run() }).await;
+            let _ = this.update(cx, |workspace, cx| {
+                let session = workspace.session.clone();
+                cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| {
+                    bridge.finish_start(started, &session);
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Debug-only `surface.ide.state`.
+    fn control_ide_state(&self, cx: &App) -> Vec<(String, String)> {
+        if !cx.has_global::<ide_bridge::IdeBridge>() {
+            return vec![("state".to_string(), "{\"enabled\":false}".to_string())];
+        }
+        vec![("state".to_string(), cx.global::<ide_bridge::IdeBridge>().state_json())]
     }
 
     /// What OpenCode's watch says, onto the UI thread. The watch lives on a thread of its
@@ -31931,6 +32066,7 @@ fn settings_snapshot_from_app_settings(settings: AppSettings) -> SettingsSnapsho
         // it is runtime state, not an AppSettings field.
         socket_path: String::new(),
         resume_agent_sessions: settings.resume_agent_sessions,
+        claude_ide_bridge: settings.claude_ide_bridge,
         auto_naming: settings.auto_naming,
         limit_chat_history: settings.limit_chat_history,
         chat_retention: settings.chat_retention.clamp(5, 500) as i32,
@@ -31966,6 +32102,7 @@ fn app_settings_from_snapshot(snapshot: SettingsSnapshot) -> AppSettings {
         // is persisted by its dedicated host callback.
         updates_enabled: true,
         resume_agent_sessions: snapshot.resume_agent_sessions,
+        claude_ide_bridge: snapshot.claude_ide_bridge,
         auto_naming: snapshot.auto_naming,
         limit_chat_history: snapshot.limit_chat_history,
         chat_retention: i64::from(snapshot.chat_retention.clamp(5, 500)),
@@ -33495,6 +33632,14 @@ fn main() {
         // project/worktree id convention.
         session_store.schedule_catalog(&project_catalog);
         let saved_settings = app_settings_with_environment_override(session_store.load_settings());
+        // Binds the IDE bridge's port and writes its lockfile before any terminal is created
+        // or restored, so every one of them is born with `CLAUDE_CODE_SSE_PORT`. A failure
+        // leaves it off and is logged without content.
+        cx.set_global(ide_bridge::start_at_launch(
+            &session_store,
+            saved_settings.claude_ide_bridge,
+            ide_bridge::workspace_folders(&project_catalog),
+        ));
         // The base colour first: `Theme::set_mode` recovers it from the
         // installed theme, so setting the mode before the colour would build
         // one frame with the default and then throw it away.
@@ -33881,6 +34026,7 @@ fn main() {
                         .on_change(move |snapshot| {
                             let plantuml_server = snapshot.plantuml_server.clone();
                             let translucency = snapshot.translucency;
+                            let ide_bridge_enabled = snapshot.claude_ide_bridge;
                             control_socket_for_settings
                                 .set_enabled(snapshot.control_socket_enabled);
                             let stored = session_store_for_settings.load_settings();
@@ -33889,6 +34035,7 @@ fn main() {
                             if let Ok(mut actions) = pending_for_settings_change.lock() {
                                 actions.push(WorkspaceAction::SetTranslucency(translucency));
                                 actions.push(WorkspaceAction::SetPlantumlServer(plantuml_server));
+                                actions.push(WorkspaceAction::SetIdeBridge(ide_bridge_enabled));
                             }
                         })
                         .on_revoke_browser_origin({
@@ -34067,6 +34214,9 @@ fn main() {
         let session_store_for_quit = session_store.clone();
         let panes_for_quit = panes.clone();
         cx.on_app_quit(move |cx| {
+            // The lockfile goes before the listener does: it never names a port nobody
+            // listens on while Sirio is alive.
+            cx.update_global(|bridge: &mut ide_bridge::IdeBridge, _| bridge.shutdown());
             // A prompt typed less than the autosave delay ago is written
             // now. Outside any workspace update: the flush updates every
             // open prompt view.
@@ -46350,6 +46500,7 @@ done
             control_socket_enabled: false,
             updates_enabled: true,
             resume_agent_sessions: false,
+            claude_ide_bridge: false,
             auto_naming: true,
             limit_chat_history: false,
             chat_retention: 37,
@@ -46394,6 +46545,7 @@ done
         assert_eq!(snapshot.terminal_font_size, 16);
         assert!(!snapshot.control_socket_enabled);
         assert!(!snapshot.resume_agent_sessions);
+        assert!(!snapshot.claude_ide_bridge);
         assert!(snapshot.auto_naming);
         assert!(!snapshot.limit_chat_history);
         assert_eq!(snapshot.chat_retention, 37);
@@ -46425,6 +46577,7 @@ done
             restored.resume_agent_sessions,
             persisted.resume_agent_sessions
         );
+        assert_eq!(restored.claude_ide_bridge, persisted.claude_ide_bridge);
         assert_eq!(restored.auto_naming, persisted.auto_naming);
         assert_eq!(restored.limit_chat_history, persisted.limit_chat_history);
         assert_eq!(restored.chat_retention, persisted.chat_retention);
@@ -49706,6 +49859,8 @@ done
             | ControlAction::FilesRead { reply }
             | ControlAction::ProjectIdentityAct { reply, .. }
             | ControlAction::Attention { reply, .. }
+            | ControlAction::IdeState { reply }
+            | ControlAction::IdeSwitch { reply, .. }
             | ControlAction::CycleTab { reply, .. }
             | ControlAction::SelectTab { reply, .. }
             | ControlAction::Browser { reply, .. }
@@ -49836,6 +49991,8 @@ done
             "surface.host.end_all" => request_with_params(method, &[]),
             "surface.terminal.open" => request_with_params(method, &[]),
             "surface.settings.act" => request_with_params(method, &[("action", "install-hooks")]),
+            "surface.ide.state" => request_with_params(method, &[]),
+            "surface.ide.switch" => request_with_params(method, &[("on", "true")]),
             "surface.attention.read" => request::attention_read(),
             "surface.attention.act" => request_with_params(method, &[("focus", "active")]),
             "surface.terminal.restart" | "surface.terminal.state" => {

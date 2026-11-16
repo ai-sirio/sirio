@@ -2877,6 +2877,47 @@ impl SessionStore {
         }
     }
 
+    /// The IDE bridge's last port and token (`AppDatabase::ide_bridge_endpoint`), absent when
+    /// none was saved or the database is unavailable.
+    pub fn load_ide_bridge_endpoint(&self) -> (Option<u16>, Option<String>) {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return (None, None);
+        };
+        match db.ide_bridge_endpoint() {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                eprintln!("[session] failed to load the IDE bridge endpoint: {error}");
+                (None, None)
+            }
+        }
+    }
+
+    /// Saves the IDE bridge's port and token immediately; a failure is logged and the bridge
+    /// keeps running (the next start picks a port again).
+    pub fn save_ide_bridge_endpoint(&self, port: u16, token: &str) {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(db) = db.as_ref() else {
+            return;
+        };
+        match db.set_ide_bridge_endpoint(port, token) {
+            Ok(()) => {
+                self.inner.writes.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(error) => {
+                eprintln!("[session] failed to persist the IDE bridge endpoint: {error}");
+            }
+        }
+    }
+
     /// Loads pane-to-agent-session associations, or an empty map when the
     /// database is unavailable. With the mirror installed it is the mirror's copy: the
     /// database as it was at startup plus every write since, queued ones included.
@@ -4246,6 +4287,7 @@ mod tests {
             control_socket_enabled: false,
             updates_enabled: true,
             resume_agent_sessions: false,
+            claude_ide_bridge: false,
             auto_naming: true,
             limit_chat_history: false,
             chat_retention: 37,
@@ -4319,6 +4361,7 @@ mod tests {
                 ("chat.composerMaxRows".into(), "20".into()),
                 ("chat.limitHistory".into(), "false".into()),
                 ("chat.retentionCount".into(), "37".into()),
+                ("claude.ideBridge".into(), "false".into()),
                 ("controlSocket.enabled".into(), "false".into()),
                 ("editor.codeLens".into(), "false".into()),
                 ("editor.cursorShape".into(), "underline".into()),

@@ -346,6 +346,8 @@ pub struct SettingsSnapshot {
     pub socket_path: String,
     /// "Resume agent sessions on launch" (F-SET-04).
     pub resume_agent_sessions: bool,
+    /// "Connect Claude Code to Sirio (/ide)": whether Sirio serves Claude Code's IDE protocol.
+    pub claude_ide_bridge: bool,
     /// "Auto-rename tabs and agents" (F-SET-05).
     pub auto_naming: bool,
     /// "Limit stored chats" (F-SET-06).
@@ -402,6 +404,7 @@ impl Default for SettingsSnapshot {
             control_socket_enabled: true,
             socket_path: String::new(),
             resume_agent_sessions: true,
+            claude_ide_bridge: true,
             auto_naming: false,
             limit_chat_history: true,
             chat_retention: 100,
@@ -808,6 +811,7 @@ pub struct Settings {
     ollama_show_in_bar: bool,
     refresh_interval: i32,
     resume_agent_sessions: bool,
+    claude_ide_bridge: bool,
     auto_naming: bool,
     limit_chat_history: bool,
     chat_retention: i32,
@@ -1124,6 +1128,7 @@ impl Settings {
             surface_focus: cx.focus_handle(),
             surface_focus_pending: false,
             resume_agent_sessions: initial.resume_agent_sessions,
+            claude_ide_bridge: initial.claude_ide_bridge,
             auto_naming: initial.auto_naming,
             limit_chat_history: initial.limit_chat_history,
             chat_retention: initial.chat_retention.clamp(5, 500),
@@ -1708,6 +1713,7 @@ impl Settings {
             control_socket_enabled: self.control_socket_enabled,
             socket_path: self.socket_path.clone(),
             resume_agent_sessions: self.resume_agent_sessions,
+            claude_ide_bridge: self.claude_ide_bridge,
             auto_naming: self.auto_naming,
             limit_chat_history: self.limit_chat_history,
             chat_retention: self.chat_retention,
@@ -1919,6 +1925,21 @@ impl Settings {
         self.refresh_interval = value.clamp(1, 60);
         self.changed();
         cx.notify();
+    }
+
+    fn set_claude_ide_bridge(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.claude_ide_bridge = enabled;
+        self.changed();
+        cx.notify();
+    }
+
+    /// The switch changed somewhere other than this screen (the control socket): show it
+    /// without telling the host again, which already acted.
+    pub fn apply_claude_ide_bridge(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.claude_ide_bridge != enabled {
+            self.claude_ide_bridge = enabled;
+            cx.notify();
+        }
     }
 
     fn set_resume_agent_sessions(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -2876,6 +2897,29 @@ impl Settings {
             .child(controls::separator(theme))
             .child(controls::action_row(refresh_now, theme))
             .child(controls::separator(theme));
+
+        // Claude Code's `/ide`: Sirio serves the IDE protocol its terminals connect to.
+        if provider == ProviderKind::Claude {
+            let ide_entity = entity.clone();
+            let ide_bridge = controls::toggle(
+                "provider-claude-ide-bridge",
+                self.claude_ide_bridge,
+                theme,
+                move |_, _, cx| {
+                    ide_entity.update(cx, |this, cx| {
+                        this.set_claude_ide_bridge(!this.claude_ide_bridge, cx);
+                    });
+                },
+            );
+            card = card
+                .child(controls::row(
+                    "Connect Claude Code to Sirio (/ide)",
+                    None,
+                    ide_bridge,
+                    theme,
+                ))
+                .child(controls::separator(theme));
+        }
 
         // F-SET-12/F-SET-13: OpenCode Go and Ollama Cloud authenticate
         // with a pasted web cookie — Claude and Codex read the credential

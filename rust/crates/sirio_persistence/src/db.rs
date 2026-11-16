@@ -1233,6 +1233,27 @@ impl AppDatabase {
         Ok(())
     }
 
+    /// The port Sirio's IDE bridge listened on last, and the token it served. Both are kept so
+    /// a restarted Sirio listens where the terminals it left behind expect it, and a client
+    /// that lost its connection can reconnect with what it already holds. Absent until the
+    /// bridge first starts; an unparseable port reads back as absent.
+    pub fn ide_bridge_endpoint(&self) -> Result<(Option<u16>, Option<String>), PersistenceError> {
+        let port = self
+            .setting_value(settings_keys::IDE_BRIDGE_PORT)?
+            .and_then(|value| value.parse::<u16>().ok());
+        let token = self.setting_value(settings_keys::IDE_BRIDGE_TOKEN)?;
+        Ok((port, token))
+    }
+
+    /// Saves the IDE bridge's port and token together.
+    pub fn set_ide_bridge_endpoint(&self, port: u16, token: &str) -> Result<(), PersistenceError> {
+        let transaction = write_transaction(&self.conn)?;
+        set_setting(&transaction, settings_keys::IDE_BRIDGE_PORT, &port.to_string())?;
+        set_setting(&transaction, settings_keys::IDE_BRIDGE_TOKEN, token)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Settings
     // ------------------------------------------------------------------
@@ -1268,6 +1289,9 @@ impl AppDatabase {
         }
         if let Some(value) = self.setting_value(settings_keys::RESUME_AGENT_SESSIONS)? {
             defaults.resume_agent_sessions = parse_bool_setting(&value, true);
+        }
+        if let Some(value) = self.setting_value(settings_keys::CLAUDE_IDE_BRIDGE)? {
+            defaults.claude_ide_bridge = parse_bool_setting(&value, true);
         }
         if let Some(value) = self.setting_value(settings_keys::AUTO_NAMING)? {
             defaults.auto_naming = parse_bool_setting(&value, false);
@@ -1462,6 +1486,15 @@ impl AppDatabase {
             &transaction,
             settings_keys::RESUME_AGENT_SESSIONS,
             if settings.resume_agent_sessions {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
+        set_setting(
+            &transaction,
+            settings_keys::CLAUDE_IDE_BRIDGE,
+            if settings.claude_ide_bridge {
                 "true"
             } else {
                 "false"

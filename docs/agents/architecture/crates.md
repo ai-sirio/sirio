@@ -12,7 +12,8 @@ sirio_env        (below everything, beside sirio_perf — no dependencies. It is
                     launch snapshot minus the launcher's own variables (APPIMAGE,
                     APPDIR, ARGV0, OWD, SIRIO_LAUNCH_ENV), the stable `sirioctl`
                     directory first on `PATH`, the per-pane names stripped
-                    (`SIRIO_WORKTREE_ID`, `SIRIO_PANE_ID`, `TILLER_PANE_ID`), and
+                    (`SIRIO_WORKTREE_ID`, `SIRIO_PANE_ID`, `TILLER_PANE_ID`,
+                    `CLAUDE_CODE_SSE_PORT`), and
                     `for_child()` for a site that cannot spawn through `command`.
                     Its dependents are sirio_acp, sirio_chat, sirio_control,
                     sirio_diagram, sirio_forge, sirio_git, sirio_lsp, sirio_project,
@@ -74,10 +75,13 @@ sirio_term_session, sirio_chat_vocab, sirio_opencode_watch, sirio_ide
                                  only, `sirio` is its one dependent, and its
                                  `discover` makes no network call;
                                  sirio_ide is Claude Code's IDE protocol,
-                                 protocol only — the endpoint and the
-                                 lockfile, later the server — with no GPUI,
-                                 and it never writes user-global Claude
-                                 config)
+                                 protocol only — the endpoint, the lockfile and
+                                 the server — with no GPUI, and it never writes
+                                 user-global Claude config; `sirio` is its one
+                                 dependent: `ide_bridge.rs` binds it from `main()`,
+                                 owns the switch, the saved port and token and the
+                                 lockfile, and hands the port to every terminal as
+                                 `CLAUDE_CODE_SSE_PORT`)
     ^
 sirio_agents     (-> sirio_claude)
 sirio_usage      (-> sirio_claude)

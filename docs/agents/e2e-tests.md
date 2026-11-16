@@ -705,6 +705,21 @@ Scripts/Tests/test-markdown-scroll-probe.sh --xvfb   # -> prints "MARKDOWN SCROL
 # `--only replace_mixed`, which then proves Replace all tells the open tabs itself.
 Scripts/Tests/test-editor-e2e.sh --xvfb   # -> prints "EDITOR E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
 
+# Sirio as Claude Code's IDE (/ide), in a real, isolated debug Sirio on a private Xvfb with a
+# stand-in client (Scripts/Tests/ide_client.py: stdlib RFC 6455, the mcp subprotocol, the token
+# in x-claude-code-ide-authorization) running in one of its panes. A private HOME (the lockfile
+# goes to $HOME/.claude/ide/), database, socket, host root and a TMPDIR on disk: nothing of your
+# real ~/.claude or a running Sirio is touched. Cases: lockfile_and_env (six keys, 0600, the
+# port in a new pane), token_refused (401, no connection), handshake (the mcp echo, exactly four
+# tools), switch_off (lockfile gone, connection closed, then the same port and token),
+# port_survives_catalog_change, restart_keeps_port (same port and token across a quit; the old
+# client reconnects) and inherited_port (a launch's CLAUDE_CODE_SSE_PORT never reaches a pane).
+# --xvfb or --display :N picks the display (never your own $DISPLAY); --state-only takes no
+# captures; --out-dir DIR keeps transcript.log, app.log, client-*.jsonl (every frame), socket.jsonl,
+# the lockfile with authToken redacted and the PID-matched captures. Run it with
+# `env -u WAYLAND_DISPLAY` from a Wayland session.
+Scripts/Tests/test-ide-bridge-e2e.sh --xvfb   # -> prints "IDE BRIDGE E2E OK (<n> cases, state-only <0|1>)"
+
 # How Sirio launches the built-in `jdtls` around Lombok (spec
 # docs/superpowers/specs/2026-10-26-jdtls-lombok-design.md) in a real, isolated debug Sirio on
 # a private Xvfb, with a fake `jdtls` on PATH that logs each launch's argv and project and

@@ -24,8 +24,15 @@ pub const LAUNCHER_ONLY: [&str; 5] = ["APPIMAGE", "APPDIR", "ARGV0", "OWD", LAUN
 /// Every other `set_var` or `remove_var` in `sirio` is for the app alone.
 pub const FOR_CHILDREN: [&str; 1] = ["SIRIO_PANE_HOST_HOME"];
 
-/// Set per pane by whoever opens it, so never inherited.
-pub const PER_PANE: [&str; 3] = ["SIRIO_WORKTREE_ID", "SIRIO_PANE_ID", "TILLER_PANE_ID"];
+/// Set per pane by whoever opens it, so never inherited. `CLAUDE_CODE_SSE_PORT` is Sirio's own
+/// IDE bridge's port: a Sirio launched from a VS Code terminal must not hand that terminal's
+/// port to its panes, and the native chat must not inherit one.
+pub const PER_PANE: [&str; 4] = [
+    "SIRIO_WORKTREE_ID",
+    "SIRIO_PANE_ID",
+    "TILLER_PANE_ID",
+    "CLAUDE_CODE_SSE_PORT",
+];
 
 static INSTALLED: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 
