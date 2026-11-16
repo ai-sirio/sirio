@@ -164,7 +164,9 @@ Scripts/Tests/test-hand-agents-e2e.sh   # -> prints "HAND AGENTS E2E OK (<n> cas
 # rows: focus, Enter and Esc, skip against save, the queue, the clone and non-git paths, a Clone
 # form dismissed while git runs (by Esc, by a click inside a dialog over it, or replaced by the
 # Create form), which still adds its project and opens its dialog like any clone, or reports its
-# failure, with the URL's credentials redacted, in the sidebar's notice and a toast, the Project
+# failure, with the URL's credentials redacted, in the sidebar's notice and a toast, a Create form
+# replaced while its folder is still being made (Linux only: an LD_PRELOAD shim, built with cc,
+# stalls the app's mkdir), which still adds its project or reports its failure, the Project
 # Settings tab's label, the privacy of the perf trace, and the label across a focus refresh and a
 # relaunch. A git wrapper in the debug build's own bin directory logs every git call and floods,
 # stalls, holds (with a progress line every 5 s, so a held clone stays alive), or fails a clone, or
@@ -173,7 +175,7 @@ Scripts/Tests/test-hand-agents-e2e.sh   # -> prints "HAND AGENTS E2E OK (<n> cas
 # transcript.log, <scenario>/app.log, projects.tsv and git-calls.log, and
 # frames/<scenario>-*.png; --appearance light|dark (default light); --only NAME[,NAME...] prints
 # "PROJECT IDENTITY E2E PARTIAL (<n> scenarios)". It needs xset (x11-xserver-utils) and
-# python3-gi with gir1.2-gtk-3.0 for the clipboard.
+# python3-gi with gir1.2-gtk-3.0 for the clipboard, and cc for the mkdir hold.
 Scripts/Tests/test-project-identity-e2e.sh   # -> prints "PROJECT IDENTITY E2E OK (<n> scenarios, appearance <a>, state-only <0|1>)"
 
 # Saved prompts in the right panel, in one real, isolated debug Sirio on a private Xvfb, driven by

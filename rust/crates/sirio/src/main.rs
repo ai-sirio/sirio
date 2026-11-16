@@ -11756,7 +11756,7 @@ impl SirioWorkspace {
             SidebarEvent::AddProject { path, origin } => {
                 self.add_project(path.clone(), *origin, cx)
             }
-            SidebarEvent::CloneFailed { message } => {
+            SidebarEvent::AddFailed { message } => {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.set_notice(message.clone(), cx));
                 self.show_toast_after_identity_error(message.clone(), cx);

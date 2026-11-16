@@ -40,6 +40,8 @@ set -eEuo pipefail
 #   24 clone_replaced_fails  a replaced Clone form's clone that fails says so, its URL's password redacted
 #   25 clone_dismissed_by_click [display]
 #   26 clone_replaced_by_create  a Clone form replaced by the Create form mid-clone still adds the clone's project and opens its dialog
+#   27 create_replaced_by_clone  a Create form replaced by the Clone form while its mkdir stalls still adds the folder's project and opens its dialog
+#   28 create_replaced_fails     a replaced Create form whose mkdir then fails says so in the notice and a toast, and adds nothing
 #
 # The git wrapper: the debug build leads the PATH of its git calls with
 # $XDG_DATA_HOME/Sirio/bin-debug (its own copy directory), so a `git` placed
@@ -48,6 +50,14 @@ set -eEuo pipefail
 # clone (slow-clone), holds a clone until the scenario creates clone-go
 # (gate-clone), makes a clone fail after leaving a half-made checkout
 # (fail-clone) or delays discovery (slow-discovery).
+#
+# The mkdir hold (scenarios 27 and 28, Linux only): an LD_PRELOAD shim, built with
+# cc into $WORK, makes the app's mkdir of exactly $SIRIO_E2E_MKDIR_HOLD stall like
+# a slow filesystem: it creates <scenario>/mkdir-held and waits until the scenario
+# creates <scenario>/mkdir-go (or its work dir is gone, or 300 s pass), then runs
+# the real mkdir. It acts only in the process whose executable is named sirio:
+# children (git, shells, sirio-host) inherit LD_PRELOAD and load it, but it stays
+# inactive there. macOS has no LD_PRELOAD, so there both scenarios are skipped.
 #
 # The artifact: --out-dir DIR (default artifacts/project-identity-e2e-<stamp>-<pid>)
 # keeps transcript.log (every sirioctl call and its reply, prefixed by the
@@ -92,11 +102,13 @@ SCENARIO_KINDS=(
   refresh_then_relaunch:d picker_modes:d over_open_form:d settings_tab:d
   copy_field:d save_error:d trace_privacy:d icon_save:d
   clone_dismissed:d clone_replaced_fails:s clone_dismissed_by_click:d
-  clone_replaced_by_create:s
+  clone_replaced_by_create:s create_replaced_by_clone:s create_replaced_fails:s
 )
 # Scenarios registered but not yet written. A run that reaches one fails: the
 # OK line cannot be printed while this list is not empty.
 UNWRITTEN=()
+# Scenarios that need LD_PRELOAD (the mkdir hold): skipped wherever it is not Linux.
+LINUX_ONLY=(create_replaced_by_clone create_replaced_fails)
 
 STATE_ONLY=0
 START_XVFB=0
@@ -813,6 +825,74 @@ scenario_clone_replaced_by_create() {
   [ "$(listed_count)" = 1 ] || fail "$SCENARIO: $(listed_count) projects are listed, not 1"
 }
 
+# 27. The Clone form opened over a Create form whose folder is still being made
+# (#681; a stalled mkdir, held by the mkdir hold): the replaced form's Create goes
+# on, adds its project and opens its dialog, as after any Create, over the Clone
+# form, which stays open behind it.
+scenario_create_replaced_by_clone() {
+  local made="$SD/projects/made"
+  note "step 1: the Create form submitted; its mkdir is held"
+  add_form create made --submit
+  wait_file "$SD/mkdir-held"
+  wait_for projectForm=create
+  [ ! -e "$made" ] || fail "$SCENARIO: $made exists while its mkdir is held"
+
+  note "step 2: the Clone form replaces the Create form while the folder is still being made"
+  add_form clone "$SD/origin/none"
+  wait_for projectForm=clone
+  note "release the mkdir"
+  : >"$SD/mkdir-go"
+
+  note "step 3: the folder is made, its project listed, its dialog open over the Clone form"
+  wait_file "$made"
+  wait_listed "$made"
+  wait_for open=true origin=created "projectId=$(listed id "$made")" nameDraft=made projectForm=clone
+  if ! skip_display "step 3: focus=field, as after any Create"; then
+    wait_for focus=field
+  fi
+
+  note "step 4: Skip closes the dialog and leaves the Clone form open, with no notice"
+  act skip
+  wait_for open=false lastOutcome=skipped projectForm=clone
+  hold_for "$HOLD_SECS" open=false projectForm=clone sidebarNotice=
+  if ! skip_display "step 4: Skip gives focus back to the Clone form's field (focus=other)"; then
+    wait_for focus=other projectForm=clone
+  fi
+  [ "$(listed_count)" = 1 ] || fail "$SCENARIO: $(listed_count) projects are listed, not 1"
+}
+
+# 28. A Create whose form was replaced while its mkdir stalled, and whose mkdir
+# then fails because the folder appeared meanwhile (#681), says so in the
+# sidebar's notice and in a toast, adds no project and opens no dialog.
+scenario_create_replaced_fails() {
+  local made="$SD/projects/made" want notice
+  want="could not create $made: File exists (os error 17)"
+  note "step 1: the Create form submitted; its mkdir is held"
+  add_form create made --submit
+  wait_file "$SD/mkdir-held"
+  wait_for projectForm=create
+
+  note "step 2: the Clone form replaces the Create form while the folder is still being made"
+  add_form clone "$SD/origin/none"
+  wait_for projectForm=clone
+
+  note "step 3: the folder appears before the held mkdir runs, so that mkdir fails"
+  mkdir "$made"
+  : >"$SD/mkdir-go"
+
+  note "step 4: the failure is in the sidebar's notice and in a toast"
+  wait_nonempty sidebarNotice
+  notice="$(state_value sidebarNotice)"
+  [ "$notice" = "$want" ] || fail "$SCENARIO: sidebarNotice is '$notice', not '$want'"
+  note "OK: sidebarNotice=$notice"
+  [ "$(state_value toast)" = "$want" ] || fail "$SCENARIO: toast is '$(state_value toast)', not '$want'"
+  capture notice
+
+  note "step 5: no project and no dialog; the Clone form stays"
+  [ "$(listed_count)" = 0 ] || fail "$SCENARIO: $(listed_count) project(s) are listed, not 0"
+  hold_for "$HOLD_SECS" open=false projectForm=clone
+}
+
 # 18. The Project Settings tab's label field writes at once, and typing the root name clears it.
 scenario_settings_tab() {
   local app="$SD/tab/app" label="tab label" backspaces=()
@@ -1208,6 +1288,16 @@ wait_nonempty() { # key
   done
   fail "$SCENARIO: $1 stayed empty -- last read: $(last_read)"
 }
+# Polls until a file appears (the mkdir hold's marker, the folder it was holding).
+wait_file() { # path
+  local tries=0
+  while [ "$tries" -lt "$POLL_TRIES" ]; do
+    ! [ -e "$1" ] || { note "OK: $1 exists"; return 0; }
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  fail "$SCENARIO: $1 never appeared"
+}
 # Polls until a log line (fixed text) appears in this scenario's git-calls.log.
 wait_log() { # text
   local tries=0
@@ -1491,6 +1581,71 @@ WRAPPER
   chmod 755 "$bin/git"
 }
 
+# The mkdir hold's LD_PRELOAD shim (see the header), compiled once per run.
+build_mkdir_hold() {
+  [ ! -f "$WORK/mkdir-hold.so" ] || return 0
+  command -v cc >/dev/null || fail "$SCENARIO: cc is required for the mkdir hold"
+  cat >"$WORK/mkdir-hold.c" <<'SHIM'
+/* The E2E mkdir hold: see the header of test-project-identity-e2e.sh. */
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+static char hold_path[PATH_MAX];
+static char work_dir[PATH_MAX];
+static char held_marker[PATH_MAX];
+static char go_marker[PATH_MAX];
+static int active;
+
+/* Read once at load: getenv from the worker thread could race a setenv. */
+__attribute__((constructor)) static void mkdir_hold_init(void) {
+    const char *hold = getenv("SIRIO_E2E_MKDIR_HOLD");
+    const char *dir = getenv("SIRIO_E2E_MKDIR_DIR");
+    char exe[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (!hold || !dir || n <= 0) return;
+    exe[n] = '\0';
+    const char *base = strrchr(exe, '/');
+    if (strcmp(base ? base + 1 : exe, "sirio") != 0) return;
+    snprintf(hold_path, sizeof hold_path, "%s", hold);
+    snprintf(work_dir, sizeof work_dir, "%s", dir);
+    snprintf(held_marker, sizeof held_marker, "%s/mkdir-held", dir);
+    snprintf(go_marker, sizeof go_marker, "%s/mkdir-go", dir);
+    active = 1;
+}
+
+int mkdir(const char *path, mode_t mode) {
+    static int (*real_mkdir)(const char *, mode_t);
+    if (!real_mkdir) real_mkdir = (int (*)(const char *, mode_t))dlsym(RTLD_NEXT, "mkdir");
+    if (active && strcmp(path, hold_path) == 0) {
+        FILE *marker = fopen(held_marker, "w");
+        if (marker) fclose(marker);
+        for (int i = 0; i < 3000 && access(go_marker, F_OK) != 0 && access(work_dir, F_OK) == 0; i++)
+            usleep(100000);
+    }
+    return real_mkdir(path, mode);
+}
+SHIM
+  cc -shared -fPIC -O2 -o "$WORK/mkdir-hold.so" "$WORK/mkdir-hold.c" -ldl \
+    || fail "$SCENARIO: the mkdir hold did not compile"
+}
+# Launches the scenario's app with its mkdir of PATH held.
+hold_mkdir_of() { # path
+  # LD_PRELOAD splits its list on spaces and colons.
+  case "$WORK" in *[[:space:]:]*) fail "$SCENARIO: the mkdir hold needs a work dir without spaces or colons: $WORK (set SIRIO_E2E_TMP)" ;; esac
+  build_mkdir_hold
+  APP_EXTRA_ENV=("LD_PRELOAD=$WORK/mkdir-hold.so" "SIRIO_E2E_MKDIR_HOLD=$1" "SIRIO_E2E_MKDIR_DIR=$SD")
+}
+# The Create form's default parent is SIRIO_PROJECTS_DIR, which app_start sets to $SD/projects.
+prelaunch_create_replaced_by_clone() { hold_mkdir_of "$SD/projects/made"; }
+prelaunch_create_replaced_fails() { hold_mkdir_of "$SD/projects/made"; }
+
 app_ready() { ctlq surface tabs read >/dev/null 2>&1; }
 app_start() {
   local n=0
@@ -1661,6 +1816,14 @@ is_unwritten() { # name
   return 1
 }
 
+is_linux_only() { # name
+  local entry
+  for entry in "${LINUX_ONLY[@]}"; do
+    [ "$entry" = "$1" ] && return 0
+  done
+  return 1
+}
+
 for entry in "${SCENARIO_KINDS[@]}"; do
   name="${entry%%:*}"
   kind="${entry##*:}"
@@ -1670,6 +1833,11 @@ for entry in "${SCENARIO_KINDS[@]}"; do
   SCENARIO="$name"
   # An unwritten scenario fails before the --state-only skip can hide it.
   is_unwritten "$name" && fail "scenario $name is not written yet"
+  if is_linux_only "$name" && [ "$OS" != linux ]; then
+    echo "[$name] SKIPPED (not Linux): the mkdir hold needs LD_PRELOAD"
+    SKIPPED+=("$name: the whole scenario (not Linux)")
+    continue
+  fi
   if [ "$kind" = d ] && [ "$STATE_ONLY" -eq 1 ]; then
     echo "[$name] SKIPPED (state-only): a display scenario"
     SKIPPED+=("$name: the whole scenario")

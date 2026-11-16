@@ -512,12 +512,41 @@ pub enum CreateFormEvent {
     Created(PathBuf),
 }
 
+/// A Create that has started, held apart from the form that started it, like
+/// a `CloneJob`: the form can be dismissed while the folder is still being
+/// made (a slow or stalled filesystem), and whoever then holds the job still
+/// learns how it ended (#681).
+pub struct CreateJob {
+    _task: Task<()>,
+}
+
+pub enum CreateJobEvent {
+    /// `Ok` carries the new folder, `Err` `create_project`'s message.
+    Finished(Result<PathBuf, String>),
+}
+
+impl EventEmitter<CreateJobEvent> for CreateJob {}
+
+impl CreateJob {
+    fn start(parent: PathBuf, name: String, cx: &mut Context<Self>) -> Self {
+        let task = cx.spawn(async move |job, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    create_project(&parent, &name).map_err(|error| error.to_string())
+                })
+                .await;
+            let _ = job.update(cx, |_, cx| cx.emit(CreateJobEvent::Finished(result)));
+        });
+        Self { _task: task }
+    }
+}
+
 /// A GPUI surface for creating a new project directory.
 pub struct CreateForm {
     parent: PathBuf,
     state: CreateFormState,
     name_field: Entity<TextInput>,
-    task: Option<Task<()>>,
+    job: Option<Entity<CreateJob>>,
 }
 
 impl CreateForm {
@@ -541,7 +570,7 @@ impl CreateForm {
             parent,
             state: CreateFormState::default(),
             name_field,
-            task: None,
+            job: None,
         }
     }
 
@@ -586,24 +615,32 @@ impl CreateForm {
         }
         let parent = self.parent.clone();
         let name = self.state.name().to_owned();
-        self.task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    create_project(&parent, &name).map_err(|error| error.to_string())
-                })
-                .await;
-            let _ = this.update(cx, |form, cx| {
-                form.task = None;
-                match result {
-                    Ok(destination) => {
-                        form.state.complete(destination.clone());
-                        cx.emit(CreateFormEvent::Created(destination));
-                    }
-                    Err(error) => form.state.fail(error),
+        let job = cx.new(|cx| CreateJob::start(parent, name, cx));
+        cx.subscribe(&job, |form, job, event: &CreateJobEvent, cx| {
+            // A job taken by the host is the host's to finish.
+            if form.job.as_ref() != Some(&job) {
+                return;
+            }
+            let CreateJobEvent::Finished(result) = event;
+            form.job = None;
+            match result {
+                Ok(destination) => {
+                    form.state.complete(destination.clone());
+                    cx.emit(CreateFormEvent::Created(destination.clone()));
                 }
-                cx.notify();
-            });
-        }));
+                Err(error) => form.state.fail(error.clone()),
+            }
+            cx.notify();
+        })
+        .detach();
+        self.job = Some(job);
+    }
+
+    /// Hands the Create in progress to a host that dismisses the form before
+    /// the folder is made (#681). The form then ignores that job's events, so
+    /// the Create's end is handled once, by the host.
+    pub fn take_running_job(&mut self) -> Option<Entity<CreateJob>> {
+        self.job.take()
     }
 }
 

@@ -316,6 +316,15 @@ Each goal is phrased as something the end-to-end proof can show.
     entity's node. This is unverified at run time.
     *   **Resolved by:** <!-- TODO(F1): D1 does not say how or by whom this is
         checked. -->
+*   **A late Create's focus mode.** A Create form dismissed or replaced while
+    its folder is still being made (a slow or stalled filesystem) still adds
+    the project with origin `Created`, so its dialog opens in field mode (§2),
+    although the premise of that choice, Enter just pressed in the form's own
+    field, no longer holds: keys typed elsewhere can reach the label, the
+    hazard A12 names. A distinct origin mapped to dialog mode would follow
+    CUJ 2, but it is a form of A12's conditional variant, which Enzo rejected
+    for a Create made from the form.
+    *   **Resolved by:** Enzo.
 
 ## Critical User Journeys (CUJs)
 
@@ -466,8 +475,9 @@ and the picker changes live in `sirio_ui`.
 *   **The event carries an origin.**
     `SidebarEvent::AddProject { path, origin: AddOrigin }`, with
     `AddOrigin = OpenedFolder | AddedWithoutGit | InitializedGit | Cloned { truncated } | Created`.
-    There is one variant for each add path, and each of the five emit sites
-    sets its own.
+    There is one variant for each add path, and every emit site sets its
+    own: one for each of the five add paths, plus the sidebar's late adds of
+    a Clone or Create form dismissed before its add finished (#681).
 *   **Which origins are synchronous.** Decision 1 named Open folder as
     synchronous and Clone and Initialize Git as asynchronous. The other two
     are classified here:
@@ -476,7 +486,12 @@ and the picker changes live in `sirio_ui`.
     *   Create is treated as synchronous (Enzo, 2026-10-29).
         `CreateForm::submit` runs `create_project` on `background_spawn`, but
         that work is two directory creations, and the user has just pressed
-        Enter in the form's own field.
+        Enter in the form's own field. On a slow or stalled filesystem the
+        form can still be dismissed or replaced before they finish; it then
+        hands its running Create to the sidebar, as a Clone form hands its
+        clone, and the sidebar adds the project with origin `Created` (field
+        mode, as above) or reports the failure in the notice and a toast
+        (scenarios 27 and 28).
 *   **Focus mode, by origin.** The dialog has two modes:
     *   *Field mode*: the field takes focus and the root name is selected, so
         typing replaces it. It is used after `OpenedFolder`, `AddedWithoutGit`
@@ -495,7 +510,8 @@ and the picker changes live in `sirio_ui`.
         is still running, and closing it used to drop the clone (issue
         [#681](https://github.com/ai-sirio/sirio/issues/681)). The #681 fix
         keeps the running clone in the sidebar, which adds the project or
-        reports the failure (scenarios 23 to 26).
+        reports the failure (scenarios 23 to 26). A Create form whose folder
+        is still being made is kept the same way (scenarios 27 and 28).
 
 ### 3. The dialog
 
@@ -788,6 +804,10 @@ This section is the only normative statement of the rule.
         root, not on the new project's row.
     *   For the other origins, focus returns to where it was, for example the
         terminal.
+    *   After a late add, one whose Clone or Create form was dismissed or
+        replaced before it finished (#681), the handle held before the dialog
+        is wherever the user went meanwhile: the field of a form opened since,
+        or a terminal. Focus returns there (scenarios 25 to 27).
 
 ### 8. The queue (M11)
 
@@ -834,8 +854,8 @@ This section is the only normative statement of the rule.
 *   **After a save error.** `save_project_identity` shows the toast and
     remembers its id in `identity_error_toast`. The drain then does not open
     the next dialog until that toast expires (4 s) or the user dismisses it.
-    Ordinary toasts delay nothing. The toast of a dismissed clone that fails
-    (#681) waits until that error toast is gone instead of replacing it,
+    Ordinary toasts delay nothing. The toast of a dismissed clone or Create
+    that fails (#681) waits until that error toast is gone instead of replacing it,
     since a replacement would cut it short and open the next dialog early.
 *   **Element ids.** Each dialog's element id is `("project-identity", seq)`,
     where `seq` is a per-workspace counter. Ely's focus takeover lives in keyed
@@ -1206,7 +1226,10 @@ crate-private.
     running clone in the sidebar, which adds the project or reports the
     failure (scenarios 23 to 26). A late success opens the dialog like any
     clone, with focus on the dialog (decision 1, CUJ 2); a failure shows in
-    the notice and a toast (after a failed save's toast, §8).
+    the notice and a toast (after a failed save's toast, §8). A Create form
+    whose folder is still being made is kept the same way, and its late
+    success opens the dialog in field mode, as after any Create (§2,
+    scenarios 27 and 28).
 *   **Reason for rejection:** §7 already stops the form's Esc branch from
     running while the dialog is open, and the workspace never closes a form
     (§2).
@@ -2314,6 +2337,20 @@ gives its full path.
         *   otherwise runs `exec` on the real git.
 
         The flag files are created by the scenario that needs them.
+    *   **The mkdir hold (scenarios 27 and 28, Linux only).** An
+        `LD_PRELOAD` shim, compiled with `cc` into `$WORK` once per run,
+        makes the app's `mkdir` of exactly `$SIRIO_E2E_MKDIR_HOLD` stall the
+        way a slow filesystem does: it creates `$WORK/<scenario>/mkdir-held`
+        and waits until the scenario creates `mkdir-go` (or the work
+        directory is gone, or 300 s pass), then runs the real `mkdir`. The
+        wait sits inside the background thread's `create_dir`, so a dismissed
+        form's Create still lands on disk, as on a stalled filesystem. The
+        shim acts only in the process whose executable is named `sirio`:
+        git, shells and `sirio-host` inherit `LD_PRELOAD` and load it, but it
+        stays inactive there. `LD_PRELOAD` splits on spaces and colons, so
+        the script refuses a work directory that holds either. No production
+        code has a hook for it. macOS has no `LD_PRELOAD`, so there both scenarios are
+        skipped.
     *   **Shortcuts.** The display steps run on Linux. The script sends
         Ctrl+Shift+S for the sidebar, Ctrl+T for a new tab, Ctrl+Shift+W for
         close tab and Ctrl+Shift+P for the palette. Windows binds the
@@ -2654,6 +2691,39 @@ gives its full path.
                 open. With a display, the read verb then shows and keeps
                 showing `focus=other`: focus went back to the Create form's
                 field. The listing holds exactly one project.
+        27. **`create_replaced_by_clone` [state-only safe, Linux only].**
+            Fixture: none; the mkdir hold holds `projects/made`. It sends no
+            X input; its focus check runs only with a display.
+            1.  Run the add verb with `kind=create`, the name `made` and
+                `submit`. `mkdir-held` appears, the read verb shows
+                `projectForm=create`, and `projects/made` does not exist yet.
+            2.  Run the add verb with `kind=clone` and a URL, without
+                `submit`: the Clone form replaces the Create form while its
+                folder is still being made, and the read verb shows
+                `projectForm=clone`. Create `mkdir-go` to release the `mkdir`.
+            3.  `projects/made` exists and is listed, and the read verb shows
+                `open=true`, `origin=created`, its `projectId`,
+                `nameDraft=made` and `projectForm=clone` (and `focus=field`,
+                as after any Create): the replaced form's Create added its
+                project and opened its dialog over the Clone form.
+            4.  `act skip`. The read verb shows `open=false`,
+                `lastOutcome=skipped` and `projectForm=clone`, and keeps
+                showing them and an empty `sidebarNotice` for the hold time.
+                With a display, the read verb then shows `focus=other`:
+                focus went back to the Clone form's field. The listing holds
+                exactly one project.
+        28. **`create_replaced_fails` [state-only safe, Linux only].**
+            Fixture: none; the mkdir hold holds `projects/made`.
+            1.  As step 1 of scenario 27.
+            2.  As step 2 of scenario 27, except that the scenario first
+                makes `projects/made` itself, so the held `mkdir` fails once
+                released.
+            3.  `sidebarNotice` becomes non-empty and is exactly
+                `could not create <work>/projects/made: File exists (os error 17)`,
+                and the `toast` value of the same read is that same text. One
+                capture shows the notice (skipped with `--state-only`).
+            4.  No project is listed, and the read verb keeps showing
+                `open=false` and `projectForm=clone` for the hold time.
     *   **The artifact.** Under `--out-dir`:
         *   `transcript.log`, every `sirioctl` call and its reply, prefixed by
             the scenario name;
