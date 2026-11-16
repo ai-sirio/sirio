@@ -72,8 +72,11 @@ jobs:
 
       # The terminal session engine. Only the pure units run here: the engine
       # tests are `cfg(unix)` except `a_missing_cwd_is_refused…`, which runs
-      # anywhere.
+      # anywhere. It runs even when a step before it failed, so a red test in
+      # the step above does not hide this crate's tests (#736); the job still
+      # fails.
       - name: Test sirio_term_session
+        if: success() || failure()
         working-directory: rust
         run: cargo test --locked -p sirio_term_session
 
