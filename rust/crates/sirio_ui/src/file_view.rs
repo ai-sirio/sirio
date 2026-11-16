@@ -44,6 +44,7 @@ use ely_gpui_component::forms::TextInput;
 pub use ely_gpui_component::editor::{FindOptions, LspState};
 pub use status_actions::StatusItem;
 pub use status_row::StatusFacts;
+pub(crate) use code_surface::standalone_highlighter;
 use crate::chat::{Chat, LinkClickOverride};
 use crate::drawer::WorktreeDrawer;
 use crate::editor::{

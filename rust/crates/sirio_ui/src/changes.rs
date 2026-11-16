@@ -57,6 +57,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ely_gpui_component::{
@@ -339,6 +340,7 @@ impl ChangeSection {
     fn label_in(self, source: &ChangesSource) -> &'static str {
         match (self, source) {
             (ChangeSection::Staged, ChangesSource::Range { .. }) => "Changes",
+            (ChangeSection::Staged, ChangesSource::Proposal(_)) => "Proposed change",
             _ => self.label(),
         }
     }
@@ -579,6 +581,9 @@ enum ChangesSource {
     /// its row opens, because a whole-request patch can exceed the git
     /// runner's output cap.
     Range { base: String, head: String },
+    /// Claude's proposed edit of one file, already diffed by the host. Immutable
+    /// and never polled; `ChangesTab::set_proposal` swaps the diff.
+    Proposal(Arc<FileDiff>),
 }
 
 type GitOperation = Box<dyn FnOnce(&Path) -> Result<(), GitError> + Send + 'static>;
@@ -604,6 +609,8 @@ pub struct ChangesTab {
     is_git: bool,
     /// What this surface reads and whether it may mutate it.
     source: ChangesSource,
+    /// Bumped by `set_proposal`: a load that started for an older diff is dropped when it lands.
+    proposal_generation: u64,
     entries: Vec<StatusEntry>,
     diffs: HashMap<PathBuf, FileDiff>,
     /// Commentable diff positions, computed when their diff is loaded.
@@ -769,6 +776,35 @@ impl ChangesTab {
         Self::with_source(repo_root, ChangesSource::Range { base, head }, true, cx)
     }
 
+    /// Creates a read-only surface over Claude's proposed edit of one file. `display_root`
+    /// is only what the surface is rooted at; nothing is read from it. The file's row is
+    /// open, and `set_commentable` is the owner's to turn on.
+    pub fn for_proposal(display_root: PathBuf, diff: Arc<FileDiff>, cx: &mut Context<Self>) -> Self {
+        let path = diff.path.clone();
+        let mut tab = Self::with_source(display_root, ChangesSource::Proposal(diff), true, cx);
+        tab.expand_proposal(path);
+        tab
+    }
+
+    /// Shows `diff` instead: the latest one wins, so a load in flight for an older diff is
+    /// dropped and `refresh`'s single-flight guard cannot keep it.
+    pub fn set_proposal(&mut self, diff: Arc<FileDiff>, cx: &mut Context<Self>) {
+        if !matches!(self.source, ChangesSource::Proposal(_)) {
+            return;
+        }
+        self.proposal_generation += 1;
+        self.git_task = None;
+        let path = diff.path.clone();
+        self.source = ChangesSource::Proposal(diff);
+        self.expand_proposal(path);
+        self.refresh(cx);
+    }
+
+    fn expand_proposal(&mut self, path: PathBuf) {
+        self.expanded_changes.insert((ChangeSection::Staged, path.clone()));
+        self.last_focus = Some(path);
+    }
+
     /// The `(base, head)` this surface shows, or `None` for any other source.
     pub fn range(&self) -> Option<(&str, &str)> {
         match &self.source {
@@ -907,6 +943,7 @@ impl ChangesTab {
             repo_root,
             is_git,
             source,
+            proposal_generation: 0,
             entries: Vec::new(),
             diffs: HashMap::new(),
             commentable_by_path: Rc::default(),
@@ -983,7 +1020,9 @@ impl ChangesTab {
     pub fn commit(&self) -> Option<&str> {
         match &self.source {
             ChangesSource::Commit(sha) => Some(sha),
-            ChangesSource::WorkingTree | ChangesSource::Range { .. } => None,
+            ChangesSource::WorkingTree
+            | ChangesSource::Range { .. }
+            | ChangesSource::Proposal(_) => None,
         }
     }
 
@@ -1150,6 +1189,7 @@ impl ChangesTab {
         }
         let repo_root = self.repo_root.clone();
         let source = self.source.clone();
+        let generation = self.proposal_generation;
         let expanded_paths = self.expanded_paths_for_load();
         self.git_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -1158,6 +1198,9 @@ impl ChangesTab {
                 })
                 .await;
             let _ = this.update(cx, |tab, cx| {
+                if tab.proposal_generation != generation {
+                    return;
+                }
                 tab.git_task = None;
                 tab.has_loaded = true;
                 match result {
@@ -2813,7 +2856,9 @@ impl ChangesTab {
         let mode_entity = entity.clone();
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
-        let title = if self.git_error.is_some() {
+        let title = if matches!(self.source, ChangesSource::Proposal(_)) {
+            "Proposed change".to_string()
+        } else if self.git_error.is_some() {
             "Local changes (unavailable)".to_string()
         } else {
             format!("Local changes ({})", self.entries.len())
@@ -2869,13 +2914,15 @@ impl ChangesTab {
             // spinner while a snapshot loads (a refresh runs every second),
             // and a click during one is a no-op by `refresh`'s own
             // single-flight guard.
-            .child(crate::ely_ui::icon_button(
-                "changes-refresh",
-                IconName::RefreshCw,
-                "Refresh",
-                true,
-                move |_, cx| refresh_entity.update(cx, |tab, cx| tab.refresh(cx)),
-            ))
+            .when(!matches!(self.source, ChangesSource::Proposal(_)), |this| {
+                this.child(crate::ely_ui::icon_button(
+                    "changes-refresh",
+                    IconName::RefreshCw,
+                    "Refresh",
+                    true,
+                    move |_, cx| refresh_entity.update(cx, |tab, cx| tab.refresh(cx)),
+                ))
+            })
             .child(crate::ely_ui::icon_button(
                 "changes-expand-all",
                 IconName::Maximize2,
@@ -4163,6 +4210,28 @@ fn load_snapshot(
         ChangesSource::WorkingTree => load_worktree_snapshot(repo_root, expanded_paths),
         ChangesSource::Commit(sha) => load_commit_snapshot(repo_root, sha),
         ChangesSource::Range { base, head } => load_range_snapshot(repo_root, base, head),
+        ChangesSource::Proposal(diff) => Ok(load_proposal_snapshot(diff)),
+    }
+}
+
+/// The snapshot of a proposal: its one file, with the diff the host already computed.
+fn load_proposal_snapshot(diff: &FileDiff) -> GitSnapshot {
+    let entry = StatusEntry {
+        path: diff.path.clone(),
+        original_path: None,
+        index_status: Some(StatusKind::Modified),
+        worktree_status: None,
+    };
+    let stat = DiffStat {
+        additions: diff.additions,
+        deletions: diff.deletions,
+        is_binary: diff.is_binary,
+    };
+    GitSnapshot {
+        stats: HashMap::from([(diff.path.clone(), stat)]),
+        diffs: HashMap::from([(diff.path.clone(), diff.clone())]),
+        entries: vec![entry],
+        diff_errors: HashMap::new(),
     }
 }
 
@@ -4312,6 +4381,7 @@ fn load_expanded_diff(
             entry.original_path.as_deref(),
             CHANGES_CONTEXT_LINES,
         ),
+        ChangesSource::Proposal(diff) => Ok((**diff).clone()),
     }
 }
 
@@ -5115,6 +5185,7 @@ mod tests {
             repo_root,
             is_git: true,
             source: ChangesSource::WorkingTree,
+            proposal_generation: 0,
             entries: Vec::new(),
             diffs: HashMap::new(),
             commentable_by_path: Rc::default(),
@@ -7054,6 +7125,7 @@ mod tests {
             repo_root: PathBuf::from("/tmp"),
             is_git: true,
             source: ChangesSource::WorkingTree,
+            proposal_generation: 0,
             entries: vec![StatusEntry {
                 path: PathBuf::from("x.rs"),
                 original_path: None,
@@ -7141,6 +7213,7 @@ mod tests {
             repo_root: PathBuf::from("/tmp"),
             is_git: true,
             source: ChangesSource::WorkingTree,
+            proposal_generation: 0,
             entries: vec![StatusEntry {
                 path: PathBuf::from("image.bin"),
                 original_path: None,
@@ -7436,6 +7509,7 @@ mod tests {
             repo_root: PathBuf::from("/repo"),
             is_git: true,
             source: ChangesSource::WorkingTree,
+            proposal_generation: 0,
             entries: vec![StatusEntry {
                 path: path.clone(),
                 original_path: None,
@@ -7904,6 +7978,7 @@ mod tests {
                 repo_root: PathBuf::from("/repo"),
                 is_git: true,
                 source: ChangesSource::WorkingTree,
+                proposal_generation: 0,
                 entries: vec![StatusEntry {
                     path: path.clone(),
                     original_path: None,
@@ -8388,6 +8463,7 @@ mod tests {
             repo_root: PathBuf::from("."),
             is_git: true,
             source: ChangesSource::Commit("synthetic".to_owned()),
+            proposal_generation: 0,
             entries: vec![entry],
             diffs,
             commentable_by_path: Rc::default(),

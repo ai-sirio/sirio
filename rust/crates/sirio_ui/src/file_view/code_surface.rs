@@ -706,6 +706,18 @@ fn code_highlighter(
     }
 }
 
+/// The colours of a code editor that is not a file tab's (the proposal's Edit mode): the
+/// same highlighter with a span cache and a drawn-language note of its own.
+pub(crate) fn standalone_highlighter(
+    language: Language,
+) -> impl Fn(usize, &str, &App) -> Vec<(Range<usize>, HighlightStyle)> + 'static {
+    code_highlighter(
+        language,
+        Rc::new(RefCell::new(SpanCache::default())),
+        Rc::new(Cell::new(None)),
+    )
+}
+
 /// Where line `line` (0-based) begins. A line past the end begins where the
 /// last line does.
 pub(super) fn line_start_offset(text: &str, line: usize) -> usize {
