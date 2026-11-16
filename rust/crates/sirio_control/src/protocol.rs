@@ -1144,6 +1144,32 @@ pub mod request {
         request("surface.chat.effort", params)
     }
 
+    /// Debug-only `surface.chat.elicitation {surfaceId, requestId, row|text|cancel}`:
+    /// does to the open question what a digit key (`row`, 1-based), Enter in
+    /// the free-text row (`text`) or Esc (`cancel=1`) does.
+    pub fn chat_elicitation(
+        surface_id: &str,
+        request_id: u64,
+        row: Option<u32>,
+        text: Option<&str>,
+        cancel: bool,
+    ) -> ControlRequest {
+        let mut params = BTreeMap::from([
+            ("surfaceId".to_string(), surface_id.to_string()),
+            ("requestId".to_string(), request_id.to_string()),
+        ]);
+        if let Some(row) = row {
+            params.insert("row".to_string(), row.to_string());
+        }
+        if let Some(text) = text {
+            params.insert("text".to_string(), text.to_string());
+        }
+        if cancel {
+            params.insert("cancel".to_string(), "1".to_string());
+        }
+        request("surface.chat.elicitation", params)
+    }
+
     /// Debug-only `surface.project_add {kind, value, submit?, answer?}`: starts
     /// an add without the folder chooser. `kind` is `path` (the Open folder
     /// flow on the folder `value`), `clone` or `create` (the form, its field

@@ -418,8 +418,13 @@ impl Chat {
 
     /// The field's placeholder names the state the composer is in.
     pub(crate) fn composer_placeholder(&self) -> String {
-        if self.pending_question().is_some() {
-            "Waiting for permission response…".to_string()
+        if let Some((index, server)) = self.pending_question() {
+            match self.entries.get(index) {
+                Some(Entry::Elicitation { .. }) => {
+                    format!("Waiting for your answer to {}…", super::question_dock::clean_line(&server))
+                }
+                _ => "Waiting for permission response…".to_string(),
+            }
         } else if self.streaming {
             "Type to queue for the next turn…".to_string()
         } else if self.is_offline() {

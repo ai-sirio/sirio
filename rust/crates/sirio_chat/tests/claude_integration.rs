@@ -9,8 +9,8 @@ use std::time::Duration;
 use futures::future::Either;
 use sirio_chat::ThinkingDisplay;
 use sirio_chat::{
-    AvailableCommandInfo, ChatEvent, ClaudeClient, ClaudeLaunch, SessionNotice, SpanKind,
-    TraceEvent,
+    AvailableCommandInfo, ChatEvent, ClaudeClient, ClaudeLaunch, CloseReason, ElicitationAction,
+    ElicitationPrompt, RequestKind, SessionNotice, SpanKind, TraceEvent,
 };
 use sirio_claude::FastMode;
 
@@ -1230,4 +1230,428 @@ fn sign_in_returns_the_url_to_open() {
     assert_eq!(start.auth_url.as_deref(), Some("http://127.0.0.1:9/authorize"));
     assert!(start.requires_user_action);
     client.shutdown().expect("clean shutdown");
+}
+
+// ---------------------------------------------------------------------------
+// MCP elicitation, withdrawal and refusal.
+//
+// Ways this can fail:
+//   - an answer reaches the CLI under the wrong id, with the wrong action, or
+//     with content a URL request must not carry;
+//   - a form the build cannot draw is shown as a form (or not shown at all)
+//     instead of being offered a decline;
+//   - a withdrawn request is answered anyway, or its card is never closed;
+//   - a withdrawn permission is answered, or closed as the wrong kind;
+//   - a request the worker does not handle is left unanswered, so the CLI
+//     waits for ever, or is answered under another id;
+//   - two open requests cross their answers, or the turn ends on the first;
+//   - an unanswered elicitation trips the prompt watchdog before the
+//     permission clock, or expires without telling the CLI it was cancelled;
+//   - a server's completion notice is lost.
+// ---------------------------------------------------------------------------
+
+static LOG_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn response_log_path() -> PathBuf {
+    let n = LOG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path =
+        std::env::temp_dir().join(format!("sirio-elicitation-{}-{n}.log", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+fn elicitation_launch(log: &std::path::Path) -> ClaudeLaunch {
+    ClaudeLaunch::fixture(
+        PathBuf::from("python3"),
+        vec![
+            FIXTURE.into(),
+            "elicitation".into(),
+            format!("--fixture-response-log={}", log.display()),
+        ],
+    )
+}
+
+fn launch_elicitation(log: &std::path::Path) -> (ClaudeClient, sirio_chat::EventStream) {
+    ClaudeClient::launch(elicitation_launch(log), std::env::temp_dir())
+        .expect("fixture claude should complete its handshake")
+}
+
+fn log_lines(log: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+/// The `response` bodies the host sent for fixture-originated ids, with the id.
+fn logged_responses(log: &std::path::Path) -> Vec<(String, serde_json::Value)> {
+    log_lines(log)
+        .into_iter()
+        .filter_map(|line| {
+            let response = line.get("response")?;
+            let id = response.get("request_id")?.as_str()?.to_string();
+            let body = response.get("response").cloned().or_else(|| {
+                response
+                    .get("error")
+                    .map(|e| serde_json::json!({"error": e}))
+            })?;
+            Some((id, body))
+        })
+        .collect()
+}
+
+fn wait_for_log(log: &std::path::Path, want: impl Fn(&[serde_json::Value]) -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if want(&log_lines(log)) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "the response log never held what the test waits for: {:?}",
+        log_lines(log)
+    );
+}
+
+/// Whether a `TurnEnded` arrives within `budget`, skipping other events.
+fn first_turn_end_within(events: &sirio_chat::EventStream, budget: Duration) -> Option<ChatEvent> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let receive = events.recv();
+        let timer = async_io::Timer::after(remaining);
+        let got = futures::executor::block_on(async move {
+            futures::pin_mut!(receive, timer);
+            match futures::future::select(receive, timer).await {
+                Either::Left((event, _)) => event.ok(),
+                Either::Right((_, _)) => None,
+            }
+        });
+        match got {
+            Some(event @ ChatEvent::TurnEnded { .. }) => return Some(event),
+            Some(_) => continue,
+            None => return None,
+        }
+    }
+}
+
+fn next_elicitation(events: &sirio_chat::EventStream) -> (u64, String, ElicitationPrompt) {
+    loop {
+        if let ChatEvent::Elicitation {
+            request_id,
+            server,
+            prompt,
+            ..
+        } = next_event(events)
+        {
+            return (request_id, server, prompt);
+        }
+    }
+}
+
+#[test]
+fn an_elicitation_form_is_asked_and_its_answer_reaches_the_cli() {
+    let log = response_log_path();
+    let (client, events) = launch_elicitation(&log);
+    client.prompt("form").expect("prompt is accepted");
+    let (request_id, server, prompt) = next_elicitation(&events);
+    assert_eq!(server, "elic");
+    let ElicitationPrompt::Form(fields) = prompt else {
+        panic!("a form request must be drawn as a form, got {prompt:?}");
+    };
+    let names: Vec<_> = fields.iter().map(|field| field.name.as_str()).collect();
+    assert_eq!(names, ["colour", "count", "note", "ok"]);
+    let mut content = serde_json::Map::new();
+    content.insert("colour".into(), "blue".into());
+    content.insert("count".into(), 2.into());
+    client
+        .respond_elicitation(request_id, ElicitationAction::Accept(content))
+        .expect("the answer reaches the agent");
+    let seen = drain_until_turn_end(&events);
+    assert!(matches!(seen.last(), Some(ChatEvent::TurnEnded { .. })));
+    assert_eq!(
+        logged_responses(&log),
+        [(
+            "elic-form".to_string(),
+            serde_json::json!({"action": "accept", "content": {"colour": "blue", "count": 2}})
+        )]
+    );
+}
+
+#[test]
+fn a_url_elicitation_is_accepted_without_content_and_completes() {
+    let log = response_log_path();
+    let (client, events) = launch_elicitation(&log);
+    client.prompt("url").expect("prompt is accepted");
+    let (request_id, _server, prompt) = next_elicitation(&events);
+    assert!(
+        matches!(&prompt, ElicitationPrompt::Url { url, elicitation_id }
+            if url == "https://example.com/auth?x=1" && elicitation_id.as_deref() == Some("el-2")),
+        "got {prompt:?}"
+    );
+    client
+        .respond_elicitation(
+            request_id,
+            ElicitationAction::Accept(serde_json::Map::new()),
+        )
+        .expect("the answer reaches the agent");
+    let seen = drain_until_turn_end(&events);
+    assert!(
+        seen.iter().any(|event| matches!(event,
+            ChatEvent::ElicitationCompleted { server, elicitation_id }
+                if server == "elic" && elicitation_id == "el-2")),
+        "the server's completion notice must reach the surface: {seen:?}"
+    );
+    assert_eq!(
+        logged_responses(&log),
+        [(
+            "elic-url".to_string(),
+            serde_json::json!({"action": "accept"})
+        )]
+    );
+}
+
+#[test]
+fn an_unrenderable_form_is_unsupported_and_can_be_declined() {
+    let log = response_log_path();
+    let (client, events) = launch_elicitation(&log);
+    client.prompt("bad schema").expect("prompt is accepted");
+    let (request_id, _server, prompt) = next_elicitation(&events);
+    assert!(
+        matches!(prompt, ElicitationPrompt::Unsupported { .. }),
+        "a nested property cannot be a form: {prompt:?}"
+    );
+    client
+        .respond_elicitation(request_id, ElicitationAction::Decline)
+        .expect("the answer reaches the agent");
+    drain_until_turn_end(&events);
+    assert_eq!(
+        logged_responses(&log),
+        [(
+            "elic-bad".to_string(),
+            serde_json::json!({"action": "decline"})
+        )]
+    );
+}
+
+#[test]
+fn a_withdrawn_elicitation_is_not_answered() {
+    let log = response_log_path();
+    let (client, events) = launch_elicitation(&log);
+    client.prompt("withdraw").expect("prompt is accepted");
+    let (request_id, _server, _prompt) = next_elicitation(&events);
+    loop {
+        if let ChatEvent::RequestClosed {
+            request_id: closed,
+            kind,
+            reason,
+        } = next_event(&events)
+        {
+            assert_eq!(closed, request_id);
+            assert_eq!(kind, RequestKind::Elicitation);
+            assert_eq!(reason, CloseReason::Withdrawn);
+            break;
+        }
+    }
+    drain_until_turn_end(&events);
+    client
+        .respond_elicitation(
+            request_id,
+            ElicitationAction::Accept(serde_json::Map::new()),
+        )
+        .expect("the worker is still there");
+    client.prompt("form").expect("prompt is accepted");
+    next_elicitation(&events);
+    wait_for_log(&log, |lines| {
+        lines.iter().any(|line| line["prompt"] == "form")
+    });
+    assert_eq!(
+        logged_responses(&log),
+        [],
+        "an answer to a withdrawn request must not be sent"
+    );
+}
+
+#[test]
+fn a_withdrawn_permission_closes_and_is_not_answered() {
+    let log = response_log_path();
+    let (client, events) = launch_elicitation(&log);
+    client
+        .prompt("withdraw permission")
+        .expect("prompt is accepted");
+    let request_id = loop {
+        if let ChatEvent::PermissionRequest { request_id, .. } = next_event(&events) {
+            break request_id;
+        }
+    };
+    loop {
+        if let ChatEvent::RequestClosed {
+            request_id: closed,
+            kind,
+            reason,
+        } = next_event(&events)
+        {
+            assert_eq!(closed, request_id);
+            assert_eq!(kind, RequestKind::Permission);
+            assert_eq!(reason, CloseReason::Withdrawn);
+            break;
+        }
+    }
+    drain_until_turn_end(&events);
+    client
+        .respond_permission(request_id, "allow_once")
+        .expect("the worker is still there");
+    client.prompt("form").expect("prompt is accepted");
+    next_elicitation(&events);
+    wait_for_log(&log, |lines| {
+        lines.iter().any(|line| line["prompt"] == "form")
+    });
+    assert_eq!(
+        logged_responses(&log),
+        [],
+        "an answer to a withdrawn card must not be sent"
+    );
+}
+
+#[test]
+fn an_unhandled_request_is_refused_by_name() {
+    let log = response_log_path();
+    let (client, events) = launch_elicitation(&log);
+    client.prompt("unknown").expect("prompt is accepted");
+    drain_until_turn_end(&events);
+    let responses = logged_responses(&log);
+    assert_eq!(responses.len(), 1, "{responses:?}");
+    assert_eq!(responses[0].0, "u1");
+    let error = responses[0].1["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("future_thing"),
+        "the refusal names the request: {error}"
+    );
+}
+
+#[test]
+fn a_request_sent_before_the_handshake_is_answered_is_refused() {
+    let log = response_log_path();
+    let launch = ClaudeLaunch::fixture(
+        PathBuf::from("python3"),
+        vec![
+            FIXTURE.into(),
+            "early_request".into(),
+            format!("--fixture-response-log={}", log.display()),
+        ],
+    );
+    let (_client, events) = ClaudeClient::launch(launch, std::env::temp_dir())
+        .expect("fixture claude should complete its handshake");
+    wait_for_log(&log, |lines| lines.len() >= 2);
+    let responses = logged_responses(&log);
+    for id in ["early-e", "early-p"] {
+        let error = responses
+            .iter()
+            .find(|(response_id, _)| response_id == id)
+            .and_then(|(_, body)| body["error"].as_str())
+            .unwrap_or_else(|| panic!("{id} was not refused: {responses:?}"));
+        assert!(error.contains("not ready"), "{id}: {error}");
+    }
+    assert!(
+        !std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
+            event,
+            ChatEvent::Elicitation { .. } | ChatEvent::PermissionRequest { .. }
+        )),
+        "a refused request is never shown"
+    );
+}
+
+#[test]
+fn two_open_requests_are_answered_independently() {
+    let log = response_log_path();
+    let (client, events) = launch_elicitation(&log);
+    client.prompt("both").expect("prompt is accepted");
+    let mut permission = None;
+    let mut elicitation = None;
+    while permission.is_none() || elicitation.is_none() {
+        match next_event(&events) {
+            ChatEvent::PermissionRequest { request_id, .. } => permission = Some(request_id),
+            ChatEvent::Elicitation { request_id, .. } => elicitation = Some(request_id),
+            _ => {}
+        }
+    }
+    let (permission, elicitation) = (permission.unwrap(), elicitation.unwrap());
+    assert_ne!(permission, elicitation);
+    client
+        .respond_elicitation(elicitation, ElicitationAction::Decline)
+        .expect("the answer reaches the agent");
+    wait_for_log(&log, |lines| {
+        lines.iter().any(|l| l.get("response").is_some())
+    });
+    // The permission is still open, so the turn must not end yet.
+    assert!(
+        first_turn_end_within(&events, Duration::from_millis(800)).is_none(),
+        "the turn ended with a request still open"
+    );
+    client
+        .respond_permission(permission, "allow_once")
+        .expect("the choice reaches the agent");
+    drain_until_turn_end(&events);
+    let responses = logged_responses(&log);
+    let ids: Vec<_> = responses.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["elic-both", "cli-perm-both"],
+        "answers keep their order and ids"
+    );
+    assert_eq!(responses[0].1["action"], "decline");
+    assert_eq!(responses[1].1["behavior"], "allow");
+}
+
+#[test]
+fn an_unanswered_elicitation_expires_as_cancel_and_holds_off_the_watchdog() {
+    let log = response_log_path();
+    let (client, events) = ClaudeClient::launch_with_timeouts(
+        elicitation_launch(&log),
+        std::env::temp_dir(),
+        Duration::from_secs(10),
+        Duration::from_millis(400),
+        Duration::from_secs(3),
+    )
+    .expect("handshake succeeds");
+    client.prompt("silent form").expect("prompt is accepted");
+    let (request_id, _server, _prompt) = next_elicitation(&events);
+    let started = std::time::Instant::now();
+    loop {
+        match next_event(&events) {
+            ChatEvent::Timeout { .. } => {
+                panic!("the prompt watchdog fired while an elicitation was open")
+            }
+            ChatEvent::RequestClosed {
+                request_id: closed,
+                kind,
+                reason,
+            } => {
+                assert_eq!(closed, request_id);
+                assert_eq!(kind, RequestKind::Elicitation);
+                assert_eq!(reason, CloseReason::Expired);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        started.elapsed() >= Duration::from_secs(2),
+        "expired too early"
+    );
+    wait_for_log(&log, |lines| {
+        lines.iter().any(|l| l.get("response").is_some())
+    });
+    assert_eq!(
+        logged_responses(&log),
+        [(
+            "elic-silent".to_string(),
+            serde_json::json!({"action": "cancel"})
+        )]
+    );
 }

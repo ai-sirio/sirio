@@ -612,6 +612,11 @@ fn apply_event(state: &mut ChatState, event: ChatEvent) -> EventFold {
             state.status = ChatStatus::Streaming;
             EventFold::default()
         }
+        // Elicitations are live-only: a card asks and closes within the
+        // session and has no transcript row to restore.
+        ChatEvent::Elicitation { .. }
+        | ChatEvent::RequestClosed { .. }
+        | ChatEvent::ElicitationCompleted { .. } => EventFold::default(),
         ChatEvent::PlanUpdate { entries } => {
             let entries = entries
                 .into_iter()

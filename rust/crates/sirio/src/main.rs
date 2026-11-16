@@ -44,7 +44,9 @@ use sirio_theme::{AgentBrandColor, Theme, ThemeMode};
 use sirio_ui::{
     browser::{BrowserEvent, BrowserSurface, normalize_address},
     changes::{ChangesReport, ChangesTab, ChangesTabActionEvent, ChangesTabEvent},
-    chat::{Chat, ChatControlSnapshot, ChatEvent, EffortListAction, SessionPanelAction},
+    chat::{
+        Chat, ChatControlSnapshot, ChatEvent, EffortListAction, ElicitationAct, SessionPanelAction,
+    },
     drawer::{DrawerTab, SearchQuery, SearchRequest, WorktreeDrawer, WorktreeDrawerEvent, rematch},
     editor::fs_actions::{open_command as platform_open_command, reveal_command},
     editor::{Conflict, LineEnding},
@@ -1541,6 +1543,13 @@ enum ChatControlAction {
     Effort {
         surface_id: String,
         action: EffortListAction,
+    },
+    /// Debug-only: what a digit key, Enter in the free-text row or Esc does
+    /// to the open question.
+    Elicitation {
+        surface_id: String,
+        request_id: u64,
+        act: ElicitationAct,
     },
 }
 /// Cloning shares every entity handle (`PaneContent`'s `Clone`): a cloned
@@ -3739,6 +3748,66 @@ impl ControlHandler for AppControlHandler {
                 };
                 self.queue_action(request, move |reply| ControlAction::Chat {
                     action: ChatControlAction::Effort { surface_id, action },
+                    reply,
+                })
+            }
+            "surface.chat.elicitation" if cfg!(debug_assertions) => {
+                let Some(surface_id) = request.params.get("surfaceId").cloned() else {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.chat.elicitation requires surfaceId",
+                    );
+                };
+                let request_id = match request.params.get("requestId").map(|id| id.parse::<u64>())
+                {
+                    Some(Ok(request_id)) => request_id,
+                    Some(Err(error)) => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            format!("invalid requestId: {error}"),
+                        );
+                    }
+                    None => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.chat.elicitation requires requestId",
+                        );
+                    }
+                };
+                let row = request.params.get("row");
+                let text = request.params.get("text");
+                let cancel = request.params.get("cancel");
+                if cancel.is_some_and(|value| value != "1") {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "surface.chat.elicitation cancel must be 1",
+                    );
+                }
+                let act = match (row, text, cancel) {
+                    (Some(row), None, None) => match row.parse::<usize>() {
+                        Ok(row) => ElicitationAct::Row(row),
+                        Err(error) => {
+                            return ControlResponse::failure(
+                                &request.id,
+                                format!("invalid row: {error}"),
+                            );
+                        }
+                    },
+                    (None, Some(text), None) => ElicitationAct::Text(text.clone()),
+                    (None, None, Some(_)) => ElicitationAct::Cancel,
+                    _ => {
+                        return ControlResponse::failure(
+                            &request.id,
+                            "surface.chat.elicitation requires exactly one of row, text or cancel=1",
+                        );
+                    }
+                };
+                self.queue_action(request, move |reply| ControlAction::Chat {
+                    action: ChatControlAction::Elicitation {
+                        surface_id,
+                        request_id,
+                        act,
+                    },
                     reply,
                 })
             }
@@ -24582,6 +24651,19 @@ impl SirioWorkspace {
                 let window = window.ok_or("the effort list needs a window")?;
                 let snapshot = chat.update(cx, |chat, cx| {
                     chat.effort_act(action, window, cx)?;
+                    Ok::<_, String>(chat.control_snapshot())
+                })?;
+                Ok(Self::control_chat_result(&surface_id, snapshot))
+            }
+            ChatControlAction::Elicitation {
+                surface_id,
+                request_id,
+                act,
+            } => {
+                let chat = self.control_chat_surface(&surface_id)?;
+                let window = window.ok_or("the question dock needs a window")?;
+                let snapshot = chat.update(cx, |chat, cx| {
+                    chat.elicitation_act(request_id, act, window, cx)?;
                     Ok::<_, String>(chat.control_snapshot())
                 })?;
                 Ok(Self::control_chat_result(&surface_id, snapshot))
@@ -49198,6 +49280,9 @@ done
             "surface.chat.read" => request_with_params(method, &[]),
             "surface.chat.panel" => request::chat_panel("chat-1", "open", None),
             "surface.chat.effort" => request::chat_effort("chat-1", "open", None),
+            "surface.chat.elicitation" => {
+                request::chat_elicitation("chat-1", 1, Some(1), None, false)
+            }
             "surface.project_add" => {
                 request::surface_project_add("path", VERBATIM_PATH, false, None)
             }
