@@ -163,6 +163,8 @@ pub(super) struct Shared {
     notices: Mutex<Vec<sirio_chat_vocab::SessionNotice>>,
     background_tasks: AtomicUsize,
     last_user_message_id: Mutex<Option<String>>,
+    /// The stored session was refused, and the fresh one that replaced it
+    /// has not named itself yet.
     resumed_session_refused: AtomicBool,
     /// The CLI's own breakdown of what fills the window, from the latest
     /// `get_context_usage` answer that carried one.
@@ -242,6 +244,19 @@ impl Shared {
 
     pub(super) fn resumed_session_refused(&self) -> bool {
         self.resumed_session_refused.load(Ordering::Acquire)
+    }
+
+    /// Publishes the session this process's CLI has named, before the
+    /// events that announce it are sent: the surface re-reads the id on
+    /// `SessionIdentified`. A session that names itself also ends a refused
+    /// resume: after a refusal it is the fresh one the worker fell back to,
+    /// and with the flag still raised the surface would drop its id as the
+    /// dead one.
+    fn identify(&self, session_id: &str) {
+        if let Ok(mut held) = self.session_id.lock() {
+            *held = Some(session_id.to_owned());
+        }
+        self.resumed_session_refused.store(false, Ordering::Release);
     }
 
     pub(super) fn context_breakdown(&self) -> Option<ContextBreakdown> {
@@ -714,7 +729,13 @@ async fn session(context: SessionContext) -> SessionOutcome {
         }
         // Anything else before the handshake answer is ordinary traffic.
         send_trace(&event_tx, trace.line(&message, at)).await;
-        for event in fold.apply(message) {
+        let events = fold.apply(message);
+        // An `init` printed before the answer names the session here, so it
+        // is published ahead of its signal, as in the loop below.
+        if let Some(session_id) = fold.session_id() {
+            shared.identify(session_id);
+        }
+        for event in events {
             let _ = event_tx.send(event).await;
         }
     };
@@ -731,8 +752,7 @@ async fn session(context: SessionContext) -> SessionOutcome {
     publish_catalogues(&shared, &catalog);
     // The CLI prints its init line unprompted, possibly before answering
     // the handshake, so the fold may already hold the version. Publish it
-    // before `Ready`: unlike the session id — which stays `None` until the
-    // first turn opens one — the version is a property of the binary.
+    // before `Ready`: the version is a property of the binary.
     if let Some(version) = fold.claude_version()
         && let Ok(mut held) = shared.claude_version.lock()
     {
@@ -744,6 +764,13 @@ async fn session(context: SessionContext) -> SessionOutcome {
         let _ = event_tx.send(other_update(MCP_SERVERS_INIT)).await;
     }
     let _ = startup_tx.send(Startup::Ready);
+    // The retry after a refused resume: the surface is told now that the id
+    // it holds is dead, so a quit before the first turn does not keep it. A
+    // session that already named itself has lowered the flag, and its own
+    // signal is already on its way.
+    if shared.resumed_session_refused() {
+        let _ = event_tx.send(other_update("SessionIdentified")).await;
+    }
     // The effort levels are per-model, so the selector has to be republished
     // whenever the model moves, and the selection carried across the move.
     // This is the same model `publish_catalogues` marks as selected: the CLI
@@ -1210,10 +1237,8 @@ async fn session(context: SessionContext) -> SessionOutcome {
                         shared
                             .background_tasks
                             .store(fold.background_task_count(), Ordering::Release);
-                        if let Some(id) = fold.session_id()
-                            && let Ok(mut held) = shared.session_id.lock()
-                        {
-                            *held = Some(id.to_string());
+                        if let Some(id) = fold.session_id() {
+                            shared.identify(id);
                         }
                         if let Some(version) = fold.claude_version()
                             && let Ok(mut held) = shared.claude_version.lock()

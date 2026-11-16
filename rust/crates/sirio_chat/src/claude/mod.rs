@@ -255,9 +255,11 @@ impl ClaudeClient {
         self.shared.mode_catalog()
     }
 
-    /// Whether the launch's `--resume` id was refused and the session is
-    /// fresh instead. The surface clears its stored id when this is true,
-    /// so the next restart does not retry a session that is gone.
+    /// Whether the launch's `--resume` id was refused and the fresh session
+    /// that replaced it has not named itself yet. The surface clears its
+    /// stored id when this is true, so the next restart does not retry a
+    /// session that is gone; once the fresh session names itself this is
+    /// false again, and its id is the one to store.
     #[must_use]
     pub fn resumed_session_refused(&self) -> bool {
         self.shared.resumed_session_refused()

@@ -59,6 +59,13 @@ RESPONSE_LOG_PATH = next(
     (arg[len("--fixture-response-log="):] for arg in sys.argv if arg.startswith("--fixture-response-log=")),
     None,
 )
+# A launch argument names the file each process appends its `--resume` id to
+# at startup, one JSON line per launch, `null` for a fresh session: the
+# session every launch and relaunch asked for, as the CLI heard it.
+LAUNCH_LOG_PATH = next(
+    (arg[len("--fixture-launch-log="):] for arg in sys.argv if arg.startswith("--fixture-launch-log=")),
+    None,
+)
 # The file every `user` line (a prompt, as the CLI heard it) is appended to,
 # one JSON line each, before the turn runs: what a mention became on the wire.
 USER_LOG_PATH = os.environ.get("SIRIO_FIXTURE_USER_LOG")
@@ -1098,17 +1105,37 @@ def elicitation_answered(message):
         result()
 
 
+def resume_arg():
+    """The id after `--resume`, or None for a launch that resumes nothing."""
+    if "--resume" not in sys.argv:
+        return None
+    at = sys.argv.index("--resume")
+    return sys.argv[at + 1] if at + 1 < len(sys.argv) else ""
+
 
 def main():
+    if LAUNCH_LOG_PATH:
+        with open(LAUNCH_LOG_PATH, "a", encoding="utf-8") as log:
+            log.write(json.dumps({"resume": resume_arg()}) + "\n")
     if MODE == "trace":
         trace_main()
         return
-    if MODE == "refuse_resume" and "--resume" in sys.argv:
+    if MODE == "refuse_unknown_resume" and resume_arg() not in (None, SESSION_ID):
+        # Only this fixture's own session exists: the resume of any other id
+        # is refused, one of its own is continued.
+        sys.stderr.write("fixture: unknown session\n")
+        sys.stderr.flush()
+        os._exit(1)
+    if MODE in ("refuse_resume", "refuse_resume_early_init") and "--resume" in sys.argv:
         # The session file is gone: refuse the resume the way the real CLI
         # does, so the worker must come back without the id.
         sys.stderr.write("fixture: unknown session\n")
         sys.stderr.flush()
         os._exit(1)
+    if MODE == "refuse_resume_early_init":
+        # The fresh session the worker comes back with names itself in an
+        # unprompted init, before the handshake is answered.
+        init_line()
     if MODE == "echo_argv":
         # The real CLI prints its init line unprompted at startup, before
         # answering the handshake; the argv it reports is what the test
