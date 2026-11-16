@@ -201,6 +201,10 @@ Each item is laid out the same way:
   - Where the chat derives running, waiting-for-you or idle today, the CLI's state wins once one
     has arrived. That covers the sidebar's status dot, the Sessions tab and the Trace card's
     headline.
+  - `idle` does not override: it hands the decision back to the turns. It can arrive before the
+    turn's held `TurnEnded`, or from a finished turn while a queued one streams, and a false
+    Running, Done, Running would fire a stop and a desktop notification. An open card also
+    outranks `running`.
   - #699's watchdog is not touched.
 - **Degrade.** No `session_state_changed` arrives → today's derivation, unchanged.
 - **Proof.**

@@ -7195,7 +7195,8 @@ impl Chat {
     /// the turn does not show). `idle` overrides nothing: it can arrive before
     /// the turn's held `TurnEnded`, or from a turn already over while a queued
     /// one streams, and the turns then decide, so the status never reads Done
-    /// between two Running stretches.
+    /// between two Running stretches. An open card outranks `running`: the
+    /// user is still asked, whatever else the CLI is doing.
     pub fn claim(&self) -> Option<ChatClaim> {
         match self.cli_state {
             None | Some(sirio_chat::CliState::Idle) => {
@@ -7211,7 +7212,11 @@ impl Chat {
                     None
                 }
             }
-            Some(sirio_chat::CliState::Running) => Some(ChatClaim::Running),
+            Some(sirio_chat::CliState::Running) => Some(if self.awaits_user() {
+                ChatClaim::NeedsInput
+            } else {
+                ChatClaim::Running
+            }),
             Some(sirio_chat::CliState::RequiresAction) => Some(ChatClaim::NeedsInput),
         }
     }
@@ -14508,6 +14513,58 @@ two"
         chat.read_with(cx, |chat, _| {
             assert_ne!(chat.claim(), Some(ChatClaim::Running));
             assert_eq!(chat.cli_state(), None);
+        });
+    }
+
+    /// The CLI says `running` while a permission card is open (a background
+    /// agent's request beside main-thread work): the card outranks it, on the
+    /// dot and on the Trace card alike. With no card open `running` still wins.
+    #[gpui::test]
+    async fn an_open_card_outranks_the_cli_running(cx: &mut TestAppContext) {
+        let (chat, cx) = silent_state_chat(cx);
+        submit_silent(&chat, cx, "silent go");
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::Trace(sirio_chat::TraceEvent::TurnStarted {
+                    at: std::time::Instant::now(),
+                }),
+                cx,
+            );
+            chat.handle_event(cli_state_event(sirio_chat::CliState::Running), cx);
+        });
+        chat.read_with(cx, |chat, _| {
+            assert_eq!(chat.claim(), Some(ChatClaim::Running));
+            assert_eq!(chat.trace_headline(), Some(trace::TurnState::Live));
+        });
+        chat.update(cx, |chat, cx| {
+            chat.handle_event(
+                sirio_chat::ChatEvent::Trace(sirio_chat::TraceEvent::WaitStarted {
+                    span: None,
+                    request_id: 9,
+                    at: std::time::Instant::now(),
+                }),
+                cx,
+            );
+            chat.handle_event(
+                sirio_chat::ChatEvent::PermissionRequest {
+                    request_id: 9,
+                    session_id: "session".into(),
+                    title: "Bash".into(),
+                    options: vec![sirio_chat::PermissionOption {
+                        id: "allow_once".into(),
+                        name: "Allow".into(),
+                        kind: "AllowOnce".into(),
+                        description: None,
+                    }],
+                    question: None,
+                },
+                cx,
+            );
+        });
+        chat.read_with(cx, |chat, _| {
+            assert!(chat.awaits_user(), "the card is open");
+            assert_eq!(chat.claim(), Some(ChatClaim::NeedsInput));
+            assert_eq!(chat.trace_headline(), Some(trace::TurnState::Waiting));
         });
     }
 

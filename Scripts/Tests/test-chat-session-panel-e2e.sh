@@ -124,9 +124,17 @@ set -euo pipefail
 #                      the CLI's reason as its tooltip and Thinking enabled; a real Enter chooses
 #                      the first enabled row, Thinking, and `picker` is `thinking`; Escape closes it.
 #                      The stub's handshake names `preference` as the reason Fast is refused
-# The session_state_background scenario uses a stub of its own, Scripts/Tests/stubs/session-state/claude,
-# the fixture in its session_state mode: the CLI's `session_state_changed` lines, held between two gate
-# files (SIRIO_FIXTURE_GATE and `.2`) that the scenario touches.
+#
+# The session_state scenarios (spec 2026-11-15-claude-protocol-parity-design.md, A2) use a stub of their
+# own, Scripts/Tests/stubs/session-state/claude, the fixture in its session_state mode: the CLI's
+# `session_state_changed` lines (SIRIO_FIXTURE_GATE and `.2` are the files the first scenario touches):
+#   session_state_background  the CLI's `running` outlives the turn's `result` while a background agent
+#                      works: status stays running past the turn and past the CLI's own follow-up turn
+#                      (the Trace card reads Live on the CLI's state alone), and only the CLI's `idle`
+#                      brings done and a Done card
+#   session_state_ask  the CLI's `requires_action` before a permission request: `sessionState` says so,
+#                      the status is needs-input and the card reads Waiting for you; allowing it ends in
+#                      `idle`, done and a Done card
 # The elicitation scenarios use Scripts/Tests/stubs/elicitation/claude, the fixture's elicitation mode.
 # The composer_keys scenario (this script's own; test-ely-chat-ui-e2e.py has one of the same name)
 # uses the default stub, whose fixture logs every prompt it hears (SIRIO_FIXTURE_USER_LOG) and every
@@ -206,7 +214,7 @@ ALL_SCENARIOS=(environment default_folds context connectors change_request rate_
   trace_tab trace_idle trace_keys file_links clipboard_keys composer_compact composer_keys composer_resize
   unread_parked_chat unread_question unread_secondary_seen unread_restored_chat_quiet
   elicitation_form elicitation_url elicitation_withdrawn unhandled_request
-  session_state_background)
+  session_state_background session_state_ask)
 # Scenarios that need more of the machine than the default set does, so only --only runs them.
 OPT_IN_SCENARIOS=(notification_click)
 STATE_ONLY=0
@@ -3306,6 +3314,24 @@ scenario_session_state_background() {
   wait_panel "the CLI said idle" 'c["sessionState"] == "idle"' 10
   check_panel "the card reads Done once the CLI is idle" 'S("trace")["summary"].startswith("Done")'
   echo "OK: session_state_background: a chat stays running while the CLI's background agent works, and reads done once the CLI goes idle"
+  stop_app
+}
+
+scenario_session_state_ask() {
+  use_stub session-state
+  launch session_state_ask
+  ctl project add "$PRIMARY" >/dev/null
+  open_chat
+  open_column
+  send_prompt ask
+  wait_panel "the CLI said requires_action" 'c["sessionState"] == "requires_action"' 30
+  wait_attention "the CLI waits for the user" status needs-input 10
+  wait_panel "the card reads Waiting for you" 'S("trace") is not None and S("trace")["summary"].startswith("Waiting for you")' 10
+  answer_permission allow_once
+  wait_panel "the CLI went idle" 'c["sessionState"] == "idle"' 30
+  wait_attention "the answered chat is done" status done 10
+  check_panel "the card reads Done" 'S("trace")["summary"].startswith("Done")'
+  echo "OK: session_state_ask: the CLI's requires_action reads needs-input and Waiting for you, and its idle after the answer reads done"
   stop_app
 }
 

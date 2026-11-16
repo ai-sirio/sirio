@@ -121,14 +121,14 @@ ignored and the last known state stands). `ChatEvent::CliState` carries them to 
 `surface.chat.read` reports the last one as `sessionState` (`""` until one arrives, and again after every clear below).
 `Chat::claim()` reads it so that a chat stays Running while the CLI's background agent works after the
 main `result`, which no turn shows: `running` and `requires_action` override the turn-derived
-status (Running and NeedsInput), while `idle`, like no state at all, only hands the decision back
+status (Running and NeedsInput; an open card outranks `running`), while `idle`, like no state at all, only hands the decision back
 to the turns. `idle` cannot win outright because one can land before the turn's held `TurnEnded` (the
 worker holds it for the `get_context_usage` answer), or be stale from a turn that ended while a
 queued prompt streams; read as Done it would fake a stop and a desktop notification between two
 queued turns. The cost is that Done lands with `TurnEnded`, at most `CONTEXT_USAGE_GRACE` (2 s)
 after the result, as before. A CLI that writes no state lines (one launched without the variable, or
-older than the event) keeps today's derivation; the 2.1.257 floor already writes them under the
-variable. `initialize`'s own `session_state` is ignored: the CLI reports it (`idle`) even without the
+older than the event) keeps today's derivation; the SDK bundle at 2.1.257 already knows the
+variable, and the behaviour was probed on 2.1.325. `initialize`'s own `session_state` is ignored: the CLI reports it (`idle`) even without the
 variable, so reading it would make `sessionState` read `"idle"` on a CLI that never sends state
 lines, against the empty-when-none rule. The CLI does not resend `running` while it is already
 running, for example while a background agent works, so a prompt typed or dequeued then clears the
