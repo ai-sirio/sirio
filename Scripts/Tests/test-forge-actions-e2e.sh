@@ -1015,15 +1015,8 @@ run_ci() { # flavour host project number origin-url job running-job
   ctl project add "$repo" >/dev/null
   ctl select-workspace --workspace "$repo" >/dev/null
   ctl surface change-requests show >/dev/null
-  # Let the first host probe settle before a token is saved, as the sign-in
-  # UI does: a save racing it can leave the list unsigned (testing doc,
-  # "Not seen").
-  if [ "$flavour" = github ]; then
-    wait_for state not-connected surface change-requests read >/dev/null
-  else
-    wait_for state unknown-forge surface change-requests read >/dev/null
-  fi
-  wait_for host "$host" surface change-requests read >/dev/null
+  # The token may land while the first host probe still runs, as a Settings
+  # save can; test-forge-diff-e2e.sh holds that probe to make it certain (#613).
   saved_token "$host" "$flavour" good
 
   ctl surface change-request open "$number" >/dev/null

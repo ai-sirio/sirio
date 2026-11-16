@@ -427,11 +427,13 @@ Both appearances ran to `FORGE ACTIONS E2E OK` on `:96` (1600x1500), with
   unpublished state; nextest's live bodies skip with isolated credentials.
 - macOS, Windows and Wayland. The Windows-only test helpers were updated,
   but the Linux build does not compile or execute them.
-- Saving a token through the socket while its initial host probe still
-  runs: the full diff regression exposed an unsigned-cache race twice.
-  Its harness now waits for the initial sign-in/unknown-forge state, like
-  the visible UI; production handling of overlapping socket calls is
-  outside this B2c proof.
+
+Since #613 (2026-11-14), saving a token through the socket while the host's
+first probe still runs is proven rather than avoided. The full diff regression
+had caught that race twice, leaving the list unsigned, and the harnesses then
+waited for the initial sign-in/unknown-forge state. `test-forge-diff-e2e.sh`
+now saves each scenario's first token while a stub `gh` holds that probe, and
+this harness no longer waits.
 
 
 ## B3a: review threads in the diff
