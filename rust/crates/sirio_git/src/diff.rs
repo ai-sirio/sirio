@@ -635,8 +635,10 @@ pub fn diff_proposal(
     let new_file = ScratchFile::create(scratch, new).map_err(io_error)?;
 
     let unified = format!("--unified={context_lines}");
-    // The same flags as `diff_entry`'s `--no-index` branch, so the user's git config
-    // cannot change what comes back.
+    // `diff_entry`'s `--no-index` flags (`--no-color`, `--no-ext-diff`, `--unified`, and
+    // the zero-context pair), so the user's git config cannot change what comes back.
+    // Unlike `diff_entry`, the `-c` pairs below are added too: a proposal's whole point
+    // can be a line-ending change, which `diff_entry`'s callers do not need pinned.
     let zero_context: &[&str] = if context_lines == 0 {
         &["--inter-hunk-context=0", "--no-textconv"]
     } else {
@@ -1123,13 +1125,45 @@ mod diff_proposal_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    #[test]
-    fn user_autocrlf_does_not_hide_a_line_ending_change() {
+    /// Runs `body` in a child copy of this test binary whose `GIT_CONFIG_GLOBAL` is
+    /// `config_text` (written to a temp file), so no test mutates this process's
+    /// environment. The child is filtered to exactly this test and never calls
+    /// `sirio_env::install`, so `sirio_env::command` inherits the variable; the child
+    /// also checks that git reports the setting before it diffs, so it cannot pass
+    /// vacuously.
+    fn with_global_config(test: &str, env_marker: &str, config_text: impl Fn(&Path) -> String) {
         let scratch = scratch_dir();
-        let config = scratch_dir();
-        std::fs::write(&config, "[core]\n\tautocrlf = true\n").unwrap();
-        // One test per process under nextest, so the process-wide variable is this test's.
-        unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", &config) };
+        std::fs::create_dir_all(&scratch).unwrap();
+        let attributes = scratch.join("attributes");
+        std::fs::write(&attributes, "* text=auto\n").unwrap();
+        let config = scratch.join("gitconfig");
+        std::fs::write(&config, config_text(&attributes)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture", "--test-threads=1"])
+            .env(env_marker, "1")
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .output()
+            .expect("rerun the test with the git config");
+        std::fs::remove_dir_all(&scratch).ok();
+        assert!(
+            output.status.success(),
+            "child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child ran no test (filter selected nothing)"
+        );
+    }
+
+    fn line_ending_change_has_hunks(setting: &str) {
+        let scratch = scratch_dir();
+        std::fs::create_dir_all(&scratch).unwrap();
+        // The user's setting must be visible to git through the same runner.
+        let seen = git::run_accepting(&["config", "--global", "--get", setting], &scratch, &[0])
+            .expect("git sees the global setting");
+        assert!(!seen.stdout_string().trim().is_empty());
         let diff = diff_proposal(
             Some(b"a\nb\n"),
             b"a\r\nb\r\n",
@@ -1137,9 +1171,30 @@ mod diff_proposal_tests {
             &scratch,
             3,
         );
-        unsafe { std::env::remove_var("GIT_CONFIG_GLOBAL") };
-        std::fs::remove_file(&config).ok();
         std::fs::remove_dir_all(&scratch).ok();
         assert!(!diff.unwrap().hunks.is_empty());
+    }
+
+    #[test]
+    fn user_autocrlf_does_not_hide_a_line_ending_change() {
+        const TEST: &str = "diff::diff_proposal_tests::user_autocrlf_does_not_hide_a_line_ending_change";
+        if std::env::var_os("SIRIO_DIFF_PROPOSAL_AUTOCRLF").is_some() {
+            return line_ending_change_has_hunks("core.autocrlf");
+        }
+        with_global_config(TEST, "SIRIO_DIFF_PROPOSAL_AUTOCRLF", |_| {
+            "[core]\n\tautocrlf = true\n".to_string()
+        });
+    }
+
+    #[test]
+    fn user_global_attributes_do_not_hide_a_line_ending_change() {
+        const TEST: &str =
+            "diff::diff_proposal_tests::user_global_attributes_do_not_hide_a_line_ending_change";
+        if std::env::var_os("SIRIO_DIFF_PROPOSAL_ATTRIBUTES").is_some() {
+            return line_ending_change_has_hunks("core.attributesFile");
+        }
+        with_global_config(TEST, "SIRIO_DIFF_PROPOSAL_ATTRIBUTES", |attributes| {
+            format!("[core]\n\tattributesFile = {}\n", attributes.display())
+        });
     }
 }
