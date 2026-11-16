@@ -9,6 +9,9 @@ API that Sirio reads, with the shapes Task 2 measured against the real service:
   GET /api/session/active            {"data":{"<sid>":{"type":"running"}}}
   GET /api/session/<sid>/permission  {"data":[...]}   the asks the session waits on
   GET /api/session/<sid>/form        {"data":[...]}
+  POST /api/session                  {"location":{"directory":<abs dir>}} -> 200 {"data":Session.Info}
+                                     a new, untitled session in that directory (session.created is
+                                     emitted); the log line is `POST /api/session 200 <id> <dir>`
   GET /api/event                     SSE: `data: {json}` frames and `: heartbeat` comments;
                                      the first frame is server.connected; nothing is replayed
 
@@ -28,6 +31,10 @@ It is driven by lines appended to the --cmd file (one command per line):
   ask <sid>               form.created
   cancel <sid>            form.cancelled
   rename <sid> <title>    session.renamed
+  create ok               POST /api/session answers normally (the default)
+  create fail             POST /api/session answers 500 and creates nothing
+  create delay <seconds>  POST /api/session sleeps that long, then answers normally; only that
+                          request waits, the server is threaded
   stop                    close every connection and exit; the registration file stays
 
 and `--ack FILE` receives the number of commands handled so far, after each one. A
@@ -50,6 +57,8 @@ SESSIONS = {}  # sid -> dict
 ASKS = {}  # sid -> {"permission": [...], "form": [...]}
 SUBSCRIBERS = []  # queue.Queue per /api/event connection
 COUNTER = [0]
+CREATE_MODE = ["ok", 0.0]  # what POST /api/session does: ["ok"|"fail"|"delay", seconds]
+ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 # 43 characters, like the real service's: base64 of `opencode:<password>` then ends in `=`.
 PASSWORD = secrets.token_urlsafe(32)
 ARGS = None
@@ -95,6 +104,33 @@ def session_info(sid):
     return info
 
 
+def add_session(sid, directory):
+    """A session in `directory` and its session.created event. The caller holds LOCK."""
+    stamp = now_ms()
+    SESSIONS[sid] = {
+        "directory": directory,
+        "title": "",
+        "created": stamp,
+        "updated": stamp,
+        "busy": False,
+    }
+    ASKS[sid] = {"permission": [], "form": []}
+    emit(
+        "session.created",
+        {
+            "sessionID": sid,
+            "slug": "stub",
+            "version": "2.0.29",
+            "projectID": "prj_stub",
+            "location": {"directory": directory},
+            "subpath": "",
+            "agent": "build",
+            "model": {"id": "stub", "providerID": "stub"},
+        },
+        directory,
+    )
+
+
 def command(line):
     words = line.split()
     if not words:
@@ -105,31 +141,16 @@ def command(line):
             STOPPING.set()
             return
         sid = rest[0] if rest else ""
+        if name == "create" and sid in ("ok", "fail", "delay"):
+            # A mode for POST /api/session. Session ids are `ses_...`, so none is one of these.
+            try:
+                seconds = float(rest[1]) if sid == "delay" and len(rest) > 1 else 0.0
+            except ValueError:
+                seconds = 0.0
+            CREATE_MODE[0], CREATE_MODE[1] = sid, seconds
+            return
         if name == "create" and len(rest) >= 2:
-            directory = " ".join(rest[1:])
-            stamp = now_ms()
-            SESSIONS[sid] = {
-                "directory": directory,
-                "title": "",
-                "created": stamp,
-                "updated": stamp,
-                "busy": False,
-            }
-            ASKS[sid] = {"permission": [], "form": []}
-            emit(
-                "session.created",
-                {
-                    "sessionID": sid,
-                    "slug": "stub",
-                    "version": "2.0.29",
-                    "projectID": "prj_stub",
-                    "location": {"directory": directory},
-                    "subpath": "",
-                    "agent": "build",
-                    "model": {"id": "stub", "providerID": "stub"},
-                },
-                directory,
-            )
+            add_session(sid, " ".join(rest[1:]))
             return
         if sid not in SESSIONS:
             return
@@ -228,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
         want = "Basic " + base64.b64encode(("opencode:" + PASSWORD).encode()).decode()
         return self.headers.get("Authorization") == want
 
-    def reply(self, status, body=None):
+    def reply(self, status, body=None, note=""):
         raw = json.dumps(body).encode() if body is not None else b""
         self.send_response(status)
         if status == 401:
@@ -237,7 +258,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
-        log_line("%s %s %d" % (self.command, urlparse(self.path).path, status))
+        log_line("%s %s %d%s" % (self.command, urlparse(self.path).path, status, note))
 
     def do_GET(self):
         url = urlparse(self.path)
@@ -278,6 +299,32 @@ class Handler(BaseHTTPRequestHandler):
                 asks = ASKS.get(parts[3], {}).get(parts[4], [])
                 return self.reply(200, {"data": asks})
         return self.reply(404)
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        if path != "/api/session":
+            return self.reply(404)
+        if not self.authorized():
+            return self.reply(401)
+        with LOCK:
+            mode, seconds = CREATE_MODE
+        if mode == "delay":
+            time.sleep(seconds)  # outside LOCK: only this request waits
+        if mode == "fail":
+            return self.reply(500)
+        try:
+            directory = json.loads(raw)["location"]["directory"]
+            if not isinstance(directory, str) or not directory.startswith("/"):
+                raise ValueError(directory)
+        except (ValueError, KeyError, TypeError):
+            return self.reply(400)
+        with LOCK:
+            sid = "ses_" + "".join(secrets.choice(ID_ALPHABET) for _ in range(20))
+            add_session(sid, directory)
+            info = session_info(sid)
+        return self.reply(200, {"data": info}, " %s %s" % (sid, directory))
 
     def stream(self):
         mine = queue.Queue()

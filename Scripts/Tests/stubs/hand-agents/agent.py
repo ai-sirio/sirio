@@ -13,10 +13,14 @@ a `claude-code`, `codex`, `opencode-ai` or `pi-coding-agent` segment of its path
   agent --no-reports  sends no OSC 7501 and no probe, whichever agent it plays (an agent that
                       reports nothing: its hooks are all it has)
   agent --version     prints `<name> 9.9.9` and exits (a version probe, as
-                      Scripts/Tests/stubs/session-panel/claude answers one)
+                      Scripts/Tests/stubs/session-panel/claude answers one); as `opencode` it
+                      prints `opencode v<V>`, or a bare `<V>` for a 1.x, V read from `oc-version`
+                      beside `bin/` (default 2.3.0); it never starts the agent loop
   agent               with a terminal on stdin: starts as its agent does (below),
                       then reads typed lines in raw mode and answers each with
-                      `ack <line>`. Without a terminal it exits at once.
+                      `ack <line>`. Without a terminal it exits at once. As `opencode` it
+                      first appends `plugin <cwd>` or `clean <cwd>` to `oc-starts` beside
+                      `bin/`: whether Sirio's worktree plugin was there when it started.
 
 Typed lines (the whole line, then Enter):
   work | idle | done | block | error | clear
@@ -158,10 +162,43 @@ class Input:
         return None
 
 
+def run_dir():
+    """The directory that holds the `bin` directory the fake is launched from."""
+    return os.path.dirname(os.path.dirname(sys.argv[0]))
+
+
+def note_opencode_start():
+    """Appends `plugin <cwd>` to `oc-starts` beside `bin/` when the worktree plugin
+    `.opencode/plugin/sirio-session.js` is in the folder this opencode starts in, `clean <cwd>`
+    otherwise: what a real OpenCode would load at that moment, read by the E2E."""
+    present = os.path.exists(os.path.join(".opencode", "plugin", "sirio-session.js"))
+    try:
+        with open(os.path.join(run_dir(), "oc-starts"), "a") as handle:
+            handle.write(("plugin " if present else "clean ") + os.getcwd() + "\n")
+    except OSError:
+        pass
+
+
+def version_text(name):
+    """`<name> 9.9.9`; the OpenCode fake answers as OpenCode does: `opencode v<V>` for a 2.x
+    (or later) V, a bare V for a 1.x. V is the first line of `oc-version`, beside the `bin`
+    directory the fake is launched from (2.3.0 when the file is absent)."""
+    if name != "opencode":
+        return name + " 9.9.9"
+    version = "2.3.0"
+    try:
+        path = os.path.join(run_dir(), "oc-version")
+        with open(path) as handle:
+            version = handle.readline().strip() or version
+    except OSError:
+        pass
+    return version if version.split(".")[0] == "1" else "opencode v" + version
+
+
 def main():
     name = profile()
     if "--version" in sys.argv[1:] or "-V" in sys.argv[1:]:
-        print(name + " 9.9.9")
+        print(version_text(name))
         return
     if not os.isatty(0):
         return
@@ -189,6 +226,7 @@ def main():
         title("π > " + os.getcwd())
         report(name, "idle")
     elif name == "opencode":
+        note_opencode_start()
         title("OpenCode")
     say(name + " ready")
 

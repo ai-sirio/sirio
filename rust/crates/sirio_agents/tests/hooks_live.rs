@@ -109,7 +109,7 @@ fn claude_fires_its_hooks_for_one_turn() {
         "project,local",
         "--strict-mcp-config",
     ]);
-    let turn = run_turn(command, &scratch);
+    let turn = run_turn(command, &scratch, pane);
     let requests = recorder.finish();
     if !turn_completed("claude", &turn) {
         return;
@@ -179,7 +179,7 @@ fn codex_fires_its_notify_hook_for_one_turn() {
     let recorder = Recorder::start(&scratch.socket());
     let mut command = Command::new("sh");
     command.args(["-c", &line]);
-    let turn = run_turn(command, &scratch);
+    let turn = run_turn(command, &scratch, pane);
     let requests = recorder.finish();
     if !turn_completed("codex", &turn) {
         return;
@@ -205,6 +205,24 @@ fn opencode_reports_its_session_for_one_turn() {
         println!("SKIP: {SIRIOCTL_NOT_BUILT}");
         return;
     };
+    // The worktree plugin is written only for a confirmed OpenCode 1.x: OpenCode 2 refuses it,
+    // and its ref comes from the session Sirio creates for the tab, not from a plugin.
+    let version = Command::new(&opencode)
+        .arg("--version")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    match sirio_agents::parse_version_major(&version) {
+        Some(major) if major < 2 => sirio_agents::note_installed_major(Some(major)),
+        Some(major) => {
+            println!("SKIP: opencode {major}.x takes no plugin (Sirio creates its sessions)");
+            return;
+        }
+        None => {
+            println!("SKIP: opencode --version gave no readable version, so no plugin is written");
+            return;
+        }
+    }
     let pane = "pane-hooks-live-opencode";
     let scratch = Scratch::new("opencode");
     prepare("opencode", &scratch, pane, &sirioctl);
@@ -214,7 +232,7 @@ fn opencode_reports_its_session_for_one_turn() {
     let recorder = Recorder::start(&scratch.socket());
     let mut command = Command::new(opencode);
     command.args(["run", "say ok"]);
-    let turn = run_turn(command, &scratch);
+    let turn = run_turn(command, &scratch, pane);
     let requests = recorder.finish();
     if !turn_completed("opencode", &turn) {
         return;
@@ -381,17 +399,19 @@ struct Turn {
     transcript: String,
 }
 
-/// Runs one turn in the worktree. `SIRIO_SOCKET` names the recorder, and the pane
-/// variables are removed, so only a hook that names its pane can reach it. The
-/// turn is killed at `TURN_TIMEOUT`.
-fn run_turn(mut command: Command, scratch: &Scratch) -> Turn {
+/// Runs one turn in the worktree. `SIRIO_SOCKET` names the recorder and
+/// `SIRIO_PANE_ID` the pane under test, as a Sirio pane exports it: the
+/// worktree's hook files name no pane (one file serves every tab of the
+/// worktree), so the pane comes from the agent's environment. The other pane
+/// variables are removed. The turn is killed at `TURN_TIMEOUT`.
+fn run_turn(mut command: Command, scratch: &Scratch, pane: &str) -> Turn {
     let transcript_path = scratch.root.join("turn.txt");
     let transcript = File::create(&transcript_path).expect("create the turn's transcript");
     // Its own process group, so a timeout takes the CLI's children down with it.
     let mut child = command
         .current_dir(scratch.worktree())
         .env("SIRIO_SOCKET", scratch.socket())
-        .env_remove("SIRIO_PANE_ID")
+        .env("SIRIO_PANE_ID", pane)
         .env_remove("TILLER_PANE_ID")
         .env_remove("SIRIO_WORKTREE_ID")
         .stdin(Stdio::null())

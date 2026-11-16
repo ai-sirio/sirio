@@ -14,6 +14,14 @@
 # stub records a SKIP and holds the pane the same way.
 set -euo pipefail
 
+# `opencode --version` (Sirio's version probe, run outside any pane): this stand-in drives
+# OpenCode 1.x's worktree plugin, so it answers as OpenCode 1.x does, with a bare version.
+# Sirio writes that plugin only for a confirmed 1.x; a version it cannot read gets none.
+if [ "${1:-}" = --version ]; then
+  echo 1.18.33
+  exit 0
+fi
+
 out=${HOOK_STUB_OUT:?HOOK_STUB_OUT must name the handshake directory}
 : "${SIRIO_PANE_ID:?opencode must run inside a Sirio pane}"
 go="$out/opencode.go"

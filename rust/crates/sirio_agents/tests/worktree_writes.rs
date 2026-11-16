@@ -83,6 +83,8 @@ fn omp_refuses_a_symlinked_sirio_folder_and_leaves_its_target_alone() {
 
 #[test]
 fn opencode_refuses_a_symlinked_plugin_folder_and_leaves_its_target_alone() {
+    // The v1 plugin step: OpenCode 1.x is the installed major.
+    sirio_agents::note_installed_major(Some(1));
     let root = TempDir::new();
     let (worktree, outside, secret) = layout(&root.0);
     symlink(&outside, worktree.join(".opencode")).unwrap();
@@ -95,6 +97,8 @@ fn opencode_refuses_a_symlinked_plugin_folder_and_leaves_its_target_alone() {
 
 #[test]
 fn opencode_refuses_a_committed_plugin_link_and_leaves_its_target_alone() {
+    // The v1 plugin step: OpenCode 1.x is the installed major.
+    sirio_agents::note_installed_major(Some(1));
     let root = TempDir::new();
     let (worktree, outside, secret) = layout(&root.0);
     std::fs::create_dir_all(worktree.join(".opencode/plugin")).unwrap();

@@ -12,10 +12,16 @@
 //! status there is a `None`, the re-seed of a reconnect included, which would wipe the record
 //! the watch put there. Nothing is logged here: a title, a directory and a session are
 //! content.
+//!
+//! A tab Sirio launched as OpenCode joins the watch from its first title, in its tab's
+//! worktree, because the host names no program for it (`note_launched`). A fresh OpenCode 2
+//! tab brings the session Sirio created for its launch, which the link prefers to a guess by
+//! title; a restored tab has none.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::channel::mpsc::UnboundedSender;
 use sirio_activity::{AgentActivityModel, ReportedState};
@@ -24,15 +30,87 @@ use sirio_opencode_watch::{
 };
 use sirio_terminal::TerminalActivityEvent;
 
+/// How long `opencode --version` may take (it answers in well under a second).
+const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Asks the installed `opencode` for its major version and remembers the answer
+/// (`sirio_agents::note_installed_major`; `None` is "asked, no answer"). Runs the binary:
+/// never on the UI thread. Nothing of its output is logged.
+///
+/// It runs in `directory` (when that exists): version managers (mise, asdf, a project's
+/// `node_modules/.bin` shim) pick the binary by folder, and the pane runs `opencode` in its
+/// worktree. The memo stays process-wide, because one installation per machine is what it
+/// models.
+pub(crate) fn probe_installed_major(directory: &Path) -> Option<u64> {
+    let major = run_version_probe(directory);
+    sirio_agents::note_installed_major(major);
+    major
+}
+
+fn run_version_probe(directory: &Path) -> Option<u64> {
+    // The unit tests never exec whatever `opencode` the machine has: an unknown version is
+    // what they have always had (the v1 plugin is written).
+    if cfg!(test) {
+        return None;
+    }
+    let program = sirio_agents::find_executable_on_path("opencode")?;
+    let mut command = sirio_env::command(program);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if directory.is_dir() {
+        command.current_dir(directory);
+    }
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    // Read on a thread of its own, so a binary that never closes its pipe cannot outlast the
+    // timeout below.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("opencode-version".into())
+        .spawn(move || {
+            use std::io::Read;
+            let mut text = String::new();
+            let _ = stdout.take(4096).read_to_string(&mut text);
+            let _ = sender.send(text);
+        })
+        .ok()?;
+    let deadline = Instant::now() + VERSION_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let text = receiver.recv_timeout(left).ok()?;
+                return sirio_agents::parse_version_major(&text);
+            }
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
 /// The catalog id the host's program resolution gives OpenCode.
 const AGENT: &str = "opencode";
 
-/// A pane whose foreground program is `opencode`.
+/// A pane whose foreground program is `opencode`, or a tab Sirio launched as OpenCode.
 struct Running {
-    /// Canonical; empty when the host could not read the program's cwd (nothing links).
+    /// Canonical (a launched tab's: its worktree); empty when the host could not read the
+    /// program's cwd (nothing links).
     cwd: PathBuf,
     /// Wall-clock milliseconds at which the app learned of this program.
     started_ms: u64,
+    /// Whether a `Program` event named the pane's program (a typed `opencode`); a launched
+    /// tab's never is.
+    named: bool,
+    /// The session Sirio created for this launch.
+    created: Option<String>,
 }
 
 pub(crate) struct OpenCodeStatus {
@@ -98,18 +176,31 @@ impl OpenCodeStatus {
                         .unwrap_or_default();
                     match self.panes.get_mut(pane_id) {
                         // The same program named again (a seed, a reconnect).
-                        Some(running) if was_opencode => running.cwd = cwd,
+                        Some(running) if was_opencode => {
+                            running.cwd = cwd;
+                            running.named = true;
+                        }
                         _ => {
                             self.panes.insert(
                                 pane_id.to_string(),
                                 Running {
                                     cwd,
                                     started_ms: wall_ms(),
+                                    named: true,
+                                    created: None,
                                 },
                             );
                         }
                     }
                 }
+            }
+            // A reconnect's re-seed, and the app's listener's seed of a hidden tab, send a
+            // `Program(None)` for a session that never named a program: a launched tab's
+            // `opencode` is still there (`main.rs` keeps the same rule, `program_none_ends_one`).
+            TerminalActivityEvent::Program(None)
+                if self.panes.get(pane_id).is_some_and(|running| !running.named) =>
+            {
+                return false;
             }
             TerminalActivityEvent::Program(None)
             | TerminalActivityEvent::ChildExited { .. }
@@ -130,6 +221,33 @@ impl OpenCodeStatus {
         self.titles.remove(pane_id);
         self.panes.remove(pane_id);
         self.reported.remove(pane_id);
+    }
+
+    /// Whether the watch follows `pane_id`.
+    pub(crate) fn tracks(&self, pane_id: &str) -> bool {
+        self.panes.contains_key(pane_id)
+    }
+
+    /// A pane whose agent is `opencode` but whose program the host does not name: a tab Sirio
+    /// launched runs `opencode` as its session's own process (`$SHELL -lc opencode`), and the
+    /// host names only a program a shell hands the terminal to. Its folder is the tab's
+    /// worktree and its start is now, its first title; the caller's next `sync` links it. A
+    /// `Program` event that names the pane later (a typed `opencode` whose title came first)
+    /// corrects the folder. `created` is the session Sirio created for a fresh tab's launch,
+    /// `None` for a restored pane.
+    pub(crate) fn note_launched(
+        &mut self,
+        pane_id: &str,
+        worktree: &Path,
+        created: Option<String>,
+    ) {
+        let cwd = std::fs::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+        self.panes.entry(pane_id.to_string()).or_insert(Running {
+            cwd,
+            started_ms: wall_ms(),
+            named: false,
+            created,
+        });
     }
 
     /// What the watch of `generation` said. Ignored once no pane runs `opencode`, and when
@@ -216,6 +334,7 @@ impl OpenCodeStatus {
                 title: self.titles.get(pane_id).cloned().unwrap_or_default(),
                 started_ms: running.started_ms,
                 held: self.reported.get(pane_id).map(|(held, ..)| held.clone()),
+                created: running.created.clone(),
             })
             .collect();
         // One keep rule, in `link`: a held session keeps its pane while it has no title yet

@@ -71,6 +71,29 @@ pub(crate) fn write_in_worktree(worktree: &Path, relative: &Path, contents: &[u8
     })
 }
 
+/// Removes `relative` under `worktree` when it is a regular file whose text `generated`
+/// accepts. A symlink anywhere on the path is refused, like `write_in_worktree`; nothing at the
+/// path, or a file `generated` rejects, is left alone. Whether the file was removed.
+///
+/// Like `write_in_worktree`, this checks and then acts: what it defends against is content
+/// committed to the worktree, which is fixed while Sirio runs. Swapping a folder on the path for
+/// a link between the check and the removal takes a process already running as the user, which
+/// could remove the file itself. (`remove_file` never follows a link at the final name.)
+pub(crate) fn remove_in_worktree_if(
+    worktree: &Path,
+    relative: &Path,
+    generated: impl Fn(&str) -> bool,
+) -> io::Result<bool> {
+    let Some(text) = read_in_worktree(worktree, relative)? else {
+        return Ok(false);
+    };
+    if !generated(&text) {
+        return Ok(false);
+    }
+    std::fs::remove_file(worktree.join(relative))?;
+    Ok(true)
+}
+
 /// The most `read_in_worktree` reads: a settings or skill file is a few KiB.
 const READ_LIMIT: u64 = 1024 * 1024;
 

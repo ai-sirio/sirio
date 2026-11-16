@@ -2253,6 +2253,13 @@ pub struct TerminalView {
     /// A view that was abandoned never opens again.
     abandoned: std::cell::Cell<Option<Abandon>>,
     empty_prompt: bool,
+    /// The owner asked for the launch to wait ([`Self::hold_launch`]): nothing opens until
+    /// [`Self::release_launch`]. The pane draws the blank surface of any pane not yet started.
+    launch_held: bool,
+    /// Something asked the held view to open (a render, `start`, `retry`, `restart`):
+    /// [`Self::release_launch`] opens it then. A view nothing asked, a tab not shown, stays
+    /// unopened until its first render, as any view does.
+    launch_wanted: bool,
     font_size: Pixels,
     focus_handle: gpui::FocusHandle,
     exit_status: Option<TerminalExitStatus>,
@@ -2463,6 +2470,8 @@ impl TerminalView {
             connecting_factory: None,
             abandoned: std::cell::Cell::new(None),
             empty_prompt: false,
+            launch_held: false,
+            launch_wanted: false,
             font_size: FONT_SIZE,
             focus_handle,
             exit_status: None,
@@ -2506,6 +2515,8 @@ impl TerminalView {
             connecting_factory: None,
             abandoned: std::cell::Cell::new(None),
             empty_prompt: true,
+            launch_held: false,
+            launch_wanted: false,
             font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
             exit_status: None,
@@ -2571,6 +2582,8 @@ impl TerminalView {
             connecting_factory: None,
             abandoned: std::cell::Cell::new(None),
             empty_prompt: false,
+            launch_held: false,
+            launch_wanted: false,
             font_size: FONT_SIZE,
             focus_handle: cx.focus_handle(),
             exit_status: None,
@@ -2785,6 +2798,29 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Keeps the session from opening, on any trigger (render, `start`, `retry`, `restart`),
+    /// until [`Self::release_launch`]. For an owner that must settle something the launch
+    /// depends on (a command line that needs an answer from another process) without
+    /// blocking the UI thread.
+    pub fn hold_launch(&mut self) {
+        self.launch_held = true;
+    }
+
+    /// Ends [`Self::hold_launch`], with `shell` as the launch command when given and the one
+    /// the view was built with otherwise. The session opens now if something asked for it
+    /// while it was held; otherwise at the first trigger, as for any view (a restored tab that
+    /// is not shown stays unopened).
+    pub fn release_launch(&mut self, shell: Option<TerminalShell>, cx: &mut gpui::Context<Self>) {
+        if let Some(shell) = shell {
+            self.spawn.shell = shell;
+        }
+        self.launch_held = false;
+        if std::mem::take(&mut self.launch_wanted) {
+            self.ensure_started(cx);
+        }
+        cx.notify();
+    }
+
     fn receive_diff_drop(&mut self, payload: (PathBuf, String), cx: &mut gpui::Context<Self>) {
         self.last_dropped_diff = Some(payload.clone());
         cx.emit(TerminalDropEvent::Diff {
@@ -2937,6 +2973,10 @@ impl TerminalView {
 
     fn ensure_started(&mut self, cx: &mut gpui::Context<Self>) {
         if self.empty_prompt {
+            return;
+        }
+        if self.launch_held {
+            self.launch_wanted = true;
             return;
         }
         // Ended or dropped while it waited: never opened again, so nothing is
