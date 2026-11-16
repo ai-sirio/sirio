@@ -1,7 +1,7 @@
 //! The composer field's row arithmetic: how many rows it may grow to, and how
 //! many rows a drag of its top edge asks for.
 
-use gpui::{Bounds, Context, EntityId, Pixels};
+use gpui::{App, Bounds, Context, EntityId, Pixels};
 
 use super::{Chat, ChatEvent};
 use crate::composer_prefs::ComposerPrefs;
@@ -62,6 +62,9 @@ pub(super) struct ComposerDrag {
     pub(super) dragged: bool,
     /// `rows` has differed from `anchor_rows` at some point: the release saves.
     changed: bool,
+    /// The global's maximum when the press began: a finish publishes only while
+    /// the global still holds it, so a stale drag never overwrites a newer value.
+    published: usize,
 }
 
 /// The rows a painted field box holds: its height less the padding, over a row.
@@ -92,8 +95,10 @@ impl Chat {
         self.composer_row
             .stored_max_rows
             .set(ComposerPrefs::current(cx).max_rows);
-        // A drag that has moved pins the field to its rows; a press that has
-        // not moved pins nothing.
+        // A drag that has moved pins the field to its rows, held to the cap as it
+        // stands now (the window or pane may have been resized since the move);
+        // a press that has not moved pins nothing.
+        self.clamp_drag_rows();
         let wanted = match &self.composer_drag {
             Some(drag) if drag.dragged => (drag.rows, drag.rows),
             _ => (MIN_ROWS, self.drawn_max_rows()),
@@ -104,10 +109,36 @@ impl Chat {
         }
     }
 
+    /// The most rows a drag may ask for now: the cap (the stored range's end
+    /// before the first paint), never past the stored range, at least `MIN_ROWS`.
+    fn drag_cap(&self) -> usize {
+        let stored_most = *settings_ranges::CHAT_COMPOSER_MAX_ROWS.end() as usize;
+        self.composer_row
+            .cap_rows
+            .get()
+            .unwrap_or(stored_most)
+            .min(stored_most)
+            .max(MIN_ROWS)
+    }
+
+    /// Holds a moved drag's rows to the current cap. A clamped value that
+    /// differs from the anchor counts as a change.
+    fn clamp_drag_rows(&mut self) {
+        let cap = self.drag_cap();
+        if let Some(drag) = self.composer_drag.as_mut() {
+            if drag.dragged && drag.rows > cap {
+                drag.rows = cap;
+                if cap != drag.anchor_rows {
+                    drag.changed = true;
+                }
+            }
+        }
+    }
+
     /// A press on the edge at window `pointer_y`: the anchor is the field's
     /// measured rows, or the drawn maximum before it is measured. It replaces
     /// a drag a lost release left behind.
-    pub(super) fn begin_composer_drag(&mut self, pointer_y: f32) {
+    pub(super) fn begin_composer_drag(&mut self, pointer_y: f32, cx: &App) {
         let anchor_rows = self
             .composer_row
             .field
@@ -121,6 +152,7 @@ impl Chat {
             rows: anchor_rows,
             dragged: false,
             changed: false,
+            published: ComposerPrefs::current(cx).max_rows,
         });
     }
 
@@ -128,13 +160,7 @@ impl Chat {
     /// drawn but not saved (the release saves).
     pub(super) fn composer_drag_to(&mut self, pointer_y: f32, cx: &mut Context<Self>) {
         // Never past the stored range, however tall the chat.
-        let stored_most = *settings_ranges::CHAT_COMPOSER_MAX_ROWS.end() as usize;
-        let cap = self
-            .composer_row
-            .cap_rows
-            .get()
-            .unwrap_or(stored_most)
-            .min(stored_most);
+        let cap = self.drag_cap();
         let Some(drag) = self.composer_drag.as_mut() else {
             return;
         };
@@ -153,10 +179,14 @@ impl Chat {
     /// can end and does nothing the second time. A drag that changed the rows
     /// publishes them (every chat follows), then the workspace saves them.
     pub(super) fn finish_composer_drag(&mut self, cx: &mut Context<Self>) {
+        // Held to the cap as it stands at the release.
+        self.clamp_drag_rows();
         let Some(drag) = self.composer_drag.take() else {
             return;
         };
-        if drag.changed {
+        // A newer value another chat published since the press wins: this
+        // drag's rows are stale, so it publishes nothing.
+        if drag.changed && ComposerPrefs::current(cx).max_rows == drag.published {
             ComposerPrefs::apply(ComposerPrefs { max_rows: drag.rows }, cx);
             self.sync_composer_rows(cx);
             cx.emit(ChatEvent::ComposerMaxRowsChanged(drag.rows));

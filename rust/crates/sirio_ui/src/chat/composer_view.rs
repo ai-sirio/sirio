@@ -1403,7 +1403,7 @@ impl Chat {
             .on_mouse_down(gpui::MouseButton::Left, {
                 move |event, _, cx| {
                     let pointer_y = f32::from(event.position.y);
-                    edge_entity.update(cx, |chat, _| chat.begin_composer_drag(pointer_y));
+                    edge_entity.update(cx, |chat, cx| chat.begin_composer_drag(pointer_y, cx));
                 }
             })
             // A press released on the edge with no drag is not a drop: this ends
@@ -1441,14 +1441,16 @@ impl Chat {
                         }),
                     )
                     .on_drag_move::<DraggedComposerEdge>(cx.listener(
-                        |this, event: &gpui::DragMoveEvent<DraggedComposerEdge>, _, cx| {
+                        |this, event: &gpui::DragMoveEvent<DraggedComposerEdge>, window, cx| {
                             // Every painted chat hears every composer-edge drag:
                             // only the chat whose edge it is follows it.
                             if event.drag(cx).0 != cx.entity_id() {
                                 return;
                             }
-                            // The button came up where no release reached us.
+                            // The button came up where no release reached us: end
+                            // GPUI's drag too, or its cursor and the drag lock stay.
                             if event.event.pressed_button != Some(gpui::MouseButton::Left) {
+                                cx.stop_active_drag(window);
                                 this.finish_composer_drag(cx);
                                 return;
                             }

@@ -145,12 +145,19 @@ set -euo pipefail
 #                      at 2200x1000 again the field is back to 12. Then the edge on the composer's top is
 #                      dragged with real X events: 4 rows up raises the maximum to 16 (released where
 #                      the dragged edge now is); pulled to the transcript it stops at the cap (released
-#                      over the transcript); an emptied field is 3 rows; a drag held 5 rows up pins the field at 8
-#                      and the release frees it with the maximum kept at 8; a press that never moved changes
-#                      nothing, and one held 8 px up pins the field at 3 rows and, released, saves nothing. Last, Sirio is
-#                      stopped and started again under the same name (the same database) with a new chat: its
-#                      maximum, stored and drawn, is the 8 the drag left, and the empty field shows 3 rows.
-#                      Frames: rest, full, short, taller, held, relaunched
+#                      over the transcript); with the 40-line draft still in, a drag pulled down past
+#                      the window's bottom edge and released there (outside the window) ends the drag and
+#                      the rows bottom out at 3, saved; an emptied field is 3 rows; a drag held 5 rows up
+#                      pins the field at 8 and the release frees it with the maximum kept at 8; a press
+#                      that never moved changes nothing, and one held 8 px up pins the field at 3 rows
+#                      and, released, saves nothing. A real drag of the sidebar's divider follows (its
+#                      debounced save writes the whole settings row; the sidebar's new width is checked
+#                      after the relaunch, so the save did run). Last, Sirio is stopped and started
+#                      again under the same name (the same database): the chat it restores (the same
+#                      tab, read before any tab is opened) and a second chat opened beside it both read
+#                      a maximum, stored and drawn, of the 8 the drag left, and a 40-line draft in each
+#                      fills the field to 8 rows, which proves the maximum reaches the field.
+#                      Frames: rest, full, short, taller, outside, held, relaunched
 # trace_tab and trace_idle need a painted column (--display :N): the tab closes when its chat is
 # released (observe_release, then TraceTabEvent::Close), which in a window comes after the paint
 # that replaces the chat's last frame, and a frame that is never painted asks for nothing
@@ -2332,6 +2339,14 @@ drag_edge() { # rows [hold]
   drag_edge_to "$(( $(printf '%s' "$geometry" | awk '{print $2}') - $1 * 18 ))" "${2:-}"
 }
 
+# The sidebar panel's rect in window pixels, "x y w h" (the debug `shellRects` of `surface layout read`).
+sidebar_geometry() {
+  reply surface layout read | python3 -c 'import json, sys
+rects = json.loads(json.load(sys.stdin)[0]["shellRects"])
+left = rects["left"]
+print(*[round(v) for v in left])' || fail "the sidebar's rect is not drawn"
+}
+
 scenario_composer_resize() {
   launch composer_resize
   ctl project add "$PRIMARY" >/dev/null
@@ -2374,6 +2389,18 @@ scenario_composer_resize() {
   wait_composer "the field and the stored maximum are the cap" \
     '(r := c["composerRow"])["fieldRows"] == r["capRows"] and r["storedMaxRows"] == r["capRows"] and r["capRows"] > 16 and not r["resizing"]'
 
+  echo "step: a release below the window ends the drag too, and the rows bottom out at 3"
+  # The screen (2400x1200) is taller than the window (2200x1000): window y 1080 is outside the window
+  # and still on the screen, so X delivers the release through the press's implicit grab. The 40-line
+  # draft is still in: an empty field anchors at 3 rows and dragging it down would change nothing.
+  local below_origin
+  below_origin=$(window_origin)
+  [ "$(( ${below_origin#* } + 1080 ))" -lt 1200 ] || fail "window y 1080 is off the screen (window origin $below_origin)"
+  drag_edge_to 1080
+  wait_composer "released below the window, the field, the drawn maximum and the stored maximum are 3 and nothing is held" \
+    'c["composerRow"]["fieldRows"] == 3 and c["composerRow"]["maxRows"] == 3 and c["composerRow"]["storedMaxRows"] == 3 and not c["composerRow"]["resizing"]'
+  capture composer-resize-outside
+
   echo "step: an empty field leaves nothing pinned"
   compose ""
   wait_composer "the empty field shows 3 rows" 'c["composerRow"]["fieldRows"] == 3'
@@ -2403,16 +2430,90 @@ scenario_composer_resize() {
   wait_composer "released, the 8 px drag keeps the maximum at 8" \
     'not c["composerRow"]["resizing"] and c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3'
 
-  echo "step: Sirio starts again and the new chat keeps the dragged maximum"
+  echo "step: a real divider drag saves the whole settings row, and the maximum survives it"
+  # The sidebar's divider saves through `app_settings_for_settings_save`, the writer that once could
+  # reset the rows to 12; the relaunch below proves the 8 survived it.
+  local sidebar_before sidebar_after sidebar_after_relaunch sx sy
+  sidebar_before=$(sidebar_geometry)
+  origin=$(window_origin)
+  sx=$(( $(printf '%s' "$sidebar_before" | awk '{print int($1 + $3 - 3)}') + ${origin% *} ))
+  sy=$(( $(printf '%s' "$sidebar_before" | awk '{print int($2 + $4 / 2)}') + ${origin#* } ))
+  echo "  drag: the sidebar's divider (screen $sx,$sy) 80 px right"
+  DISPLAY="$DISPLAY_TARGET" timeout 10 xdotool mousemove "$sx" "$sy" sleep 0.5 mousedown 1 sleep 0.3 mousemove $((sx + 5)) "$sy" sleep 0.3 mousemove $((sx + 40)) "$sy" sleep 0.3 mousemove $((sx + 80)) "$sy" sleep 0.5 mouseup 1 || fail "xdotool could not drag the sidebar's divider"
+  for _ in $(seq 1 50); do
+    sidebar_after=$(sidebar_geometry)
+    [ "$(printf '%s' "$sidebar_after" | awk '{print int($3)}')" -ge "$(( $(printf '%s' "$sidebar_before" | awk '{print int($3)}') + 40 ))" ] && break
+    sleep 0.2
+  done
+  echo "  sidebar: before '$sidebar_before', after '$sidebar_after'"
+  [ "$(printf '%s' "$sidebar_after" | awk '{print int($3)}')" -ge "$(( $(printf '%s' "$sidebar_before" | awk '{print int($3)}') + 40 ))" ] \
+    || fail "the divider drag did not widen the sidebar"
+  wait_composer "the divider drag left the maximum at 8" 'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8'
+  # PANEL_WIDTH_SAVE_DEBOUNCE is 500 ms.
+  sleep 2
+  local chat_tabs_before
+  chat_tabs_before=$(tab_positions chat terminal)
+
+  echo "step: Sirio starts again; the restored chat and a second chat both keep the dragged maximum"
   stop_app
   launch composer_resize
-  open_chat
+  # The relaunch restores the tabs it had: no tab is opened, closed or counted new before the chat is
+  # read, so the surface read next is the restored one.
+  local chat_tabs_after
+  for _ in $(seq 1 50); do
+    chat_tabs_after=$(tab_positions chat terminal)
+    [ -n "$chat_tabs_after" ] && break
+    sleep 0.3
+  done
+  [ "$chat_tabs_after" = "$chat_tabs_before" ] \
+    || fail "the relaunch restored tabs '$chat_tabs_after', not the '$chat_tabs_before' it had"
   show_chat
-  wait_panel "the new chat is ready" 'c["status"] in ("idle", "completed")' 30
-  wait_composer "after the relaunch the maximum and the stored maximum are 8 and the empty field shows 3 rows" \
-    'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3'
+  SURFACE=""
+  for _ in $(seq 1 50); do
+    SURFACE=$(E2E chat-surface 2>/dev/null || true)
+    [ -n "$SURFACE" ] && break
+    sleep 0.3
+  done
+  [ -n "$SURFACE" ] || fail "no restored chat tab"
+  [ "$(tab_positions chat terminal)" = "$chat_tabs_before" ] || fail "reading the restored chat opened a tab: $(tab_positions chat terminal)"
+  echo "OK: the restored chat is surface $SURFACE, in tab $chat_tabs_before"
+  local restored=$SURFACE
+  wait_composer "the restored chat: the maximum and the stored maximum are 8 and the empty field shows 3 rows" \
+    'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3' 30
+  compose "$(printf 'line %d\n' $(seq 1 40))"
+  wait_composer "the restored chat's 40-line draft fills the field to the restored 8 rows" 'c["composerRow"]["fieldRows"] == 8'
   capture composer-resize-relaunched
-  echo "OK: composer_resize: the field follows the stored maximum and the cap, the edge's drag sets and keeps it, and a relaunch restores it"
+  compose ""
+  wait_composer "the restored chat's empty field is back to 3 rows" 'c["composerRow"]["fieldRows"] == 3'
+  sidebar_after_relaunch=$(sidebar_geometry)
+  echo "  sidebar after the relaunch: '$sidebar_after_relaunch'"
+  [ "$(printf '%s' "$sidebar_after_relaunch" | awk '{print int($3)}')" -ge "$(( $(printf '%s' "$sidebar_before" | awk '{print int($3)}') + 40 ))" ] \
+    || fail "the relaunch drew the sidebar at its old width: the divider's save never ran, so it proves nothing about the maximum"
+
+  # A second chat, opened beside the first (open_chat would close every tab).
+  ctl surface open-list open --entry agent:claude >/dev/null || fail "the second chat did not open"
+  local second="" id
+  for _ in $(seq 1 50); do
+    for id in $(reply surface attention read | python3 -c 'import json, sys
+reply = json.load(sys.stdin)
+reply = reply[0] if isinstance(reply, list) else reply
+for row in json.loads(reply["sessions"]):
+    if row["kind"] == "chat":
+        print(row["id"])'); do
+      [ "$id" != "$restored" ] && second=$id
+    done
+    [ -n "$second" ] && break
+    sleep 0.2
+  done
+  [ -n "$second" ] || fail "no second chat opened beside the restored one"
+  SURFACE=$second
+  echo "OK: the second chat is surface $second, the restored one stays open as $restored"
+  wait_panel "the second chat is ready" 'c["status"] in ("idle", "completed")' 30
+  wait_composer "the second chat: the maximum and the stored maximum are 8 and the empty field shows 3 rows" \
+    'c["composerRow"]["maxRows"] == 8 and c["composerRow"]["storedMaxRows"] == 8 and c["composerRow"]["fieldRows"] == 3' 30
+  compose "$(printf 'line %d\n' $(seq 1 40))"
+  wait_composer "the second chat's 40-line draft fills the field to 8 rows" 'c["composerRow"]["fieldRows"] == 8'
+  echo "OK: composer_resize: the field follows the stored maximum and the cap, the edge's drag sets and keeps it, a release outside the window ends a drag, a divider save keeps it, and a relaunch restores it in the restored chat and in a new one"
   stop_app
 }
 

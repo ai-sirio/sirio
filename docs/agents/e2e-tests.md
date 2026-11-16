@@ -216,7 +216,7 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # a fresh Sirio; --state-only skips the
 # captures; --display :N is a private Xvfb (at least --window-size, default 2200x1000)
 # with Mesa's lavapipe, and trace_tab and trace_idle need one (--state-only with it paints
-# but takes no captures), trace_keys, file_links, clipboard_keys and composer_keys a framed run at --window-size 2200x1000;
+# but takes no captures), trace_keys, file_links, clipboard_keys, composer_keys and composer_resize a framed run at --window-size 2200x1000;
 # --appearance light|dark; --only NAME[,NAME...] prints "CHAT SESSION PANEL E2E PARTIAL". The
 # composer_compact scenario uses Scripts/Tests/stubs/session-panel-bypass/claude, the fixture's
 # session_panel_bypass mode (the CLI starts in bypassPermissions), and proves the native Claude
@@ -247,10 +247,14 @@ Scripts/Tests/test-files-fold-e2e.sh --xvfb   # -> prints "ok 1" to "ok 8", then
 # stored 12 is drawn and the empty field shows 3 rows; a 40-line draft fills it to 12; a 2200x400
 # window caps the field at half the chat while the stored maximum stays 12. Then real X drags on the
 # composer's top edge: 4 rows up sets 16 and stores it; pulled to the transcript it stops at the cap;
-# a drag held 5 rows up pins the field at 8 and its release keeps 8; a press that never moved, and one
-# held 8 px up, save nothing. Last, Sirio is stopped and started again under the same name with a new
-# chat: the maximum, drawn and stored, is still 8. It needs --display :N --window-size 2200x1000 and
-# captures frames/composer-resize-{rest,full,short,taller,held,relaunched}.png.
+# with the 40-line draft still in, a drag released below the window (outside it) ends too and the rows
+# bottom out at 3; a drag held 5 rows up pins the field at 8 and its release keeps 8; a press that never
+# moved, and one held 8 px up, save nothing. A real drag of the sidebar's divider then saves the whole
+# settings row. Last, Sirio is stopped and started again under the same name: the restored chat (the
+# same tab) and a second chat opened beside it both read a maximum, drawn and stored, of 8, a 40-line
+# draft in each fills the field to 8 rows, and the sidebar keeps its dragged width. It needs
+# --display :N --window-size 2200x1000 and captures
+# frames/composer-resize-{rest,full,short,taller,outside,held,relaunched}.png.
 # The four unread scenarios run in the default set and need no display: `unread_parked_chat` (a
 # turn that ends while its worktree is not selected marks the chat unread, posts one notification
 # naming its branch, and showing the worktree clears the mark), `unread_question` (a permission
