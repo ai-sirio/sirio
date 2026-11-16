@@ -662,23 +662,23 @@ fn claude_prepare_writes_worktree_local_settings_with_all_five_hooks() {
     let quoted = shell_quote(SIRIOCTL);
     assert_eq!(
         command_of("Stop"),
-        format!("{quoted} notify --session {PANE_ID} --status needs-input --stdin-json")
+        format!("{quoted} notify --status needs-input --stdin-json")
     );
     assert_eq!(
         command_of("Notification"),
-        format!("{quoted} notify --session {PANE_ID} --status needs-input --stdin-json")
+        format!("{quoted} notify --status needs-input --stdin-json")
     );
     assert_eq!(
         command_of("SessionStart"),
-        format!("{quoted} notify --session {PANE_ID} --status needs-input --stdin-json")
+        format!("{quoted} notify --status needs-input --stdin-json")
     );
     assert_eq!(
         command_of("UserPromptSubmit"),
-        format!("{quoted} notify --session {PANE_ID} --status running --stdin-json")
+        format!("{quoted} notify --status running --stdin-json")
     );
     assert_eq!(
         command_of("SessionEnd"),
-        format!("{quoted} notify --session {PANE_ID} --status done --stdin-json")
+        format!("{quoted} notify --status done --stdin-json")
     );
 }
 
@@ -748,7 +748,9 @@ fn omp_prepare_writes_the_hook_file() {
     let hook = std::fs::read_to_string(worktree.path().join(".sirio/omp-hook.ts"))
         .expect("hook written inside the worktree");
     assert!(hook.contains(&json_string_literal(SIRIOCTL)));
-    assert!(hook.contains(PANE_ID));
+    // One worktree file serves all its tabs: no pane is named, the omp process's own is read.
+    assert!(!hook.contains(PANE_ID));
+    assert!(hook.contains("process.env.SIRIO_PANE_ID"));
     assert!(hook.contains("pi.on(\"turn_start\""));
     assert!(hook.contains("--agent-session"));
 }

@@ -55,7 +55,7 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
     fn prepare(
         &self,
         worktree_path: &str,
-        pane_id: &str,
+        _pane_id: &str,
         sirioctl_path: &str,
     ) -> Result<(), PrepareError> {
         if let Some(markdown) = self.skill_markdown() {
@@ -63,7 +63,11 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
         }
         let settings = Path::new(".claude").join(SETTINGS_FILE_NAME);
         let existing = read_in_worktree(Path::new(worktree_path), &settings)?;
-        let merged = merged_settings(existing.as_deref(), sirio_hooks(sirioctl_path, Some(pane_id)))?;
+        // The pane is not written into the file: one worktree holds one settings file for
+        // all of its Claude tabs, and a pane named here would be every tab's (the last one
+        // prepared). sirioctl reads the pane from the `SIRIO_PANE_ID` each tab's own process
+        // carries, as the user-global hooks do.
+        let merged = merged_settings(existing.as_deref(), sirio_hooks(sirioctl_path))?;
         write_in_worktree(Path::new(worktree_path), &settings, merged.as_bytes())?;
         Ok(())
     }
@@ -83,7 +87,7 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
             .unwrap_or_else(|| home.join(".claude"));
         std::fs::create_dir_all(&config_dir)?;
         let settings_path = config_dir.join(GLOBAL_SETTINGS_FILE_NAME);
-        merge_sirio_hooks(&settings_path, sirio_hooks(sirioctl_path, None))?;
+        merge_sirio_hooks(&settings_path, sirio_hooks(sirioctl_path))?;
         Ok(GlobalHookInstall::Written(settings_path))
     }
 
@@ -112,17 +116,14 @@ impl super::AgentAdapter for ClaudeCodeAdapter {
 }
 
 /// The five hook arrays, each running `sirioctl notify` with the concrete
-/// sirioctl path. `session` pins a pane — the worktree-local shape, one
-/// file per launch; `None` leaves the pane to sirioctl's own
-/// `SIRIO_PANE_ID` resolution — the user-global shape, one file for every
-/// pane.
-fn sirio_hooks(sirioctl_path: &str, session: Option<&str>) -> Value {
-    let session = session
-        .map(|pane| format!(" --session {pane}"))
-        .unwrap_or_default();
+/// sirioctl path. They name no pane: sirioctl resolves it from the
+/// `SIRIO_PANE_ID` of the agent process that runs the hook, so one file
+/// (worktree-local or user-global) serves every pane, and outside a Sirio
+/// pane the hook is inert.
+fn sirio_hooks(sirioctl_path: &str) -> Value {
     let command = |status: &str| {
         format!(
-            "{} notify{session} --status {status} --stdin-json",
+            "{} notify --status {status} --stdin-json",
             shell_quote(sirioctl_path)
         )
     };

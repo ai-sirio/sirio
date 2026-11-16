@@ -42,8 +42,11 @@ set -eEuo pipefail
 #                       session on the host; the other worktree's session lives (finding 8)
 #   31. agent-rebind-reports-under-its-id  a new agent tab takes a fresh id when its id is
 #                       held: its codex notify names that fresh id, not the held one (I1)
-#   32. restored-agent-rebind-resumes-under-its-id  a restored agent whose id is held by
-#                       another worktree resumes its saved session under the fresh id (I1)
+#   32. restored-agent-rebind-starts-fresh  a restored agent whose id is held by another
+#                       worktree takes a fresh id and starts fresh there: its codex notify
+#                       names that id, it resumes nothing (though its saved session would
+#                       validate), no row is carried to the fresh id and the row under the
+#                       old id is gone (I1, ref life cycle)
 #   33. unread-across-restart  an agent that stopped while the app was closed comes back
 #                       unread and posts nothing; the mark survives a second restart and
 #                       leaves with its tab
@@ -1521,7 +1524,11 @@ with open(base + ".argv", "wb") as f:
     f.write(b"\0".join(a.encode() for a in args))
 pane = os.environ.get("SIRIO_PANE_ID", "")
 notify = json.loads(args[1][len("notify="):])
-subprocess.run(notify + ["--agent-session", "e2e-" + pane], check=False)
+# E2E_STUB_QUIET_ON names a file: once it exists, the stub reports nothing, so a ref
+# under its pane can only be the app's own write.
+quiet = os.environ.get("E2E_STUB_QUIET_ON")
+if not (quiet and os.path.exists(quiet)):
+    subprocess.run(notify + ["--agent-session", "e2e-" + pane], check=False)
 with open(base + ".env", "w") as f:
     f.write(pane)
 # E2E_STUB_EXIT_ON names a file: the stub leaves, exit 0, once it exists.
@@ -1567,11 +1574,16 @@ print(parts[parts.index("--session") + 1])
 ' "$1"
 }
 # The ref the store holds for a pane key ("" when none): read from the world's db.
+# `__ERROR__` when the read fails, so a check for no row never passes on a failed read.
 saved_ref() {
   python3 -c '
 import sqlite3, sys
-row = sqlite3.connect(sys.argv[1]).execute("SELECT reference FROM session_ref WHERE session = ?", (sys.argv[2],)).fetchone()
-print(row[0] if row else "")
+try:
+    row = sqlite3.connect(sys.argv[1]).execute("SELECT reference FROM session_ref WHERE session = ?", (sys.argv[2],)).fetchone()
+except Exception:
+    print("__ERROR__")
+else:
+    print(row[0] if row and row[0] is not None else "")
 ' "$W/s.sqlite" "$1"
 }
 saved_ref_is() { [ "$(saved_ref "$1")" = "$2" ]; }
@@ -1604,11 +1616,15 @@ case_agent_rebind_reports_under_its_id() {
   NOTE="held $next (pid $control_pid) untouched; the agent took $new_pane and reported under it"
 }
 
-# Fix batch 7, I1 for a restored agent: its saved session ref moves with it, so
-# the pane that takes a fresh id after the held one resumes the same session.
-# App A's codex pane is saved and resumable (its rollout file is on disk); the
-# host is ended, another worktree's control session takes its id, and the
-# relaunch refuses that id (N3) and reopens the agent under a fresh one.
+# Fix batch 7, I1 for a restored agent, under the session-ref life cycle: the pane
+# that takes a fresh id after the held one launches its agent under that id and
+# resumes nothing. The old id is held by another session by construction (here B's
+# control session), so a row under it may be that session's: the rebind deletes the
+# rows of both ids and copies nothing. Losing a resume is acceptable, a wrong one is
+# not. App A's codex pane is saved and its rollout file is on disk, so a resume would
+# pass the validator: only that rule keeps it out. The host is ended, another
+# worktree's control session takes the id, and the relaunch refuses that id (N3) and
+# reopens the agent under a fresh one.
 codex_launches() { ls "$W"/stub/codex-*.env 2>/dev/null | wc -l; }
 codex_launched_twice() { [ "$(codex_launches)" -ge 2 ]; }
 codex_resume_arg() {
@@ -1619,16 +1635,16 @@ print(args[args.index(b"resume") + 1].decode() if b"resume" in args else "")
 ' "$1"
 }
 
-case_restored_agent_rebind_resumes_under_its_id() {
+case_restored_agent_rebind_starts_fresh() {
   new_world c32
   git -C "$W/repo" worktree add -q "$W/wt-b" -b feature-b
   install_codex_stub
   mkdir -p "$W/codex-home/sessions"
-  local -a agent_env=("PATH=$W/bin:$PATH" "SHELL=$W/bin/guard-shell" "E2E_STUB_DIR=$W/stub" "CODEX_HOME=$W/codex-home")
+  local -a agent_env=("PATH=$W/bin:$PATH" "SHELL=$W/bin/guard-shell" "E2E_STUB_DIR=$W/stub" "CODEX_HOME=$W/codex-home" "E2E_STUB_QUIET_ON=$W/stub-quiet")
   app_start "${agent_env[@]}"
   select_repo "$W/repo"
   ctl project add "$W/wt-b" >/dev/null 2>&1 || true
-  local pane_a ref control_pid argv_new pane_new
+  local pane_a ref control_pid argv_new pane_new resume_new
   ctl surface terminal open --agent codex >/dev/null || fail "the agent terminal was refused"
   wait_until 60 codex_launched || fail "the codex agent never started"
   pane_a=$(cat "$(newest_codex env)")
@@ -1644,17 +1660,28 @@ case_restored_agent_rebind_resumes_under_its_id() {
   [ "$RC" -eq 0 ] || fail "host_probe term-create $pane_a in B failed: $OUT"
   wait_until 10 session_listed "$pane_a" || fail "B's session $pane_a is not listed"
   control_pid=$(session_pid "$pane_a")
+  # From here the stub reports nothing: a row under the fresh id could only be one the app
+  # carried over from the old id.
+  : >"$W/stub-quiet"
   app_start "${agent_env[@]}"
   wait_until 60 codex_launched_twice || fail "the restored agent of A never relaunched (its tab held $pane_a)"
   pane_new=$(cat "$(newest_codex env)")
   [ -n "$pane_new" ] && [ "$pane_new" != "$pane_a" ] || fail "the restored agent kept the held id $pane_a (SIRIO_PANE_ID=$pane_new)"
   argv_new=$(newest_codex argv)
   [ "$(codex_notify_session "$argv_new")" = "$pane_new" ] || fail "codex reports under $(codex_notify_session "$argv_new"), but its pane is $pane_new (the held id was $pane_a)"
-  [ "$(codex_resume_arg "$argv_new")" = "$ref" ] || fail "the restored agent does not resume $ref under $pane_new (resume: '$(codex_resume_arg "$argv_new")')"
+  resume_new=$(codex_resume_arg "$argv_new")
+  [ -z "$resume_new" ] || fail "the restored agent resumes '$resume_new' under $pane_new: a rebind must copy no ref (the row under $pane_a was $ref)"
   wait_until 10 session_listed "$pane_new" || fail "the restored agent's pane $pane_new is not on the host"
+  # The rebind deleted the row under the old id and wrote none under the fresh one: the stub
+  # is quiet now, so any row here is the app's. Held for 2 s.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    saved_ref_is "$pane_new" "" || fail "the rebind carried a ref to $pane_new (saved: '$(saved_ref "$pane_new")'; the row under $pane_a was $ref)"
+    saved_ref_is "$pane_a" "" || fail "the row under the held id $pane_a survived the rebind (saved: '$(saved_ref "$pane_a")')"
+    sleep 0.2
+  done
   [ "$(session_pid "$pane_a")" = "$control_pid" ] || fail "B's session $pane_a changed pid"
   pid_alive "$control_pid" || fail "B's session pid $control_pid is not alive"
-  NOTE="B's $pane_a (pid $control_pid) untouched; A's restored agent took $pane_new and resumed $ref under it"
+  NOTE="B's $pane_a (pid $control_pid) untouched; A's restored agent took $pane_new, resumed nothing and the row under $pane_a is gone"
 }
 
 # ---------------------------------------------------------------- unread across a restart
@@ -2214,7 +2241,7 @@ run_case 28 restore-stale-id-of-another-worktree case_restore_stale_id_of_anothe
 run_case 29 nested-app-own-host case_nested_app_own_host
 run_case 30 ensure-storm case_ensure_storm
 run_case 31 agent-rebind-reports-under-its-id case_agent_rebind_reports_under_its_id
-run_case 32 restored-agent-rebind-resumes-under-its-id case_restored_agent_rebind_resumes_under_its_id
+run_case 32 restored-agent-rebind-starts-fresh case_restored_agent_rebind_starts_fresh
 run_case 33 unread-across-restart case_unread_across_restart
 run_case 34 unread-unmounted-after-restart case_unread_unmounted_after_restart
 run_case 35 restored-scrollback-rows case_restored_scrollback_rows

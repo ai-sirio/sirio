@@ -2356,15 +2356,21 @@ impl AppControlHandler {
         }
     }
 
-    /// Records a pane's session ref: through the store when there is one (it keeps the same
-    /// `session_refs` map under its own database lock, so this must not hold the map's lock
-    /// while calling it), else in the in-memory map alone.
-    fn record_session_ref(&self, pane: &str, reference: &str) {
+    /// Records a pane's session ref in the in-memory map and, when there is a store, in the
+    /// database (the store keeps the same map, so this and the app's own writers agree).
+    /// Whether it wrote: `false` only when a close ended the pane's session in this run.
+    fn record_session_ref(&self, pane: &str, reference: &str) -> bool {
         if let Some(store) = &self.session_store {
-            store.save_session_ref(pane, reference);
+            // The store mirrors `session_refs` and updates it under its database lock. It
+            // refuses a key a close ended in this run: the write is the dead pane's.
+            if !store.save_session_ref(pane, reference) {
+                eprintln!("[sirio] {pane}: session ref not written: its pane was closed");
+                return false;
+            }
         } else if let Ok(mut references) = self.session_refs.lock() {
             references.insert(pane.to_string(), reference.to_string());
         }
+        true
     }
 
     /// Shares the link the host factory fills (see `ensure_host_in_background`).
@@ -4013,7 +4019,12 @@ impl ControlHandler for AppControlHandler {
                 let Some(reference) = request.params.get("ref") else {
                     return ControlResponse::failure(&request.id, "session.ref requires ref");
                 };
-                self.record_session_ref(session, reference);
+                if !self.record_session_ref(session, reference) {
+                    return ControlResponse::failure(
+                        &request.id,
+                        "session ref not written: the pane was closed",
+                    );
+                }
                 Self::success(
                     &request.id,
                     [
@@ -4153,7 +4164,9 @@ impl ControlHandler for AppControlHandler {
                     return ControlResponse::failure(&request.id, "notify has an unknown status");
                 };
                 if let Some(agent_session) = request.params.get("agentSession") {
-                    self.record_session_ref(&pane_id, agent_session);
+                    // A refused ref (the pane was closed) does not fail the notify: its status
+                    // part still applies, and the refusal is already logged.
+                    let _ = self.record_session_ref(&pane_id, agent_session);
                 }
                 let Ok(mut actions) = self.control_actions.lock() else {
                     return ControlResponse::failure(
@@ -5878,6 +5891,9 @@ struct SirioWorkspace {
     next_retained_chat_id: usize,
     retained_chats: Vec<RetainedChat>,
     next_pane_id: usize,
+    /// Whether `dedup_pane_ids_at_first_answer` has run: at the host's first answer at
+    /// startup, or, when the host did not answer then, at its first late adoption.
+    pane_ids_deduped: bool,
     working_directory: PathBuf,
     /// The last resolved status each session tab was seen in, by
     /// `persistence_id` — the other half of event detection in
@@ -7294,6 +7310,7 @@ impl SirioWorkspace {
             next_retained_chat_id: 0,
             retained_chats: Vec::new(),
             next_pane_id,
+            pane_ids_deduped: false,
             working_directory,
             session_last_seen: HashMap::new(),
             session_event_at: session.tab_event_times(),
@@ -10086,13 +10103,39 @@ impl SirioWorkspace {
     /// else the first in catalog order. The others move to fresh ids from the
     /// allocator: the active strip's panes live, the other rows are rewritten.
     /// With no listing (`sessions` empty) there is no owner to prefer.
+    ///
+    /// `late` is the run made at the first adoption after a host that did not answer at
+    /// startup: terminals may already be open by then, in the active strip and in parked or
+    /// cached worktrees, so no pane that may be live is moved. The active worktree, every
+    /// parked or cached one and every worktree owning a session the host lists count as holders
+    /// (they keep their ids), and only the persisted rows of worktrees with no live pane are
+    /// rewritten. Two live layouts that collide on an id are both left as they are, and the id
+    /// is logged.
     fn dedup_pane_ids_at_first_answer(
         &mut self,
         sessions: &[sirio_host_protocol::term::SessionSummary],
+        late: bool,
         cx: &mut Context<Self>,
     ) {
-        let worktrees = self.known_worktree_paths();
+        self.pane_ids_deduped = true;
+        // Two catalog entries for one worktree are one layout, as the startup purge counts.
+        let worktrees = self
+            .session
+            .distinct_worktrees(&self.known_worktree_paths());
         let active = self.working_directory.clone();
+        let owners: HashMap<usize, PathBuf> = sessions
+            .iter()
+            .filter(|session| session.origin == sirio_host_protocol::term::Origin::App)
+            .filter_map(|session| {
+                let id = session.session_id.strip_prefix("pane-")?.parse::<usize>().ok()?;
+                let owner =
+                    sirio_control::panel::owning_worktree(Path::new(&session.cwd), &worktrees)?;
+                Some((id, owner.clone()))
+            })
+            .collect();
+        // A worktree the host runs a session for is live too, mounted or not: a late run must
+        // not move its ids from under that session.
+        let owning: HashSet<&PathBuf> = owners.values().collect();
         let parked: HashSet<PathBuf> = worktrees
             .iter()
             .filter(|path| **path != active)
@@ -10108,19 +10151,27 @@ impl SirioWorkspace {
             .map(|path| host_sessions::PaneIdLayout {
                 worktree: path.clone(),
                 ids: self.session.persisted_pane_ids_for(path).into_iter().collect(),
-                parked: parked.contains(path),
+                // A late run cannot tell which panes of the active strip are open already (on the
+                // host or in-process), so the active worktree is a holder too, and so is every
+                // worktree owning a session the host lists.
+                parked: parked.contains(path) || (late && (*path == active || owning.contains(path))),
             })
             .collect();
-        let owners: HashMap<usize, PathBuf> = sessions
-            .iter()
-            .filter(|session| session.origin == sirio_host_protocol::term::Origin::App)
-            .filter_map(|session| {
-                let id = session.session_id.strip_prefix("pane-")?.parse::<usize>().ok()?;
-                let owner =
-                    sirio_control::panel::owning_worktree(Path::new(&session.cwd), &worktrees)?;
-                Some((id, owner.clone()))
-            })
-            .collect();
+        if late {
+            let mut live_holders: BTreeMap<usize, usize> = BTreeMap::new();
+            for layout in layouts.iter().filter(|layout| layout.parked) {
+                for &id in &layout.ids {
+                    *live_holders.entry(id).or_insert(0) += 1;
+                }
+            }
+            for (id, holders) in live_holders {
+                if holders >= 2 {
+                    eprintln!(
+                        "[sirio] pane ids: pane-{id} is named by {holders} live layouts, left as it is"
+                    );
+                }
+            }
+        }
         let listed: Vec<String> = sessions.iter().map(|session| session.session_id.clone()).collect();
         let layout_floor = layouts
             .iter()
@@ -10135,18 +10186,25 @@ impl SirioWorkspace {
             return;
         }
         eprintln!("[sirio] pane ids: {} duplicate id(s) moved to fresh ids", moves.len());
-        let refs = self.session.load_session_refs();
         let mut by_worktree: BTreeMap<PathBuf, Vec<(usize, usize)>> = BTreeMap::new();
         for pane_move in &moves {
             by_worktree
                 .entry(pane_move.worktree.clone())
                 .or_default()
                 .push((pane_move.from, pane_move.to));
-            // A moved pane still resumes whatever its old key would have.
-            if let Some(reference) = refs.get(&format!("pane-{}", pane_move.from)) {
-                self.session
-                    .save_session_ref(&format!("pane-{}", pane_move.to), reference);
-            }
+            // `from` is held by another layout by construction, so its row is ambiguous and
+            // copying it could resume that layout's session: Codex's validator accepts any
+            // session in CODEX_HOME, and Pi, omp and OpenCode check nothing. Whatever the
+            // agent, the moved pane clears both keys and copies nothing; `to` may also carry
+            // a row an older build never deleted, or a hook wrote after a close. A late run
+            // clears `from` too, though its holder may be live and the row its own: a process
+            // no layout counts (an evicted worktree's in-process terminal, a second live
+            // writer under the id) may have written it as well. Losing a resume is acceptable,
+            // a wrong one is not.
+            self.session
+                .delete_session_ref(&format!("pane-{}", pane_move.from));
+            self.session
+                .delete_session_ref(&format!("pane-{}", pane_move.to));
         }
         for (worktree, pairs) in &by_worktree {
             if *worktree == active {
@@ -10207,6 +10265,13 @@ impl SirioWorkspace {
             (tab.id, tab.agent_id.clone(), was_root)
         };
         self.forget_pane_activity(&format!("pane-{from}"));
+        // Every caller moves a pane off an id another session holds by construction (another
+        // layout, a live host session on `IdTaken`, a parked pane), so the old row is ambiguous
+        // whatever the agent: Codex's validator accepts any session in CODEX_HOME, and Pi, omp
+        // and OpenCode check nothing. The new key may also hold a row an older build never
+        // deleted. Neither is carried: losing a resume is acceptable, a wrong one is not.
+        self.session.delete_session_ref(&format!("pane-{from}"));
+        self.session.delete_session_ref(&format!("pane-{to}"));
         register_restored_agent(&mut self.activity, to, agent_id.as_deref());
         if let Some(terminal) = terminal {
             Self::bind_terminal(terminal, tab_id, to, cx);
@@ -10215,7 +10280,7 @@ impl SirioWorkspace {
             // under `to`, before its next open (fix batch 7, I1).
             if was_root
                 && let Some(shell) =
-                    self.relaunch_agent_shell(terminal, agent_id.as_deref(), from, to, cx)
+                    self.relaunch_agent_shell(terminal, agent_id.as_deref(), to)
             {
                 terminal.update(cx, |view, _| view.set_launch_shell(shell));
             }
@@ -10226,17 +10291,17 @@ impl SirioWorkspace {
     /// (fix batch 7, I1): the launch its tab was made with, under the new key.
     /// A new agent starts fresh with its prompt, as `add_agent_terminal_tab`
     /// starts it. An OpenCode 2 tab Sirio created the session of resumes that
-    /// session under the new key. A restored one resumes the session its pane
-    /// saved under `from`, which moves to `to` with it, as a restore resumes it.
-    /// `None` for a pane with no agent, or when sirioctl cannot be resolved (the
-    /// command it has keeps the old key then).
+    /// session under the new key: the id is the tab's own launch, not a row read
+    /// under the old key. A restored one resumes nothing: `move_pane`
+    /// has deleted the rows of both keys, because the old id is held by another
+    /// session by construction and its row is ambiguous. `None` only for a pane
+    /// with no agent, or an agent id that is not in the catalog; a missing
+    /// sirioctl does not make it `None`, the launch just writes no hooks.
     fn relaunch_agent_shell(
         &mut self,
         terminal: &Entity<TerminalView>,
         agent_id: Option<&str>,
-        from: usize,
         to: usize,
-        cx: &mut Context<Self>,
     ) -> Option<TerminalShell> {
         let worktree = self.working_directory.to_string_lossy().into_owned();
         let pane_key = format!("pane-{to}");
@@ -10259,8 +10324,8 @@ impl SirioWorkspace {
                     eprintln!(
                         "[sirio] {pane_key}: session ref not written: pane id held by another layout"
                     );
-                } else {
-                    self.session.save_session_ref(&pane_key, &id);
+                } else if !self.session.save_session_ref(&pane_key, &id) {
+                    eprintln!("[sirio] {pane_key}: session ref not written: its pane was closed");
                 }
                 let (program, args) =
                     command_shell_invocation(&sirio_agents::opencode_launch_command(Some(&id), &prompt));
@@ -10293,25 +10358,15 @@ impl SirioWorkspace {
         let adapter = *AGENT_CATALOG
             .iter()
             .find(|adapter| Some(adapter.id()) == agent_id)?;
-        let from_key = format!("pane-{from}");
-        let refs = self.session.load_session_refs();
-        let mut resumable = BTreeMap::new();
-        if let Some(reference) = refs.get(&from_key) {
-            self.session.save_session_ref(&pane_key, reference);
-            let resume = self.settings.read(cx).snapshot().resume_agent_sessions;
-            if resume
-                && sirio_agents::AgentSessionValidator::is_likely_valid(
-                    adapter.id(),
-                    reference,
-                    &worktree,
-                    claude_config_dir(),
-                    codex_home(),
-                )
-            {
-                resumable.insert(pane_key.clone(), reference.clone());
-            }
+        // Resumes nothing: the old id's row is ambiguous and `move_pane` deleted it. A fresh
+        // launch never fails for want of sirioctl, so the view cannot keep its old shell,
+        // whose `--resume <ref>` came from the ambiguous old key. A restored pane has no prompt
+        // to send: its plain command runs, as a restore with no ref runs it.
+        let (shell, warning) = agent_launch_shell(adapter, &pane_key, &worktree, None);
+        if let Some(warning) = warning {
+            eprintln!("[sirio] {pane_key}: {warning}");
         }
-        restored_agent_shell(Some(adapter.id()), &pane_key, Path::new(&worktree), &resumable)
+        Some(shell)
     }
 
     /// Moves the live pane `from` of the active strip to `to`, whatever its
@@ -11164,8 +11219,16 @@ impl SirioWorkspace {
                     .any(|path| paths_name_the_same_document(&session.worktree, path))
             });
             if elsewhere {
+                // A row under an id another layout holds is ambiguous (either pane may have
+                // written it), and an ambiguous row is deleted, never kept for the other
+                // layout. That layout's session is not ended, so its later writes stay.
+                self.session.delete_session_ref(session_id);
                 continue;
             }
+            // The close ends this session, so a hook of the dead pane that writes after it is
+            // refused. A pane id that another layout also holds loses that layout's later
+            // writes for the rest of the run, which costs a resume, never a wrong one.
+            self.session.end_session_ref(session_id);
             self.forget_pane_activity(session_id);
             self.host_programs.closing.insert(session_id.clone());
         }
@@ -13672,6 +13735,8 @@ impl SirioWorkspace {
             })
             .filter(|pane_id| !mounted.contains(pane_id))
             .collect();
+        // No session ref is deleted here: an evicted worktree comes back and resumes its panes.
+        // A closed worktree or project deletes them in `forget_layout_panes`, before this runs.
         for pane_id in forgotten_panes {
             self.forget_pane_activity(&format!("pane-{pane_id}"));
         }
@@ -13896,17 +13961,44 @@ impl SirioWorkspace {
                 0,
                 &mut self.next_pane_id,
             );
+            // The restore hands every pane key of the layout to a pane again, so a mark left by
+            // closing this worktree earlier in the run is lifted, or every ref the new processes
+            // report would be refused. A hook of the old, dead process writing after this
+            // point could still land; that is acceptable: the close ended those processes, and
+            // a write that lands is this same tab's own conversation (unless another worktree's
+            // layout shares the legacy id, a limit). Every tab counts, a legacy one with no saved
+            // state too (its root alone).
+            {
+                let roots = restored_pane_ids(&restored, 0);
+                let no_state = SessionTabState::default();
+                self.session.lift_ended(
+                    roots
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(index, &root)| {
+                            restored_tab_pane_ids(
+                                root,
+                                restored.tab_states.get(index).unwrap_or(&no_state),
+                            )
+                        })
+                        .map(|id| format!("pane-{id}")),
+                );
+            }
             let mut saved_session_refs = if self.settings.read(cx).snapshot().resume_agent_sessions
             {
                 self.session.load_session_refs()
             } else {
                 BTreeMap::new()
             };
-            // A moved pane still resumes whatever its old key would have.
+            // `old` is renamed because a parked pane holds it, so its row is ambiguous: most
+            // often the parked pane's own, but a second live writer under the id (a legacy
+            // duplicate the dedup left to two live layouts) may have written it. Whatever the
+            // agent, both keys are cleared, in the database and in the map the restore resumes
+            // from, and nothing is copied. Losing a resume is acceptable, a wrong one is not.
             for (old, new) in renamed_panes {
-                if let Some(reference) = saved_session_refs.get(&format!("pane-{old}")).cloned() {
-                    saved_session_refs.insert(format!("pane-{new}"), reference);
-                }
+                self.session.delete_session_ref(&format!("pane-{old}"));
+                self.session.delete_session_ref(&format!("pane-{new}"));
+                saved_session_refs.remove(&format!("pane-{new}"));
             }
             let resume_agent_sessions = self.settings.read(cx).snapshot().resume_agent_sessions;
             let (mut new_tabs, active, reused_terminal_panes) = restore_tabs_with_terminal_cache(
@@ -14403,6 +14495,13 @@ impl SirioWorkspace {
                 tab_states: Vec::new(),
                 diagnostics: Vec::new(),
             };
+            // These tabs have no saved tab states, so every one gets a fresh id from the
+            // allocator, and a ref found under that id is never the tab's own (a crash, an
+            // older build, another session's row). Drop it first, as a fresh tab drops the row
+            // it would inherit.
+            for id in restored_pane_ids(&restored, self.next_pane_id) {
+                self.session.delete_fresh_session_ref(&format!("pane-{id}"));
+            }
             // F-SET-04: resume_agent_sessions gates whether a saved native
             // session ref is honored on restore -- with it off, restored
             // agent panes must start fresh rather than silently resuming.
@@ -16825,12 +16924,16 @@ impl SirioWorkspace {
         let mut browsers = Vec::new();
         let mut prompts = Vec::new();
         let mut closed_panes = Vec::new();
+        let mut attached_panes = HashSet::new();
         self.tabs[index].panes.for_each(&mut |pane_id, content| {
             closed_panes.push(pane_id);
             if let TabContent::Chat(chat) = content {
                 self.chat_evidence.remove(&chat.entity_id());
             }
             if let Some(terminal) = content.terminal() {
+                if terminal.read(cx).attached() {
+                    attached_panes.insert(pane_id);
+                }
                 terminals.push(terminal);
                 terminal_pane_ids.push(pane_id);
             }
@@ -16905,8 +17008,24 @@ impl SirioWorkspace {
         // by the next pane to get its id. Only explicit closes forget: a
         // worktree switch keeps its entries on purpose (the rows of
         // unselected worktrees read their status from the model).
+        // The same goes for the pane's session ref: a stale one would resume in the next
+        // pane to get the id.
         for pane_id in closed_panes {
-            self.forget_pane_activity(&format!("pane-{pane_id}"));
+            let pane_key = format!("pane-{pane_id}");
+            self.forget_pane_activity(&pane_key);
+            // A pane that only shows an attached session (Show session, another worktree's orphan) is
+            // detached by the close and its session lives on: a re-adoption brings the same
+            // pane back, so its row stays, and a fresh tab that gets the id deletes the row as
+            // it is made.
+            if attached_panes.contains(&pane_id) {
+                continue;
+            }
+            // An ambiguous row (another layout may hold the key) is deleted, a close never
+            // keeps it for another layout. The close ends the session, so a late hook write
+            // of the dead pane is refused; a pane id that another layout also holds loses that
+            // layout's later writes for the rest of the run, which costs a resume, never a
+            // wrong one.
+            self.session.end_session_ref(&pane_key);
         }
         if self.tab_menu_tab == Some(tab_id) {
             self.tab_menu_tab = None;
@@ -17926,7 +18045,8 @@ impl SirioWorkspace {
         self.adopt_worktree_environment(&terminal, &self.working_directory, cx);
         Self::bind_terminal(&terminal, tab_id, pane_id, cx);
         // A pane id is reused: a ref a closed pane left under this key must not resume in
-        // the new one.
+        // the new one. Pane ids are not unique across layouts, so a row under a key another
+        // layout holds is ambiguous, and an ambiguous row is deleted, never kept.
         let fresh_key = format!("pane-{pane_id}");
         self.session.delete_fresh_session_ref(&fresh_key);
         // OpenCode names itself nowhere a fresh tab could hear it: it sends no report, and the
@@ -20526,8 +20646,8 @@ impl SirioWorkspace {
                 // a row under it is not this tab's, which runs `--session <id>`.
                 self.session.delete_session_ref(&key);
                 eprintln!("[sirio] {key}: session ref not written: pane id held by another layout");
-            } else {
-                self.session.save_session_ref(&key, id);
+            } else if !self.session.save_session_ref(&key, id) {
+                eprintln!("[sirio] {key}: session ref not written: its pane was closed");
             }
             let (program, args) =
                 command_shell_invocation(&sirio_agents::opencode_launch_command(Some(id), prompt));
@@ -24975,6 +25095,7 @@ impl SirioWorkspace {
         }
         let removed = tab.panes.remove(focused_pane);
         if let Some(removed) = removed {
+            let mut attached = false;
             tab.session_state
                 .pane_events
                 .push(PaneEvent::Close { id: focused_pane });
@@ -24996,6 +25117,7 @@ impl SirioWorkspace {
                 view.update(cx, |prompt, cx| prompt.close_prompt(cx));
             }
             if let Some(terminal) = removed.terminal() {
+                attached = terminal.read(cx).attached();
                 // Closing a pane in a split ends its session (SP2 spec §4.2).
                 terminal.update(cx, |terminal, _| terminal.end_session());
                 self.terminal_pane_cache
@@ -25036,7 +25158,19 @@ impl SirioWorkspace {
             }
             // Same reason as `close_tab`: the id is free for reuse the moment
             // the leaf is gone, and its model entry must not outlive it.
-            self.forget_pane_activity(&format!("pane-{focused_pane}"));
+            let pane_key = format!("pane-{focused_pane}");
+            self.forget_pane_activity(&pane_key);
+            // An attached pane (Show session, another worktree's orphan) is only detached by the close:
+            // its session lives on, a re-adoption brings the same pane back, so its row stays
+            // (a fresh tab that gets the id deletes it as it is made).
+            if !attached {
+                // An ambiguous row (another layout may hold the key) is deleted, a close never
+                // keeps it for another layout. The close ends the session, so a late hook
+                // write of the dead pane is refused; a pane id that another layout also holds
+                // loses that layout's later writes for the rest of the run, which costs a
+                // resume, never a wrong one.
+                self.session.end_session_ref(&pane_key);
+            }
             self.mark_activity_dirty();
             self.schedule_save(cx);
             cx.notify();
@@ -29991,6 +30125,18 @@ fn fresh_agent_shell(
     worktree: &str,
     prompt: &str,
 ) -> (TerminalShell, Option<String>) {
+    agent_launch_shell(adapter, pane_key, worktree, Some(prompt))
+}
+
+/// The launch of an agent pane that resumes nothing: the hooks for `pane_key`, then the
+/// adapter's command, with `prompt` as its first message when given and its plain command
+/// otherwise (an empty prompt would still be passed as an empty argument).
+fn agent_launch_shell(
+    adapter: &dyn sirio_agents::AgentAdapter,
+    pane_key: &str,
+    worktree: &str,
+    prompt: Option<&str>,
+) -> (TerminalShell, Option<String>) {
     let mut warning = None;
     let sirioctl = match resolve_sirioctl_for_process() {
         Ok(path) => path.to_string_lossy().into_owned(),
@@ -30008,7 +30154,10 @@ fn fresh_agent_shell(
         warning = Some(format!("hooks not written: {error}"));
     }
     keep_agent_skill_out_of_git(adapter.id(), Path::new(worktree));
-    let command = adapter.command_with_prompt(worktree, pane_key, &sirioctl, prompt);
+    let command = match prompt {
+        Some(prompt) => adapter.command_with_prompt(worktree, pane_key, &sirioctl, prompt),
+        None => adapter.command(worktree, pane_key, &sirioctl),
+    };
     let (program, args) = command_shell_invocation(&command);
     (TerminalShell::WithArguments { program, args }, warning)
 }
@@ -30071,10 +30220,11 @@ fn resumable_session_refs(
         // on the bare adapter id, so extract it (None for a value that does
         // not resolve to a known adapter — the same skip as before).
         let adapter_id = tab.agent_id.as_ref().and_then(AgentRef::adapter_id);
-        let legacy_pane_key = format!("pane-{}", fallback_pane_id_start.saturating_add(tab_index));
-        let session_ref = saved_refs
-            .get(&pane_key)
-            .or_else(|| saved_refs.get(&legacy_pane_key));
+        // Only the key of the id the tab is assigned. A tab whose layout persists no root id
+        // gets `fallback_pane_id_start + tab_index` unless another pane of the layout reserves
+        // that id, and then the key is that other pane's: a ref found there would resume its
+        // session in this tab (or the same session in two tabs).
+        let session_ref = saved_refs.get(&pane_key);
         if let (Some(agent_id), Some(session_ref)) = (adapter_id, session_ref) {
             refs.push(AgentSessionRef::new(
                 TerminalContentId::new(pane_key.clone()),
@@ -30264,7 +30414,14 @@ fn apply_pane_id_moves(restored: &mut RestoredSession, moves: &[(usize, usize)])
 /// One past the largest pane id any catalog worktree's persisted layout names
 /// (SP2 fix batch 5): a new pane never takes an id a layout holds, whichever
 /// worktree holds it.
+///
+/// At startup the purge of ambiguous session refs has already read every layout and left the
+/// floor behind, so it is taken from there once; without a purge (a workspace built in a
+/// test, or a second call) the layouts are read here.
 fn db_pane_id_floor(session: &session::SessionStore, catalog: &ProjectCatalog) -> usize {
+    if let Some(floor) = session.take_startup_pane_floor() {
+        return floor;
+    }
     catalog
         .projects()
         .iter()
@@ -32639,6 +32796,11 @@ fn ensure_host_in_background(
                         .cloned()
                     {
                         workspace.update(cx, |workspace, cx| {
+                            // The host did not answer at startup, so the dedup has not run and
+                            // the startup purge would drop those rows at every start.
+                            if !workspace.pane_ids_deduped {
+                                workspace.dedup_pane_ids_at_first_answer(&sessions, true, cx);
+                            }
                             workspace.raise_next_pane_id(floor);
                             workspace.adopt_host_orphans(sessions, cx);
                         });
@@ -32728,7 +32890,7 @@ fn ensure_host_in_background(
                                 .cloned()
                             {
                                 workspace.update(cx, |workspace, cx| {
-                                    workspace.dedup_pane_ids_at_first_answer(&sessions, cx);
+                                    workspace.dedup_pane_ids_at_first_answer(&sessions, false, cx);
                                     workspace.raise_next_pane_id(floor);
                                     workspace.adopt_host_orphans(sessions, cx);
                                 });
@@ -32751,7 +32913,7 @@ fn ensure_host_in_background(
                                 .cloned()
                             {
                                 workspace.update(cx, |workspace, cx| {
-                                    workspace.dedup_pane_ids_at_first_answer(&[], cx);
+                                    workspace.dedup_pane_ids_at_first_answer(&[], false, cx);
                                 });
                             }
                         }
@@ -33054,6 +33216,34 @@ fn main() {
         let host_terminal: Arc<HostTerminal> = Arc::new(HostTerminal::default());
         let control_terminal: Arc<HostTerminal> = Arc::new(HostTerminal::default());
         let notifications = Arc::new(Mutex::new(Vec::<ControlNotification>::new()));
+        // The startup restore builds every pane's launch shell from these refs before the host
+        // answers, so the pane-id dedup, which deletes these keys when it moves a duplicate,
+        // comes too late, and it does not run at all when the host does not answer at startup.
+        // A row under an id several saved layouts name is ambiguous, so it goes first: the
+        // restore map and the control mirror below are both cloned from this load.
+        {
+            let known_worktrees: Vec<PathBuf> = project_catalog
+                .projects()
+                .iter()
+                .flat_map(|project| project.worktrees.iter().map(|worktree| worktree.path.clone()))
+                .collect();
+            // An older build's worktree-local hook file named one pane for all the worktree's
+            // tabs, so two tabs' rows may hold one conversation; both would resume it. This
+            // goes first, on every row: once the next purge has taken one of two such rows, the
+            // other would look like the only holder of its reference and stay.
+            let shared = session_store.delete_refs_shared_by_several_keys();
+            if shared > 0 {
+                eprintln!(
+                    "[sirio] session refs: {shared} reference(s) held under several keys were dropped"
+                );
+            }
+            let dropped = session_store.delete_refs_named_by_several_layouts(&known_worktrees);
+            if dropped > 0 {
+                eprintln!(
+                    "[sirio] pane ids: {dropped} session ref(s) under an id several saved layouts name were dropped"
+                );
+            }
+        }
         let saved_session_refs = session_store.load_session_refs();
         let session_refs = Arc::new(Mutex::new(saved_session_refs.clone()));
         // The one write path: the store's saves and deletes keep this map the same as the

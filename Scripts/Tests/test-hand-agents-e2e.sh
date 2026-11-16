@@ -124,9 +124,13 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #                                  /api/session, no ref, no plugin written and the real v1
 #                                  plugin an earlier OpenCode 1 tab wrote, and the legacy one,
 #                                  removed; then 2.3.0 is back and the app relaunched
-#   fresh_tab_drops_stale_ref      a row left under the key the next fresh tab takes (a crash, an
-#                                  older build, a closed pane) is dropped as that tab is made: a
-#                                  codex tab opened after a relaunch has no ref
+#   closed_tab_ref_is_not_inherited
+#                                  a reference held under two keys is dropped at startup; a
+#                                  codex tab's ref goes with the tab (`surface tabs close`);
+#                                  a stale row under the next tab's key is dropped as it is
+#                                  made; and a ref written for a closed pane (Claude's SessionEnd
+#                                  hook, simulated with `sirioctl notify --agent-session`) is
+#                                  refused and logged
 #   no_service_degrades            the service stops: the mark stays, no status, and the app's
 #                                  stderr names the failure kind once and nothing else
 #
@@ -1255,9 +1259,25 @@ open_oc_tab() {
   wait_ref "$PANE" "$OC_TAB_ID" 10
   wait_until 15 runs_resumed "$PANE" "$OC_TAB_ID" || fail "the OpenCode tab $PANE did not start opencode --session $OC_TAB_ID (argv: $(oc_argv_of "$PANE" || echo none))"
 }
-# Closes the tab of pane $1 (the debug build's --confirm skips the dialog for a live agent).
+# Closes the tab of pane $1 (the debug build's --confirm skips the dialog for a live agent)
+# and waits until its session ref row is gone.
 close_tab() { # pane
   ctl surface tabs close "$(tab_index_of "$1")" --confirm >/dev/null
+  wait_ref "$1" "" 8
+}
+# Waits up to $2 seconds for the world's host to stop listing session $1. A closed tab's host
+# session ends asynchronously, and an id the host still lists raises the pane-id floor of the
+# next app start.
+wait_host_dropped() { # session seconds
+  local listed
+  for _ in $(seq 1 $(( $2 * 5 ))); do
+    # A list the probe failed to read proves nothing: only a read list without the line does.
+    if listed="$("$PROBE" term-list 2>/dev/null)"; then
+      grep -q "^session=$1 " <<<"$listed" || return 0
+    fi
+    sleep 0.2
+  done
+  fail "the host still lists the session $1 $2 s after its tab was closed"
 }
 # A typed `opencode` is linked by the watch and never gets a session ref: this fails on a ref
 # (or on a database that cannot be read) at the moment it is called, which is after the link.
@@ -1905,17 +1925,40 @@ case_opencode_unknown_version_writes_no_plugin() {
   rm -f "$plugin"
 }
 
-case_fresh_tab_drops_stale_ref() {
-  local old_pane codex
+case_closed_tab_ref_is_not_inherited() {
+  local old_pane codex got key log_from new_log
   # Pane ids are reused after a relaunch: the first free id is one past the largest a persisted
-  # layout names. A row left under the key the next tab takes (a crash, an older build, a closed
-  # pane) is dropped as the fresh tab is made, whatever its agent, before anything could resume
-  # it. A tab whose OpenCode 2 session could not be created writes none and would inherit it,
-  # and so would any other agent.
+  # layout names, whatever earlier cases opened and closed. The first part proves that rows an
+  # older build left with one reference under two keys are dropped at startup, and that a
+  # reference under one key stays. The second proves the close deletes the row: `close_tab`
+  # waits for it to go.
+  python3 -I -c 'import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+for key, ref in (("pane-9001", "dup-ref-from-an-older-build"), ("pane-9002", "dup-ref-from-an-older-build"), ("pane-9003", "lone-ref-kept")):
+    con.execute("INSERT OR REPLACE INTO session_ref (session, reference) VALUES (?, ?)", (key, ref))
+con.commit()' "$W/s.sqlite"
+  # The app log is appended across starts: only what this start writes counts.
+  log_from="$(wc -c < "$W/app.log")"
   relaunch_app
-  open_oc_tab
+  for key in pane-9001 pane-9002; do
+    got="$(session_ref_of "$key")"
+    [ -z "$got" ] || fail "the row of $key, a reference held under two keys, survived the startup (read '$got')"
+  done
+  got="$(session_ref_of pane-9003)"
+  [ "$got" = lone-ref-kept ] || fail "the row of pane-9003, a reference held under one key, read '$got' instead of lone-ref-kept"
+  new_log="$(tail -c +"$(( log_from + 1 ))" "$W/app.log")"
+  grep -qF "[sirio] session refs: 1 reference(s) held under several keys were dropped" <<<"$new_log" || fail "the app log has no '[sirio] session refs: 1 reference(s) held under several keys were dropped' after the startup"
+  echo "OK: a reference held under two keys was dropped at startup, one held under a single key stayed"
+  open_pane --agent codex
   old_pane="$PANE"
+  ctl session-ref --session "$old_pane" --ref codex-ref-to-drop >/dev/null
+  wait_ref "$old_pane" codex-ref-to-drop 5
   close_tab "$old_pane"
+  # The close ends the host session asynchronously; a session the host still lists at the next
+  # start would raise the pane-id floor and the new tab would not get $old_pane.
+  wait_host_dropped "$old_pane" 10
+  # A row no close removed (a crash, an older build) under the key the next tab takes: the
+  # fresh tab drops it as it is made, before anything could resume it.
   relaunch_app
   # Written through the control socket, so the app's mirror of the rows holds it, as it holds
   # every row it loaded at startup (a crash's, an older build's): a fresh tab looks there, and
@@ -1928,6 +1971,21 @@ case_fresh_tab_drops_stale_ref() {
   [ "$codex" = "$old_pane" ] || fail "the codex tab got the pane key $codex, not $old_pane: the stale row proves nothing"
   [ -z "$(session_ref_of "$codex")" ] || fail "the fresh codex tab $codex kept the stale ref '$(session_ref_of "$codex")'"
   echo "OK: a fresh tab under $codex dropped the stale row it would have inherited"
+  # Every agent's ref goes with its tab.
+  ctl session-ref --session "$codex" --ref codex-ref-to-drop >/dev/null
+  wait_ref "$codex" codex-ref-to-drop 5
+  close_tab "$codex"
+  # Claude's `SessionEnd` hook reports `sirioctl notify --status done` with the session id after
+  # the close deleted the row. This is that hook's write simulated with the same socket call,
+  # not a real Claude: a key closed in this run refuses it, so the next pane to get this id
+  # after a relaunch cannot resume the closed conversation.
+  log_from="$(wc -c < "$W/app.log")"
+  ctl notify --session "$codex" --status done --agent-session late-session-end-ref >/dev/null
+  hold_ref "$codex" "" 2
+  # Only what this write logs counts: the same id was closed once before the relaunch.
+  new_log="$(tail -c +"$(( log_from + 1 ))" "$W/app.log")"
+  grep -qF "[sirio] $codex: session ref not written: its pane was closed" <<<"$new_log" || fail "the app log has no '[sirio] $codex: session ref not written: its pane was closed' after a ref write for the closed pane"
+  echo "OK: a ref written for $codex after its close was refused and logged"
 }
 
 case_no_service_degrades() {
@@ -2298,9 +2356,13 @@ case_close_hidden_worktree_mid_turn_is_silent() {
   sleep 2
   OPEN_DIR="$W/repo-c" start_agent codex
   PANE_B="$PANE"; SESS_B="$SESS"
+  # The pane's session ref: a quit keeps it, closing its worktree ends the pane and drops it.
+  ctl session-ref --session "$PANE_B" --ref repo-c-ref >/dev/null
+  wait_ref "$PANE_B" repo-c-ref 5
   ctl select-workspace --workspace "$wt" >/dev/null
   sleep 2
   relaunch_app
+  [ "$(session_ref_of "$PANE_B")" = repo-c-ref ] || fail "the relaunch dropped the hidden pane's session ref: '$(session_ref_of "$PANE_B")'"
   running_before="$(running_rows)"
   working_before="$(agents_working)"
   type_line "$PANE_B" work
@@ -2312,6 +2374,7 @@ case_close_hidden_worktree_mid_turn_is_silent() {
   [ "$(agents_working)" = "$(( working_before + 1 ))" ] || fail "the activity model's working count is $(agents_working), it was $working_before before the turn"
   base="$(posted_count)"
   ctl close-workspace --workspace "$wt_c" >/dev/null
+  wait_ref "$PANE_B" "" 8
   sleep 6
   stepn "repo-c closed mid-turn" "$SESS_B"
   expect_posted "$base" 0 "closing a worktree whose hidden tab is mid-turn"
@@ -2684,7 +2747,7 @@ run_case opencode_agent_tab_resumes
 run_case opencode_unavailable_service_launches_plain
 run_case opencode_v2_writes_no_plugin
 run_case opencode_unknown_version_writes_no_plugin
-run_case fresh_tab_drops_stale_ref
+run_case closed_tab_ref_is_not_inherited
 run_case background_opencode_notifies
 run_case no_service_degrades
 run_case background_tab_notifies

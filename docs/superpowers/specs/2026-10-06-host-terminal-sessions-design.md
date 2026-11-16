@@ -215,10 +215,14 @@ catalogued worktree's persisted and parked layouts and of the host's
 listing, so a new pane never takes an id any worktree still names. The
 duplicates a database already holds are renamed once, at the first answer of
 a startup that finds a host (or a host without terminals): a parked
-worktree's rows are rewritten, and the active strip's panes move live. A
-lazy adoption after an unverifiable or failed startup does not repeat that
-rename, so owner preference holds on the first-answer path only; the floor
-still keeps the ids unique there. A fresh open whose id the host already holds
+worktree's rows are rewritten, and the active strip's panes move live. When
+the startup found no host (unverifiable or failed), the rename runs once, late,
+at the first lazy adoption: terminals may be open by then, so it moves no pane
+that may be live (the active worktree, parked or cached ones and every worktree
+owning a session the host lists keep their ids), rewrites only the persisted
+rows of the others, and leaves two live layouts that collide on an id as they
+are, logging the id. Owner preference holds on the first-answer path only; the
+floor still keeps the ids unique. A fresh open whose id the host already holds
 takes a new id and never attaches to it. A restore attaches only to a session
 its own worktree owns (§4.2).
 
@@ -368,7 +372,7 @@ sides change together; SP2 is the first change to the codec since SP1.
 - Re-ensure is lazy: the next terminal the app opens, or a Restart, starts a lost host again. Nothing re-ensures on a timer, and an ensure that succeeds clears any failure it replaces, so the first open after a lost client ensures at once (fix batch 6, N4; B3).
 - Control `panel.*` through the app fails until a terminal is opened after End All (B3, corrected cost). `sirioctl` reaches the host directly only when the app's socket is missing or refuses (`route::decide`), never when the app answers with an error.
 - The 30 s back-off covers no-host failures only. An unverifiable or failed ensure is shared with the openers waiting for it and never answered from a cache.
-- Dedup runs at the first answer of a startup that finds a host, not on a lazy adoption (§4.1). A pane moved by dedup or by a rebind keeps its saved agent session reference under the old key where the ref store wrote one, so it may resume the other worktree's conversation; the ref store, not the id allocator, owns that ambiguity.
+- Dedup runs at the first answer of a startup that finds a host, or, when that startup found none, once at the first lazy adoption, moving no pane that may be live (§4.1). A pane moved by dedup, by a rebind on `IdTaken` or by the rename when a worktree is selected resumes nothing (this replaces the earlier ruling, which kept the reference under the old key and accepted that a moved pane might resume the other worktree's conversation). The old id is held by another session by construction, so a row under it may be that session's: the move deletes the rows of both the old and the new key and copies nothing, and the restored agent starts fresh under its new id. Losing a resume is acceptable, a wrong one is not (the session-ref life cycle, `docs/agents/architecture/agent-adapters.md`). An OpenCode 2 tab opened in this run, whose session Sirio created, keeps that session under the new key: the id is the tab's own launch, not a row read under the old key. A restored OpenCode 2 tab has no such id: it starts plain `opencode`, and since OpenCode 2 reports no ref it has none from then on.
 - Control sessions keep the ids the host gave them. A collision with one is handled by the restore check and the rebind (§4.1), not prevented.
 
 ## §9 Testing
