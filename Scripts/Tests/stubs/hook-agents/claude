@@ -10,10 +10,25 @@
 #   claude.log   one line per fired hook: `claude <event> exit=<status>`.
 # After the last hook the pane stays up until one more claude.go, so the E2E can
 # read the status that hook left behind. Neither jq nor python3 is a SKIP.
+#
+# Opt-in per-pane mode, for an E2E that runs several of these stubs at once in one
+# worktree: while the file $HOOK_STUB_OUT/claude.per-pane exists, the handshake directory is
+# $HOOK_STUB_OUT/$SIRIO_PANE_ID (claude.pane, claude.go and claude.log live there) and the
+# payload's session id is `stub-claude-$SIRIO_PANE_ID-$$` (one per process) instead of
+# `stub-claude`. The id is also written to claude.session there, atomically and before claude.pane,
+# so once claude.pane exists the session file is this process's. Without that file nothing changes.
 set -euo pipefail
 
 out=${HOOK_STUB_OUT:?HOOK_STUB_OUT must name the handshake directory}
 : "${SIRIO_PANE_ID:?claude must run inside a Sirio pane}"
+session_id=stub-claude
+if [ -e "$out/claude.per-pane" ]; then
+  out="$out/$SIRIO_PANE_ID"
+  mkdir -p "$out"
+  session_id="stub-claude-$SIRIO_PANE_ID-$$"
+  printf '%s\n' "$session_id" > "$out/claude.session.tmp"
+  mv -f "$out/claude.session.tmp" "$out/claude.session"
+fi
 go="$out/claude.go"
 log="$out/claude.log"
 
@@ -77,7 +92,7 @@ for event in SessionStart UserPromptSubmit Stop; do
     count=$((count + 1))
     await_go "$event"
     status=0
-    sh -c "$command" <<< '{"session_id":"stub-claude"}' || status=$?
+    sh -c "$command" <<< "{\"session_id\":\"$session_id\"}" || status=$?
     echo "claude $event exit=$status" >> "$log"
   done < <(hook_commands "$event")
   if [ "$count" -eq 0 ]; then

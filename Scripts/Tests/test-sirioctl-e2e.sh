@@ -62,12 +62,15 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 #      is not unread, shown or in a parked worktree (needs a pane's shell, like 6); a
 #      stop while Settings covers the window marks and posts, and closing Settings
 #      (Escape) shows the tab again and clears the mark
+#  16  two Claude agent tabs in one worktree: the worktree's hook file names no pane, and
+#      each tab's SessionStart (B first, A last) writes the tab's own session ref, again after
+#      a quit with the host down and a relaunch, and again after a Restart of tab A
 #
 # --out-dir DIR keeps transcript.log, app-<world>.log, host-<world>-log/ (the
 # host's logs), env/<case>.env (each pane's `env -0` dump, never printed),
 # hooks/*.status and hooks/global-*.rc, and copies.sha256.
 #
-# --state-only takes no window captures, and skips 4, 4c, 5, 6, 10 and 15: each needs
+# --state-only takes no window captures, and skips 4, 4c, 5, 6, 10, 15 and 16: each needs
 # a pane's own shell to run a command, which a state-only run does not render for
 # the case's purpose. 9, 12, 13 and 14 run there: a session starts without a window.
 # --xvfb starts a private Xvfb on a free display; --display :N uses one that is
@@ -1555,6 +1558,23 @@ for key, value in reply.items():
 panel_ids() { ctl_json panel list | python3 -I -c 'import json, sys
 for row in json.load(sys.stdin):
     print(row["id"])'; }
+# The 1-based tab index of pane $1: the app's panes in pane-id order, as hand-agents reads it.
+# It counts every pane-N the app lists (the default Chat pane-0 and Terminal pane-1 included), so it
+# equals `tab select`'s position only while every tab is one Primary pane added in order, as in
+# case 16. A caller checks the select itself (pane_active).
+tab_index_of_pane() { # pane
+  panel_ids | python3 -I -c 'import re, sys
+ids = sorted((line.strip() for line in sys.stdin if re.fullmatch(r"pane-[0-9]+", line.strip())), key=lambda i: int(i.rsplit("-", 1)[1]))
+print(ids.index(sys.argv[1]) + 1)' "$1"
+}
+# Succeeds when pane $1 is the active tab.
+pane_active() { # pane
+  ctl_json panel list | python3 -I -c 'import json, sys
+for row in json.load(sys.stdin):
+    if row["id"] == sys.argv[1] and row["active"] == "true":
+        sys.exit(0)
+sys.exit(1)' "$1"
+}
 # The notifications the app decided to post, one JSON object per line, oldest
 # first: `surface attention read`'s `posted`, which only a debug build keeps. Fails
 # with its own message when the key is missing.
@@ -1911,6 +1931,134 @@ json.dump(reply, open(sys.argv[1], "w"), indent=2)' "$OUT_DIR/case15-attention.j
   app_quit
 }
 
+# ---- case 16: two Claude tabs in one worktree keep their own session refs
+
+# The session ref of pane $1 in the world's database; empty for none, `__ERROR__` when the
+# database cannot be read.
+session_ref_of() { # pane
+  python3 -I -c '
+import sqlite3, sys
+try:
+    con = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+    row = con.execute("SELECT reference FROM session_ref WHERE session = ?", (sys.argv[2],)).fetchone()
+except Exception:
+    print("__ERROR__")
+else:
+    print(row[0] if row and row[0] is not None else "")
+' "$W/s.sqlite" "$1" 2>/dev/null || echo __ERROR__
+}
+ref_is() { [ "$(session_ref_of "$1")" = "$2" ]; }
+# The per-pane handshake of the claude stub (see its header): one directory per pane.
+pp_dir() { echo "$W/hook-out/$1"; }
+pp_log_count() { # pane event
+  local n
+  n="$(grep -c "^claude $2 exit=" "$(pp_dir "$1")/claude.log" 2>/dev/null || true)"
+  echo "${n:-0}"
+}
+pp_more() { [ "$(pp_log_count "$1" "$2")" -gt "$3" ]; }
+# Releases one event of pane $1's stub and waits until it has run its hook.
+pp_fire() { # pane event
+  local base
+  base="$(pp_log_count "$1" "$2")"
+  touch "$(pp_dir "$1")/claude.go"
+  wait_until 30 pp_more "$1" "$2" "$base" || fail "pane $1: the stub's $2 hook never ran"
+  local status
+  status="$(grep "^claude $2 exit=" "$(pp_dir "$1")/claude.log" | tail -n 1 | sed 's/.*exit=//')"
+  [ "$status" = 0 ] || fail "pane $1: the stub's $2 hook exited with $status"
+}
+# Lets pane $1's stub reach its hold, so no stub times out waiting while the case checks.
+pp_finish() { # pane
+  pp_fire "$1" UserPromptSubmit
+  pp_fire "$1" Stop
+}
+pp_started() { test -s "$(pp_dir "$1")/claude.pane"; }
+# The session id of the process now running in pane $1 (the stub writes it before claude.pane).
+pp_session() { # pane
+  cat "$(pp_dir "$1")/claude.session"
+}
+# Both panes' rows read their own stub process's session id, for the step $3 of the case.
+refs_are_own() { # paneA paneB what
+  local want_a want_b
+  want_a="$(pp_session "$1")"
+  want_b="$(pp_session "$2")"
+  wait_until 20 ref_is "$1" "$want_a" || fail "$3: pane $1's ref is '$(session_ref_of "$1")', wanted $want_a"
+  wait_until 20 ref_is "$2" "$want_b" || fail "$3: pane $2's ref is '$(session_ref_of "$2")', wanted $want_b"
+  echo "OK: $3: $1 -> $want_a and $2 -> $want_b"
+}
+
+case_16() {
+  needs_window || return 0
+  world_open w16
+  W_PATH="$(path_with_stubs)"
+  echo "step 16: two Claude agent tabs in one worktree keep their own session refs across a relaunch and a restart"
+  touch "$W/hook-out/claude.per-pane"
+  app_start "$RUN/app-a/sirio"
+  select_repo "$W_REPO"
+  local pane_a pane_b
+  pane_a="$(ctl_json surface terminal open --agent claude | pane_of)"
+  pane_b="$(ctl_json surface terminal open --agent claude | pane_of)"
+  [ -n "$pane_a" ] && [ -n "$pane_b" ] && [ "$pane_a" != "$pane_b" ] || fail "two claude tabs did not give two panes ('$pane_a', '$pane_b')"
+  wait_until 30 pp_started "$pane_a" || fail "the claude stub of $pane_a never started"
+  wait_until 30 pp_started "$pane_b" || fail "the claude stub of $pane_b never started"
+  # One file serves both tabs, so it can name neither of them.
+  python3 -I -c 'import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+assert "sirioctl" in text, "no sirioctl hook in the file"
+assert "--session" not in text, "the worktree hook file names a pane"' "$W_REPO/.claude/settings.local.json" || fail "$W_REPO/.claude/settings.local.json holds no hooks, or one names a pane with --session"
+  echo "OK: the worktree's .claude/settings.local.json names no pane (no --session)"
+
+  echo "step 16.1: both SessionStarts, then both turns: each row is its own tab's"
+  pp_fire "$pane_b" SessionStart
+  pp_fire "$pane_a" SessionStart
+  refs_are_own "$pane_a" "$pane_b" "after the first SessionStarts"
+  # The stub reads an event's commands after the previous event fired, so A's turn reads the
+  # file as both tabs left it: a file naming B would write A's session into B's row.
+  pp_finish "$pane_b"
+  pp_finish "$pane_a"
+  refs_are_own "$pane_a" "$pane_b" "after both turns"
+
+  echo "step 16.2: quit, host down, relaunch: both tabs prepared in tab order; B, selected, runs its turn, then A once shown: rows stay their own"
+  # Both restored tabs are prepared in tab order (A, then B) at restore and not again on show:
+  # with a pane-baked file A's process would read a file naming B and write B's row. Only the
+  # selected tab B starts at once; B must finish its turn before A is selected (the stub's
+  # await_go times out per step, its final hold does not).
+  local old_a old_b index
+  old_a="$(pp_session "$pane_a")"
+  old_b="$(pp_session "$pane_b")"
+  rm -f "$(pp_dir "$pane_a")/claude.pane" "$(pp_dir "$pane_a")/claude.session" "$(pp_dir "$pane_b")/claude.pane" "$(pp_dir "$pane_b")/claude.session"
+  app_quit
+  host_shutdown
+  app_start "$RUN/app-a/sirio"
+  wait_until 30 pp_started "$pane_b" || fail "the restored, selected claude tab $pane_b never started its process"
+  [ "$(pp_session "$pane_b")" != "$old_b" ] || fail "$pane_b: the stub reused its session id $old_b, the check would be vacuous"
+  pp_fire "$pane_b" SessionStart
+  pp_finish "$pane_b"
+  index="$(tab_index_of_pane "$pane_a")"
+  ctl tab select "$index" >/dev/null || fail "tab select $index was refused"
+  wait_until 10 pane_active "$pane_a" || fail "tab select $index did not make $pane_a the active tab"
+  wait_until 30 pp_started "$pane_a" || fail "the restored claude tab $pane_a never started its process once shown"
+  [ "$(pp_session "$pane_a")" != "$old_a" ] || fail "$pane_a: the stub reused its session id $old_a, the check would be vacuous"
+  pp_fire "$pane_a" SessionStart
+  refs_are_own "$pane_a" "$pane_b" "after the relaunch: B's turn, then A's SessionStart"
+  pp_finish "$pane_a"
+  refs_are_own "$pane_a" "$pane_b" "after A's turn"
+
+  echo "step 16.3: Restart on tab A re-reads the file: both rows are still their own"
+  # Prepare is not called on Restart: a pane-baked file would still name B.
+  old_a="$(pp_session "$pane_a")"
+  rm -f "$(pp_dir "$pane_a")/claude.pane" "$(pp_dir "$pane_a")/claude.session"
+  ctl surface terminal restart "$pane_a" >/dev/null || fail "surface terminal restart $pane_a was refused"
+  wait_until 30 pp_started "$pane_a" || fail "the restarted claude tab $pane_a never started its process"
+  [ "$(pp_session "$pane_a")" != "$old_a" ] || fail "$pane_a: the stub reused its session id $old_a, the check would be vacuous"
+  pp_fire "$pane_a" SessionStart
+  refs_are_own "$pane_a" "$pane_b" "after the restart"
+  pp_finish "$pane_a"
+  # No stub hangs: each holds after its last hook until one more go.
+  touch "$(pp_dir "$pane_a")/claude.go" "$(pp_dir "$pane_b")/claude.go"
+  rm -f "$W/hook-out/claude.per-pane"
+  app_quit
+}
+
 # ---------------------------------------------------------------- run
 
 echo "run started"
@@ -1930,6 +2078,7 @@ run_case 12 "panel wait exits with the child's code" case_12
 run_case 13 "--dry-run prints one request and creates no pane" case_13
 run_case 14 "project add --display-name: the label, no dialog, a duplicate" case_14
 run_case 15 "unread sessions: a stop off screen marks the session until it is seen" case_15
+run_case 16 "two Claude tabs in one worktree keep their own session refs" case_16
 
 # Teardown: nothing of this run may outlive it. Every host is shut down, every
 # app quit, every holder and every pane session of this run ended.

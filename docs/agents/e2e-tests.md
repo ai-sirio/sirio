@@ -93,10 +93,16 @@ Scripts/Tests/test-host-sessions-e2e.sh  # -> prints "HOST SESSIONS E2E OK (<n> 
 # `surface settings open`: a stop of the shown agent tab under it marks the session and
 # posts one notification, a look does not clear it, and Escape (a real key, pressed in the
 # app's window: no verb closes Settings) shows the tab again, which clears the mark. Linux
-# runs it with --xvfb or --display :N; --state-only skips cases 4, 4c, 5, 6, 10 and 15 and
+# runs it with --xvfb or --display :N; --state-only skips cases 4, 4c, 5, 6, 10, 15 and 16 and
 # is what macOS runs. --out-dir DIR keeps the transcript, logs and env dumps (and case 15's
 # case15-attention.json); --only N[,N...] prints "SIRIOCTL E2E PARTIAL"; --mutate
-# claude-prompt-hook is case 6's mutation check.
+# claude-prompt-hook is case 6's mutation check. Case 16 opens two Claude agent tabs in one worktree
+# (the stub's per-pane mode, `claude.per-pane`, gives each its own handshake directory and a session
+# id of its own per process, `stub-claude-<pane>-<pid>`, kept in `claude.session`): the worktree's
+# `.claude/settings.local.json` holds no `--session`, both SessionStarts write their own tab's row
+# in the world's database and both turns leave each row its own; again after a quit with the host
+# down and a relaunch (both tabs prepared in tab order, the selected tab B runs its turn, then A
+# once shown) and again after a Restart of tab A.
 Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 
 # An agent typed by hand into a terminal shows its mark: a debug sirio on a private Xvfb (or
@@ -135,12 +141,16 @@ Scripts/Tests/test-sirioctl-e2e.sh   # -> prints "SIRIOCTL E2E OK"
 # with the user's own body, untouched), an OpenCode that
 # reports no readable version (`oc-version` `garbage`, the app relaunched: plain `opencode`, no
 # POST, no ref, no plugin written and the real v1 plugin an earlier OpenCode 1 tab wrote, and
-# the legacy one, removed), a stale row under the next fresh tab's key dropped as it is made (a
-# codex tab's), and, last because it stops the
+# the legacy one, removed), and, last because it stops the
 # host, a relaunch with no host to attach to that starts `opencode --session <id>`, a turn under a second
 # (finished, +1), two panes in one folder (no guess, then each by its title), a failed turn (the
 # service's error text and password stay out of the app's stderr), a relaunch, and a service that
-# goes away (the mark stays, no status, one `[opencode-watch] <kind>` line). Tabs no terminal
+# goes away (the mark stays, no status, one `[opencode-watch] <kind>` line). Rows that hold one
+# reference under two keys (an older build's) are dropped at startup, a lone one stays. A codex tab's session
+# ref row goes with its tab (`surface tabs close`), a stale row under the key the next tab takes
+# is dropped as that tab is made, and a ref written for a closed pane (Claude's `SessionEnd`,
+# simulated with `sirioctl notify --agent-session`) is refused and logged; a hidden tab's ref
+# survives a quit and relaunch, and closing its worktree drops it. Tabs no terminal
 # holds are covered too: after a relaunch a turn typed into a tab never shown (codex, an exit mid-turn,
 # OpenCode) or into a worktree never selected makes one stop and an unread mark, showing the tab adds
 # none, a finished claude turn read before the quit stays silent, and a `panel create` session that

@@ -1873,6 +1873,19 @@ struct SessionInner {
     /// `session.transcript`), set once at startup by `mirror_session_refs`: every write
     /// below keeps it and the database the same.
     mirror: Mutex<Option<Arc<Mutex<BTreeMap<String, String>>>>>,
+    /// The pane keys a close ended in this run (see [`SessionStore::end_session_ref`]).
+    /// Within one run the pane-id allocator only grows, so it never hands an ended key out
+    /// again: a ref reported for it comes from the dead pane. A layout restored with
+    /// duplicate ids, when the startup dedup did not run (the host was unavailable at
+    /// startup), can bring a pane back under an ended key; that pane's reported writes are
+    /// then refused for the run (its resume, `system.identify` and `session.transcript` read
+    /// the mirror), never misattributed.
+    ended: Mutex<HashSet<String>>,
+    /// One past the largest pane id any catalog worktree's saved layout named at startup,
+    /// computed by the purge's single pass over the layouts
+    /// ([`SessionStore::delete_refs_named_by_several_layouts`]) and handed to the workspace's
+    /// pane-id allocator once ([`SessionStore::take_startup_pane_floor`]).
+    startup_pane_floor: Mutex<Option<usize>>,
     interval: Duration,
 }
 
@@ -1925,6 +1938,8 @@ impl SessionStore {
                 writes: AtomicUsize::new(0),
                 layout_saves: AtomicUsize::new(0),
                 mirror: Mutex::new(None),
+                ended: Mutex::new(HashSet::new()),
+                startup_pane_floor: Mutex::new(None),
                 interval,
             }),
         };
@@ -2746,18 +2761,45 @@ impl SessionStore {
         self.delete_session_ref(session);
     }
 
-    /// Saves one pane-to-agent-session association immediately. This is a
-    /// hook write rather than a layout snapshot, so it must not wait for the
-    /// layout debounce window. The mirrored map follows.
-    pub fn save_session_ref(&self, session: &str, reference: &str) {
+    /// Saves a pane's ref, as the control socket reports it (a hook, the OpenCode 1.x plugin,
+    /// `sirioctl session-ref`) or as Sirio created it (an OpenCode 2 tab's session),
+    /// immediately: a hook write, not a layout snapshot, so it does not wait for the layout
+    /// debounce window. The mirrored map follows. `false`, with nothing written, when a close
+    /// ended that pane's session in this run: a report can only come from the dead pane, as
+    /// Claude's `SessionEnd` hook lands after the close deleted the row. Sirio's own save runs
+    /// only for a tab still in the strip, under a key the allocator handed out, so it meets the
+    /// mark only under a duplicate legacy id, and is refused the same way. Only a restore that
+    /// hands the key to a pane again lifts the mark ([`Self::lift_ended`]).
+    pub fn save_session_ref(&self, session: &str, reference: &str) -> bool {
+        // The mirror changes while the database lock is held, so a save and a delete of one
+        // key from two threads leave the map and the database in the same state. Lock order:
+        // the database, then `ended`, then the mirror; nothing holding the map takes the
+        // database.
         let mut db = self
             .inner
             .db
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The mirror changes while the database lock is held, so a save and a delete of one
-        // key from two threads leave the map and the database in the same state. Lock order:
-        // the database, then the mirror; nothing holding the map takes the database.
+        if self
+            .inner
+            .ended
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(session)
+        {
+            return false;
+        }
+        self.write_session_ref(&mut db, session, reference);
+        true
+    }
+
+    /// The row and mirror write of a save, under the caller's database lock.
+    fn write_session_ref(
+        &self,
+        db: &mut std::sync::MutexGuard<'_, Option<AppDatabase>>,
+        session: &str,
+        reference: &str,
+    ) {
         self.with_mirror(|map| {
             map.insert(session.to_string(), reference.to_string());
         });
@@ -2774,8 +2816,132 @@ impl SessionStore {
         }
     }
 
+    /// Lifts a close's mark from `session`. The caller holds the database lock.
+    fn unmark_ended(&self, session: &str) {
+        self.inner
+            .ended
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session);
+    }
+
+    /// The first path of each distinct database worktree among `worktrees`, in order. Paths
+    /// the database cannot give an identity (no row and not a directory) are dropped, as the
+    /// layout readers give them no layout either. One worktree the catalog lists twice (a
+    /// legacy duplicate project) is one layout, not two. `session.rs` merges duplicate
+    /// projects when it restores, so this may be unreachable; the pane-id dedup and the
+    /// startup purge must still count layouts the same way, or one deletes rows (or moves
+    /// panes) for a collision the other does not see.
+    pub fn distinct_worktrees(&self, worktrees: &[PathBuf]) -> Vec<PathBuf> {
+        let db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut counted = HashSet::new();
+        let mut distinct = Vec::new();
+        for path in worktrees {
+            let worktree_id = db
+                .as_ref()
+                .and_then(|db| worktree_id_for_database(db, path).ok().flatten());
+            let Some(worktree_id) = worktree_id else {
+                continue;
+            };
+            if counted.insert(worktree_id) {
+                distinct.push(path.clone());
+            }
+        }
+        distinct
+    }
+
+    /// Deletes the row of every `pane-N` whose N the persisted layouts of two or more of these
+    /// worktrees name, through [`Self::delete_session_ref`] so the database and the mirror
+    /// agree, and returns how many it deleted. Such a row is ambiguous: it could resume the
+    /// conversation of either worktree's pane, and losing a resume is acceptable where a wrong
+    /// one is not.
+    ///
+    /// The same pass reads every layout once, so it also records the pane-id floor (one past
+    /// the largest id any of them names) for [`Self::take_startup_pane_floor`], instead of the
+    /// workspace reading every layout a second time.
+    pub fn delete_refs_named_by_several_layouts(&self, worktrees: &[PathBuf]) -> usize {
+        let mut seen: HashMap<usize, usize> = HashMap::new();
+        for path in self.distinct_worktrees(worktrees) {
+            for id in self.persisted_pane_ids_for(&path) {
+                *seen.entry(id).or_insert(0) += 1;
+            }
+        }
+        *self
+            .inner
+            .startup_pane_floor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
+            seen.keys()
+                .max()
+                .map_or(0, |max| max.saturating_add(1)),
+        );
+        // Only rows that are there are counted, so the caller's log says what was dropped.
+        let rows = self.load_session_refs();
+        let mut deleted = 0;
+        for (id, count) in seen {
+            let key = format!("pane-{id}");
+            if count >= 2 && rows.contains_key(&key) {
+                self.delete_session_ref(&key);
+                deleted += 1;
+            }
+        }
+        deleted
+    }
+
+    /// Deletes every row whose reference two or more keys hold, through
+    /// [`Self::delete_session_ref`] so the database and the mirror agree, and returns how many
+    /// references it dropped. Two tabs never own one conversation, so such rows are a leftover
+    /// of a build whose worktree-local hook file named one pane for every tab of the worktree,
+    /// and at least one of them would resume another tab's conversation. Which one is not
+    /// knowable, so all go: losing a resume is acceptable, a wrong one is not. A lone row under
+    /// the wrong key is not detectable and stays.
+    pub fn delete_refs_shared_by_several_keys(&self) -> usize {
+        let mut keys_by_reference: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (key, reference) in self.load_session_refs() {
+            keys_by_reference.entry(reference).or_default().push(key);
+        }
+        let mut dropped = 0;
+        for keys in keys_by_reference.into_values().filter(|keys| keys.len() >= 2) {
+            for key in &keys {
+                self.delete_session_ref(key);
+            }
+            dropped += 1;
+        }
+        dropped
+    }
+
+    /// The pane-id floor the startup purge computed, once: a later call finds nothing, so the
+    /// caller recomputes from the layouts as they are then.
+    pub fn take_startup_pane_floor(&self) -> Option<usize> {
+        self.inner
+            .startup_pane_floor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// Lifts a close's mark from each of `sessions` (`pane-N` keys), for a restore that hands
+    /// those keys to panes again: a worktree closed in this run and selected again restores its
+    /// tabs under the keys the close ended, and the new processes' reports must land. Takes the
+    /// database lock first, like [`Self::save_session_ref`].
+    pub fn lift_ended(&self, sessions: impl IntoIterator<Item = String>) {
+        let _db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for session in sessions {
+            self.unmark_ended(&session);
+        }
+    }
+
     /// Removes one pane's association, in the database and the mirrored map. A pane id is
-    /// reused, so a ref left behind would resume another pane's session.
+    /// reused, so a ref left behind would resume another pane's session. It frees a key
+    /// without handing it out, so it leaves a close's mark in place.
     pub fn delete_session_ref(&self, session: &str) {
         // Under the database lock, like `save_session_ref`.
         let mut db = self
@@ -2783,6 +2949,33 @@ impl SessionStore {
             .db
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.delete_session_ref_locked(&mut db, session);
+    }
+
+    /// For a close that ends the pane's session: marks `session` ended, so
+    /// [`Self::save_session_ref`] refuses the dead pane's late writes, then deletes
+    /// the row and the mirror's entry as [`Self::delete_session_ref`] does.
+    pub fn end_session_ref(&self, session: &str) {
+        // Same lock order as `save_session_ref`: the database, then `ended`, then the mirror.
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.inner
+            .ended
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session.to_string());
+        self.delete_session_ref_locked(&mut db, session);
+    }
+
+    /// The row and mirror delete, under the caller's database lock.
+    fn delete_session_ref_locked(
+        &self,
+        db: &mut std::sync::MutexGuard<'_, Option<AppDatabase>>,
+        session: &str,
+    ) {
         self.with_mirror(|map| {
             map.remove(session);
         });
