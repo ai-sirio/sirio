@@ -1164,9 +1164,12 @@ double_click_bounds() { # key
   window="$(find_window)"
   DISPLAY="$DISPLAY_TARGET" xdotool mousemove --window "$window" ${point% *} ${point#* } click --repeat 2 --delay 80 1
 }
-# The CLIPBOARD selection of this display, read through GTK (python3-gi).
+# The CLIPBOARD selection of this display, read through GTK (python3-gi). The
+# clean environment pinned to X11 keeps a caller's WAYLAND_DISPLAY or
+# GDK_BACKEND from steering GTK to the desktop's clipboard.
 x_clipboard() { # get
-  DISPLAY="$DISPLAY_TARGET" with_timeout 10 python3 -I - "$@" <<'PY'
+  with_timeout 10 env -i PATH=/usr/bin:/bin HOME="$SD/home" GDK_BACKEND=x11 DISPLAY="$DISPLAY_TARGET" \
+    python3 -I - "$@" <<'PY'
 import sys
 import gi
 gi.require_version("Gtk", "3.0")
