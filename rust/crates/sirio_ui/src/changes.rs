@@ -340,7 +340,7 @@ impl ChangeSection {
     fn label_in(self, source: &ChangesSource) -> &'static str {
         match (self, source) {
             (ChangeSection::Staged, ChangesSource::Range { .. }) => "Changes",
-            (ChangeSection::Staged, ChangesSource::Proposal(_)) => "Proposed change",
+            (ChangeSection::Staged, ChangesSource::Proposal { .. }) => "Proposed change",
             _ => self.label(),
         }
     }
@@ -583,8 +583,13 @@ enum ChangesSource {
     Range { base: String, head: String },
     /// Claude's proposed edit of one file, already diffed by the host. Immutable
     /// and never polled; `ChangesTab::set_proposal` swaps the diff.
-    Proposal(Arc<FileDiff>),
+    /// `is_new`: the file does not exist yet.
+    Proposal { diff: Arc<FileDiff>, is_new: bool },
 }
+
+/// Why the proposed side takes no new comment once the proposal was edited.
+pub const PROPOSED_SIDE_CLOSED: &str =
+    "The proposed side takes no new comment once the text is edited. Comment on the file's own lines.";
 
 type GitOperation = Box<dyn FnOnce(&Path) -> Result<(), GitError> + Send + 'static>;
 
@@ -778,26 +783,32 @@ impl ChangesTab {
         Self::with_source(repo_root, ChangesSource::Range { base, head }, true, cx)
     }
 
-    /// Creates a read-only surface over Claude's proposed edit of one file. `display_root`
-    /// is only what the surface is rooted at; nothing is read from it. The file's row is
-    /// open, and `set_commentable` is the owner's to turn on.
-    pub fn for_proposal(display_root: PathBuf, diff: Arc<FileDiff>, cx: &mut Context<Self>) -> Self {
+    /// Creates a read-only surface over Claude's proposed edit of one file (`is_new`: the file
+    /// does not exist yet). `display_root` is only what the surface is rooted at; nothing is
+    /// read from it. The file's row is open, and `set_commentable` is the owner's to turn on.
+    /// The diff is held on return: a proposal's snapshot is applied in the same update.
+    pub fn for_proposal(
+        display_root: PathBuf,
+        diff: Arc<FileDiff>,
+        is_new: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let path = diff.path.clone();
-        let mut tab = Self::with_source(display_root, ChangesSource::Proposal(diff), true, cx);
+        let mut tab = Self::with_source(display_root, ChangesSource::Proposal { diff, is_new }, true, cx);
         tab.expand_proposal(path);
         tab
     }
 
-    /// Shows `diff` instead: the latest one wins, so a load in flight for an older diff is
-    /// dropped and `refresh`'s single-flight guard cannot keep it.
-    pub fn set_proposal(&mut self, diff: Arc<FileDiff>, cx: &mut Context<Self>) {
-        if !matches!(self.source, ChangesSource::Proposal(_)) {
+    /// Shows `diff` instead, in the same update: `refresh` applies a proposal's snapshot
+    /// synchronously (a clone, no I/O), so what is held is what the owner just handed over.
+    pub fn set_proposal(&mut self, diff: Arc<FileDiff>, is_new: bool, cx: &mut Context<Self>) {
+        if !matches!(self.source, ChangesSource::Proposal { .. }) {
             return;
         }
         self.proposal_generation += 1;
         self.git_task = None;
         let path = diff.path.clone();
-        self.source = ChangesSource::Proposal(diff);
+        self.source = ChangesSource::Proposal { diff, is_new };
         self.expand_proposal(path);
         self.refresh(cx);
     }
@@ -876,7 +887,7 @@ impl ChangesTab {
         }
         if to.side == AnnotationSide::New && !self.new_side_commentable {
             cx.emit(ChangesTabEvent::CommentRefused(
-                "The proposed side takes no new comment once it is edited.".to_string(),
+                PROPOSED_SIDE_CLOSED.to_string(),
             ));
             return;
         }
@@ -1041,7 +1052,7 @@ impl ChangesTab {
             ChangesSource::Commit(sha) => Some(sha),
             ChangesSource::WorkingTree
             | ChangesSource::Range { .. }
-            | ChangesSource::Proposal(_) => None,
+            | ChangesSource::Proposal { .. } => None,
         }
     }
 
@@ -1191,6 +1202,15 @@ impl ChangesTab {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        if let ChangesSource::Proposal { diff, is_new } = &self.source {
+            let snapshot = load_proposal_snapshot(diff, *is_new);
+            self.has_loaded = true;
+            self.git_error = None;
+            self.git_error_from_mutation = false;
+            self.apply_snapshot(snapshot, cx);
+            cx.notify();
+            return;
+        }
         if !self.is_git {
             self.has_loaded = true;
             self.git_error = None;
@@ -2738,12 +2758,23 @@ impl ChangesTab {
             line.new_line_number.unwrap_or(0)
         );
         let group = SharedString::from(format!("diff-row-{row_id}"));
-        let position = if let Some(number) = line.new_line_number {
-            u32::try_from(number).ok().map(|line| (AnnotationSide::New, line))
-        } else {
-            line.old_line_number
-                .and_then(|number| u32::try_from(number).ok())
-                .map(|line| (AnnotationSide::Old, line))
+        // A context line has both numbers and is offered as its new side, unless only its
+        // old side takes a comment (a proposal the user edited keeps the disk side).
+        let new_position = line
+            .new_line_number
+            .and_then(|number| u32::try_from(number).ok())
+            .map(|line| (AnnotationSide::New, line));
+        let old_position = line
+            .old_line_number
+            .and_then(|number| u32::try_from(number).ok())
+            .map(|line| (AnnotationSide::Old, line));
+        let is_open = |position: &(AnnotationSide, u32)| {
+            open_lines.get(&path).is_some_and(|lines| lines.contains(position))
+        };
+        let position = match (new_position, old_position) {
+            (Some(new), Some(old)) if !is_open(&new) && is_open(&old) => Some(old),
+            (Some(new), _) => Some(new),
+            (None, old) => old,
         };
         let plus = position
             .filter(|(side, line)| {
@@ -2880,7 +2911,7 @@ impl ChangesTab {
         let mode_entity = entity.clone();
         // While git is broken the count is stale or unknown; saying so beats
         // a confident number next to an error panel.
-        let title = if matches!(self.source, ChangesSource::Proposal(_)) {
+        let title = if matches!(self.source, ChangesSource::Proposal { .. }) {
             "Proposed change".to_string()
         } else if self.git_error.is_some() {
             "Local changes (unavailable)".to_string()
@@ -2938,7 +2969,7 @@ impl ChangesTab {
             // spinner while a snapshot loads (a refresh runs every second),
             // and a click during one is a no-op by `refresh`'s own
             // single-flight guard.
-            .when(!matches!(self.source, ChangesSource::Proposal(_)), |this| {
+            .when(!matches!(self.source, ChangesSource::Proposal { .. }), |this| {
                 this.child(crate::ely_ui::icon_button(
                     "changes-refresh",
                     IconName::RefreshCw,
@@ -3525,7 +3556,7 @@ impl ChangesTab {
                     .collect(),
             )
         };
-        let opens_files = !matches!(self.source, ChangesSource::Proposal(_));
+        let opens_files = !matches!(self.source, ChangesSource::Proposal { .. });
         let allows_staging = self.allows_staging();
         let draws_open_diff = self.embedded_in_panel;
         let source = self.source.clone();
@@ -4246,21 +4277,16 @@ fn load_snapshot(
         ChangesSource::WorkingTree => load_worktree_snapshot(repo_root, expanded_paths),
         ChangesSource::Commit(sha) => load_commit_snapshot(repo_root, sha),
         ChangesSource::Range { base, head } => load_range_snapshot(repo_root, base, head),
-        ChangesSource::Proposal(diff) => Ok(load_proposal_snapshot(diff)),
+        ChangesSource::Proposal { diff, is_new } => Ok(load_proposal_snapshot(diff, *is_new)),
     }
 }
 
 /// The snapshot of a proposal: its one file, with the diff the host already computed.
-fn load_proposal_snapshot(diff: &FileDiff) -> GitSnapshot {
+fn load_proposal_snapshot(diff: &FileDiff, is_new: bool) -> GitSnapshot {
     let entry = StatusEntry {
         path: diff.path.clone(),
         original_path: None,
-        // A diff against nothing starts at line 0 with no old lines: the file is new.
-        index_status: Some(if diff.hunks.first().is_some_and(|hunk| hunk.old_start == 0 && hunk.old_lines == 0) {
-            StatusKind::Added
-        } else {
-            StatusKind::Modified
-        }),
+        index_status: Some(if is_new { StatusKind::Added } else { StatusKind::Modified }),
         worktree_status: None,
     };
     let stat = DiffStat {
@@ -4422,7 +4448,7 @@ fn load_expanded_diff(
             entry.original_path.as_deref(),
             CHANGES_CONTEXT_LINES,
         ),
-        ChangesSource::Proposal(diff) => Ok((**diff).clone()),
+        ChangesSource::Proposal { diff, .. } => Ok((**diff).clone()),
     }
 }
 

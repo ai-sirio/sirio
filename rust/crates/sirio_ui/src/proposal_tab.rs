@@ -16,7 +16,7 @@ use gpui::{
 use sirio_git::{FileDiff, diff_proposal};
 use sirio_theme::Theme;
 
-use crate::changes::{CHANGES_CONTEXT_LINES, ChangesTab, ChangesTabEvent};
+use crate::changes::{CHANGES_CONTEXT_LINES, ChangesTab, ChangesTabEvent, PROPOSED_SIDE_CLOSED};
 use crate::diff_annotations::{Annotation, AnnotationKind, AnnotationSide, CommentAnchor};
 use crate::editor::{Language, MAX_FILE_BYTES};
 use crate::editor_prefs::EditorPrefs;
@@ -64,7 +64,8 @@ pub fn restore_line_endings(reference: &[u8], text: &str) -> String {
 /// What Accept sends and the diff shows: the edited text (or the proposal) in the line
 /// endings of the original, or, with no original, of the proposal as Claude sent it.
 fn text_to_send(original: Option<&[u8]>, proposal: &str, edited: Option<&str>) -> String {
-    let reference = original.unwrap_or(proposal.as_bytes());
+    // An original with no line ending at all (empty, or one line) carries no convention.
+    let reference = original.filter(|bytes| bytes.contains(&b'\n')).unwrap_or(proposal.as_bytes());
     restore_line_endings(reference, edited.unwrap_or(proposal))
 }
 
@@ -405,13 +406,17 @@ impl ProposalTab {
 
     fn apply_diff(&mut self, diff: Arc<FileDiff>, cx: &mut Context<Self>) {
         self.diff_stats = Some((diff.additions, diff.deletions));
+        let is_new = self.original.is_none();
         let new_side_open = !self.proposal_was_edited(cx);
+        if !new_side_open && self.composer.as_ref().is_some_and(|open| open.anchor.side == AnnotationSide::New) {
+            self.composer = None;
+        }
         match &self.changes {
-            Some(changes) => changes.update(cx, |changes, cx| changes.set_proposal(diff, cx)),
+            Some(changes) => changes.update(cx, |changes, cx| changes.set_proposal(diff, is_new, cx)),
             None => {
                 let root = self.display_root.clone();
                 let changes = cx.new(|cx| {
-                    let mut changes = ChangesTab::for_proposal(root, diff, cx);
+                    let mut changes = ChangesTab::for_proposal(root, diff, is_new, cx);
                     changes.set_commentable(true, cx);
                     changes
                 });
@@ -492,6 +497,12 @@ impl ProposalTab {
     }
 
     pub fn add_comment(&mut self, comment: ProposalComment, cx: &mut Context<Self>) {
+        if comment.side == CommentSide::New && self.proposal_was_edited(cx) {
+            self.notice = Some(PROPOSED_SIDE_CLOSED.to_owned());
+            self.push_annotations(cx);
+            cx.notify();
+            return;
+        }
         self.comments.push(comment);
         self.rebuild_cards(cx);
         self.push_annotations(cx);
@@ -527,7 +538,7 @@ impl ProposalTab {
 
     fn open_composer(&mut self, anchor: CommentAnchor, cx: &mut Context<Self>) {
         if anchor.side == AnnotationSide::New && self.proposal_was_edited(cx) {
-            self.notice = Some("Comments on the proposed side stop once the text is edited.".to_owned());
+            self.notice = Some(PROPOSED_SIDE_CLOSED.to_owned());
             cx.notify();
             return;
         }
@@ -712,11 +723,11 @@ impl Render for ProposalTab {
                 .text_color(theme.ely.fg_muted)
                 .child(selectable_text(reason.clone()).id("proposal-message-text"))
         } else if self.diff_pending {
-            div().id("proposal-loading").flex_1().min_h(px(0.0)).p(px(16.0)).text_color(theme.ely.fg_muted).child("Loading…")
+            div().id("proposal-loading").debug_selector(|| "proposal-loading".into()).flex_1().min_h(px(0.0)).p(px(16.0)).text_color(theme.ely.fg_muted).child("Loading…")
         } else if let Some(changes) = &self.changes {
             div().id("proposal-diff").flex_1().min_h(px(0.0)).child(changes.clone())
         } else {
-            div().id("proposal-loading").flex_1().min_h(px(0.0)).p(px(16.0)).text_color(theme.ely.fg_muted).child("Loading…")
+            div().id("proposal-loading").debug_selector(|| "proposal-loading".into()).flex_1().min_h(px(0.0)).p(px(16.0)).text_color(theme.ely.fg_muted).child("Loading…")
         };
         div().size_full().flex().flex_col().bg(theme.ely.bg).child(bar).child(body)
     }
@@ -891,6 +902,12 @@ mod tests {
     fn missing_original_follows_the_proposal() {
         assert_eq!(text_to_send(None, "a\r\nb\r\n", None), "a\r\nb\r\n");
         assert_eq!(text_to_send(None, "a\nb\n", None), "a\nb\n");
+    }
+
+    #[test]
+    fn original_without_line_endings_follows_the_proposal() {
+        assert_eq!(text_to_send(Some(b""), "a\r\nb\r\n", None), "a\r\nb\r\n");
+        assert_eq!(text_to_send(Some(b"one line"), "a\r\nb\r\n", None), "a\r\nb\r\n");
     }
 
     #[test]
